@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1" />
+      <stop offset="100%" style="stop-color:#8b5cf6" />
+    </linearGradient>
+    <linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8b5cf6" />
+      <stop offset="100%" style="stop-color:#a78bfa" />
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="512" height="512" rx="112" fill="url(#g1)"/>
+  <!-- Headset band -->
+  <path d="M148 252C148 184 192 120 256 120C320 120 364 184 364 252" stroke="white" stroke-width="26" stroke-linecap="round" fill="none"/>
+  <!-- Left ear -->
+  <rect x="110" y="232" width="52" height="88" rx="18" fill="white"/>
+  <!-- Right ear -->
+  <rect x="350" y="232" width="52" height="88" rx="18" fill="white"/>
+  <!-- Mic boom -->
+  <path d="M350 300C350 300 324 336 298 358" stroke="white" stroke-width="14" stroke-linecap="round" fill="none" opacity="0.9"/>
+  <!-- Mic -->
+  <circle cx="288" cy="368" r="18" fill="white" opacity="0.9"/>
+  <!-- AI pulse -->
+  <path d="M216 268 L234 250 L256 276 L278 244 L296 268" stroke="#c084fc" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle cx="216" cy="268" r="5" fill="#e0e7ff"/>
+  <circle cx="256" cy="276" r="5" fill="#e0e7ff"/>
+  <circle cx="296" cy="268" r="5" fill="#e0e7ff"/>
+</svg>

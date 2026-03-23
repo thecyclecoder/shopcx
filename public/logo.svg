@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8b5cf6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#a78bfa;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="grad3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#8b5cf6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#c084fc;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- Headset band -->
+  <path d="M128 240C128 168 176 96 256 96C336 96 384 168 384 240" stroke="url(#grad1)" stroke-width="28" stroke-linecap="round" fill="none"/>
+  <!-- Left ear cup -->
+  <rect x="88" y="220" width="56" height="96" rx="20" fill="url(#grad1)"/>
+  <!-- Right ear cup -->
+  <rect x="368" y="220" width="56" height="96" rx="20" fill="url(#grad1)"/>
+  <!-- Mic boom -->
+  <path d="M368 290C368 290 340 330 310 356" stroke="url(#grad2)" stroke-width="16" stroke-linecap="round" fill="none"/>
+  <!-- Mic head -->
+  <circle cx="298" cy="368" r="22" fill="url(#grad2)"/>
+  <!-- AI brain pulse - center -->
+  <path d="M210 268 L230 248 L250 278 L270 238 L290 268" stroke="url(#grad3)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- AI nodes -->
+  <circle cx="210" cy="268" r="6" fill="#c084fc"/>
+  <circle cx="250" cy="278" r="6" fill="#a78bfa"/>
+  <circle cx="290" cy="268" r="6" fill="#c084fc"/>
+  <!-- Subtle glow dots -->
+  <circle cx="230" cy="248" r="4" fill="#e0e7ff" opacity="0.8"/>
+  <circle cx="270" cy="238" r="4" fill="#e0e7ff" opacity="0.8"/>
+</svg>
