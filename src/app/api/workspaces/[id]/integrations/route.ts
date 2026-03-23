@@ -68,23 +68,39 @@ export async function PATCH(
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const body = await request.json();
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
   const updates: Record<string, string | null> = {};
 
-  if ("resend_api_key" in body) {
-    if (body.resend_api_key) {
-      // Validate key format
-      if (!body.resend_api_key.startsWith("re_")) {
-        return NextResponse.json({ error: "Invalid Resend API key format" }, { status: 400 });
+  try {
+    if ("resend_api_key" in body) {
+      if (body.resend_api_key) {
+        if (!body.resend_api_key.startsWith("re_")) {
+          return NextResponse.json({ error: "Invalid Resend API key format" }, { status: 400 });
+        }
+        updates.resend_api_key_encrypted = encrypt(body.resend_api_key);
+      } else {
+        updates.resend_api_key_encrypted = null;
       }
-      updates.resend_api_key_encrypted = encrypt(body.resend_api_key);
-    } else {
-      updates.resend_api_key_encrypted = null;
     }
+  } catch (err) {
+    return NextResponse.json(
+      { error: "Encryption failed. ENCRYPTION_KEY may not be configured." },
+      { status: 500 }
+    );
   }
 
   if ("resend_domain" in body) {
     updates.resend_domain = body.resend_domain || null;
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return NextResponse.json({ error: "No fields to update" }, { status: 400 });
   }
 
   const { error } = await admin

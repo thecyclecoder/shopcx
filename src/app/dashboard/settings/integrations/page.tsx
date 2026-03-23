@@ -47,8 +47,12 @@ export default function IntegrationsPage() {
       setResendHint(resendKey ? `re_...${resendKey.slice(-4)}` : resendHint);
       setResendKey("");
     } else {
-      const data = await res.json();
-      setMessage(data.error || "Failed to save");
+      try {
+        const data = await res.json();
+        setMessage(data.error || "Failed to save");
+      } catch {
+        setMessage(`Failed to save (HTTP ${res.status})`);
+      }
     }
     setSaving(false);
   };
