@@ -48,7 +48,8 @@ export default function TeamPage() {
     const data = await res.json();
 
     if (res.ok) {
-      setMessage(`Invite sent to ${inviteEmail}`);
+      const emailNote = data.email_sent ? " (email sent)" : " (email not sent — configure Resend in Settings > Integrations)";
+      setMessage(`Invite created for ${inviteEmail}${emailNote}`);
       setInviteEmail("");
     } else {
       setMessage(data.error || "Failed to send invite");

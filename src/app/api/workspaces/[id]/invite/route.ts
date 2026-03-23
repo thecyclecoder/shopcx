@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { sendInviteEmail } from "@/lib/email";
 import type { WorkspaceRole } from "@/lib/types/workspace";
 
 const VALID_ROLES: WorkspaceRole[] = ["admin", "agent", "social", "marketing", "read_only"];
@@ -77,5 +78,24 @@ export async function POST(
     return NextResponse.json({ error: "Failed to create invite" }, { status: 500 });
   }
 
-  return NextResponse.json(invite, { status: 201 });
+  // Get workspace name for the email
+  const { data: workspace } = await admin
+    .from("workspaces")
+    .select("name")
+    .eq("id", workspaceId)
+    .single();
+
+  // Send invite email (best-effort, don't fail the invite if email fails)
+  const emailResult = await sendInviteEmail({
+    workspaceId,
+    workspaceName: workspace?.name || "ShopCX.AI",
+    toEmail: email.toLowerCase(),
+    role,
+    invitedByName: user.user_metadata?.full_name || user.email || "A team member",
+  });
+
+  return NextResponse.json(
+    { ...invite, email_sent: !emailResult.error, email_error: emailResult.error },
+    { status: 201 }
+  );
 }
