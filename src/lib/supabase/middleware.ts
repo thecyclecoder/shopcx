@@ -1,8 +1,9 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula"];
+const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula", "/coming-soon"];
 const WORKSPACE_SETUP_ROUTES = ["/workspace/new", "/workspace/select"];
+const ADMIN_EMAIL = "dylan@superfoodscompany.com";
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
@@ -41,6 +42,22 @@ export async function updateSession(request: NextRequest) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);
+  }
+
+  // Authenticated users: check access gate
+  // Middleware can't do DB queries efficiently, so we check workspace_id cookie
+  // as a proxy — if they have one, they passed the gate at login.
+  // The auth callback does the real authorization check.
+  if (user && !isPublicRoute) {
+    const isAdmin = user.email?.toLowerCase() === ADMIN_EMAIL;
+    const hasWorkspaceCookie = !!request.cookies.get("workspace_id")?.value;
+
+    // If not admin and no workspace cookie, they haven't been authorized yet
+    if (!isAdmin && !hasWorkspaceCookie && !isWorkspaceSetup && !pathname.startsWith("/api")) {
+      const url = request.nextUrl.clone();
+      url.pathname = "/coming-soon";
+      return NextResponse.redirect(url);
+    }
   }
 
   // Authenticated users on login -> redirect based on workspace

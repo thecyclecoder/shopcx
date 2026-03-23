@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { getUserWorkspaces, setActiveWorkspace, autoAcceptInvites } from "@/lib/workspace";
+import { isAuthorizedUser } from "@/lib/access";
 
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
@@ -18,12 +19,18 @@ export async function GET(request: Request) {
   }
 
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
+  if (!user?.email) {
     return NextResponse.redirect(`${origin}/login?error=no_user`);
   }
 
+  // Gate: check if user is authorized
+  const authorized = await isAuthorizedUser(user.email);
+  if (!authorized) {
+    return NextResponse.redirect(`${origin}/coming-soon`);
+  }
+
   // Auto-accept any pending invites for this email
-  await autoAcceptInvites(user.id, user.email!);
+  await autoAcceptInvites(user.id, user.email);
 
   // Determine workspace routing
   const workspaces = await getUserWorkspaces(user.id);
