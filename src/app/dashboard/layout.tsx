@@ -29,7 +29,7 @@ export default async function DashboardLayout({
           workspace={current}
           user={{ email: user.email!, name: user.user_metadata?.full_name || user.user_metadata?.name }}
         />
-        <main className="flex-1 overflow-y-auto">
+        <main className="flex-1 overflow-y-auto scrollbar-hidden pt-14 md:pt-0">
           {children}
         </main>
       </div>

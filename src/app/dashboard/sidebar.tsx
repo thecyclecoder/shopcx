@@ -1,5 +1,6 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
@@ -23,6 +24,22 @@ export default function Sidebar({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const [open, setOpen] = useState(false);
+
+  // Close sidebar on route change (mobile)
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
+
+  // Prevent body scroll when sidebar is open on mobile
+  useEffect(() => {
+    if (open) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => { document.body.style.overflow = ""; };
+  }, [open]);
 
   const handleSignOut = async () => {
     const supabase = createClient();
@@ -30,15 +47,26 @@ export default function Sidebar({
     router.push("/login");
   };
 
-  return (
-    <aside className="flex w-60 flex-col border-r border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+  const sidebarContent = (
+    <>
       {/* Logo */}
-      <div className="flex items-center gap-2.5 border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
-        <Image src="/logo.svg" alt="ShopCX.AI" width={28} height={28} />
-        <span className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
-          Shop<span className="text-indigo-500">CX</span>
-          <span className="text-xs font-medium text-violet-400">.AI</span>
-        </span>
+      <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
+        <div className="flex items-center gap-2.5">
+          <Image src="/logo.svg" alt="ShopCX.AI" width={28} height={28} />
+          <span className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
+            Shop<span className="text-indigo-500">CX</span>
+            <span className="text-xs font-medium text-violet-400">.AI</span>
+          </span>
+        </div>
+        {/* Close button - mobile only */}
+        <button
+          onClick={() => setOpen(false)}
+          className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 md:hidden dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+        >
+          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </div>
 
       {/* Workspace name */}
@@ -97,6 +125,47 @@ export default function Sidebar({
           </button>
         </div>
       </div>
-    </aside>
+    </>
+  );
+
+  return (
+    <>
+      {/* Mobile header bar */}
+      <div className="fixed inset-x-0 top-0 z-40 flex h-14 items-center gap-3 border-b border-zinc-200 bg-white/80 px-4 backdrop-blur-md md:hidden dark:border-zinc-800 dark:bg-zinc-900/80">
+        <button
+          onClick={() => setOpen(true)}
+          className="rounded p-1.5 text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+        >
+          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+          </svg>
+        </button>
+        <Image src="/logo.svg" alt="ShopCX.AI" width={24} height={24} />
+        <span className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
+          Shop<span className="text-indigo-500">CX</span>
+          <span className="text-xs font-medium text-violet-400">.AI</span>
+        </span>
+      </div>
+
+      {/* Desktop sidebar - always visible */}
+      <aside className="hidden w-60 flex-col border-r border-zinc-200 bg-white md:flex dark:border-zinc-800 dark:bg-zinc-900">
+        {sidebarContent}
+      </aside>
+
+      {/* Mobile sidebar - overlay */}
+      {open && (
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 z-40 bg-black/40 md:hidden"
+            onClick={() => setOpen(false)}
+          />
+          {/* Drawer */}
+          <aside className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-white md:hidden dark:bg-zinc-900">
+            {sidebarContent}
+          </aside>
+        </>
+      )}
+    </>
   );
 }
