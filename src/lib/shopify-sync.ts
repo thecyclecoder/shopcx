@@ -207,7 +207,7 @@ export async function startBulkOperationWithQuery(
   startDate: string,
   endDate: string,
 ): Promise<string> {
-  const dateFilter = `updated_at:>='${startDate}' AND updated_at:<='${endDate}'`;
+  const dateFilter = `created_at:>='${startDate}' AND created_at:<='${endDate}'`;
 
   const customerFields = `
     id email firstName lastName phone

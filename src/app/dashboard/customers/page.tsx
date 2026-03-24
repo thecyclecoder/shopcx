@@ -205,7 +205,7 @@ export default function CustomersPage() {
       progressPercent = Math.round((currentMonth / totalMonths) * 95);
       const typeLabel = syncJob.phase === "customers" ? "customers" : "orders";
       const count = syncJob.phase === "customers" ? syncJob.synced_customers : syncJob.synced_orders;
-      progressLabel = `Syncing ${typeLabel}: ${count.toLocaleString()} (month ${currentMonth}/${totalMonths})`;
+      progressLabel = `Syncing ${typeLabel}: ${count.toLocaleString()} objects (month ${currentMonth}/${totalMonths})`;
     } else if (syncJob.status === "running" && syncJob.phase === "finalizing") {
       progressPercent = 95;
       progressLabel = "Calculating retention scores...";
