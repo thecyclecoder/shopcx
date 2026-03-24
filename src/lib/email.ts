@@ -2,11 +2,11 @@ import { Resend } from "resend";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 
-export async function getResendClient(workspaceId: string): Promise<{ resend: Resend; domain: string } | null> {
+export async function getResendClient(workspaceId: string): Promise<{ resend: Resend; domain: string; supportEmail: string | null } | null> {
   const admin = createAdminClient();
   const { data: workspace } = await admin
     .from("workspaces")
-    .select("resend_api_key_encrypted, resend_domain")
+    .select("resend_api_key_encrypted, resend_domain, support_email")
     .eq("id", workspaceId)
     .single();
 
@@ -18,6 +18,7 @@ export async function getResendClient(workspaceId: string): Promise<{ resend: Re
   return {
     resend: new Resend(apiKey),
     domain: workspace.resend_domain,
+    supportEmail: workspace.support_email || null,
   };
 }
 
@@ -89,8 +90,11 @@ export async function sendTicketReply({
     headers["References"] = inReplyTo;
   }
 
+  const replyTo = client.supportEmail || `support@${client.domain}`;
+
   const { data, error } = await client.resend.emails.send({
     from: `${agentName} via ${workspaceName} <support@${client.domain}>`,
+    replyTo,
     to: toEmail,
     subject: subject.startsWith("Re:") ? subject : `Re: ${subject}`,
     html: `

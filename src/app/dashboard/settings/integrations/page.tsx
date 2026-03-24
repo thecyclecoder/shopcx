@@ -24,6 +24,9 @@ export default function IntegrationsPage() {
   const [shopifyMyshopifyDomain, setShopifyMyshopifyDomain] = useState<string | null>(null);
   const [shopifyScopes, setShopifyScopes] = useState<string | null>(null);
 
+  // Support email
+  const [supportEmail, setSupportEmail] = useState("");
+
   // General state
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -35,6 +38,7 @@ export default function IntegrationsPage() {
       .then((data) => {
         setResendConnected(data.resend_connected);
         setResendHint(data.resend_api_key_hint);
+        setSupportEmail(data.support_email || "");
         setResendDomain(data.resend_domain || "");
         setShopifyConnected(data.shopify_connected);
         setShopifyHasCredentials(data.shopify_has_credentials);
@@ -91,6 +95,7 @@ export default function IntegrationsPage() {
     const body: Record<string, string> = {};
     if (resendKey) body.resend_api_key = resendKey;
     if (resendDomain) body.resend_domain = resendDomain;
+    body.support_email = supportEmail;
     if (await patchIntegrations(body)) {
       setMessage("Resend configuration saved");
       setResendConnected(true);
@@ -389,10 +394,21 @@ export default function IntegrationsPage() {
                 />
                 <p className="mt-1 text-xs text-zinc-400">Must be verified in your Resend dashboard</p>
               </div>
+              <div>
+                <label className="block text-xs font-medium text-zinc-500">Support Email (Reply-To)</label>
+                <input
+                  type="email"
+                  value={supportEmail}
+                  onChange={(e) => setSupportEmail(e.target.value)}
+                  placeholder="support@superfoodscompany.com"
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+                <p className="mt-1 text-xs text-zinc-400">Customer replies go to this address. Set to your forwarded support email.</p>
+              </div>
               <div className="flex items-center gap-3">
                 <button
                   type="submit"
-                  disabled={saving || (!resendKey && !resendDomain)}
+                  disabled={saving || (!resendKey && !resendDomain && !supportEmail)}
                   className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
                 >
                   {saving ? "Saving..." : "Save"}

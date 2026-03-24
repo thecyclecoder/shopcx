@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes"
+      "resend_api_key_encrypted, resend_domain, support_email, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes"
     )
     .eq("id", workspaceId)
     .single();
@@ -44,6 +44,7 @@ export async function GET(
     resend_api_key_hint: workspace.resend_api_key_encrypted
       ? `re_...${decrypt(workspace.resend_api_key_encrypted).slice(-4)}`
       : null,
+    support_email: workspace.support_email,
 
     // Shopify
     shopify_connected: !!workspace.shopify_access_token_encrypted,
@@ -100,6 +101,10 @@ export async function PATCH(
 
     if ("resend_domain" in body) {
       updates.resend_domain = body.resend_domain || null;
+    }
+
+    if ("support_email" in body) {
+      updates.support_email = body.support_email || null;
     }
 
     // Shopify credentials
