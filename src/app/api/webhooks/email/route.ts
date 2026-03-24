@@ -14,17 +14,18 @@ export async function POST(request: Request) {
     html,
     text,
     headers: emailHeaders,
+    message_id: topLevelMessageId,
+    in_reply_to: topLevelInReplyTo,
   } = body;
 
-  // Debug logging — remove once confirmed working
   console.log("Inbound email webhook:", JSON.stringify({
-    hasData: !!rawBody.data,
     type: rawBody.type,
     from: fromEmail,
     to: toAddresses,
     subject,
     hasHtml: !!html,
     hasText: !!text,
+    message_id: topLevelMessageId,
   }));
 
   // Extract sender email
@@ -60,9 +61,9 @@ export async function POST(request: Request) {
   }
 
   const workspaceId = workspace.id;
-  const messageId = emailHeaders?.["message-id"] || emailHeaders?.["Message-ID"] || null;
-  const inReplyTo = emailHeaders?.["in-reply-to"] || emailHeaders?.["In-Reply-To"] || null;
-  const messageBody = html || text || "(empty message)";
+  const messageId = topLevelMessageId || emailHeaders?.["message-id"] || emailHeaders?.["Message-ID"] || null;
+  const inReplyTo = topLevelInReplyTo || emailHeaders?.["in-reply-to"] || emailHeaders?.["In-Reply-To"] || null;
+  const messageBody = html || text || body.body || "(No message body)";
   const normalizedEmail = senderEmail.toLowerCase().trim();
 
   // Capture original To address (for routing/tagging by support email)
