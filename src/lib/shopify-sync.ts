@@ -99,7 +99,7 @@ export async function getShopifyCounts(workspaceId: string): Promise<{ customers
 
 // ── Multi-page sync: fetches PAGES_PER_CALL pages in one API route call ──
 
-const PAGES_PER_CALL = 5;
+const PAGES_PER_CALL = 2;
 const GQL_PAGE_SIZE = 250;
 const UPSERT_BATCH = 250;
 
