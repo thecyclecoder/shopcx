@@ -71,10 +71,7 @@ export const syncShopify = inngest.createFunction(
           await step.run(`poll-bulk-customers-${pollNum}`, async () => {
             await new Promise((r) => setTimeout(r, 10000));
             const result = await pollBulkOperation(workspace_id);
-            await updateJob({
-              synced_customers: result.objectCount,
-              total_customers: result.objectCount,
-            });
+            await updateJob({ synced_customers: result.objectCount });
             return result;
           });
 
@@ -131,11 +128,7 @@ export const syncShopify = inngest.createFunction(
         await step.run(`poll-bulk-orders-${pollNum}`, async () => {
           await new Promise((r) => setTimeout(r, 10000));
           const result = await pollBulkOperation(workspace_id);
-          // Use objectCount as both progress and running total
-          await updateJob({
-            synced_orders: result.objectCount,
-            total_orders: result.objectCount,
-          });
+          await updateJob({ synced_orders: result.objectCount });
           return result;
         });
 

@@ -200,11 +200,8 @@ export default function CustomersPage() {
         : 0;
       progressLabel = `Syncing customers: ${syncJob.synced_customers.toLocaleString()} / ${syncJob.total_customers.toLocaleString()}`;
     } else if (syncJob.status === "running" && (syncJob.phase === "orders" || syncJob.synced_orders > 0)) {
-      const orderTotal = Math.max(syncJob.total_orders, syncJob.synced_orders);
-      progressPercent = orderTotal > 0
-        ? 50 + Math.round((syncJob.synced_orders / orderTotal) * 45)
-        : 50;
-      progressLabel = `Syncing orders: ${syncJob.synced_orders.toLocaleString()} / ${orderTotal.toLocaleString()}`;
+      progressPercent = 75; // Indeterminate — just show we're in the orders phase
+      progressLabel = `Syncing orders: ${syncJob.synced_orders.toLocaleString()}`;
     } else if (syncJob.status === "running" && syncJob.phase === "finalizing") {
       progressPercent = 95;
       progressLabel = "Calculating retention scores...";
