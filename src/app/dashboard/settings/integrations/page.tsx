@@ -23,6 +23,14 @@ export default function IntegrationsPage() {
   const [resendHint, setResendHint] = useState<string | null>(null);
   const [resendConnected, setResendConnected] = useState(false);
 
+  // Appstle state
+  const [appstleSecret, setAppstleSecret] = useState("");
+  const [appstleApiKey, setAppstleApiKey] = useState("");
+  const [appstleConnected, setAppstleConnected] = useState(false);
+  const [appstleHasApiKey, setAppstleHasApiKey] = useState(false);
+  const [appstleSecretHint, setAppstleSecretHint] = useState<string | null>(null);
+  const [appstleApiKeyHint, setAppstleApiKeyHint] = useState<string | null>(null);
+
   // Shopify state
   const [shopifyClientId, setShopifyClientId] = useState("");
   const [shopifyClientSecret, setShopifyClientSecret] = useState("");
@@ -83,6 +91,10 @@ export default function IntegrationsPage() {
         setShopifyDomain(data.shopify_domain || "");
         setShopifyMyshopifyDomain(data.shopify_myshopify_domain);
         setShopifyScopes(data.shopify_scopes);
+        setAppstleConnected(data.appstle_connected);
+        setAppstleHasApiKey(data.appstle_has_api_key);
+        setAppstleSecretHint(data.appstle_secret_hint);
+        setAppstleApiKeyHint(data.appstle_api_key_hint);
         setLoading(false);
       });
   }, [workspace.id]);
@@ -691,19 +703,112 @@ export default function IntegrationsPage() {
           )}
         </div>
 
-        {/* ── Stripe — placeholder ── */}
-        <div className="rounded-lg border border-zinc-200 bg-white p-6 opacity-60 dark:border-zinc-800 dark:bg-zinc-900">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-zinc-100 dark:bg-zinc-800">
-              <svg className="h-5 w-5 text-zinc-600 dark:text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25v10.5A2.25 2.25 0 004.5 19.5z" />
-              </svg>
+        {/* ── Appstle (Subscriptions) ── */}
+        <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-100 dark:bg-indigo-900/30">
+                <svg className="h-5 w-5 text-indigo-600 dark:text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 00-3.7-3.7 48.678 48.678 0 00-7.324 0 4.006 4.006 0 00-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3l-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 003.7 3.7 48.656 48.656 0 007.324 0 4.006 4.006 0 003.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3l-3 3" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Appstle</h2>
+                <p className="text-xs text-zinc-500">Subscription management webhooks</p>
+              </div>
             </div>
-            <div>
-              <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Stripe</h2>
-              <p className="text-xs text-zinc-500">Coming in Phase 7</p>
-            </div>
+            {appstleConnected && (
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                Connected
+              </span>
+            )}
           </div>
+
+          {canEdit && (
+            <div className="mt-5 space-y-4">
+              <p className="text-xs text-zinc-500">
+                Enter the webhook signing secret from Appstle. The webhook endpoint is:{" "}
+                <code className="rounded bg-zinc-100 px-1 py-0.5 text-[10px] dark:bg-zinc-800">
+                  {typeof window !== "undefined" ? window.location.origin : "https://shopcx.ai"}/api/webhooks/appstle/{workspace.id}
+                </code>
+              </p>
+              <div>
+                <label className="block text-xs font-medium text-zinc-500">API Key</label>
+                <input
+                  type="password"
+                  value={appstleApiKey}
+                  onChange={(e) => setAppstleApiKey(e.target.value)}
+                  placeholder={appstleApiKeyHint || "Your Appstle API key"}
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+                {appstleApiKeyHint && (
+                  <p className="mt-1 text-xs text-zinc-400">Current: ...{appstleApiKeyHint}</p>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-zinc-500">Webhook Signing Secret</label>
+                <input
+                  type="password"
+                  value={appstleSecret}
+                  onChange={(e) => setAppstleSecret(e.target.value)}
+                  placeholder={appstleSecretHint || "whsec_xxxxxxxxxxxxxxxxxxxxxxxx"}
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+                {appstleSecretHint && (
+                  <p className="mt-1 text-xs text-zinc-400">Current: {appstleSecretHint}</p>
+                )}
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={async () => {
+                    if (!appstleSecret && !appstleApiKey) return;
+                    const updates: Record<string, string> = {};
+                    if (appstleSecret) updates.appstle_webhook_secret = appstleSecret;
+                    if (appstleApiKey) updates.appstle_api_key = appstleApiKey;
+                    if (await patchIntegrations(updates)) {
+                      setMessage("Appstle settings saved");
+                      if (appstleSecret) {
+                        setAppstleConnected(true);
+                        setAppstleSecretHint(`whsec_...${appstleSecret.slice(-4)}`);
+                        setAppstleSecret("");
+                      }
+                      if (appstleApiKey) {
+                        setAppstleHasApiKey(true);
+                        setAppstleApiKeyHint(`...${appstleApiKey.slice(-4)}`);
+                        setAppstleApiKey("");
+                      }
+                    }
+                  }}
+                  disabled={saving || (!appstleSecret && !appstleApiKey)}
+                  className="cursor-pointer rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  {saving ? "Saving..." : "Save"}
+                </button>
+                {appstleConnected && (
+                  <button
+                    onClick={async () => {
+                      if (await patchIntegrations({ appstle_webhook_secret: null })) {
+                        setAppstleConnected(false);
+                        setAppstleSecretHint(null);
+                        setMessage("Appstle disconnected");
+                      }
+                    }}
+                    disabled={saving}
+                    className="cursor-pointer rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                  >
+                    Disconnect
+                  </button>
+                )}
+              </div>
+
+              {appstleConnected && (
+                <div className="rounded-md bg-zinc-50 p-3 text-[10px] text-zinc-500 dark:bg-zinc-800">
+                  <p className="font-medium">Events received:</p>
+                  <p className="mt-1">subscription.created, .activated, .paused, .cancelled, .updated, .billing-success, .billing-failure, .billing-skipped, .billing-interval-changed, .next-order-date-changed, .upcoming-order-notification</p>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* ── Meta — placeholder ── */}

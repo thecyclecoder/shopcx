@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted"
     )
     .eq("id", workspaceId)
     .single();
@@ -53,6 +53,16 @@ export async function GET(
     shopify_domain: workspace.shopify_domain,
     shopify_myshopify_domain: workspace.shopify_myshopify_domain,
     shopify_scopes: workspace.shopify_scopes,
+
+    // Appstle
+    appstle_connected: !!workspace.appstle_webhook_secret_encrypted,
+    appstle_has_api_key: !!workspace.appstle_api_key_encrypted,
+    appstle_secret_hint: workspace.appstle_webhook_secret_encrypted
+      ? `whsec_...${decrypt(workspace.appstle_webhook_secret_encrypted).slice(-4)}`
+      : null,
+    appstle_api_key_hint: workspace.appstle_api_key_encrypted
+      ? `...${decrypt(workspace.appstle_api_key_encrypted).slice(-4)}`
+      : null,
   });
 }
 
@@ -138,6 +148,19 @@ export async function PATCH(
       updates.shopify_myshopify_domain = null;
       updates.shopify_scopes = null;
       updates.shopify_oauth_state = null;
+    }
+
+    // Appstle
+    if ("appstle_webhook_secret" in body) {
+      updates.appstle_webhook_secret_encrypted = body.appstle_webhook_secret
+        ? encrypt(body.appstle_webhook_secret)
+        : null;
+    }
+
+    if ("appstle_api_key" in body) {
+      updates.appstle_api_key_encrypted = body.appstle_api_key
+        ? encrypt(body.appstle_api_key)
+        : null;
     }
   } catch {
     return NextResponse.json(
