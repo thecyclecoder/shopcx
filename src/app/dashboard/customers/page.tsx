@@ -15,6 +15,17 @@ interface Customer {
   last_order_at: string | null;
 }
 
+interface SyncJob {
+  id: string;
+  status: "pending" | "running" | "completed" | "failed";
+  phase: string | null;
+  total_customers: number;
+  synced_customers: number;
+  total_orders: number;
+  synced_orders: number;
+  error: string | null;
+}
+
 type SortField = "retention_score" | "ltv_cents" | "total_orders" | "last_order_at";
 
 function formatCents(cents: number): string {
@@ -53,19 +64,10 @@ function RetentionBadge({ score }: { score: number }) {
 
 const PAGE_SIZE = 25;
 
-interface SyncState {
-  phase: "idle" | "counting" | "customers" | "orders" | "finalizing" | "done" | "error";
-  totalCustomers: number;
-  totalOrders: number;
-  syncedCustomers: number;
-  syncedOrders: number;
-  error: string | null;
-}
-
 export default function CustomersPage() {
   const workspace = useWorkspace();
   const router = useRouter();
-  const abortRef = useRef(false);
+  const pollRef = useRef<NodeJS.Timeout | null>(null);
 
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [total, setTotal] = useState(0);
@@ -75,14 +77,7 @@ export default function CustomersPage() {
   const [order, setOrder] = useState<"asc" | "desc">("desc");
   const [offset, setOffset] = useState(0);
 
-  const [sync, setSync] = useState<SyncState>({
-    phase: "idle",
-    totalCustomers: 0,
-    totalOrders: 0,
-    syncedCustomers: 0,
-    syncedOrders: 0,
-    error: null,
-  });
+  const [syncJob, setSyncJob] = useState<SyncJob | null>(null);
 
   const fetchCustomers = useCallback(async () => {
     setLoading(true);
@@ -109,6 +104,68 @@ export default function CustomersPage() {
     fetchCustomers();
   }, [fetchCustomers]);
 
+  // Check for existing running sync on mount
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspace.id}/sync`)
+      .then((res) => res.json())
+      .then((job) => {
+        if (job && (job.status === "pending" || job.status === "running")) {
+          setSyncJob(job);
+          startPolling(job.id);
+        }
+      });
+    return () => stopPolling();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace.id]);
+
+  const startPolling = (jobId: string) => {
+    stopPolling();
+    pollRef.current = setInterval(async () => {
+      const res = await fetch(`/api/workspaces/${workspace.id}/sync?job_id=${jobId}`);
+      const job = await res.json();
+      setSyncJob(job);
+
+      if (job.status === "completed" || job.status === "failed") {
+        stopPolling();
+        if (job.status === "completed") fetchCustomers();
+      }
+    }, 3000);
+  };
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+
+  const handleSync = async () => {
+    const res = await fetch(`/api/workspaces/${workspace.id}/sync`, {
+      method: "POST",
+    });
+    const data = await res.json();
+
+    if (res.status === 409) {
+      // Already running, start polling it
+      startPolling(data.job_id);
+      return;
+    }
+
+    if (res.ok) {
+      setSyncJob({
+        id: data.job_id,
+        status: "pending",
+        phase: null,
+        total_customers: 0,
+        synced_customers: 0,
+        total_orders: 0,
+        synced_orders: 0,
+        error: null,
+      });
+      startPolling(data.job_id);
+    }
+  };
+
   const handleSort = (field: SortField) => {
     if (sort === field) {
       setOrder(order === "asc" ? "desc" : "asc");
@@ -125,144 +182,36 @@ export default function CustomersPage() {
     fetchCustomers();
   };
 
-  // ── Sync with progress ──
-
-  const handleSync = async () => {
-    abortRef.current = false;
-
-    setSync({
-      phase: "counting",
-      totalCustomers: 0,
-      totalOrders: 0,
-      syncedCustomers: 0,
-      syncedOrders: 0,
-      error: null,
-    });
-
-    try {
-      // Step 1: Get counts
-      const countRes = await fetch(`/api/workspaces/${workspace.id}/sync`);
-      if (!countRes.ok) throw new Error("Failed to get counts");
-      const counts = await countRes.json();
-
-      setSync((s) => ({
-        ...s,
-        phase: "customers",
-        totalCustomers: counts.customers,
-        totalOrders: counts.orders,
-      }));
-
-      // Step 2: Sync customers page by page
-      let customerCursor: string | null = null;
-      let customersSynced = 0;
-      let hasMoreCustomers = true;
-
-      while (hasMoreCustomers) {
-        if (abortRef.current) throw new Error("Sync cancelled");
-
-        const custRes: Response = await fetch(`/api/workspaces/${workspace.id}/sync`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "customers", cursor: customerCursor }),
-        });
-
-        if (!custRes.ok) {
-          const errData = await custRes.json();
-          throw new Error(errData.error || "Customer sync failed");
-        }
-
-        const page = await custRes.json();
-        customersSynced += page.synced;
-
-        setSync((s) => ({ ...s, syncedCustomers: customersSynced }));
-
-        hasMoreCustomers = page.hasMore;
-        customerCursor = page.nextCursor;
-      }
-
-      // Step 3: Sync orders page by page
-      setSync((s) => ({ ...s, phase: "orders" }));
-      let orderCursor: string | null = null;
-      let ordersSynced = 0;
-      let hasMoreOrders = true;
-
-      while (hasMoreOrders) {
-        if (abortRef.current) throw new Error("Sync cancelled");
-
-        const ordRes: Response = await fetch(`/api/workspaces/${workspace.id}/sync`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "orders", cursor: orderCursor }),
-        });
-
-        if (!ordRes.ok) {
-          const errData = await ordRes.json();
-          throw new Error(errData.error || "Order sync failed");
-        }
-
-        const page = await ordRes.json();
-        ordersSynced += page.synced;
-
-        setSync((s) => ({ ...s, syncedOrders: ordersSynced }));
-
-        hasMoreOrders = page.hasMore;
-        orderCursor = page.nextCursor;
-      }
-
-      // Step 4: Finalize (order dates + retention scores)
-      setSync((s) => ({ ...s, phase: "finalizing" }));
-
-      const finalRes = await fetch(`/api/workspaces/${workspace.id}/sync`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "finalize", cursor: null }),
-      });
-
-      if (!finalRes.ok) throw new Error("Finalize failed");
-
-      setSync((s) => ({ ...s, phase: "done" }));
-      fetchCustomers();
-    } catch (err) {
-      setSync((s) => ({
-        ...s,
-        phase: "error",
-        error: err instanceof Error ? err.message : "Sync failed",
-      }));
-    }
-  };
-
-  const handleCancelSync = () => {
-    abortRef.current = true;
-  };
-
   const totalPages = Math.ceil(total / PAGE_SIZE);
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
-  const isSyncing = !["idle", "done", "error"].includes(sync.phase);
+  const isSyncing = syncJob && (syncJob.status === "pending" || syncJob.status === "running");
 
   // Progress calculation
   let progressPercent = 0;
   let progressLabel = "";
 
-  if (sync.phase === "counting") {
-    progressLabel = "Getting store info...";
-  } else if (sync.phase === "customers") {
-    progressPercent = sync.totalCustomers > 0
-      ? Math.round((sync.syncedCustomers / sync.totalCustomers) * 50)
-      : 0;
-    progressLabel = `Syncing customers: ${sync.syncedCustomers.toLocaleString()} / ${sync.totalCustomers.toLocaleString()}`;
-  } else if (sync.phase === "orders") {
-    progressPercent = sync.totalOrders > 0
-      ? 50 + Math.round((sync.syncedOrders / sync.totalOrders) * 45)
-      : 50;
-    progressLabel = `Syncing orders: ${sync.syncedOrders.toLocaleString()} / ${sync.totalOrders.toLocaleString()}`;
-  } else if (sync.phase === "finalizing") {
-    progressPercent = 95;
-    progressLabel = "Calculating retention scores...";
-  } else if (sync.phase === "done") {
-    progressPercent = 100;
-    progressLabel = `Done! ${sync.syncedCustomers.toLocaleString()} customers, ${sync.syncedOrders.toLocaleString()} orders synced.`;
-  } else if (sync.phase === "error") {
-    progressLabel = sync.error || "Sync failed";
+  if (syncJob) {
+    if (syncJob.status === "pending") {
+      progressLabel = "Starting sync...";
+    } else if (syncJob.status === "running" && syncJob.phase === "customers") {
+      progressPercent = syncJob.total_customers > 0
+        ? Math.round((syncJob.synced_customers / syncJob.total_customers) * 50)
+        : 0;
+      progressLabel = `Syncing customers: ${syncJob.synced_customers.toLocaleString()} / ${syncJob.total_customers.toLocaleString()}`;
+    } else if (syncJob.status === "running" && syncJob.phase === "orders") {
+      progressPercent = syncJob.total_orders > 0
+        ? 50 + Math.round((syncJob.synced_orders / syncJob.total_orders) * 45)
+        : 50;
+      progressLabel = `Syncing orders: ${syncJob.synced_orders.toLocaleString()} / ${syncJob.total_orders.toLocaleString()}`;
+    } else if (syncJob.status === "running" && syncJob.phase === "finalizing") {
+      progressPercent = 95;
+      progressLabel = "Calculating retention scores...";
+    } else if (syncJob.status === "completed") {
+      progressPercent = 100;
+      progressLabel = `Done! ${syncJob.synced_customers.toLocaleString()} customers, ${syncJob.synced_orders.toLocaleString()} orders synced.`;
+    } else if (syncJob.status === "failed") {
+      progressLabel = syncJob.error || "Sync failed";
+    }
   }
 
   const SortIcon = ({ field }: { field: SortField }) => {
@@ -283,56 +232,56 @@ export default function CustomersPage() {
             {total} customer{total !== 1 ? "s" : ""} in this workspace.
           </p>
         </div>
-        {!isSyncing ? (
-          <button
-            onClick={handleSync}
-            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
-          >
-            Sync Customers
-          </button>
-        ) : (
-          <button
-            onClick={handleCancelSync}
-            className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 dark:border-red-800 dark:text-red-400"
-          >
-            Cancel
-          </button>
-        )}
+        <button
+          onClick={handleSync}
+          disabled={!!isSyncing}
+          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+        >
+          {isSyncing ? "Syncing..." : "Sync Customers"}
+        </button>
       </div>
 
       {/* ── Progress Bar ── */}
-      {sync.phase !== "idle" && (
+      {syncJob && syncJob.status !== "pending" && (
         <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex items-center justify-between text-sm">
-            <span className={sync.phase === "error" ? "text-red-500" : "text-zinc-700 dark:text-zinc-300"}>
+            <span className={syncJob.status === "failed" ? "text-red-500" : "text-zinc-700 dark:text-zinc-300"}>
               {progressLabel}
             </span>
-            {sync.phase !== "error" && sync.phase !== "counting" && (
+            {syncJob.status !== "failed" && (
               <span className="text-xs text-zinc-400">{progressPercent}%</span>
             )}
           </div>
-          {sync.phase !== "error" && (
+          {syncJob.status !== "failed" && (
             <div className="mt-2 h-2 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
               <div
-                className={`h-full rounded-full transition-all duration-500 ${
-                  sync.phase === "done"
+                className={`h-full rounded-full transition-all duration-700 ${
+                  syncJob.status === "completed"
                     ? "bg-emerald-500"
-                    : sync.phase === "counting"
-                      ? "animate-pulse bg-indigo-300"
-                      : "bg-indigo-500"
+                    : "bg-indigo-500"
                 }`}
-                style={{ width: sync.phase === "counting" ? "100%" : `${progressPercent}%` }}
+                style={{ width: `${progressPercent}%` }}
               />
             </div>
           )}
-          {sync.phase === "done" && (
+          {(syncJob.status === "completed" || syncJob.status === "failed") && (
             <button
-              onClick={() => setSync((s) => ({ ...s, phase: "idle" }))}
+              onClick={() => setSyncJob(null)}
               className="mt-2 text-xs text-zinc-400 hover:text-zinc-600"
             >
               Dismiss
             </button>
           )}
+        </div>
+      )}
+
+      {/* ── Pending state ── */}
+      {syncJob?.status === "pending" && (
+        <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-center gap-2 text-sm text-zinc-500">
+            <div className="h-2 w-full animate-pulse rounded-full bg-indigo-200 dark:bg-indigo-900" />
+          </div>
+          <p className="mt-2 text-xs text-zinc-400">Starting background sync...</p>
         </div>
       )}
 
