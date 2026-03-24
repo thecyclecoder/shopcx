@@ -24,8 +24,10 @@ export default function IntegrationsPage() {
   const [shopifyMyshopifyDomain, setShopifyMyshopifyDomain] = useState<string | null>(null);
   const [shopifyScopes, setShopifyScopes] = useState<string | null>(null);
 
-  // Support email
+  // Support email + webhook
   const [supportEmail, setSupportEmail] = useState("");
+  const [webhookConfigured, setWebhookConfigured] = useState(false);
+  const [webhookLoading, setWebhookLoading] = useState(false);
 
   // General state
   const [saving, setSaving] = useState(false);
@@ -40,6 +42,11 @@ export default function IntegrationsPage() {
         setResendHint(data.resend_api_key_hint);
         setSupportEmail(data.support_email || "");
         setResendDomain(data.resend_domain || "");
+        if (data.resend_connected) {
+          fetch(`/api/workspaces/${workspace.id}/integrations/resend/webhook`)
+            .then((r) => r.json())
+            .then((wh) => setWebhookConfigured(wh.configured));
+        }
         setShopifyConnected(data.shopify_connected);
         setShopifyHasCredentials(data.shopify_has_credentials);
         setShopifyDomain(data.shopify_domain || "");
@@ -405,6 +412,63 @@ export default function IntegrationsPage() {
                 />
                 <p className="mt-1 text-xs text-zinc-400">Customer replies go to this address. Set to your forwarded support email.</p>
               </div>
+
+              {/* Inbound email setup */}
+              {resendConnected && (
+                <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">Inbound Emails</p>
+                    {webhookConfigured ? (
+                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Active</span>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={webhookLoading}
+                        onClick={async () => {
+                          setWebhookLoading(true);
+                          const res = await fetch(`/api/workspaces/${workspace.id}/integrations/resend/webhook`, { method: "POST" });
+                          const data = await res.json();
+                          if (res.ok) {
+                            setWebhookConfigured(true);
+                            setMessage("Inbound email webhook created");
+                          } else {
+                            setMessage(data.error || "Failed to create webhook");
+                          }
+                          setWebhookLoading(false);
+                        }}
+                        className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                      >
+                        {webhookLoading ? "Setting up..." : "Enable Inbound Emails"}
+                      </button>
+                    )}
+                  </div>
+
+                  {webhookConfigured && resendDomain && (
+                    <div className="space-y-2">
+                      <div>
+                        <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Default Inbound Address</p>
+                        <p className="mt-0.5 rounded bg-white px-2 py-1 font-mono text-xs text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100">
+                          inbound@{resendDomain}
+                        </p>
+                        <p className="mt-1 text-[10px] text-zinc-400">
+                          Emails sent here automatically create tickets. Use this directly or forward from a pretty address.
+                        </p>
+                      </div>
+
+                      {supportEmail && (
+                        <div className="rounded border border-amber-200 bg-amber-50 p-2 dark:border-amber-800 dark:bg-amber-950">
+                          <p className="text-[10px] font-medium text-amber-700 dark:text-amber-400">Forwarding Setup</p>
+                          <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">
+                            Forward <strong>{supportEmail}</strong> to <strong>inbound@{resendDomain}</strong> in your email provider settings.
+                            Customers will see replies from {supportEmail}.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="flex items-center gap-3">
                 <button
                   type="submit"
