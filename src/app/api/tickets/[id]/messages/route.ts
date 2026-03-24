@@ -1,0 +1,102 @@
+import { NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { cookies } from "next/headers";
+import { sendTicketReply } from "@/lib/email";
+
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: ticketId } = await params;
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const cookieStore = await cookies();
+  const workspaceId = cookieStore.get("workspace_id")?.value;
+  if (!workspaceId) return NextResponse.json({ error: "No workspace" }, { status: 400 });
+
+  const admin = createAdminClient();
+  const body = await request.json();
+  const { body: messageBody, visibility = "external" } = body;
+
+  if (!messageBody?.trim()) {
+    return NextResponse.json({ error: "Message body is required" }, { status: 400 });
+  }
+
+  // Get ticket with customer info
+  const { data: ticket } = await admin
+    .from("tickets")
+    .select("*, customers(email)")
+    .eq("id", ticketId)
+    .eq("workspace_id", workspaceId)
+    .single();
+
+  if (!ticket) return NextResponse.json({ error: "Ticket not found" }, { status: 404 });
+
+  // Create message
+  const message: Record<string, unknown> = {
+    ticket_id: ticketId,
+    direction: "outbound",
+    visibility,
+    author_type: "agent",
+    author_id: user.id,
+    body: messageBody,
+  };
+
+  // Send email if external reply
+  let emailError: string | undefined;
+  if (visibility === "external" && ticket.customers?.email) {
+    const { data: workspace } = await admin
+      .from("workspaces")
+      .select("name")
+      .eq("id", workspaceId)
+      .single();
+
+    const result = await sendTicketReply({
+      workspaceId,
+      toEmail: ticket.customers.email,
+      subject: ticket.subject || "Support Request",
+      body: messageBody,
+      inReplyTo: ticket.email_message_id,
+      agentName: user.user_metadata?.full_name || user.user_metadata?.name || "Support",
+      workspaceName: workspace?.name || "ShopCX",
+    });
+
+    if (result.error) {
+      emailError = result.error;
+    } else if (result.messageId) {
+      message.email_message_id = result.messageId;
+    }
+  }
+
+  const { data: created, error } = await admin
+    .from("ticket_messages")
+    .insert(message)
+    .select()
+    .single();
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Auto-transitions
+  const ticketUpdates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+
+  // First outbound external message → set first_response_at
+  if (visibility === "external" && !ticket.first_response_at) {
+    ticketUpdates.first_response_at = new Date().toISOString();
+  }
+
+  // Agent reply on open ticket → pending
+  if (visibility === "external" && ticket.status === "open") {
+    ticketUpdates.status = "pending";
+  }
+
+  await admin.from("tickets").update(ticketUpdates).eq("id", ticketId);
+
+  return NextResponse.json({
+    message: created,
+    email_sent: visibility === "external" && !emailError,
+    email_error: emailError,
+  });
+}
