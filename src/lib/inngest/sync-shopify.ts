@@ -85,7 +85,7 @@ export const syncShopify = inngest.createFunction(
         const pollNum = pollCount;
         const pollResult: { status: string; objectCount: number; url: string | null } =
           await step.run(`poll-cust-${monthIdx}-${pollNum}`, async () => {
-            await new Promise((r) => setTimeout(r, 5000));
+            await new Promise((r) => setTimeout(r, 20000));
             return pollBulkOperation(workspace_id);
           });
         pollCount++;
@@ -128,7 +128,7 @@ export const syncShopify = inngest.createFunction(
         const pollNum = pollCount;
         const pollResult: { status: string; objectCount: number; url: string | null } =
           await step.run(`poll-ord-${monthIdx}-${pollNum}`, async () => {
-            await new Promise((r) => setTimeout(r, 5000));
+            await new Promise((r) => setTimeout(r, 20000));
             return pollBulkOperation(workspace_id);
           });
         pollCount++;
