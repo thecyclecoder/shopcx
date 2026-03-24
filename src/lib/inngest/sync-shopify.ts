@@ -3,17 +3,31 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getShopifyCounts,
   cancelBulkOperation,
-  startBulkOperation,
+  startBulkOperationWithQuery,
   pollBulkOperation,
-  downloadBulkCustomerUrl,
-  upsertCustomerChunk,
-  downloadBulkOrderUrl,
-  upsertOrderChunk,
+  downloadAndUpsertCustomers,
+  downloadAndUpsertOrders,
   finalizeSyncOrderDates,
-  BULK_CUSTOMERS_QUERY,
-  BULK_ORDERS_QUERY,
 } from "@/lib/shopify-sync";
 import { updateRetentionScores } from "@/lib/retention-score";
+
+// Generate month ranges from current month going backwards
+function getMonthRanges(maxMonths: number = 36): { start: string; end: string; label: string }[] {
+  const ranges: { start: string; end: string; label: string }[] = [];
+  const now = new Date();
+
+  for (let i = 0; i < maxMonths; i++) {
+    const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 0, 23, 59, 59);
+    ranges.push({
+      start: start.toISOString(),
+      end: end.toISOString(),
+      label: start.toLocaleDateString("en-US", { month: "short", year: "numeric" }),
+    });
+  }
+
+  return ranges;
+}
 
 export const syncShopify = inngest.createFunction(
   {
@@ -47,138 +61,93 @@ export const syncShopify = inngest.createFunction(
       });
     });
 
-    // ── CUSTOMERS ──
+    const months = getMonthRanges(36);
 
-    // Cancel stale bulk op
-    await step.run("cancel-stale-bulk-op", async () => {
-      await cancelBulkOperation(workspace_id);
-    });
-
-    // Start bulk customer query
-    await step.run("start-bulk-customers", async () => {
-      await startBulkOperation(workspace_id, BULK_CUSTOMERS_QUERY);
-    });
-
-    // Poll until complete
-    let customerBulkDone = false;
-    let pollCount = 0;
-
-    while (!customerBulkDone && pollCount < 200) {
-      const pollNum = pollCount;
-      const pollResult: { status: string; objectCount: number; url: string | null } =
-        await step.run(`poll-bulk-customers-${pollNum}`, async () => {
-          await new Promise((r) => setTimeout(r, 10000));
-          const result = await pollBulkOperation(workspace_id);
-          await updateJob({ synced_customers: result.objectCount });
-          return result;
-        });
-
-      pollCount++;
-
-      if (pollResult.status === "completed") {
-        customerBulkDone = true;
-      } else if (pollResult.status === "failed") {
-        throw new Error("Bulk customer sync failed on Shopify side");
-      }
-    }
-
-    if (!customerBulkDone) {
-      throw new Error("Bulk customer sync timed out");
-    }
-
-    // Download URL
-    const customerUrl: string = await step.run("get-customer-download-url", async () => {
-      return downloadBulkCustomerUrl(workspace_id);
-    });
-
-    // Upsert in chunks (50K per step)
+    // ── CUSTOMERS: sync month by month (current → oldest, max 36 months) ──
     let customersSynced = 0;
-    let customerChunk = 0;
-    let hasMoreCustomers = true;
+    let emptyCustomerMonths = 0;
 
-    while (hasMoreCustomers) {
-      const chunkNum = customerChunk;
-      const chunkResult: { synced: number; hasMore: boolean } =
-        await step.run(`upsert-customers-chunk-${chunkNum}`, async () => {
-          return upsertCustomerChunk(workspace_id, customerUrl, chunkNum);
-        });
+    for (let m = 0; m < months.length; m++) {
+      if (emptyCustomerMonths >= 3) break;
 
-      customersSynced += chunkResult.synced;
-      hasMoreCustomers = chunkResult.hasMore;
-      customerChunk++;
+      const month = months[m];
+      const monthIdx = m;
 
-      await step.run(`update-customer-progress-${customerChunk}`, async () => {
-        await updateJob({ synced_customers: customersSynced });
-      });
-    }
+      await step.run(`cancel-cust-${monthIdx}`, () => cancelBulkOperation(workspace_id));
 
-    // ── ORDERS ──
+      await step.run(`start-cust-${monthIdx}`, () =>
+        startBulkOperationWithQuery(workspace_id, "customers", month.start, month.end)
+      );
 
-    await step.run("switch-to-orders", async () => {
-      await updateJob({ phase: "orders" });
-    });
-
-    // Cancel stale bulk op from customer phase
-    await step.run("cancel-stale-bulk-op-orders", async () => {
-      await cancelBulkOperation(workspace_id);
-    });
-
-    await step.run("start-bulk-orders", async () => {
-      await startBulkOperation(workspace_id, BULK_ORDERS_QUERY);
-    });
-
-    let orderBulkDone = false;
-    let orderPollCount = 0;
-
-    while (!orderBulkDone && orderPollCount < 200) {
-      const pollNum = orderPollCount;
-      const pollResult: { status: string; objectCount: number; url: string | null } =
-        await step.run(`poll-bulk-orders-${pollNum}`, async () => {
-          await new Promise((r) => setTimeout(r, 10000));
-          const result = await pollBulkOperation(workspace_id);
-          await updateJob({ synced_orders: result.objectCount });
-          return result;
-        });
-
-      orderPollCount++;
-
-      if (pollResult.status === "completed") {
-        orderBulkDone = true;
-      } else if (pollResult.status === "failed") {
-        throw new Error("Bulk order sync failed on Shopify side");
+      let done = false;
+      let pollCount = 0;
+      while (!done && pollCount < 60) {
+        const pollNum = pollCount;
+        const pollResult: { status: string; objectCount: number; url: string | null } =
+          await step.run(`poll-cust-${monthIdx}-${pollNum}`, async () => {
+            await new Promise((r) => setTimeout(r, 5000));
+            return pollBulkOperation(workspace_id);
+          });
+        pollCount++;
+        if (pollResult.status === "completed" || pollResult.status === "failed") done = true;
       }
+
+      const synced: number = await step.run(`upsert-cust-${monthIdx}`, () =>
+        downloadAndUpsertCustomers(workspace_id)
+      );
+
+      customersSynced += synced;
+      emptyCustomerMonths = synced === 0 ? emptyCustomerMonths + 1 : 0;
+
+      await step.run(`progress-cust-${monthIdx}`, () =>
+        updateJob({ synced_customers: customersSynced, current_month: m + 1 })
+      );
     }
 
-    if (!orderBulkDone) {
-      throw new Error("Bulk order sync timed out");
-    }
-
-    const orderUrl: string = await step.run("get-order-download-url", async () => {
-      return downloadBulkOrderUrl(workspace_id);
-    });
+    // ── ORDERS: sync month by month ──
+    await step.run("switch-to-orders", () => updateJob({ phase: "orders" }));
 
     let ordersSynced = 0;
-    let orderChunk = 0;
-    let hasMoreOrders = true;
+    let emptyOrderMonths = 0;
 
-    while (hasMoreOrders) {
-      const chunkNum = orderChunk;
-      const chunkResult: { synced: number; hasMore: boolean } =
-        await step.run(`upsert-orders-chunk-${chunkNum}`, async () => {
-          return upsertOrderChunk(workspace_id, orderUrl, chunkNum);
-        });
+    for (let m = 0; m < months.length; m++) {
+      if (emptyOrderMonths >= 3) break;
 
-      ordersSynced += chunkResult.synced;
-      hasMoreOrders = chunkResult.hasMore;
-      orderChunk++;
+      const month = months[m];
+      const monthIdx = m;
 
-      await step.run(`update-order-progress-${orderChunk}`, async () => {
-        await updateJob({ synced_orders: ordersSynced });
-      });
+      await step.run(`cancel-ord-${monthIdx}`, () => cancelBulkOperation(workspace_id));
+
+      await step.run(`start-ord-${monthIdx}`, () =>
+        startBulkOperationWithQuery(workspace_id, "orders", month.start, month.end)
+      );
+
+      let done = false;
+      let pollCount = 0;
+      while (!done && pollCount < 60) {
+        const pollNum = pollCount;
+        const pollResult: { status: string; objectCount: number; url: string | null } =
+          await step.run(`poll-ord-${monthIdx}-${pollNum}`, async () => {
+            await new Promise((r) => setTimeout(r, 5000));
+            return pollBulkOperation(workspace_id);
+          });
+        pollCount++;
+        if (pollResult.status === "completed" || pollResult.status === "failed") done = true;
+      }
+
+      const synced: number = await step.run(`upsert-ord-${monthIdx}`, () =>
+        downloadAndUpsertOrders(workspace_id)
+      );
+
+      ordersSynced += synced;
+      emptyOrderMonths = synced === 0 ? emptyOrderMonths + 1 : 0;
+
+      await step.run(`progress-ord-${monthIdx}`, () =>
+        updateJob({ synced_orders: ordersSynced, current_month: m + 1 })
+      );
     }
 
     // ── FINALIZE ──
-
     await step.run("finalize", async () => {
       await updateJob({ phase: "finalizing" });
       await finalizeSyncOrderDates(workspace_id);
@@ -194,9 +163,6 @@ export const syncShopify = inngest.createFunction(
       });
     });
 
-    return {
-      customers_synced: customersSynced,
-      orders_synced: ordersSynced,
-    };
+    return { customers_synced: customersSynced, orders_synced: ordersSynced };
   }
 );

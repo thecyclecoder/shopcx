@@ -201,6 +201,50 @@ export async function cancelBulkOperation(workspaceId: string): Promise<void> {
   }
 }
 
+// Start a bulk operation with date range filter
+export async function startBulkOperationWithQuery(
+  workspaceId: string,
+  type: "customers" | "orders",
+  startDate: string,
+  endDate: string,
+): Promise<string> {
+  const dateFilter = `updated_at:>='${startDate}' AND updated_at:<='${endDate}'`;
+
+  const customerFields = `
+    id email firstName lastName phone
+    numberOfOrders
+    amountSpent { amount }
+    productSubscriberStatus
+    emailMarketingConsent { marketingState }
+    smsMarketingConsent { marketingState }
+    tags locale note state validEmailAddress createdAt
+    defaultAddress {
+      address1 address2 city province provinceCode
+      country countryCodeV2 zip
+    }
+    addresses(first: 5) {
+      address1 address2 city province provinceCode
+      country countryCodeV2 zip
+    }
+  `;
+
+  const orderFields = `
+    id name email tags sourceName
+    totalPriceSet { shopMoney { amount currencyCode } }
+    displayFinancialStatus displayFulfillmentStatus createdAt
+    customer { id }
+    lineItems(first: 20) {
+      edges { node { title quantity sku originalUnitPriceSet { shopMoney { amount } } } }
+    }
+  `;
+
+  const query = type === "customers"
+    ? `mutation { bulkOperationRunQuery(query: """{ customers(query: "${dateFilter}") { edges { node { ${customerFields} } } } }""") { bulkOperation { id status } userErrors { field message } } }`
+    : `mutation { bulkOperationRunQuery(query: """{ orders(query: "${dateFilter}") { edges { node { ${orderFields} } } } }""") { bulkOperation { id status } userErrors { field message } } }`;
+
+  return startBulkOperation(workspaceId, query);
+}
+
 // Start a bulk operation (returns immediately)
 export async function startBulkOperation(workspaceId: string, mutation: string): Promise<string> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
@@ -408,6 +452,158 @@ async function downloadBulkResults(url: string): Promise<string[]> {
 }
 
 // Download bulk results and return the URL for chunked processing
+// Download bulk results and upsert customers (for month-by-month sync)
+export async function downloadAndUpsertCustomers(workspaceId: string): Promise<number> {
+  const admin = createAdminClient();
+  const pollResult = await pollBulkOperation(workspaceId);
+  if (pollResult.status !== "completed" || !pollResult.url) return 0;
+
+  const res = await fetch(pollResult.url);
+  if (!res.ok) return 0;
+  const text = await res.text();
+  const allLines = text.trim().split("\n").filter(Boolean);
+
+  const records: Record<string, unknown>[] = [];
+  for (const line of allLines) {
+    const c = JSON.parse(line);
+    if (c.__parentId) continue;
+    if (!c.id?.includes("Customer")) continue;
+    const email = c.email
+      ? c.email.toLowerCase()
+      : c.phone
+        ? `${c.phone.replace(/\D/g, "")}@phone.local`
+        : null;
+    if (!email) continue;
+
+    records.push({
+      workspace_id: workspaceId,
+      shopify_customer_id: extractShopifyId(c.id),
+      email,
+      first_name: c.firstName || null,
+      last_name: c.lastName || null,
+      phone: c.phone || null,
+      total_orders: parseInt(c.numberOfOrders) || 0,
+      ltv_cents: dollarsToCents(c.amountSpent?.amount),
+      subscription_status: mapSubscriptionStatus(c.productSubscriberStatus),
+      email_marketing_status: c.emailMarketingConsent?.marketingState?.toLowerCase() || "not_subscribed",
+      sms_marketing_status: c.smsMarketingConsent?.marketingState?.toLowerCase() || "not_subscribed",
+      tags: c.tags || [],
+      default_address: c.defaultAddress || null,
+      addresses: c.addresses || [],
+      locale: c.locale || null,
+      note: c.note || null,
+      shopify_state: c.state || null,
+      valid_email: c.validEmailAddress ?? true,
+      shopify_created_at: c.createdAt || null,
+      updated_at: new Date().toISOString(),
+    });
+  }
+
+  let synced = 0;
+  for (let i = 0; i < records.length; i += UPSERT_BATCH) {
+    const batch = records.slice(i, i + UPSERT_BATCH);
+    const { error } = await admin
+      .from("customers")
+      .upsert(batch, { onConflict: "workspace_id,shopify_customer_id" });
+    if (!error) synced += batch.length;
+    else console.error("Customer upsert error:", error.message);
+  }
+  return synced;
+}
+
+// Download bulk results and upsert orders (for month-by-month sync)
+export async function downloadAndUpsertOrders(workspaceId: string): Promise<number> {
+  const admin = createAdminClient();
+  const pollResult = await pollBulkOperation(workspaceId);
+  if (pollResult.status !== "completed" || !pollResult.url) return 0;
+
+  const res = await fetch(pollResult.url);
+  if (!res.ok) return 0;
+  const text = await res.text();
+  const allLines = text.trim().split("\n").filter(Boolean);
+
+  // Parse orders and line items
+  const orderLines: Record<string, unknown>[] = [];
+  const lineItemsMap = new Map<string, Record<string, unknown>[]>();
+
+  for (const line of allLines) {
+    const obj = JSON.parse(line);
+    if (obj.__parentId) {
+      const parentId = obj.__parentId as string;
+      if (!lineItemsMap.has(parentId)) lineItemsMap.set(parentId, []);
+      lineItemsMap.get(parentId)!.push({
+        title: obj.title,
+        quantity: obj.quantity,
+        price_cents: dollarsToCents(obj.originalUnitPriceSet?.shopMoney?.amount),
+        sku: obj.sku || null,
+      });
+    } else if (obj.id?.includes("Order")) {
+      orderLines.push(obj);
+    }
+  }
+
+  // Preload customer lookup (paginated)
+  const customerByShopifyId = new Map<string, string>();
+  const customerByEmail = new Map<string, string>();
+  let custOffset = 0;
+  while (true) {
+    const { data: batch } = await admin
+      .from("customers")
+      .select("id, shopify_customer_id, email")
+      .eq("workspace_id", workspaceId)
+      .range(custOffset, custOffset + 4999);
+    if (!batch || batch.length === 0) break;
+    for (const c of batch) {
+      if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
+      if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
+    }
+    custOffset += batch.length;
+    if (batch.length < 5000) break;
+  }
+
+  const records: Record<string, unknown>[] = [];
+  for (const o of orderLines) {
+    const gid = o.id as string;
+    const shopifyOrderId = extractShopifyId(gid);
+    const orderEmail = ((o.email as string) || "").toLowerCase();
+    const custGid = (o.customer as { id?: string })?.id;
+    const shopifyCustomerId = custGid ? extractShopifyId(custGid) : null;
+
+    let customerId: string | null = null;
+    if (shopifyCustomerId) customerId = customerByShopifyId.get(shopifyCustomerId) || null;
+    if (!customerId && orderEmail) customerId = customerByEmail.get(orderEmail) || null;
+
+    const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
+
+    records.push({
+      workspace_id: workspaceId,
+      shopify_order_id: shopifyOrderId,
+      customer_id: customerId,
+      order_number: (o.name as string) || null,
+      email: orderEmail || null,
+      total_cents: dollarsToCents(priceSet?.shopMoney?.amount),
+      currency: priceSet?.shopMoney?.currencyCode || "USD",
+      financial_status: (o.displayFinancialStatus as string) || null,
+      fulfillment_status: (o.displayFulfillmentStatus as string) || null,
+      line_items: lineItemsMap.get(gid) || [],
+      source_name: (o.sourceName as string) || null,
+      tags: (o.tags as string[])?.join(", ") || null,
+      created_at: (o.createdAt as string) || new Date().toISOString(),
+    });
+  }
+
+  let synced = 0;
+  for (let i = 0; i < records.length; i += UPSERT_BATCH) {
+    const batch = records.slice(i, i + UPSERT_BATCH);
+    const { error } = await admin
+      .from("orders")
+      .upsert(batch, { onConflict: "workspace_id,shopify_order_id" });
+    if (!error) synced += batch.length;
+    else console.error("Order upsert error:", error.message);
+  }
+  return synced;
+}
+
 export async function downloadBulkCustomerUrl(workspaceId: string): Promise<string> {
   const pollResult = await pollBulkOperation(workspaceId);
   if (pollResult.status !== "completed" || !pollResult.url) {
