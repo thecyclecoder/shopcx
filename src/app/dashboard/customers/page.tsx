@@ -105,14 +105,16 @@ export default function CustomersPage() {
     fetchCustomers();
   }, [fetchCustomers]);
 
-  // Check for existing running sync on mount
+  // Check for existing sync on mount (running or recent failed with progress)
   useEffect(() => {
     fetch(`/api/workspaces/${workspace.id}/sync`)
       .then((res) => res.json())
       .then((job) => {
-        if (job && (job.status === "pending" || job.status === "running")) {
+        if (job) {
           setSyncJob(job);
-          startPolling(job.id);
+          if (job.status === "pending" || job.status === "running") {
+            startPolling(job.id);
+          }
         }
       });
     return () => stopPolling();
