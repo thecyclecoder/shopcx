@@ -228,7 +228,7 @@ export async function bulkSyncCustomers(
 
 // ── Multi-page sync: fetches PAGES_PER_CALL pages in one API route call ──
 
-const PAGES_PER_CALL = 10;
+const PAGES_PER_CALL = 10; // 2,500 records per call
 const GQL_PAGE_SIZE = 250;
 const UPSERT_BATCH = 250;
 

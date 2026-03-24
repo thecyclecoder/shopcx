@@ -27,7 +27,7 @@ export async function GET(
   }
 
   const domain = workspace.resend_domain;
-  const results: { domain: string; has_mx: boolean; mx_records: string[]; can_receive: boolean }[] = [];
+  const results: { domain: string; has_mx: boolean; mx_records: string[]; can_receive: boolean; google_dns_propagated: boolean }[] = [];
 
   // Check the domain itself and common subdomains
   const domainsToCheck = [
@@ -44,6 +44,21 @@ export async function GET(
     domainsToCheck.push(parent);
   }
 
+  // Also check via Google DNS (dig @8.8.8.8) using DNS-over-HTTPS
+  async function checkMxGoogle(domain: string): Promise<{ has_mx: boolean; records: string[] }> {
+    try {
+      const res = await fetch(`https://dns.google/resolve?name=${domain}&type=MX`);
+      const data = await res.json();
+      if (!data.Answer?.length) return { has_mx: false, records: [] };
+      const records = data.Answer
+        .filter((a: { type: number }) => a.type === 15) // MX type
+        .map((a: { data: string }) => a.data);
+      return { has_mx: records.length > 0, records };
+    } catch {
+      return { has_mx: false, records: [] };
+    }
+  }
+
   for (const d of domainsToCheck) {
     try {
       const mxRecords = await dns.resolveMx(d);
@@ -53,18 +68,28 @@ export async function GET(
         r.exchange.toLowerCase().includes("inbound-smtp")
       );
 
+      // Also check Google DNS propagation
+      const googleCheck = await checkMxGoogle(d);
+
       results.push({
         domain: d,
         has_mx: sorted.length > 0,
         mx_records: sorted.map((r) => `${r.priority} ${r.exchange}`),
         can_receive: hasResendInbound,
+        google_dns_propagated: googleCheck.has_mx,
       });
     } catch {
+      // Server DNS failed, try Google DNS as fallback
+      const googleCheck = await checkMxGoogle(d);
+
       results.push({
         domain: d,
-        has_mx: false,
-        mx_records: [],
-        can_receive: false,
+        has_mx: googleCheck.has_mx,
+        mx_records: googleCheck.records,
+        can_receive: googleCheck.records.some((r: string) =>
+          r.toLowerCase().includes("resend") || r.toLowerCase().includes("inbound-smtp")
+        ),
+        google_dns_propagated: googleCheck.has_mx,
       });
     }
   }

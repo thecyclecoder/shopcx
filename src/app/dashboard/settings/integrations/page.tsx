@@ -32,6 +32,16 @@ export default function IntegrationsPage() {
   const [webhookConfigured, setWebhookConfigured] = useState(false);
   const [webhookLoading, setWebhookLoading] = useState(false);
 
+  // MX check
+  const [mxStatus, setMxStatus] = useState<{
+    inbound_ready: string | null;
+    inbound_address: string | null;
+    setup_needed: boolean;
+    setup_instructions: string | null;
+    checks: { domain: string; has_mx: boolean; mx_records: string[]; can_receive: boolean; google_dns_propagated?: boolean }[];
+  } | null>(null);
+  const [mxLoading, setMxLoading] = useState(false);
+
   // Sandbox
   const [sandboxMode, setSandboxMode] = useState(true);
 
@@ -56,6 +66,9 @@ export default function IntegrationsPage() {
           fetch(`/api/workspaces/${workspace.id}/support-emails`)
             .then((r) => r.json())
             .then((emails) => { if (Array.isArray(emails)) setSupportEmails(emails); });
+          fetch(`/api/workspaces/${workspace.id}/integrations/resend/check-mx`)
+            .then((r) => r.json())
+            .then((mx) => setMxStatus(mx));
         }
         setShopifyConnected(data.shopify_connected);
         setShopifyHasCredentials(data.shopify_has_credentials);
@@ -535,40 +548,109 @@ export default function IntegrationsPage() {
                 <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800">
                   <div className="flex items-center justify-between">
                     <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">Inbound Emails</p>
-                    {webhookConfigured ? (
-                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Active</span>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={webhookLoading}
-                        onClick={async () => {
-                          setWebhookLoading(true);
-                          const res = await fetch(`/api/workspaces/${workspace.id}/integrations/resend/webhook`, { method: "POST" });
-                          const data = await res.json();
-                          if (res.ok) {
-                            setWebhookConfigured(true);
-                            setMessage("Inbound email webhook created");
-                          } else {
-                            setMessage(data.error || "Failed to create webhook");
-                          }
-                          setWebhookLoading(false);
-                        }}
-                        className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
-                      >
-                        {webhookLoading ? "Setting up..." : "Enable Inbound Emails"}
-                      </button>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {webhookConfigured ? (
+                        <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Webhook Active</span>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={webhookLoading}
+                          onClick={async () => {
+                            setWebhookLoading(true);
+                            const res = await fetch(`/api/workspaces/${workspace.id}/integrations/resend/webhook`, { method: "POST" });
+                            const data = await res.json();
+                            if (res.ok) {
+                              setWebhookConfigured(true);
+                              setMessage("Inbound email webhook created");
+                            } else {
+                              setMessage(data.error || "Failed to create webhook");
+                            }
+                            setWebhookLoading(false);
+                          }}
+                          className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                        >
+                          {webhookLoading ? "Setting up..." : "Enable Inbound Emails"}
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   {webhookConfigured && resendDomain && (
-                    <div>
-                      <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Inbound Address</p>
-                      <p className="mt-0.5 rounded bg-white px-2 py-1 font-mono text-xs text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100">
-                        inbound@{resendDomain}
-                      </p>
-                      <p className="mt-1 text-[10px] text-zinc-400">
-                        Forward your support emails to this address to create tickets automatically.
-                      </p>
+                    <div className="space-y-3">
+                      {/* Inbound address */}
+                      <div>
+                        <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Inbound Address</p>
+                        <p className="mt-0.5 rounded bg-white px-2 py-1 font-mono text-xs text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100">
+                          inbound@{resendDomain}
+                        </p>
+                        <p className="mt-1 text-[10px] text-zinc-400">
+                          Forward your support emails to this address to create tickets automatically.
+                        </p>
+                      </div>
+
+                      {/* MX Record Status */}
+                      <div>
+                        <div className="flex items-center justify-between">
+                          <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">DNS Status</p>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setMxLoading(true);
+                              const res = await fetch(`/api/workspaces/${workspace.id}/integrations/resend/check-mx`);
+                              const data = await res.json();
+                              setMxStatus(data);
+                              setMxLoading(false);
+                            }}
+                            className="text-[10px] text-indigo-500 hover:text-indigo-600"
+                          >
+                            {mxLoading ? "Checking..." : "Refresh"}
+                          </button>
+                        </div>
+
+                        {mxStatus ? (
+                          <div className="mt-1.5 space-y-1.5">
+                            {mxStatus.checks.filter(c => c.has_mx || c.domain === resendDomain).map((check) => (
+                              <div key={check.domain} className="flex items-center gap-2">
+                                {check.can_receive ? (
+                                  <div className="h-2 w-2 flex-shrink-0 rounded-full bg-emerald-500" title="MX records point to Resend — ready to receive" />
+                                ) : check.has_mx ? (
+                                  <div className="h-2 w-2 flex-shrink-0 rounded-full bg-amber-500" title="MX records exist but don't point to Resend" />
+                                ) : (
+                                  <div className="h-2 w-2 flex-shrink-0 rounded-full bg-red-500" title="No MX records — cannot receive email" />
+                                )}
+                                <span className="font-mono text-[10px] text-zinc-600 dark:text-zinc-400">{check.domain}</span>
+                                {check.can_receive && check.google_dns_propagated && (
+                                  <span className="text-[10px] text-emerald-600 dark:text-emerald-400">Ready</span>
+                                )}
+                                {check.can_receive && !check.google_dns_propagated && (
+                                  <span className="text-[10px] text-amber-600 dark:text-amber-400">Propagating (Google DNS pending)</span>
+                                )}
+                                {check.has_mx && !check.can_receive && (
+                                  <span className="text-[10px] text-amber-600 dark:text-amber-400">MX not Resend</span>
+                                )}
+                                {!check.has_mx && (
+                                  <span className="text-[10px] text-red-500">No MX</span>
+                                )}
+                              </div>
+                            ))}
+
+                            {mxStatus.inbound_ready ? (
+                              <p className="mt-1 text-[10px] text-emerald-600 dark:text-emerald-400">
+                                Inbound email will work at <strong>{mxStatus.inbound_address}</strong>
+                              </p>
+                            ) : (
+                              <div className="mt-1 rounded border border-red-200 bg-red-50 p-2 dark:border-red-800 dark:bg-red-950">
+                                <p className="text-[10px] font-medium text-red-600 dark:text-red-400">MX record needed</p>
+                                <p className="mt-0.5 text-[10px] text-red-500 dark:text-red-400">
+                                  {mxStatus.setup_instructions}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <p className="mt-1 text-[10px] text-zinc-400">Loading DNS status...</p>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>

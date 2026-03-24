@@ -4,7 +4,6 @@ import {
   getShopifyCounts,
   syncCustomerPages,
   syncOrderPages,
-  bulkSyncCustomers,
   finalizeSyncOrderDates,
 } from "@/lib/shopify-sync";
 import { updateRetentionScores } from "@/lib/retention-score";
@@ -45,8 +44,8 @@ export const syncShopify = inngest.createFunction(
       });
     });
 
-    // Step 2: Sync customers — choose strategy based on DB state
-    const customerSyncMode: "skip" | "bulk" | "paginated" = await step.run("check-customer-sync", async () => {
+    // Step 2: Sync customers — skip if already synced, otherwise paginate
+    const shouldSyncCustomers: boolean = await step.run("check-customer-sync", async () => {
       const { count } = await admin
         .from("customers")
         .select("id", { count: "exact", head: true })
@@ -54,35 +53,17 @@ export const syncShopify = inngest.createFunction(
 
       const dbCount = count || 0;
       const threshold = counts.customers * 0.01;
-
-      // Already synced (within 1%)
-      if (dbCount > 0 && Math.abs(dbCount - counts.customers) <= threshold) return "skip";
-      // Large initial sync — use bulk operations (single Shopify job, no step limit issues)
-      if (counts.customers > 5000 && dbCount < counts.customers * 0.5) return "bulk";
-      // Small or incremental — use paginated
-      return "paginated";
+      return !dbCount || Math.abs(dbCount - counts.customers) > threshold;
     });
 
     let customersSynced = 0;
 
-    if (customerSyncMode === "skip") {
+    if (!shouldSyncCustomers) {
       await step.run("skip-customers", async () => {
         await updateJob({ synced_customers: counts.customers });
       });
       customersSynced = counts.customers;
-    } else if (customerSyncMode === "bulk") {
-      // Bulk operation: one step, Shopify handles pagination internally
-      customersSynced = await step.run("bulk-sync-customers", async () => {
-        await updateJob({ phase: "customers" });
-        return bulkSyncCustomers(workspace_id, async (synced) => {
-          await updateJob({ synced_customers: synced });
-        });
-      });
-      await step.run("update-bulk-customer-count", async () => {
-        await updateJob({ synced_customers: customersSynced });
-      });
     } else {
-      // Paginated sync
       let customerCursor: string | null = null;
       let customerBatch = 0;
 
@@ -98,7 +79,9 @@ export const syncShopify = inngest.createFunction(
         customerCursor = result.nextCursor;
         customerBatch++;
 
-        if (customerBatch % 5 === 0 || !result.hasMore) {
+        // Update progress every 10 batches to stay well under 1000 step limit
+        // 619K / 2500 per batch = ~248 batches, / 10 = 25 progress updates
+        if (customerBatch % 10 === 0 || !result.hasMore) {
           await step.run(`update-customer-progress-${customerBatch}`, async () => {
             await updateJob({ synced_customers: customersSynced });
           });
@@ -129,8 +112,8 @@ export const syncShopify = inngest.createFunction(
       orderCursor = result.nextCursor;
       orderBatch++;
 
-      // Update progress every 5 batches to save steps
-      if (orderBatch % 5 === 0 || !result.hasMore) {
+      // Update progress every 10 batches to stay under step limit
+      if (orderBatch % 10 === 0 || !result.hasMore) {
         await step.run(`update-order-progress-${orderBatch}`, async () => {
           await updateJob({ synced_orders: ordersSynced });
         });
