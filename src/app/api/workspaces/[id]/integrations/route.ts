@@ -14,7 +14,6 @@ export async function GET(
 
   const admin = createAdminClient();
 
-  // Check membership and role
   const { data: member } = await admin
     .from("workspace_members")
     .select("role")
@@ -28,7 +27,9 @@ export async function GET(
 
   const { data: workspace } = await admin
     .from("workspaces")
-    .select("resend_api_key_encrypted, resend_domain")
+    .select(
+      "resend_api_key_encrypted, resend_domain, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes"
+    )
     .eq("id", workspaceId)
     .single();
 
@@ -37,12 +38,19 @@ export async function GET(
   }
 
   return NextResponse.json({
+    // Resend
     resend_connected: !!workspace.resend_api_key_encrypted,
     resend_domain: workspace.resend_domain,
-    // Mask the key - only show last 4 chars
     resend_api_key_hint: workspace.resend_api_key_encrypted
       ? `re_...${decrypt(workspace.resend_api_key_encrypted).slice(-4)}`
       : null,
+
+    // Shopify
+    shopify_connected: !!workspace.shopify_access_token_encrypted,
+    shopify_has_credentials: !!(workspace.shopify_client_id_encrypted && workspace.shopify_client_secret_encrypted),
+    shopify_domain: workspace.shopify_domain,
+    shopify_myshopify_domain: workspace.shopify_myshopify_domain,
+    shopify_scopes: workspace.shopify_scopes,
   });
 }
 
@@ -78,6 +86,7 @@ export async function PATCH(
   const updates: Record<string, string | null> = {};
 
   try {
+    // Resend
     if ("resend_api_key" in body) {
       if (body.resend_api_key) {
         if (!body.resend_api_key.startsWith("re_")) {
@@ -88,15 +97,43 @@ export async function PATCH(
         updates.resend_api_key_encrypted = null;
       }
     }
-  } catch (err) {
+
+    if ("resend_domain" in body) {
+      updates.resend_domain = body.resend_domain || null;
+    }
+
+    // Shopify credentials
+    if ("shopify_client_id" in body) {
+      updates.shopify_client_id_encrypted = body.shopify_client_id
+        ? encrypt(body.shopify_client_id)
+        : null;
+    }
+
+    if ("shopify_client_secret" in body) {
+      updates.shopify_client_secret_encrypted = body.shopify_client_secret
+        ? encrypt(body.shopify_client_secret)
+        : null;
+    }
+
+    if ("shopify_domain" in body) {
+      updates.shopify_domain = body.shopify_domain || null;
+    }
+
+    // Shopify disconnect — clear all shopify fields
+    if (body.shopify_disconnect === true) {
+      updates.shopify_client_id_encrypted = null;
+      updates.shopify_client_secret_encrypted = null;
+      updates.shopify_access_token_encrypted = null;
+      updates.shopify_domain = null;
+      updates.shopify_myshopify_domain = null;
+      updates.shopify_scopes = null;
+      updates.shopify_oauth_state = null;
+    }
+  } catch {
     return NextResponse.json(
       { error: "Encryption failed. ENCRYPTION_KEY may not be configured." },
       { status: 500 }
     );
-  }
-
-  if ("resend_domain" in body) {
-    updates.resend_domain = body.resend_domain || null;
   }
 
   if (Object.keys(updates).length === 0) {
