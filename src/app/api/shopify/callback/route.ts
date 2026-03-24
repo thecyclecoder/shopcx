@@ -7,6 +7,7 @@ import {
   exchangeShopifyCode,
   fetchShopDetails,
 } from "@/lib/shopify";
+import { registerShopifyWebhooks } from "@/lib/shopify-webhook-register";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -95,6 +96,17 @@ export async function GET(request: Request) {
         shopify_scopes: scope,
       })
       .eq("id", workspaceId);
+
+    // Register webhooks for real-time sync
+    const webhookUrl = `${siteUrl}/api/webhooks/shopify`;
+    const { errors: webhookErrors } = await registerShopifyWebhooks(
+      shopDetails.myshopify_domain,
+      access_token,
+      webhookUrl
+    );
+    if (webhookErrors.length) {
+      console.warn("Webhook registration errors:", webhookErrors);
+    }
 
     return NextResponse.redirect(`${siteUrl}/dashboard/settings/integrations?shopify=connected`);
   } catch (err) {
