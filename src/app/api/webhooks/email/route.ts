@@ -51,6 +51,19 @@ export async function POST(request: Request) {
   const messageBody = html || text || "(empty message)";
   const normalizedEmail = senderEmail.toLowerCase().trim();
 
+  // Capture original To address (for routing/tagging by support email)
+  // Check forwarded headers first, fall back to X-Original-To, then the To field itself
+  const originalTo = (
+    emailHeaders?.["x-original-to"] ||
+    emailHeaders?.["X-Original-To"] ||
+    emailHeaders?.["x-forwarded-to"] ||
+    emailHeaders?.["X-Forwarded-To"] ||
+    emailHeaders?.["delivered-to"] ||
+    emailHeaders?.["Delivered-To"] ||
+    (typeof toAddress === "string" ? toAddress : toAddress?.address) ||
+    ""
+  ).toLowerCase().trim();
+
   // Try to thread to existing ticket
   let ticketId: string | null = null;
 
@@ -169,6 +182,7 @@ export async function POST(request: Request) {
         status: "open",
         subject: subject || "(No subject)",
         email_message_id: messageId,
+        received_at_email: originalTo || null,
       })
       .select("id")
       .single();

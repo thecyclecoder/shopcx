@@ -24,8 +24,11 @@ export default function IntegrationsPage() {
   const [shopifyMyshopifyDomain, setShopifyMyshopifyDomain] = useState<string | null>(null);
   const [shopifyScopes, setShopifyScopes] = useState<string | null>(null);
 
-  // Support email + webhook
+  // Support emails + webhook
   const [supportEmail, setSupportEmail] = useState("");
+  const [supportEmails, setSupportEmails] = useState<{ id: string; email: string; label: string | null; is_default: boolean }[]>([]);
+  const [newSupportEmail, setNewSupportEmail] = useState("");
+  const [newSupportLabel, setNewSupportLabel] = useState("");
   const [webhookConfigured, setWebhookConfigured] = useState(false);
   const [webhookLoading, setWebhookLoading] = useState(false);
 
@@ -46,6 +49,9 @@ export default function IntegrationsPage() {
           fetch(`/api/workspaces/${workspace.id}/integrations/resend/webhook`)
             .then((r) => r.json())
             .then((wh) => setWebhookConfigured(wh.configured));
+          fetch(`/api/workspaces/${workspace.id}/support-emails`)
+            .then((r) => r.json())
+            .then((emails) => { if (Array.isArray(emails)) setSupportEmails(emails); });
         }
         setShopifyConnected(data.shopify_connected);
         setShopifyHasCredentials(data.shopify_has_credentials);
@@ -401,17 +407,91 @@ export default function IntegrationsPage() {
                 />
                 <p className="mt-1 text-xs text-zinc-400">Must be verified in your Resend dashboard</p>
               </div>
-              <div>
-                <label className="block text-xs font-medium text-zinc-500">Support Email (Reply-To)</label>
-                <input
-                  type="email"
-                  value={supportEmail}
-                  onChange={(e) => setSupportEmail(e.target.value)}
-                  placeholder="support@superfoodscompany.com"
-                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
-                />
-                <p className="mt-1 text-xs text-zinc-400">Customer replies go to this address. Set to your forwarded support email.</p>
-              </div>
+              {/* Support emails list */}
+              {resendConnected && webhookConfigured && (
+                <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800">
+                  <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">Support Email Addresses</p>
+                  <p className="text-[10px] text-zinc-400">
+                    Add email addresses that customers can contact. Forward each to <strong>inbound@{resendDomain}</strong>. The default is used as Reply-To on outbound emails.
+                  </p>
+
+                  {supportEmails.length > 0 && (
+                    <div className="divide-y divide-zinc-200 rounded border border-zinc-200 bg-white dark:divide-zinc-700 dark:border-zinc-700 dark:bg-zinc-900">
+                      {supportEmails.map((se) => (
+                        <div key={se.id} className="flex items-center justify-between px-3 py-2">
+                          <div>
+                            <span className="text-xs font-medium text-zinc-900 dark:text-zinc-100">{se.email}</span>
+                            {se.label && <span className="ml-2 text-[10px] text-zinc-400">({se.label})</span>}
+                            {se.is_default && (
+                              <span className="ml-2 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+                                Reply-To
+                              </span>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await fetch(`/api/workspaces/${workspace.id}/support-emails?email_id=${se.id}`, { method: "DELETE" });
+                              setSupportEmails((prev) => prev.filter((e) => e.id !== se.id));
+                            }}
+                            className="text-xs text-zinc-400 hover:text-red-500"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex items-end gap-2">
+                    <div className="flex-1">
+                      <input
+                        type="email"
+                        value={newSupportEmail}
+                        onChange={(e) => setNewSupportEmail(e.target.value)}
+                        placeholder="support@company.com"
+                        className="block w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                      />
+                    </div>
+                    <div className="w-24">
+                      <input
+                        type="text"
+                        value={newSupportLabel}
+                        onChange={(e) => setNewSupportLabel(e.target.value)}
+                        placeholder="Label"
+                        className="block w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!newSupportEmail}
+                      onClick={async () => {
+                        const res = await fetch(`/api/workspaces/${workspace.id}/support-emails`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            email: newSupportEmail,
+                            label: newSupportLabel || null,
+                            is_default: supportEmails.length === 0,
+                          }),
+                        });
+                        if (res.ok) {
+                          const created = await res.json();
+                          setSupportEmails((prev) => [...prev, created]);
+                          setNewSupportEmail("");
+                          setNewSupportLabel("");
+                        } else {
+                          const data = await res.json();
+                          setMessage(data.error || "Failed to add email");
+                        }
+                      }}
+                      className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      Add
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Inbound email setup */}
               {resendConnected && (
@@ -444,26 +524,14 @@ export default function IntegrationsPage() {
                   </div>
 
                   {webhookConfigured && resendDomain && (
-                    <div className="space-y-2">
-                      <div>
-                        <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Default Inbound Address</p>
-                        <p className="mt-0.5 rounded bg-white px-2 py-1 font-mono text-xs text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100">
-                          inbound@{resendDomain}
-                        </p>
-                        <p className="mt-1 text-[10px] text-zinc-400">
-                          Emails sent here automatically create tickets. Use this directly or forward from a pretty address.
-                        </p>
-                      </div>
-
-                      {supportEmail && (
-                        <div className="rounded border border-amber-200 bg-amber-50 p-2 dark:border-amber-800 dark:bg-amber-950">
-                          <p className="text-[10px] font-medium text-amber-700 dark:text-amber-400">Forwarding Setup</p>
-                          <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">
-                            Forward <strong>{supportEmail}</strong> to <strong>inbound@{resendDomain}</strong> in your email provider settings.
-                            Customers will see replies from {supportEmail}.
-                          </p>
-                        </div>
-                      )}
+                    <div>
+                      <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Inbound Address</p>
+                      <p className="mt-0.5 rounded bg-white px-2 py-1 font-mono text-xs text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100">
+                        inbound@{resendDomain}
+                      </p>
+                      <p className="mt-1 text-[10px] text-zinc-400">
+                        Forward your support emails to this address to create tickets automatically.
+                      </p>
                     </div>
                   )}
                 </div>
