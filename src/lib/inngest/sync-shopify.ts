@@ -76,7 +76,7 @@ export const syncCustomers = inngest.createFunction(
         const pi = polls;
         const pr: { status: string; objectCount: number; url: string | null } =
           await step.run(`poll-${mi}-${pi}`, async () => {
-            await new Promise((r) => setTimeout(r, 15000));
+            await new Promise((r) => setTimeout(r, 30000));
             return pollBulkOperation(workspace_id);
           });
         polls++;
@@ -161,7 +161,7 @@ export const syncOrders = inngest.createFunction(
         const pi = polls;
         const pr: { status: string; objectCount: number; url: string | null } =
           await step.run(`poll-${mi}-${pi}`, async () => {
-            await new Promise((r) => setTimeout(r, 15000));
+            await new Promise((r) => setTimeout(r, 30000));
             return pollBulkOperation(workspace_id);
           });
         polls++;
