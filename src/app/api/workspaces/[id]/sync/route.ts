@@ -9,7 +9,6 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: workspaceId } = await params;
-  void request;
 
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -28,10 +27,14 @@ export async function POST(
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  // Check if there's already a running sync
+  let body: { type?: string } = {};
+  try { body = await request.json(); } catch { /* empty body ok */ }
+  const syncType = body.type === "orders" ? "orders" : body.type === "customers" ? "customers" : "full";
+
+  // Check if there's already a running sync of any type
   const { data: existingJob } = await admin
     .from("sync_jobs")
-    .select("id, status")
+    .select("id, status, type")
     .eq("workspace_id", workspaceId)
     .in("status", ["pending", "running"])
     .limit(1)
@@ -39,17 +42,17 @@ export async function POST(
 
   if (existingJob) {
     return NextResponse.json(
-      { error: "A sync is already in progress", job_id: existingJob.id },
+      { error: `A ${existingJob.type} sync is already in progress`, job_id: existingJob.id },
       { status: 409 }
     );
   }
 
-  // Create sync job record
+  // Create sync job
   const { data: job, error: jobError } = await admin
     .from("sync_jobs")
     .insert({
       workspace_id: workspaceId,
-      type: "full",
+      type: syncType,
       status: "pending",
     })
     .select()
@@ -59,14 +62,23 @@ export async function POST(
     return NextResponse.json({ error: "Failed to create sync job" }, { status: 500 });
   }
 
-  // Fire Inngest event
-  await inngest.send({
-    name: "shopify/sync.requested",
-    data: {
-      workspace_id: workspaceId,
-      job_id: job.id,
-    },
-  });
+  // Fire appropriate Inngest event(s)
+  if (syncType === "customers" || syncType === "full") {
+    await inngest.send({
+      name: "shopify/sync.customers",
+      data: { workspace_id: workspaceId, job_id: job.id },
+    });
+  }
+
+  if (syncType === "orders") {
+    await inngest.send({
+      name: "shopify/sync.orders",
+      data: { workspace_id: workspaceId, job_id: job.id },
+    });
+  }
+
+  // For "full", fire orders after customers complete (handled by separate button now)
+  // Full sync just does customers — user clicks orders separately
 
   return NextResponse.json({ job_id: job.id }, { status: 202 });
 }

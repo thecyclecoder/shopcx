@@ -140,14 +140,15 @@ export default function CustomersPage() {
     }
   };
 
-  const handleSync = async () => {
+  const handleSync = async (type: "customers" | "orders") => {
     const res = await fetch(`/api/workspaces/${workspace.id}/sync`, {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type }),
     });
     const data = await res.json();
 
     if (res.status === 409) {
-      // Already running, start polling it
       startPolling(data.job_id);
       return;
     }
@@ -239,12 +240,20 @@ export default function CustomersPage() {
             Synced {syncJob.synced_customers?.toLocaleString()} customers, {syncJob.synced_orders?.toLocaleString()} orders
           </span>
         ) : (workspace.role === "owner" || (workspace.role === "admin" && total === 0)) ? (
-          <button
-            onClick={handleSync}
-            className="cursor-pointer rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
-          >
-            {total > 0 ? "Re-sync" : "Sync Customers"}
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => handleSync("customers")}
+              className="cursor-pointer rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
+            >
+              {total > 0 ? "Re-sync Customers" : "Sync Customers"}
+            </button>
+            <button
+              onClick={() => handleSync("orders")}
+              className="cursor-pointer rounded-md border border-indigo-300 px-3 py-2 text-sm font-medium text-indigo-600 transition-colors hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
+            >
+              Sync Orders
+            </button>
+          </div>
         ) : null}
       </div>
 
