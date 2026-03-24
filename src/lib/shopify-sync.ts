@@ -949,7 +949,7 @@ export async function finalizeSyncOrderDates(workspaceId: string): Promise<void>
 
 // ── Batch sync: paginate ALL, 10 pages (2500 records) per call ──
 
-const PAGES_PER_BATCH = 10;
+const PAGES_PER_BATCH = 20; // 5,000 records per Inngest step
 
 export async function syncCustomerBatch(
   workspaceId: string,

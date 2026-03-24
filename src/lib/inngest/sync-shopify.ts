@@ -53,18 +53,17 @@ export const syncCustomers = inngest.createFunction(
       const cursorForStep: string | null = cursor;
 
       const result: { synced: number; nextCursor: string | null; hasMore: boolean } =
-        await step.run(`batch-${bn}`, () =>
-          syncCustomerBatch(workspace_id, cursorForStep)
-        );
+        await step.run(`batch-${bn}`, async () => {
+          const r = await syncCustomerBatch(workspace_id, cursorForStep);
+          // Update progress in same step to halve step count
+          await updateJob({ synced_customers: customersSynced + r.synced, last_cursor: r.nextCursor, current_month: bn + 1 });
+          return r;
+        });
 
       customersSynced += result.synced;
       cursor = result.nextCursor;
       done = !result.hasMore;
       batchNum++;
-
-      await step.run(`progress-${batchNum}`, () =>
-        updateJob({ synced_customers: customersSynced, last_cursor: cursor, current_month: batchNum })
-      );
     }
 
     await step.run("finalize", async () => {
@@ -124,18 +123,16 @@ export const syncOrders = inngest.createFunction(
       const cursorForStep: string | null = cursor;
 
       const result: { synced: number; nextCursor: string | null; hasMore: boolean } =
-        await step.run(`batch-${bn}`, () =>
-          syncOrderBatch(workspace_id, cursorForStep)
-        );
+        await step.run(`batch-${bn}`, async () => {
+          const r = await syncOrderBatch(workspace_id, cursorForStep);
+          await updateJob({ synced_orders: ordersSynced + r.synced, last_cursor: r.nextCursor, current_month: bn + 1 });
+          return r;
+        });
 
       ordersSynced += result.synced;
       cursor = result.nextCursor;
       done = !result.hasMore;
       batchNum++;
-
-      await step.run(`progress-${batchNum}`, () =>
-        updateJob({ synced_orders: ordersSynced, last_cursor: cursor, current_month: batchNum })
-      );
     }
 
     await step.run("finalize", async () => {
