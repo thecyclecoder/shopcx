@@ -176,21 +176,28 @@ const BULK_POLL_QUERY = `{
 export async function cancelBulkOperation(workspaceId: string): Promise<void> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
 
-  // Check if one is running
   const pollData = await shopifyGraphQL(shop, accessToken, BULK_POLL_QUERY);
   const op = pollData.currentBulkOperation as { id: string; status: string } | null;
 
-  if (op && (op.status === "RUNNING" || op.status === "CREATED")) {
-    await shopifyGraphQL(shop, accessToken,
-      `mutation { bulkOperationCancel(id: "${op.id}") { bulkOperation { id status } userErrors { field message } } }`
-    );
-    // Wait for cancellation to complete
-    for (let i = 0; i < 12; i++) {
+  if (op && (op.status === "RUNNING" || op.status === "CREATED" || op.status === "CANCELING")) {
+    if (op.status !== "CANCELING") {
+      try {
+        await shopifyGraphQL(shop, accessToken,
+          `mutation { bulkOperationCancel(id: "${op.id}") { bulkOperation { id status } userErrors { field message } } }`
+        );
+      } catch {
+        // Ignore cancel errors
+      }
+    }
+    // Wait briefly, but don't block forever
+    for (let i = 0; i < 24; i++) {
       await new Promise((r) => setTimeout(r, 5000));
       const check = await shopifyGraphQL(shop, accessToken, BULK_POLL_QUERY);
       const checkOp = check.currentBulkOperation as { status: string } | null;
-      if (!checkOp || checkOp.status === "CANCELED" || checkOp.status === "CANCELLED" || checkOp.status === "COMPLETED") break;
+      if (!checkOp || checkOp.status === "CANCELED" || checkOp.status === "CANCELLED" || checkOp.status === "COMPLETED") return;
     }
+    // If still not cancelled after 2 min, throw so Inngest retries the step later
+    throw new Error("Bulk operation still cancelling — will retry");
   }
 }
 
