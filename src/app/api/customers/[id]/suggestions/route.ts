@@ -3,6 +3,13 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 
+// Extract the local part of an email (before @), stripping +aliases
+function getEmailBase(email: string): string {
+  const local = email.split("@")[0]?.toLowerCase() || "";
+  // Strip +alias (e.g., dylan+testing@ → dylan@)
+  return local.split("+")[0];
+}
+
 // GET: find potential duplicate customers to link
 export async function GET(
   request: Request,
@@ -23,7 +30,7 @@ export async function GET(
   // Get the current customer
   const { data: customer } = await admin
     .from("customers")
-    .select("id, email, first_name, last_name, phone")
+    .select("id, email, first_name, last_name, phone, default_address")
     .eq("id", customerId)
     .eq("workspace_id", workspaceId)
     .single();
@@ -51,25 +58,63 @@ export async function GET(
   const suggestions: { id: string; email: string; first_name: string | null; last_name: string | null; phone: string | null; match_reason: string }[] = [];
   const seenIds = new Set(excludeIds);
 
-  // Match by name (first + last)
-  if (customer.first_name && customer.last_name) {
-    const { data: nameMatches } = await admin
+  function addSuggestion(m: { id: string; email: string; first_name: string | null; last_name: string | null; phone: string | null }, reason: string) {
+    if (!seenIds.has(m.id)) {
+      suggestions.push({ ...m, match_reason: reason });
+      seenIds.add(m.id);
+    }
+  }
+
+  // 1. Match by same email local part across different domains
+  // e.g., dylanralston@superfoodscompany.com ↔ dylanralston@gmail.com
+  const emailBase = getEmailBase(customer.email);
+  if (emailBase && emailBase.length > 3) { // Avoid matching very short bases like "hi" or "info"
+    const { data: baseMatches } = await admin
       .from("customers")
       .select("id, email, first_name, last_name, phone")
       .eq("workspace_id", workspaceId)
-      .ilike("first_name", customer.first_name)
-      .ilike("last_name", customer.last_name)
-      .limit(5);
+      .ilike("email", `${emailBase}%@%`)
+      .limit(10);
 
-    for (const m of nameMatches || []) {
-      if (!seenIds.has(m.id)) {
-        suggestions.push({ ...m, match_reason: "Same name" });
-        seenIds.add(m.id);
+    for (const m of baseMatches || []) {
+      const mBase = getEmailBase(m.email);
+      if (mBase === emailBase) {
+        addSuggestion(m, "Same email username");
       }
     }
   }
 
-  // Match by phone
+  // 2. Match by +alias variants of the same email
+  // e.g., dylan@superfoodscompany.com ↔ dylan+testing@superfoodscompany.com
+  const emailDomain = customer.email.split("@")[1]?.toLowerCase();
+  if (emailBase && emailDomain) {
+    const { data: aliasMatches } = await admin
+      .from("customers")
+      .select("id, email, first_name, last_name, phone")
+      .eq("workspace_id", workspaceId)
+      .ilike("email", `${emailBase}+%@${emailDomain}`)
+      .limit(5);
+
+    for (const m of aliasMatches || []) {
+      addSuggestion(m, "Email alias (+)");
+    }
+
+    // Also check if THIS customer is a +alias and match to the base
+    if (customer.email.includes("+")) {
+      const { data: baseMatch } = await admin
+        .from("customers")
+        .select("id, email, first_name, last_name, phone")
+        .eq("workspace_id", workspaceId)
+        .eq("email", `${emailBase}@${emailDomain}`)
+        .limit(1);
+
+      for (const m of baseMatch || []) {
+        addSuggestion(m, "Base email (without +alias)");
+      }
+    }
+  }
+
+  // 3. Match by phone number
   if (customer.phone) {
     const { data: phoneMatches } = await admin
       .from("customers")
@@ -79,28 +124,37 @@ export async function GET(
       .limit(5);
 
     for (const m of phoneMatches || []) {
-      if (!seenIds.has(m.id)) {
-        suggestions.push({ ...m, match_reason: "Same phone" });
-        seenIds.add(m.id);
-      }
+      addSuggestion(m, "Same phone number");
     }
   }
 
-  // Match by email domain (same person, different email at same company)
-  const emailDomain = customer.email.split("@")[1];
-  if (emailDomain && !emailDomain.includes("phone.local") && !["gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com", "icloud.com"].includes(emailDomain)) {
-    const { data: domainMatches } = await admin
+  // 4. Match by first name + last name (exact, case-insensitive)
+  if (customer.first_name && customer.last_name && customer.first_name.length > 1 && customer.last_name.length > 1) {
+    const { data: nameMatches } = await admin
       .from("customers")
       .select("id, email, first_name, last_name, phone")
       .eq("workspace_id", workspaceId)
-      .ilike("email", `%@${emailDomain}`)
+      .ilike("first_name", customer.first_name)
+      .ilike("last_name", customer.last_name)
       .limit(5);
 
-    for (const m of domainMatches || []) {
-      if (!seenIds.has(m.id)) {
-        suggestions.push({ ...m, match_reason: "Same email domain" });
-        seenIds.add(m.id);
-      }
+    for (const m of nameMatches || []) {
+      addSuggestion(m, "Same name");
+    }
+  }
+
+  // 5. Match by default address (same street + zip)
+  const addr = customer.default_address as { address1?: string; zip?: string } | null;
+  if (addr?.address1 && addr?.zip) {
+    const { data: addrMatches } = await admin
+      .from("customers")
+      .select("id, email, first_name, last_name, phone")
+      .eq("workspace_id", workspaceId)
+      .contains("default_address", { address1: addr.address1, zip: addr.zip })
+      .limit(5);
+
+    for (const m of addrMatches || []) {
+      addSuggestion(m, "Same address");
     }
   }
 

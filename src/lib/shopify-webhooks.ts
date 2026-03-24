@@ -257,6 +257,15 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
       line_items: lineItems,
       source_name: (payload.source_name as string) || null,
       tags: (payload.tags as string) || null,
+      fulfillments: ((payload.fulfillments as Record<string, unknown>[]) || []).map((f) => ({
+        trackingInfo: ((f.tracking_numbers as string[]) || []).map((num, i) => ({
+          number: num,
+          url: (f.tracking_urls as string[])?.[i] || null,
+          company: (f.tracking_company as string) || null,
+        })),
+        status: f.status || null,
+        createdAt: f.created_at || null,
+      })),
       created_at: (payload.created_at as string) || new Date().toISOString(),
     },
     { onConflict: "workspace_id,shopify_order_id" }

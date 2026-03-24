@@ -236,6 +236,11 @@ export async function startBulkOperationWithQuery(
     lineItems(first: 20) {
       edges { node { title quantity sku originalUnitPriceSet { shopMoney { amount } } } }
     }
+    fulfillments {
+      trackingInfo { number url company }
+      status
+      createdAt
+    }
   `;
 
   const query = type === "customers"
@@ -425,6 +430,7 @@ export async function upsertOrderChunk(
       line_items: lineItemsMap.get(gid) || [],
       source_name: (o.sourceName as string) || null,
       tags: (o.tags as string[])?.join(", ") || null,
+      fulfillments: (o.fulfillments as unknown[]) || [],
       created_at: (o.createdAt as string) || new Date().toISOString(),
     });
   }
@@ -588,6 +594,7 @@ export async function downloadAndUpsertOrders(workspaceId: string): Promise<numb
       line_items: lineItemsMap.get(gid) || [],
       source_name: (o.sourceName as string) || null,
       tags: (o.tags as string[])?.join(", ") || null,
+      fulfillments: (o.fulfillments as unknown[]) || [],
       created_at: (o.createdAt as string) || new Date().toISOString(),
     });
   }

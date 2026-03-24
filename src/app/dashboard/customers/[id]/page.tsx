@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
 interface Customer {
@@ -34,6 +34,25 @@ interface PaymentMethod {
   email?: string | null;
 }
 
+interface OrderLineItem {
+  title: string;
+  quantity: number;
+  price_cents: number;
+  sku: string | null;
+}
+
+interface TrackingInfo {
+  number: string;
+  url: string | null;
+  company: string | null;
+}
+
+interface Fulfillment {
+  trackingInfo: TrackingInfo[];
+  status: string | null;
+  createdAt: string | null;
+}
+
 interface Order {
   id: string;
   order_number: string | null;
@@ -42,6 +61,11 @@ interface Order {
   currency: string;
   financial_status: string | null;
   fulfillment_status: string | null;
+  source_name: string | null;
+  order_type: string | null;
+  tags: string | null;
+  line_items: OrderLineItem[];
+  fulfillments: Fulfillment[];
   created_at: string;
 }
 
@@ -115,6 +139,7 @@ export default function CustomerDetailPage() {
   const [linkedIdentities, setLinkedIdentities] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; is_primary: boolean }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [linkEmail, setLinkEmail] = useState("");
   const [linkMessage, setLinkMessage] = useState("");
   const [suggestions, setSuggestions] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; phone: string | null; match_reason: string }[]>([]);
@@ -477,7 +502,7 @@ export default function CustomerDetailPage() {
         )}
       </div>
 
-      {/* Orders table */}
+      {/* Orders */}
       <div className="mt-8">
         <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
           Recent Orders
@@ -487,6 +512,7 @@ export default function CustomerDetailPage() {
             <thead>
               <tr className="text-left text-xs font-medium uppercase tracking-wider text-zinc-500">
                 <th className="px-4 py-3">Order</th>
+                <th className="px-4 py-3">Type</th>
                 <th className="px-4 py-3">Date</th>
                 <th className="px-4 py-3">Total</th>
                 <th className="px-4 py-3">Payment</th>
@@ -496,32 +522,140 @@ export default function CustomerDetailPage() {
             <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
               {orders.length === 0 ? (
                 <tr>
-                  <td
-                    colSpan={5}
-                    className="px-4 py-8 text-center text-sm text-zinc-400"
-                  >
+                  <td colSpan={6} className="px-4 py-8 text-center text-sm text-zinc-400">
                     No orders found.
                   </td>
                 </tr>
               ) : (
                 orders.map((o) => (
-                  <tr key={o.id}>
-                    <td className="whitespace-nowrap px-4 py-3 text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                      {o.order_number || "--"}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500">
-                      {formatDate(o.created_at)}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-700 dark:text-zinc-300">
-                      {formatCents(o.total_cents, o.currency)}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-sm">
-                      <StatusBadge status={o.financial_status} />
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-sm">
-                      <StatusBadge status={o.fulfillment_status} />
-                    </td>
-                  </tr>
+                  <React.Fragment key={o.id}>
+                    <tr
+                      onClick={() => setSelectedOrderId(selectedOrderId === o.id ? null : o.id)}
+                      className="cursor-pointer transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                    >
+                      <td className="whitespace-nowrap px-4 py-3 text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                        <div className="flex items-center gap-1.5">
+                          <svg
+                            className={`h-3 w-3 text-zinc-400 transition-transform ${selectedOrderId === o.id ? "rotate-90" : ""}`}
+                            fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                          </svg>
+                          {o.order_number || "--"}
+                        </div>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-sm">
+                        {o.order_type === "recurring" ? (
+                          <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400">Recurring</span>
+                        ) : o.order_type === "checkout" ? (
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Checkout</span>
+                        ) : o.order_type === "replacement" ? (
+                          <span className="rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">Replacement</span>
+                        ) : (
+                          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                            {o.source_name || "--"}
+                          </span>
+                        )}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500">
+                        {formatDate(o.created_at)}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-700 dark:text-zinc-300">
+                        {formatCents(o.total_cents, o.currency)}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-sm">
+                        <StatusBadge status={o.financial_status} />
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-sm">
+                        <StatusBadge status={o.fulfillment_status} />
+                      </td>
+                    </tr>
+
+                    {/* Expanded order detail */}
+                    {selectedOrderId === o.id && (
+                      <tr>
+                        <td colSpan={6} className="bg-zinc-50 px-4 py-4 dark:bg-zinc-800/30">
+                          <div className="space-y-3">
+                            {/* Order meta */}
+                            <div className="flex flex-wrap gap-4 text-xs text-zinc-500">
+                              {o.source_name && (
+                                <span>Source: <span className="font-medium text-zinc-700 dark:text-zinc-300">{o.source_name}</span></span>
+                              )}
+                              {o.tags && (
+                                <span>Tags: <span className="font-medium text-zinc-700 dark:text-zinc-300">{o.tags}</span></span>
+                              )}
+                            </div>
+
+                            {/* Fulfillment & Tracking */}
+                            {o.fulfillments && o.fulfillments.length > 0 && (
+                              <div className="space-y-1.5">
+                                {o.fulfillments.map((f, fi) => (
+                                  <div key={fi} className="flex flex-wrap items-center gap-2 text-xs">
+                                    <span className={`rounded-full px-2 py-0.5 font-medium ${
+                                      f.status === "SUCCESS" || f.status === "success"
+                                        ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                                        : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                                    }`}>
+                                      {f.status || "Pending"}
+                                    </span>
+                                    {f.trackingInfo?.map((t, ti) => (
+                                      <span key={ti} className="flex items-center gap-1">
+                                        {t.company && <span className="text-zinc-400">{t.company}:</span>}
+                                        {t.url ? (
+                                          <a
+                                            href={t.url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="font-mono text-indigo-600 hover:underline dark:text-indigo-400"
+                                          >
+                                            {t.number}
+                                          </a>
+                                        ) : (
+                                          <span className="font-mono text-zinc-600 dark:text-zinc-300">{t.number}</span>
+                                        )}
+                                      </span>
+                                    ))}
+                                    {f.createdAt && (
+                                      <span className="text-zinc-400">{formatDate(f.createdAt)}</span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+
+                            {/* Line items */}
+                            {o.line_items && o.line_items.length > 0 ? (
+                              <div>
+                                <p className="mb-2 text-xs font-medium uppercase tracking-wider text-zinc-500">Items</p>
+                                <div className="divide-y divide-zinc-200 rounded border border-zinc-200 bg-white dark:divide-zinc-700 dark:border-zinc-700 dark:bg-zinc-900">
+                                  {o.line_items.map((item, idx) => (
+                                    <div key={idx} className="flex items-center justify-between px-3 py-2">
+                                      <div>
+                                        <p className="text-sm text-zinc-900 dark:text-zinc-100">{item.title}</p>
+                                        {item.sku && (
+                                          <p className="text-[10px] text-zinc-400">SKU: {item.sku}</p>
+                                        )}
+                                      </div>
+                                      <div className="text-right">
+                                        <p className="text-sm text-zinc-700 dark:text-zinc-300">
+                                          {item.quantity} × {formatCents(item.price_cents)}
+                                        </p>
+                                        <p className="text-xs text-zinc-400">
+                                          {formatCents(item.quantity * item.price_cents)}
+                                        </p>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-zinc-400">No line items available.</p>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
                 ))
               )}
             </tbody>
