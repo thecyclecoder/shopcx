@@ -4,6 +4,7 @@ import {
   getShopifyCounts,
   syncCustomerPages,
   syncOrderPages,
+  bulkSyncCustomers,
   finalizeSyncOrderDates,
 } from "@/lib/shopify-sync";
 import { updateRetentionScores } from "@/lib/retention-score";
@@ -44,28 +45,67 @@ export const syncShopify = inngest.createFunction(
       });
     });
 
-    // Step 2: Sync customers (paginated, each batch is a step for retryability)
-    let customerCursor: string | null = null;
+    // Step 2: Sync customers — choose strategy based on DB state
+    const customerSyncMode: "skip" | "bulk" | "paginated" = await step.run("check-customer-sync", async () => {
+      const { count } = await admin
+        .from("customers")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", workspace_id);
+
+      const dbCount = count || 0;
+      const threshold = counts.customers * 0.01;
+
+      // Already synced (within 1%)
+      if (dbCount > 0 && Math.abs(dbCount - counts.customers) <= threshold) return "skip";
+      // Large initial sync — use bulk operations (single Shopify job, no step limit issues)
+      if (counts.customers > 5000 && dbCount < counts.customers * 0.5) return "bulk";
+      // Small or incremental — use paginated
+      return "paginated";
+    });
+
     let customersSynced = 0;
-    let customerBatch = 0;
 
-    while (true) {
-      const cursor: string | null = customerCursor;
-      const batchNum = customerBatch;
-      const result: { synced: number; nextCursor: string | null; hasMore: boolean } =
-        await step.run(`sync-customers-batch-${batchNum}`, () =>
-          syncCustomerPages(workspace_id, cursor)
-        );
-
-      customersSynced += result.synced;
-      customerCursor = result.nextCursor;
-      customerBatch++;
-
-      await step.run(`update-customer-progress-${customerBatch}`, async () => {
+    if (customerSyncMode === "skip") {
+      await step.run("skip-customers", async () => {
+        await updateJob({ synced_customers: counts.customers });
+      });
+      customersSynced = counts.customers;
+    } else if (customerSyncMode === "bulk") {
+      // Bulk operation: one step, Shopify handles pagination internally
+      customersSynced = await step.run("bulk-sync-customers", async () => {
+        await updateJob({ phase: "customers" });
+        return bulkSyncCustomers(workspace_id, async (synced) => {
+          await updateJob({ synced_customers: synced });
+        });
+      });
+      await step.run("update-bulk-customer-count", async () => {
         await updateJob({ synced_customers: customersSynced });
       });
+    } else {
+      // Paginated sync
+      let customerCursor: string | null = null;
+      let customerBatch = 0;
 
-      if (!result.hasMore) break;
+      while (true) {
+        const cursor: string | null = customerCursor;
+        const batchNum = customerBatch;
+        const result: { synced: number; nextCursor: string | null; hasMore: boolean } =
+          await step.run(`sync-customers-batch-${batchNum}`, () =>
+            syncCustomerPages(workspace_id, cursor)
+          );
+
+        customersSynced += result.synced;
+        customerCursor = result.nextCursor;
+        customerBatch++;
+
+        if (customerBatch % 5 === 0 || !result.hasMore) {
+          await step.run(`update-customer-progress-${customerBatch}`, async () => {
+            await updateJob({ synced_customers: customersSynced });
+          });
+        }
+
+        if (!result.hasMore) break;
+      }
     }
 
     // Step 3: Sync orders
@@ -89,9 +129,12 @@ export const syncShopify = inngest.createFunction(
       orderCursor = result.nextCursor;
       orderBatch++;
 
-      await step.run(`update-order-progress-${orderBatch}`, async () => {
-        await updateJob({ synced_orders: ordersSynced });
-      });
+      // Update progress every 5 batches to save steps
+      if (orderBatch % 5 === 0 || !result.hasMore) {
+        await step.run(`update-order-progress-${orderBatch}`, async () => {
+          await updateJob({ synced_orders: ordersSynced });
+        });
+      }
 
       if (!result.hasMore) break;
     }

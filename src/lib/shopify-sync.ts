@@ -97,9 +97,138 @@ export async function getShopifyCounts(workspaceId: string): Promise<{ customers
   };
 }
 
+// ── Bulk Operations (for initial large syncs) ──
+
+const BULK_CUSTOMERS_QUERY = `
+  mutation {
+    bulkOperationRunQuery(
+      query: """
+      {
+        customers {
+          edges {
+            node {
+              id email firstName lastName phone
+              numberOfOrders
+              amountSpent { amount }
+              productSubscriberStatus
+              tags
+            }
+          }
+        }
+      }
+      """
+    ) {
+      bulkOperation { id status }
+      userErrors { field message }
+    }
+  }
+`;
+
+const BULK_POLL_QUERY = `{
+  currentBulkOperation {
+    id status errorCode objectCount url
+  }
+}`;
+
+async function runBulkOperation(
+  shop: string,
+  accessToken: string,
+  mutation: string,
+  onPoll?: (objectCount: number) => void,
+): Promise<string> {
+  const data = await shopifyGraphQL(shop, accessToken, mutation);
+  const result = data.bulkOperationRunQuery as {
+    bulkOperation: { id: string; status: string } | null;
+    userErrors: { field: string; message: string }[];
+  };
+
+  if (result.userErrors?.length) {
+    throw new Error(`Bulk operation error: ${result.userErrors[0].message}`);
+  }
+  if (!result.bulkOperation) {
+    throw new Error("Failed to start bulk operation");
+  }
+
+  // Poll until complete (up to 30 minutes)
+  let attempts = 0;
+  while (attempts < 360) {
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    attempts++;
+
+    const pollData = await shopifyGraphQL(shop, accessToken, BULK_POLL_QUERY);
+    const op = pollData.currentBulkOperation as {
+      status: string; errorCode: string | null; objectCount: string; url: string | null;
+    } | null;
+
+    if (!op) throw new Error("No bulk operation found");
+    if (onPoll) onPoll(parseInt(op.objectCount) || 0);
+
+    if (op.status === "COMPLETED") return op.url || "";
+    if (op.status === "FAILED") throw new Error(`Bulk operation failed: ${op.errorCode}`);
+    if (op.status === "CANCELED" || op.status === "CANCELLED") throw new Error("Bulk operation cancelled");
+  }
+  throw new Error("Bulk operation timed out");
+}
+
+async function downloadBulkResults(url: string): Promise<string[]> {
+  if (!url) return [];
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to download bulk results: ${res.status}`);
+  const text = await res.text();
+  return text.trim().split("\n").filter(Boolean);
+}
+
+export async function bulkSyncCustomers(
+  workspaceId: string,
+  onProgress?: (synced: number) => Promise<void>,
+): Promise<number> {
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+  const admin = createAdminClient();
+
+  const resultUrl = await runBulkOperation(shop, accessToken, BULK_CUSTOMERS_QUERY);
+  const lines = await downloadBulkResults(resultUrl);
+
+  let synced = 0;
+  const records: Record<string, unknown>[] = [];
+
+  for (const line of lines) {
+    const c = JSON.parse(line);
+    if (c.__parentId) continue;
+    if (!c.id?.includes("Customer")) continue;
+
+    records.push({
+      workspace_id: workspaceId,
+      shopify_customer_id: extractShopifyId(c.id),
+      email: (c.email || `no-email-${extractShopifyId(c.id)}@unknown.com`).toLowerCase(),
+      first_name: c.firstName || null,
+      last_name: c.lastName || null,
+      phone: c.phone || null,
+      total_orders: parseInt(c.numberOfOrders) || 0,
+      ltv_cents: dollarsToCents(c.amountSpent?.amount),
+      subscription_status: mapSubscriptionStatus(c.productSubscriberStatus),
+      tags: c.tags || [],
+      updated_at: new Date().toISOString(),
+    });
+  }
+
+  // Batch upsert
+  for (let i = 0; i < records.length; i += UPSERT_BATCH) {
+    const batch = records.slice(i, i + UPSERT_BATCH);
+    const { error } = await admin
+      .from("customers")
+      .upsert(batch, { onConflict: "workspace_id,shopify_customer_id" });
+    if (!error) synced += batch.length;
+    else console.error("Bulk customer upsert error:", error.message);
+
+    if (onProgress && i % 2500 === 0) await onProgress(synced);
+  }
+
+  return synced;
+}
+
 // ── Multi-page sync: fetches PAGES_PER_CALL pages in one API route call ──
 
-const PAGES_PER_CALL = 2;
+const PAGES_PER_CALL = 10;
 const GQL_PAGE_SIZE = 250;
 const UPSERT_BATCH = 250;
 
