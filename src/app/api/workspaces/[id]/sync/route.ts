@@ -47,12 +47,14 @@ export async function POST(
     );
   }
 
-  // Check for a recent failed job of the same type to resume from
-  let startMonth = 0;
+  // Check for a recent failed job to resume from
+  let resumeCursor: string | null = null;
+  let resumeSynced = 0;
+  let resumeBatch = 0;
   if (body.resume) {
     const { data: lastFailed } = await admin
       .from("sync_jobs")
-      .select("last_completed_month, current_month, type")
+      .select("last_cursor, synced_customers, synced_orders, current_month, type")
       .eq("workspace_id", workspaceId)
       .eq("type", syncType)
       .eq("status", "failed")
@@ -60,11 +62,10 @@ export async function POST(
       .limit(1)
       .single();
 
-    if (lastFailed?.last_completed_month) {
-      startMonth = lastFailed.last_completed_month;
-    } else if (lastFailed?.current_month) {
-      // Fallback: current_month - 1 (the month it was working on when it failed)
-      startMonth = Math.max(0, lastFailed.current_month - 1);
+    if (lastFailed?.last_cursor) {
+      resumeCursor = lastFailed.last_cursor;
+      resumeSynced = syncType === "orders" ? (lastFailed.synced_orders || 0) : (lastFailed.synced_customers || 0);
+      resumeBatch = lastFailed.current_month || 0;
     }
   }
 
@@ -75,8 +76,10 @@ export async function POST(
       workspace_id: workspaceId,
       type: syncType,
       status: "pending",
-      last_completed_month: startMonth,
-      current_month: startMonth,
+      last_cursor: resumeCursor,
+      current_month: resumeBatch,
+      synced_customers: syncType === "customers" ? resumeSynced : 0,
+      synced_orders: syncType === "orders" ? resumeSynced : 0,
     })
     .select()
     .single();

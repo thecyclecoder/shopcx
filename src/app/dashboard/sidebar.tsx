@@ -131,7 +131,7 @@ export default function Sidebar({
   return (
     <>
       {/* Mobile header bar */}
-      <div className="fixed inset-x-0 top-0 z-40 flex h-14 items-center gap-3 border-b border-zinc-200 bg-white/80 px-4 backdrop-blur-md md:hidden dark:border-zinc-800 dark:bg-zinc-900/80">
+      <div className="fixed inset-x-0 top-0 z-40 flex h-14 items-center gap-3 border-b border-zinc-200 bg-white/80 px-4 pt-[env(safe-area-inset-top)] backdrop-blur-md md:hidden dark:border-zinc-800 dark:bg-zinc-900/80">
         <button
           onClick={() => setOpen(true)}
           className="rounded p-1.5 text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
@@ -161,7 +161,7 @@ export default function Sidebar({
             onClick={() => setOpen(false)}
           />
           {/* Drawer */}
-          <aside className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-white md:hidden dark:bg-zinc-900">
+          <aside className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-white pt-[env(safe-area-inset-top)] md:hidden dark:bg-zinc-900">
             {sidebarContent}
           </aside>
         </>

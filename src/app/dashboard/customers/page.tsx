@@ -243,12 +243,9 @@ export default function CustomersPage() {
               onClick={() => handleSync(syncJob.phase === "orders" ? "orders" : "customers", true)}
               className="cursor-pointer rounded-md bg-amber-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-amber-500"
             >
-              Resume from {(() => {
-                const monthOffset = (syncJob as SyncJob & { last_completed_month?: number; current_month?: number }).last_completed_month || ((syncJob as SyncJob & { current_month?: number }).current_month || 1) - 1;
-                const now = new Date();
-                const resumeDate = new Date(now.getFullYear(), now.getMonth() - monthOffset, 1);
-                return resumeDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
-              })()}
+              Resume ({syncJob.phase === "customers"
+                ? `${syncJob.synced_customers.toLocaleString()} customers synced`
+                : `${syncJob.synced_orders.toLocaleString()} orders synced`})
             </button>
             <button
               onClick={() => handleSync(syncJob.phase === "orders" ? "orders" : "customers")}

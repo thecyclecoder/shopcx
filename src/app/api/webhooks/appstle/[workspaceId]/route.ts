@@ -40,14 +40,15 @@ export async function POST(
 ) {
   const { workspaceId } = await params;
   const body = await request.text();
+  // Svix/webhook headers — Appstle uses "webhook-*" prefix instead of "svix-*"
   const headers = {
-    "svix-id": request.headers.get("svix-id") || "",
-    "svix-timestamp": request.headers.get("svix-timestamp") || "",
-    "svix-signature": request.headers.get("svix-signature") || "",
+    "svix-id": request.headers.get("webhook-id") || request.headers.get("svix-id") || "",
+    "svix-timestamp": request.headers.get("webhook-timestamp") || request.headers.get("svix-timestamp") || "",
+    "svix-signature": request.headers.get("webhook-signature") || request.headers.get("svix-signature") || "",
   };
 
   if (!headers["svix-id"] || !headers["svix-signature"]) {
-    return NextResponse.json({ error: "Missing Svix headers" }, { status: 400 });
+    return NextResponse.json({ error: "Missing webhook headers" }, { status: 400 });
   }
 
   const admin = createAdminClient();
