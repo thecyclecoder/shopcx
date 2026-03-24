@@ -157,12 +157,31 @@ const BULK_POLL_QUERY = `{
   }
 }`;
 
-async function runBulkOperation(
-  shop: string,
-  accessToken: string,
-  mutation: string,
-  onPoll?: (objectCount: number) => void,
-): Promise<string> {
+// Cancel any running bulk operation (prevents conflicts)
+export async function cancelBulkOperation(workspaceId: string): Promise<void> {
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+
+  // Check if one is running
+  const pollData = await shopifyGraphQL(shop, accessToken, BULK_POLL_QUERY);
+  const op = pollData.currentBulkOperation as { id: string; status: string } | null;
+
+  if (op && (op.status === "RUNNING" || op.status === "CREATED")) {
+    await shopifyGraphQL(shop, accessToken,
+      `mutation { bulkOperationCancel(id: "${op.id}") { bulkOperation { id status } userErrors { field message } } }`
+    );
+    // Wait for cancellation to complete
+    for (let i = 0; i < 12; i++) {
+      await new Promise((r) => setTimeout(r, 5000));
+      const check = await shopifyGraphQL(shop, accessToken, BULK_POLL_QUERY);
+      const checkOp = check.currentBulkOperation as { status: string } | null;
+      if (!checkOp || checkOp.status === "CANCELED" || checkOp.status === "CANCELLED" || checkOp.status === "COMPLETED") break;
+    }
+  }
+}
+
+// Start a bulk operation (returns immediately)
+export async function startBulkOperation(workspaceId: string, mutation: string): Promise<string> {
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const data = await shopifyGraphQL(shop, accessToken, mutation);
   const result = data.bulkOperationRunQuery as {
     bulkOperation: { id: string; status: string } | null;
@@ -175,27 +194,34 @@ async function runBulkOperation(
   if (!result.bulkOperation) {
     throw new Error("Failed to start bulk operation");
   }
-
-  // Poll until complete (up to 30 minutes)
-  let attempts = 0;
-  while (attempts < 360) {
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-    attempts++;
-
-    const pollData = await shopifyGraphQL(shop, accessToken, BULK_POLL_QUERY);
-    const op = pollData.currentBulkOperation as {
-      status: string; errorCode: string | null; objectCount: string; url: string | null;
-    } | null;
-
-    if (!op) throw new Error("No bulk operation found");
-    if (onPoll) onPoll(parseInt(op.objectCount) || 0);
-
-    if (op.status === "COMPLETED") return op.url || "";
-    if (op.status === "FAILED") throw new Error(`Bulk operation failed: ${op.errorCode}`);
-    if (op.status === "CANCELED" || op.status === "CANCELLED") throw new Error("Bulk operation cancelled");
-  }
-  throw new Error("Bulk operation timed out");
+  return result.bulkOperation.id;
 }
+
+// Poll bulk operation status — returns url if complete, null if still running
+export async function pollBulkOperation(workspaceId: string): Promise<{
+  status: "running" | "completed" | "failed";
+  objectCount: number;
+  url: string | null;
+}> {
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+  const pollData = await shopifyGraphQL(shop, accessToken, BULK_POLL_QUERY);
+  const op = pollData.currentBulkOperation as {
+    status: string; errorCode: string | null; objectCount: string; url: string | null;
+  } | null;
+
+  if (!op) return { status: "failed", objectCount: 0, url: null };
+
+  if (op.status === "COMPLETED") {
+    return { status: "completed", objectCount: parseInt(op.objectCount) || 0, url: op.url };
+  }
+  if (op.status === "FAILED" || op.status === "CANCELED" || op.status === "CANCELLED") {
+    return { status: "failed", objectCount: parseInt(op.objectCount) || 0, url: null };
+  }
+
+  return { status: "running", objectCount: parseInt(op.objectCount) || 0, url: null };
+}
+
+export { BULK_CUSTOMERS_QUERY };
 
 async function downloadBulkResults(url: string): Promise<string[]> {
   if (!url) return [];
@@ -209,11 +235,14 @@ export async function bulkSyncCustomers(
   workspaceId: string,
   onProgress?: (synced: number) => Promise<void>,
 ): Promise<number> {
-  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const admin = createAdminClient();
 
-  const resultUrl = await runBulkOperation(shop, accessToken, BULK_CUSTOMERS_QUERY);
-  const lines = await downloadBulkResults(resultUrl);
+  // Get the completed bulk operation's download URL
+  const pollResult = await pollBulkOperation(workspaceId);
+  if (pollResult.status !== "completed" || !pollResult.url) {
+    throw new Error("Bulk operation not completed or no download URL");
+  }
+  const lines = await downloadBulkResults(pollResult.url);
 
   let synced = 0;
   const records: Record<string, unknown>[] = [];

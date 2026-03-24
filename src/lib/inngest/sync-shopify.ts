@@ -2,9 +2,13 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getShopifyCounts,
-  syncCustomerPages,
+  cancelBulkOperation,
+  startBulkOperation,
+  pollBulkOperation,
+  bulkSyncCustomers,
   syncOrderPages,
   finalizeSyncOrderDates,
+  BULK_CUSTOMERS_QUERY,
 } from "@/lib/shopify-sync";
 import { updateRetentionScores } from "@/lib/retention-score";
 
@@ -23,7 +27,6 @@ export const syncShopify = inngest.createFunction(
 
     const admin = createAdminClient();
 
-    // Helper to update job progress
     async function updateJob(updates: Record<string, unknown>) {
       await admin
         .from("sync_jobs")
@@ -44,13 +47,12 @@ export const syncShopify = inngest.createFunction(
       });
     });
 
-    // Step 2: Sync customers — skip if already synced, otherwise paginate
+    // Step 2: Check if customers need syncing
     const shouldSyncCustomers: boolean = await step.run("check-customer-sync", async () => {
       const { count } = await admin
         .from("customers")
         .select("id", { count: "exact", head: true })
         .eq("workspace_id", workspace_id);
-
       const dbCount = count || 0;
       const threshold = counts.customers * 0.01;
       return !dbCount || Math.abs(dbCount - counts.customers) > threshold;
@@ -64,34 +66,58 @@ export const syncShopify = inngest.createFunction(
       });
       customersSynced = counts.customers;
     } else {
-      let customerCursor: string | null = null;
-      let customerBatch = 0;
+      // Step 3a: Cancel any stale bulk operation
+      await step.run("cancel-stale-bulk-op", async () => {
+        await cancelBulkOperation(workspace_id);
+      });
 
-      while (true) {
-        const cursor: string | null = customerCursor;
-        const batchNum = customerBatch;
-        const result: { synced: number; nextCursor: string | null; hasMore: boolean } =
-          await step.run(`sync-customers-batch-${batchNum}`, () =>
-            syncCustomerPages(workspace_id, cursor)
-          );
+      // Step 3b: Start bulk operation
+      await step.run("start-bulk-customers", async () => {
+        await startBulkOperation(workspace_id, BULK_CUSTOMERS_QUERY);
+      });
 
-        customersSynced += result.synced;
-        customerCursor = result.nextCursor;
-        customerBatch++;
+      // Step 3c: Poll until complete (each poll is a step — handles Vercel timeout)
+      let bulkDone = false;
+      let pollCount = 0;
 
-        // Update progress every 10 batches to stay well under 1000 step limit
-        // 619K / 2500 per batch = ~248 batches, / 10 = 25 progress updates
-        if (customerBatch % 10 === 0 || !result.hasMore) {
-          await step.run(`update-customer-progress-${customerBatch}`, async () => {
+      while (!bulkDone && pollCount < 120) {
+        const pollNum = pollCount;
+        const pollResult: { status: string; objectCount: number; url: string | null } =
+          await step.run(`poll-bulk-customers-${pollNum}`, async () => {
+            // Wait 10s before checking (Shopify needs time)
+            await new Promise((r) => setTimeout(r, 10000));
+            const result = await pollBulkOperation(workspace_id);
+            await updateJob({ synced_customers: result.objectCount });
+            return result;
+          });
+
+        pollCount++;
+
+        if (pollResult.status === "completed") {
+          bulkDone = true;
+
+          // Step 3d: Download and upsert
+          customersSynced = await step.run("download-and-upsert-customers", async () => {
+            return bulkSyncCustomers(workspace_id, async (synced) => {
+              await updateJob({ synced_customers: synced });
+            });
+          });
+
+          await step.run("update-customer-final", async () => {
             await updateJob({ synced_customers: customersSynced });
           });
+        } else if (pollResult.status === "failed") {
+          throw new Error("Bulk customer sync failed on Shopify side");
         }
+        // status === "running" → loop and poll again
+      }
 
-        if (!result.hasMore) break;
+      if (!bulkDone) {
+        throw new Error("Bulk customer sync timed out after 20 minutes of polling");
       }
     }
 
-    // Step 3: Sync orders
+    // Step 4: Sync orders (REST API, paginated — no bulk op needed for ~125K)
     await step.run("switch-to-orders", async () => {
       await updateJob({ phase: "orders" });
     });
@@ -112,7 +138,6 @@ export const syncShopify = inngest.createFunction(
       orderCursor = result.nextCursor;
       orderBatch++;
 
-      // Update progress every 10 batches to stay under step limit
       if (orderBatch % 10 === 0 || !result.hasMore) {
         await step.run(`update-order-progress-${orderBatch}`, async () => {
           await updateJob({ synced_orders: ordersSynced });
@@ -122,14 +147,14 @@ export const syncShopify = inngest.createFunction(
       if (!result.hasMore) break;
     }
 
-    // Step 4: Finalize
+    // Step 5: Finalize
     await step.run("finalize", async () => {
       await updateJob({ phase: "finalizing" });
       await finalizeSyncOrderDates(workspace_id);
       await updateRetentionScores(workspace_id);
     });
 
-    // Step 5: Mark complete
+    // Step 6: Mark complete
     await step.run("complete", async () => {
       await updateJob({
         status: "completed",
