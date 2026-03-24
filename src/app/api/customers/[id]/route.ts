@@ -55,17 +55,62 @@ export async function GET(
     );
   }
 
-  // Fetch recent orders
+  // Fetch recent orders (including linked customer orders)
+  const linkedCustomerIds = [customerId];
+
+  const { data: link } = await admin
+    .from("customer_links")
+    .select("group_id")
+    .eq("customer_id", customerId)
+    .single();
+
+  if (link) {
+    const { data: groupLinks } = await admin
+      .from("customer_links")
+      .select("customer_id")
+      .eq("group_id", link.group_id);
+
+    for (const gl of groupLinks || []) {
+      if (!linkedCustomerIds.includes(gl.customer_id)) {
+        linkedCustomerIds.push(gl.customer_id);
+      }
+    }
+  }
+
   const { data: orders } = await admin
     .from("orders")
     .select("*")
-    .eq("customer_id", customerId)
     .eq("workspace_id", workspaceId)
+    .in("customer_id", linkedCustomerIds)
     .order("created_at", { ascending: false })
     .limit(20);
+
+  // Get linked identities
+  let linkedIdentities: { id: string; email: string; first_name: string | null; last_name: string | null; is_primary: boolean }[] = [];
+  if (link) {
+    const { data: groupLinks } = await admin
+      .from("customer_links")
+      .select("customer_id, is_primary, customers(id, email, first_name, last_name)")
+      .eq("group_id", link.group_id);
+
+    linkedIdentities = (groupLinks || [])
+      .filter((l) => l.customer_id !== customerId)
+      .map((l) => {
+        const c = l.customers as unknown as { id: string; email: string; first_name: string | null; last_name: string | null };
+        return {
+          id: c.id,
+          email: c.email,
+          first_name: c.first_name,
+          last_name: c.last_name,
+          is_primary: l.is_primary,
+        };
+      });
+  }
 
   return NextResponse.json({
     customer,
     orders: orders || [],
+    linked_identities: linkedIdentities,
+    group_id: link?.group_id || null,
   });
 }

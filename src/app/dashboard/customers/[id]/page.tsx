@@ -97,8 +97,11 @@ export default function CustomerDetailPage() {
   const router = useRouter();
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [linkedIdentities, setLinkedIdentities] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; is_primary: boolean }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [linkEmail, setLinkEmail] = useState("");
+  const [linkMessage, setLinkMessage] = useState("");
 
   useEffect(() => {
     async function load() {
@@ -111,10 +114,52 @@ export default function CustomerDetailPage() {
       const data = await res.json();
       setCustomer(data.customer);
       setOrders(data.orders);
+      setLinkedIdentities(data.linked_identities || []);
       setLoading(false);
     }
     load();
   }, [id]);
+
+  const handleLink = async () => {
+    if (!linkEmail.trim()) return;
+    setLinkMessage("");
+
+    // Search for customer by email
+    const searchRes = await fetch(`/api/customers?search=${encodeURIComponent(linkEmail)}&limit=1`);
+    const searchData = await searchRes.json();
+    const target = searchData.customers?.[0];
+
+    if (!target) {
+      setLinkMessage("No customer found with that email");
+      return;
+    }
+    if (target.id === id) {
+      setLinkMessage("That's this customer");
+      return;
+    }
+
+    const res = await fetch(`/api/customers/${id}/links`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ link_to: target.id }),
+    });
+
+    if (res.ok) {
+      setLinkedIdentities((prev) => [...prev, { id: target.id, email: target.email, first_name: target.first_name, last_name: target.last_name, is_primary: false }]);
+      setLinkEmail("");
+      setLinkMessage("Linked!");
+    } else {
+      const data = await res.json();
+      setLinkMessage(data.error || "Failed to link");
+    }
+  };
+
+  const handleUnlink = async (unlinkId: string) => {
+    const res = await fetch(`/api/customers/${id}/links?unlink_id=${unlinkId}`, { method: "DELETE" });
+    if (res.ok) {
+      setLinkedIdentities((prev) => prev.filter((l) => l.id !== unlinkId));
+    }
+  };
 
   if (loading) {
     return (
@@ -229,6 +274,60 @@ export default function CustomerDetailPage() {
           </div>
         </div>
       )}
+
+      {/* Linked Identities */}
+      <div className="mt-6">
+        <p className="text-xs font-medium uppercase text-zinc-500">Linked Identities</p>
+
+        {linkedIdentities.length > 0 && (
+          <div className="mt-2 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
+            {linkedIdentities.map((li) => (
+              <div key={li.id} className="flex items-center justify-between px-3 py-2">
+                <button
+                  onClick={() => router.push(`/dashboard/customers/${li.id}`)}
+                  className="text-left"
+                >
+                  <span className="text-sm text-indigo-600 hover:underline dark:text-indigo-400">
+                    {li.email}
+                  </span>
+                  {(li.first_name || li.last_name) && (
+                    <span className="ml-2 text-xs text-zinc-400">
+                      {[li.first_name, li.last_name].filter(Boolean).join(" ")}
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={() => handleUnlink(li.id)}
+                  className="text-xs text-zinc-400 hover:text-red-500"
+                >
+                  Unlink
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            type="text"
+            value={linkEmail}
+            onChange={(e) => setLinkEmail(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleLink()}
+            placeholder="Link by email..."
+            className="block flex-1 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+          />
+          <button
+            onClick={handleLink}
+            disabled={!linkEmail.trim()}
+            className="cursor-pointer rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+          >
+            Link
+          </button>
+        </div>
+        {linkMessage && (
+          <p className="mt-1 text-xs text-indigo-600 dark:text-indigo-400">{linkMessage}</p>
+        )}
+      </div>
 
       {/* Orders table */}
       <div className="mt-8">
