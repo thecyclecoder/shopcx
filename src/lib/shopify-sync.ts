@@ -189,15 +189,26 @@ export async function syncCustomerPages(
   };
 }
 
+// ── REST-based order sync (no 60-day limit, includes source_name) ──
+
+function parseLinkHeader(header: string | null): string | null {
+  if (!header) return null;
+  const parts = header.split(",");
+  for (const part of parts) {
+    const match = part.match(/<([^>]+)>;\s*rel="next"/);
+    if (match) return match[1];
+  }
+  return null;
+}
+
 export async function syncOrderPages(
   workspaceId: string,
-  cursor: string | null,
+  cursor: string | null, // cursor here is the full next URL or null for first page
 ): Promise<SyncPageResult> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const admin = createAdminClient();
 
-  // Preload ALL customer lookups once (cheap — just id + shopify_customer_id + email)
-  // Cache in this closure so we don't re-fetch per page
+  // Preload customer lookups once
   const { data: allCustomers } = await admin
     .from("customers")
     .select("id, shopify_customer_id, email")
@@ -210,84 +221,66 @@ export async function syncOrderPages(
     if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
   }
 
-  let currentCursor = cursor;
+  let nextUrl: string | null = cursor ||
+    `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders.json?limit=250&status=any`;
+
   let totalSynced = 0;
   let hasMore = true;
 
-  for (let page = 0; page < PAGES_PER_CALL && hasMore; page++) {
-    const afterClause = currentCursor ? `, after: "${currentCursor}"` : "";
-    const query = `{
-      orders(first: ${GQL_PAGE_SIZE}${afterClause}, sortKey: UPDATED_AT) {
-        edges {
-          cursor
-          node {
-            id name email
-            totalPriceSet { shopMoney { amount currencyCode } }
-            displayFinancialStatus
-            displayFulfillmentStatus
-            createdAt
-            customer { id }
-            lineItems(first: 20) {
-              edges {
-                node {
-                  title quantity sku
-                  originalUnitPriceSet { shopMoney { amount } }
-                }
-              }
-            }
-          }
-        }
-        pageInfo { hasNextPage }
-      }
-    }`;
+  for (let page = 0; page < PAGES_PER_CALL && hasMore && nextUrl; page++) {
+    const res = await fetch(nextUrl, {
+      headers: {
+        "X-Shopify-Access-Token": accessToken,
+        "Content-Type": "application/json",
+      },
+    });
 
-    const data = await shopifyGraphQL(shop, accessToken, query);
-    const result = data.orders as {
-      edges: { cursor: string; node: Record<string, unknown> }[];
-      pageInfo: { hasNextPage: boolean };
-    };
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Shopify orders fetch failed: ${res.status} ${text}`);
+    }
 
-    const edges = result.edges || [];
-    if (edges.length === 0) {
+    const data = await res.json();
+    const orders = data.orders || [];
+
+    if (orders.length === 0) {
       hasMore = false;
       break;
     }
 
-    const records = edges.map((edge) => {
-      const o = edge.node;
-      const shopifyOrderId = extractShopifyId(o.id as string);
+    const records = orders.map((o: Record<string, unknown>) => {
+      const shopifyOrderId = String(o.id);
       const orderEmail = ((o.email as string) || "").toLowerCase();
-      const custGid = (o.customer as { id?: string })?.id;
-      const shopifyCustomerId = custGid ? extractShopifyId(custGid) : null;
+      const shopifyCustomerId = (o.customer as { id?: number })?.id
+        ? String((o.customer as { id: number }).id)
+        : null;
 
       let customerId: string | null = null;
       if (shopifyCustomerId) customerId = customerByShopifyId.get(shopifyCustomerId) || null;
       if (!customerId && orderEmail) customerId = customerByEmail.get(orderEmail) || null;
 
-      const lineItemEdges = (o.lineItems as { edges: { node: Record<string, unknown> }[] })?.edges || [];
-      const lineItems = lineItemEdges.map((li) => ({
-        title: li.node.title,
-        quantity: li.node.quantity,
-        price_cents: dollarsToCents(
-          (li.node.originalUnitPriceSet as { shopMoney?: { amount?: string } })?.shopMoney?.amount
-        ),
-        sku: li.node.sku || null,
+      const lineItems = ((o.line_items as Record<string, unknown>[]) || []).map((li) => ({
+        title: li.title,
+        quantity: li.quantity,
+        price_cents: dollarsToCents(li.price as string),
+        sku: li.sku || null,
       }));
-
-      const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
 
       return {
         workspace_id: workspaceId,
         shopify_order_id: shopifyOrderId,
         customer_id: customerId,
-        order_number: (o.name as string) || null,
+        order_number: (o.name as string) || String(o.order_number) || null,
         email: orderEmail || null,
-        total_cents: dollarsToCents(priceSet?.shopMoney?.amount),
-        currency: priceSet?.shopMoney?.currencyCode || "USD",
-        financial_status: (o.displayFinancialStatus as string) || null,
-        fulfillment_status: (o.displayFulfillmentStatus as string) || null,
+        total_cents: dollarsToCents(o.total_price as string),
+        currency: (o.currency as string) || "USD",
+        financial_status: (o.financial_status as string) || null,
+        fulfillment_status: (o.fulfillment_status as string) || null,
         line_items: lineItems,
-        created_at: (o.createdAt as string) || new Date().toISOString(),
+        source_name: (o.source_name as string) || null,
+        app_id: (o.app_id as number) || null,
+        tags: (o.tags as string) || null,
+        created_at: (o.created_at as string) || new Date().toISOString(),
       };
     });
 
@@ -301,13 +294,13 @@ export async function syncOrderPages(
       else totalSynced += batch.length;
     }
 
-    currentCursor = edges[edges.length - 1].cursor;
-    hasMore = result.pageInfo.hasNextPage;
+    nextUrl = parseLinkHeader(res.headers.get("link"));
+    hasMore = !!nextUrl;
   }
 
   return {
     synced: totalSynced,
-    nextCursor: hasMore ? currentCursor : null,
+    nextCursor: hasMore ? nextUrl : null,
     hasMore,
   };
 }
