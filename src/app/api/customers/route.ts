@@ -62,13 +62,21 @@ export async function GET(request: NextRequest) {
 
   if (search) {
     if (search.includes("@")) {
-      // Email search — use prefix match (fast with btree index)
+      // Email search
       query = query.ilike("email", `%${search}%`);
     } else {
-      // Name search — prefix match on first/last name (faster than %search%)
-      query = query.or(
-        `first_name.ilike.${search}%,last_name.ilike.${search}%,email.ilike.${search}%`
-      );
+      const words = search.trim().split(/\s+/);
+      if (words.length >= 2) {
+        // Multi-word: first word = first_name, last word = last_name
+        const first = words[0];
+        const last = words[words.length - 1];
+        query = query.ilike("first_name", `${first}%`).ilike("last_name", `${last}%`);
+      } else {
+        // Single word: match first_name OR last_name OR email prefix
+        query = query.or(
+          `first_name.ilike.${search}%,last_name.ilike.${search}%,email.ilike.${search}%`
+        );
+      }
     }
   }
 
