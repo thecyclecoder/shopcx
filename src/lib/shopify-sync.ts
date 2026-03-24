@@ -273,18 +273,30 @@ export async function bulkSyncOrders(
   }
   const lines = await downloadBulkResults(pollResult.url);
 
-  // Preload customer lookup
-  const { data: allCustomers } = await admin
-    .from("customers")
-    .select("id, shopify_customer_id, email")
-    .eq("workspace_id", workspaceId);
-
+  // Preload customer lookup — paginate to get all (Supabase default limit is 1000)
   const customerByShopifyId = new Map<string, string>();
   const customerByEmail = new Map<string, string>();
-  for (const c of allCustomers || []) {
-    if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
-    if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
+
+  let customerOffset = 0;
+  const customerPageSize = 5000;
+  while (true) {
+    const { data: batch } = await admin
+      .from("customers")
+      .select("id, shopify_customer_id, email")
+      .eq("workspace_id", workspaceId)
+      .range(customerOffset, customerOffset + customerPageSize - 1);
+
+    if (!batch || batch.length === 0) break;
+
+    for (const c of batch) {
+      if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
+      if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
+    }
+
+    customerOffset += batch.length;
+    if (batch.length < customerPageSize) break;
   }
+  console.log(`Loaded ${customerByShopifyId.size} customers for order linking`);
 
   // Parse JSONL — orders and their child line items come as separate lines
   const orderMap = new Map<string, Record<string, unknown>>();
@@ -541,17 +553,23 @@ export async function syncOrderPages(
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const admin = createAdminClient();
 
-  // Preload customer lookups once
-  const { data: allCustomers } = await admin
-    .from("customers")
-    .select("id, shopify_customer_id, email")
-    .eq("workspace_id", workspaceId);
-
+  // Preload customer lookups — paginate to get all
   const customerByShopifyId = new Map<string, string>();
   const customerByEmail = new Map<string, string>();
-  for (const c of allCustomers || []) {
-    if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
-    if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
+  let custOffset = 0;
+  while (true) {
+    const { data: batch } = await admin
+      .from("customers")
+      .select("id, shopify_customer_id, email")
+      .eq("workspace_id", workspaceId)
+      .range(custOffset, custOffset + 4999);
+    if (!batch || batch.length === 0) break;
+    for (const c of batch) {
+      if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
+      if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
+    }
+    custOffset += batch.length;
+    if (batch.length < 5000) break;
   }
 
   let nextUrl: string | null = cursor ||
@@ -642,6 +660,15 @@ export async function syncOrderPages(
 
 export async function finalizeSyncOrderDates(workspaceId: string): Promise<void> {
   const admin = createAdminClient();
+
+  // Link any unlinked orders to customers by email
+  try {
+    await admin.rpc("link_orders_to_customers", { ws_id: workspaceId });
+  } catch {
+    console.warn("RPC link_orders_to_customers not available");
+  }
+
+  // Update first/last order dates
   try {
     await admin.rpc("update_customer_order_dates", { ws_id: workspaceId });
   } catch {
