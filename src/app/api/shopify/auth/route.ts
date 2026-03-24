@@ -49,7 +49,7 @@ export async function POST(request: Request) {
     .update({ shopify_oauth_state: state })
     .eq("id", workspace_id);
 
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
+  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
   const redirectUri = `${siteUrl}/api/shopify/callback`;
 
   const url = buildShopifyAuthUrl({
