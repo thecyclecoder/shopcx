@@ -86,8 +86,16 @@ export async function GET(
 
   const admin = createAdminClient();
 
+  // Auto-fail stale jobs (running for more than 15 minutes)
+  const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  await admin
+    .from("sync_jobs")
+    .update({ status: "failed", error: "Timed out — no progress for 15 minutes" })
+    .eq("workspace_id", workspaceId)
+    .in("status", ["pending", "running"])
+    .lt("started_at", fifteenMinAgo);
+
   if (jobId) {
-    // Get specific job
     const { data: job } = await admin
       .from("sync_jobs")
       .select("*")

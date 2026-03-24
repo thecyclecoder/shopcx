@@ -11,7 +11,7 @@ import { updateRetentionScores } from "@/lib/retention-score";
 export const syncShopify = inngest.createFunction(
   {
     id: "sync-shopify",
-    retries: 2,
+    retries: 3,
     concurrency: [{ limit: 1, key: "event.data.workspace_id" }],
     triggers: [{ event: "shopify/sync.requested" }],
   },
