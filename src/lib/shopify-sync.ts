@@ -150,10 +150,6 @@ const BULK_CUSTOMERS_QUERY = `
                 address1 address2 city province provinceCode
                 country countryCodeV2 zip
               }
-              addresses(first: 5) {
-                address1 address2 city province provinceCode
-                country countryCodeV2 zip
-              }
             }
           }
         }
@@ -222,10 +218,6 @@ export async function startBulkOperationWithQuery(
     smsMarketingConsent { marketingState }
     tags locale note state validEmailAddress createdAt
     defaultAddress {
-      address1 address2 city province provinceCode
-      country countryCodeV2 zip
-    }
-    addresses(first: 5) {
       address1 address2 city province provinceCode
       country countryCodeV2 zip
     }
@@ -498,7 +490,7 @@ export async function downloadAndUpsertCustomers(workspaceId: string): Promise<n
       sms_marketing_status: c.smsMarketingConsent?.marketingState?.toLowerCase() || "not_subscribed",
       tags: c.tags || [],
       default_address: c.defaultAddress || null,
-      addresses: c.addresses || [],
+      addresses: [],
       locale: c.locale || null,
       note: c.note || null,
       shopify_state: c.state || null,
@@ -677,7 +669,7 @@ export async function upsertCustomerChunk(
       sms_marketing_status: c.smsMarketingConsent?.marketingState?.toLowerCase() || "not_subscribed",
       tags: c.tags || [],
       default_address: c.defaultAddress || null,
-      addresses: c.addresses || [],
+      addresses: [],
       locale: c.locale || null,
       note: c.note || null,
       shopify_state: c.state || null,
