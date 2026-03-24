@@ -51,14 +51,15 @@ export async function GET(
     counts.set(src, (counts.get(src) || 0) + 1);
   }
 
-  // Get current mapping
+  // Get current mapping + threshold
   const { data: workspace } = await admin
     .from("workspaces")
-    .select("order_source_mapping")
+    .select("order_source_mapping, replacement_threshold_cents")
     .eq("id", workspaceId)
     .single();
 
   const mapping = (workspace?.order_source_mapping || {}) as Record<string, string>;
+  const replacementThreshold = workspace?.replacement_threshold_cents ?? 0;
 
   const result = [...counts.entries()]
     .sort((a, b) => b[1] - a[1])
@@ -69,7 +70,7 @@ export async function GET(
       order_type: mapping[source] || "unknown",
     }));
 
-  return NextResponse.json({ sources: result, mapping });
+  return NextResponse.json({ sources: result, mapping, replacement_threshold_cents: replacementThreshold });
 }
 
 // PATCH: update the mapping + apply to existing orders
@@ -97,29 +98,58 @@ export async function PATCH(
 
   const body = await request.json();
   const mapping = body.mapping as Record<string, string>;
+  const replacementThreshold = body.replacement_threshold_cents as number | undefined;
 
   if (!mapping || typeof mapping !== "object") {
     return NextResponse.json({ error: "Invalid mapping" }, { status: 400 });
   }
 
-  // Save mapping to workspace
-  await admin
+  // Save mapping + threshold to workspace
+  const wsUpdate: Record<string, unknown> = { order_source_mapping: mapping };
+  if (replacementThreshold !== undefined) {
+    wsUpdate.replacement_threshold_cents = Math.max(0, replacementThreshold);
+  }
+  await admin.from("workspaces").update(wsUpdate).eq("id", workspaceId);
+
+  // Get threshold for replacement logic
+  const { data: ws } = await admin
     .from("workspaces")
-    .update({ order_source_mapping: mapping })
-    .eq("id", workspaceId);
+    .select("replacement_threshold_cents")
+    .eq("id", workspaceId)
+    .single();
+  const threshold = ws?.replacement_threshold_cents ?? 0;
 
   // Apply mapping to all existing orders
   let updated = 0;
   for (const [source, orderType] of Object.entries(mapping)) {
-    if (!["checkout", "recurring", "unknown"].includes(orderType)) continue;
+    if (!["checkout", "recurring", "replacement", "unknown"].includes(orderType)) continue;
 
-    const { count } = await admin
-      .from("orders")
-      .update({ order_type: orderType })
-      .eq("workspace_id", workspaceId)
-      .eq("source_name", source);
+    if (orderType === "replacement") {
+      // Replacement: only tag orders at or below the threshold
+      const { count: replCount } = await admin
+        .from("orders")
+        .update({ order_type: "replacement" })
+        .eq("workspace_id", workspaceId)
+        .eq("source_name", source)
+        .lte("total_cents", threshold);
+      updated += replCount || 0;
 
-    updated += count || 0;
+      // Orders above threshold from this source get tagged as "checkout"
+      const { count: nonReplCount } = await admin
+        .from("orders")
+        .update({ order_type: "checkout" })
+        .eq("workspace_id", workspaceId)
+        .eq("source_name", source)
+        .gt("total_cents", threshold);
+      updated += nonReplCount || 0;
+    } else {
+      const { count } = await admin
+        .from("orders")
+        .update({ order_type: orderType })
+        .eq("workspace_id", workspaceId)
+        .eq("source_name", source);
+      updated += count || 0;
+    }
   }
 
   return NextResponse.json({ success: true, updated });

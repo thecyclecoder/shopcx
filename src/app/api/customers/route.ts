@@ -61,9 +61,15 @@ export async function GET(request: NextRequest) {
     .eq("workspace_id", workspaceId);
 
   if (search) {
-    query = query.or(
-      `email.ilike.%${search}%,first_name.ilike.%${search}%,last_name.ilike.%${search}%`
-    );
+    if (search.includes("@")) {
+      // Email search — use prefix match (fast with btree index)
+      query = query.ilike("email", `%${search}%`);
+    } else {
+      // Name search — prefix match on first/last name (faster than %search%)
+      query = query.or(
+        `first_name.ilike.${search}%,last_name.ilike.${search}%,email.ilike.${search}%`
+      );
+    }
   }
 
   query = query

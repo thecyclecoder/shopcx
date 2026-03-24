@@ -73,6 +73,7 @@ export default function CustomersPage() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [appliedSearch, setAppliedSearch] = useState("");
   const [sort, setSort] = useState<SortField>("retention_score");
   const [order, setOrder] = useState<"asc" | "desc">("desc");
   const [offset, setOffset] = useState(0);
@@ -88,7 +89,7 @@ export default function CustomersPage() {
         limit: String(PAGE_SIZE),
         offset: String(offset),
       });
-      if (search) params.set("search", search);
+      if (appliedSearch) params.set("search", appliedSearch);
       const res = await fetch(`/api/customers?${params}`);
       const data = await res.json();
       if (res.ok) {
@@ -98,7 +99,7 @@ export default function CustomersPage() {
     } finally {
       setLoading(false);
     }
-  }, [search, sort, order, offset]);
+  }, [appliedSearch, sort, order, offset]);
 
   useEffect(() => {
     fetchCustomers();
@@ -179,7 +180,7 @@ export default function CustomersPage() {
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setOffset(0);
-    fetchCustomers();
+    setAppliedSearch(search);
   };
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
@@ -199,10 +200,11 @@ export default function CustomersPage() {
         : 0;
       progressLabel = `Syncing customers: ${syncJob.synced_customers.toLocaleString()} / ${syncJob.total_customers.toLocaleString()}`;
     } else if (syncJob.status === "running" && (syncJob.phase === "orders" || syncJob.synced_orders > 0)) {
-      progressPercent = syncJob.total_orders > 0
-        ? 50 + Math.round((syncJob.synced_orders / syncJob.total_orders) * 45)
+      const orderTotal = Math.max(syncJob.total_orders, syncJob.synced_orders);
+      progressPercent = orderTotal > 0
+        ? 50 + Math.round((syncJob.synced_orders / orderTotal) * 45)
         : 50;
-      progressLabel = `Syncing orders: ${syncJob.synced_orders.toLocaleString()}${syncJob.total_orders > 0 ? ` / ${syncJob.total_orders.toLocaleString()}` : ""}`;
+      progressLabel = `Syncing orders: ${syncJob.synced_orders.toLocaleString()} / ${orderTotal.toLocaleString()}`;
     } else if (syncJob.status === "running" && syncJob.phase === "finalizing") {
       progressPercent = 95;
       progressLabel = "Calculating retention scores...";
@@ -293,7 +295,7 @@ export default function CustomersPage() {
           </svg>
           <input
             type="text"
-            placeholder="Search by email or name..."
+            placeholder="Search by email or name... (press Enter)"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="block w-full rounded-md border border-zinc-300 bg-white py-2 pl-10 pr-3 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
