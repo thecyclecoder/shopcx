@@ -59,182 +59,19 @@ async function shopifyGraphQL(
   return json.data;
 }
 
-// ── Bulk Operations ──
+// ── Helpers ──
 
-const CUSTOMERS_BULK_QUERY = `
-  mutation {
-    bulkOperationRunQuery(
-      query: """
-      {
-        customers {
-          edges {
-            node {
-              id
-              email
-              firstName
-              lastName
-              phone
-              numberOfOrders
-              amountSpent {
-                amount
-                currencyCode
-              }
-              tags
-              productSubscriberStatus
-              createdAt
-              updatedAt
-            }
-          }
-        }
-      }
-      """
-    ) {
-      bulkOperation {
-        id
-        status
-      }
-      userErrors {
-        field
-        message
-      }
-    }
-  }
-`;
-
-const ORDERS_BULK_QUERY = `
-  mutation {
-    bulkOperationRunQuery(
-      query: """
-      {
-        orders {
-          edges {
-            node {
-              id
-              name
-              email
-              totalPriceSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-              }
-              displayFinancialStatus
-              displayFulfillmentStatus
-              createdAt
-              customer {
-                id
-              }
-              lineItems(first: 50) {
-                edges {
-                  node {
-                    title
-                    quantity
-                    originalUnitPriceSet {
-                      shopMoney {
-                        amount
-                      }
-                    }
-                    sku
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-      """
-    ) {
-      bulkOperation {
-        id
-        status
-      }
-      userErrors {
-        field
-        message
-      }
-    }
-  }
-`;
-
-const POLL_QUERY = `
-  query {
-    currentBulkOperation {
-      id
-      status
-      errorCode
-      objectCount
-      url
-    }
-  }
-`;
-
-async function runBulkOperation(
-  shop: string,
-  accessToken: string,
-  mutation: string
-): Promise<string> {
-  // Start the bulk operation
-  const data = await shopifyGraphQL(shop, accessToken, mutation);
-  const result = data.bulkOperationRunQuery as {
-    bulkOperation: { id: string; status: string } | null;
-    userErrors: { field: string; message: string }[];
-  };
-
-  if (result.userErrors?.length) {
-    throw new Error(`Bulk operation error: ${result.userErrors[0].message}`);
-  }
-
-  if (!result.bulkOperation) {
-    throw new Error("Failed to start bulk operation");
-  }
-
-  // Poll until complete
-  let attempts = 0;
-  const maxAttempts = 120; // 10 minutes at 5s intervals
-
-  while (attempts < maxAttempts) {
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-    attempts++;
-
-    const pollData = await shopifyGraphQL(shop, accessToken, POLL_QUERY);
-    const op = pollData.currentBulkOperation as {
-      id: string;
-      status: string;
-      errorCode: string | null;
-      objectCount: string;
-      url: string | null;
-    } | null;
-
-    if (!op) throw new Error("No bulk operation found");
-
-    if (op.status === "COMPLETED") {
-      if (!op.url) return ""; // No results (empty store)
-      return op.url;
-    }
-
-    if (op.status === "FAILED") {
-      throw new Error(`Bulk operation failed: ${op.errorCode}`);
-    }
-
-    if (op.status === "CANCELED" || op.status === "CANCELLED") {
-      throw new Error("Bulk operation was cancelled");
-    }
-
-    // Still RUNNING or CREATED — keep polling
-  }
-
-  throw new Error("Bulk operation timed out after 10 minutes");
+function dollarsToCents(amount: string | number | null | undefined): number {
+  if (amount == null) return 0;
+  const num = typeof amount === "string" ? parseFloat(amount) : amount;
+  if (isNaN(num)) return 0;
+  return Math.round(num * 100);
 }
 
-async function downloadBulkResults(url: string): Promise<string[]> {
-  if (!url) return [];
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Failed to download bulk results: ${res.status}`);
-  const text = await res.text();
-  return text.trim().split("\n").filter(Boolean);
+function extractShopifyId(gid: string): string {
+  const parts = gid.split("/");
+  return parts[parts.length - 1];
 }
-
-// ── Subscription status mapping ──
 
 function mapSubscriptionStatus(
   shopifyStatus: string | null | undefined
@@ -254,110 +91,183 @@ function mapSubscriptionStatus(
   }
 }
 
-function dollarsToCents(amount: string | number | null | undefined): number {
-  if (amount == null) return 0;
-  const num = typeof amount === "string" ? parseFloat(amount) : amount;
-  if (isNaN(num)) return 0;
-  return Math.round(num * 100);
+// ── Count ──
+
+export async function getShopifyCounts(workspaceId: string): Promise<{ customers: number; orders: number }> {
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+
+  const data = await shopifyGraphQL(shop, accessToken, `{
+    customersCount { count }
+    ordersCount { count }
+  }`);
+
+  return {
+    customers: (data.customersCount as { count: number })?.count ?? 0,
+    orders: (data.ordersCount as { count: number })?.count ?? 0,
+  };
 }
 
-function extractShopifyId(gid: string): string {
-  // "gid://shopify/Customer/12345" → "12345"
-  const parts = gid.split("/");
-  return parts[parts.length - 1];
+// ── Paginated customer sync (one page at a time) ──
+
+interface SyncPageResult {
+  synced: number;
+  nextCursor: string | null;
+  hasMore: boolean;
 }
 
-// ── Sync functions ──
-
-export async function syncCustomers(workspaceId: string): Promise<number> {
+export async function syncCustomerPage(
+  workspaceId: string,
+  cursor: string | null,
+  pageSize: number = 250
+): Promise<SyncPageResult> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const admin = createAdminClient();
 
-  const resultUrl = await runBulkOperation(shop, accessToken, CUSTOMERS_BULK_QUERY);
-  const lines = await downloadBulkResults(resultUrl);
+  const afterClause = cursor ? `, after: "${cursor}"` : "";
+  const query = `{
+    customers(first: ${pageSize}${afterClause}, sortKey: UPDATED_AT) {
+      edges {
+        cursor
+        node {
+          id
+          email
+          firstName
+          lastName
+          phone
+          numberOfOrders
+          amountSpent { amount }
+          productSubscriberStatus
+          tags
+        }
+      }
+      pageInfo {
+        hasNextPage
+      }
+    }
+  }`;
 
-  let synced = 0;
-  const batchSize = 50;
-  const records: Record<string, unknown>[] = [];
+  const data = await shopifyGraphQL(shop, accessToken, query);
+  const result = data.customers as {
+    edges: { cursor: string; node: Record<string, unknown> }[];
+    pageInfo: { hasNextPage: boolean };
+  };
 
-  for (const line of lines) {
-    const c = JSON.parse(line);
-
-    // Bulk operation results: top-level objects have an `id` field with gid format
-    // Skip any nested objects (line items etc) that have a `__parentId`
-    if (c.__parentId) continue;
-    if (!c.id || !c.id.includes("Customer")) continue;
-
-    records.push({
-      workspace_id: workspaceId,
-      shopify_customer_id: extractShopifyId(c.id),
-      email: (c.email || `no-email-${extractShopifyId(c.id)}@unknown.com`).toLowerCase(),
-      first_name: c.firstName || null,
-      last_name: c.lastName || null,
-      phone: c.phone || null,
-      total_orders: parseInt(c.numberOfOrders) || 0,
-      ltv_cents: dollarsToCents(c.amountSpent?.amount),
-      subscription_status: mapSubscriptionStatus(c.productSubscriberStatus),
-      tags: c.tags || [],
-      updated_at: new Date().toISOString(),
-    });
+  const edges = result.edges || [];
+  if (edges.length === 0) {
+    return { synced: 0, nextCursor: null, hasMore: false };
   }
 
   // Batch upsert
-  for (let i = 0; i < records.length; i += batchSize) {
-    const batch = records.slice(i, i + batchSize);
-    const { error } = await admin
-      .from("customers")
-      .upsert(batch, { onConflict: "workspace_id,shopify_customer_id" });
+  const records = edges.map((edge) => {
+    const c = edge.node;
+    return {
+      workspace_id: workspaceId,
+      shopify_customer_id: extractShopifyId(c.id as string),
+      email: ((c.email as string) || `no-email-${extractShopifyId(c.id as string)}@unknown.com`).toLowerCase(),
+      first_name: (c.firstName as string) || null,
+      last_name: (c.lastName as string) || null,
+      phone: (c.phone as string) || null,
+      total_orders: parseInt(c.numberOfOrders as string) || 0,
+      ltv_cents: dollarsToCents((c.amountSpent as { amount?: string })?.amount),
+      subscription_status: mapSubscriptionStatus(c.productSubscriberStatus as string),
+      tags: (c.tags as string[]) || [],
+      updated_at: new Date().toISOString(),
+    };
+  });
 
-    if (!error) {
-      synced += batch.length;
-    } else {
-      console.error("Customer upsert error:", error.message, "batch index:", i);
-    }
+  const { error } = await admin
+    .from("customers")
+    .upsert(records, { onConflict: "workspace_id,shopify_customer_id" });
+
+  if (error) {
+    console.error("Customer upsert error:", error.message);
   }
 
-  return synced;
+  const lastCursor = edges[edges.length - 1].cursor;
+
+  return {
+    synced: error ? 0 : records.length,
+    nextCursor: result.pageInfo.hasNextPage ? lastCursor : null,
+    hasMore: result.pageInfo.hasNextPage,
+  };
 }
 
-export async function syncOrders(workspaceId: string): Promise<number> {
+// ── Paginated order sync (one page at a time) ──
+
+export async function syncOrderPage(
+  workspaceId: string,
+  cursor: string | null,
+  pageSize: number = 250
+): Promise<SyncPageResult> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const admin = createAdminClient();
 
-  const resultUrl = await runBulkOperation(shop, accessToken, ORDERS_BULK_QUERY);
-  const lines = await downloadBulkResults(resultUrl);
-
-  // First pass: collect orders and their line items
-  // Bulk operations emit parent objects and child objects separately
-  // Orders come first, then their line items with __parentId
-  const orderMap = new Map<string, Record<string, unknown>>();
-  const lineItemsMap = new Map<string, Record<string, unknown>[]>();
-
-  for (const line of lines) {
-    const obj = JSON.parse(line);
-
-    if (obj.__parentId) {
-      // This is a line item (child of an order)
-      const parentId = obj.__parentId as string;
-      if (!lineItemsMap.has(parentId)) {
-        lineItemsMap.set(parentId, []);
+  const afterClause = cursor ? `, after: "${cursor}"` : "";
+  const query = `{
+    orders(first: ${pageSize}${afterClause}, sortKey: UPDATED_AT) {
+      edges {
+        cursor
+        node {
+          id
+          name
+          email
+          totalPriceSet {
+            shopMoney { amount currencyCode }
+          }
+          displayFinancialStatus
+          displayFulfillmentStatus
+          createdAt
+          customer { id }
+          lineItems(first: 20) {
+            edges {
+              node {
+                title
+                quantity
+                originalUnitPriceSet { shopMoney { amount } }
+                sku
+              }
+            }
+          }
+        }
       }
-      lineItemsMap.get(parentId)!.push({
-        title: obj.title,
-        quantity: obj.quantity,
-        price_cents: dollarsToCents(obj.originalUnitPriceSet?.shopMoney?.amount),
-        sku: obj.sku || null,
-      });
-    } else if (obj.id?.includes("Order")) {
-      orderMap.set(obj.id, obj);
+      pageInfo {
+        hasNextPage
+      }
     }
+  }`;
+
+  const data = await shopifyGraphQL(shop, accessToken, query);
+  const result = data.orders as {
+    edges: { cursor: string; node: Record<string, unknown> }[];
+    pageInfo: { hasNextPage: boolean };
+  };
+
+  const edges = result.edges || [];
+  if (edges.length === 0) {
+    return { synced: 0, nextCursor: null, hasMore: false };
   }
 
-  // Build a lookup of shopify_customer_id → our customer UUID
+  // Build customer lookup for this batch
+  const customerGids = new Set<string>();
+  const customerEmails = new Set<string>();
+  for (const edge of edges) {
+    const o = edge.node;
+    const custGid = (o.customer as { id?: string })?.id;
+    if (custGid) customerGids.add(extractShopifyId(custGid));
+    const email = (o.email as string || "").toLowerCase();
+    if (email) customerEmails.add(email);
+  }
+
   const { data: customers } = await admin
     .from("customers")
     .select("id, shopify_customer_id, email")
-    .eq("workspace_id", workspaceId);
+    .eq("workspace_id", workspaceId)
+    .or(
+      [
+        ...[...customerGids].map((gid) => `shopify_customer_id.eq.${gid}`),
+        ...[...customerEmails].map((e) => `email.eq.${e}`),
+      ].join(",")
+    );
 
   const customerByShopifyId = new Map<string, string>();
   const customerByEmail = new Map<string, string>();
@@ -366,57 +276,68 @@ export async function syncOrders(workspaceId: string): Promise<number> {
     if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
   }
 
-  let synced = 0;
-  const batchSize = 50;
-  const records: Record<string, unknown>[] = [];
-
-  for (const [gid, o] of orderMap) {
-    const shopifyOrderId = extractShopifyId(gid);
+  const records = edges.map((edge) => {
+    const o = edge.node;
+    const shopifyOrderId = extractShopifyId(o.id as string);
     const orderEmail = ((o.email as string) || "").toLowerCase();
-    const shopifyCustomerGid = (o.customer as { id?: string })?.id;
-    const shopifyCustomerId = shopifyCustomerGid ? extractShopifyId(shopifyCustomerGid) : null;
+    const custGid = (o.customer as { id?: string })?.id;
+    const shopifyCustomerId = custGid ? extractShopifyId(custGid) : null;
 
-    // Resolve customer
     let customerId: string | null = null;
     if (shopifyCustomerId) customerId = customerByShopifyId.get(shopifyCustomerId) || null;
     if (!customerId && orderEmail) customerId = customerByEmail.get(orderEmail) || null;
 
-    records.push({
+    const lineItemEdges = (o.lineItems as { edges: { node: Record<string, unknown> }[] })?.edges || [];
+    const lineItems = lineItemEdges.map((li) => ({
+      title: li.node.title,
+      quantity: li.node.quantity,
+      price_cents: dollarsToCents(
+        (li.node.originalUnitPriceSet as { shopMoney?: { amount?: string } })?.shopMoney?.amount
+      ),
+      sku: li.node.sku || null,
+    }));
+
+    const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
+
+    return {
       workspace_id: workspaceId,
       shopify_order_id: shopifyOrderId,
       customer_id: customerId,
       order_number: (o.name as string) || null,
       email: orderEmail || null,
-      total_cents: dollarsToCents((o.totalPriceSet as { shopMoney?: { amount?: string } })?.shopMoney?.amount),
-      currency: (o.totalPriceSet as { shopMoney?: { currencyCode?: string } })?.shopMoney?.currencyCode || "USD",
+      total_cents: dollarsToCents(priceSet?.shopMoney?.amount),
+      currency: priceSet?.shopMoney?.currencyCode || "USD",
       financial_status: (o.displayFinancialStatus as string) || null,
       fulfillment_status: (o.displayFulfillmentStatus as string) || null,
-      line_items: lineItemsMap.get(gid) || [],
+      line_items: lineItems,
       created_at: (o.createdAt as string) || new Date().toISOString(),
-    });
+    };
+  });
+
+  const { error } = await admin
+    .from("orders")
+    .upsert(records, { onConflict: "workspace_id,shopify_order_id" });
+
+  if (error) {
+    console.error("Order upsert error:", error.message);
   }
 
-  // Batch upsert
-  for (let i = 0; i < records.length; i += batchSize) {
-    const batch = records.slice(i, i + batchSize);
-    const { error } = await admin
-      .from("orders")
-      .upsert(batch, { onConflict: "workspace_id,shopify_order_id" });
+  const lastCursor = edges[edges.length - 1].cursor;
 
-    if (!error) {
-      synced += batch.length;
-    } else {
-      console.error("Order upsert error:", error.message, "batch index:", i);
-    }
-  }
+  return {
+    synced: error ? 0 : records.length,
+    nextCursor: result.pageInfo.hasNextPage ? lastCursor : null,
+    hasMore: result.pageInfo.hasNextPage,
+  };
+}
 
-  // Update first_order_at and last_order_at on customers via SQL
-  // This is much more efficient than looping through each customer
+// ── Finalize (order dates + retention scores) ──
+
+export async function finalizeSyncOrderDates(workspaceId: string): Promise<void> {
+  const admin = createAdminClient();
   try {
     await admin.rpc("update_customer_order_dates", { ws_id: workspaceId });
   } catch {
-    console.warn("RPC update_customer_order_dates not available, skipping order date backfill");
+    console.warn("RPC update_customer_order_dates not available");
   }
-
-  return synced;
 }
