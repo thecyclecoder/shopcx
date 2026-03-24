@@ -248,7 +248,7 @@ const BULK_ORDERS_QUERY = `
               name
               email
               tags
-              sourceIdentifier
+              sourceName
               totalPriceSet { shopMoney { amount currencyCode } }
               displayFinancialStatus
               displayFulfillmentStatus
@@ -360,7 +360,7 @@ export async function bulkSyncOrders(
       financial_status: (o.displayFinancialStatus as string) || null,
       fulfillment_status: (o.displayFulfillmentStatus as string) || null,
       line_items: lineItemsMap.get(gid) || [],
-      source_name: (o.sourceIdentifier as string) || null,
+      source_name: (o.sourceName as string) || null,
       tags: (o.tags as string[])?.join(", ") || null,
       created_at: (o.createdAt as string) || new Date().toISOString(),
     });
