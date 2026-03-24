@@ -2,6 +2,7 @@ import { createHmac } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { calculateRetentionScore } from "@/lib/retention-score";
+import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 
 // ── HMAC verification ──
 
@@ -40,6 +41,70 @@ function dollarsToCents(amount: string | number | null | undefined): number {
   return Math.round(num * 100);
 }
 
+// ── GraphQL enrichment ──
+
+function mapSubscriptionStatus(
+  shopifyStatus: string | null | undefined
+): "active" | "paused" | "cancelled" | "never" {
+  switch (shopifyStatus) {
+    case "ACTIVE": return "active";
+    case "PAUSED": return "paused";
+    case "CANCELLED": case "EXPIRED": case "FAILED": return "cancelled";
+    default: return "never";
+  }
+}
+
+async function fetchSubscriptionStatus(
+  shop: string,
+  accessToken: string,
+  shopifyCustomerId: string
+): Promise<string | null> {
+  const gid = `gid://shopify/Customer/${shopifyCustomerId}`;
+  const query = `{
+    customer(id: "${gid}") {
+      productSubscriberStatus
+    }
+  }`;
+
+  try {
+    const res = await fetch(
+      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      {
+        method: "POST",
+        headers: {
+          "X-Shopify-Access-Token": accessToken,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query }),
+      }
+    );
+
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.data?.customer?.productSubscriberStatus || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getShopCredentials(workspaceId: string): Promise<{ shop: string; accessToken: string } | null> {
+  const admin = createAdminClient();
+  const { data: workspace } = await admin
+    .from("workspaces")
+    .select("shopify_myshopify_domain, shopify_access_token_encrypted")
+    .eq("id", workspaceId)
+    .single();
+
+  if (!workspace?.shopify_access_token_encrypted || !workspace?.shopify_myshopify_domain) {
+    return null;
+  }
+
+  return {
+    shop: workspace.shopify_myshopify_domain,
+    accessToken: decrypt(workspace.shopify_access_token_encrypted),
+  };
+}
+
 // ── Customer update handler ──
 
 export async function handleCustomerUpdate(workspaceId: string, payload: Record<string, unknown>) {
@@ -47,8 +112,16 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
   const shopifyCustomerId = String(payload.id);
   const email = ((payload.email as string) || "").toLowerCase();
 
+  // Enrich with subscription status via GraphQL
+  let subscriptionStatus: "active" | "paused" | "cancelled" | "never" | undefined;
+  const creds = await getShopCredentials(workspaceId);
+  if (creds) {
+    const rawStatus = await fetchSubscriptionStatus(creds.shop, creds.accessToken, shopifyCustomerId);
+    subscriptionStatus = mapSubscriptionStatus(rawStatus);
+  }
+
   // Upsert customer
-  const record = {
+  const record: Record<string, unknown> = {
     workspace_id: workspaceId,
     shopify_customer_id: shopifyCustomerId,
     email: email || `no-email-${shopifyCustomerId}@unknown.com`,
@@ -60,6 +133,10 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
     tags: payload.tags ? (payload.tags as string).split(", ").filter(Boolean) : [],
     updated_at: new Date().toISOString(),
   };
+
+  if (subscriptionStatus) {
+    record.subscription_status = subscriptionStatus;
+  }
 
   const { data: customer } = await admin
     .from("customers")
