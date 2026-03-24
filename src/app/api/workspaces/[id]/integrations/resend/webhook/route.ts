@@ -38,9 +38,9 @@ export async function POST(
   try {
     // Check if webhook already exists
     const { data: existingList } = await client.resend.webhooks.list();
-    const webhooks = Array.isArray(existingList) ? existingList : (existingList as unknown as { data: { url: string; id: string }[] })?.data || [];
+    const webhooks = Array.isArray(existingList) ? existingList : (existingList as unknown as { data: { endpoint: string; id: string }[] })?.data || [];
     const alreadyExists = webhooks.find(
-      (wh: { url: string }) => wh.url === webhookUrl
+      (wh: { endpoint: string }) => wh.endpoint === webhookUrl
     );
 
     if (alreadyExists) {
@@ -96,9 +96,9 @@ export async function GET(
     const webhookUrl = `${siteUrl}/api/webhooks/email`;
 
     const { data: whList } = await client.resend.webhooks.list();
-    const whArr = Array.isArray(whList) ? whList : (whList as unknown as { data: { url: string; id: string }[] })?.data || [];
+    const whArr = Array.isArray(whList) ? whList : (whList as unknown as { data: { endpoint: string; id: string }[] })?.data || [];
     const found = whArr.find(
-      (wh: { url: string }) => wh.url === webhookUrl
+      (wh: { endpoint: string }) => wh.endpoint === webhookUrl
     );
 
     return NextResponse.json({
