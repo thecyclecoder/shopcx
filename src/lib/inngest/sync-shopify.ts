@@ -2,11 +2,8 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getShopifyCounts,
-  cancelBulkOperation,
-  startBulkOperationWithQuery,
-  pollBulkOperation,
-  downloadAndUpsertCustomers,
-  downloadAndUpsertOrders,
+  syncCustomerMonth,
+  syncOrderMonth,
   finalizeSyncOrderDates,
 } from "@/lib/shopify-sync";
 import { updateRetentionScores } from "@/lib/retention-score";
@@ -22,7 +19,7 @@ function getMonthRanges(maxMonths: number = 36): { start: string; end: string }[
   return ranges;
 }
 
-// ── Sync Customers ──
+// ── Sync Customers (paginated, month by month) ──
 export const syncCustomers = inngest.createFunction(
   {
     id: "sync-shopify-customers",
@@ -38,13 +35,9 @@ export const syncCustomers = inngest.createFunction(
       await admin.from("sync_jobs").update(updates).eq("id", job_id);
     }
 
-    // Check if resuming from a previous failed sync
     const resumeInfo: { startMonth: number; previousSynced: number } = await step.run("check-resume", async () => {
       const { data: job } = await admin.from("sync_jobs").select("last_completed_month, synced_customers").eq("id", job_id).single();
-      return {
-        startMonth: job?.last_completed_month || 0,
-        previousSynced: job?.synced_customers || 0,
-      };
+      return { startMonth: job?.last_completed_month || 0, previousSynced: job?.synced_customers || 0 };
     });
 
     const counts = await step.run("get-counts", async () => {
@@ -65,26 +58,9 @@ export const syncCustomers = inngest.createFunction(
       const month = months[m];
       const mi = m;
 
-      await step.run(`cancel-${mi}`, () => cancelBulkOperation(workspace_id));
-      await step.run(`start-${mi}`, () =>
-        startBulkOperationWithQuery(workspace_id, "customers", month.start, month.end)
-      );
-
-      let done = false;
-      let polls = 0;
-      while (!done && polls < 60) {
-        const pi = polls;
-        const pr: { status: string; objectCount: number; url: string | null } =
-          await step.run(`poll-${mi}-${pi}`, async () => {
-            await new Promise((r) => setTimeout(r, 30000));
-            return pollBulkOperation(workspace_id);
-          });
-        polls++;
-        if (pr.status === "completed" || pr.status === "failed") done = true;
-      }
-
-      const synced: number = await step.run(`upsert-${mi}`, () =>
-        downloadAndUpsertCustomers(workspace_id)
+      // Each month is one step — paginated internally (~1-4 pages for <1K customers)
+      const synced: number = await step.run(`month-${mi}`, () =>
+        syncCustomerMonth(workspace_id, month.start, month.end)
       );
 
       customersSynced += synced;
@@ -108,7 +84,7 @@ export const syncCustomers = inngest.createFunction(
   }
 );
 
-// ── Sync Orders ──
+// ── Sync Orders (paginated, month by month) ──
 export const syncOrders = inngest.createFunction(
   {
     id: "sync-shopify-orders",
@@ -126,10 +102,7 @@ export const syncOrders = inngest.createFunction(
 
     const resumeInfo: { startMonth: number; previousSynced: number } = await step.run("check-resume", async () => {
       const { data: job } = await admin.from("sync_jobs").select("last_completed_month, synced_orders").eq("id", job_id).single();
-      return {
-        startMonth: job?.last_completed_month || 0,
-        previousSynced: job?.synced_orders || 0,
-      };
+      return { startMonth: job?.last_completed_month || 0, previousSynced: job?.synced_orders || 0 };
     });
 
     const counts = await step.run("get-counts", async () => {
@@ -150,26 +123,8 @@ export const syncOrders = inngest.createFunction(
       const month = months[m];
       const mi = m;
 
-      await step.run(`cancel-${mi}`, () => cancelBulkOperation(workspace_id));
-      await step.run(`start-${mi}`, () =>
-        startBulkOperationWithQuery(workspace_id, "orders", month.start, month.end)
-      );
-
-      let done = false;
-      let polls = 0;
-      while (!done && polls < 60) {
-        const pi = polls;
-        const pr: { status: string; objectCount: number; url: string | null } =
-          await step.run(`poll-${mi}-${pi}`, async () => {
-            await new Promise((r) => setTimeout(r, 30000));
-            return pollBulkOperation(workspace_id);
-          });
-        polls++;
-        if (pr.status === "completed" || pr.status === "failed") done = true;
-      }
-
-      const synced: number = await step.run(`upsert-${mi}`, () =>
-        downloadAndUpsertOrders(workspace_id)
+      const synced: number = await step.run(`month-${mi}`, () =>
+        syncOrderMonth(workspace_id, month.start, month.end)
       );
 
       ordersSynced += synced;
