@@ -82,8 +82,8 @@ export default function TicketsPage() {
       .catch(() => {});
   }, [workspace.id]);
 
-  const fetchTickets = useCallback(async () => {
-    setLoading(true);
+  const fetchTickets = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const params = new URLSearchParams({
         sort: "updated_at",
@@ -103,12 +103,20 @@ export default function TicketsPage() {
         setTotal(data.total);
       }
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [statusFilter, channelFilter, assigneeFilter, search, offset]);
 
   useEffect(() => {
     fetchTickets();
+  }, [fetchTickets]);
+
+  // Auto-refresh every 10 seconds (silent — no loading flash)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchTickets(true);
+    }, 10000);
+    return () => clearInterval(interval);
   }, [fetchTickets]);
 
   const handleSearch = (e: React.FormEvent) => {

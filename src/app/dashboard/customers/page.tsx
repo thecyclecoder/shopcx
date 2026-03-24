@@ -193,16 +193,16 @@ export default function CustomersPage() {
   if (syncJob) {
     if (syncJob.status === "pending") {
       progressLabel = "Starting sync...";
-    } else if (syncJob.status === "running" && syncJob.phase === "customers") {
+    } else if (syncJob.status === "running" && syncJob.phase === "customers" && syncJob.synced_orders === 0) {
       progressPercent = syncJob.total_customers > 0
         ? Math.round((syncJob.synced_customers / syncJob.total_customers) * 50)
         : 0;
       progressLabel = `Syncing customers: ${syncJob.synced_customers.toLocaleString()} / ${syncJob.total_customers.toLocaleString()}`;
-    } else if (syncJob.status === "running" && syncJob.phase === "orders") {
+    } else if (syncJob.status === "running" && (syncJob.phase === "orders" || syncJob.synced_orders > 0)) {
       progressPercent = syncJob.total_orders > 0
         ? 50 + Math.round((syncJob.synced_orders / syncJob.total_orders) * 45)
         : 50;
-      progressLabel = `Syncing orders: ${syncJob.synced_orders.toLocaleString()} / ${syncJob.total_orders.toLocaleString()}`;
+      progressLabel = `Syncing orders: ${syncJob.synced_orders.toLocaleString()}${syncJob.total_orders > 0 ? ` / ${syncJob.total_orders.toLocaleString()}` : ""}`;
     } else if (syncJob.status === "running" && syncJob.phase === "finalizing") {
       progressPercent = 95;
       progressLabel = "Calculating retention scores...";
@@ -235,7 +235,7 @@ export default function CustomersPage() {
         <button
           onClick={handleSync}
           disabled={!!isSyncing}
-          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+          className="cursor-pointer rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isSyncing ? "Syncing..." : "Sync Customers"}
         </button>

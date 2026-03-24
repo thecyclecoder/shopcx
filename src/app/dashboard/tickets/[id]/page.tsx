@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 import type { Ticket, TicketMessage, TicketStatus } from "@/lib/types/ticket";
+import { cleanEmailForDisplay } from "@/lib/email-utils";
 
 interface Member {
   user_id: string;
@@ -305,7 +306,7 @@ export default function TicketDetailPage() {
                     </div>
                     <div
                       className={`prose prose-sm max-w-none ${textClass} ${!isInbound && !isInternal ? "prose-invert" : ""}`}
-                      dangerouslySetInnerHTML={{ __html: m.body }}
+                      dangerouslySetInnerHTML={{ __html: m.direction === "inbound" ? cleanEmailForDisplay(m.body) : m.body }}
                     />
                     {(m as TicketMessage & { _sandbox_suppressed?: boolean })._sandbox_suppressed && (
                       <div className="mt-1.5 flex items-center gap-1 text-[10px] text-amber-300">

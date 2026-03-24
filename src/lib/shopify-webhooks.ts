@@ -196,7 +196,7 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
   }));
 
   // Upsert order
-  await admin.from("orders").upsert(
+  const { error: orderError } = await admin.from("orders").upsert(
     {
       workspace_id: workspaceId,
       shopify_order_id: shopifyOrderId,
@@ -208,10 +208,16 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
       financial_status: (payload.financial_status as string) || null,
       fulfillment_status: (payload.fulfillment_status as string) || null,
       line_items: lineItems,
+      source_name: (payload.source_name as string) || null,
+      tags: (payload.tags as string) || null,
       created_at: (payload.created_at as string) || new Date().toISOString(),
     },
     { onConflict: "workspace_id,shopify_order_id" }
   );
+
+  if (orderError) {
+    console.error("Order webhook upsert error:", orderError.message);
+  }
 
   // Update customer order dates + retention score
   if (customerId) {

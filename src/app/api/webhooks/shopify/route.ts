@@ -31,8 +31,11 @@ export async function POST(request: Request) {
   // Verify HMAC
   const valid = await verifyShopifyWebhook(body, hmac, workspace.id);
   if (!valid) {
+    console.error(`Shopify webhook HMAC failed for topic=${topic} shop=${shopDomain}`);
     return NextResponse.json({ error: "Invalid HMAC" }, { status: 401 });
   }
+
+  console.log(`Shopify webhook received: topic=${topic} shop=${shopDomain}`);
 
   const payload = JSON.parse(body);
 

@@ -1,5 +1,32 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getResendClient } from "@/lib/email";
+import { decrypt } from "@/lib/crypto";
+
+// Fetch email body from Resend's receiving API
+async function fetchEmailBody(
+  apiKey: string,
+  emailId: string
+): Promise<{ html: string | null; text: string | null; headers: Record<string, string> }> {
+  try {
+    const res = await fetch(`https://api.resend.com/emails/receiving/${emailId}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!res.ok) {
+      console.error("Failed to fetch email body:", res.status, await res.text());
+      return { html: null, text: null, headers: {} };
+    }
+    const data = await res.json();
+    return {
+      html: data.html || null,
+      text: data.text || null,
+      headers: data.headers || {},
+    };
+  } catch (err) {
+    console.error("Error fetching email body:", err);
+    return { html: null, text: null, headers: {} };
+  }
+}
 
 export async function POST(request: Request) {
   const rawBody = await request.json();
@@ -11,22 +38,10 @@ export async function POST(request: Request) {
     from: fromEmail,
     to: toAddresses,
     subject,
-    html,
-    text,
-    headers: emailHeaders,
+    email_id: emailId,
     message_id: topLevelMessageId,
     in_reply_to: topLevelInReplyTo,
   } = body;
-
-  console.log("Inbound email webhook:", JSON.stringify({
-    type: rawBody.type,
-    from: fromEmail,
-    to: toAddresses,
-    subject,
-    hasHtml: !!html,
-    hasText: !!text,
-    message_id: topLevelMessageId,
-  }));
 
   // Extract sender email
   const senderEmail = typeof fromEmail === "string"
@@ -52,7 +67,7 @@ export async function POST(request: Request) {
   // Look up workspace by resend_domain
   const { data: workspace } = await admin
     .from("workspaces")
-    .select("id, name")
+    .select("id, name, resend_api_key_encrypted")
     .eq("resend_domain", toDomain)
     .single();
 
@@ -61,20 +76,29 @@ export async function POST(request: Request) {
   }
 
   const workspaceId = workspace.id;
-  const messageId = topLevelMessageId || emailHeaders?.["message-id"] || emailHeaders?.["Message-ID"] || null;
-  const inReplyTo = topLevelInReplyTo || emailHeaders?.["in-reply-to"] || emailHeaders?.["In-Reply-To"] || null;
-  const messageBody = html || text || body.body || "(No message body)";
+
+  // Fetch the full email body from Resend's receiving API
+  let emailContent = { html: null as string | null, text: null as string | null, headers: {} as Record<string, string> };
+  if (emailId && workspace.resend_api_key_encrypted) {
+    const apiKey = decrypt(workspace.resend_api_key_encrypted);
+    emailContent = await fetchEmailBody(apiKey, emailId);
+  }
+
+  const messageId = topLevelMessageId || emailContent.headers?.["message-id"] || null;
+  const inReplyTo = topLevelInReplyTo || emailContent.headers?.["in-reply-to"] || null;
+  const messageBody = emailContent.html || emailContent.text || "(No message body)";
   const normalizedEmail = senderEmail.toLowerCase().trim();
 
   // Capture original To address (for routing/tagging by support email)
   // Check forwarded headers first, fall back to X-Original-To, then the To field itself
+  const hdrs = emailContent.headers || {};
   const originalTo = (
-    emailHeaders?.["x-original-to"] ||
-    emailHeaders?.["X-Original-To"] ||
-    emailHeaders?.["x-forwarded-to"] ||
-    emailHeaders?.["X-Forwarded-To"] ||
-    emailHeaders?.["delivered-to"] ||
-    emailHeaders?.["Delivered-To"] ||
+    hdrs["x-original-to"] ||
+    hdrs["X-Original-To"] ||
+    hdrs["x-forwarded-to"] ||
+    hdrs["X-Forwarded-To"] ||
+    hdrs["delivered-to"] ||
+    hdrs["Delivered-To"] ||
     (typeof toAddress === "string" ? toAddress : toAddress?.address) ||
     ""
   ).toLowerCase().trim();
