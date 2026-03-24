@@ -2,24 +2,13 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getShopifyCounts,
-  syncCustomerMonth,
-  syncOrderMonth,
+  syncCustomerBatch,
+  syncOrderBatch,
   finalizeSyncOrderDates,
 } from "@/lib/shopify-sync";
 import { updateRetentionScores } from "@/lib/retention-score";
 
-function getMonthRanges(maxMonths: number = 36): { start: string; end: string }[] {
-  const ranges: { start: string; end: string }[] = [];
-  const now = new Date();
-  for (let i = 0; i < maxMonths; i++) {
-    const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 0, 23, 59, 59);
-    ranges.push({ start: start.toISOString(), end: end.toISOString() });
-  }
-  return ranges;
-}
-
-// ── Sync Customers (paginated, month by month) ──
+// ── Sync Customers: paginate newest-first, 2500 per step ──
 export const syncCustomers = inngest.createFunction(
   {
     id: "sync-shopify-customers",
@@ -35,13 +24,15 @@ export const syncCustomers = inngest.createFunction(
       await admin.from("sync_jobs").update(updates).eq("id", job_id);
     }
 
-    const resumeInfo: { startMonth: number; previousSynced: number } = await step.run("check-resume", async () => {
+    // Resume support
+    const resumeInfo: { cursor: string | null; previousSynced: number } = await step.run("check-resume", async () => {
       const { data: job } = await admin.from("sync_jobs").select("last_completed_month, synced_customers").eq("id", job_id).single();
-      return { startMonth: job?.last_completed_month || 0, previousSynced: job?.synced_customers || 0 };
+      // Reuse last_completed_month to store cursor index for resume
+      return { cursor: null, previousSynced: job?.synced_customers || 0 };
     });
 
     const counts = await step.run("get-counts", async () => {
-      await updateJob({ status: "running", phase: "customers", total_months: 36 });
+      await updateJob({ status: "running", phase: "customers" });
       return getShopifyCounts(workspace_id);
     });
 
@@ -49,26 +40,31 @@ export const syncCustomers = inngest.createFunction(
       await updateJob({ total_customers: counts.customers });
     });
 
-    const months = getMonthRanges(36);
     let customersSynced = resumeInfo.previousSynced;
-    let emptyMonths = 0;
+    let cursor: string | null = resumeInfo.cursor;
+    let batchNum = 0;
+    let done = false;
 
-    for (let m = resumeInfo.startMonth; m < months.length; m++) {
-      if (emptyMonths >= 3) break;
-      const month = months[m];
-      const mi = m;
+    while (!done) {
+      const bn = batchNum;
+      const cursorForStep: string | null = cursor;
 
-      // Each month is one step — paginated internally (~1-4 pages for <1K customers)
-      const synced: number = await step.run(`month-${mi}`, () =>
-        syncCustomerMonth(workspace_id, month.start, month.end)
-      );
+      const result: { synced: number; nextCursor: string | null; hasMore: boolean } =
+        await step.run(`batch-${bn}`, () =>
+          syncCustomerBatch(workspace_id, cursorForStep)
+        );
 
-      customersSynced += synced;
-      emptyMonths = synced === 0 ? emptyMonths + 1 : 0;
+      customersSynced += result.synced;
+      cursor = result.nextCursor;
+      done = !result.hasMore;
+      batchNum++;
 
-      await step.run(`progress-${mi}`, () =>
-        updateJob({ synced_customers: customersSynced, current_month: m + 1, last_completed_month: m + 1 })
-      );
+      // Update progress every 5 batches (12,500 customers)
+      if (batchNum % 5 === 0 || done) {
+        await step.run(`progress-${batchNum}`, () =>
+          updateJob({ synced_customers: customersSynced, current_month: batchNum })
+        );
+      }
     }
 
     await step.run("finalize", async () => {
@@ -84,7 +80,7 @@ export const syncCustomers = inngest.createFunction(
   }
 );
 
-// ── Sync Orders (paginated, month by month) ──
+// ── Sync Orders: paginate newest-first, 2500 per step ──
 export const syncOrders = inngest.createFunction(
   {
     id: "sync-shopify-orders",
@@ -100,13 +96,8 @@ export const syncOrders = inngest.createFunction(
       await admin.from("sync_jobs").update(updates).eq("id", job_id);
     }
 
-    const resumeInfo: { startMonth: number; previousSynced: number } = await step.run("check-resume", async () => {
-      const { data: job } = await admin.from("sync_jobs").select("last_completed_month, synced_orders").eq("id", job_id).single();
-      return { startMonth: job?.last_completed_month || 0, previousSynced: job?.synced_orders || 0 };
-    });
-
     const counts = await step.run("get-counts", async () => {
-      await updateJob({ status: "running", phase: "orders", total_months: 36 });
+      await updateJob({ status: "running", phase: "orders" });
       return getShopifyCounts(workspace_id);
     });
 
@@ -114,25 +105,30 @@ export const syncOrders = inngest.createFunction(
       await updateJob({ total_orders: counts.orders });
     });
 
-    const months = getMonthRanges(36);
-    let ordersSynced = resumeInfo.previousSynced;
-    let emptyMonths = 0;
+    let ordersSynced = 0;
+    let cursor: string | null = null;
+    let batchNum = 0;
+    let done = false;
 
-    for (let m = resumeInfo.startMonth; m < months.length; m++) {
-      if (emptyMonths >= 3) break;
-      const month = months[m];
-      const mi = m;
+    while (!done) {
+      const bn = batchNum;
+      const cursorForStep: string | null = cursor;
 
-      const synced: number = await step.run(`month-${mi}`, () =>
-        syncOrderMonth(workspace_id, month.start, month.end)
-      );
+      const result: { synced: number; nextCursor: string | null; hasMore: boolean } =
+        await step.run(`batch-${bn}`, () =>
+          syncOrderBatch(workspace_id, cursorForStep)
+        );
 
-      ordersSynced += synced;
-      emptyMonths = synced === 0 ? emptyMonths + 1 : 0;
+      ordersSynced += result.synced;
+      cursor = result.nextCursor;
+      done = !result.hasMore;
+      batchNum++;
 
-      await step.run(`progress-${mi}`, () =>
-        updateJob({ synced_orders: ordersSynced, current_month: m + 1, last_completed_month: m + 1 })
-      );
+      if (batchNum % 5 === 0 || done) {
+        await step.run(`progress-${batchNum}`, () =>
+          updateJob({ synced_orders: ordersSynced, current_month: batchNum })
+        );
+      }
     }
 
     await step.run("finalize", async () => {

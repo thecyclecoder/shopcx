@@ -947,7 +947,227 @@ export async function finalizeSyncOrderDates(workspaceId: string): Promise<void>
   }
 }
 
-// ── Month-based paginated sync (respects created_at filter) ──
+// ── Batch sync: paginate ALL, 10 pages (2500 records) per call ──
+
+const PAGES_PER_BATCH = 10;
+
+export async function syncCustomerBatch(
+  workspaceId: string,
+  cursor: string | null,
+): Promise<{ synced: number; nextCursor: string | null; hasMore: boolean }> {
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+  const admin = createAdminClient();
+
+  let currentCursor = cursor;
+  let totalSynced = 0;
+  let hasMore = true;
+
+  for (let page = 0; page < PAGES_PER_BATCH && hasMore; page++) {
+    const afterClause = currentCursor ? `, after: "${currentCursor}"` : "";
+    const query = `{
+      customers(first: 250, sortKey: CREATED_AT, reverse: true${afterClause}) {
+        edges {
+          cursor
+          node {
+            id email firstName lastName phone
+            numberOfOrders
+            amountSpent { amount }
+            productSubscriberStatus
+            emailMarketingConsent { marketingState }
+            smsMarketingConsent { marketingState }
+            tags locale note state validEmailAddress createdAt
+            defaultAddress {
+              address1 address2 city province provinceCode
+              country countryCodeV2 zip
+            }
+            addresses(first: 5) {
+              address1 address2 city province provinceCode
+              country countryCodeV2 zip
+            }
+          }
+        }
+        pageInfo { hasNextPage }
+      }
+    }`;
+
+    const data = await shopifyGraphQL(shop, accessToken, query);
+    const result = data.customers as {
+      edges: { cursor: string; node: Record<string, unknown> }[];
+      pageInfo: { hasNextPage: boolean };
+    };
+
+    const edges = result.edges || [];
+    if (edges.length === 0) { hasMore = false; break; }
+
+    const records = edges
+      .filter((edge) => !!(edge.node.email as string) || !!(edge.node.phone as string))
+      .map((edge) => {
+        const c = edge.node;
+        const email = (c.email as string)
+          ? (c.email as string).toLowerCase()
+          : `${(c.phone as string).replace(/\D/g, "")}@phone.local`;
+        return {
+          workspace_id: workspaceId,
+          shopify_customer_id: extractShopifyId(c.id as string),
+          email,
+          first_name: (c.firstName as string) || null,
+          last_name: (c.lastName as string) || null,
+          phone: (c.phone as string) || null,
+          total_orders: parseInt(c.numberOfOrders as string) || 0,
+          ltv_cents: dollarsToCents((c.amountSpent as { amount?: string })?.amount),
+          subscription_status: mapSubscriptionStatus(c.productSubscriberStatus as string),
+          email_marketing_status: (c.emailMarketingConsent as { marketingState?: string })?.marketingState?.toLowerCase() || "not_subscribed",
+          sms_marketing_status: (c.smsMarketingConsent as { marketingState?: string })?.marketingState?.toLowerCase() || "not_subscribed",
+          tags: (c.tags as string[]) || [],
+          default_address: c.defaultAddress || null,
+          addresses: c.addresses || [],
+          locale: (c.locale as string) || null,
+          note: (c.note as string) || null,
+          shopify_state: (c.state as string) || null,
+          valid_email: (c.validEmailAddress as boolean) ?? true,
+          shopify_created_at: (c.createdAt as string) || null,
+          updated_at: new Date().toISOString(),
+        };
+      });
+
+    for (let i = 0; i < records.length; i += UPSERT_BATCH) {
+      const batch = records.slice(i, i + UPSERT_BATCH);
+      const { error } = await admin
+        .from("customers")
+        .upsert(batch, { onConflict: "workspace_id,shopify_customer_id" });
+      if (!error) totalSynced += batch.length;
+      else console.error("Customer batch upsert error:", error.message);
+    }
+
+    currentCursor = edges[edges.length - 1].cursor;
+    hasMore = result.pageInfo.hasNextPage;
+  }
+
+  return { synced: totalSynced, nextCursor: hasMore ? currentCursor : null, hasMore };
+}
+
+export async function syncOrderBatch(
+  workspaceId: string,
+  cursor: string | null,
+): Promise<{ synced: number; nextCursor: string | null; hasMore: boolean }> {
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+  const admin = createAdminClient();
+
+  // Preload customer lookup
+  const customerByShopifyId = new Map<string, string>();
+  const customerByEmail = new Map<string, string>();
+  let custOffset = 0;
+  while (true) {
+    const { data: batch } = await admin
+      .from("customers")
+      .select("id, shopify_customer_id, email")
+      .eq("workspace_id", workspaceId)
+      .range(custOffset, custOffset + 4999);
+    if (!batch || batch.length === 0) break;
+    for (const c of batch) {
+      if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
+      if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
+    }
+    custOffset += batch.length;
+    if (batch.length < 5000) break;
+  }
+
+  let currentCursor = cursor;
+  let totalSynced = 0;
+  let hasMore = true;
+
+  for (let page = 0; page < PAGES_PER_BATCH && hasMore; page++) {
+    const afterClause = currentCursor ? `, after: "${currentCursor}"` : "";
+    const query = `{
+      orders(first: 250, sortKey: CREATED_AT, reverse: true${afterClause}) {
+        edges {
+          cursor
+          node {
+            id name email tags sourceName
+            totalPriceSet { shopMoney { amount currencyCode } }
+            displayFinancialStatus displayFulfillmentStatus createdAt
+            customer { id }
+            lineItems(first: 20) {
+              edges { node { title quantity sku originalUnitPriceSet { shopMoney { amount } } } }
+            }
+            fulfillments {
+              trackingInfo { number url company }
+              status
+              createdAt
+            }
+          }
+        }
+        pageInfo { hasNextPage }
+      }
+    }`;
+
+    const data = await shopifyGraphQL(shop, accessToken, query);
+    const result = data.orders as {
+      edges: { cursor: string; node: Record<string, unknown> }[];
+      pageInfo: { hasNextPage: boolean };
+    };
+
+    const edges = result.edges || [];
+    if (edges.length === 0) { hasMore = false; break; }
+
+    const records = edges.map((edge) => {
+      const o = edge.node;
+      const shopifyOrderId = extractShopifyId(o.id as string);
+      const orderEmail = ((o.email as string) || "").toLowerCase();
+      const custGid = (o.customer as { id?: string })?.id;
+      const shopifyCustomerId = custGid ? extractShopifyId(custGid) : null;
+
+      let customerId: string | null = null;
+      if (shopifyCustomerId) customerId = customerByShopifyId.get(shopifyCustomerId) || null;
+      if (!customerId && orderEmail) customerId = customerByEmail.get(orderEmail) || null;
+
+      const lineItemEdges = (o.lineItems as { edges: { node: Record<string, unknown> }[] })?.edges || [];
+      const lineItems = lineItemEdges.map((li) => ({
+        title: li.node.title,
+        quantity: li.node.quantity,
+        price_cents: dollarsToCents(
+          (li.node.originalUnitPriceSet as { shopMoney?: { amount?: string } })?.shopMoney?.amount
+        ),
+        sku: li.node.sku || null,
+      }));
+
+      const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
+
+      return {
+        workspace_id: workspaceId,
+        shopify_order_id: shopifyOrderId,
+        customer_id: customerId,
+        order_number: (o.name as string) || null,
+        email: orderEmail || null,
+        total_cents: dollarsToCents(priceSet?.shopMoney?.amount),
+        currency: priceSet?.shopMoney?.currencyCode || "USD",
+        financial_status: (o.displayFinancialStatus as string) || null,
+        fulfillment_status: (o.displayFulfillmentStatus as string) || null,
+        line_items: lineItems,
+        source_name: (o.sourceName as string) || null,
+        tags: (o.tags as string[])?.join(", ") || null,
+        fulfillments: (o.fulfillments as unknown[]) || [],
+        created_at: (o.createdAt as string) || new Date().toISOString(),
+      };
+    });
+
+    for (let i = 0; i < records.length; i += UPSERT_BATCH) {
+      const batch = records.slice(i, i + UPSERT_BATCH);
+      const { error } = await admin
+        .from("orders")
+        .upsert(batch, { onConflict: "workspace_id,shopify_order_id" });
+      if (!error) totalSynced += batch.length;
+      else console.error("Order batch upsert error:", error.message);
+    }
+
+    currentCursor = edges[edges.length - 1].cursor;
+    hasMore = result.pageInfo.hasNextPage;
+  }
+
+  return { synced: totalSynced, nextCursor: hasMore ? currentCursor : null, hasMore };
+}
+
+// ── Legacy month-based functions (kept for reference) ──
 
 export async function syncCustomerMonth(
   workspaceId: string,
