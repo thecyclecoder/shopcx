@@ -201,11 +201,14 @@ export default function CustomersPage() {
     if (syncJob.status === "pending") {
       progressLabel = "Starting sync...";
     } else if (syncJob.status === "running" && (syncJob.phase === "customers" || syncJob.phase === "orders")) {
-      // Each sync type gets its own 0-95% based on months completed
       progressPercent = Math.round((currentMonth / totalMonths) * 95);
       const typeLabel = syncJob.phase === "customers" ? "customers" : "orders";
       const count = syncJob.phase === "customers" ? syncJob.synced_customers : syncJob.synced_orders;
-      progressLabel = `Syncing ${typeLabel}: ${count.toLocaleString()} objects (month ${currentMonth}/${totalMonths})`;
+      // Show the month name being synced (current month minus currentMonth offset)
+      const now = new Date();
+      const syncingDate = new Date(now.getFullYear(), now.getMonth() - currentMonth, 1);
+      const monthName = syncingDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+      progressLabel = `Syncing ${typeLabel}: ${count.toLocaleString()} — ${monthName}`;
     } else if (syncJob.status === "running" && syncJob.phase === "finalizing") {
       progressPercent = 95;
       progressLabel = "Calculating retention scores...";
