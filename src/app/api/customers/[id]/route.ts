@@ -85,6 +85,23 @@ export async function GET(
     .order("created_at", { ascending: false })
     .limit(20);
 
+  // Compute real LTV and order count from DB (source of truth)
+  const { count: realOrderCount } = await admin
+    .from("orders")
+    .select("id", { count: "exact", head: true })
+    .in("customer_id", linkedCustomerIds);
+
+  const { data: ltvRows } = await admin
+    .from("orders")
+    .select("total_cents")
+    .in("customer_id", linkedCustomerIds);
+
+  const realLtv = (ltvRows || []).reduce((sum, o) => sum + (o.total_cents || 0), 0);
+
+  // Override stored values with computed values
+  customer.total_orders = realOrderCount || customer.total_orders;
+  customer.ltv_cents = realLtv || customer.ltv_cents;
+
   // Get linked identities
   let linkedIdentities: { id: string; email: string; first_name: string | null; last_name: string | null; is_primary: boolean }[] = [];
   if (link) {

@@ -54,15 +54,23 @@ function mapSubscriptionStatus(
   }
 }
 
-async function fetchSubscriptionStatus(
+interface CustomerEnrichment {
+  productSubscriberStatus: string | null;
+  emailMarketingState: string | null;
+  smsMarketingState: string | null;
+}
+
+async function fetchCustomerEnrichment(
   shop: string,
   accessToken: string,
   shopifyCustomerId: string
-): Promise<string | null> {
+): Promise<CustomerEnrichment> {
   const gid = `gid://shopify/Customer/${shopifyCustomerId}`;
   const query = `{
     customer(id: "${gid}") {
       productSubscriberStatus
+      emailMarketingConsent { marketingState }
+      smsMarketingConsent { marketingState }
     }
   }`;
 
@@ -79,11 +87,16 @@ async function fetchSubscriptionStatus(
       }
     );
 
-    if (!res.ok) return null;
+    if (!res.ok) return { productSubscriberStatus: null, emailMarketingState: null, smsMarketingState: null };
     const json = await res.json();
-    return json.data?.customer?.productSubscriberStatus || null;
+    const c = json.data?.customer;
+    return {
+      productSubscriberStatus: c?.productSubscriberStatus || null,
+      emailMarketingState: c?.emailMarketingConsent?.marketingState || null,
+      smsMarketingState: c?.smsMarketingConsent?.marketingState || null,
+    };
   } catch {
-    return null;
+    return { productSubscriberStatus: null, emailMarketingState: null, smsMarketingState: null };
   }
 }
 
@@ -112,12 +125,11 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
   const shopifyCustomerId = String(payload.id);
   const email = ((payload.email as string) || "").toLowerCase();
 
-  // Enrich with subscription status via GraphQL
-  let subscriptionStatus: "active" | "paused" | "cancelled" | "never" | undefined;
+  // Enrich with subscription + marketing status via GraphQL
+  let enrichment: CustomerEnrichment = { productSubscriberStatus: null, emailMarketingState: null, smsMarketingState: null };
   const creds = await getShopCredentials(workspaceId);
   if (creds) {
-    const rawStatus = await fetchSubscriptionStatus(creds.shop, creds.accessToken, shopifyCustomerId);
-    subscriptionStatus = mapSubscriptionStatus(rawStatus);
+    enrichment = await fetchCustomerEnrichment(creds.shop, creds.accessToken, shopifyCustomerId);
   }
 
   // Upsert customer
@@ -134,8 +146,14 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
     updated_at: new Date().toISOString(),
   };
 
-  if (subscriptionStatus) {
-    record.subscription_status = subscriptionStatus;
+  if (enrichment.productSubscriberStatus) {
+    record.subscription_status = mapSubscriptionStatus(enrichment.productSubscriberStatus);
+  }
+  if (enrichment.emailMarketingState) {
+    record.email_marketing_status = enrichment.emailMarketingState.toLowerCase();
+  }
+  if (enrichment.smsMarketingState) {
+    record.sms_marketing_status = enrichment.smsMarketingState.toLowerCase();
   }
 
   const { data: customer } = await admin
@@ -219,8 +237,14 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
     console.error("Order webhook upsert error:", orderError.message);
   }
 
-  // Update customer order dates + retention score
+  // Update customer stats from DB (not payload — payload may be incomplete)
   if (customerId) {
+    // Count orders and sum LTV from our DB (source of truth)
+    const { count: orderCount } = await admin
+      .from("orders")
+      .select("id", { count: "exact", head: true })
+      .eq("customer_id", customerId);
+
     const { data: firstOrder } = await admin
       .from("orders")
       .select("created_at")
@@ -237,25 +261,21 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
       .limit(1)
       .single();
 
-    // Update customer stats from Shopify payload if available
-    const customerPayload = payload.customer as Record<string, unknown> | undefined;
+    // Sum total cents
+    const { data: ltvData } = await admin
+      .from("orders")
+      .select("total_cents")
+      .eq("customer_id", customerId);
+
+    const totalLtv = (ltvData || []).reduce((sum, o) => sum + (o.total_cents || 0), 0);
+
     const customerUpdate: Record<string, unknown> = {
+      total_orders: orderCount || 0,
+      ltv_cents: totalLtv,
       first_order_at: firstOrder?.created_at || null,
       last_order_at: lastOrder?.created_at || null,
       updated_at: new Date().toISOString(),
     };
-
-    if (customerPayload) {
-      customerUpdate.total_orders = (customerPayload.orders_count as number) ?? undefined;
-      customerUpdate.ltv_cents = customerPayload.total_spent
-        ? dollarsToCents(customerPayload.total_spent as string)
-        : undefined;
-    }
-
-    // Remove undefined values
-    Object.keys(customerUpdate).forEach(
-      (k) => customerUpdate[k] === undefined && delete customerUpdate[k]
-    );
 
     await admin.from("customers").update(customerUpdate).eq("id", customerId);
 

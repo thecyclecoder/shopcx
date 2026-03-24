@@ -138,7 +138,22 @@ const BULK_CUSTOMERS_QUERY = `
               numberOfOrders
               amountSpent { amount }
               productSubscriberStatus
+              emailMarketingConsent { marketingState }
+              smsMarketingConsent { marketingState }
               tags
+              locale
+              note
+              state
+              validEmailAddress
+              createdAt
+              defaultAddress {
+                address1 address2 city province provinceCode
+                country countryCodeV2 zip
+              }
+              addresses(first: 5) {
+                address1 address2 city province provinceCode
+                country countryCodeV2 zip
+              }
             }
           }
         }
@@ -414,7 +429,16 @@ export async function bulkSyncCustomers(
       total_orders: parseInt(c.numberOfOrders) || 0,
       ltv_cents: dollarsToCents(c.amountSpent?.amount),
       subscription_status: mapSubscriptionStatus(c.productSubscriberStatus),
+      email_marketing_status: c.emailMarketingConsent?.marketingState?.toLowerCase() || "not_subscribed",
+      sms_marketing_status: c.smsMarketingConsent?.marketingState?.toLowerCase() || "not_subscribed",
       tags: c.tags || [],
+      default_address: c.defaultAddress || null,
+      addresses: c.addresses || [],
+      locale: c.locale || null,
+      note: c.note || null,
+      shopify_state: c.state || null,
+      valid_email: c.validEmailAddress ?? true,
+      shopify_created_at: c.createdAt || null,
       updated_at: new Date().toISOString(),
     });
   }
@@ -468,7 +492,13 @@ export async function syncCustomerPages(
             numberOfOrders
             amountSpent { amount }
             productSubscriberStatus
-            tags
+            emailMarketingConsent { marketingState }
+            smsMarketingConsent { marketingState }
+            tags locale note state validEmailAddress createdAt
+            defaultAddress {
+              address1 address2 city province provinceCode
+              country countryCodeV2 zip
+            }
           }
         }
         pageInfo { hasNextPage }
@@ -508,7 +538,15 @@ export async function syncCustomerPages(
         total_orders: parseInt(c.numberOfOrders as string) || 0,
         ltv_cents: dollarsToCents((c.amountSpent as { amount?: string })?.amount),
         subscription_status: mapSubscriptionStatus(c.productSubscriberStatus as string),
+        email_marketing_status: (c.emailMarketingConsent as { marketingState?: string })?.marketingState?.toLowerCase() || "not_subscribed",
+        sms_marketing_status: (c.smsMarketingConsent as { marketingState?: string })?.marketingState?.toLowerCase() || "not_subscribed",
         tags: (c.tags as string[]) || [],
+        default_address: c.defaultAddress || null,
+        locale: (c.locale as string) || null,
+        note: (c.note as string) || null,
+        shopify_state: (c.state as string) || null,
+        valid_email: (c.validEmailAddress as boolean) ?? true,
+        shopify_created_at: (c.createdAt as string) || null,
         updated_at: new Date().toISOString(),
       };
     });

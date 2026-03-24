@@ -48,26 +48,10 @@ export const syncShopify = inngest.createFunction(
       });
     });
 
-    // Step 2: Check if customers need syncing
-    const shouldSyncCustomers: boolean = await step.run("check-customer-sync", async () => {
-      const { count } = await admin
-        .from("customers")
-        .select("id", { count: "exact", head: true })
-        .eq("workspace_id", workspace_id);
-      const dbCount = count || 0;
-      const threshold = counts.customers * 0.01;
-      return !dbCount || Math.abs(dbCount - counts.customers) > threshold;
-    });
-
+    // Step 2: Sync customers via bulk operation (always full sync)
     let customersSynced = 0;
 
-    if (!shouldSyncCustomers) {
-      await step.run("skip-customers", async () => {
-        await updateJob({ synced_customers: counts.customers });
-      });
-      customersSynced = counts.customers;
-    } else {
-      // Step 3a: Cancel any stale bulk operation
+    {
       await step.run("cancel-stale-bulk-op", async () => {
         await cancelBulkOperation(workspace_id);
       });
@@ -118,7 +102,7 @@ export const syncShopify = inngest.createFunction(
       if (!bulkDone) {
         throw new Error("Bulk customer sync timed out after 20 minutes of polling");
       }
-    }
+    }  // end customer sync block
 
     // Step 4: Sync orders via bulk operation
     await step.run("switch-to-orders", async () => {

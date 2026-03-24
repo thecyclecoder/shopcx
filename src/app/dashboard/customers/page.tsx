@@ -236,16 +236,16 @@ export default function CustomersPage() {
         </div>
         {isSyncing ? (
           <span className="text-sm text-zinc-400">Syncing...</span>
-        ) : syncJob?.status === "completed" ? (
+        ) : syncJob?.status === "completed" && workspace.role !== "owner" ? (
           <span className="text-xs text-zinc-400">
             Synced {syncJob.synced_customers?.toLocaleString()} customers, {syncJob.synced_orders?.toLocaleString()} orders
           </span>
-        ) : total === 0 ? (
+        ) : (workspace.role === "owner" || (workspace.role === "admin" && total === 0)) ? (
           <button
             onClick={handleSync}
             className="cursor-pointer rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
           >
-            Sync Customers
+            {total > 0 ? "Re-sync" : "Sync Customers"}
           </button>
         ) : null}
       </div>

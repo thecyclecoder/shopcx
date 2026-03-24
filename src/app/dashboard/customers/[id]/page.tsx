@@ -11,12 +11,27 @@ interface Customer {
   phone: string | null;
   retention_score: number;
   subscription_status: string;
+  email_marketing_status: string | null;
+  sms_marketing_status: string | null;
   total_orders: number;
   ltv_cents: number;
   first_order_at: string | null;
   last_order_at: string | null;
   tags: string[];
+  default_address: { address1?: string; address2?: string; city?: string; province?: string; provinceCode?: string; country?: string; countryCodeV2?: string; zip?: string } | null;
+  addresses: { address1?: string; city?: string; province?: string; country?: string; zip?: string }[];
+  note: string | null;
+  locale: string | null;
+  shopify_created_at: string | null;
   created_at: string;
+}
+
+interface PaymentMethod {
+  type: string;
+  brand?: string;
+  last_digits?: string;
+  expiry?: string;
+  email?: string | null;
 }
 
 interface Order {
@@ -103,6 +118,7 @@ export default function CustomerDetailPage() {
   const [linkEmail, setLinkEmail] = useState("");
   const [linkMessage, setLinkMessage] = useState("");
   const [suggestions, setSuggestions] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; phone: string | null; match_reason: string }[]>([]);
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -118,10 +134,13 @@ export default function CustomerDetailPage() {
       setLinkedIdentities(data.linked_identities || []);
       setLoading(false);
 
-      // Load link suggestions
+      // Load link suggestions + payment methods
       fetch(`/api/customers/${id}/suggestions`)
         .then((r) => r.json())
         .then((s) => setSuggestions(s.suggestions || []));
+      fetch(`/api/customers/${id}/payment-methods`)
+        .then((r) => r.json())
+        .then((p) => setPaymentMethods(p.payment_methods || []));
     }
     load();
   }, [id]);
@@ -244,30 +263,118 @@ export default function CustomerDetailPage() {
           </p>
         </div>
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <p className="text-xs font-medium uppercase text-zinc-500">
-            Total Orders
-          </p>
+          <p className="text-xs font-medium uppercase text-zinc-500">Total Orders</p>
           <p className="mt-1 text-xl font-semibold text-zinc-900 dark:text-zinc-100">
             {customer.total_orders}
           </p>
         </div>
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <p className="text-xs font-medium uppercase text-zinc-500">
-            Subscription
-          </p>
+          <p className="text-xs font-medium uppercase text-zinc-500">Subscription</p>
           <p className="mt-1 text-xl font-semibold capitalize text-zinc-900 dark:text-zinc-100">
             {customer.subscription_status}
           </p>
         </div>
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <p className="text-xs font-medium uppercase text-zinc-500">
-            Customer Since
-          </p>
+          <p className="text-xs font-medium uppercase text-zinc-500">Customer Since</p>
           <p className="mt-1 text-xl font-semibold text-zinc-900 dark:text-zinc-100">
-            {formatDate(customer.first_order_at || customer.created_at)}
+            {formatDate(customer.shopify_created_at || customer.first_order_at || customer.created_at)}
           </p>
         </div>
       </div>
+
+      {/* Contact & Marketing */}
+      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
+        {/* Contact */}
+        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+          <p className="text-xs font-medium uppercase text-zinc-500">Contact</p>
+          <div className="mt-2 space-y-1.5 text-sm text-zinc-700 dark:text-zinc-300">
+            <p>{customer.email}</p>
+            {customer.phone && <p>{customer.phone}</p>}
+            {customer.default_address && (
+              <p className="text-xs text-zinc-400">
+                {[customer.default_address.city, customer.default_address.province, customer.default_address.countryCodeV2].filter(Boolean).join(", ")}
+                {customer.default_address.zip && ` ${customer.default_address.zip}`}
+              </p>
+            )}
+            {customer.locale && (
+              <p className="text-xs text-zinc-400">Locale: {customer.locale}</p>
+            )}
+          </div>
+        </div>
+
+        {/* Marketing */}
+        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+          <p className="text-xs font-medium uppercase text-zinc-500">Marketing</p>
+          <div className="mt-2 space-y-1.5">
+            <div className="flex items-center gap-2">
+              <div className={`h-2 w-2 rounded-full ${customer.email_marketing_status === "subscribed" ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-600"}`} />
+              <span className="text-sm text-zinc-700 dark:text-zinc-300">
+                Email: <span className="capitalize">{customer.email_marketing_status?.replace("_", " ") || "Unknown"}</span>
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className={`h-2 w-2 rounded-full ${customer.sms_marketing_status === "subscribed" ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-600"}`} />
+              <span className="text-sm text-zinc-700 dark:text-zinc-300">
+                SMS: <span className="capitalize">{customer.sms_marketing_status?.replace("_", " ") || "Unknown"}</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Payment Methods (live from Shopify) */}
+      {paymentMethods.length > 0 && (
+        <div className="mt-6">
+          <p className="text-xs font-medium uppercase text-zinc-500">Payment Methods</p>
+          <div className="mt-2 space-y-1.5">
+            {paymentMethods.map((pm, i) => (
+              <div key={i} className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+                {pm.type === "credit_card" && (
+                  <>
+                    <span className="capitalize">{pm.brand}</span>
+                    <span className="text-zinc-400">****{pm.last_digits}</span>
+                    <span className="text-xs text-zinc-400">exp {pm.expiry}</span>
+                  </>
+                )}
+                {pm.type === "shop_pay" && (
+                  <>
+                    <span>Shop Pay</span>
+                    <span className="text-zinc-400">****{pm.last_digits}</span>
+                    <span className="text-xs text-zinc-400">exp {pm.expiry}</span>
+                  </>
+                )}
+                {pm.type === "paypal" && (
+                  <span>PayPal{pm.email ? ` (${pm.email})` : ""}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Addresses */}
+      {customer.addresses && customer.addresses.length > 0 && (
+        <div className="mt-6">
+          <p className="text-xs font-medium uppercase text-zinc-500">Addresses</p>
+          <div className="mt-2 space-y-2">
+            {customer.addresses.map((addr, i) => (
+              <div key={i} className="rounded border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+                {addr.address1 && <p>{addr.address1}</p>}
+                <p>{[addr.city, addr.province, addr.zip].filter(Boolean).join(", ")}</p>
+                {addr.country && <p>{addr.country}</p>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Note */}
+      {customer.note && (
+        <div className="mt-6">
+          <p className="text-xs font-medium uppercase text-zinc-500">Note</p>
+          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">{customer.note}</p>
+        </div>
+      )}
 
       {/* Tags */}
       {customer.tags && customer.tags.length > 0 && (
