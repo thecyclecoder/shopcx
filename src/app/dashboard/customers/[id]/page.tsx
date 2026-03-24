@@ -102,6 +102,7 @@ export default function CustomerDetailPage() {
   const [error, setError] = useState("");
   const [linkEmail, setLinkEmail] = useState("");
   const [linkMessage, setLinkMessage] = useState("");
+  const [suggestions, setSuggestions] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; phone: string | null; match_reason: string }[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -116,15 +117,37 @@ export default function CustomerDetailPage() {
       setOrders(data.orders);
       setLinkedIdentities(data.linked_identities || []);
       setLoading(false);
+
+      // Load link suggestions
+      fetch(`/api/customers/${id}/suggestions`)
+        .then((r) => r.json())
+        .then((s) => setSuggestions(s.suggestions || []));
     }
     load();
   }, [id]);
+
+  const handleLinkById = async (targetId: string, targetEmail: string, targetFirst: string | null, targetLast: string | null) => {
+    setLinkMessage("");
+    const res = await fetch(`/api/customers/${id}/links`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ link_to: targetId }),
+    });
+
+    if (res.ok) {
+      setLinkedIdentities((prev) => [...prev, { id: targetId, email: targetEmail, first_name: targetFirst, last_name: targetLast, is_primary: false }]);
+      setSuggestions((prev) => prev.filter((s) => s.id !== targetId));
+      setLinkMessage("Linked!");
+    } else {
+      const data = await res.json();
+      setLinkMessage(data.error || "Failed to link");
+    }
+  };
 
   const handleLink = async () => {
     if (!linkEmail.trim()) return;
     setLinkMessage("");
 
-    // Search for customer by email
     const searchRes = await fetch(`/api/customers?search=${encodeURIComponent(linkEmail)}&limit=1`);
     const searchData = await searchRes.json();
     const target = searchData.customers?.[0];
@@ -138,20 +161,8 @@ export default function CustomerDetailPage() {
       return;
     }
 
-    const res = await fetch(`/api/customers/${id}/links`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ link_to: target.id }),
-    });
-
-    if (res.ok) {
-      setLinkedIdentities((prev) => [...prev, { id: target.id, email: target.email, first_name: target.first_name, last_name: target.last_name, is_primary: false }]);
-      setLinkEmail("");
-      setLinkMessage("Linked!");
-    } else {
-      const data = await res.json();
-      setLinkMessage(data.error || "Failed to link");
-    }
+    await handleLinkById(target.id, target.email, target.first_name, target.last_name);
+    setLinkEmail("");
   };
 
   const handleUnlink = async (unlinkId: string) => {
@@ -326,6 +337,36 @@ export default function CustomerDetailPage() {
         </div>
         {linkMessage && (
           <p className="mt-1 text-xs text-indigo-600 dark:text-indigo-400">{linkMessage}</p>
+        )}
+
+        {/* Auto-suggested matches */}
+        {suggestions.length > 0 && (
+          <div className="mt-3">
+            <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">Possible Matches</p>
+            <div className="mt-1.5 divide-y divide-zinc-200 rounded-lg border border-amber-200 bg-amber-50 dark:divide-zinc-700 dark:border-amber-800 dark:bg-amber-950">
+              {suggestions.map((s) => (
+                <div key={s.id} className="flex items-center justify-between px-3 py-2">
+                  <div>
+                    <span className="text-xs font-medium text-zinc-900 dark:text-zinc-100">{s.email}</span>
+                    {(s.first_name || s.last_name) && (
+                      <span className="ml-1.5 text-[10px] text-zinc-500">
+                        {[s.first_name, s.last_name].filter(Boolean).join(" ")}
+                      </span>
+                    )}
+                    <span className="ml-1.5 rounded bg-amber-200 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-800 dark:text-amber-300">
+                      {s.match_reason}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => handleLinkById(s.id, s.email, s.first_name, s.last_name)}
+                    className="cursor-pointer rounded-md border border-indigo-300 px-2 py-1 text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
+                  >
+                    Link
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
       </div>
 
