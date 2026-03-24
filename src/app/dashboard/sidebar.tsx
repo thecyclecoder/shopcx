@@ -131,12 +131,12 @@ export default function Sidebar({
   return (
     <>
       {/* Mobile header bar */}
-      <div className="fixed inset-x-0 top-0 z-40 flex h-14 items-center gap-3 border-b border-zinc-200 bg-white/80 px-4 pt-[env(safe-area-inset-top)] backdrop-blur-md md:hidden dark:border-zinc-800 dark:bg-zinc-900/80">
+      <div className="fixed inset-x-0 top-0 z-40 flex items-center gap-3 border-b border-zinc-200 bg-white/80 px-4 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))] backdrop-blur-md md:hidden dark:border-zinc-800 dark:bg-zinc-900/80">
         <button
           onClick={() => setOpen(true)}
-          className="rounded p-1.5 text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          className="rounded p-2 text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
         >
-          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <svg className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
           </svg>
         </button>
