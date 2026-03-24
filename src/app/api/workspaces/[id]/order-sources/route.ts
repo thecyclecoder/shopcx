@@ -20,13 +20,12 @@ export async function GET(
   const { data: sources } = await admin
     .from("orders")
     .select("source_name")
-    .eq("workspace_id", workspaceId)
-    .not("source_name", "is", null);
+    .eq("workspace_id", workspaceId);
 
   // Count by source
   const counts = new Map<string, number>();
   for (const row of sources || []) {
-    const src = row.source_name || "unknown";
+    const src = row.source_name || "(unknown)";
     counts.set(src, (counts.get(src) || 0) + 1);
   }
 
