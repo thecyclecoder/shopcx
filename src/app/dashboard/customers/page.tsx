@@ -234,13 +234,20 @@ export default function CustomersPage() {
             {total} customer{total !== 1 ? "s" : ""} in this workspace.
           </p>
         </div>
-        <button
-          onClick={handleSync}
-          disabled={!!isSyncing}
-          className="cursor-pointer rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {isSyncing ? "Syncing..." : "Sync Customers"}
-        </button>
+        {isSyncing ? (
+          <span className="text-sm text-zinc-400">Syncing...</span>
+        ) : syncJob?.status === "completed" ? (
+          <span className="text-xs text-zinc-400">
+            Synced {syncJob.synced_customers?.toLocaleString()} customers, {syncJob.synced_orders?.toLocaleString()} orders
+          </span>
+        ) : total === 0 ? (
+          <button
+            onClick={handleSync}
+            className="cursor-pointer rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
+          >
+            Sync Customers
+          </button>
+        ) : null}
       </div>
 
       {/* ── Progress Bar ── */}
