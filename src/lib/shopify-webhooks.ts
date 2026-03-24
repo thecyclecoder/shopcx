@@ -132,6 +132,10 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
     enrichment = await fetchCustomerEnrichment(creds.shop, creds.accessToken, shopifyCustomerId);
   }
 
+  // Build address from webhook payload
+  const defaultAddr = payload.default_address as Record<string, unknown> | undefined;
+  const addresses = payload.addresses as Record<string, unknown>[] | undefined;
+
   // Upsert customer
   const record: Record<string, unknown> = {
     workspace_id: workspaceId,
@@ -143,6 +147,31 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
     total_orders: (payload.orders_count as number) ?? 0,
     ltv_cents: dollarsToCents(payload.total_spent as string),
     tags: payload.tags ? (payload.tags as string).split(", ").filter(Boolean) : [],
+    locale: (payload.locale as string) || null,
+    note: (payload.note as string) || null,
+    shopify_state: (payload.state as string) || null,
+    valid_email: (payload.verified_email as boolean) ?? true,
+    shopify_created_at: (payload.created_at as string) || null,
+    default_address: defaultAddr ? {
+      address1: defaultAddr.address1,
+      address2: defaultAddr.address2,
+      city: defaultAddr.city,
+      province: defaultAddr.province,
+      provinceCode: defaultAddr.province_code,
+      country: defaultAddr.country,
+      countryCodeV2: defaultAddr.country_code,
+      zip: defaultAddr.zip,
+    } : null,
+    addresses: addresses ? addresses.map((a) => ({
+      address1: a.address1,
+      address2: a.address2,
+      city: a.city,
+      province: a.province,
+      provinceCode: a.province_code,
+      country: a.country,
+      countryCodeV2: a.country_code,
+      zip: a.zip,
+    })) : [],
     updated_at: new Date().toISOString(),
   };
 
