@@ -4,6 +4,9 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { syncCustomers, syncOrders } from "@/lib/shopify-sync";
 import { updateRetentionScores } from "@/lib/retention-score";
 
+// Bulk operations can take several minutes for large stores
+export const maxDuration = 300; // 5 minutes
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
