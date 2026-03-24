@@ -32,6 +32,9 @@ export default function IntegrationsPage() {
   const [webhookConfigured, setWebhookConfigured] = useState(false);
   const [webhookLoading, setWebhookLoading] = useState(false);
 
+  // Sandbox
+  const [sandboxMode, setSandboxMode] = useState(true);
+
   // General state
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -45,6 +48,7 @@ export default function IntegrationsPage() {
         setResendHint(data.resend_api_key_hint);
         setSupportEmail(data.support_email || "");
         setResendDomain(data.resend_domain || "");
+        setSandboxMode(data.sandbox_mode ?? true);
         if (data.resend_connected) {
           fetch(`/api/workspaces/${workspace.id}/integrations/resend/webhook`)
             .then((r) => r.json())
@@ -197,6 +201,39 @@ export default function IntegrationsPage() {
       )}
 
       <div className="max-w-xl space-y-6">
+        {/* ── Sandbox Mode ── */}
+        <div className={`rounded-lg border p-4 ${sandboxMode ? "border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950" : "border-emerald-300 bg-emerald-50 dark:border-emerald-700 dark:bg-emerald-950"}`}>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className={`text-sm font-medium ${sandboxMode ? "text-amber-700 dark:text-amber-400" : "text-emerald-700 dark:text-emerald-400"}`}>
+                {sandboxMode ? "Sandbox Mode" : "Live Mode"}
+              </p>
+              <p className={`mt-0.5 text-xs ${sandboxMode ? "text-amber-600 dark:text-amber-500" : "text-emerald-600 dark:text-emerald-500"}`}>
+                {sandboxMode
+                  ? "Replies to forwarded support email tickets will not be sent to customers. Only direct inbound@ tickets get real replies."
+                  : "All ticket replies will be sent to customers."}
+              </p>
+            </div>
+            <button
+              onClick={async () => {
+                const newValue = !sandboxMode;
+                const res = await patchIntegrations({ sandbox_mode: newValue });
+                if (res) {
+                  setSandboxMode(newValue);
+                  setMessage(newValue ? "Sandbox mode enabled" : "Live mode enabled — replies will be sent to customers");
+                }
+              }}
+              className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+                sandboxMode
+                  ? "bg-emerald-600 text-white hover:bg-emerald-500"
+                  : "bg-amber-600 text-white hover:bg-amber-500"
+              }`}
+            >
+              {sandboxMode ? "Go Live" : "Enable Sandbox"}
+            </button>
+          </div>
+        </div>
+
         {/* ── Shopify ── */}
         <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex items-center justify-between">

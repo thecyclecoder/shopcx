@@ -82,10 +82,23 @@ export async function GET(
     assignedName = userMap.get(ticket.assigned_to)?.name || null;
   }
 
+  // Get sandbox mode
+  const { data: ws } = await admin
+    .from("workspaces")
+    .select("sandbox_mode, resend_domain")
+    .eq("id", workspaceId)
+    .single();
+
+  const sandboxMode = ws?.sandbox_mode ?? true;
+  const inboundAddress = ws?.resend_domain ? `inbound@${ws.resend_domain}` : null;
+  const isInboundTicket = ticket.received_at_email === inboundAddress || !ticket.received_at_email;
+
   return NextResponse.json({
     ticket: { ...ticket, assigned_name: assignedName },
     messages: enrichedMessages || [],
     customer,
+    sandbox_mode: sandboxMode,
+    email_live: !sandboxMode || isInboundTicket,
   });
 }
 

@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes"
     )
     .eq("id", workspaceId)
     .single();
@@ -45,6 +45,7 @@ export async function GET(
       ? `re_...${decrypt(workspace.resend_api_key_encrypted).slice(-4)}`
       : null,
     support_email: workspace.support_email,
+    sandbox_mode: workspace.sandbox_mode ?? true,
 
     // Shopify
     shopify_connected: !!workspace.shopify_access_token_encrypted,
@@ -84,7 +85,7 @@ export async function PATCH(
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const updates: Record<string, string | null> = {};
+  const updates: Record<string, string | boolean | null> = {};
 
   try {
     // Resend
@@ -105,6 +106,10 @@ export async function PATCH(
 
     if ("support_email" in body) {
       updates.support_email = body.support_email || null;
+    }
+
+    if ("sandbox_mode" in body) {
+      updates.sandbox_mode = !!body.sandbox_mode;
     }
 
     // Shopify credentials

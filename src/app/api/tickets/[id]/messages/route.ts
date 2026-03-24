@@ -47,27 +47,39 @@ export async function POST(
 
   // Send email if external reply
   let emailError: string | undefined;
+  let emailSuppressed = false;
+
   if (visibility === "external" && ticket.customers?.email) {
     const { data: workspace } = await admin
       .from("workspaces")
-      .select("name")
+      .select("name, sandbox_mode, resend_domain")
       .eq("id", workspaceId)
       .single();
 
-    const result = await sendTicketReply({
-      workspaceId,
-      toEmail: ticket.customers.email,
-      subject: ticket.subject || "Support Request",
-      body: messageBody,
-      inReplyTo: ticket.email_message_id,
-      agentName: user.user_metadata?.full_name || user.user_metadata?.name || "Support",
-      workspaceName: workspace?.name || "ShopCX",
-    });
+    // In sandbox mode, only send emails for tickets received at the inbound@ address
+    const isSandbox = workspace?.sandbox_mode ?? true;
+    const inboundAddress = workspace?.resend_domain ? `inbound@${workspace.resend_domain}` : null;
+    const isInboundTicket = ticket.received_at_email === inboundAddress || !ticket.received_at_email;
+    const shouldSendEmail = !isSandbox || isInboundTicket;
 
-    if (result.error) {
-      emailError = result.error;
-    } else if (result.messageId) {
-      message.email_message_id = result.messageId;
+    if (!shouldSendEmail) {
+      emailSuppressed = true;
+    } else {
+      const result = await sendTicketReply({
+        workspaceId,
+        toEmail: ticket.customers.email,
+        subject: ticket.subject || "Support Request",
+        body: messageBody,
+        inReplyTo: ticket.email_message_id,
+        agentName: user.user_metadata?.full_name || user.user_metadata?.name || "Support",
+        workspaceName: workspace?.name || "ShopCX",
+      });
+
+      if (result.error) {
+        emailError = result.error;
+      } else if (result.messageId) {
+        message.email_message_id = result.messageId;
+      }
     }
   }
 
@@ -96,7 +108,8 @@ export async function POST(
 
   return NextResponse.json({
     message: created,
-    email_sent: visibility === "external" && !emailError,
+    email_sent: visibility === "external" && !emailError && !emailSuppressed,
+    email_suppressed: emailSuppressed,
     email_error: emailError,
   });
 }
