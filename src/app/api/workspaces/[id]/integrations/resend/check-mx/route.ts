@@ -29,20 +29,8 @@ export async function GET(
   const domain = workspace.resend_domain;
   const results: { domain: string; has_mx: boolean; mx_records: string[]; can_receive: boolean; google_dns_propagated: boolean }[] = [];
 
-  // Check the domain itself and common subdomains
-  const domainsToCheck = [
-    domain,
-    `send.${domain}`,
-    `mail.${domain}`,
-    `inbound.${domain}`,
-  ];
-
-  // Also check parent domain if this is already a subdomain
-  const parts = domain.split(".");
-  if (parts.length > 2) {
-    const parent = parts.slice(1).join(".");
-    domainsToCheck.push(parent);
-  }
+  // Only check the configured domain itself — that's where inbound MX needs to be
+  const domainsToCheck = [domain];
 
   // Also check via Google DNS (dig @8.8.8.8) using DNS-over-HTTPS
   async function checkMxGoogle(domain: string): Promise<{ has_mx: boolean; records: string[] }> {
@@ -63,10 +51,12 @@ export async function GET(
     try {
       const mxRecords = await dns.resolveMx(d);
       const sorted = mxRecords.sort((a, b) => a.priority - b.priority);
-      const hasResendInbound = sorted.some((r) =>
-        r.exchange.toLowerCase().includes("resend") ||
-        r.exchange.toLowerCase().includes("inbound-smtp")
-      );
+      const hasResendInbound = sorted.some((r) => {
+        const ex = r.exchange.toLowerCase();
+        return ex.includes("resend") ||
+          ex.includes("inbound-smtp") ||
+          (ex.includes("amazonaws.com") && ex.includes("inbound"));
+      });
 
       // Also check Google DNS propagation
       const googleCheck = await checkMxGoogle(d);
@@ -86,9 +76,10 @@ export async function GET(
         domain: d,
         has_mx: googleCheck.has_mx,
         mx_records: googleCheck.records,
-        can_receive: googleCheck.records.some((r: string) =>
-          r.toLowerCase().includes("resend") || r.toLowerCase().includes("inbound-smtp")
-        ),
+        can_receive: googleCheck.records.some((r: string) => {
+          const ex = r.toLowerCase();
+          return ex.includes("resend") || ex.includes("inbound-smtp") || (ex.includes("amazonaws.com") && ex.includes("inbound"));
+        }),
         google_dns_propagated: googleCheck.has_mx,
       });
     }

@@ -29,12 +29,39 @@ export async function getShopifyCredentials(
 
 // ── GraphQL ──
 
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  retries = 3,
+): Promise<Response> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      // Retry on 429 (rate limit) and 5xx
+      if ((res.status === 429 || res.status >= 500) && attempt < retries) {
+        const wait = res.status === 429 ? 2000 : 1000 * (attempt + 1);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      // Network errors (ECONNRESET, etc) — retry
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("fetchWithRetry: exhausted retries");
+}
+
 async function shopifyGraphQL(
   shop: string,
   accessToken: string,
   query: string,
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
     {
       method: "POST",
@@ -195,11 +222,18 @@ export async function bulkSyncCustomers(
     const c = JSON.parse(line);
     if (c.__parentId) continue;
     if (!c.id?.includes("Customer")) continue;
+    // Use phone as fallback identifier if no email
+    const email = c.email
+      ? c.email.toLowerCase()
+      : c.phone
+        ? `${c.phone.replace(/\D/g, "")}@phone.local`
+        : null;
+    if (!email) continue; // Skip if no email AND no phone
 
     records.push({
       workspace_id: workspaceId,
       shopify_customer_id: extractShopifyId(c.id),
-      email: (c.email || `no-email-${extractShopifyId(c.id)}@unknown.com`).toLowerCase(),
+      email,
       first_name: c.firstName || null,
       last_name: c.lastName || null,
       phone: c.phone || null,
@@ -279,13 +313,21 @@ export async function syncCustomerPages(
       break;
     }
 
-    // Build records
-    const records = edges.map((edge) => {
+    // Build records — use phone as fallback identifier
+    const records = edges
+      .filter((edge) => {
+        const c = edge.node;
+        return !!(c.email as string) || !!(c.phone as string);
+      })
+      .map((edge) => {
       const c = edge.node;
+      const email = (c.email as string)
+        ? (c.email as string).toLowerCase()
+        : `${(c.phone as string).replace(/\D/g, "")}@phone.local`;
       return {
         workspace_id: workspaceId,
         shopify_customer_id: extractShopifyId(c.id as string),
-        email: ((c.email as string) || `no-email-${extractShopifyId(c.id as string)}@unknown.com`).toLowerCase(),
+        email,
         first_name: (c.firstName as string) || null,
         last_name: (c.lastName as string) || null,
         phone: (c.phone as string) || null,
@@ -357,7 +399,7 @@ export async function syncOrderPages(
   let hasMore = true;
 
   for (let page = 0; page < PAGES_PER_CALL && hasMore && nextUrl; page++) {
-    const res = await fetch(nextUrl, {
+    const res = await fetchWithRetry(nextUrl, {
       headers: {
         "X-Shopify-Access-Token": accessToken,
         "Content-Type": "application/json",

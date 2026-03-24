@@ -11,6 +11,15 @@ interface SourceRow {
 
 export default function ShopifySettingsPage() {
   const workspace = useWorkspace();
+
+  if (!["owner", "admin"].includes(workspace.role)) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center p-8">
+        <p className="text-sm text-zinc-400">You don&apos;t have permission to view this page.</p>
+      </div>
+    );
+  }
+
   const [sources, setSources] = useState<SourceRow[]>([]);
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
