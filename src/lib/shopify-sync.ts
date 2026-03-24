@@ -276,51 +276,34 @@ const BULK_ORDERS_QUERY = `
   }
 `;
 
-export async function bulkSyncOrders(
-  workspaceId: string,
-  onProgress?: (synced: number) => Promise<void>,
-): Promise<number> {
-  const admin = createAdminClient();
-
+export async function downloadBulkOrderUrl(workspaceId: string): Promise<string> {
   const pollResult = await pollBulkOperation(workspaceId);
   if (pollResult.status !== "completed" || !pollResult.url) {
     throw new Error("Bulk operation not completed or no download URL");
   }
-  const lines = await downloadBulkResults(pollResult.url);
+  return pollResult.url;
+}
 
-  // Preload customer lookup — paginate to get all (Supabase default limit is 1000)
-  const customerByShopifyId = new Map<string, string>();
-  const customerByEmail = new Map<string, string>();
+export async function upsertOrderChunk(
+  workspaceId: string,
+  url: string,
+  chunkIndex: number,
+): Promise<{ synced: number; hasMore: boolean }> {
+  const admin = createAdminClient();
 
-  let customerOffset = 0;
-  const customerPageSize = 5000;
-  while (true) {
-    const { data: batch } = await admin
-      .from("customers")
-      .select("id, shopify_customer_id, email")
-      .eq("workspace_id", workspaceId)
-      .range(customerOffset, customerOffset + customerPageSize - 1);
+  // Download and parse full JSONL
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to download: ${res.status}`);
+  const text = await res.text();
+  const allLines = text.trim().split("\n").filter(Boolean);
 
-    if (!batch || batch.length === 0) break;
-
-    for (const c of batch) {
-      if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
-      if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
-    }
-
-    customerOffset += batch.length;
-    if (batch.length < customerPageSize) break;
-  }
-  console.log(`Loaded ${customerByShopifyId.size} customers for order linking`);
-
-  // Parse JSONL — orders and their child line items come as separate lines
-  const orderMap = new Map<string, Record<string, unknown>>();
+  // Separate orders and line items
+  const orderLines: string[] = [];
   const lineItemsMap = new Map<string, Record<string, unknown>[]>();
 
-  for (const line of lines) {
+  for (const line of allLines) {
     const obj = JSON.parse(line);
     if (obj.__parentId) {
-      // Child line item
       const parentId = obj.__parentId as string;
       if (!lineItemsMap.has(parentId)) lineItemsMap.set(parentId, []);
       lineItemsMap.get(parentId)!.push({
@@ -330,14 +313,43 @@ export async function bulkSyncOrders(
         sku: obj.sku || null,
       });
     } else if (obj.id?.includes("Order")) {
-      orderMap.set(obj.id, obj);
+      orderLines.push(line);
     }
+  }
+
+  const start = chunkIndex * CHUNK_SIZE;
+  const end = start + CHUNK_SIZE;
+  const chunkLines = orderLines.slice(start, end);
+
+  if (chunkLines.length === 0) {
+    return { synced: 0, hasMore: false };
+  }
+
+  // Preload customer lookup (paginated)
+  const customerByShopifyId = new Map<string, string>();
+  const customerByEmail = new Map<string, string>();
+  let custOffset = 0;
+  while (true) {
+    const { data: batch } = await admin
+      .from("customers")
+      .select("id, shopify_customer_id, email")
+      .eq("workspace_id", workspaceId)
+      .range(custOffset, custOffset + 4999);
+    if (!batch || batch.length === 0) break;
+    for (const c of batch) {
+      if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
+      if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
+    }
+    custOffset += batch.length;
+    if (batch.length < 5000) break;
   }
 
   let synced = 0;
   const records: Record<string, unknown>[] = [];
 
-  for (const [gid, o] of orderMap) {
+  for (const line of chunkLines) {
+    const o = JSON.parse(line);
+    const gid = o.id as string;
     const shopifyOrderId = extractShopifyId(gid);
     const orderEmail = ((o.email as string) || "").toLowerCase();
     const custGid = (o.customer as { id?: string })?.id;
@@ -366,7 +378,6 @@ export async function bulkSyncOrders(
     });
   }
 
-  // Batch upsert
   for (let i = 0; i < records.length; i += UPSERT_BATCH) {
     const batch = records.slice(i, i + UPSERT_BATCH);
     const { error } = await admin
@@ -374,11 +385,9 @@ export async function bulkSyncOrders(
       .upsert(batch, { onConflict: "workspace_id,shopify_order_id" });
     if (!error) synced += batch.length;
     else console.error("Bulk order upsert error:", error.message);
-
-    if (onProgress && i % 2500 === 0) await onProgress(synced);
   }
 
-  return synced;
+  return { synced, hasMore: end < orderLines.length };
 }
 
 export { BULK_CUSTOMERS_QUERY, BULK_ORDERS_QUERY };
@@ -391,33 +400,55 @@ async function downloadBulkResults(url: string): Promise<string[]> {
   return text.trim().split("\n").filter(Boolean);
 }
 
-export async function bulkSyncCustomers(
-  workspaceId: string,
-  onProgress?: (synced: number) => Promise<void>,
-): Promise<number> {
-  const admin = createAdminClient();
-
-  // Get the completed bulk operation's download URL
+// Download bulk results and return the URL for chunked processing
+export async function downloadBulkCustomerUrl(workspaceId: string): Promise<string> {
   const pollResult = await pollBulkOperation(workspaceId);
   if (pollResult.status !== "completed" || !pollResult.url) {
     throw new Error("Bulk operation not completed or no download URL");
   }
-  const lines = await downloadBulkResults(pollResult.url);
+  return pollResult.url;
+}
+
+// Process a chunk of the JSONL file (by line range)
+const CHUNK_SIZE = 50000; // 50K records per Inngest step
+
+export async function upsertCustomerChunk(
+  workspaceId: string,
+  url: string,
+  chunkIndex: number,
+): Promise<{ synced: number; hasMore: boolean }> {
+  const admin = createAdminClient();
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to download: ${res.status}`);
+  const text = await res.text();
+  const allLines = text.trim().split("\n").filter(Boolean);
+
+  // Filter to customer records only (skip line items etc)
+  const customerLines = allLines.filter((line) => {
+    const obj = JSON.parse(line);
+    return !obj.__parentId && obj.id?.includes("Customer");
+  });
+
+  const start = chunkIndex * CHUNK_SIZE;
+  const end = start + CHUNK_SIZE;
+  const chunkLines = customerLines.slice(start, end);
+
+  if (chunkLines.length === 0) {
+    return { synced: 0, hasMore: false };
+  }
 
   let synced = 0;
   const records: Record<string, unknown>[] = [];
 
-  for (const line of lines) {
+  for (const line of chunkLines) {
     const c = JSON.parse(line);
-    if (c.__parentId) continue;
-    if (!c.id?.includes("Customer")) continue;
-    // Use phone as fallback identifier if no email
     const email = c.email
       ? c.email.toLowerCase()
       : c.phone
         ? `${c.phone.replace(/\D/g, "")}@phone.local`
         : null;
-    if (!email) continue; // Skip if no email AND no phone
+    if (!email) continue;
 
     records.push({
       workspace_id: workspaceId,
@@ -443,7 +474,6 @@ export async function bulkSyncCustomers(
     });
   }
 
-  // Batch upsert
   for (let i = 0; i < records.length; i += UPSERT_BATCH) {
     const batch = records.slice(i, i + UPSERT_BATCH);
     const { error } = await admin
@@ -451,11 +481,9 @@ export async function bulkSyncCustomers(
       .upsert(batch, { onConflict: "workspace_id,shopify_customer_id" });
     if (!error) synced += batch.length;
     else console.error("Bulk customer upsert error:", error.message);
-
-    if (onProgress && i % 2500 === 0) await onProgress(synced);
   }
 
-  return synced;
+  return { synced, hasMore: end < customerLines.length };
 }
 
 // ── Multi-page sync: fetches PAGES_PER_CALL pages in one API route call ──
