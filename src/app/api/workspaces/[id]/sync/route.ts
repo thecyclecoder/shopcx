@@ -69,6 +69,24 @@ export async function POST(
     }
   }
 
+  // Get total counts for the new job (so progress bar shows correctly from the start)
+  let totalCustomers = 0;
+  let totalOrders = 0;
+  if (resumeSynced > 0) {
+    // Pre-populate from the failed job's totals
+    const { data: lastJob } = await admin
+      .from("sync_jobs")
+      .select("total_customers, total_orders")
+      .eq("workspace_id", workspaceId)
+      .eq("type", syncType)
+      .eq("status", "failed")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+    totalCustomers = lastJob?.total_customers || 0;
+    totalOrders = lastJob?.total_orders || 0;
+  }
+
   // Create sync job
   const { data: job, error: jobError } = await admin
     .from("sync_jobs")
@@ -80,6 +98,8 @@ export async function POST(
       current_month: resumeBatch,
       synced_customers: syncType === "customers" ? resumeSynced : 0,
       synced_orders: syncType === "orders" ? resumeSynced : 0,
+      total_customers: totalCustomers,
+      total_orders: totalOrders,
     })
     .select()
     .single();
