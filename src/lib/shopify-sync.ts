@@ -150,10 +150,6 @@ const BULK_CUSTOMERS_QUERY = `
                 address1 address2 city province provinceCode
                 country countryCodeV2 zip
               }
-              addresses(first: 5) {
-                address1 address2 city province provinceCode
-                country countryCodeV2 zip
-              }
             }
           }
         }
@@ -179,26 +175,29 @@ export async function cancelBulkOperation(workspaceId: string): Promise<void> {
   const pollData = await shopifyGraphQL(shop, accessToken, BULK_POLL_QUERY);
   const op = pollData.currentBulkOperation as { id: string; status: string } | null;
 
-  if (op && (op.status === "RUNNING" || op.status === "CREATED" || op.status === "CANCELING")) {
-    if (op.status !== "CANCELING") {
-      try {
-        await shopifyGraphQL(shop, accessToken,
-          `mutation { bulkOperationCancel(id: "${op.id}") { bulkOperation { id status } userErrors { field message } } }`
-        );
-      } catch {
-        // Ignore cancel errors
-      }
-    }
-    // Wait briefly, but don't block forever
-    for (let i = 0; i < 24; i++) {
-      await new Promise((r) => setTimeout(r, 5000));
-      const check = await shopifyGraphQL(shop, accessToken, BULK_POLL_QUERY);
-      const checkOp = check.currentBulkOperation as { status: string } | null;
-      if (!checkOp || checkOp.status === "CANCELED" || checkOp.status === "CANCELLED" || checkOp.status === "COMPLETED") return;
-    }
-    // If still not cancelled after 2 min, throw so Inngest retries the step later
-    throw new Error("Bulk operation still cancelling — will retry");
+  // Only cancel if actively running — COMPLETED/CANCELED are fine
+  if (!op || op.status === "COMPLETED" || op.status === "CANCELED" || op.status === "CANCELLED") {
+    return;
   }
+
+  if (op.status === "RUNNING" || op.status === "CREATED") {
+    try {
+      await shopifyGraphQL(shop, accessToken,
+        `mutation { bulkOperationCancel(id: "${op.id}") { bulkOperation { id status } userErrors { field message } } }`
+      );
+    } catch {
+      // Ignore cancel errors
+    }
+  }
+
+  // Wait for cancellation (max 90s to stay within Vercel timeout)
+  for (let i = 0; i < 18; i++) {
+    await new Promise((r) => setTimeout(r, 5000));
+    const check = await shopifyGraphQL(shop, accessToken, BULK_POLL_QUERY);
+    const checkOp = check.currentBulkOperation as { status: string } | null;
+    if (!checkOp || checkOp.status === "CANCELED" || checkOp.status === "CANCELLED" || checkOp.status === "COMPLETED") return;
+  }
+  throw new Error("Bulk operation still cancelling — will retry");
 }
 
 // Start a bulk operation with date range filter
@@ -219,10 +218,6 @@ export async function startBulkOperationWithQuery(
     smsMarketingConsent { marketingState }
     tags locale note state validEmailAddress createdAt
     defaultAddress {
-      address1 address2 city province provinceCode
-      country countryCodeV2 zip
-    }
-    addresses(first: 5) {
       address1 address2 city province provinceCode
       country countryCodeV2 zip
     }
@@ -495,7 +490,7 @@ export async function downloadAndUpsertCustomers(workspaceId: string): Promise<n
       sms_marketing_status: c.smsMarketingConsent?.marketingState?.toLowerCase() || "not_subscribed",
       tags: c.tags || [],
       default_address: c.defaultAddress || null,
-      addresses: c.addresses || [],
+      addresses: [],
       locale: c.locale || null,
       note: c.note || null,
       shopify_state: c.state || null,
@@ -674,7 +669,7 @@ export async function upsertCustomerChunk(
       sms_marketing_status: c.smsMarketingConsent?.marketingState?.toLowerCase() || "not_subscribed",
       tags: c.tags || [],
       default_address: c.defaultAddress || null,
-      addresses: c.addresses || [],
+      addresses: [],
       locale: c.locale || null,
       note: c.note || null,
       shopify_state: c.state || null,

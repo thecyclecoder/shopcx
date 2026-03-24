@@ -140,11 +140,11 @@ export default function CustomersPage() {
     }
   };
 
-  const handleSync = async (type: "customers" | "orders") => {
+  const handleSync = async (type: "customers" | "orders", resume = false) => {
     const res = await fetch(`/api/workspaces/${workspace.id}/sync`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type }),
+      body: JSON.stringify({ type, resume }),
     });
     const data = await res.json();
 
@@ -198,18 +198,21 @@ export default function CustomersPage() {
 
     if (syncJob.status === "pending") {
       progressLabel = "Starting sync...";
-    } else if (syncJob.status === "running" && syncJob.phase === "customers") {
-      progressPercent = Math.round((currentMonth / totalMonths) * 50);
-      progressLabel = `Syncing customers: ${syncJob.synced_customers.toLocaleString()} (month ${currentMonth}/${totalMonths})`;
-    } else if (syncJob.status === "running" && syncJob.phase === "orders") {
-      progressPercent = 50 + Math.round((currentMonth / totalMonths) * 45);
-      progressLabel = `Syncing orders: ${syncJob.synced_orders.toLocaleString()} (month ${currentMonth}/${totalMonths})`;
+    } else if (syncJob.status === "running" && (syncJob.phase === "customers" || syncJob.phase === "orders")) {
+      // Each sync type gets its own 0-95% based on months completed
+      progressPercent = Math.round((currentMonth / totalMonths) * 95);
+      const typeLabel = syncJob.phase === "customers" ? "customers" : "orders";
+      const count = syncJob.phase === "customers" ? syncJob.synced_customers : syncJob.synced_orders;
+      progressLabel = `Syncing ${typeLabel}: ${count.toLocaleString()} (month ${currentMonth}/${totalMonths})`;
     } else if (syncJob.status === "running" && syncJob.phase === "finalizing") {
       progressPercent = 95;
       progressLabel = "Calculating retention scores...";
     } else if (syncJob.status === "completed") {
       progressPercent = 100;
-      progressLabel = `Done! ${syncJob.synced_customers.toLocaleString()} customers, ${syncJob.synced_orders.toLocaleString()} orders synced.`;
+      const parts = [];
+      if (syncJob.synced_customers > 0) parts.push(`${syncJob.synced_customers.toLocaleString()} customers`);
+      if (syncJob.synced_orders > 0) parts.push(`${syncJob.synced_orders.toLocaleString()} orders`);
+      progressLabel = `Done! ${parts.join(", ")} synced.`;
     } else if (syncJob.status === "failed") {
       progressLabel = syncJob.error || "Sync failed";
     }
@@ -235,6 +238,21 @@ export default function CustomersPage() {
         </div>
         {isSyncing ? (
           <span className="text-sm text-zinc-400">Syncing...</span>
+        ) : syncJob?.status === "failed" && (syncJob as SyncJob & { last_completed_month?: number }).last_completed_month ? (
+          <div className="flex gap-2">
+            <button
+              onClick={() => handleSync(syncJob.phase === "orders" ? "orders" : "customers", true)}
+              className="cursor-pointer rounded-md bg-amber-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-amber-500"
+            >
+              Resume from month {(syncJob as SyncJob & { last_completed_month?: number }).last_completed_month}
+            </button>
+            <button
+              onClick={() => handleSync(syncJob.phase === "orders" ? "orders" : "customers")}
+              className="cursor-pointer rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400"
+            >
+              Start Over
+            </button>
+          </div>
         ) : syncJob?.status === "completed" && workspace.role !== "owner" ? (
           <span className="text-xs text-zinc-400">
             Synced {syncJob.synced_customers?.toLocaleString()} customers, {syncJob.synced_orders?.toLocaleString()} orders

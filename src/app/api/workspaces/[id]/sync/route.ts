@@ -27,11 +27,11 @@ export async function POST(
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  let body: { type?: string } = {};
+  let body: { type?: string; resume?: boolean } = {};
   try { body = await request.json(); } catch { /* empty body ok */ }
   const syncType = body.type === "orders" ? "orders" : body.type === "customers" ? "customers" : "full";
 
-  // Check if there's already a running sync of any type
+  // Check if there's already a running sync
   const { data: existingJob } = await admin
     .from("sync_jobs")
     .select("id, status, type")
@@ -47,6 +47,24 @@ export async function POST(
     );
   }
 
+  // Check for a recent failed job of the same type to resume from
+  let startMonth = 0;
+  if (body.resume) {
+    const { data: lastFailed } = await admin
+      .from("sync_jobs")
+      .select("last_completed_month, type")
+      .eq("workspace_id", workspaceId)
+      .eq("type", syncType)
+      .eq("status", "failed")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    if (lastFailed?.last_completed_month) {
+      startMonth = lastFailed.last_completed_month;
+    }
+  }
+
   // Create sync job
   const { data: job, error: jobError } = await admin
     .from("sync_jobs")
@@ -54,6 +72,8 @@ export async function POST(
       workspace_id: workspaceId,
       type: syncType,
       status: "pending",
+      last_completed_month: startMonth,
+      current_month: startMonth,
     })
     .select()
     .single();
@@ -98,14 +118,14 @@ export async function GET(
 
   const admin = createAdminClient();
 
-  // Auto-fail stale jobs (running for more than 15 minutes)
-  const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  // Auto-fail stale jobs (running for more than 2 hours with no progress)
+  const twoHoursAgo = new Date(Date.now() - 120 * 60 * 1000).toISOString();
   await admin
     .from("sync_jobs")
-    .update({ status: "failed", error: "Timed out — no progress for 15 minutes" })
+    .update({ status: "failed", error: "Timed out — no progress for 2 hours" })
     .eq("workspace_id", workspaceId)
     .in("status", ["pending", "running"])
-    .lt("started_at", fifteenMinAgo);
+    .lt("started_at", twoHoursAgo);
 
   if (jobId) {
     const { data: job } = await admin

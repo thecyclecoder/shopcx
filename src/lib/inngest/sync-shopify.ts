@@ -38,6 +38,15 @@ export const syncCustomers = inngest.createFunction(
       await admin.from("sync_jobs").update(updates).eq("id", job_id);
     }
 
+    // Check if resuming from a previous failed sync
+    const resumeInfo: { startMonth: number; previousSynced: number } = await step.run("check-resume", async () => {
+      const { data: job } = await admin.from("sync_jobs").select("last_completed_month, synced_customers").eq("id", job_id).single();
+      return {
+        startMonth: job?.last_completed_month || 0,
+        previousSynced: job?.synced_customers || 0,
+      };
+    });
+
     const counts = await step.run("get-counts", async () => {
       await updateJob({ status: "running", phase: "customers", total_months: 36 });
       return getShopifyCounts(workspace_id);
@@ -48,10 +57,10 @@ export const syncCustomers = inngest.createFunction(
     });
 
     const months = getMonthRanges(36);
-    let customersSynced = 0;
+    let customersSynced = resumeInfo.previousSynced;
     let emptyMonths = 0;
 
-    for (let m = 0; m < months.length; m++) {
+    for (let m = resumeInfo.startMonth; m < months.length; m++) {
       if (emptyMonths >= 3) break;
       const month = months[m];
       const mi = m;
@@ -82,7 +91,7 @@ export const syncCustomers = inngest.createFunction(
       emptyMonths = synced === 0 ? emptyMonths + 1 : 0;
 
       await step.run(`progress-${mi}`, () =>
-        updateJob({ synced_customers: customersSynced, current_month: m + 1 })
+        updateJob({ synced_customers: customersSynced, current_month: m + 1, last_completed_month: m + 1 })
       );
     }
 
@@ -115,6 +124,14 @@ export const syncOrders = inngest.createFunction(
       await admin.from("sync_jobs").update(updates).eq("id", job_id);
     }
 
+    const resumeInfo: { startMonth: number; previousSynced: number } = await step.run("check-resume", async () => {
+      const { data: job } = await admin.from("sync_jobs").select("last_completed_month, synced_orders").eq("id", job_id).single();
+      return {
+        startMonth: job?.last_completed_month || 0,
+        previousSynced: job?.synced_orders || 0,
+      };
+    });
+
     const counts = await step.run("get-counts", async () => {
       await updateJob({ status: "running", phase: "orders", total_months: 36 });
       return getShopifyCounts(workspace_id);
@@ -125,10 +142,10 @@ export const syncOrders = inngest.createFunction(
     });
 
     const months = getMonthRanges(36);
-    let ordersSynced = 0;
+    let ordersSynced = resumeInfo.previousSynced;
     let emptyMonths = 0;
 
-    for (let m = 0; m < months.length; m++) {
+    for (let m = resumeInfo.startMonth; m < months.length; m++) {
       if (emptyMonths >= 3) break;
       const month = months[m];
       const mi = m;
@@ -159,7 +176,7 @@ export const syncOrders = inngest.createFunction(
       emptyMonths = synced === 0 ? emptyMonths + 1 : 0;
 
       await step.run(`progress-${mi}`, () =>
-        updateJob({ synced_orders: ordersSynced, current_month: m + 1 })
+        updateJob({ synced_orders: ordersSynced, current_month: m + 1, last_completed_month: m + 1 })
       );
     }
 
