@@ -5,6 +5,7 @@ import { useWorkspace } from "@/lib/workspace-context";
 
 interface SourceRow {
   source: string;
+  friendly_name: string | null;
   count: number;
   order_type: string;
 }
@@ -111,9 +112,13 @@ export default function ShopifySettingsPage() {
                 >
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                      {s.source}
+                      {s.friendly_name || s.source}
                     </p>
                     <p className="text-xs text-zinc-400">
+                      {s.friendly_name && s.friendly_name !== s.source && (
+                        <span className="font-mono">{s.source}</span>
+                      )}
+                      {s.friendly_name && s.friendly_name !== s.source && " · "}
                       {s.count.toLocaleString()} order{s.count !== 1 ? "s" : ""}
                     </p>
                   </div>

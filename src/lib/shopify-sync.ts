@@ -221,7 +221,140 @@ export async function pollBulkOperation(workspaceId: string): Promise<{
   return { status: "running", objectCount: parseInt(op.objectCount) || 0, url: null };
 }
 
-export { BULK_CUSTOMERS_QUERY };
+const BULK_ORDERS_QUERY = `
+  mutation {
+    bulkOperationRunQuery(
+      query: """
+      {
+        orders {
+          edges {
+            node {
+              id
+              name
+              email
+              tags
+              sourceIdentifier
+              totalPriceSet { shopMoney { amount currencyCode } }
+              displayFinancialStatus
+              displayFulfillmentStatus
+              createdAt
+              customer { id }
+              lineItems(first: 20) {
+                edges {
+                  node {
+                    title
+                    quantity
+                    sku
+                    originalUnitPriceSet { shopMoney { amount } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      """
+    ) {
+      bulkOperation { id status }
+      userErrors { field message }
+    }
+  }
+`;
+
+export async function bulkSyncOrders(
+  workspaceId: string,
+  onProgress?: (synced: number) => Promise<void>,
+): Promise<number> {
+  const admin = createAdminClient();
+
+  const pollResult = await pollBulkOperation(workspaceId);
+  if (pollResult.status !== "completed" || !pollResult.url) {
+    throw new Error("Bulk operation not completed or no download URL");
+  }
+  const lines = await downloadBulkResults(pollResult.url);
+
+  // Preload customer lookup
+  const { data: allCustomers } = await admin
+    .from("customers")
+    .select("id, shopify_customer_id, email")
+    .eq("workspace_id", workspaceId);
+
+  const customerByShopifyId = new Map<string, string>();
+  const customerByEmail = new Map<string, string>();
+  for (const c of allCustomers || []) {
+    if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
+    if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
+  }
+
+  // Parse JSONL — orders and their child line items come as separate lines
+  const orderMap = new Map<string, Record<string, unknown>>();
+  const lineItemsMap = new Map<string, Record<string, unknown>[]>();
+
+  for (const line of lines) {
+    const obj = JSON.parse(line);
+    if (obj.__parentId) {
+      // Child line item
+      const parentId = obj.__parentId as string;
+      if (!lineItemsMap.has(parentId)) lineItemsMap.set(parentId, []);
+      lineItemsMap.get(parentId)!.push({
+        title: obj.title,
+        quantity: obj.quantity,
+        price_cents: dollarsToCents(obj.originalUnitPriceSet?.shopMoney?.amount),
+        sku: obj.sku || null,
+      });
+    } else if (obj.id?.includes("Order")) {
+      orderMap.set(obj.id, obj);
+    }
+  }
+
+  let synced = 0;
+  const records: Record<string, unknown>[] = [];
+
+  for (const [gid, o] of orderMap) {
+    const shopifyOrderId = extractShopifyId(gid);
+    const orderEmail = ((o.email as string) || "").toLowerCase();
+    const custGid = (o.customer as { id?: string })?.id;
+    const shopifyCustomerId = custGid ? extractShopifyId(custGid) : null;
+
+    let customerId: string | null = null;
+    if (shopifyCustomerId) customerId = customerByShopifyId.get(shopifyCustomerId) || null;
+    if (!customerId && orderEmail) customerId = customerByEmail.get(orderEmail) || null;
+
+    const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
+
+    records.push({
+      workspace_id: workspaceId,
+      shopify_order_id: shopifyOrderId,
+      customer_id: customerId,
+      order_number: (o.name as string) || null,
+      email: orderEmail || null,
+      total_cents: dollarsToCents(priceSet?.shopMoney?.amount),
+      currency: priceSet?.shopMoney?.currencyCode || "USD",
+      financial_status: (o.displayFinancialStatus as string) || null,
+      fulfillment_status: (o.displayFulfillmentStatus as string) || null,
+      line_items: lineItemsMap.get(gid) || [],
+      source_name: (o.sourceIdentifier as string) || null,
+      tags: (o.tags as string[])?.join(", ") || null,
+      created_at: (o.createdAt as string) || new Date().toISOString(),
+    });
+  }
+
+  // Batch upsert
+  for (let i = 0; i < records.length; i += UPSERT_BATCH) {
+    const batch = records.slice(i, i + UPSERT_BATCH);
+    const { error } = await admin
+      .from("orders")
+      .upsert(batch, { onConflict: "workspace_id,shopify_order_id" });
+    if (!error) synced += batch.length;
+    else console.error("Bulk order upsert error:", error.message);
+
+    if (onProgress && i % 2500 === 0) await onProgress(synced);
+  }
+
+  return synced;
+}
+
+export { BULK_CUSTOMERS_QUERY, BULK_ORDERS_QUERY };
 
 async function downloadBulkResults(url: string): Promise<string[]> {
   if (!url) return [];

@@ -2,6 +2,28 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
+// Known Shopify source names and app IDs → friendly names
+const KNOWN_SOURCES: Record<string, string> = {
+  web: "Online Store",
+  pos: "Shopify POS",
+  shopify_draft_order: "Draft Order",
+  iphone: "Shopify iOS",
+  android: "Shopify Android",
+  subscription_contract_checkout_one: "Subscription (Recurring)",
+  // Known app IDs
+  "580111": "Shopify Online Store",
+  "1354745": "Shopify POS",
+  "2329312": "Shopify Draft Orders",
+  "3890849": "Facebook & Instagram",
+  "5765187": "Google & YouTube",
+  "6009345": "Shop App",
+  "5765955": "Shopify Inbox",
+  "1778060": "Recharge",
+  "3921523": "Bold Subscriptions",
+  "294517": "Walmart Marketplace",
+  walmart: "Walmart Marketplace",
+};
+
 // GET: return distinct order sources with counts + current mapping
 export async function GET(
   request: Request,
@@ -42,6 +64,7 @@ export async function GET(
     .sort((a, b) => b[1] - a[1])
     .map(([source, count]) => ({
       source,
+      friendly_name: KNOWN_SOURCES[source] || null,
       count,
       order_type: mapping[source] || "unknown",
     }));

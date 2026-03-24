@@ -6,9 +6,10 @@ import {
   startBulkOperation,
   pollBulkOperation,
   bulkSyncCustomers,
-  syncOrderPages,
+  bulkSyncOrders,
   finalizeSyncOrderDates,
   BULK_CUSTOMERS_QUERY,
+  BULK_ORDERS_QUERY,
 } from "@/lib/shopify-sync";
 import { updateRetentionScores } from "@/lib/retention-score";
 
@@ -117,34 +118,58 @@ export const syncShopify = inngest.createFunction(
       }
     }
 
-    // Step 4: Sync orders (REST API, paginated — no bulk op needed for ~125K)
+    // Step 4: Sync orders via bulk operation
     await step.run("switch-to-orders", async () => {
       await updateJob({ phase: "orders" });
     });
 
-    let orderCursor: string | null = null;
     let ordersSynced = 0;
-    let orderBatch = 0;
 
-    while (true) {
-      const cursor: string | null = orderCursor;
-      const batchNum = orderBatch;
-      const result: { synced: number; nextCursor: string | null; hasMore: boolean } =
-        await step.run(`sync-orders-batch-${batchNum}`, () =>
-          syncOrderPages(workspace_id, cursor)
-        );
+    // Cancel any stale bulk op from customer phase
+    await step.run("cancel-stale-bulk-op-orders", async () => {
+      await cancelBulkOperation(workspace_id);
+    });
 
-      ordersSynced += result.synced;
-      orderCursor = result.nextCursor;
-      orderBatch++;
+    // Start bulk order query
+    await step.run("start-bulk-orders", async () => {
+      await startBulkOperation(workspace_id, BULK_ORDERS_QUERY);
+    });
 
-      if (orderBatch % 10 === 0 || !result.hasMore) {
-        await step.run(`update-order-progress-${orderBatch}`, async () => {
+    // Poll until complete
+    let orderBulkDone = false;
+    let orderPollCount = 0;
+
+    while (!orderBulkDone && orderPollCount < 120) {
+      const pollNum = orderPollCount;
+      const pollResult: { status: string; objectCount: number; url: string | null } =
+        await step.run(`poll-bulk-orders-${pollNum}`, async () => {
+          await new Promise((r) => setTimeout(r, 10000));
+          const result = await pollBulkOperation(workspace_id);
+          await updateJob({ synced_orders: result.objectCount });
+          return result;
+        });
+
+      orderPollCount++;
+
+      if (pollResult.status === "completed") {
+        orderBulkDone = true;
+
+        ordersSynced = await step.run("download-and-upsert-orders", async () => {
+          return bulkSyncOrders(workspace_id, async (synced) => {
+            await updateJob({ synced_orders: synced });
+          });
+        });
+
+        await step.run("update-order-final", async () => {
           await updateJob({ synced_orders: ordersSynced });
         });
+      } else if (pollResult.status === "failed") {
+        throw new Error("Bulk order sync failed on Shopify side");
       }
+    }
 
-      if (!result.hasMore) break;
+    if (!orderBulkDone) {
+      throw new Error("Bulk order sync timed out after 20 minutes of polling");
     }
 
     // Step 5: Finalize
