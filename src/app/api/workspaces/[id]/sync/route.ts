@@ -3,8 +3,8 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getShopifyCounts,
-  syncCustomerPage,
-  syncOrderPage,
+  syncCustomerPages,
+  syncOrderPages,
   finalizeSyncOrderDates,
 } from "@/lib/shopify-sync";
 import { updateRetentionScores } from "@/lib/retention-score";
@@ -65,12 +65,12 @@ export async function POST(
 
   try {
     if (type === "customers") {
-      const result = await syncCustomerPage(workspaceId, cursor || null);
+      const result = await syncCustomerPages(workspaceId, cursor || null);
       return NextResponse.json(result);
     }
 
     if (type === "orders") {
-      const result = await syncOrderPage(workspaceId, cursor || null);
+      const result = await syncOrderPages(workspaceId, cursor || null);
       return NextResponse.json(result);
     }
 

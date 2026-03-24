@@ -27,13 +27,12 @@ export async function getShopifyCredentials(
   };
 }
 
-// ── GraphQL helpers ──
+// ── GraphQL ──
 
 async function shopifyGraphQL(
   shop: string,
   accessToken: string,
   query: string,
-  variables?: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
   const res = await fetch(
     `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
@@ -43,7 +42,7 @@ async function shopifyGraphQL(
         "X-Shopify-Access-Token": accessToken,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ query, variables }),
+      body: JSON.stringify({ query }),
     }
   );
 
@@ -77,37 +76,32 @@ function mapSubscriptionStatus(
   shopifyStatus: string | null | undefined
 ): "active" | "paused" | "cancelled" | "never" {
   switch (shopifyStatus) {
-    case "ACTIVE":
-      return "active";
-    case "PAUSED":
-      return "paused";
-    case "CANCELLED":
-    case "EXPIRED":
-    case "FAILED":
-      return "cancelled";
-    case "NEVER_SUBSCRIBED":
-    default:
-      return "never";
+    case "ACTIVE": return "active";
+    case "PAUSED": return "paused";
+    case "CANCELLED": case "EXPIRED": case "FAILED": return "cancelled";
+    default: return "never";
   }
 }
 
-// ── Count ──
+// ── Counts ──
 
 export async function getShopifyCounts(workspaceId: string): Promise<{ customers: number; orders: number }> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
-
   const data = await shopifyGraphQL(shop, accessToken, `{
     customersCount { count }
     ordersCount { count }
   }`);
-
   return {
     customers: (data.customersCount as { count: number })?.count ?? 0,
     orders: (data.ordersCount as { count: number })?.count ?? 0,
   };
 }
 
-// ── Paginated customer sync (one page at a time) ──
+// ── Multi-page sync: fetches PAGES_PER_CALL pages in one API route call ──
+
+const PAGES_PER_CALL = 5;
+const GQL_PAGE_SIZE = 250;
+const UPSERT_BATCH = 250;
 
 interface SyncPageResult {
   synced: number;
@@ -115,223 +109,210 @@ interface SyncPageResult {
   hasMore: boolean;
 }
 
-export async function syncCustomerPage(
+export async function syncCustomerPages(
   workspaceId: string,
   cursor: string | null,
-  pageSize: number = 250
 ): Promise<SyncPageResult> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const admin = createAdminClient();
 
-  const afterClause = cursor ? `, after: "${cursor}"` : "";
-  const query = `{
-    customers(first: ${pageSize}${afterClause}, sortKey: UPDATED_AT) {
-      edges {
-        cursor
-        node {
-          id
-          email
-          firstName
-          lastName
-          phone
-          numberOfOrders
-          amountSpent { amount }
-          productSubscriberStatus
-          tags
+  let currentCursor = cursor;
+  let totalSynced = 0;
+  let hasMore = true;
+
+  for (let page = 0; page < PAGES_PER_CALL && hasMore; page++) {
+    const afterClause = currentCursor ? `, after: "${currentCursor}"` : "";
+    const query = `{
+      customers(first: ${GQL_PAGE_SIZE}${afterClause}, sortKey: UPDATED_AT) {
+        edges {
+          cursor
+          node {
+            id email firstName lastName phone
+            numberOfOrders
+            amountSpent { amount }
+            productSubscriberStatus
+            tags
+          }
         }
+        pageInfo { hasNextPage }
       }
-      pageInfo {
-        hasNextPage
-      }
-    }
-  }`;
+    }`;
 
-  const data = await shopifyGraphQL(shop, accessToken, query);
-  const result = data.customers as {
-    edges: { cursor: string; node: Record<string, unknown> }[];
-    pageInfo: { hasNextPage: boolean };
-  };
-
-  const edges = result.edges || [];
-  if (edges.length === 0) {
-    return { synced: 0, nextCursor: null, hasMore: false };
-  }
-
-  // Batch upsert
-  const records = edges.map((edge) => {
-    const c = edge.node;
-    return {
-      workspace_id: workspaceId,
-      shopify_customer_id: extractShopifyId(c.id as string),
-      email: ((c.email as string) || `no-email-${extractShopifyId(c.id as string)}@unknown.com`).toLowerCase(),
-      first_name: (c.firstName as string) || null,
-      last_name: (c.lastName as string) || null,
-      phone: (c.phone as string) || null,
-      total_orders: parseInt(c.numberOfOrders as string) || 0,
-      ltv_cents: dollarsToCents((c.amountSpent as { amount?: string })?.amount),
-      subscription_status: mapSubscriptionStatus(c.productSubscriberStatus as string),
-      tags: (c.tags as string[]) || [],
-      updated_at: new Date().toISOString(),
+    const data = await shopifyGraphQL(shop, accessToken, query);
+    const result = data.customers as {
+      edges: { cursor: string; node: Record<string, unknown> }[];
+      pageInfo: { hasNextPage: boolean };
     };
-  });
 
-  const { error } = await admin
-    .from("customers")
-    .upsert(records, { onConflict: "workspace_id,shopify_customer_id" });
+    const edges = result.edges || [];
+    if (edges.length === 0) {
+      hasMore = false;
+      break;
+    }
 
-  if (error) {
-    console.error("Customer upsert error:", error.message);
+    // Build records
+    const records = edges.map((edge) => {
+      const c = edge.node;
+      return {
+        workspace_id: workspaceId,
+        shopify_customer_id: extractShopifyId(c.id as string),
+        email: ((c.email as string) || `no-email-${extractShopifyId(c.id as string)}@unknown.com`).toLowerCase(),
+        first_name: (c.firstName as string) || null,
+        last_name: (c.lastName as string) || null,
+        phone: (c.phone as string) || null,
+        total_orders: parseInt(c.numberOfOrders as string) || 0,
+        ltv_cents: dollarsToCents((c.amountSpent as { amount?: string })?.amount),
+        subscription_status: mapSubscriptionStatus(c.productSubscriberStatus as string),
+        tags: (c.tags as string[]) || [],
+        updated_at: new Date().toISOString(),
+      };
+    });
+
+    // Batch upsert
+    for (let i = 0; i < records.length; i += UPSERT_BATCH) {
+      const batch = records.slice(i, i + UPSERT_BATCH);
+      const { error } = await admin
+        .from("customers")
+        .upsert(batch, { onConflict: "workspace_id,shopify_customer_id" });
+      if (error) console.error("Customer upsert error:", error.message);
+      else totalSynced += batch.length;
+    }
+
+    currentCursor = edges[edges.length - 1].cursor;
+    hasMore = result.pageInfo.hasNextPage;
   }
-
-  const lastCursor = edges[edges.length - 1].cursor;
 
   return {
-    synced: error ? 0 : records.length,
-    nextCursor: result.pageInfo.hasNextPage ? lastCursor : null,
-    hasMore: result.pageInfo.hasNextPage,
+    synced: totalSynced,
+    nextCursor: hasMore ? currentCursor : null,
+    hasMore,
   };
 }
 
-// ── Paginated order sync (one page at a time) ──
-
-export async function syncOrderPage(
+export async function syncOrderPages(
   workspaceId: string,
   cursor: string | null,
-  pageSize: number = 250
 ): Promise<SyncPageResult> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const admin = createAdminClient();
 
-  const afterClause = cursor ? `, after: "${cursor}"` : "";
-  const query = `{
-    orders(first: ${pageSize}${afterClause}, sortKey: UPDATED_AT) {
-      edges {
-        cursor
-        node {
-          id
-          name
-          email
-          totalPriceSet {
-            shopMoney { amount currencyCode }
-          }
-          displayFinancialStatus
-          displayFulfillmentStatus
-          createdAt
-          customer { id }
-          lineItems(first: 20) {
-            edges {
-              node {
-                title
-                quantity
-                originalUnitPriceSet { shopMoney { amount } }
-                sku
-              }
-            }
-          }
-        }
-      }
-      pageInfo {
-        hasNextPage
-      }
-    }
-  }`;
-
-  const data = await shopifyGraphQL(shop, accessToken, query);
-  const result = data.orders as {
-    edges: { cursor: string; node: Record<string, unknown> }[];
-    pageInfo: { hasNextPage: boolean };
-  };
-
-  const edges = result.edges || [];
-  if (edges.length === 0) {
-    return { synced: 0, nextCursor: null, hasMore: false };
-  }
-
-  // Build customer lookup for this batch
-  const customerGids = new Set<string>();
-  const customerEmails = new Set<string>();
-  for (const edge of edges) {
-    const o = edge.node;
-    const custGid = (o.customer as { id?: string })?.id;
-    if (custGid) customerGids.add(extractShopifyId(custGid));
-    const email = (o.email as string || "").toLowerCase();
-    if (email) customerEmails.add(email);
-  }
-
-  const { data: customers } = await admin
+  // Preload ALL customer lookups once (cheap — just id + shopify_customer_id + email)
+  // Cache in this closure so we don't re-fetch per page
+  const { data: allCustomers } = await admin
     .from("customers")
     .select("id, shopify_customer_id, email")
-    .eq("workspace_id", workspaceId)
-    .or(
-      [
-        ...[...customerGids].map((gid) => `shopify_customer_id.eq.${gid}`),
-        ...[...customerEmails].map((e) => `email.eq.${e}`),
-      ].join(",")
-    );
+    .eq("workspace_id", workspaceId);
 
   const customerByShopifyId = new Map<string, string>();
   const customerByEmail = new Map<string, string>();
-  for (const c of customers || []) {
+  for (const c of allCustomers || []) {
     if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
     if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
   }
 
-  const records = edges.map((edge) => {
-    const o = edge.node;
-    const shopifyOrderId = extractShopifyId(o.id as string);
-    const orderEmail = ((o.email as string) || "").toLowerCase();
-    const custGid = (o.customer as { id?: string })?.id;
-    const shopifyCustomerId = custGid ? extractShopifyId(custGid) : null;
+  let currentCursor = cursor;
+  let totalSynced = 0;
+  let hasMore = true;
 
-    let customerId: string | null = null;
-    if (shopifyCustomerId) customerId = customerByShopifyId.get(shopifyCustomerId) || null;
-    if (!customerId && orderEmail) customerId = customerByEmail.get(orderEmail) || null;
+  for (let page = 0; page < PAGES_PER_CALL && hasMore; page++) {
+    const afterClause = currentCursor ? `, after: "${currentCursor}"` : "";
+    const query = `{
+      orders(first: ${GQL_PAGE_SIZE}${afterClause}, sortKey: UPDATED_AT) {
+        edges {
+          cursor
+          node {
+            id name email
+            totalPriceSet { shopMoney { amount currencyCode } }
+            displayFinancialStatus
+            displayFulfillmentStatus
+            createdAt
+            customer { id }
+            lineItems(first: 20) {
+              edges {
+                node {
+                  title quantity sku
+                  originalUnitPriceSet { shopMoney { amount } }
+                }
+              }
+            }
+          }
+        }
+        pageInfo { hasNextPage }
+      }
+    }`;
 
-    const lineItemEdges = (o.lineItems as { edges: { node: Record<string, unknown> }[] })?.edges || [];
-    const lineItems = lineItemEdges.map((li) => ({
-      title: li.node.title,
-      quantity: li.node.quantity,
-      price_cents: dollarsToCents(
-        (li.node.originalUnitPriceSet as { shopMoney?: { amount?: string } })?.shopMoney?.amount
-      ),
-      sku: li.node.sku || null,
-    }));
-
-    const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
-
-    return {
-      workspace_id: workspaceId,
-      shopify_order_id: shopifyOrderId,
-      customer_id: customerId,
-      order_number: (o.name as string) || null,
-      email: orderEmail || null,
-      total_cents: dollarsToCents(priceSet?.shopMoney?.amount),
-      currency: priceSet?.shopMoney?.currencyCode || "USD",
-      financial_status: (o.displayFinancialStatus as string) || null,
-      fulfillment_status: (o.displayFulfillmentStatus as string) || null,
-      line_items: lineItems,
-      created_at: (o.createdAt as string) || new Date().toISOString(),
+    const data = await shopifyGraphQL(shop, accessToken, query);
+    const result = data.orders as {
+      edges: { cursor: string; node: Record<string, unknown> }[];
+      pageInfo: { hasNextPage: boolean };
     };
-  });
 
-  const { error } = await admin
-    .from("orders")
-    .upsert(records, { onConflict: "workspace_id,shopify_order_id" });
+    const edges = result.edges || [];
+    if (edges.length === 0) {
+      hasMore = false;
+      break;
+    }
 
-  if (error) {
-    console.error("Order upsert error:", error.message);
+    const records = edges.map((edge) => {
+      const o = edge.node;
+      const shopifyOrderId = extractShopifyId(o.id as string);
+      const orderEmail = ((o.email as string) || "").toLowerCase();
+      const custGid = (o.customer as { id?: string })?.id;
+      const shopifyCustomerId = custGid ? extractShopifyId(custGid) : null;
+
+      let customerId: string | null = null;
+      if (shopifyCustomerId) customerId = customerByShopifyId.get(shopifyCustomerId) || null;
+      if (!customerId && orderEmail) customerId = customerByEmail.get(orderEmail) || null;
+
+      const lineItemEdges = (o.lineItems as { edges: { node: Record<string, unknown> }[] })?.edges || [];
+      const lineItems = lineItemEdges.map((li) => ({
+        title: li.node.title,
+        quantity: li.node.quantity,
+        price_cents: dollarsToCents(
+          (li.node.originalUnitPriceSet as { shopMoney?: { amount?: string } })?.shopMoney?.amount
+        ),
+        sku: li.node.sku || null,
+      }));
+
+      const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
+
+      return {
+        workspace_id: workspaceId,
+        shopify_order_id: shopifyOrderId,
+        customer_id: customerId,
+        order_number: (o.name as string) || null,
+        email: orderEmail || null,
+        total_cents: dollarsToCents(priceSet?.shopMoney?.amount),
+        currency: priceSet?.shopMoney?.currencyCode || "USD",
+        financial_status: (o.displayFinancialStatus as string) || null,
+        fulfillment_status: (o.displayFulfillmentStatus as string) || null,
+        line_items: lineItems,
+        created_at: (o.createdAt as string) || new Date().toISOString(),
+      };
+    });
+
+    // Batch upsert
+    for (let i = 0; i < records.length; i += UPSERT_BATCH) {
+      const batch = records.slice(i, i + UPSERT_BATCH);
+      const { error } = await admin
+        .from("orders")
+        .upsert(batch, { onConflict: "workspace_id,shopify_order_id" });
+      if (error) console.error("Order upsert error:", error.message);
+      else totalSynced += batch.length;
+    }
+
+    currentCursor = edges[edges.length - 1].cursor;
+    hasMore = result.pageInfo.hasNextPage;
   }
 
-  const lastCursor = edges[edges.length - 1].cursor;
-
   return {
-    synced: error ? 0 : records.length,
-    nextCursor: result.pageInfo.hasNextPage ? lastCursor : null,
-    hasMore: result.pageInfo.hasNextPage,
+    synced: totalSynced,
+    nextCursor: hasMore ? currentCursor : null,
+    hasMore,
   };
 }
 
-// ── Finalize (order dates + retention scores) ──
+// ── Finalize ──
 
 export async function finalizeSyncOrderDates(workspaceId: string): Promise<void> {
   const admin = createAdminClient();
