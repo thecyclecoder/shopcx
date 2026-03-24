@@ -74,8 +74,11 @@ const CUSTOMERS_BULK_QUERY = `
               firstName
               lastName
               phone
-              ordersCount
-              totalSpent
+              numberOfOrders
+              amountSpent {
+                amount
+                currencyCode
+              }
               tags
               productSubscriberStatus
               createdAt
@@ -292,8 +295,8 @@ export async function syncCustomers(workspaceId: string): Promise<number> {
       first_name: c.firstName || null,
       last_name: c.lastName || null,
       phone: c.phone || null,
-      total_orders: typeof c.ordersCount === "object" ? (c.ordersCount?.count ?? 0) : (c.ordersCount ?? 0),
-      ltv_cents: dollarsToCents(c.totalSpent),
+      total_orders: parseInt(c.numberOfOrders) || 0,
+      ltv_cents: dollarsToCents(c.amountSpent?.amount),
       subscription_status: mapSubscriptionStatus(c.productSubscriberStatus),
       tags: c.tags || [],
       updated_at: new Date().toISOString(),
