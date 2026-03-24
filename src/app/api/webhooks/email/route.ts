@@ -2,7 +2,10 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export async function POST(request: Request) {
-  const body = await request.json();
+  const rawBody = await request.json();
+
+  // Resend webhooks wrap the email in { type: "email.received", data: { ... } }
+  const body = rawBody.data || rawBody;
 
   const {
     from: fromEmail,
@@ -12,6 +15,17 @@ export async function POST(request: Request) {
     text,
     headers: emailHeaders,
   } = body;
+
+  // Debug logging — remove once confirmed working
+  console.log("Inbound email webhook:", JSON.stringify({
+    hasData: !!rawBody.data,
+    type: rawBody.type,
+    from: fromEmail,
+    to: toAddresses,
+    subject,
+    hasHtml: !!html,
+    hasText: !!text,
+  }));
 
   // Extract sender email
   const senderEmail = typeof fromEmail === "string"
