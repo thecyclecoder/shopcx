@@ -240,13 +240,13 @@ export default function CustomersPage() {
         </div>
         {isSyncing ? (
           <span className="text-sm text-zinc-400">Syncing...</span>
-        ) : syncJob?.status === "failed" && (syncJob as SyncJob & { last_completed_month?: number }).last_completed_month ? (
+        ) : syncJob?.status === "failed" && ((syncJob as SyncJob & { last_completed_month?: number; current_month?: number }).last_completed_month || (syncJob as SyncJob & { current_month?: number }).current_month) ? (
           <div className="flex gap-2">
             <button
               onClick={() => handleSync(syncJob.phase === "orders" ? "orders" : "customers", true)}
               className="cursor-pointer rounded-md bg-amber-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-amber-500"
             >
-              Resume from month {(syncJob as SyncJob & { last_completed_month?: number }).last_completed_month}
+              Resume from month {(syncJob as SyncJob & { last_completed_month?: number; current_month?: number }).last_completed_month || ((syncJob as SyncJob & { current_month?: number }).current_month || 1) - 1}
             </button>
             <button
               onClick={() => handleSync(syncJob.phase === "orders" ? "orders" : "customers")}

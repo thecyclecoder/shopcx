@@ -52,7 +52,7 @@ export async function POST(
   if (body.resume) {
     const { data: lastFailed } = await admin
       .from("sync_jobs")
-      .select("last_completed_month, type")
+      .select("last_completed_month, current_month, type")
       .eq("workspace_id", workspaceId)
       .eq("type", syncType)
       .eq("status", "failed")
@@ -62,6 +62,9 @@ export async function POST(
 
     if (lastFailed?.last_completed_month) {
       startMonth = lastFailed.last_completed_month;
+    } else if (lastFailed?.current_month) {
+      // Fallback: current_month - 1 (the month it was working on when it failed)
+      startMonth = Math.max(0, lastFailed.current_month - 1);
     }
   }
 
