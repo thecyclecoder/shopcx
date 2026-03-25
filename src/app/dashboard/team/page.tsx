@@ -119,9 +119,29 @@ export default function TeamPage() {
                     <p className="text-xs text-zinc-400">{member.email}</p>
                   )}
                 </div>
-                <span className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs font-medium capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-                  {member.role.replace("_", " ")}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs font-medium capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                    {member.role.replace("_", " ")}
+                  </span>
+                  {canManage && member.role !== "owner" && (
+                    <button
+                      onClick={async () => {
+                        if (!confirm(`Remove ${member.display_name || member.email} from this workspace?`)) return;
+                        const res = await fetch(`/api/workspaces/${workspace.id}/members`, {
+                          method: "DELETE",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ user_id: member.user_id }),
+                        });
+                        if (res.ok) {
+                          setMembers(prev => prev.filter(m => m.user_id !== member.user_id));
+                        }
+                      }}
+                      className="text-xs text-red-500 hover:underline"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
               </div>
             ))}
           </div>

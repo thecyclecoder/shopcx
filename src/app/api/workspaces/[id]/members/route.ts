@@ -53,3 +53,58 @@ export async function GET(
 
   return NextResponse.json(enriched);
 }
+
+export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: workspaceId } = await params;
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const admin = createAdminClient();
+
+  // Verify caller is owner or admin
+  const { data: caller } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user.id)
+    .single();
+
+  if (!caller || !["owner", "admin"].includes(caller.role)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const body = await request.json();
+  const { user_id } = body;
+  if (!user_id) return NextResponse.json({ error: "user_id required" }, { status: 400 });
+
+  // Can't remove yourself
+  if (user_id === user.id) {
+    return NextResponse.json({ error: "Cannot remove yourself" }, { status: 400 });
+  }
+
+  // Can't remove the owner
+  const { data: target } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user_id)
+    .single();
+
+  if (!target) return NextResponse.json({ error: "Member not found" }, { status: 404 });
+  if (target.role === "owner") {
+    return NextResponse.json({ error: "Cannot remove the workspace owner" }, { status: 403 });
+  }
+
+  await admin
+    .from("workspace_members")
+    .delete()
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user_id);
+
+  return NextResponse.json({ removed: true });
+}
