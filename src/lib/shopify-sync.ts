@@ -964,7 +964,7 @@ export async function finalizeSyncOrderDates(workspaceId: string): Promise<void>
 // ── Batch sync ──
 
 const CUSTOMER_PAGES_PER_BATCH = 10; // 2,500 customers per Inngest step
-const ORDER_PAGES_PER_BATCH = 2; // 500 orders per Inngest step
+const ORDER_PAGES_PER_BATCH = 4; // 1,000 orders per Inngest step
 
 export async function syncCustomerBatch(
   workspaceId: string,

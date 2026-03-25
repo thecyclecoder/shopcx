@@ -200,9 +200,15 @@ export default function CustomersPage() {
     } else if (syncJob.status === "running" && (syncJob.phase === "customers" || syncJob.phase === "orders")) {
       const typeLabel = syncJob.phase === "customers" ? "customers" : "orders";
       const count = syncJob.phase === "customers" ? syncJob.synced_customers : syncJob.synced_orders;
-      const total = syncJob.phase === "customers" ? syncJob.total_customers : 0;
-      progressPercent = total > 0 ? Math.min(95, Math.round((count / total) * 95)) : 50;
-      progressLabel = `Syncing ${typeLabel}: ${count.toLocaleString()}${total > 0 ? ` / ${total.toLocaleString()}` : ""}`;
+      if (syncJob.phase === "customers") {
+        const total = syncJob.total_customers;
+        progressPercent = total > 0 ? Math.min(95, Math.round((count / total) * 95)) : 10;
+      } else {
+        // Orders: estimate against 150K, start at 10%, cap at 95%
+        const estimatedTotal = 150000;
+        progressPercent = Math.max(10, Math.min(95, Math.round(10 + (count / estimatedTotal) * 85)));
+      }
+      progressLabel = `Syncing ${typeLabel}: ${count.toLocaleString()}`;
     } else if (syncJob.status === "running" && syncJob.phase === "finalizing") {
       progressPercent = 95;
       progressLabel = "Calculating retention scores...";
