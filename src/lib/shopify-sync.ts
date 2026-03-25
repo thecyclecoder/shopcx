@@ -1071,19 +1071,20 @@ export async function preloadCustomerMaps(workspaceId: string): Promise<{
   const byShopifyId: Record<string, string> = {};
   const byEmail: Record<string, string> = {};
   let offset = 0;
+  const PAGE = 10000;
   while (true) {
     const { data: batch } = await admin
       .from("customers")
       .select("id, shopify_customer_id, email")
       .eq("workspace_id", workspaceId)
-      .range(offset, offset + 999);
+      .range(offset, offset + PAGE - 1);
     if (!batch || batch.length === 0) break;
     for (const c of batch) {
       if (c.shopify_customer_id) byShopifyId[c.shopify_customer_id] = c.id;
       if (c.email) byEmail[c.email.toLowerCase()] = c.id;
     }
     offset += batch.length;
-    if (batch.length < 1000) break;
+    if (batch.length < PAGE) break;
   }
   return { byShopifyId, byEmail };
 }
