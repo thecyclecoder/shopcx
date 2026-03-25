@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface TicketRow {
@@ -56,6 +56,8 @@ const PAGE_SIZE = 25;
 export default function TicketsPage() {
   const workspace = useWorkspace();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const viewId = searchParams.get("view");
 
   const [tickets, setTickets] = useState<TicketRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -67,6 +69,9 @@ export default function TicketsPage() {
   const [tagFilter, setTagFilter] = useState("");
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [offset, setOffset] = useState(0);
+  const [viewName, setViewName] = useState("");
+  const [savingView, setSavingView] = useState(false);
+  const [activeViewName, setActiveViewName] = useState<string | null>(null);
 
   const [members, setMembers] = useState<Member[]>([]);
   const [showNewTicket, setShowNewTicket] = useState(false);
@@ -74,6 +79,30 @@ export default function TicketsPage() {
   const [newTicketSubject, setNewTicketSubject] = useState("");
   const [newTicketMessage, setNewTicketMessage] = useState("");
   const [creating, setCreating] = useState(false);
+
+  // Load view filters when viewId changes
+  useEffect(() => {
+    if (!viewId) {
+      setActiveViewName(null);
+      return;
+    }
+    fetch(`/api/workspaces/${workspace.id}/ticket-views`)
+      .then(r => r.json())
+      .then((views) => {
+        if (!Array.isArray(views)) return;
+        const view = views.find((v: { id: string }) => v.id === viewId);
+        if (view) {
+          const f = view.filters as Record<string, string>;
+          setStatusFilter(f.status || "all");
+          setChannelFilter(f.channel || "all");
+          setAssigneeFilter(f.assigned_to || "");
+          setTagFilter(f.tag || "");
+          setSearch("");
+          setOffset(0);
+          setActiveViewName(view.name);
+        }
+      });
+  }, [viewId, workspace.id]);
 
   // Fetch members + tags
   useEffect(() => {
@@ -306,6 +335,54 @@ export default function TicketsPage() {
             />
           </div>
         </form>
+      </div>
+
+      {/* Active view name + Save as View */}
+      <div className="mt-3 flex items-center gap-3">
+        {activeViewName && (
+          <span className="rounded bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+            View: {activeViewName}
+          </span>
+        )}
+        {(statusFilter !== "all" || channelFilter !== "all" || assigneeFilter || tagFilter) && !viewId && (
+          <div className="flex items-center gap-1.5">
+            {savingView ? (
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                if (!viewName.trim()) return;
+                const filters: Record<string, string> = {};
+                if (statusFilter !== "all") filters.status = statusFilter;
+                if (channelFilter !== "all") filters.channel = channelFilter;
+                if (assigneeFilter) filters.assigned_to = assigneeFilter;
+                if (tagFilter) filters.tag = tagFilter;
+                const res = await fetch(`/api/workspaces/${workspace.id}/ticket-views`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ name: viewName, filters }),
+                });
+                if (res.ok) {
+                  setSavingView(false);
+                  setViewName("");
+                  window.location.reload(); // Reload to refresh sidebar
+                }
+              }} className="flex items-center gap-1.5">
+                <input
+                  value={viewName}
+                  onChange={(e) => setViewName(e.target.value)}
+                  placeholder="View name..."
+                  autoFocus
+                  className="rounded border border-zinc-300 bg-white px-2 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                />
+                <button type="submit" className="rounded bg-indigo-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-indigo-500">Save</button>
+                <button type="button" onClick={() => setSavingView(false)} className="text-xs text-zinc-400">Cancel</button>
+              </form>
+            ) : (
+              <button onClick={() => setSavingView(true)} className="text-xs text-indigo-600 hover:underline dark:text-indigo-400">
+                Save as View
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Table */}

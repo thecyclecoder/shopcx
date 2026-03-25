@@ -7,6 +7,12 @@ import { usePathname, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import type { WorkspaceWithRole } from "@/lib/types/workspace";
 
+interface TicketView {
+  id: string;
+  name: string;
+  filters: Record<string, string>;
+}
+
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Overview", icon: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1" },
   { href: "/dashboard/tickets", label: "Tickets", icon: "M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" },
@@ -25,11 +31,20 @@ export default function Sidebar({
   const pathname = usePathname();
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  const [ticketViews, setTicketViews] = useState<TicketView[]>([]);
 
   // Close sidebar on route change (mobile)
   useEffect(() => {
     setOpen(false);
   }, [pathname]);
+
+  // Load ticket views
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspace.id}/ticket-views`)
+      .then(r => r.json())
+      .then(d => { if (Array.isArray(d)) setTicketViews(d); })
+      .catch(() => {});
+  }, [workspace.id]);
 
   // Prevent body scroll when sidebar is open on mobile
   useEffect(() => {
@@ -80,25 +95,48 @@ export default function Sidebar({
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 space-y-0.5 px-3 py-3">
+      <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 py-3">
         {NAV_ITEMS.map((item) => {
           const isActive = pathname === item.href ||
             (item.href !== "/dashboard" && pathname.startsWith(item.href));
           return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${
-                isActive
-                  ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
-                  : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
-              }`}
-            >
-              <svg className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
-              </svg>
-              {item.label}
-            </Link>
+            <div key={item.href}>
+              <Link
+                href={item.href}
+                className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${
+                  isActive
+                    ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
+                    : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                }`}
+              >
+                <svg className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
+                </svg>
+                {item.label}
+              </Link>
+              {/* Ticket views submenu */}
+              {item.href === "/dashboard/tickets" && ticketViews.length > 0 && (
+                <div className="ml-6 mt-0.5 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-800">
+                  {ticketViews.map((view) => {
+                    const viewHref = `/dashboard/tickets?view=${view.id}`;
+                    const isViewActive = pathname === "/dashboard/tickets" && typeof window !== "undefined" && new URLSearchParams(window.location.search).get("view") === view.id;
+                    return (
+                      <Link
+                        key={view.id}
+                        href={viewHref}
+                        className={`block rounded px-2 py-1 text-xs transition-colors ${
+                          isViewActive
+                            ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
+                            : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+                        }`}
+                      >
+                        {view.name}
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           );
         })}
       </nav>
