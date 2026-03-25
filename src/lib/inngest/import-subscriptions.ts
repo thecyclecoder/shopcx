@@ -176,15 +176,7 @@ export const importSubscriptions = inngest.createFunction(
           if (!error) count += batch.length;
         }
 
-        // Update customer statuses once per unique customer (not per subscription)
-        for (const cid of customerIds) {
-          const { data: subs } = await admin.from("subscriptions").select("status").eq("customer_id", cid);
-          const hasActive = subs?.some(s => s.status === "active");
-          const hasPaused = subs?.some(s => s.status === "paused");
-          await admin.from("customers").update({
-            subscription_status: hasActive ? "active" : hasPaused ? "paused" : "cancelled",
-          }).eq("id", cid);
-        }
+        // Skip per-customer status update during import — done in finalize step
 
         // Update progress
         await updateJob({ synced_customers: totalImported + count });
@@ -194,7 +186,35 @@ export const importSubscriptions = inngest.createFunction(
       totalImported += imported;
     }
 
-    // Mark complete (keep files for now — can clean up manually)
+    // Finalize: bulk update customer subscription statuses
+    await step.run("finalize", async () => {
+      await updateJob({ phase: "finalizing" });
+
+      // Get all customers who have subscriptions
+      let offset = 0;
+      while (true) {
+        const { data: batch } = await admin.from("subscriptions")
+          .select("customer_id")
+          .eq("workspace_id", workspace_id)
+          .not("customer_id", "is", null)
+          .range(offset, offset + 999);
+        if (!batch || batch.length === 0) break;
+
+        const uniqueIds = [...new Set(batch.map(s => s.customer_id))];
+        for (const cid of uniqueIds) {
+          const { data: subs } = await admin.from("subscriptions").select("status").eq("customer_id", cid);
+          const hasActive = subs?.some(s => s.status === "active");
+          const hasPaused = subs?.some(s => s.status === "paused");
+          await admin.from("customers").update({
+            subscription_status: hasActive ? "active" : hasPaused ? "paused" : "cancelled",
+          }).eq("id", cid);
+        }
+
+        offset += batch.length;
+        if (batch.length < 1000) break;
+      }
+    });
+
     await step.run("complete", async () => {
       await updateJob({ status: "completed", synced_customers: totalImported, completed_at: new Date().toISOString() });
     });
