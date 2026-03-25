@@ -62,8 +62,8 @@ export async function GET(request: NextRequest) {
 
   if (search) {
     if (search.includes("@")) {
-      // Email search
-      query = query.ilike("email", `%${search}%`);
+      // Email search — exact match (indexed) for full emails, prefix match for partial
+      query = query.ilike("email", `${search.toLowerCase()}%`);
     } else {
       const words = search.trim().split(/\s+/);
       if (words.length >= 2) {
