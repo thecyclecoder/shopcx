@@ -131,13 +131,18 @@ export const importSubscriptions = inngest.createFunction(
           for (const c of custs || []) { if (c.email) custMap.set(c.email.toLowerCase(), c.id); }
         }
 
-        let count = 0;
+        // Build all records first, then batch upsert
+        const records: Record<string, unknown>[] = [];
+        const customerIds = new Set<string>();
+
         for (const [subId, rows] of subRows) {
           const firstRow = rows[0];
           const email = firstRow[emailIdx]?.toLowerCase()?.trim();
           if (!email) continue;
 
           const customerId = custMap.get(email) || null;
+          if (customerId) customerIds.add(customerId);
+
           const rawStatus = firstRow[statusIdx]?.toLowerCase()?.trim();
           const status = rawStatus === "active" ? "active" : rawStatus === "paused" ? "paused" : "cancelled";
 
@@ -151,7 +156,7 @@ export const importSubscriptions = inngest.createFunction(
             selling_plan: row[linePlanNameIdx]?.trim() || null,
           })).filter(i => i.title);
 
-          const { error } = await admin.from("subscriptions").upsert({
+          records.push({
             workspace_id, customer_id: customerId, shopify_contract_id: subId, status,
             billing_interval: firstRow[intervalTypeIdx]?.toLowerCase()?.trim() || null,
             billing_interval_count: parseInt(firstRow[intervalCountIdx]) || null,
@@ -160,17 +165,25 @@ export const importSubscriptions = inngest.createFunction(
             items,
             delivery_price_cents: Math.round(parseFloat(firstRow[shippingPriceIdx] || "0") * 100),
             updated_at: new Date().toISOString(),
-          }, { onConflict: "workspace_id,shopify_contract_id" });
-          if (!error) count++;
+          });
+        }
 
-          if (customerId) {
-            const { data: subs } = await admin.from("subscriptions").select("status").eq("customer_id", customerId);
-            const hasActive = subs?.some(s => s.status === "active");
-            const hasPaused = subs?.some(s => s.status === "paused");
-            await admin.from("customers").update({
-              subscription_status: hasActive ? "active" : hasPaused ? "paused" : "cancelled",
-            }).eq("id", customerId);
-          }
+        // Batch upsert subscriptions (250 at a time)
+        let count = 0;
+        for (let r = 0; r < records.length; r += 250) {
+          const batch = records.slice(r, r + 250);
+          const { error } = await admin.from("subscriptions").upsert(batch, { onConflict: "workspace_id,shopify_contract_id" });
+          if (!error) count += batch.length;
+        }
+
+        // Update customer statuses once per unique customer (not per subscription)
+        for (const cid of customerIds) {
+          const { data: subs } = await admin.from("subscriptions").select("status").eq("customer_id", cid);
+          const hasActive = subs?.some(s => s.status === "active");
+          const hasPaused = subs?.some(s => s.status === "paused");
+          await admin.from("customers").update({
+            subscription_status: hasActive ? "active" : hasPaused ? "paused" : "cancelled",
+          }).eq("id", cid);
         }
 
         // Update progress
