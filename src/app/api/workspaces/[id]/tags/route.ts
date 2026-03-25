@@ -74,5 +74,20 @@ export async function DELETE(
     await admin.from("tickets").update({ tags: newTags }).eq("id", ticket.id);
   }
 
+  // Delete any ticket views that use this tag as a filter
+  const { data: views } = await admin
+    .from("ticket_views")
+    .select("id, filters")
+    .eq("workspace_id", workspaceId);
+
+  for (const view of views || []) {
+    const filters = (view.filters || {}) as Record<string, string>;
+    if (filters.tag === tag) {
+      // Delete this view and any children
+      await admin.from("ticket_views").delete().eq("parent_id", view.id);
+      await admin.from("ticket_views").delete().eq("id", view.id);
+    }
+  }
+
   return NextResponse.json({ deleted: true, affected: tickets?.length || 0 });
 }

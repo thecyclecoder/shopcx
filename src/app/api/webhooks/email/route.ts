@@ -4,6 +4,7 @@ import { getResendClient } from "@/lib/email";
 import { decrypt } from "@/lib/crypto";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
+import { matchPatterns } from "@/lib/pattern-matcher";
 
 // Fetch email body from Resend's receiving API
 async function fetchEmailBody(
@@ -258,7 +259,15 @@ export async function POST(request: Request) {
         properties: { ticket_id: ticket.id, subject, from: normalizedEmail },
       });
 
-      // Evaluate rules for new ticket
+      // Smart pattern matching — auto-tag before rules evaluate
+      const matched = await matchPatterns(workspaceId, subject, messageBody);
+      if (matched?.autoTag) {
+        const { data: t } = await admin.from("tickets").select("tags").eq("id", ticket.id).single();
+        const tags = [...((t?.tags as string[]) || []), matched.autoTag];
+        await admin.from("tickets").update({ tags: [...new Set(tags)] }).eq("id", ticket.id);
+      }
+
+      // Evaluate rules for new ticket (tags are set, so rules can trigger on them)
       const { data: fullTicket } = await admin.from("tickets").select("*").eq("id", ticket.id).single();
       const { data: custData } = customerId
         ? await admin.from("customers").select("*").eq("id", customerId).single()
