@@ -385,14 +385,14 @@ export async function upsertOrderChunk(
       .from("customers")
       .select("id, shopify_customer_id, email")
       .eq("workspace_id", workspaceId)
-      .range(custOffset, custOffset + 4999);
+      .range(custOffset, custOffset + 999);
     if (!batch || batch.length === 0) break;
     for (const c of batch) {
       if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
       if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
     }
     custOffset += batch.length;
-    if (batch.length < 5000) break;
+    if (batch.length < 1000) break;
   }
 
   let synced = 0;
@@ -552,14 +552,14 @@ export async function downloadAndUpsertOrders(workspaceId: string): Promise<numb
       .from("customers")
       .select("id, shopify_customer_id, email")
       .eq("workspace_id", workspaceId)
-      .range(custOffset, custOffset + 4999);
+      .range(custOffset, custOffset + 999);
     if (!batch || batch.length === 0) break;
     for (const c of batch) {
       if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
       if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
     }
     custOffset += batch.length;
-    if (batch.length < 5000) break;
+    if (batch.length < 1000) break;
   }
 
   const records: Record<string, unknown>[] = [];
@@ -833,14 +833,14 @@ export async function syncOrderPages(
       .from("customers")
       .select("id, shopify_customer_id, email")
       .eq("workspace_id", workspaceId)
-      .range(custOffset, custOffset + 4999);
+      .range(custOffset, custOffset + 999);
     if (!batch || batch.length === 0) break;
     for (const c of batch) {
       if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
       if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
     }
     custOffset += batch.length;
-    if (batch.length < 5000) break;
+    if (batch.length < 1000) break;
   }
 
   let nextUrl: string | null = cursor ||
@@ -1062,14 +1062,14 @@ export async function syncOrderBatch(
       .from("customers")
       .select("id, shopify_customer_id, email")
       .eq("workspace_id", workspaceId)
-      .range(custOffset, custOffset + 4999);
+      .range(custOffset, custOffset + 999);
     if (!batch || batch.length === 0) break;
     for (const c of batch) {
       if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
       if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
     }
     custOffset += batch.length;
-    if (batch.length < 5000) break;
+    if (batch.length < 1000) break;
   }
 
   let currentCursor = cursor;
@@ -1286,14 +1286,14 @@ export async function syncOrderMonth(
       .from("customers")
       .select("id, shopify_customer_id, email")
       .eq("workspace_id", workspaceId)
-      .range(custOffset, custOffset + 4999);
+      .range(custOffset, custOffset + 999);
     if (!batch || batch.length === 0) break;
     for (const c of batch) {
       if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
       if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
     }
     custOffset += batch.length;
-    if (batch.length < 5000) break;
+    if (batch.length < 1000) break;
   }
 
   let cursor: string | null = null;

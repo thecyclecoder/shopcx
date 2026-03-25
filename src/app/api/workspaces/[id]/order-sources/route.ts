@@ -38,17 +38,23 @@ export async function GET(
 
   const admin = createAdminClient();
 
-  // Get distinct source_names with counts
-  const { data: sources } = await admin
-    .from("orders")
-    .select("source_name")
-    .eq("workspace_id", workspaceId);
-
-  // Count by source
+  // Get distinct source_names with counts (paginate to avoid 1000 row limit)
   const counts = new Map<string, number>();
-  for (const row of sources || []) {
-    const src = row.source_name || "(unknown)";
-    counts.set(src, (counts.get(src) || 0) + 1);
+  let offset = 0;
+  while (true) {
+    const { data: batch } = await admin
+      .from("orders")
+      .select("source_name")
+      .eq("workspace_id", workspaceId)
+      .range(offset, offset + 999);
+
+    if (!batch || batch.length === 0) break;
+    for (const row of batch) {
+      const src = row.source_name || "(unknown)";
+      counts.set(src, (counts.get(src) || 0) + 1);
+    }
+    offset += batch.length;
+    if (batch.length < 1000) break;
   }
 
   // Get current mapping + threshold
