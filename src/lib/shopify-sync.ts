@@ -78,6 +78,17 @@ async function shopifyGraphQL(
     throw new Error(`Shopify GraphQL error: ${res.status} ${text}`);
   }
 
+  // Rate limit guard: log usage and throttle if nearing limit
+  const callLimit = res.headers.get("X-Shopify-Shop-Api-Call-Limit");
+  if (callLimit) {
+    const [used, max] = callLimit.split("/").map(Number);
+    console.log(`Shopify API rate: ${used}/${max}`);
+    if (max && used > max * 0.875) {
+      // Over 35/40 — back off 500ms
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+
   const json = await res.json();
   if (json.errors?.length) {
     throw new Error(`Shopify GraphQL: ${json.errors[0].message}`);
@@ -950,9 +961,10 @@ export async function finalizeSyncOrderDates(workspaceId: string): Promise<void>
   }
 }
 
-// ── Batch sync: paginate ALL, 10 pages (2500 records) per call ──
+// ── Batch sync ──
 
-const PAGES_PER_BATCH = 20; // 5,000 records per Inngest step
+const CUSTOMER_PAGES_PER_BATCH = 10; // 2,500 customers per Inngest step
+const ORDER_PAGES_PER_BATCH = 2; // 500 orders per Inngest step
 
 export async function syncCustomerBatch(
   workspaceId: string,
@@ -965,7 +977,7 @@ export async function syncCustomerBatch(
   let totalSynced = 0;
   let hasMore = true;
 
-  for (let page = 0; page < PAGES_PER_BATCH && hasMore; page++) {
+  for (let page = 0; page < CUSTOMER_PAGES_PER_BATCH && hasMore; page++) {
     const afterClause = currentCursor ? `, after: "${currentCursor}"` : "";
     const query = `{
       customers(first: 250, sortKey: CREATED_AT, reverse: true${afterClause}) {
@@ -1049,37 +1061,54 @@ export async function syncCustomerBatch(
   return { synced: totalSynced, nextCursor: hasMore ? currentCursor : null, hasMore };
 }
 
-export async function syncOrderBatch(
-  workspaceId: string,
-  cursor: string | null,
-): Promise<{ synced: number; nextCursor: string | null; hasMore: boolean }> {
-  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+// Preload all customers for a workspace into lookup maps.
+// Called once as a memoized step, then passed to syncOrderBatch.
+export async function preloadCustomerMaps(workspaceId: string): Promise<{
+  byShopifyId: Record<string, string>;
+  byEmail: Record<string, string>;
+}> {
   const admin = createAdminClient();
-
-  // Preload customer lookup
-  const customerByShopifyId = new Map<string, string>();
-  const customerByEmail = new Map<string, string>();
-  let custOffset = 0;
+  const byShopifyId: Record<string, string> = {};
+  const byEmail: Record<string, string> = {};
+  let offset = 0;
   while (true) {
     const { data: batch } = await admin
       .from("customers")
       .select("id, shopify_customer_id, email")
       .eq("workspace_id", workspaceId)
-      .range(custOffset, custOffset + 999);
+      .range(offset, offset + 999);
     if (!batch || batch.length === 0) break;
     for (const c of batch) {
-      if (c.shopify_customer_id) customerByShopifyId.set(c.shopify_customer_id, c.id);
-      if (c.email) customerByEmail.set(c.email.toLowerCase(), c.id);
+      if (c.shopify_customer_id) byShopifyId[c.shopify_customer_id] = c.id;
+      if (c.email) byEmail[c.email.toLowerCase()] = c.id;
     }
-    custOffset += batch.length;
+    offset += batch.length;
     if (batch.length < 1000) break;
   }
+  return { byShopifyId, byEmail };
+}
+
+export async function syncOrderBatch(
+  workspaceId: string,
+  cursor: string | null,
+  customerMaps?: { byShopifyId: Record<string, string>; byEmail: Record<string, string> },
+): Promise<{ synced: number; nextCursor: string | null; hasMore: boolean }> {
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+  const admin = createAdminClient();
+
+  // Use provided maps or preload (fallback for callers that don't pass maps)
+  let maps = customerMaps;
+  if (!maps) {
+    maps = await preloadCustomerMaps(workspaceId);
+  }
+  const customerByShopifyId = maps.byShopifyId;
+  const customerByEmail = maps.byEmail;
 
   let currentCursor = cursor;
   let totalSynced = 0;
   let hasMore = true;
 
-  for (let page = 0; page < PAGES_PER_BATCH && hasMore; page++) {
+  for (let page = 0; page < ORDER_PAGES_PER_BATCH && hasMore; page++) {
     const afterClause = currentCursor ? `, after: "${currentCursor}"` : "";
     const query = `{
       orders(first: 250, sortKey: CREATED_AT, reverse: true${afterClause}) {
@@ -1121,8 +1150,8 @@ export async function syncOrderBatch(
       const shopifyCustomerId = custGid ? extractShopifyId(custGid) : null;
 
       let customerId: string | null = null;
-      if (shopifyCustomerId) customerId = customerByShopifyId.get(shopifyCustomerId) || null;
-      if (!customerId && orderEmail) customerId = customerByEmail.get(orderEmail) || null;
+      if (shopifyCustomerId) customerId = customerByShopifyId[shopifyCustomerId] || null;
+      if (!customerId && orderEmail) customerId = customerByEmail[orderEmail] || null;
 
       const lineItemEdges = (o.lineItems as { edges: { node: Record<string, unknown> }[] })?.edges || [];
       const lineItems = lineItemEdges.map((li) => ({

@@ -4,6 +4,7 @@ import {
   getShopifyCounts,
   syncCustomerBatch,
   syncOrderBatch,
+  preloadCustomerMaps,
   finalizeSyncOrderDates,
 } from "@/lib/shopify-sync";
 import { updateRetentionScores } from "@/lib/retention-score";
@@ -113,6 +114,11 @@ export const syncOrders = inngest.createFunction(
       await updateJob({ total_orders: counts.orders });
     });
 
+    // Preload customer maps once — memoized so it runs exactly once even on restart
+    const customerMaps = await step.run("preload-customers", async () => {
+      return preloadCustomerMaps(workspace_id);
+    });
+
     let ordersSynced = resumeInfo.previousSynced;
     let cursor: string | null = resumeInfo.cursor;
     let batchNum = resumeInfo.startBatch;
@@ -124,7 +130,7 @@ export const syncOrders = inngest.createFunction(
 
       const result: { synced: number; nextCursor: string | null; hasMore: boolean } =
         await step.run(`batch-${bn}`, async () => {
-          const r = await syncOrderBatch(workspace_id, cursorForStep);
+          const r = await syncOrderBatch(workspace_id, cursorForStep, customerMaps);
           await updateJob({ synced_orders: ordersSynced + r.synced, last_cursor: r.nextCursor, current_month: bn + 1 });
           return r;
         });
