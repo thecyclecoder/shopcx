@@ -260,10 +260,10 @@ export default function TicketDetailPage() {
   }
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden md:flex-row">
+    <div className="flex h-full flex-1 flex-col overflow-hidden md:flex-row">
       {/* Left column - conversation */}
-      <div className="flex flex-1 flex-col overflow-hidden">
-        <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="min-h-0 flex-1 overflow-y-auto p-6">
           {/* Back button */}
           <button
             onClick={() => router.push("/dashboard/tickets")}
@@ -404,44 +404,48 @@ export default function TicketDetailPage() {
           )}
         </div>
 
-        {/* Reply composer — fixed to bottom */}
-        <div className="border-t border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <div className="mb-2 flex gap-1">
-            <button
-              onClick={() => setReplyMode("external")}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                replyMode === "external"
-                  ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400"
-                  : "text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-              }`}
-            >
-              Reply
-            </button>
-            <button
-              onClick={() => setReplyMode("internal")}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                replyMode === "internal"
-                  ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-                  : "text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-              }`}
-            >
-              Note
-            </button>
-          </div>
-          <form onSubmit={handleSend} className="flex gap-2">
-            <textarea
-              rows={2}
-              value={replyBody}
-              onChange={(e) => setReplyBody(e.target.value)}
-              placeholder={replyMode === "external" ? "Type your reply..." : "Add an internal note..."}
-              className="flex-1 resize-none rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-            />
+        {/* Reply composer — pinned to bottom */}
+        <div className="shrink-0 border-t border-zinc-200 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900">
+          <form onSubmit={handleSend} className="flex items-end gap-2">
+            <div className="flex min-w-0 flex-1 flex-col gap-1">
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  onClick={() => setReplyMode("external")}
+                  className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                    replyMode === "external"
+                      ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400"
+                      : "text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  }`}
+                >
+                  Reply
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReplyMode("internal")}
+                  className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                    replyMode === "internal"
+                      ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                      : "text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  }`}
+                >
+                  Note
+                </button>
+              </div>
+              <textarea
+                rows={1}
+                value={replyBody}
+                onChange={(e) => setReplyBody(e.target.value)}
+                placeholder={replyMode === "external" ? "Type your reply..." : "Internal note..."}
+                className="w-full resize-none rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              />
+            </div>
             <button
               type="submit"
               disabled={sending || !replyBody.trim()}
-              className="self-end rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+              className="shrink-0 rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
             >
-              {sending ? "Sending..." : sandboxMode && !emailLive && replyMode === "external" ? "Send (Sandbox)" : "Send"}
+              {sending ? "..." : sandboxMode && !emailLive && replyMode === "external" ? "Send (Sandbox)" : "Send"}
             </button>
           </form>
         </div>
