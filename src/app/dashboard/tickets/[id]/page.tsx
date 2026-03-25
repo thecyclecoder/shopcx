@@ -168,6 +168,8 @@ export default function TicketDetailPage() {
   const [customerEvents, setCustomerEvents] = useState<{ id: string; event_type: string; source: string; summary: string; created_at: string }[]>([]);
   const [closeWithReply, setCloseWithReply] = useState(true);
   const [tagInput, setTagInput] = useState("");
+  const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
+  const [showTagDropdown, setShowTagDropdown] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -203,9 +205,11 @@ export default function TicketDetailPage() {
   useEffect(() => {
     fetch(`/api/workspaces/${workspace.id}/members`)
       .then((res) => res.json())
-      .then((data) => {
-        if (Array.isArray(data)) setMembers(data);
-      })
+      .then((data) => { if (Array.isArray(data)) setMembers(data); })
+      .catch(() => {});
+    fetch(`/api/workspaces/${workspace.id}/tags`)
+      .then((res) => res.json())
+      .then((data) => { if (Array.isArray(data)) setTagSuggestions(data); })
       .catch(() => {});
   }, [workspace.id]);
 
@@ -354,21 +358,70 @@ export default function TicketDetailPage() {
                 >x</button>
               </span>
             ))}
-            <form onSubmit={async (e) => {
-              e.preventDefault();
-              const t = tagInput.trim().toLowerCase();
-              if (!t) return;
-              const tags = [...(ticket.tags || []), t];
-              await handlePatch({ tags: [...new Set(tags)] });
-              setTagInput("");
-            }} className="inline-flex">
-              <input
-                value={tagInput}
-                onChange={(e) => setTagInput(e.target.value)}
-                placeholder="+ tag"
-                className="w-16 border-none bg-transparent px-1 text-[10px] text-zinc-500 placeholder-zinc-400 outline-none focus:w-24 focus:ring-0"
-              />
-            </form>
+            <div className="relative inline-flex">
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                const t = tagInput.trim().toLowerCase();
+                if (!t) return;
+                const tags = [...(ticket.tags || []), t];
+                await handlePatch({ tags: [...new Set(tags)] });
+                setTagInput("");
+                setShowTagDropdown(false);
+              }}>
+                <input
+                  value={tagInput}
+                  onChange={(e) => { setTagInput(e.target.value); setShowTagDropdown(true); }}
+                  onFocus={() => setShowTagDropdown(true)}
+                  onBlur={() => setTimeout(() => setShowTagDropdown(false), 150)}
+                  placeholder="+ tag"
+                  className="w-20 border-none bg-transparent px-1 text-[10px] text-zinc-500 placeholder-zinc-400 outline-none focus:w-28 focus:ring-0"
+                />
+              </form>
+              {showTagDropdown && tagInput.trim() && (() => {
+                const existing = ticket.tags || [];
+                const filtered = tagSuggestions.filter(t =>
+                  t.toLowerCase().includes(tagInput.toLowerCase()) && !existing.includes(t)
+                );
+                const exactMatch = tagSuggestions.some(t => t.toLowerCase() === tagInput.trim().toLowerCase());
+                if (filtered.length === 0 && exactMatch) return null;
+                return (
+                  <div className="absolute left-0 top-full z-10 mt-1 max-h-32 w-40 overflow-y-auto rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+                    {filtered.map(tag => (
+                      <button
+                        key={tag}
+                        type="button"
+                        onMouseDown={async (e) => {
+                          e.preventDefault();
+                          const tags = [...existing, tag];
+                          await handlePatch({ tags: [...new Set(tags)] });
+                          setTagInput("");
+                          setShowTagDropdown(false);
+                        }}
+                        className="block w-full px-2 py-1 text-left text-[10px] text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 dark:text-zinc-300 dark:hover:bg-indigo-900/30"
+                      >
+                        {tag}
+                      </button>
+                    ))}
+                    {!exactMatch && tagInput.trim() && (
+                      <button
+                        type="button"
+                        onMouseDown={async (e) => {
+                          e.preventDefault();
+                          const t = tagInput.trim().toLowerCase();
+                          const tags = [...existing, t];
+                          await handlePatch({ tags: [...new Set(tags)] });
+                          setTagInput("");
+                          setShowTagDropdown(false);
+                        }}
+                        className="block w-full border-t border-zinc-100 px-2 py-1 text-left text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 dark:border-zinc-700 dark:text-indigo-400"
+                      >
+                        Create &ldquo;{tagInput.trim().toLowerCase()}&rdquo;
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
           </div>
 
           {/* Tabs */}
