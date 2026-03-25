@@ -99,7 +99,7 @@ export default function TicketsPage() {
           setChannelFilter(f.channel || "all");
           setAssigneeFilter(f.assigned_to || "");
           setTagFilter(f.tag || "");
-          setSearch("");
+          setSearch(f.search || "");
           setOffset(0);
           setActiveViewName(view.name);
         }
@@ -346,7 +346,7 @@ export default function TicketsPage() {
             View: {activeViewName}
           </span>
         )}
-        {(statusFilter !== "all" || channelFilter !== "all" || assigneeFilter || tagFilter) && !viewId && (
+        {(statusFilter !== "all" || channelFilter !== "all" || assigneeFilter || tagFilter || search) && !viewId && (
           <div className="flex items-center gap-1.5">
             {savingView ? (
               <form onSubmit={async (e) => {
@@ -357,6 +357,7 @@ export default function TicketsPage() {
                 if (channelFilter !== "all") filters.channel = channelFilter;
                 if (assigneeFilter) filters.assigned_to = assigneeFilter;
                 if (tagFilter) filters.tag = tagFilter;
+                if (search) filters.search = search;
                 const res = await fetch(`/api/workspaces/${workspace.id}/ticket-views`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
