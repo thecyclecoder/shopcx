@@ -24,7 +24,7 @@ export default function ImportPage() {
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState("");
 
-  const { activeJobId, job, startJob } = useImportStore();
+  const { activeJobId, job, startJob, dismiss } = useImportStore();
 
   if (!["owner", "admin"].includes(workspace.role)) {
     return (
@@ -197,8 +197,9 @@ export default function ImportPage() {
 
             {/* Success message */}
             {isDone && job && (
-              <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-400">
-                Import complete! {job.processed_records.toLocaleString()} subscriptions imported.
+              <div className="flex items-center justify-between rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-400">
+                <span>Import complete! {job.processed_records.toLocaleString()} subscriptions imported.</span>
+                <button onClick={dismiss} className="ml-2 text-xs text-emerald-500 hover:text-emerald-700 dark:hover:text-emerald-300">Dismiss</button>
               </div>
             )}
 

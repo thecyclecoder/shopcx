@@ -61,8 +61,11 @@ export async function GET(request: NextRequest) {
     .eq("workspace_id", workspaceId);
 
   if (search) {
-    if (search.includes("@")) {
-      // Email search — exact match (indexed) for full emails, prefix match for partial
+    if (search.includes("@") && search.includes(".")) {
+      // Full email — use exact match (hits index directly)
+      query = query.eq("email", search.toLowerCase());
+    } else if (search.includes("@")) {
+      // Partial email with @ — prefix match
       query = query.ilike("email", `${search.toLowerCase()}%`);
     } else {
       const words = search.trim().split(/\s+/);
