@@ -206,6 +206,18 @@ export default function CustomerDetailPage() {
       setLinkedIdentities(data.linked_identities || []);
       setLoading(false);
 
+      // Auto-enrich if missing personalization
+      if (data.customer && !data.customer.first_name) {
+        fetch(`/api/customers/${id}/enrich`, { method: "POST" })
+          .then((r) => r.json())
+          .then((enriched) => {
+            if (enriched.enriched && enriched.customer) {
+              setCustomer(enriched.customer);
+            }
+          })
+          .catch(() => {});
+      }
+
       // Load link suggestions + payment methods
       fetch(`/api/customers/${id}/suggestions`)
         .then((r) => r.json())

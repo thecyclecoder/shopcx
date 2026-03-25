@@ -182,6 +182,18 @@ export default function TicketDetailPage() {
       setSandboxMode(data.sandbox_mode ?? false);
       setEmailLive(data.email_live ?? true);
       setLoading(false);
+
+      // Auto-enrich customer if missing personalization
+      if (data.customer && !data.customer.first_name) {
+        fetch(`/api/customers/${data.customer.id}/enrich`, { method: "POST" })
+          .then((r) => r.json())
+          .then((enriched) => {
+            if (enriched.enriched && enriched.customer) {
+              setCustomer((prev) => prev ? { ...prev, ...enriched.customer } : prev);
+            }
+          })
+          .catch(() => {});
+      }
     }
     load();
   }, [id]);
