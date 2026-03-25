@@ -20,6 +20,8 @@ function parseCSVLine(line: string): string[] {
   return result;
 }
 
+const CHUNK_SIZE = 500;
+
 export const importSubscriptions = inngest.createFunction(
   {
     id: "import-subscriptions",
@@ -40,69 +42,49 @@ export const importSubscriptions = inngest.createFunction(
       await admin.from("sync_jobs").update(updates).eq("id", job_id);
     }
 
-    // Step 1: Download and parse CSV
-    const parsed: { totalSubs: number; subChunks: string[][] } = await step.run("parse-csv", async () => {
-      await updateJob({ status: "running", phase: "customers" }); // reuse phase for "processing"
+    // Step 1: Count total subscriptions
+    const totalSubs: number = await step.run("count-subs", async () => {
+      await updateJob({ status: "running", phase: "customers" });
 
-      const { data: fileData, error } = await admin.storage.from("imports").download(file_path);
-      if (error || !fileData) throw new Error("Failed to download CSV");
+      const { data: fileData } = await admin.storage.from("imports").download(file_path);
+      if (!fileData) throw new Error("Failed to download CSV");
 
       const csvText = await fileData.text();
       const lines = csvText.split("\n");
       const headers = parseCSVLine(lines[0]);
+      const idIdx = headers.findIndex((h) => h.trim().toLowerCase() === "id");
 
-      const col = (name: string) => headers.findIndex((h) => h.trim().toLowerCase() === name.toLowerCase());
-      const idIdx = col("ID");
-
-      // Group rows by subscription ID
-      const subsMap = new Map<string, string[]>();
+      const ids = new Set<string>();
       for (let i = 1; i < lines.length; i++) {
         if (!lines[i].trim()) continue;
         const row = parseCSVLine(lines[i]);
-        const subId = row[idIdx];
-        if (!subId) continue;
-        if (!subsMap.has(subId)) subsMap.set(subId, []);
-        subsMap.get(subId)!.push(lines[i]);
+        if (row[idIdx]) ids.add(row[idIdx]);
       }
 
-      // Split into chunks of 500 subscriptions
-      const allSubIds = [...subsMap.keys()];
-      const chunks: string[][] = [];
-      for (let i = 0; i < allSubIds.length; i += 500) {
-        chunks.push(allSubIds.slice(i, i + 500));
-      }
-
-      await updateJob({ total_customers: subsMap.size }); // reuse total_customers for total subs
-
-      // Store the full CSV lines per sub in a temp format
-      // We'll re-download the CSV in each chunk step
-      return { totalSubs: subsMap.size, subChunks: chunks };
+      await updateJob({ total_customers: ids.size });
+      return ids.size;
     });
 
-    // Step 2: Preload customer lookup
-    const customerMap: Record<string, string> = await step.run("load-customers", async () => {
-      const map: Record<string, string> = {};
-      let offset = 0;
-      while (true) {
-        const { data: batch } = await admin.from("customers")
-          .select("id, email").eq("workspace_id", workspace_id).range(offset, offset + 999);
-        if (!batch || batch.length === 0) break;
-        for (const c of batch) { if (c.email) map[c.email.toLowerCase()] = c.id; }
-        offset += batch.length;
-        if (batch.length < 1000) break;
-      }
-      return map;
-    });
-
-    // Step 3: Process chunks (re-download CSV in each chunk to avoid step data limits)
+    // Step 2+: Process in chunks — each chunk loads its own customer lookups
+    const totalChunks = Math.ceil(totalSubs / CHUNK_SIZE);
     let totalImported = 0;
 
-    for (let chunkIdx = 0; chunkIdx < parsed.subChunks.length; chunkIdx++) {
-      const subIds = parsed.subChunks[chunkIdx];
-      const ci = chunkIdx;
+    for (let ci = 0; ci < totalChunks; ci++) {
+      const chunkIdx = ci;
 
-      const imported: number = await step.run(`chunk-${ci}`, async () => {
-        // Re-download CSV for this chunk
+      const imported: number = await step.run(`chunk-${chunkIdx}`, async () => {
+        // Load customer emails for lookup (within chunk step)
+        const custMap = new Map<string, string>();
+        let cOffset = 0;
+        while (true) {
+          const { data: batch } = await admin.from("customers")
+            .select("id, email").eq("workspace_id", workspace_id).range(cOffset, cOffset + 999);
+          if (!batch || batch.length === 0) break;
+          for (const c of batch) { if (c.email) custMap.set(c.email.toLowerCase(), c.id); }
+          cOffset += batch.length;
+          if (batch.length < 1000) break;
+        }
+
         const { data: fileData } = await admin.storage.from("imports").download(file_path);
         if (!fileData) return 0;
 
@@ -126,25 +108,29 @@ export const importSubscriptions = inngest.createFunction(
         const linePlanNameIdx = col("Line selling plan name");
         const shippingPriceIdx = col("Shipping Price");
 
-        // Collect rows for this chunk's subscription IDs
-        const subIdSet = new Set(subIds);
-        const subsRows = new Map<string, string[][]>();
+        // Group all rows by subscription ID
+        const subsMap = new Map<string, string[][]>();
         for (let i = 1; i < lines.length; i++) {
           if (!lines[i].trim()) continue;
           const row = parseCSVLine(lines[i]);
           const subId = row[idIdx];
-          if (!subIdSet.has(subId)) continue;
-          if (!subsRows.has(subId)) subsRows.set(subId, []);
-          subsRows.get(subId)!.push(row);
+          if (!subId) continue;
+          if (!subsMap.has(subId)) subsMap.set(subId, []);
+          subsMap.get(subId)!.push(row);
         }
 
+        // Get this chunk's subscription IDs
+        const allSubIds = [...subsMap.keys()];
+        const chunkSubIds = allSubIds.slice(chunkIdx * CHUNK_SIZE, (chunkIdx + 1) * CHUNK_SIZE);
+
         let count = 0;
-        for (const [subId, rows] of subsRows) {
+        for (const subId of chunkSubIds) {
+          const rows = subsMap.get(subId)!;
           const firstRow = rows[0];
           const email = firstRow[emailIdx]?.toLowerCase()?.trim();
           if (!email) continue;
 
-          const customerId = customerMap[email] || null;
+          const customerId = custMap.get(email) || null;
           const rawStatus = firstRow[statusIdx]?.toLowerCase()?.trim();
           const status = rawStatus === "active" ? "active" : rawStatus === "paused" ? "paused" : "cancelled";
 
@@ -173,21 +159,16 @@ export const importSubscriptions = inngest.createFunction(
           }, { onConflict: "workspace_id,shopify_contract_id" });
 
           if (!error) count++;
-        }
 
-        // Update customer statuses for this chunk
-        const uniqueEmails = [...new Set(subsRows.values().next().value?.[0] ?
-          [...subsRows.values()].map(rows => rows[0][emailIdx]?.toLowerCase()?.trim()).filter(Boolean) : [])];
-
-        for (const email of uniqueEmails) {
-          const cid = customerMap[email];
-          if (!cid) continue;
-          const { data: allSubs } = await admin.from("subscriptions").select("status").eq("customer_id", cid);
-          const hasActive = allSubs?.some((s) => s.status === "active");
-          const hasPaused = allSubs?.some((s) => s.status === "paused");
-          await admin.from("customers").update({
-            subscription_status: hasActive ? "active" : hasPaused ? "paused" : "cancelled",
-          }).eq("id", cid);
+          // Update customer subscription status
+          if (customerId) {
+            const { data: allSubs } = await admin.from("subscriptions").select("status").eq("customer_id", customerId);
+            const hasActive = allSubs?.some((s) => s.status === "active");
+            const hasPaused = allSubs?.some((s) => s.status === "paused");
+            await admin.from("customers").update({
+              subscription_status: hasActive ? "active" : hasPaused ? "paused" : "cancelled",
+            }).eq("id", customerId);
+          }
         }
 
         await updateJob({ synced_customers: totalImported + count });
@@ -197,7 +178,7 @@ export const importSubscriptions = inngest.createFunction(
       totalImported += imported;
     }
 
-    // Step 4: Cleanup
+    // Cleanup
     await step.run("cleanup", async () => {
       await admin.storage.from("imports").remove([file_path]);
       await updateJob({
