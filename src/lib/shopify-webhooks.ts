@@ -186,6 +186,42 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
     record.sms_marketing_status = enrichment.smsMarketingState.toLowerCase();
   }
 
+  // Merge logic: if an email-only customer exists (created from a ticket/inbound email),
+  // absorb it into this Shopify customer instead of creating a duplicate.
+  if (email) {
+    const { data: emailOnly } = await admin
+      .from("customers")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("email", email)
+      .is("shopify_customer_id", null)
+      .single();
+
+    if (emailOnly) {
+      // Check if a customer with this shopify_customer_id already exists
+      const { data: existing } = await admin
+        .from("customers")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_customer_id", shopifyCustomerId)
+        .single();
+
+      if (existing) {
+        // Both exist — reassign tickets/orders from email-only to Shopify customer, then delete email-only
+        await admin.from("tickets").update({ customer_id: existing.id }).eq("customer_id", emailOnly.id);
+        await admin.from("orders").update({ customer_id: existing.id }).eq("customer_id", emailOnly.id);
+        await admin.from("subscriptions").update({ customer_id: existing.id }).eq("customer_id", emailOnly.id);
+        await admin.from("customers").delete().eq("id", emailOnly.id);
+      } else {
+        // No Shopify customer yet — just stamp the shopify_customer_id onto the email-only record
+        // so the upsert below matches on the conflict key and updates it in place
+        await admin.from("customers")
+          .update({ shopify_customer_id: shopifyCustomerId })
+          .eq("id", emailOnly.id);
+      }
+    }
+  }
+
   const { data: customer } = await admin
     .from("customers")
     .upsert(record, { onConflict: "workspace_id,shopify_customer_id" })

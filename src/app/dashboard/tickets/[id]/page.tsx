@@ -147,6 +147,8 @@ export default function TicketDetailPage() {
   const [replyMode, setReplyMode] = useState<"external" | "internal">("external");
   const [sending, setSending] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"messages" | "history">("messages");
+  const [customerEvents, setCustomerEvents] = useState<{ id: string; event_type: string; source: string; summary: string; created_at: string }[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -179,6 +181,16 @@ export default function TicketDetailPage() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Fetch customer events when history tab is selected
+  useEffect(() => {
+    if (activeTab !== "history" || !customer?.id) return;
+    if (customerEvents.length > 0) return; // already loaded
+    fetch(`/api/customers/${customer.id}/events`)
+      .then((res) => res.json())
+      .then((data) => { if (Array.isArray(data)) setCustomerEvents(data); })
+      .catch(() => {});
+  }, [activeTab, customer?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handlePatch = async (updates: Record<string, unknown>) => {
     const res = await fetch(`/api/tickets/${id}`, {
@@ -287,8 +299,32 @@ export default function TicketDetailPage() {
             <ChannelBadge channel={ticket.channel} />
           </div>
 
-          {/* Messages */}
-          <div className="mt-6 space-y-4">
+          {/* Tabs */}
+          <div className="mt-4 flex gap-4 border-b border-zinc-200 dark:border-zinc-800">
+            <button
+              onClick={() => setActiveTab("messages")}
+              className={`pb-2 text-sm font-medium transition-colors ${
+                activeTab === "messages"
+                  ? "border-b-2 border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400"
+                  : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+              }`}
+            >
+              Messages
+            </button>
+            <button
+              onClick={() => setActiveTab("history")}
+              className={`pb-2 text-sm font-medium transition-colors ${
+                activeTab === "history"
+                  ? "border-b-2 border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400"
+                  : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+              }`}
+            >
+              History
+            </button>
+          </div>
+
+          {/* Messages tab */}
+          {activeTab === "messages" && <div className="mt-4 space-y-4">
             {messages.map((m) => {
               const isInbound = m.direction === "inbound";
               const isInternal = m.visibility === "internal";
@@ -343,10 +379,32 @@ export default function TicketDetailPage() {
               );
             })}
             <div ref={messagesEndRef} />
-          </div>
+          </div>}
+
+          {/* History tab */}
+          {activeTab === "history" && (
+            <div className="mt-4 space-y-2">
+              {customerEvents.length === 0 ? (
+                <p className="py-8 text-center text-sm text-zinc-400">No history events yet.</p>
+              ) : (
+                customerEvents.map((ev) => (
+                  <div key={ev.id} className="flex items-start gap-3 rounded-lg border border-zinc-200 bg-white px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-900">
+                    <div className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-zinc-300 dark:bg-zinc-600" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm text-zinc-700 dark:text-zinc-300">{ev.summary}</p>
+                      <div className="mt-0.5 flex items-center gap-2 text-xs text-zinc-400">
+                        <span className="capitalize">{ev.source}</span>
+                        <span>{formatDateTime(ev.created_at)}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
         </div>
 
-        {/* Reply composer */}
+        {/* Reply composer — fixed to bottom */}
         <div className="border-t border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="mb-2 flex gap-1">
             <button
@@ -459,11 +517,13 @@ export default function TicketDetailPage() {
           <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
             <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-500">Customer</h3>
             <div className="mt-3 space-y-2">
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              <div>
+                <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
                   {[customer.first_name, customer.last_name].filter(Boolean).join(" ") || customer.email}
                 </p>
-                <RetentionBadge score={customer.retention_score} />
+                <div className="mt-1">
+                  <RetentionBadge score={customer.retention_score} />
+                </div>
               </div>
               <p className="text-xs text-zinc-500">{customer.email}</p>
               {customer.phone && <p className="text-xs text-zinc-500">{customer.phone}</p>}
@@ -504,20 +564,30 @@ export default function TicketDetailPage() {
                               <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                             </svg>
                             <span className="font-medium text-zinc-700 dark:text-zinc-300">#{o.order_number || "--"}</span>
-                            {o.order_type === "recurring" && <span className="rounded bg-violet-100 px-1 py-0.5 text-[9px] font-medium text-violet-600 dark:bg-violet-900/30 dark:text-violet-400">Recurring</span>}
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-zinc-500">{formatCents(o.total_cents)}</span>
-                            <span className="text-zinc-400">{formatDate(o.created_at)}</span>
-                          </div>
+                          <span className="text-zinc-500">{formatCents(o.total_cents)}</span>
                         </button>
                         {expandedOrderId === o.id && (
                           <div className="mt-1 rounded border border-zinc-200 bg-white p-2 text-xs dark:border-zinc-700 dark:bg-zinc-900">
-                            <div className="flex gap-2 text-zinc-400">
-                              {o.financial_status && <span className="capitalize">{o.financial_status}</span>}
-                              {o.fulfillment_status && <span className="capitalize">{o.fulfillment_status}</span>}
-                              {o.source_name && <span>{o.source_name}</span>}
+                            <div className="flex flex-wrap gap-1">
+                              {o.order_type && (
+                                <span className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                                  o.order_type === "recurring" ? "bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
+                                  : o.order_type === "replacement" ? "bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400"
+                                  : o.order_type === "checkout" ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
+                                  : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                                }`}>
+                                  {o.order_type === "recurring" ? "Recurring" : o.order_type === "replacement" ? "Replacement" : o.order_type === "checkout" ? "Checkout" : o.order_type}
+                                </span>
+                              )}
+                              {o.financial_status && (
+                                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium capitalize text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.financial_status}</span>
+                              )}
+                              {o.fulfillment_status && (
+                                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium capitalize text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.fulfillment_status}</span>
+                              )}
                             </div>
+                            <p className="mt-1 text-[10px] text-zinc-400">{formatDate(o.created_at)}</p>
                             {/* Fulfillments */}
                             {o.fulfillments?.length > 0 && (
                               <div className="mt-1.5 space-y-1">
