@@ -3,7 +3,6 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 
-// POST: upload triggers Inngest, or process directly for small files
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -30,19 +29,19 @@ export async function POST(
   const { file_path } = body;
   if (!file_path) return NextResponse.json({ error: "file_path required" }, { status: 400 });
 
-  // Create job to track progress
-  const { data: job } = await admin.from("sync_jobs").insert({
+  // Create import job
+  const { data: job } = await admin.from("import_jobs").insert({
     workspace_id: workspaceId,
-    type: "full",
+    type: "subscriptions",
     status: "pending",
-    phase: "customers",
+    file_path,
   }).select("id").single();
 
-  if (!job) return NextResponse.json({ error: "Failed to create job" }, { status: 500 });
+  if (!job) return NextResponse.json({ error: "Failed to create import job" }, { status: 500 });
 
   // Fire Inngest event
   await inngest.send({
-    name: "import/subscriptions",
+    name: "import/file.upload",
     data: { workspace_id: workspaceId, job_id: job.id, file_path },
   });
 

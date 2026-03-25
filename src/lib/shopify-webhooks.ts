@@ -261,6 +261,7 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
     {
       workspace_id: workspaceId,
       shopify_order_id: shopifyOrderId,
+      shopify_customer_id: shopifyCustomerId,
       customer_id: customerId,
       order_number: (payload.name as string) || String(payload.order_number) || null,
       email: orderEmail || null,

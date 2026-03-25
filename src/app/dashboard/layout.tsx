@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getActiveWorkspaceId, getUserWorkspaces } from "@/lib/workspace";
 import { WorkspaceProvider } from "@/lib/workspace-context";
 import Sidebar from "./sidebar";
+import ImportProgressBar from "@/components/import-progress-bar";
 
 export default async function DashboardLayout({
   children,
@@ -30,6 +31,7 @@ export default async function DashboardLayout({
           user={{ email: user.email!, name: user.user_metadata?.full_name || user.user_metadata?.name }}
         />
         <main className="flex-1 overflow-y-auto scrollbar-hidden pt-[calc(4rem+env(safe-area-inset-top))] md:pt-0">
+          <ImportProgressBar />
           {children}
         </main>
       </div>

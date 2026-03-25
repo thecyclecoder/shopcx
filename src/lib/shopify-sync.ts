@@ -415,6 +415,7 @@ export async function upsertOrderChunk(
     records.push({
       workspace_id: workspaceId,
       shopify_order_id: shopifyOrderId,
+      shopify_customer_id: shopifyCustomerId,
       customer_id: customerId,
       order_number: (o.name as string) || null,
       email: orderEmail || null,
@@ -579,6 +580,7 @@ export async function downloadAndUpsertOrders(workspaceId: string): Promise<numb
     records.push({
       workspace_id: workspaceId,
       shopify_order_id: shopifyOrderId,
+      shopify_customer_id: shopifyCustomerId,
       customer_id: customerId,
       order_number: (o.name as string) || null,
       email: orderEmail || null,
@@ -891,6 +893,7 @@ export async function syncOrderPages(
       return {
         workspace_id: workspaceId,
         shopify_order_id: shopifyOrderId,
+        shopify_customer_id: shopifyCustomerId,
         customer_id: customerId,
         order_number: (o.name as string) || String(o.order_number) || null,
         email: orderEmail || null,
@@ -1136,6 +1139,7 @@ export async function syncOrderBatch(
       return {
         workspace_id: workspaceId,
         shopify_order_id: shopifyOrderId,
+        shopify_customer_id: shopifyCustomerId,
         customer_id: customerId,
         order_number: (o.name as string) || null,
         email: orderEmail || null,
@@ -1359,6 +1363,7 @@ export async function syncOrderMonth(
       return {
         workspace_id: workspaceId,
         shopify_order_id: shopifyOrderId,
+        shopify_customer_id: shopifyCustomerId,
         customer_id: customerId,
         order_number: (o.name as string) || null,
         email: orderEmail || null,
