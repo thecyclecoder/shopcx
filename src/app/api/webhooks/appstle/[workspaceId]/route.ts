@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { Webhook } from "svix";
 import { calculateRetentionScore } from "@/lib/retention-score";
+import { logCustomerEvent } from "@/lib/customer-events";
 
 function mapStatus(status: string): "active" | "paused" | "cancelled" | "expired" | "failed" {
   switch (status?.toUpperCase()) {
@@ -187,6 +188,33 @@ async function handleSubscriptionEvent(
   if (full) {
     await admin.from("customers").update({ retention_score: calculateRetentionScore(full) }).eq("id", dbCustomer.id);
   }
+
+  // Log event
+  const summaryMap: Record<string, string> = {
+    "subscription.created": `Subscription created — ${status}`,
+    "subscription.activated": `Subscription activated`,
+    "subscription.paused": `Subscription paused`,
+    "subscription.cancelled": `Subscription cancelled`,
+    "subscription.updated": `Subscription updated — ${status}`,
+    "subscription.billing-success": `Billing succeeded`,
+    "subscription.billing-interval-changed": `Billing interval changed to ${billingPolicy?.interval} / ${billingPolicy?.intervalCount}`,
+    "subscription.next-order-date-changed": `Next order date changed`,
+    "subscription.upcoming-order-notification": `Upcoming order notification`,
+  };
+
+  await logCustomerEvent({
+    workspaceId,
+    customerId: dbCustomer.id,
+    eventType,
+    source: "appstle",
+    summary: summaryMap[eventType] || eventType,
+    properties: {
+      shopify_contract_id: contractId,
+      status,
+      next_billing_date: data.nextBillingDate,
+      items: items.map(i => i.title).filter(Boolean),
+    },
+  });
 }
 
 async function handleBillingEvent(
@@ -225,5 +253,24 @@ async function handleBillingEvent(
     if (customer) {
       await admin.from("customers").update({ retention_score: calculateRetentionScore(customer) }).eq("id", sub.customer_id);
     }
+
+    // Log event
+    const billingMsg = eventType === "subscription.billing-failure" ? "Payment failed"
+      : eventType === "subscription.billing-skipped" ? "Billing skipped"
+      : "Payment succeeded";
+
+    await logCustomerEvent({
+      workspaceId,
+      customerId: sub.customer_id,
+      eventType,
+      source: "appstle",
+      summary: `${billingMsg} — contract ${contractId}`,
+      properties: {
+        shopify_contract_id: contractId,
+        attempt_count: data.attemptCount,
+        status: data.status,
+        error_message: data.billingAttemptResponseMessage ? JSON.parse(data.billingAttemptResponseMessage as string)?.error_message : null,
+      },
+    });
   }
 }

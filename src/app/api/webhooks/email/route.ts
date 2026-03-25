@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getResendClient } from "@/lib/email";
 import { decrypt } from "@/lib/crypto";
+import { logCustomerEvent } from "@/lib/customer-events";
 
 // Fetch email body from Resend's receiving API
 async function fetchEmailBody(
@@ -234,6 +235,15 @@ export async function POST(request: Request) {
         author_type: "customer",
         body: messageBody,
         email_message_id: messageId,
+      });
+
+      await logCustomerEvent({
+        workspaceId,
+        customerId,
+        eventType: "ticket.created",
+        source: "email",
+        summary: `New ticket: ${subject || "(No subject)"}`,
+        properties: { ticket_id: ticket.id, subject, from: normalizedEmail },
       });
     }
   }

@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { calculateRetentionScore } from "@/lib/retention-score";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
+import { logCustomerEvent } from "@/lib/customer-events";
 
 // ── HMAC verification ──
 
@@ -198,6 +199,19 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
       .from("customers")
       .update({ retention_score: score, updated_at: new Date().toISOString() })
       .eq("id", customer.id);
+
+    // Log event
+    await logCustomerEvent({
+      workspaceId,
+      customerId: customer.id,
+      eventType: "customer.updated",
+      source: "shopify",
+      summary: `Customer profile updated`,
+      properties: {
+        subscription_status: record.subscription_status,
+        email: record.email,
+      },
+    });
   }
 }
 
@@ -331,5 +345,21 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
         .update({ retention_score: score })
         .eq("id", customer.id);
     }
+
+    // Log event
+    await logCustomerEvent({
+      workspaceId,
+      customerId,
+      eventType: "order.created",
+      source: "shopify",
+      summary: `Order ${(payload.name as string) || shopifyOrderId} — $${((payload.total_price as string) || "0")}`,
+      properties: {
+        shopify_order_id: shopifyOrderId,
+        order_number: payload.name,
+        total_price: payload.total_price,
+        financial_status: payload.financial_status,
+        source_name: payload.source_name,
+      },
+    });
   }
 }
