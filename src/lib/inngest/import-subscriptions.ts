@@ -12,15 +12,13 @@ function parseCSVLine(line: string): string[] {
       else inQuotes = !inQuotes;
     } else if (char === "," && !inQuotes) {
       result.push(current); current = "";
-    } else {
-      current += char;
-    }
+    } else { current += char; }
   }
   result.push(current);
   return result;
 }
 
-const CHUNK_SIZE = 2000;
+const BATCH_SIZE = 1000;
 
 export const importSubscriptions = inngest.createFunction(
   {
@@ -31,126 +29,89 @@ export const importSubscriptions = inngest.createFunction(
   },
   async ({ event, step }) => {
     const { workspace_id, job_id, file_path } = event.data as {
-      workspace_id: string;
-      job_id: string;
-      file_path: string;
+      workspace_id: string; job_id: string; file_path: string;
     };
-
     const admin = createAdminClient();
 
     async function updateJob(updates: Record<string, unknown>) {
       await admin.from("sync_jobs").update(updates).eq("id", job_id);
     }
 
-    // Step 1: Download CSV, split into chunk files in Storage
-    const chunkInfo: { totalSubs: number; chunkCount: number } = await step.run("split-csv", async () => {
+    // Step 1: Count total subs (tiny return value)
+    const totalSubs: number = await step.run("count", async () => {
       await updateJob({ status: "running", phase: "customers" });
-
       const { data: fileData } = await admin.storage.from("imports").download(file_path);
-      if (!fileData) throw new Error("Failed to download CSV");
-
-      const csvText = await fileData.text();
-      const lines = csvText.split("\n");
-      const headerLine = lines[0];
-      const headers = parseCSVLine(headerLine);
-      const idIdx = headers.findIndex((h) => h.trim().toLowerCase() === "id");
-
-      // Group rows by subscription ID, preserve order
-      const subIds: string[] = [];
-      const subRows = new Map<string, string[]>();
+      if (!fileData) throw new Error("File not found");
+      const text = await fileData.text();
+      const lines = text.split("\n");
+      const headers = parseCSVLine(lines[0]);
+      const idIdx = headers.findIndex(h => h.trim().toLowerCase() === "id");
+      const ids = new Set<string>();
       for (let i = 1; i < lines.length; i++) {
         if (!lines[i].trim()) continue;
         const row = parseCSVLine(lines[i]);
-        const subId = row[idIdx];
-        if (!subId) continue;
-        if (!subRows.has(subId)) {
-          subIds.push(subId);
-          subRows.set(subId, []);
-        }
-        subRows.get(subId)!.push(lines[i]);
+        if (row[idIdx]) ids.add(row[idIdx]);
       }
-
-      await updateJob({ total_customers: subIds.length });
-
-      // Split into chunk files
-      const chunkCount = Math.ceil(subIds.length / CHUNK_SIZE);
-      for (let c = 0; c < chunkCount; c++) {
-        const chunkSubIds = subIds.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE);
-        const chunkLines = [headerLine];
-        for (const sid of chunkSubIds) {
-          chunkLines.push(...(subRows.get(sid) || []));
-        }
-        const chunkPath = file_path.replace(".csv", `-chunk-${c}.csv`);
-        await admin.storage.from("imports").upload(chunkPath, new Blob([chunkLines.join("\n")]), {
-          contentType: "text/csv",
-          upsert: true,
-        });
-      }
-
-      return { totalSubs: subIds.length, chunkCount };
+      await updateJob({ total_customers: ids.size });
+      return ids.size;
     });
 
-    // Step 2+: Process each chunk file
+    // Step 2+: Process batches — each step re-downloads CSV, processes its slice
+    const totalBatches = Math.ceil(totalSubs / BATCH_SIZE);
     let totalImported = 0;
 
-    for (let ci = 0; ci < chunkInfo.chunkCount; ci++) {
-      const chunkIdx = ci;
+    for (let bi = 0; bi < totalBatches; bi++) {
+      const batchIdx = bi;
 
-      const imported: number = await step.run(`chunk-${chunkIdx}`, async () => {
-        const chunkPath = file_path.replace(".csv", `-chunk-${chunkIdx}.csv`);
-        const { data: fileData } = await admin.storage.from("imports").download(chunkPath);
+      const imported: number = await step.run(`batch-${batchIdx}`, async () => {
+        const { data: fileData } = await admin.storage.from("imports").download(file_path);
         if (!fileData) return 0;
-
-        const csvText = await fileData.text();
-        const lines = csvText.split("\n");
+        const text = await fileData.text();
+        const lines = text.split("\n");
         const headers = parseCSVLine(lines[0]);
 
-        const col = (name: string) => headers.findIndex((h) => h.trim().toLowerCase() === name.toLowerCase());
-        const idIdx = col("ID");
-        const statusIdx = col("Status");
-        const emailIdx = col("Customer email");
-        const intervalTypeIdx = col("Billing interval type");
-        const intervalCountIdx = col("Billing interval count");
-        const nextOrderIdx = col("Next order date");
-        const lineTitleIdx = col("Line title");
-        const lineSkuIdx = col("Line SKU");
-        const lineQtyIdx = col("Line variant quantity");
-        const linePriceIdx = col("Line variant price");
-        const lineProductIdx = col("Line product ID");
-        const lineVariantIdx = col("Line variant ID");
-        const linePlanNameIdx = col("Line selling plan name");
+        const col = (n: string) => headers.findIndex(h => h.trim().toLowerCase() === n.toLowerCase());
+        const idIdx = col("ID"), statusIdx = col("Status"), emailIdx = col("Customer email");
+        const intervalTypeIdx = col("Billing interval type"), intervalCountIdx = col("Billing interval count");
+        const nextOrderIdx = col("Next order date"), lineTitleIdx = col("Line title");
+        const lineSkuIdx = col("Line SKU"), lineQtyIdx = col("Line variant quantity");
+        const linePriceIdx = col("Line variant price"), lineProductIdx = col("Line product ID");
+        const lineVariantIdx = col("Line variant ID"), linePlanNameIdx = col("Line selling plan name");
         const shippingPriceIdx = col("Shipping Price");
 
-        // Group rows by subscription ID
-        const subsMap = new Map<string, string[][]>();
+        // Group rows by sub ID, get this batch's slice
+        const subIds: string[] = [];
+        const subRows = new Map<string, string[][]>();
         for (let i = 1; i < lines.length; i++) {
           if (!lines[i].trim()) continue;
           const row = parseCSVLine(lines[i]);
           const subId = row[idIdx];
           if (!subId) continue;
-          if (!subsMap.has(subId)) subsMap.set(subId, []);
-          subsMap.get(subId)!.push(row);
+          if (!subRows.has(subId)) { subIds.push(subId); subRows.set(subId, []); }
+          subRows.get(subId)!.push(row);
         }
 
-        // Look up only this chunk's customer emails
-        const chunkEmails = new Set<string>();
-        for (const rows of subsMap.values()) {
-          const email = rows[0][emailIdx]?.toLowerCase()?.trim();
-          if (email) chunkEmails.add(email);
-        }
+        const batchSubIds = subIds.slice(batchIdx * BATCH_SIZE, (batchIdx + 1) * BATCH_SIZE);
+        if (batchSubIds.length === 0) return 0;
 
+        // Targeted customer lookup for this batch
+        const emails = new Set<string>();
+        for (const sid of batchSubIds) {
+          const e = subRows.get(sid)![0][emailIdx]?.toLowerCase()?.trim();
+          if (e) emails.add(e);
+        }
         const custMap = new Map<string, string>();
-        const emailArr = [...chunkEmails];
-        for (let i = 0; i < emailArr.length; i += 100) {
-          const { data: customers } = await admin.from("customers")
-            .select("id, email").eq("workspace_id", workspace_id).in("email", emailArr.slice(i, i + 100));
-          for (const c of customers || []) {
-            if (c.email) custMap.set(c.email.toLowerCase(), c.id);
-          }
+        const emailArr = [...emails];
+        for (let e = 0; e < emailArr.length; e += 100) {
+          const { data: custs } = await admin.from("customers")
+            .select("id, email").eq("workspace_id", workspace_id)
+            .in("email", emailArr.slice(e, e + 100));
+          for (const c of custs || []) { if (c.email) custMap.set(c.email.toLowerCase(), c.id); }
         }
 
         let count = 0;
-        for (const [subId, rows] of subsMap) {
+        for (const subId of batchSubIds) {
+          const rows = subRows.get(subId)!;
           const firstRow = rows[0];
           const email = firstRow[emailIdx]?.toLowerCase()?.trim();
           if (!email) continue;
@@ -159,7 +120,7 @@ export const importSubscriptions = inngest.createFunction(
           const rawStatus = firstRow[statusIdx]?.toLowerCase()?.trim();
           const status = rawStatus === "active" ? "active" : rawStatus === "paused" ? "paused" : "cancelled";
 
-          const items = rows.map((row) => ({
+          const items = rows.map(row => ({
             title: row[lineTitleIdx]?.trim() || null,
             sku: row[lineSkuIdx]?.trim() || null,
             quantity: parseInt(row[lineQtyIdx]) || 1,
@@ -167,12 +128,10 @@ export const importSubscriptions = inngest.createFunction(
             product_id: row[lineProductIdx]?.trim() || null,
             variant_id: row[lineVariantIdx]?.trim() || null,
             selling_plan: row[linePlanNameIdx]?.trim() || null,
-          })).filter((item) => item.title);
+          })).filter(i => i.title);
 
           const { error } = await admin.from("subscriptions").upsert({
-            workspace_id,
-            customer_id: customerId,
-            shopify_contract_id: subId,
+            workspace_id, customer_id: customerId, shopify_contract_id: subId,
             status,
             billing_interval: firstRow[intervalTypeIdx]?.toLowerCase()?.trim() || null,
             billing_interval_count: parseInt(firstRow[intervalCountIdx]) || null,
@@ -186,9 +145,9 @@ export const importSubscriptions = inngest.createFunction(
           if (!error) count++;
 
           if (customerId) {
-            const { data: allSubs } = await admin.from("subscriptions").select("status").eq("customer_id", customerId);
-            const hasActive = allSubs?.some((s) => s.status === "active");
-            const hasPaused = allSubs?.some((s) => s.status === "paused");
+            const { data: subs } = await admin.from("subscriptions").select("status").eq("customer_id", customerId);
+            const hasActive = subs?.some(s => s.status === "active");
+            const hasPaused = subs?.some(s => s.status === "paused");
             await admin.from("customers").update({
               subscription_status: hasActive ? "active" : hasPaused ? "paused" : "cancelled",
             }).eq("id", customerId);
@@ -196,24 +155,16 @@ export const importSubscriptions = inngest.createFunction(
         }
 
         await updateJob({ synced_customers: totalImported + count });
-
-        // Delete chunk file
-        await admin.storage.from("imports").remove([chunkPath]);
-
         return count;
       });
 
       totalImported += imported;
     }
 
-    // Cleanup original file
-    await step.run("cleanup", async () => {
+    // Cleanup
+    await step.run("complete", async () => {
       await admin.storage.from("imports").remove([file_path]);
-      await updateJob({
-        status: "completed",
-        synced_customers: totalImported,
-        completed_at: new Date().toISOString(),
-      });
+      await updateJob({ status: "completed", synced_customers: totalImported, completed_at: new Date().toISOString() });
     });
 
     return { imported: totalImported };
