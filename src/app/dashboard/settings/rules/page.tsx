@@ -74,6 +74,7 @@ const FIELD_OPTIONS = [
   { value: "order.financial_status", label: "Payment Status", type: "text" },
   { value: "subscription.status", label: "Sub Status", type: "select", options: ["active", "paused", "cancelled", "expired", "failed"] },
   { value: "subscription.last_payment_status", label: "Last Payment", type: "select", options: ["succeeded", "failed", "skipped"] },
+  { value: "subscription.consecutive_skips", label: "Consecutive Billing Skips", type: "number" },
 ];
 
 const OP_OPTIONS = [

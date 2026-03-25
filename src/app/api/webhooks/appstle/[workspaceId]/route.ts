@@ -250,11 +250,17 @@ async function handleBillingEvent(
     updates.last_payment_status = "failed";
   } else if (eventType === "subscription.billing-success") {
     updates.last_payment_status = "succeeded";
+    updates.consecutive_skips = 0; // Reset on successful billing
   } else if (eventType === "subscription.billing-skipped") {
     updates.last_payment_status = "skipped";
   }
 
   await admin.from("subscriptions").update(updates).eq("id", sub.id);
+
+  // Atomic increment consecutive_skips on billing-skipped
+  if (eventType === "subscription.billing-skipped") {
+    await admin.rpc("increment_consecutive_skips", { p_sub_id: sub.id });
+  }
 
   // Recalculate retention score on payment failures
   if (sub.customer_id && eventType !== "subscription.billing-success") {
