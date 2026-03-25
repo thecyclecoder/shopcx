@@ -140,7 +140,7 @@ export async function PATCH(
 
   if ("status" in body) {
     updates.status = body.status;
-    if (body.status === "resolved" && existing.status !== "resolved") {
+    if (body.status === "closed" && existing.status !== "closed") {
       updates.resolved_at = new Date().toISOString();
     }
     // Fire CSAT event when ticket is closed

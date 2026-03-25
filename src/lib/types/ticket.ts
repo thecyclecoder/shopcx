@@ -1,5 +1,5 @@
 export type TicketChannel = "email" | "chat" | "meta_dm" | "sms";
-export type TicketStatus = "open" | "pending" | "resolved" | "closed";
+export type TicketStatus = "open" | "pending" | "closed";
 export type MessageDirection = "inbound" | "outbound";
 export type MessageVisibility = "external" | "internal";
 export type MessageAuthorType = "customer" | "agent" | "ai" | "system";

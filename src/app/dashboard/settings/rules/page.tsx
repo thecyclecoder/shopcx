@@ -58,7 +58,7 @@ const TRIGGER_OPTIONS = [
 
 const FIELD_OPTIONS = [
   { value: "ticket.subject", label: "Ticket Subject", type: "text" },
-  { value: "ticket.status", label: "Ticket Status", type: "select", options: ["open", "pending", "resolved", "closed"] },
+  { value: "ticket.status", label: "Ticket Status", type: "select", options: ["open", "pending", "closed"] },
   { value: "ticket.channel", label: "Ticket Channel", type: "select", options: ["email", "chat", "meta_dm", "sms"] },
   { value: "ticket.tags", label: "Ticket Tags", type: "array" },
   { value: "message.body", label: "Message Body", type: "text" },
@@ -435,7 +435,6 @@ export default function RulesPage() {
                       <option value="">Select...</option>
                       <option value="open">Open</option>
                       <option value="pending">Pending</option>
-                      <option value="resolved">Resolved</option>
                       <option value="closed">Closed</option>
                     </select>
                   )}

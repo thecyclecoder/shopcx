@@ -133,7 +133,7 @@ export async function sendCsatEmail({
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px; text-align: center;">
         <h2 style="color: #18181b; font-size: 20px; margin-bottom: 8px;">How was your experience?</h2>
         <p style="color: #71717a; font-size: 14px; line-height: 1.6; margin-bottom: 24px;">
-          Your ticket "<strong>${ticketSubject}</strong>" has been resolved. We'd love to hear how we did.
+          Your ticket "<strong>${ticketSubject}</strong>" has been closed. We'd love to hear how we did.
         </p>
         <div style="display: inline-flex; gap: 8px;">
           ${[1, 2, 3, 4, 5]

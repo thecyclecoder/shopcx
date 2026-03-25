@@ -172,7 +172,7 @@ export async function POST(request: Request) {
       .eq("id", ticketId)
       .single();
 
-    if (ticket && (ticket.status === "pending" || ticket.status === "resolved")) {
+    if (ticket && (ticket.status === "pending" || ticket.status === "closed")) {
       await admin
         .from("tickets")
         .update({ status: "open", updated_at: new Date().toISOString() })
