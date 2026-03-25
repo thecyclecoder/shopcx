@@ -73,18 +73,6 @@ export const importSubscriptions = inngest.createFunction(
       const chunkIdx = ci;
 
       const imported: number = await step.run(`chunk-${chunkIdx}`, async () => {
-        // Load customer emails for lookup (within chunk step)
-        const custMap = new Map<string, string>();
-        let cOffset = 0;
-        while (true) {
-          const { data: batch } = await admin.from("customers")
-            .select("id, email").eq("workspace_id", workspace_id).range(cOffset, cOffset + 999);
-          if (!batch || batch.length === 0) break;
-          for (const c of batch) { if (c.email) custMap.set(c.email.toLowerCase(), c.id); }
-          cOffset += batch.length;
-          if (batch.length < 1000) break;
-        }
-
         const { data: fileData } = await admin.storage.from("imports").download(file_path);
         if (!fileData) return 0;
 
@@ -122,6 +110,27 @@ export const importSubscriptions = inngest.createFunction(
         // Get this chunk's subscription IDs
         const allSubIds = [...subsMap.keys()];
         const chunkSubIds = allSubIds.slice(chunkIdx * CHUNK_SIZE, (chunkIdx + 1) * CHUNK_SIZE);
+
+        // Collect unique emails for this chunk and look up only those customers
+        const chunkEmails = new Set<string>();
+        for (const subId of chunkSubIds) {
+          const rows = subsMap.get(subId)!;
+          const email = rows[0][emailIdx]?.toLowerCase()?.trim();
+          if (email) chunkEmails.add(email);
+        }
+
+        const custMap = new Map<string, string>();
+        const emailArr = [...chunkEmails];
+        for (let i = 0; i < emailArr.length; i += 100) {
+          const batch = emailArr.slice(i, i + 100);
+          const { data: customers } = await admin.from("customers")
+            .select("id, email")
+            .eq("workspace_id", workspace_id)
+            .in("email", batch);
+          for (const c of customers || []) {
+            if (c.email) custMap.set(c.email.toLowerCase(), c.id);
+          }
+        }
 
         let count = 0;
         for (const subId of chunkSubIds) {
