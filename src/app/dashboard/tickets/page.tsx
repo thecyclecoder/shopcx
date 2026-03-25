@@ -82,10 +82,29 @@ export default function TicketsPage() {
   const [newTicketMessage, setNewTicketMessage] = useState("");
   const [creating, setCreating] = useState(false);
 
-  // Load view filters when viewId changes
+  // Clear view when filters change manually
+  const clearView = () => {
+    if (viewId) {
+      router.replace("/dashboard/tickets");
+    }
+    setActiveViewName(null);
+  };
+
+  // Load view filters when viewId changes, or reset when cleared
+  const [viewLoaded, setViewLoaded] = useState<string | null>(null);
   useEffect(() => {
     if (!viewId) {
+      // Reset all filters when clicking "Tickets" (no view)
+      if (viewLoaded) {
+        setStatusFilter("all");
+        setChannelFilter("all");
+        setAssigneeFilter("");
+        setTagFilter("");
+        setSearch("");
+        setOffset(0);
+      }
       setActiveViewName(null);
+      setViewLoaded(null);
       return;
     }
     fetch(`/api/workspaces/${workspace.id}/ticket-views`)
@@ -102,9 +121,10 @@ export default function TicketsPage() {
           setSearch(f.search || "");
           setOffset(0);
           setActiveViewName(view.name);
+          setViewLoaded(viewId);
         }
       });
-  }, [viewId, workspace.id]);
+  }, [viewId, workspace.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch members + tags
   useEffect(() => {
@@ -274,7 +294,7 @@ export default function TicketsPage() {
           <label className="block text-xs font-medium text-zinc-500">Status</label>
           <select
             value={statusFilter}
-            onChange={(e) => { setStatusFilter(e.target.value); setOffset(0); }}
+            onChange={(e) => { setStatusFilter(e.target.value); setOffset(0); clearView(); }}
             className="mt-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
           >
             {STATUS_OPTIONS.map((s) => (
@@ -286,7 +306,7 @@ export default function TicketsPage() {
           <label className="block text-xs font-medium text-zinc-500">Channel</label>
           <select
             value={channelFilter}
-            onChange={(e) => { setChannelFilter(e.target.value); setOffset(0); }}
+            onChange={(e) => { setChannelFilter(e.target.value); setOffset(0); clearView(); }}
             className="mt-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
           >
             {CHANNEL_OPTIONS.map((c) => (
@@ -298,7 +318,7 @@ export default function TicketsPage() {
           <label className="block text-xs font-medium text-zinc-500">Assigned To</label>
           <select
             value={assigneeFilter}
-            onChange={(e) => { setAssigneeFilter(e.target.value); setOffset(0); }}
+            onChange={(e) => { setAssigneeFilter(e.target.value); setOffset(0); clearView(); }}
             className="mt-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
           >
             <option value="">Anyone</option>
@@ -312,7 +332,7 @@ export default function TicketsPage() {
             <label className="block text-xs font-medium text-zinc-500">Tag</label>
             <select
               value={tagFilter}
-              onChange={(e) => { setTagFilter(e.target.value); setOffset(0); }}
+              onChange={(e) => { setTagFilter(e.target.value); setOffset(0); clearView(); }}
               className="mt-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
             >
               <option value="">All Tags</option>
