@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 import { sendTicketReply } from "@/lib/email";
+import { evaluateRules } from "@/lib/rules-engine";
 
 export async function POST(
   request: Request,
@@ -105,6 +106,17 @@ export async function POST(
   }
 
   await admin.from("tickets").update(ticketUpdates).eq("id", ticketId);
+
+  // Evaluate rules on message sent
+  const { data: updatedTicket } = await admin.from("tickets").select("*").eq("id", ticketId).single();
+  const { data: custData } = ticket.customer_id
+    ? await admin.from("customers").select("*").eq("id", ticket.customer_id).single()
+    : { data: null };
+  await evaluateRules(ticket.workspace_id, "ticket.message_sent", {
+    ticket: updatedTicket || undefined,
+    customer: custData || undefined,
+    message: { body, direction: "outbound", author_type: "agent", visibility },
+  });
 
   return NextResponse.json({
     message: created,

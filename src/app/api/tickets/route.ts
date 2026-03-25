@@ -17,6 +17,7 @@ export async function GET(request: Request) {
   const status = searchParams.get("status");
   const channel = searchParams.get("channel");
   const assignedTo = searchParams.get("assigned_to");
+  const tag = searchParams.get("tag");
   const search = searchParams.get("search");
   const sort = searchParams.get("sort") || "updated_at";
   const order = searchParams.get("order") || "desc";
@@ -36,6 +37,7 @@ export async function GET(request: Request) {
   if (status && status !== "all") query = query.eq("status", status);
   if (channel && channel !== "all") query = query.eq("channel", channel);
   if (assignedTo) query = query.eq("assigned_to", assignedTo);
+  if (tag) query = query.contains("tags", [tag]);
   if (search) query = query.ilike("subject", `%${search}%`);
 
   const ascending = order === "asc";

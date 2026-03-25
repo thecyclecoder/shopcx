@@ -13,6 +13,7 @@ interface TicketRow {
   assigned_name: string | null;
   customer_email: string | null;
   customer_name: string | null;
+  tags: string[];
   updated_at: string;
 }
 
@@ -63,6 +64,8 @@ export default function TicketsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [channelFilter, setChannelFilter] = useState("all");
   const [assigneeFilter, setAssigneeFilter] = useState("");
+  const [tagFilter, setTagFilter] = useState("");
+  const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [offset, setOffset] = useState(0);
 
   const [members, setMembers] = useState<Member[]>([]);
@@ -72,13 +75,15 @@ export default function TicketsPage() {
   const [newTicketMessage, setNewTicketMessage] = useState("");
   const [creating, setCreating] = useState(false);
 
-  // Fetch members for assignee dropdown
+  // Fetch members + tags
   useEffect(() => {
     fetch(`/api/workspaces/${workspace.id}/members`)
       .then((res) => res.json())
-      .then((data) => {
-        if (Array.isArray(data)) setMembers(data);
-      })
+      .then((data) => { if (Array.isArray(data)) setMembers(data); })
+      .catch(() => {});
+    fetch(`/api/workspaces/${workspace.id}/tags`)
+      .then((res) => res.json())
+      .then((data) => { if (Array.isArray(data)) setAvailableTags(data); })
       .catch(() => {});
   }, [workspace.id]);
 
@@ -94,6 +99,7 @@ export default function TicketsPage() {
       if (statusFilter !== "all") params.set("status", statusFilter);
       if (channelFilter !== "all") params.set("channel", channelFilter);
       if (assigneeFilter) params.set("assigned_to", assigneeFilter);
+      if (tagFilter) params.set("tag", tagFilter);
       if (search) params.set("search", search);
 
       const res = await fetch(`/api/tickets?${params}`);
@@ -105,7 +111,7 @@ export default function TicketsPage() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [statusFilter, channelFilter, assigneeFilter, search, offset]);
+  }, [statusFilter, channelFilter, assigneeFilter, tagFilter, search, offset]);
 
   useEffect(() => {
     fetchTickets();
@@ -270,6 +276,21 @@ export default function TicketsPage() {
             ))}
           </select>
         </div>
+        {availableTags.length > 0 && (
+          <div>
+            <label className="block text-xs font-medium text-zinc-500">Tag</label>
+            <select
+              value={tagFilter}
+              onChange={(e) => { setTagFilter(e.target.value); setOffset(0); }}
+              className="mt-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+            >
+              <option value="">All Tags</option>
+              {availableTags.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          </div>
+        )}
         <form onSubmit={handleSearch} className="flex-1">
           <label className="block text-xs font-medium text-zinc-500">Search</label>
           <div className="relative mt-1">
@@ -321,8 +342,16 @@ export default function TicketsPage() {
                   <td className="whitespace-nowrap px-4 py-3 text-sm">
                     <StatusBadge status={t.status} />
                   </td>
-                  <td className="max-w-xs truncate px-4 py-3 text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                    {t.subject || "(no subject)"}
+                  <td className="max-w-xs px-4 py-3 text-sm">
+                    <p className="truncate font-medium text-zinc-900 dark:text-zinc-100">{t.subject || "(no subject)"}</p>
+                    {t.tags?.length > 0 && (
+                      <div className="mt-0.5 flex gap-1">
+                        {t.tags.slice(0, 3).map((tag) => (
+                          <span key={tag} className="rounded bg-indigo-50 px-1.5 py-0.5 text-[9px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">{tag}</span>
+                        ))}
+                        {t.tags.length > 3 && <span className="text-[9px] text-zinc-400">+{t.tags.length - 3}</span>}
+                      </div>
+                    )}
                   </td>
                   <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500">
                     {t.customer_name || t.customer_email || "--"}

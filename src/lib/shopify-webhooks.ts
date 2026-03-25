@@ -4,6 +4,7 @@ import { decrypt } from "@/lib/crypto";
 import { calculateRetentionScore } from "@/lib/retention-score";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { logCustomerEvent } from "@/lib/customer-events";
+import { evaluateRules } from "@/lib/rules-engine";
 
 // ── HMAC verification ──
 
@@ -248,6 +249,9 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
         email: record.email,
       },
     });
+
+    // Evaluate rules
+    await evaluateRules(workspaceId, "customer.updated", { customer });
   }
 }
 
@@ -397,6 +401,24 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
         financial_status: payload.financial_status,
         source_name: payload.source_name,
       },
+    });
+
+    // Evaluate rules
+    const orderCtx = {
+      shopify_order_id: shopifyOrderId,
+      order_number: payload.name,
+      total_cents: Math.round(parseFloat((payload.total_price as string) || "0") * 100),
+      financial_status: payload.financial_status,
+      fulfillment_status: payload.fulfillment_status,
+      source_name: payload.source_name,
+      order_type: null as string | null,
+    };
+    const { data: custCtx } = customerId
+      ? await admin.from("customers").select("*").eq("id", customerId).single()
+      : { data: null };
+    await evaluateRules(workspaceId, "order.created", {
+      order: orderCtx,
+      customer: custCtx || undefined,
     });
   }
 }

@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getResendClient } from "@/lib/email";
 import { decrypt } from "@/lib/crypto";
 import { logCustomerEvent } from "@/lib/customer-events";
+import { evaluateRules } from "@/lib/rules-engine";
 
 // Fetch email body from Resend's receiving API
 async function fetchEmailBody(
@@ -181,6 +182,17 @@ export async function POST(request: Request) {
         .update({ updated_at: new Date().toISOString() })
         .eq("id", ticketId);
     }
+
+    // Evaluate rules for message received on existing ticket
+    const { data: ticketData } = await admin.from("tickets").select("*").eq("id", ticketId).single();
+    const { data: custData } = ticketData?.customer_id
+      ? await admin.from("customers").select("*").eq("id", ticketData.customer_id).single()
+      : { data: null };
+    await evaluateRules(workspaceId, "ticket.message_received", {
+      ticket: ticketData || undefined,
+      customer: custData || undefined,
+      message: { body: messageBody, direction: "inbound", author_type: "customer" },
+    });
   } else {
     // New ticket — resolve or create customer
     let customerId: string | null = null;
@@ -244,6 +256,17 @@ export async function POST(request: Request) {
         source: "email",
         summary: `New ticket: ${subject || "(No subject)"}`,
         properties: { ticket_id: ticket.id, subject, from: normalizedEmail },
+      });
+
+      // Evaluate rules for new ticket
+      const { data: fullTicket } = await admin.from("tickets").select("*").eq("id", ticket.id).single();
+      const { data: custData } = customerId
+        ? await admin.from("customers").select("*").eq("id", customerId).single()
+        : { data: null };
+      await evaluateRules(workspaceId, "ticket.created", {
+        ticket: fullTicket || undefined,
+        customer: custData || undefined,
+        message: { body: messageBody, direction: "inbound", author_type: "customer" },
       });
     }
   }

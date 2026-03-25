@@ -4,6 +4,7 @@ import { decrypt } from "@/lib/crypto";
 import { Webhook } from "svix";
 import { calculateRetentionScore } from "@/lib/retention-score";
 import { logCustomerEvent } from "@/lib/customer-events";
+import { evaluateRules } from "@/lib/rules-engine";
 
 function mapStatus(status: string): "active" | "paused" | "cancelled" | "expired" | "failed" {
   switch (status?.toUpperCase()) {
@@ -215,6 +216,16 @@ async function handleSubscriptionEvent(
       items: items.map(i => i.title).filter(Boolean),
     },
   });
+
+  // Evaluate rules
+  const { data: subCtx } = contractId
+    ? await admin.from("subscriptions").select("*").eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).single()
+    : { data: null };
+  const { data: custCtx } = await admin.from("customers").select("*").eq("id", dbCustomer.id).single();
+  await evaluateRules(workspaceId, eventType, {
+    subscription: subCtx || undefined,
+    customer: custCtx || undefined,
+  });
 }
 
 async function handleBillingEvent(
@@ -271,6 +282,17 @@ async function handleBillingEvent(
         status: data.status,
         error_message: data.billingAttemptResponseMessage ? JSON.parse(data.billingAttemptResponseMessage as string)?.error_message : null,
       },
+    });
+
+    // Evaluate rules for billing events
+    const { data: subCtx } = await admin.from("subscriptions").select("*")
+      .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).single();
+    const { data: custCtx } = sub.customer_id
+      ? await admin.from("customers").select("*").eq("id", sub.customer_id).single()
+      : { data: null };
+    await evaluateRules(workspaceId, eventType, {
+      subscription: subCtx || undefined,
+      customer: custCtx || undefined,
     });
   }
 }

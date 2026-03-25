@@ -26,6 +26,19 @@ export default function SettingsPage() {
         </Link>
 
         <Link
+          href="/dashboard/settings/rules"
+          className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
+        >
+          <div>
+            <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Rules</h2>
+            <p className="mt-1 text-xs text-zinc-500">Automate ticket tagging, assignment, replies, and more</p>
+          </div>
+          <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+
+        <Link
           href="/dashboard/settings/import"
           className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
         >

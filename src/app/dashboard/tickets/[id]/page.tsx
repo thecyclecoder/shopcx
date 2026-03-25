@@ -166,6 +166,8 @@ export default function TicketDetailPage() {
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"messages" | "history">("messages");
   const [customerEvents, setCustomerEvents] = useState<{ id: string; event_type: string; source: string; summary: string; created_at: string }[]>([]);
+  const [closeWithReply, setCloseWithReply] = useState(true);
+  const [tagInput, setTagInput] = useState("");
 
   useEffect(() => {
     async function load() {
@@ -254,6 +256,16 @@ export default function TicketDetailPage() {
           : data.message;
         setMessages((prev) => [...prev, msg]);
         setReplyBody("");
+
+        // Close ticket if "close with reply" is checked and this is an external reply
+        if (closeWithReply && replyMode === "external") {
+          await fetch(`/api/tickets/${id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "closed" }),
+          });
+        }
+
         // Refresh ticket to get updated status
         const ticketRes = await fetch(`/api/tickets/${id}`);
         if (ticketRes.ok) {
@@ -326,6 +338,37 @@ export default function TicketDetailPage() {
             </h1>
             <StatusBadge status={ticket.status} />
             <ChannelBadge channel={ticket.channel} />
+          </div>
+
+          {/* Tags */}
+          <div className="mt-2 flex flex-wrap items-center gap-1">
+            {(ticket.tags || []).map((tag) => (
+              <span key={tag} className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+                {tag}
+                <button
+                  onClick={async () => {
+                    const tags = (ticket.tags || []).filter(t => t !== tag);
+                    await handlePatch({ tags });
+                  }}
+                  className="ml-0.5 text-indigo-400 hover:text-indigo-600"
+                >x</button>
+              </span>
+            ))}
+            <form onSubmit={async (e) => {
+              e.preventDefault();
+              const t = tagInput.trim().toLowerCase();
+              if (!t) return;
+              const tags = [...(ticket.tags || []), t];
+              await handlePatch({ tags: [...new Set(tags)] });
+              setTagInput("");
+            }} className="inline-flex">
+              <input
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value)}
+                placeholder="+ tag"
+                className="w-16 border-none bg-transparent px-1 text-[10px] text-zinc-500 placeholder-zinc-400 outline-none focus:w-24 focus:ring-0"
+              />
+            </form>
           </div>
 
           {/* Tabs */}
@@ -468,13 +511,24 @@ export default function TicketDetailPage() {
                 placeholder={replyMode === "external" ? "Type your reply..." : "Internal note..."}
                 className="w-full resize-none rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
               />
+              {replyMode === "external" && (
+                <label className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                  <input
+                    type="checkbox"
+                    checked={closeWithReply}
+                    onChange={(e) => setCloseWithReply(e.target.checked)}
+                    className="h-3 w-3 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  Close with reply
+                </label>
+              )}
             </div>
             <button
               type="submit"
               disabled={sending || !replyBody.trim()}
               className="shrink-0 rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
             >
-              {sending ? "..." : sandboxMode && !emailLive && replyMode === "external" ? "Send (Sandbox)" : "Send"}
+              {sending ? "..." : sandboxMode && !emailLive && replyMode === "external" ? "Send (Sandbox)" : closeWithReply && replyMode === "external" ? "Send & Close" : "Send"}
             </button>
           </form>
         </div>

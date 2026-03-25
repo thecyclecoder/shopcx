@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 import { inngest } from "@/lib/inngest/client";
+import { evaluateRules } from "@/lib/rules-engine";
 
 // GET: ticket detail with messages and customer
 export async function GET(
@@ -168,5 +169,17 @@ export async function PATCH(
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Evaluate rules on status change
+  if ("status" in body && body.status !== existing.status) {
+    const { data: custData } = updated.customer_id
+      ? await admin.from("customers").select("*").eq("id", updated.customer_id).single()
+      : { data: null };
+    await evaluateRules(workspaceId, "ticket.status_changed", {
+      ticket: updated,
+      customer: custData || undefined,
+    });
+  }
+
   return NextResponse.json(updated);
 }
