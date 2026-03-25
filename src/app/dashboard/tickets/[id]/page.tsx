@@ -171,6 +171,12 @@ export default function TicketDetailPage() {
   const [tagInput, setTagInput] = useState("");
   const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
   const [showTagDropdown, setShowTagDropdown] = useState(false);
+  const [suggestingPattern, setSuggestingPattern] = useState(false);
+  const [suggestCategory, setSuggestCategory] = useState("");
+  const [patternCategories, setPatternCategories] = useState<{ category: string; name: string }[]>([]);
+  const [patternSuggestion, setPatternSuggestion] = useState<{
+    category: string; category_name: string; phrases: string[]; auto_tag: string; reasoning: string;
+  } | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -211,6 +217,15 @@ export default function TicketDetailPage() {
     fetch(`/api/workspaces/${workspace.id}/tags`)
       .then((res) => res.json())
       .then((data) => { if (Array.isArray(data)) setTagSuggestions(data); })
+      .catch(() => {});
+    fetch(`/api/workspaces/${workspace.id}/patterns`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data)) {
+          const cats = [...new Map(data.map((p: { category: string; name: string }) => [p.category, { category: p.category, name: p.name }])).values()];
+          setPatternCategories(cats);
+        }
+      })
       .catch(() => {});
   }, [workspace.id]);
 
@@ -436,6 +451,107 @@ export default function TicketDetailPage() {
               })()}
             </div>
           </div>
+
+          {/* Suggest Pattern */}
+          {!patternSuggestion && (
+            <div className="mt-2 flex items-center gap-2">
+              {patternCategories.length > 0 && (
+                <select
+                  value={suggestCategory}
+                  onChange={(e) => setSuggestCategory(e.target.value)}
+                  className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-[10px] text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                >
+                  <option value="">Auto-detect category</option>
+                  {patternCategories.map(c => (
+                    <option key={c.category} value={c.category}>{c.name}</option>
+                  ))}
+                </select>
+              )}
+              <button
+                onClick={async () => {
+                  setSuggestingPattern(true);
+                  try {
+                    const res = await fetch(`/api/tickets/${id}/suggest-pattern`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(suggestCategory ? { category: suggestCategory } : {}),
+                    });
+                    if (res.ok) {
+                      const data = await res.json();
+                      setPatternSuggestion(data.suggestion);
+                    }
+                  } finally {
+                    setSuggestingPattern(false);
+                  }
+                }}
+                disabled={suggestingPattern}
+                className="text-[10px] text-indigo-600 hover:underline disabled:opacity-50 dark:text-indigo-400"
+              >
+                {suggestingPattern ? "Analyzing..." : "Suggest pattern (AI)"}
+              </button>
+            </div>
+          )}
+          {patternSuggestion && (
+            <div className="mt-2 rounded-md border border-indigo-200 bg-indigo-50 p-3 dark:border-indigo-800 dark:bg-indigo-950">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-medium text-indigo-700 dark:text-indigo-300">AI Pattern Suggestion</p>
+                <button onClick={() => setPatternSuggestion(null)} className="text-[10px] text-indigo-400 hover:text-indigo-600">Dismiss</button>
+              </div>
+              <p className="mt-1 text-[10px] text-indigo-600 dark:text-indigo-400">{patternSuggestion.reasoning}</p>
+              <div className="mt-2 space-y-1">
+                <p className="text-[10px] text-zinc-500">Category: <span className="font-medium text-zinc-700 dark:text-zinc-300">{patternSuggestion.category_name}</span></p>
+                <p className="text-[10px] text-zinc-500">Tag: <span className="font-medium text-zinc-700 dark:text-zinc-300">{patternSuggestion.auto_tag}</span></p>
+                <div className="flex flex-wrap gap-1">
+                  {patternSuggestion.phrases.map((p, i) => (
+                    <span key={i} className="rounded bg-white px-1.5 py-0.5 text-[9px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">&ldquo;{p}&rdquo;</span>
+                  ))}
+                </div>
+              </div>
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={async () => {
+                    // Create workspace pattern with these phrases
+                    const res = await fetch(`/api/workspaces/${workspace.id}/patterns`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        category: patternSuggestion.category,
+                        name: patternSuggestion.category_name,
+                        phrases: patternSuggestion.phrases,
+                        auto_tag: patternSuggestion.auto_tag,
+                        match_target: "both",
+                        priority: 50,
+                      }),
+                    });
+                    if (res.ok) {
+                      // Also tag this ticket
+                      if (patternSuggestion.auto_tag) {
+                        const tags = [...(ticket.tags || []), patternSuggestion.auto_tag];
+                        await handlePatch({ tags: [...new Set(tags)] });
+                      }
+                      setPatternSuggestion(null);
+                    }
+                  }}
+                  className="rounded bg-indigo-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-indigo-500"
+                >
+                  Accept & Create Pattern
+                </button>
+                <button
+                  onClick={async () => {
+                    // Just tag this ticket, don't create pattern
+                    if (patternSuggestion.auto_tag) {
+                      const tags = [...(ticket.tags || []), patternSuggestion.auto_tag];
+                      await handlePatch({ tags: [...new Set(tags)] });
+                    }
+                    setPatternSuggestion(null);
+                  }}
+                  className="rounded border border-indigo-300 bg-white px-2 py-0.5 text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:bg-transparent dark:text-indigo-400"
+                >
+                  Just Tag This Ticket
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Tabs */}
           <div className="mt-4 flex gap-4 border-b border-zinc-200 dark:border-zinc-800">
