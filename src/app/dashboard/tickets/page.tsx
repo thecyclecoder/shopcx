@@ -70,6 +70,8 @@ export default function TicketsPage() {
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [offset, setOffset] = useState(0);
   const [viewName, setViewName] = useState("");
+  const [viewParentId, setViewParentId] = useState("");
+  const [existingViews, setExistingViews] = useState<{ id: string; name: string; parent_id: string | null }[]>([]);
   const [savingView, setSavingView] = useState(false);
   const [activeViewName, setActiveViewName] = useState<string | null>(null);
 
@@ -358,7 +360,7 @@ export default function TicketsPage() {
                 const res = await fetch(`/api/workspaces/${workspace.id}/ticket-views`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ name: viewName, filters }),
+                  body: JSON.stringify({ name: viewName, filters, parent_id: viewParentId || null }),
                 });
                 if (res.ok) {
                   setSavingView(false);
@@ -373,11 +375,26 @@ export default function TicketsPage() {
                   autoFocus
                   className="rounded border border-zinc-300 bg-white px-2 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                 />
+                <select
+                  value={viewParentId}
+                  onChange={(e) => setViewParentId(e.target.value)}
+                  className="rounded border border-zinc-300 bg-white px-2 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                >
+                  <option value="">No parent (top level)</option>
+                  {existingViews.filter(v => !v.parent_id).map(v => (
+                    <option key={v.id} value={v.id}>{v.name}</option>
+                  ))}
+                </select>
                 <button type="submit" className="rounded bg-indigo-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-indigo-500">Save</button>
                 <button type="button" onClick={() => setSavingView(false)} className="text-xs text-zinc-400">Cancel</button>
               </form>
             ) : (
-              <button onClick={() => setSavingView(true)} className="text-xs text-indigo-600 hover:underline dark:text-indigo-400">
+              <button onClick={() => {
+                setSavingView(true);
+                fetch(`/api/workspaces/${workspace.id}/ticket-views`).then(r => r.json()).then(d => {
+                  if (Array.isArray(d)) setExistingViews(d);
+                });
+              }} className="text-xs text-indigo-600 hover:underline dark:text-indigo-400">
                 Save as View
               </button>
             )}

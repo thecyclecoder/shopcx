@@ -42,6 +42,7 @@ export async function POST(
       workspace_id: workspaceId,
       name: body.name || "Untitled View",
       filters: body.filters || {},
+      parent_id: body.parent_id || null,
       sort_order: body.sort_order ?? 0,
       created_by: user.id,
     })

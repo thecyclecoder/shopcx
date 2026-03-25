@@ -18,6 +18,7 @@ export async function PATCH(
 
   if ("name" in body) updates.name = body.name;
   if ("filters" in body) updates.filters = body.filters;
+  if ("parent_id" in body) updates.parent_id = body.parent_id || null;
   if ("sort_order" in body) updates.sort_order = body.sort_order;
 
   const { data: view, error } = await admin

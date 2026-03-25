@@ -11,6 +11,7 @@ interface TicketView {
   id: string;
   name: string;
   filters: Record<string, string>;
+  parent_id: string | null;
 }
 
 const NAV_ITEMS = [
@@ -114,28 +115,55 @@ export default function Sidebar({
                 </svg>
                 {item.label}
               </Link>
-              {/* Ticket views submenu */}
-              {item.href === "/dashboard/tickets" && ticketViews.length > 0 && (
-                <div className="ml-6 mt-0.5 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-800">
-                  {ticketViews.map((view) => {
-                    const viewHref = `/dashboard/tickets?view=${view.id}`;
-                    const isViewActive = pathname === "/dashboard/tickets" && typeof window !== "undefined" && new URLSearchParams(window.location.search).get("view") === view.id;
-                    return (
-                      <Link
-                        key={view.id}
-                        href={viewHref}
-                        className={`block rounded px-2 py-1 text-xs transition-colors ${
-                          isViewActive
-                            ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
-                            : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
-                        }`}
-                      >
-                        {view.name}
-                      </Link>
-                    );
-                  })}
-                </div>
-              )}
+              {/* Ticket views submenu (nested) */}
+              {item.href === "/dashboard/tickets" && ticketViews.length > 0 && (() => {
+                const topLevel = ticketViews.filter(v => !v.parent_id);
+                const children = (parentId: string) => ticketViews.filter(v => v.parent_id === parentId);
+                const grandChildren = (parentId: string) => ticketViews.filter(v => v.parent_id === parentId);
+                const currentViewId = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("view") : null;
+
+                const ViewLink = ({ view, indent }: { view: TicketView; indent: number }) => {
+                  const hasFilters = Object.keys(view.filters || {}).length > 0;
+                  const viewHref = hasFilters ? `/dashboard/tickets?view=${view.id}` : "#";
+                  const isViewActive = pathname === "/dashboard/tickets" && currentViewId === view.id;
+                  const subs = indent === 0 ? children(view.id) : grandChildren(view.id);
+                  const isFolder = subs.length > 0;
+
+                  return (
+                    <div>
+                      {hasFilters ? (
+                        <Link
+                          href={viewHref}
+                          className={`block rounded px-2 py-1 text-xs transition-colors ${
+                            isViewActive
+                              ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
+                              : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+                          }`}
+                        >
+                          {isFolder && <span className="mr-1 text-zinc-400">&#9662;</span>}
+                          {view.name}
+                        </Link>
+                      ) : (
+                        <span className="block px-2 py-1 text-xs font-medium text-zinc-400 dark:text-zinc-500">
+                          {isFolder && <span className="mr-1">&#9662;</span>}
+                          {view.name}
+                        </span>
+                      )}
+                      {subs.length > 0 && indent < 2 && (
+                        <div className="ml-3 mt-0.5 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-800">
+                          {subs.map(sub => <ViewLink key={sub.id} view={sub} indent={indent + 1} />)}
+                        </div>
+                      )}
+                    </div>
+                  );
+                };
+
+                return (
+                  <div className="ml-6 mt-0.5 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-800">
+                    {topLevel.map(view => <ViewLink key={view.id} view={view} indent={0} />)}
+                  </div>
+                );
+              })()}
             </div>
           );
         })}
