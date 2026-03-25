@@ -39,6 +39,22 @@ interface RecentOrder {
   created_at: string;
 }
 
+interface SubscriptionItem {
+  title: string | null;
+  quantity: number;
+  price_cents: number;
+}
+
+interface CustomerSubscription {
+  id: string;
+  status: string;
+  billing_interval: string | null;
+  billing_interval_count: number | null;
+  next_billing_date: string | null;
+  last_payment_status: string | null;
+  items: SubscriptionItem[];
+}
+
 interface CustomerDetail {
   id: string;
   email: string;
@@ -50,6 +66,7 @@ interface CustomerDetail {
   total_orders: number;
   subscription_status: string;
   recent_orders: RecentOrder[];
+  subscriptions: CustomerSubscription[];
 }
 
 interface TicketDetail extends Ticket {
@@ -551,6 +568,48 @@ export default function TicketDetailPage() {
               >
                 View full profile
               </button>
+
+              {/* Subscriptions */}
+              {customer.subscriptions?.length > 0 && (
+                <div className="pt-2">
+                  <p className="text-xs font-medium text-zinc-500">Subscriptions</p>
+                  <div className="mt-1 space-y-1">
+                    {customer.subscriptions.map((sub) => (
+                      <div key={sub.id} className="rounded bg-zinc-50 px-2 py-1.5 text-xs dark:bg-zinc-800">
+                        <div className="flex items-center justify-between">
+                          <span className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                            sub.status === "active" ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
+                            : sub.status === "paused" ? "bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
+                            : "bg-zinc-100 text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400"
+                          }`}>
+                            {sub.status}
+                          </span>
+                          {sub.billing_interval && (
+                            <span className="text-[10px] text-zinc-400">
+                              {sub.billing_interval_count}/{sub.billing_interval}
+                            </span>
+                          )}
+                        </div>
+                        {sub.items?.length > 0 && (
+                          <div className="mt-1 space-y-0.5">
+                            {sub.items.slice(0, 3).map((item, idx) => (
+                              <p key={idx} className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                                {item.quantity}x {item.title}
+                              </p>
+                            ))}
+                            {sub.items.length > 3 && (
+                              <p className="text-[10px] text-zinc-400">+{sub.items.length - 3} more</p>
+                            )}
+                          </div>
+                        )}
+                        {sub.next_billing_date && (
+                          <p className="mt-1 text-[10px] text-zinc-400">Next: {formatDate(sub.next_billing_date)}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Recent orders */}
               {customer.recent_orders.length > 0 && (

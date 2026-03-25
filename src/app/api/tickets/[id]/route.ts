@@ -72,7 +72,13 @@ export async function GET(
         .order("created_at", { ascending: false })
         .limit(10);
 
-      customer = { ...c, recent_orders: orders || [] };
+      const { data: subscriptions } = await admin
+        .from("subscriptions")
+        .select("id, status, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items")
+        .eq("customer_id", c.id)
+        .order("created_at", { ascending: false });
+
+      customer = { ...c, recent_orders: orders || [], subscriptions: subscriptions || [] };
     }
   }
 

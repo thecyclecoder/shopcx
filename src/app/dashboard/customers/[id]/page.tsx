@@ -69,6 +69,28 @@ interface Order {
   created_at: string;
 }
 
+interface SubscriptionItem {
+  title: string | null;
+  sku: string | null;
+  quantity: number;
+  price_cents: number;
+  selling_plan: string | null;
+}
+
+interface Subscription {
+  id: string;
+  shopify_contract_id?: string;
+  status: string;
+  billing_interval: string | null;
+  billing_interval_count: number | null;
+  next_billing_date: string | null;
+  last_payment_status: string | null;
+  items: SubscriptionItem[];
+  delivery_price_cents: number;
+  created_at: string;
+  updated_at: string;
+}
+
 function formatCents(cents: number, currency = "USD"): string {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -158,6 +180,7 @@ export default function CustomerDetailPage() {
   const router = useRouter();
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [linkedIdentities, setLinkedIdentities] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; is_primary: boolean }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -179,6 +202,7 @@ export default function CustomerDetailPage() {
       const data = await res.json();
       setCustomer(data.customer);
       setOrders(data.orders);
+      setSubscriptions(data.subscriptions || []);
       setLinkedIdentities(data.linked_identities || []);
       setLoading(false);
 
@@ -527,6 +551,61 @@ export default function CustomerDetailPage() {
           </div>
         )}
       </div>
+
+      {/* Subscriptions */}
+      {subscriptions.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+            Subscriptions
+          </h2>
+          <div className="mt-3 space-y-2">
+            {subscriptions.map((sub) => (
+              <div key={sub.id} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                      sub.status === "active" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                      : sub.status === "paused" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                      : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                    }`}>
+                      {sub.status}
+                    </span>
+                    {sub.billing_interval && sub.billing_interval_count && (
+                      <span className="text-xs text-zinc-500">
+                        Every {sub.billing_interval_count} {sub.billing_interval}{sub.billing_interval_count > 1 ? "s" : ""}
+                      </span>
+                    )}
+                  </div>
+                  {sub.last_payment_status && (
+                    <span className={`text-xs ${
+                      sub.last_payment_status === "succeeded" ? "text-emerald-500"
+                      : sub.last_payment_status === "failed" ? "text-red-500"
+                      : "text-zinc-400"
+                    }`}>
+                      {sub.last_payment_status}
+                    </span>
+                  )}
+                </div>
+                {sub.items?.length > 0 && (
+                  <div className="mt-2 space-y-0.5">
+                    {sub.items.map((item, idx) => (
+                      <div key={idx} className="flex justify-between text-xs">
+                        <span className="text-zinc-600 dark:text-zinc-400">{item.quantity}x {item.title}</span>
+                        <span className="text-zinc-400">{formatCents(item.price_cents * item.quantity)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {sub.next_billing_date && (
+                  <p className="mt-1.5 text-[10px] text-zinc-400">
+                    Next billing: {formatDate(sub.next_billing_date)}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Orders */}
       <div className="mt-8">

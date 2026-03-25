@@ -98,7 +98,7 @@ export async function sendTicketReply({
     to: toEmail,
     subject: subject.startsWith("Re:") ? subject : `Re: ${subject}`,
     html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; text-align: left;">
         ${body}
       </div>
     `,

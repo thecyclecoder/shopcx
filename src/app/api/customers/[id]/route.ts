@@ -85,6 +85,13 @@ export async function GET(
     .order("created_at", { ascending: false })
     .limit(20);
 
+  const { data: subscriptions } = await admin
+    .from("subscriptions")
+    .select("id, shopify_contract_id, status, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items, delivery_price_cents, created_at, updated_at")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", linkedCustomerIds)
+    .order("created_at", { ascending: false });
+
   // Compute real LTV and order count from DB (source of truth)
   const { count: realOrderCount } = await admin
     .from("orders")
@@ -127,6 +134,7 @@ export async function GET(
   return NextResponse.json({
     customer,
     orders: orders || [],
+    subscriptions: subscriptions || [],
     linked_identities: linkedIdentities,
     group_id: link?.group_id || null,
   });
