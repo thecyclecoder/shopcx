@@ -186,47 +186,15 @@ export const importSubscriptions = inngest.createFunction(
       totalImported += imported;
     }
 
-    // Finalize: update customer subscription statuses in batches
-    await step.run("finalize-start", async () => {
+    // Bulk update all customer subscription statuses in one SQL query
+    await step.run("finalize", async () => {
       await updateJob({ phase: "finalizing" });
-    });
-
-    // Get count of customers to update
-    let finalizeDone = false;
-    let finalizeOffset = 0;
-    let finalizeStep = 0;
-
-    while (!finalizeDone) {
-      const fi = finalizeStep;
-      const off = finalizeOffset;
-
-      const processed: number = await step.run(`finalize-${fi}`, async () => {
-        const { data: batch } = await admin.from("subscriptions")
-          .select("customer_id")
-          .eq("workspace_id", workspace_id)
-          .not("customer_id", "is", null)
-          .range(off, off + 999);
-        if (!batch || batch.length === 0) return 0;
-
-        const uniqueIds = [...new Set(batch.map(s => s.customer_id as string))];
-        for (const cid of uniqueIds) {
-          const { data: subs } = await admin.from("subscriptions").select("status").eq("customer_id", cid);
-          const hasActive = subs?.some(s => s.status === "active");
-          const hasPaused = subs?.some(s => s.status === "paused");
-          await admin.from("customers").update({
-            subscription_status: hasActive ? "active" : hasPaused ? "paused" : "cancelled",
-          }).eq("id", cid);
-        }
-        return batch.length;
-      });
-
-      if (processed === 0 || processed < 1000) {
-        finalizeDone = true;
-      } else {
-        finalizeOffset += processed;
-        finalizeStep++;
+      try {
+        await admin.rpc("update_customer_subscription_statuses", { ws_id: workspace_id });
+      } catch {
+        console.warn("RPC update_customer_subscription_statuses not available");
       }
-    }
+    });
 
     await step.run("complete", async () => {
       await updateJob({ status: "completed", synced_customers: totalImported, completed_at: new Date().toISOString() });
