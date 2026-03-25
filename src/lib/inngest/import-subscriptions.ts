@@ -37,36 +37,62 @@ export const importSubscriptions = inngest.createFunction(
       await admin.from("sync_jobs").update(updates).eq("id", job_id);
     }
 
-    // Step 1: Count total subs (tiny return value)
-    const totalSubs: number = await step.run("count", async () => {
+    // Step 1: Download CSV, split into chunk files in storage
+    // Returns only totalSubs and chunkCount (tiny data)
+    const splitInfo: { totalSubs: number; chunkCount: number } = await step.run("split", async () => {
       await updateJob({ status: "running", phase: "customers" });
+
       const { data: fileData } = await admin.storage.from("imports").download(file_path);
       if (!fileData) throw new Error("File not found");
       const text = await fileData.text();
       const lines = text.split("\n");
-      const headers = parseCSVLine(lines[0]);
+      const headerLine = lines[0];
+      const headers = parseCSVLine(headerLine);
       const idIdx = headers.findIndex(h => h.trim().toLowerCase() === "id");
-      const ids = new Set<string>();
+
+      // Group rows by sub ID, preserve insertion order
+      const subIds: string[] = [];
+      const subRows = new Map<string, string[]>();
       for (let i = 1; i < lines.length; i++) {
         if (!lines[i].trim()) continue;
         const row = parseCSVLine(lines[i]);
-        if (row[idIdx]) ids.add(row[idIdx]);
+        const subId = row[idIdx];
+        if (!subId) continue;
+        if (!subRows.has(subId)) { subIds.push(subId); subRows.set(subId, []); }
+        subRows.get(subId)!.push(lines[i]);
       }
-      await updateJob({ total_customers: ids.size });
-      return ids.size;
+
+      await updateJob({ total_customers: subIds.length });
+
+      // Split into chunk CSV files
+      const chunkCount = Math.ceil(subIds.length / BATCH_SIZE);
+      const basePath = file_path.replace(".csv", "");
+
+      for (let c = 0; c < chunkCount; c++) {
+        const chunkSubIds = subIds.slice(c * BATCH_SIZE, (c + 1) * BATCH_SIZE);
+        const chunkLines = [headerLine];
+        for (const sid of chunkSubIds) {
+          chunkLines.push(...(subRows.get(sid) || []));
+        }
+        const chunkBlob = new Blob([chunkLines.join("\n")], { type: "text/csv" });
+        await admin.storage.from("imports").upload(`${basePath}-chunk-${c}.csv`, chunkBlob, { upsert: true });
+      }
+
+      return { totalSubs: subIds.length, chunkCount };
     });
 
-    // Step 2+: Process batches — each step re-downloads CSV, processes its slice
-    const totalBatches = Math.ceil(totalSubs / BATCH_SIZE);
+    // Step 2+: Process each chunk file
     let totalImported = 0;
 
-    for (let bi = 0; bi < totalBatches; bi++) {
-      const batchIdx = bi;
+    for (let ci = 0; ci < splitInfo.chunkCount; ci++) {
+      const chunkIdx = ci;
+      const basePath = file_path.replace(".csv", "");
+      const chunkPath = `${basePath}-chunk-${chunkIdx}.csv`;
 
-      const imported: number = await step.run(`batch-${batchIdx}`, async () => {
-        const { data: fileData } = await admin.storage.from("imports").download(file_path);
-        if (!fileData) return 0;
-        const text = await fileData.text();
+      const imported: number = await step.run(`batch-${chunkIdx}`, async () => {
+        const { data: chunkData } = await admin.storage.from("imports").download(chunkPath);
+        if (!chunkData) return 0;
+        const text = await chunkData.text();
         const lines = text.split("\n");
         const headers = parseCSVLine(lines[0]);
 
@@ -79,25 +105,21 @@ export const importSubscriptions = inngest.createFunction(
         const lineVariantIdx = col("Line variant ID"), linePlanNameIdx = col("Line selling plan name");
         const shippingPriceIdx = col("Shipping Price");
 
-        // Group rows by sub ID, get this batch's slice
-        const subIds: string[] = [];
+        // Group rows by sub ID
         const subRows = new Map<string, string[][]>();
         for (let i = 1; i < lines.length; i++) {
           if (!lines[i].trim()) continue;
           const row = parseCSVLine(lines[i]);
           const subId = row[idIdx];
           if (!subId) continue;
-          if (!subRows.has(subId)) { subIds.push(subId); subRows.set(subId, []); }
+          if (!subRows.has(subId)) subRows.set(subId, []);
           subRows.get(subId)!.push(row);
         }
 
-        const batchSubIds = subIds.slice(batchIdx * BATCH_SIZE, (batchIdx + 1) * BATCH_SIZE);
-        if (batchSubIds.length === 0) return 0;
-
-        // Targeted customer lookup for this batch
+        // Targeted customer lookup
         const emails = new Set<string>();
-        for (const sid of batchSubIds) {
-          const e = subRows.get(sid)![0][emailIdx]?.toLowerCase()?.trim();
+        for (const rows of subRows.values()) {
+          const e = rows[0][emailIdx]?.toLowerCase()?.trim();
           if (e) emails.add(e);
         }
         const custMap = new Map<string, string>();
@@ -110,8 +132,7 @@ export const importSubscriptions = inngest.createFunction(
         }
 
         let count = 0;
-        for (const subId of batchSubIds) {
-          const rows = subRows.get(subId)!;
+        for (const [subId, rows] of subRows) {
           const firstRow = rows[0];
           const email = firstRow[emailIdx]?.toLowerCase()?.trim();
           if (!email) continue;
@@ -131,8 +152,7 @@ export const importSubscriptions = inngest.createFunction(
           })).filter(i => i.title);
 
           const { error } = await admin.from("subscriptions").upsert({
-            workspace_id, customer_id: customerId, shopify_contract_id: subId,
-            status,
+            workspace_id, customer_id: customerId, shopify_contract_id: subId, status,
             billing_interval: firstRow[intervalTypeIdx]?.toLowerCase()?.trim() || null,
             billing_interval_count: parseInt(firstRow[intervalCountIdx]) || null,
             next_billing_date: firstRow[nextOrderIdx]?.trim() || null,
@@ -141,7 +161,6 @@ export const importSubscriptions = inngest.createFunction(
             delivery_price_cents: Math.round(parseFloat(firstRow[shippingPriceIdx] || "0") * 100),
             updated_at: new Date().toISOString(),
           }, { onConflict: "workspace_id,shopify_contract_id" });
-
           if (!error) count++;
 
           if (customerId) {
@@ -154,6 +173,7 @@ export const importSubscriptions = inngest.createFunction(
           }
         }
 
+        // Update progress
         await updateJob({ synced_customers: totalImported + count });
         return count;
       });
@@ -161,9 +181,8 @@ export const importSubscriptions = inngest.createFunction(
       totalImported += imported;
     }
 
-    // Cleanup
+    // Mark complete (keep files for now — can clean up manually)
     await step.run("complete", async () => {
-      await admin.storage.from("imports").remove([file_path]);
       await updateJob({ status: "completed", synced_customers: totalImported, completed_at: new Date().toISOString() });
     });
 
