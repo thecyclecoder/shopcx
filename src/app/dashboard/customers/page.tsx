@@ -105,22 +105,18 @@ export default function CustomersPage() {
     fetchCustomers();
   }, [fetchCustomers]);
 
-  // Check for existing sync on mount — skip completed/failed jobs that were dismissed
+  // Check for existing sync on mount — only show if still running
   useEffect(() => {
     fetch(`/api/workspaces/${workspace.id}/sync`)
       .then((res) => res.json())
       .then((job) => {
         if (!job) return;
-        const dismissed = sessionStorage.getItem("dismissed_sync_jobs");
-        const dismissedIds = dismissed ? JSON.parse(dismissed) as string[] : [];
-        if (dismissedIds.includes(job.id)) return;
+        // Only auto-show jobs that are still in progress
         if (job.status === "pending" || job.status === "running") {
           setSyncJob(job);
           startPolling(job.id);
-        } else if (job.status === "failed") {
-          setSyncJob(job);
         }
-        // Don't auto-show completed jobs on mount — only show if polling caught the transition
+        // Completed/failed jobs only appear if polling catches the transition live
       });
     return () => stopPolling();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -312,13 +308,7 @@ export default function CustomersPage() {
           )}
           {(syncJob.status === "completed" || syncJob.status === "failed") && (
             <button
-              onClick={() => {
-                const dismissed = sessionStorage.getItem("dismissed_sync_jobs");
-                const ids = dismissed ? JSON.parse(dismissed) as string[] : [];
-                if (!ids.includes(syncJob.id)) ids.push(syncJob.id);
-                sessionStorage.setItem("dismissed_sync_jobs", JSON.stringify(ids));
-                setSyncJob(null);
-              }}
+              onClick={() => setSyncJob(null)}
               className="mt-2 text-xs text-zinc-400 hover:text-zinc-600"
             >
               Dismiss
