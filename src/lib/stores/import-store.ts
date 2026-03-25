@@ -93,8 +93,14 @@ export const useImportStore = create<ImportStore>()(
       },
 
       dismiss: () => {
-        set({ dismissed: true });
         get().stopPolling();
+        set({
+          activeJobId: null,
+          workspaceId: null,
+          job: null,
+          dismissed: true,
+          _pollInterval: null,
+        });
       },
 
       clear: () => {
