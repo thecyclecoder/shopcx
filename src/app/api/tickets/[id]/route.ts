@@ -67,10 +67,10 @@ export async function GET(
     if (c) {
       const { data: orders } = await admin
         .from("orders")
-        .select("id, order_number, total_cents, financial_status, created_at")
+        .select("id, order_number, total_cents, currency, financial_status, fulfillment_status, source_name, order_type, line_items, fulfillments, created_at")
         .eq("customer_id", c.id)
         .order("created_at", { ascending: false })
-        .limit(5);
+        .limit(10);
 
       customer = { ...c, recent_orders: orders || [] };
     }

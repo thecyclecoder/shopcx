@@ -108,6 +108,28 @@ function RetentionBadge({ score }: { score: number }) {
   );
 }
 
+interface CustomerEvent {
+  id: string;
+  event_type: string;
+  source: string;
+  summary: string | null;
+  properties: Record<string, unknown>;
+  created_at: string;
+}
+
+const EVENT_ICONS: Record<string, { icon: string; color: string }> = {
+  "order.created": { icon: "M2.25 3h1.386c.51 0 .955.343 1.087.835l.383 1.437M7.5 14.25a3 3 0 00-3 3h15.75m-12.75-3h11.218c1.121-2.3 2.1-4.684 2.924-7.138a60.114 60.114 0 00-16.536-1.84M7.5 14.25L5.106 5.272M6 20.25a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm12.75 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0z", color: "text-emerald-500" },
+  "customer.updated": { icon: "M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0", color: "text-blue-500" },
+  "ticket.created": { icon: "M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75", color: "text-indigo-500" },
+  "subscription.created": { icon: "M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 00-3.7-3.7 48.678 48.678 0 00-7.324 0 4.006 4.006 0 00-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3l-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 003.7 3.7 48.656 48.656 0 007.324 0 4.006 4.006 0 003.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3l-3 3", color: "text-violet-500" },
+  "subscription.cancelled": { icon: "M6 18L18 6M6 6l12 12", color: "text-red-500" },
+  "subscription.paused": { icon: "M15.75 5.25v13.5m-7.5-13.5v13.5", color: "text-amber-500" },
+  "subscription.activated": { icon: "M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z", color: "text-emerald-500" },
+  "subscription.billing-failure": { icon: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z", color: "text-red-500" },
+  "subscription.billing-skipped": { icon: "M3 8.688c0-.864.933-1.405 1.683-.977l7.108 4.062a1.125 1.125 0 010 1.953l-7.108 4.062A1.125 1.125 0 013 16.81V8.688zM12.75 8.688c0-.864.933-1.405 1.683-.977l7.108 4.062a1.125 1.125 0 010 1.953l-7.108 4.062a1.125 1.125 0 01-1.683-.977V8.688z", color: "text-amber-500" },
+  "subscription.billing-success": { icon: "M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z", color: "text-emerald-500" },
+};
+
 function StatusBadge({ status }: { status: string | null }) {
   if (!status) return <span className="text-sm text-zinc-400">--</span>;
   const map: Record<string, string> = {
@@ -144,6 +166,7 @@ export default function CustomerDetailPage() {
   const [linkMessage, setLinkMessage] = useState("");
   const [suggestions, setSuggestions] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; phone: string | null; match_reason: string }[]>([]);
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
+  const [events, setEvents] = useState<CustomerEvent[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -166,6 +189,9 @@ export default function CustomerDetailPage() {
       fetch(`/api/customers/${id}/payment-methods`)
         .then((r) => r.json())
         .then((p) => setPaymentMethods(p.payment_methods || []));
+      fetch(`/api/customers/${id}/events`)
+        .then((r) => r.json())
+        .then((e) => { if (Array.isArray(e)) setEvents(e); });
     }
     load();
   }, [id]);
@@ -662,6 +688,47 @@ export default function CustomerDetailPage() {
           </table>
         </div>
       </div>
+
+      {/* Timeline */}
+      {events.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Timeline</h2>
+          <div className="mt-3 space-y-0">
+            {events.map((evt, idx) => {
+              const iconInfo = EVENT_ICONS[evt.event_type] || { icon: "M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z", color: "text-zinc-400" };
+              return (
+                <div key={evt.id} className="flex gap-3">
+                  {/* Timeline line + icon */}
+                  <div className="flex flex-col items-center">
+                    <div className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 ${iconInfo.color}`}>
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d={iconInfo.icon} />
+                      </svg>
+                    </div>
+                    {idx < events.length - 1 && (
+                      <div className="w-px flex-1 bg-zinc-200 dark:bg-zinc-700" />
+                    )}
+                  </div>
+                  {/* Content */}
+                  <div className="pb-6">
+                    <p className="text-sm text-zinc-900 dark:text-zinc-100">
+                      {evt.summary || evt.event_type}
+                    </p>
+                    <p className="mt-0.5 text-xs text-zinc-400">
+                      {new Date(evt.created_at).toLocaleString("en-US", {
+                        month: "short", day: "numeric", year: "numeric",
+                        hour: "numeric", minute: "2-digit",
+                      })}
+                      {" · "}
+                      <span className="capitalize">{evt.source}</span>
+                    </p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

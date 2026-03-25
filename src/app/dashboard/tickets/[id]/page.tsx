@@ -12,6 +12,33 @@ interface Member {
   email: string | null;
 }
 
+interface OrderLineItem {
+  title: string;
+  quantity: number;
+  price_cents: number;
+  sku: string | null;
+}
+
+interface OrderFulfillment {
+  trackingInfo: { number: string; url: string | null; company: string | null }[];
+  status: string | null;
+  createdAt: string | null;
+}
+
+interface RecentOrder {
+  id: string;
+  order_number: string | null;
+  total_cents: number;
+  currency: string;
+  financial_status: string | null;
+  fulfillment_status: string | null;
+  source_name: string | null;
+  order_type: string | null;
+  line_items: OrderLineItem[];
+  fulfillments: OrderFulfillment[];
+  created_at: string;
+}
+
 interface CustomerDetail {
   id: string;
   email: string;
@@ -22,13 +49,7 @@ interface CustomerDetail {
   ltv_cents: number;
   total_orders: number;
   subscription_status: string;
-  recent_orders: {
-    id: string;
-    order_number: string | null;
-    total_cents: number;
-    financial_status: string | null;
-    created_at: string;
-  }[];
+  recent_orders: RecentOrder[];
 }
 
 interface TicketDetail extends Ticket {
@@ -125,6 +146,7 @@ export default function TicketDetailPage() {
   const [replyBody, setReplyBody] = useState("");
   const [replyMode, setReplyMode] = useState<"external" | "internal">("external");
   const [sending, setSending] = useState(false);
+  const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -472,10 +494,62 @@ export default function TicketDetailPage() {
                   <p className="text-xs font-medium text-zinc-500">Recent Orders</p>
                   <div className="mt-1 space-y-1">
                     {customer.recent_orders.map((o) => (
-                      <div key={o.id} className="flex items-center justify-between rounded bg-zinc-50 px-2 py-1 text-xs dark:bg-zinc-800">
-                        <span className="text-zinc-700 dark:text-zinc-300">#{o.order_number || "--"}</span>
-                        <span className="text-zinc-500">{formatCents(o.total_cents)}</span>
-                        <span className="text-zinc-400">{formatDate(o.created_at)}</span>
+                      <div key={o.id}>
+                        <button
+                          onClick={() => setExpandedOrderId(expandedOrderId === o.id ? null : o.id)}
+                          className="flex w-full items-center justify-between rounded bg-zinc-50 px-2 py-1.5 text-xs transition-colors hover:bg-zinc-100 dark:bg-zinc-800 dark:hover:bg-zinc-700"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <svg className={`h-3 w-3 text-zinc-400 transition-transform ${expandedOrderId === o.id ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                            </svg>
+                            <span className="font-medium text-zinc-700 dark:text-zinc-300">#{o.order_number || "--"}</span>
+                            {o.order_type === "recurring" && <span className="rounded bg-violet-100 px-1 py-0.5 text-[9px] font-medium text-violet-600 dark:bg-violet-900/30 dark:text-violet-400">Recurring</span>}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-zinc-500">{formatCents(o.total_cents)}</span>
+                            <span className="text-zinc-400">{formatDate(o.created_at)}</span>
+                          </div>
+                        </button>
+                        {expandedOrderId === o.id && (
+                          <div className="mt-1 rounded border border-zinc-200 bg-white p-2 text-xs dark:border-zinc-700 dark:bg-zinc-900">
+                            <div className="flex gap-2 text-zinc-400">
+                              {o.financial_status && <span className="capitalize">{o.financial_status}</span>}
+                              {o.fulfillment_status && <span className="capitalize">{o.fulfillment_status}</span>}
+                              {o.source_name && <span>{o.source_name}</span>}
+                            </div>
+                            {/* Fulfillments */}
+                            {o.fulfillments?.length > 0 && (
+                              <div className="mt-1.5 space-y-1">
+                                {o.fulfillments.map((f, fi) => (
+                                  <div key={fi}>
+                                    {f.trackingInfo?.map((t, ti) => (
+                                      <div key={ti} className="flex items-center gap-1">
+                                        {t.company && <span className="text-zinc-400">{t.company}:</span>}
+                                        {t.url ? (
+                                          <a href={t.url} target="_blank" rel="noopener noreferrer" className="font-mono text-indigo-600 hover:underline dark:text-indigo-400">{t.number}</a>
+                                        ) : (
+                                          <span className="font-mono">{t.number}</span>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {/* Line items */}
+                            {o.line_items?.length > 0 && (
+                              <div className="mt-1.5 space-y-0.5">
+                                {o.line_items.map((li, idx) => (
+                                  <div key={idx} className="flex justify-between">
+                                    <span className="text-zinc-600 dark:text-zinc-400">{li.quantity}× {li.title}</span>
+                                    <span className="text-zinc-400">{formatCents(li.price_cents * li.quantity)}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
