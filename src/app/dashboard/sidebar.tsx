@@ -12,6 +12,7 @@ interface TicketView {
   name: string;
   filters: Record<string, string>;
   parent_id: string | null;
+  count: number | null;
 }
 
 const NAV_ITEMS = [
@@ -128,20 +129,34 @@ export default function Sidebar({
                   const isViewActive = pathname === "/dashboard/tickets" && currentViewId === view.id;
                   const subs = indent === 0 ? children(view.id) : grandChildren(view.id);
                   const isFolder = subs.length > 0;
+                  const countLabel = view.count != null
+                    ? view.count > 99 ? "99+" : String(view.count)
+                    : null;
 
                   return (
                     <div>
                       {hasFilters ? (
                         <Link
                           href={viewHref}
-                          className={`block rounded px-2 py-1 text-xs transition-colors ${
+                          className={`flex items-center justify-between rounded px-2 py-1 text-xs transition-colors ${
                             isViewActive
                               ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
                               : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
                           }`}
                         >
-                          {isFolder && <span className="mr-1 text-zinc-400">&#9662;</span>}
-                          {view.name}
+                          <span>
+                            {isFolder && <span className="mr-1 text-zinc-400">&#9662;</span>}
+                            {view.name}
+                          </span>
+                          {countLabel && (
+                            <span className={`ml-1 rounded-full px-1.5 py-0.5 text-[9px] font-medium tabular-nums ${
+                              isViewActive
+                                ? "bg-indigo-100 text-indigo-600 dark:bg-indigo-900 dark:text-indigo-300"
+                                : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"
+                            }`}>
+                              {countLabel}
+                            </span>
+                          )}
                         </Link>
                       ) : (
                         <span className="block px-2 py-1 text-xs font-medium text-zinc-400 dark:text-zinc-500">

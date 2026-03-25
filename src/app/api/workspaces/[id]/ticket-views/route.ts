@@ -20,7 +20,28 @@ export async function GET(
     .eq("workspace_id", workspaceId)
     .order("sort_order", { ascending: true });
 
-  return NextResponse.json(views || []);
+  // Compute ticket counts for each view (capped at 100 for performance)
+  const enriched = await Promise.all((views || []).map(async (view) => {
+    const filters = (view.filters || {}) as Record<string, string>;
+    if (Object.keys(filters).length === 0) return { ...view, count: null };
+
+    let query = admin
+      .from("tickets")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId);
+
+    if (filters.status) query = query.eq("status", filters.status);
+    if (filters.channel) query = query.eq("channel", filters.channel);
+    if (filters.assigned_to) query = query.eq("assigned_to", filters.assigned_to);
+    if (filters.tag) query = query.contains("tags", [filters.tag]);
+    if (filters.search) query = query.ilike("subject", `%${filters.search}%`);
+
+    query = query.limit(100);
+    const { count } = await query;
+    return { ...view, count: count ?? 0 };
+  }));
+
+  return NextResponse.json(enriched);
 }
 
 export async function POST(
