@@ -1092,22 +1092,15 @@ export async function preloadCustomerMaps(workspaceId: string): Promise<{
 export async function syncOrderBatch(
   workspaceId: string,
   cursor: string | null,
-  customerMaps?: { byShopifyId: Record<string, string>; byEmail: Record<string, string> },
 ): Promise<{ synced: number; nextCursor: string | null; hasMore: boolean }> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const admin = createAdminClient();
 
-  // Use provided maps or preload (fallback for callers that don't pass maps)
-  let maps = customerMaps;
-  if (!maps) {
-    maps = await preloadCustomerMaps(workspaceId);
-  }
-  const customerByShopifyId = maps.byShopifyId;
-  const customerByEmail = maps.byEmail;
-
+  // First, fetch all order pages for this batch
   let currentCursor = cursor;
   let totalSynced = 0;
   let hasMore = true;
+  const allEdges: { cursor: string; node: Record<string, unknown> }[] = [];
 
   for (let page = 0; page < ORDER_PAGES_PER_BATCH && hasMore; page++) {
     const afterClause = currentCursor ? `, after: "${currentCursor}"` : "";
@@ -1142,60 +1135,104 @@ export async function syncOrderBatch(
 
     const edges = result.edges || [];
     if (edges.length === 0) { hasMore = false; break; }
-
-    const records = edges.map((edge) => {
-      const o = edge.node;
-      const shopifyOrderId = extractShopifyId(o.id as string);
-      const orderEmail = ((o.email as string) || "").toLowerCase();
-      const custGid = (o.customer as { id?: string })?.id;
-      const shopifyCustomerId = custGid ? extractShopifyId(custGid) : null;
-
-      let customerId: string | null = null;
-      if (shopifyCustomerId) customerId = customerByShopifyId[shopifyCustomerId] || null;
-      if (!customerId && orderEmail) customerId = customerByEmail[orderEmail] || null;
-
-      const lineItemEdges = (o.lineItems as { edges: { node: Record<string, unknown> }[] })?.edges || [];
-      const lineItems = lineItemEdges.map((li) => ({
-        title: li.node.title,
-        quantity: li.node.quantity,
-        price_cents: dollarsToCents(
-          (li.node.originalUnitPriceSet as { shopMoney?: { amount?: string } })?.shopMoney?.amount
-        ),
-        sku: li.node.sku || null,
-      }));
-
-      const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
-
-      return {
-        workspace_id: workspaceId,
-        shopify_order_id: shopifyOrderId,
-        shopify_customer_id: shopifyCustomerId,
-        customer_id: customerId,
-        order_number: (o.name as string) || null,
-        email: orderEmail || null,
-        total_cents: dollarsToCents(priceSet?.shopMoney?.amount),
-        currency: priceSet?.shopMoney?.currencyCode || "USD",
-        financial_status: (o.displayFinancialStatus as string) || null,
-        fulfillment_status: (o.displayFulfillmentStatus as string) || null,
-        line_items: lineItems,
-        source_name: (o.sourceName as string) || null,
-        tags: (o.tags as string[])?.join(", ") || null,
-        fulfillments: (o.fulfillments as unknown[]) || [],
-        created_at: (o.createdAt as string) || new Date().toISOString(),
-      };
-    });
-
-    for (let i = 0; i < records.length; i += UPSERT_BATCH) {
-      const batch = records.slice(i, i + UPSERT_BATCH);
-      const { error } = await admin
-        .from("orders")
-        .upsert(batch, { onConflict: "workspace_id,shopify_order_id" });
-      if (!error) totalSynced += batch.length;
-      else console.error("Order batch upsert error:", error.message);
-    }
-
+    allEdges.push(...edges);
     currentCursor = edges[edges.length - 1].cursor;
     hasMore = result.pageInfo.hasNextPage;
+  }
+
+  if (allEdges.length === 0) {
+    return { synced: 0, nextCursor: null, hasMore: false };
+  }
+
+  // Collect unique customer IDs and emails from this batch's orders
+  const shopifyIds = new Set<string>();
+  const emails = new Set<string>();
+  for (const edge of allEdges) {
+    const o = edge.node;
+    const custGid = (o.customer as { id?: string })?.id;
+    if (custGid) shopifyIds.add(extractShopifyId(custGid));
+    const email = ((o.email as string) || "").toLowerCase();
+    if (email) emails.add(email);
+  }
+
+  // Targeted customer lookup — only the customers referenced by these orders
+  const customerByShopifyId: Record<string, string> = {};
+  const customerByEmail: Record<string, string> = {};
+  const idArr = [...shopifyIds];
+  for (let i = 0; i < idArr.length; i += 100) {
+    const { data: custs } = await admin.from("customers")
+      .select("id, shopify_customer_id, email")
+      .eq("workspace_id", workspaceId)
+      .in("shopify_customer_id", idArr.slice(i, i + 100));
+    for (const c of custs || []) {
+      if (c.shopify_customer_id) customerByShopifyId[c.shopify_customer_id] = c.id;
+      if (c.email) customerByEmail[c.email.toLowerCase()] = c.id;
+    }
+  }
+  // Also look up by email for orders without a shopify customer ID
+  const remainingEmails = [...emails].filter(e => !Object.values(customerByEmail).length || !customerByEmail[e]);
+  for (let i = 0; i < remainingEmails.length; i += 100) {
+    const { data: custs } = await admin.from("customers")
+      .select("id, shopify_customer_id, email")
+      .eq("workspace_id", workspaceId)
+      .in("email", remainingEmails.slice(i, i + 100));
+    for (const c of custs || []) {
+      if (c.shopify_customer_id) customerByShopifyId[c.shopify_customer_id] = c.id;
+      if (c.email) customerByEmail[c.email.toLowerCase()] = c.id;
+    }
+  }
+
+  // Build order records with customer lookups
+  const records = allEdges.map((edge) => {
+    const o = edge.node;
+    const shopifyOrderId = extractShopifyId(o.id as string);
+    const orderEmail = ((o.email as string) || "").toLowerCase();
+    const custGid = (o.customer as { id?: string })?.id;
+    const shopifyCustomerId = custGid ? extractShopifyId(custGid) : null;
+
+    let customerId: string | null = null;
+    if (shopifyCustomerId) customerId = customerByShopifyId[shopifyCustomerId] || null;
+    if (!customerId && orderEmail) customerId = customerByEmail[orderEmail] || null;
+
+    const lineItemEdges = (o.lineItems as { edges: { node: Record<string, unknown> }[] })?.edges || [];
+    const lineItems = lineItemEdges.map((li) => ({
+      title: li.node.title,
+      quantity: li.node.quantity,
+      price_cents: dollarsToCents(
+        (li.node.originalUnitPriceSet as { shopMoney?: { amount?: string } })?.shopMoney?.amount
+      ),
+      sku: li.node.sku || null,
+    }));
+
+    const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
+
+    return {
+      workspace_id: workspaceId,
+      shopify_order_id: shopifyOrderId,
+      shopify_customer_id: shopifyCustomerId,
+      customer_id: customerId,
+      order_number: (o.name as string) || null,
+      email: orderEmail || null,
+      total_cents: dollarsToCents(priceSet?.shopMoney?.amount),
+      currency: priceSet?.shopMoney?.currencyCode || "USD",
+      financial_status: (o.displayFinancialStatus as string) || null,
+      fulfillment_status: (o.displayFulfillmentStatus as string) || null,
+      line_items: lineItems,
+      source_name: (o.sourceName as string) || null,
+      tags: (o.tags as string[])?.join(", ") || null,
+      fulfillments: (o.fulfillments as unknown[]) || [],
+      created_at: (o.createdAt as string) || new Date().toISOString(),
+    };
+  });
+
+  // Batch upsert
+  for (let i = 0; i < records.length; i += UPSERT_BATCH) {
+    const batch = records.slice(i, i + UPSERT_BATCH);
+    const { error } = await admin
+      .from("orders")
+      .upsert(batch, { onConflict: "workspace_id,shopify_order_id" });
+    if (!error) totalSynced += batch.length;
+    else console.error("Order batch upsert error:", error.message);
   }
 
   return { synced: totalSynced, nextCursor: hasMore ? currentCursor : null, hasMore };
