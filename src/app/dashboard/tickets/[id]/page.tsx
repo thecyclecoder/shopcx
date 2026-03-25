@@ -167,6 +167,8 @@ export default function TicketDetailPage() {
   const [activeTab, setActiveTab] = useState<"messages" | "history">("messages");
   const [customerEvents, setCustomerEvents] = useState<{ id: string; event_type: string; source: string; summary: string; created_at: string }[]>([]);
   const [closeWithReply, setCloseWithReply] = useState(true);
+  const [editorFocused, setEditorFocused] = useState(false);
+  const editorRef = useRef<HTMLDivElement>(null);
   const [tagInput, setTagInput] = useState("");
   const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
   const [showTagDropdown, setShowTagDropdown] = useState(false);
@@ -239,16 +241,26 @@ export default function TicketDetailPage() {
     }
   };
 
+  const getEditorContent = () => {
+    return editorRef.current?.innerHTML || replyBody;
+  };
+
+  const isEditorEmpty = () => {
+    const text = editorRef.current?.textContent?.trim() || replyBody.trim();
+    return !text;
+  };
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!replyBody.trim()) return;
+    const body = getEditorContent();
+    if (!body || isEditorEmpty()) return;
     setSending(true);
     try {
       const res = await fetch(`/api/tickets/${id}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          body: replyBody,
+          body,
           visibility: replyMode,
         }),
       });
@@ -260,6 +272,8 @@ export default function TicketDetailPage() {
           : data.message;
         setMessages((prev) => [...prev, msg]);
         setReplyBody("");
+        if (editorRef.current) editorRef.current.innerHTML = "";
+        setEditorFocused(false);
 
         // Close ticket if "close with reply" is checked and this is an external reply
         if (closeWithReply && replyMode === "external") {
@@ -530,9 +544,10 @@ export default function TicketDetailPage() {
         </div>
 
         {/* Reply composer — pinned to bottom */}
-        <div className="shrink-0 border-t border-zinc-200 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900">
-          <form onSubmit={handleSend} className="flex items-end gap-2">
-            <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className={`shrink-0 border-t border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 ${editorFocused ? "px-3 py-3" : "px-3 py-2"}`}>
+          <form onSubmit={handleSend}>
+            {/* Mode toggle row */}
+            <div className="mb-1.5 flex items-center justify-between">
               <div className="flex gap-1">
                 <button
                   type="button"
@@ -557,32 +572,115 @@ export default function TicketDetailPage() {
                   Note
                 </button>
               </div>
-              <textarea
-                rows={1}
-                value={replyBody}
-                onChange={(e) => setReplyBody(e.target.value)}
-                placeholder={replyMode === "external" ? "Type your reply..." : "Internal note..."}
-                className="w-full resize-none rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-              />
-              {replyMode === "external" && (
-                <label className="flex items-center gap-1.5 text-[10px] text-zinc-500">
-                  <input
-                    type="checkbox"
-                    checked={closeWithReply}
-                    onChange={(e) => setCloseWithReply(e.target.checked)}
-                    className="h-3 w-3 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
-                  />
-                  Close with reply
-                </label>
+              {!editorFocused && (
+                <button
+                  type="submit"
+                  disabled={sending}
+                  className="shrink-0 rounded-md bg-indigo-600 px-3 py-1 text-[10px] font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  {sending ? "..." : closeWithReply && replyMode === "external" ? "Send & Close" : "Send"}
+                </button>
               )}
             </div>
-            <button
-              type="submit"
-              disabled={sending || !replyBody.trim()}
-              className="shrink-0 rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
-            >
-              {sending ? "..." : sandboxMode && !emailLive && replyMode === "external" ? "Send (Sandbox)" : closeWithReply && replyMode === "external" ? "Send & Close" : "Send"}
-            </button>
+
+            {/* Formatting toolbar — only when expanded */}
+            {editorFocused && (
+              <div className="mb-1.5 flex items-center gap-0.5 border-b border-zinc-200 pb-1.5 dark:border-zinc-700">
+                {[
+                  { cmd: "bold", icon: "B", cls: "font-bold" },
+                  { cmd: "italic", icon: "I", cls: "italic" },
+                  { cmd: "underline", icon: "U", cls: "underline" },
+                ].map(({ cmd, icon, cls }) => (
+                  <button
+                    key={cmd}
+                    type="button"
+                    onMouseDown={(e) => { e.preventDefault(); document.execCommand(cmd); }}
+                    className={`rounded px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 ${cls}`}
+                  >
+                    {icon}
+                  </button>
+                ))}
+                <div className="mx-1 h-3 w-px bg-zinc-200 dark:bg-zinc-700" />
+                <button
+                  type="button"
+                  onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertUnorderedList"); }}
+                  className="rounded px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  title="Bullet list"
+                >
+                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertOrderedList"); }}
+                  className="rounded px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  title="Numbered list"
+                >
+                  1.
+                </button>
+                <button
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    const url = prompt("Enter URL:");
+                    if (url) document.execCommand("createLink", false, url);
+                  }}
+                  className="rounded px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  title="Insert link"
+                >
+                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                  </svg>
+                </button>
+              </div>
+            )}
+
+            {/* Editor */}
+            <div
+              ref={editorRef}
+              contentEditable
+              suppressContentEditableWarning
+              onFocus={() => setEditorFocused(true)}
+              onInput={() => setReplyBody(editorRef.current?.textContent || "")}
+              data-placeholder={replyMode === "external" ? "Type your reply..." : "Internal note..."}
+              className={`w-full rounded-md border border-zinc-300 bg-white text-sm text-zinc-900 placeholder-zinc-400 outline-none transition-all focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 ${
+                editorFocused ? "min-h-[120px] px-3 py-2" : "min-h-[32px] px-2.5 py-1.5"
+              } empty:before:pointer-events-none empty:before:text-zinc-400 empty:before:content-[attr(data-placeholder)]`}
+            />
+
+            {/* Bottom row — only when expanded */}
+            {editorFocused && (
+              <div className="mt-1.5 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  {replyMode === "external" && (
+                    <label className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                      <input
+                        type="checkbox"
+                        checked={closeWithReply}
+                        onChange={(e) => setCloseWithReply(e.target.checked)}
+                        className="h-3 w-3 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      Close with reply
+                    </label>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => { setEditorFocused(false); if (editorRef.current && !editorRef.current.textContent?.trim()) editorRef.current.innerHTML = ""; }}
+                    className="text-[10px] text-zinc-400 hover:text-zinc-600"
+                  >
+                    Collapse
+                  </button>
+                </div>
+                <button
+                  type="submit"
+                  disabled={sending || isEditorEmpty()}
+                  className="rounded-md bg-indigo-600 px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  {sending ? "Sending..." : sandboxMode && !emailLive && replyMode === "external" ? "Send (Sandbox)" : closeWithReply && replyMode === "external" ? "Send & Close" : "Send"}
+                </button>
+              </div>
+            )}
           </form>
         </div>
       </div>
