@@ -88,7 +88,7 @@ export async function matchPatterns(
           patternId: pattern.id,
           category: pattern.category,
           name: pattern.name,
-          autoTag: pattern.auto_tag,
+          autoTag: pattern.auto_tag ? `smart:${pattern.auto_tag}` : null,
           autoAction: pattern.auto_action,
           matchedPhrase: phrase,
         };

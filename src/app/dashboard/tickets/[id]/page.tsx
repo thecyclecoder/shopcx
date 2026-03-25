@@ -177,6 +177,8 @@ export default function TicketDetailPage() {
   const [patternSuggestion, setPatternSuggestion] = useState<{
     category: string; category_name: string; phrases: string[]; auto_tag: string; reasoning: string;
   } | null>(null);
+  const [removingSmartTag, setRemovingSmartTag] = useState<string | null>(null);
+  const [feedbackReason, setFeedbackReason] = useState("");
 
   useEffect(() => {
     async function load() {
@@ -374,18 +376,32 @@ export default function TicketDetailPage() {
 
           {/* Tags */}
           <div className="mt-2 flex flex-wrap items-center gap-1">
-            {(ticket.tags || []).map((tag) => (
-              <span key={tag} className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
-                {tag}
-                <button
-                  onClick={async () => {
-                    const tags = (ticket.tags || []).filter(t => t !== tag);
-                    await handlePatch({ tags });
-                  }}
-                  className="ml-0.5 text-indigo-400 hover:text-indigo-600"
-                >x</button>
-              </span>
-            ))}
+            {(ticket.tags || []).map((tag) => {
+              const isSmart = tag.startsWith("smart:");
+              const displayTag = isSmart ? tag.slice(6) : tag;
+              return (
+                <span key={tag} className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                  isSmart
+                    ? "bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
+                    : "bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400"
+                }`}>
+                  {isSmart && <svg className="mr-0.5 h-2.5 w-2.5" fill="currentColor" viewBox="0 0 20 20"><path d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" /></svg>}
+                  {displayTag}
+                  <button
+                    onClick={async () => {
+                      if (isSmart) {
+                        setRemovingSmartTag(tag);
+                        setFeedbackReason("");
+                        return;
+                      }
+                      const tags = (ticket.tags || []).filter(t => t !== tag);
+                      await handlePatch({ tags });
+                    }}
+                    className={`ml-0.5 ${isSmart ? "text-violet-400 hover:text-violet-600" : "text-indigo-400 hover:text-indigo-600"}`}
+                  >x</button>
+                </span>
+              );
+            })}
             <div className="relative inline-flex">
               <form onSubmit={async (e) => {
                 e.preventDefault();
@@ -451,6 +467,58 @@ export default function TicketDetailPage() {
               })()}
             </div>
           </div>
+
+          {/* Smart tag removal feedback */}
+          {removingSmartTag && (
+            <div className="mt-2 rounded-md border border-violet-200 bg-violet-50 p-3 dark:border-violet-800 dark:bg-violet-950">
+              <p className="text-xs font-medium text-violet-700 dark:text-violet-300">
+                Why are you removing &ldquo;{removingSmartTag.slice(6)}&rdquo;?
+              </p>
+              <textarea
+                rows={2}
+                value={feedbackReason}
+                onChange={(e) => setFeedbackReason(e.target.value)}
+                placeholder="e.g. This ticket is about a refund, not tracking..."
+                className="mt-1.5 w-full rounded-md border border-violet-300 bg-white px-2 py-1 text-xs text-zinc-900 dark:border-violet-700 dark:bg-zinc-800 dark:text-zinc-100"
+              />
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={async () => {
+                    // Submit feedback + remove tag
+                    await fetch(`/api/tickets/${id}/tag-feedback`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ tag: removingSmartTag, reason: feedbackReason }),
+                    });
+                    const tags = (ticket.tags || []).filter(t => t !== removingSmartTag);
+                    await handlePatch({ tags });
+                    setRemovingSmartTag(null);
+                    setFeedbackReason("");
+                  }}
+                  className="rounded bg-violet-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-violet-500"
+                >
+                  Submit & Remove
+                </button>
+                <button
+                  onClick={async () => {
+                    // Remove without feedback
+                    const tags = (ticket.tags || []).filter(t => t !== removingSmartTag);
+                    await handlePatch({ tags });
+                    setRemovingSmartTag(null);
+                  }}
+                  className="text-[10px] text-zinc-500 hover:text-zinc-700"
+                >
+                  Skip & Remove
+                </button>
+                <button
+                  onClick={() => setRemovingSmartTag(null)}
+                  className="text-[10px] text-zinc-400"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Suggest Pattern */}
           {!patternSuggestion && (

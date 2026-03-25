@@ -4,6 +4,7 @@ import { getActiveWorkspaceId, getUserWorkspaces } from "@/lib/workspace";
 import { WorkspaceProvider } from "@/lib/workspace-context";
 import Sidebar from "./sidebar";
 import ImportProgressBar from "@/components/import-progress-bar";
+import PatternReviewBanner from "@/components/pattern-review-banner";
 
 export default async function DashboardLayout({
   children,
@@ -32,6 +33,7 @@ export default async function DashboardLayout({
         />
         <main className="flex-1 overflow-y-auto scrollbar-hidden pt-[calc(4rem+env(safe-area-inset-top))] md:pt-0">
           <ImportProgressBar />
+          <PatternReviewBanner />
           {children}
         </main>
       </div>
