@@ -34,6 +34,7 @@ export default function Sidebar({
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [ticketViews, setTicketViews] = useState<TicketView[]>([]);
+  const [collapsedViews, setCollapsedViews] = useState<Set<string>>(new Set());
 
   // Close sidebar on route change (mobile)
   useEffect(() => {
@@ -123,12 +124,21 @@ export default function Sidebar({
                 const grandChildren = (parentId: string) => ticketViews.filter(v => v.parent_id === parentId);
                 const currentViewId = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("view") : null;
 
+                const toggleCollapse = (id: string) => {
+                  setCollapsedViews(prev => {
+                    const next = new Set(prev);
+                    if (next.has(id)) next.delete(id); else next.add(id);
+                    return next;
+                  });
+                };
+
                 const ViewLink = ({ view, indent }: { view: TicketView; indent: number }) => {
                   const hasFilters = Object.keys(view.filters || {}).length > 0;
                   const viewHref = hasFilters ? `/dashboard/tickets?view=${view.id}` : "#";
                   const isViewActive = pathname === "/dashboard/tickets" && currentViewId === view.id;
                   const subs = indent === 0 ? children(view.id) : grandChildren(view.id);
                   const isFolder = subs.length > 0;
+                  const isCollapsed = collapsedViews.has(view.id);
                   const countLabel = view.count != null
                     ? view.count > 99 ? "99+" : String(view.count)
                     : null;
@@ -136,35 +146,46 @@ export default function Sidebar({
                   return (
                     <div>
                       {hasFilters ? (
-                        <Link
-                          href={viewHref}
-                          className={`flex items-center justify-between rounded px-2 py-1 text-xs transition-colors ${
-                            isViewActive
-                              ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
-                              : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
-                          }`}
-                        >
-                          <span>
-                            {isFolder && <span className="mr-1 text-zinc-400">&#9662;</span>}
-                            {view.name}
-                          </span>
-                          {countLabel && (
-                            <span className={`ml-1 rounded-full px-1.5 py-0.5 text-[9px] font-medium tabular-nums ${
-                              isViewActive
-                                ? "bg-indigo-100 text-indigo-600 dark:bg-indigo-900 dark:text-indigo-300"
-                                : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"
-                            }`}>
-                              {countLabel}
-                            </span>
+                        <div className={`flex items-center rounded text-xs transition-colors ${
+                          isViewActive
+                            ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
+                            : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+                        }`}>
+                          {isFolder && (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.preventDefault(); toggleCollapse(view.id); }}
+                              className="shrink-0 px-1 py-1 text-zinc-400 hover:text-zinc-600"
+                            >
+                              <span className={`inline-block transition-transform ${isCollapsed ? "" : "rotate-90"}`}>&#9656;</span>
+                            </button>
                           )}
-                        </Link>
+                          <Link href={viewHref} className={`flex flex-1 items-center justify-between py-1 ${isFolder ? "pr-2" : "px-2"}`}>
+                            <span>{view.name}</span>
+                            {countLabel && (
+                              <span className={`ml-1 rounded-full px-1.5 py-0.5 text-[9px] font-medium tabular-nums ${
+                                isViewActive
+                                  ? "bg-indigo-100 text-indigo-600 dark:bg-indigo-900 dark:text-indigo-300"
+                                  : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"
+                              }`}>
+                                {countLabel}
+                              </span>
+                            )}
+                          </Link>
+                        </div>
                       ) : (
-                        <span className="block px-2 py-1 text-xs font-medium text-zinc-400 dark:text-zinc-500">
-                          {isFolder && <span className="mr-1">&#9662;</span>}
+                        <button
+                          type="button"
+                          onClick={() => isFolder && toggleCollapse(view.id)}
+                          className="flex w-full items-center px-2 py-1 text-xs font-medium text-zinc-400 dark:text-zinc-500"
+                        >
+                          {isFolder && (
+                            <span className={`mr-1 inline-block transition-transform ${isCollapsed ? "" : "rotate-90"}`}>&#9656;</span>
+                          )}
                           {view.name}
-                        </span>
+                        </button>
                       )}
-                      {subs.length > 0 && indent < 2 && (
+                      {isFolder && !isCollapsed && indent < 2 && (
                         <div className="ml-3 mt-0.5 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-800">
                           {subs.map(sub => <ViewLink key={sub.id} view={sub} indent={indent + 1} />)}
                         </div>
