@@ -260,12 +260,14 @@ export async function POST(request: Request) {
         properties: { ticket_id: ticket.id, subject, from: normalizedEmail },
       });
 
-      // Smart pattern matching — auto-tag before rules evaluate
+      // Smart pattern matching — 3-layer: keywords → embeddings → AI
       const matched = await matchPatterns(workspaceId, subject, messageBody);
       if (matched?.autoTag) {
         const { data: t } = await admin.from("tickets").select("tags").eq("id", ticket.id).single();
         const tags = [...((t?.tags as string[]) || []), matched.autoTag];
         await admin.from("tickets").update({ tags: [...new Set(tags)] }).eq("id", ticket.id);
+
+        console.log(`Pattern matched: ${matched.category} (${matched.method}, confidence: ${matched.confidence}) → ${matched.autoTag}`);
 
         // Execute workflow if one exists for this smart tag
         await executeWorkflow(workspaceId, ticket.id, matched.autoTag);

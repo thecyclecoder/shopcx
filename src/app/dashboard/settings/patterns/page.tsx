@@ -132,15 +132,46 @@ export default function PatternsPage() {
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Smart Patterns</h1>
           <p className="mt-1 text-sm text-zinc-500">Auto-tag incoming tickets based on message content.</p>
         </div>
-        <button
-          onClick={() => {
-            setIsNew(true);
-            setEditing({ id: "", name: "", category: "custom", phrases: "", match_target: "both", priority: 50, auto_tag: "" });
-          }}
-          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
-        >
-          New Pattern
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={async () => {
+              if (!confirm("This will analyze Gorgias ticket data with Claude Sonnet to expand pattern phrases and discover new categories. Continue?")) return;
+              const res = await fetch(`/api/workspaces/${workspace.id}/patterns/bootstrap`, { method: "POST" });
+              if (res.ok) {
+                const data = await res.json();
+                alert(`Bootstrap complete!\n${data.updated_categories} patterns expanded\n${data.new_categories} new categories created\n\nNew: ${(data.new_category_names || []).join(", ") || "none"}`);
+                window.location.reload();
+              } else {
+                const err = await res.json();
+                alert(err.error || "Bootstrap failed");
+              }
+            }}
+            className="rounded-md border border-violet-300 px-4 py-2 text-sm font-medium text-violet-600 hover:bg-violet-50 dark:border-violet-700 dark:text-violet-400"
+          >
+            Bootstrap from Gorgias (AI)
+          </button>
+          <button
+            onClick={async () => {
+              const res = await fetch(`/api/workspaces/${workspace.id}/patterns/generate-embeddings`, { method: "POST" });
+              if (res.ok) {
+                const data = await res.json();
+                alert(`Generated ${data.generated} embeddings for semantic matching.`);
+              }
+            }}
+            className="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400"
+          >
+            Generate Embeddings
+          </button>
+          <button
+            onClick={() => {
+              setIsNew(true);
+              setEditing({ id: "", name: "", category: "custom", phrases: "", match_target: "both", priority: 50, auto_tag: "" });
+            }}
+            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
+          >
+            New Pattern
+          </button>
+        </div>
       </div>
 
       {/* Editor */}
