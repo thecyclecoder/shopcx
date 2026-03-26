@@ -5,6 +5,7 @@ import { decrypt } from "@/lib/crypto";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { matchPatterns } from "@/lib/pattern-matcher";
+import { executeWorkflow } from "@/lib/workflow-executor";
 
 // Fetch email body from Resend's receiving API
 async function fetchEmailBody(
@@ -265,6 +266,9 @@ export async function POST(request: Request) {
         const { data: t } = await admin.from("tickets").select("tags").eq("id", ticket.id).single();
         const tags = [...((t?.tags as string[]) || []), matched.autoTag];
         await admin.from("tickets").update({ tags: [...new Set(tags)] }).eq("id", ticket.id);
+
+        // Execute workflow if one exists for this smart tag
+        await executeWorkflow(workspaceId, ticket.id, matched.autoTag);
       }
 
       // Evaluate rules for new ticket (tags are set, so rules can trigger on them)
