@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getActiveWorkspaceId } from "@/lib/workspace";
+import { calculateRetentionScore } from "@/lib/retention-score";
 
 export async function GET(
   request: Request,
@@ -108,6 +109,15 @@ export async function GET(
   // Override stored values with computed values
   customer.total_orders = realOrderCount || customer.total_orders;
   customer.ltv_cents = realLtv || customer.ltv_cents;
+
+  // Recalculate retention score with real data
+  const lastOrder = orders?.[0];
+  customer.retention_score = calculateRetentionScore({
+    last_order_at: lastOrder?.created_at || customer.last_order_at,
+    total_orders: customer.total_orders,
+    ltv_cents: customer.ltv_cents,
+    subscription_status: customer.subscription_status,
+  });
 
   // Get linked identities
   let linkedIdentities: { id: string; email: string; first_name: string | null; last_name: string | null; is_primary: boolean }[] = [];
