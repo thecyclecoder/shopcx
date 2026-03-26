@@ -5,7 +5,7 @@ export default function DashboardPage() {
         Overview
       </h1>
       <p className="mt-2 text-sm text-zinc-500">
-        Welcome to ShopCX.AI. Your workspace is ready.
+        Welcome to ShopCX.ai. Your workspace is ready.
       </p>
 
       {/* Placeholder stats */}

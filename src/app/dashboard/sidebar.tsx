@@ -84,10 +84,10 @@ export default function Sidebar({
       {/* Logo */}
       <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
         <div className="flex items-center gap-2.5">
-          <Image src="/logo.svg" alt="ShopCX.AI" width={28} height={28} />
+          <Image src="/logo.svg" alt="ShopCX.ai" width={28} height={28} />
           <span className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
             Shop<span className="text-indigo-500">CX</span>
-            <span className="text-sm font-medium text-violet-400">.AI</span>
+            <span className="text-sm font-medium text-violet-400">.ai</span>
           </span>
         </div>
         {/* Close button - mobile only */}
@@ -308,10 +308,10 @@ export default function Sidebar({
             <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
           </svg>
         </button>
-        <Image src="/logo.svg" alt="ShopCX.AI" width={24} height={24} />
+        <Image src="/logo.svg" alt="ShopCX.ai" width={24} height={24} />
         <span className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
           Shop<span className="text-indigo-500">CX</span>
-          <span className="text-sm font-medium text-violet-400">.AI</span>
+          <span className="text-sm font-medium text-violet-400">.ai</span>
         </span>
       </div>
 

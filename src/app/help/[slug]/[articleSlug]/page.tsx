@@ -182,7 +182,7 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
       </main>
 
       <footer className="border-t border-zinc-200 bg-white px-6 py-4 text-center text-xs text-zinc-400">
-        Powered by <a href="https://shopcx.ai" className="text-indigo-500 hover:underline">ShopCX.AI</a>
+        Powered by <a href="https://shopcx.ai" className="text-indigo-500 hover:underline">ShopCX.ai</a>
       </footer>
     </div>
   );

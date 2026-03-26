@@ -944,7 +944,7 @@ export default function TicketDetailPage() {
         )}
 
         {/* Reply composer — pinned to bottom */}
-        <div className={`shrink-0 border-t border-zinc-200 bg-white pb-[env(safe-area-inset-bottom,16px)] dark:border-zinc-800 dark:bg-zinc-900 ${editorFocused ? "px-3 py-3" : "px-3 py-2"}`}>
+        <div className={`shrink-0 border-t border-zinc-200 bg-white pb-4 dark:border-zinc-800 dark:bg-zinc-900 ${editorFocused ? "px-3 pt-3" : "px-3 pt-2"}`}>
           <form onSubmit={handleSend}>
             {/* Mode toggle row */}
             <div className="mb-1.5 flex items-center justify-between">

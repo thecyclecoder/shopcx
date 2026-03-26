@@ -37,7 +37,7 @@ export default function NewWorkspacePage() {
     <div className="flex min-h-screen items-center justify-center bg-zinc-50 dark:bg-zinc-950">
       <div className="w-full max-w-md space-y-8 px-6">
         <div className="flex flex-col items-center gap-3">
-          <Image src="/logo.svg" alt="ShopCX.AI" width={48} height={48} priority />
+          <Image src="/logo.svg" alt="ShopCX.ai" width={48} height={48} priority />
           <h1 className="text-2xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
             Create your workspace
           </h1>

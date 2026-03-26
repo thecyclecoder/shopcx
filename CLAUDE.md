@@ -1,9 +1,9 @@
 @AGENTS.md
 
-# ShopCX.AI — The Retention Operating System
+# ShopCX.ai — The Retention Operating System
 
 ## Project Overview
-ShopCX.AI replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (subscriptions), and Klaviyo (email/SMS marketing + reviews) with a unified platform. Internal-first for Superfoods Company, multi-tenant SaaS architecture from day one.
+ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (subscriptions), and Klaviyo (email/SMS marketing + reviews) with a unified platform. Internal-first for Superfoods Company, multi-tenant SaaS architecture from day one.
 
 - **Domain**: https://shopcx.ai
 - **GitHub**: https://github.com/thecyclecoder/shopcx

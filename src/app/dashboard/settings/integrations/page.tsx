@@ -355,7 +355,7 @@ export default function IntegrationsPage() {
                 <div className="mt-5 space-y-4">
                   <p className="text-sm text-zinc-500">
                     Credentials saved for <strong>{shopifyDomain}.myshopify.com</strong>.
-                    Click below to authorize ShopCX.AI to access your store.
+                    Click below to authorize ShopCX.ai to access your store.
                   </p>
                   <p className="text-sm text-zinc-400">
                     Make sure your app&apos;s redirect URL is set to:{" "}

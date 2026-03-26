@@ -23,11 +23,11 @@ export const viewport: Viewport = {
 
 export const metadata: Metadata = {
   title: {
-    default: "ShopCX.AI - AI-Powered Customer Experience",
-    template: "%s | ShopCX.AI",
+    default: "ShopCX.ai - AI-Powered Customer Experience",
+    template: "%s | ShopCX.ai",
   },
   description:
-    "ShopCX.AI is an AI-powered customer experience platform that helps businesses deliver exceptional support through intelligent agents.",
+    "ShopCX.ai is an AI-powered customer experience platform that helps businesses deliver exceptional support through intelligent agents.",
   keywords: [
     "AI",
     "customer experience",
@@ -44,8 +44,8 @@ export const metadata: Metadata = {
     type: "website",
     locale: "en_US",
     url: "https://shopcx.ai",
-    siteName: "ShopCX.AI",
-    title: "ShopCX.AI - AI-Powered Customer Experience",
+    siteName: "ShopCX.ai",
+    title: "ShopCX.ai - AI-Powered Customer Experience",
     description:
       "Deliver exceptional customer support through intelligent AI agents.",
     images: [
@@ -53,13 +53,13 @@ export const metadata: Metadata = {
         url: "/og-image.png",
         width: 1200,
         height: 630,
-        alt: "ShopCX.AI",
+        alt: "ShopCX.ai",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "ShopCX.AI - AI-Powered Customer Experience",
+    title: "ShopCX.ai - AI-Powered Customer Experience",
     description:
       "Deliver exceptional customer support through intelligent AI agents.",
     images: ["/og-image.png"],
@@ -77,7 +77,7 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "ShopCX.AI",
+    title: "ShopCX.ai",
   },
   formatDetection: {
     telephone: false,

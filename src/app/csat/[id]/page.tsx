@@ -34,7 +34,7 @@ export default function CsatPage() {
   if (submitted) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center bg-zinc-50 px-6 dark:bg-zinc-950">
-        <Image src="/logo.svg" alt="ShopCX.AI" width={48} height={48} />
+        <Image src="/logo.svg" alt="ShopCX.ai" width={48} height={48} />
         <h1 className="mt-6 text-xl font-bold text-zinc-900 dark:text-zinc-100">Thank you!</h1>
         <p className="mt-2 text-sm text-zinc-500">Your feedback helps us improve.</p>
       </div>
@@ -43,7 +43,7 @@ export default function CsatPage() {
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-zinc-50 px-6 dark:bg-zinc-950">
-      <Image src="/logo.svg" alt="ShopCX.AI" width={48} height={48} />
+      <Image src="/logo.svg" alt="ShopCX.ai" width={48} height={48} />
       <h1 className="mt-6 text-xl font-bold text-zinc-900 dark:text-zinc-100">
         How was your experience?
       </h1>

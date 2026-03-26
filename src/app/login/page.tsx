@@ -20,14 +20,14 @@ export default function LoginPage() {
         <div className="flex flex-col items-center gap-3">
           <Image
             src="/logo.svg"
-            alt="ShopCX.AI Logo"
+            alt="ShopCX.ai Logo"
             width={64}
             height={64}
             priority
           />
           <h1 className="text-3xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
             Shop<span className="text-indigo-500">CX</span>
-            <span className="text-sm font-medium text-violet-400">.AI</span>
+            <span className="text-sm font-medium text-violet-400">.ai</span>
           </h1>
           <p className="text-sm text-zinc-500 dark:text-zinc-400">
             AI-powered customer experience

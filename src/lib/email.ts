@@ -41,14 +41,14 @@ export async function sendInviteEmail({
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
 
   const { error } = await client.resend.emails.send({
-    from: `ShopCX.AI <noreply@${client.domain}>`,
+    from: `ShopCX.ai <noreply@${client.domain}>`,
     to: toEmail,
-    subject: `You've been invited to ${workspaceName} on ShopCX.AI`,
+    subject: `You've been invited to ${workspaceName} on ShopCX.ai`,
     html: `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
         <h2 style="color: #18181b; font-size: 20px; margin-bottom: 8px;">You're invited to ${workspaceName}</h2>
         <p style="color: #71717a; font-size: 14px; line-height: 1.6;">
-          ${invitedByName} has invited you to join <strong>${workspaceName}</strong> as a <strong>${role.replace("_", " ")}</strong> on ShopCX.AI.
+          ${invitedByName} has invited you to join <strong>${workspaceName}</strong> as a <strong>${role.replace("_", " ")}</strong> on ShopCX.ai.
         </p>
         <a href="${siteUrl}/login" style="display: inline-block; margin-top: 24px; padding: 12px 24px; background: #6366f1; color: white; text-decoration: none; border-radius: 8px; font-size: 14px; font-weight: 500;">
           Accept Invite

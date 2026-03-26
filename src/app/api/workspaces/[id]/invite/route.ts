@@ -88,7 +88,7 @@ export async function POST(
   // Send invite email (best-effort, don't fail the invite if email fails)
   const emailResult = await sendInviteEmail({
     workspaceId,
-    workspaceName: workspace?.name || "ShopCX.AI",
+    workspaceName: workspace?.name || "ShopCX.ai",
     toEmail: email.toLowerCase(),
     role,
     invitedByName: user.user_metadata?.full_name || user.email || "A team member",
