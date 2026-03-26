@@ -83,6 +83,8 @@ ShopCX.AI replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - Customer sidebar: orders, subscriptions, LTV, retention score (live computed)
 - Lazy customer enrichment from Shopify on page view
 - last_customer_reply_at tracking, Created + Last Reply columns
+- Delete ticket: owner/admin only with confirmation dialog
+- Sidebar counts poll every 10s for live updates
 
 ### Phase 3b: Rules Engine ✅
 - Rules table: compound AND/OR conditions (JSONB), ordered actions, priority
@@ -128,7 +130,12 @@ ShopCX.AI replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - Manual workflow trigger from ticket detail dropdown
 - Configurable status per reply step (pending/closed/open)
 - Positive confirmation detection + delayed auto-close
-- Configurable auto-close reply message
+- Configurable auto-close reply message (Settings > Auto-Close Reply)
+- Response delay settings per channel (Settings > Response Delay)
+- auto_reply_at timestamp + pending_auto_reply preview on tickets
+- Workflow preview resolves actual variables via full context build (Shopify API)
+- Delivery address from Shopify order shippingAddress (not customer default)
+- Rich text editors in workflow reply templates
 
 ### Phase 3g: Customer Identity ✅
 - Customer linking across profiles (email, phone, name, address matching)
@@ -136,7 +143,16 @@ ShopCX.AI replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - Ticket sidebar uses linked data for LTV/order count/retention score
 - Customer merge on Shopify webhook (email-only → Shopify customer)
 - Suggestions API: auto-detects potential matches
-- Tickets list on customer detail page
+- Tickets list on customer detail page (combined across linked profiles)
+- Retention score + LTV + order count computed live on both customer detail and ticket sidebar
+- Customer linking fix: is_primary NOT NULL constraint resolved
+- Linked profile banner (pending — show "linked to [Primary]" on secondary profiles)
+
+## Pending Items
+- Linked profile banner on secondary customer profiles ("This profile is linked to [Primary]")
+- Account linking UI on ticket detail sidebar
+- Nightly pattern analyzer (Inngest cron: analyze untagged tickets, suggest patterns)
+- OpenAI embeddings fully operational (key added, embeddings generated, threshold tuned to 0.40)
 
 ## Remaining Phases (from spec)
 - **Phase 4**: AI Agent + Knowledge Base (foundation built: patterns, workflows, Claude integration)
