@@ -521,8 +521,8 @@ export default function TicketDetailPage() {
             </div>
           )}
 
-          {/* Suggest Pattern */}
-          {!patternSuggestion && (
+          {/* Suggest Pattern — only show if no smart tags already applied */}
+          {!patternSuggestion && !(ticket.tags || []).some(t => t.startsWith("smart:")) && (
             <div className="mt-2 flex items-center gap-2">
               {patternCategories.length > 0 && (
                 <select
