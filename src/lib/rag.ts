@@ -71,28 +71,17 @@ export async function retrieveContext(
     }
   }
 
-  // Search macros by embedding similarity
+  // Search macros by embedding similarity via RPC
   const macros: RetrievedMacro[] = [];
-  const { data: allMacros } = await admin
-    .from("macros")
-    .select("id, name, body_text, body_html, category, embedding")
-    .eq("workspace_id", workspaceId)
-    .eq("active", true)
-    .not("embedding", "is", null);
+  const { data: matchedMacros } = await admin.rpc("match_macros", {
+    query_embedding: JSON.stringify(embedding),
+    ws_id: workspaceId,
+    match_threshold: 0.45,
+    match_count: 5,
+  });
 
-  if (allMacros?.length) {
-    // Compute cosine similarity manually since macros table doesn't have an RPC
-    const scored = allMacros
-      .map((m) => {
-        const macroEmb = typeof m.embedding === "string" ? JSON.parse(m.embedding) : m.embedding;
-        const sim = cosineSimilarity(embedding, macroEmb);
-        return { ...m, similarity: sim };
-      })
-      .filter((m) => m.similarity > 0.60)
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, 5);
-
-    for (const m of scored) {
+  if (matchedMacros?.length) {
+    for (const m of matchedMacros) {
       macros.push({
         id: m.id,
         name: m.name,
@@ -112,14 +101,3 @@ export async function retrieveContext(
   };
 }
 
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length) return 0;
-  let dot = 0, magA = 0, magB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    magA += a[i] * a[i];
-    magB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(magA) * Math.sqrt(magB);
-  return denom === 0 ? 0 : dot / denom;
-}
