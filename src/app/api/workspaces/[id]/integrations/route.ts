@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply"
     )
     .eq("id", workspaceId)
     .single();
@@ -63,6 +63,9 @@ export async function GET(
     appstle_api_key_hint: workspace.appstle_api_key_encrypted
       ? `...${decrypt(workspace.appstle_api_key_encrypted).slice(-4)}`
       : null,
+
+    // Auto-close
+    auto_close_reply: workspace.auto_close_reply || null,
   });
 }
 
@@ -120,6 +123,10 @@ export async function PATCH(
 
     if ("sandbox_mode" in body) {
       updates.sandbox_mode = !!body.sandbox_mode;
+    }
+
+    if ("auto_close_reply" in body) {
+      updates.auto_close_reply = body.auto_close_reply || null;
     }
 
     // Shopify credentials

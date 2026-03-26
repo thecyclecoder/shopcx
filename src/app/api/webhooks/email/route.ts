@@ -203,13 +203,17 @@ export async function POST(request: Request) {
     const isPositiveConfirmation = hasSmartTag && isShortPositiveReply(messageBody);
 
     if (isPositiveConfirmation && ticket && (ticket.status === "pending" || ticket.status === "closed")) {
+      // Get the configurable auto-close message
+      const { data: ws } = await admin.from("workspaces").select("name, auto_close_reply").eq("id", workspaceId).single();
+      const autoCloseReply = ws?.auto_close_reply || "You're welcome! If you need anything else, we're always here to help.";
+
       // Auto-close with friendly reply instead of reopening
       await admin.from("ticket_messages").insert({
         ticket_id: ticketId,
         direction: "outbound",
         visibility: "external",
         author_type: "system",
-        body: "You're welcome! If you need anything else, we're always here to help.",
+        body: autoCloseReply,
       });
 
       // Send the auto-close email
@@ -217,12 +221,11 @@ export async function POST(request: Request) {
         ? await admin.from("customers").select("email").eq("id", ticket.customer_id).single()
         : { data: null };
       if (cust?.email) {
-        const { data: ws } = await admin.from("workspaces").select("name").eq("id", workspaceId).single();
         await sendTicketReply({
           workspaceId,
           toEmail: cust.email,
           subject: (ticket.subject as string) || "Support",
-          body: "You're welcome! If you need anything else, we're always here to help.",
+          body: autoCloseReply,
           inReplyTo: (ticket.email_message_id as string) || null,
           agentName: "Support",
           workspaceName: ws?.name || "Support",

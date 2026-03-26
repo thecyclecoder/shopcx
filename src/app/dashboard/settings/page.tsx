@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 
@@ -103,6 +104,8 @@ export default function SettingsPage() {
           </svg>
         </Link>
 
+        <AutoCloseReplyEditor workspaceId={workspace.id} />
+
         <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
           <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Workspace</h2>
           <div className="mt-4 space-y-3">
@@ -122,6 +125,51 @@ export default function SettingsPage() {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function AutoCloseReplyEditor({ workspaceId }: { workspaceId: string }) {
+  const [message, setMessage] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspaceId}/integrations`)
+      .then(r => r.json())
+      .then(d => { setMessage(d.auto_close_reply || "You're welcome! If you need anything else, we're always here to help."); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [workspaceId]);
+
+  const handleSave = async () => {
+    await fetch(`/api/workspaces/${workspaceId}/integrations`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_close_reply: message }),
+    });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  if (loading) return null;
+
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Auto-Close Reply</h2>
+      <p className="mt-1 text-xs text-zinc-500">Message sent when a customer confirms with &ldquo;thanks&rdquo; or similar after a workflow reply.</p>
+      <textarea
+        rows={2}
+        value={message}
+        onChange={(e) => setMessage(e.target.value)}
+        className="mt-3 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+      />
+      <div className="mt-2 flex items-center gap-2">
+        <button onClick={handleSave} className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500">
+          Save
+        </button>
+        {saved && <span className="text-xs text-emerald-600">Saved!</span>}
       </div>
     </div>
   );
