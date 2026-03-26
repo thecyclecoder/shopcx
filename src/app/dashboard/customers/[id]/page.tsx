@@ -482,7 +482,13 @@ export default function CustomerDetailPage() {
 
       {/* Linked Identities */}
       <div className="mt-6">
-        <p className="text-xs font-medium uppercase text-zinc-500">Linked Identities</p>
+        <p className="text-xs font-medium uppercase text-zinc-500">
+          Linked Identities{linkedIdentities.length > 0 && <span className="ml-1 normal-case text-indigo-500">({linkedIdentities.length})</span>}
+        </p>
+
+        {linkedIdentities.length === 0 && suggestions.length === 0 && (
+          <p className="mt-2 text-xs text-zinc-400">No linked accounts.</p>
+        )}
 
         {linkedIdentities.length > 0 && (
           <div className="mt-2 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">

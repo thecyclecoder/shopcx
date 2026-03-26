@@ -286,6 +286,39 @@ export default function WorkflowsPage() {
             )}
           </div>
 
+          {/* Variable reference */}
+          <details className="mt-4 rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800">
+            <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-zinc-500">Available Variables (click to expand)</summary>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 px-3 pb-3 text-[10px]">
+              <div className="font-medium text-zinc-600 dark:text-zinc-300 mt-1">Customer</div><div />
+              <div className="text-zinc-500">{`{{customer.first_name}}`}</div><div className="text-zinc-400">First name or &ldquo;there&rdquo;</div>
+              <div className="text-zinc-500">{`{{customer.last_name}}`}</div><div className="text-zinc-400">Last name</div>
+              <div className="text-zinc-500">{`{{customer.email}}`}</div><div className="text-zinc-400">Email address</div>
+              <div className="text-zinc-500">{`{{customer.phone}}`}</div><div className="text-zinc-400">Phone number</div>
+              <div className="font-medium text-zinc-600 dark:text-zinc-300 mt-1">Order</div><div />
+              <div className="text-zinc-500">{`{{order.order_number}}`}</div><div className="text-zinc-400">e.g. SC125993</div>
+              <div className="text-zinc-500">{`{{order.total}}`}</div><div className="text-zinc-400">e.g. $89.95</div>
+              <div className="text-zinc-500">{`{{order.created_at}}`}</div><div className="text-zinc-400">Order date</div>
+              <div className="text-zinc-500">{`{{order.line_items}}`}</div><div className="text-zinc-400">e.g. 2x Coffee, 1x Creamer</div>
+              <div className="font-medium text-zinc-600 dark:text-zinc-300 mt-1">Fulfillment</div><div />
+              <div className="text-zinc-500">{`{{fulfillment.date}}`}</div><div className="text-zinc-400">Ship date</div>
+              <div className="text-zinc-500">{`{{fulfillment.carrier}}`}</div><div className="text-zinc-400">e.g. USPS, DHL</div>
+              <div className="text-zinc-500">{`{{fulfillment.tracking_number}}`}</div><div className="text-zinc-400">Tracking number</div>
+              <div className="text-zinc-500">{`{{fulfillment.url}}`}</div><div className="text-zinc-400">Tracking URL</div>
+              <div className="text-zinc-500">{`{{fulfillment.status}}`}</div><div className="text-zinc-400">e.g. DELIVERED, IN_TRANSIT</div>
+              <div className="text-zinc-500">{`{{fulfillment.delivered_at}}`}</div><div className="text-zinc-400">Delivery date</div>
+              <div className="text-zinc-500">{`{{fulfillment.estimated_delivery}}`}</div><div className="text-zinc-400">Estimated delivery</div>
+              <div className="text-zinc-500">{`{{fulfillment.latest_location}}`}</div><div className="text-zinc-400">e.g. Austin, TX</div>
+              <div className="text-zinc-500">{`{{fulfillment.delivery_address}}`}</div><div className="text-zinc-400">Ship-to address from order</div>
+              <div className="text-zinc-500">{`{{fulfillment.days_since}}`}</div><div className="text-zinc-400">Days since shipment</div>
+              <div className="font-medium text-zinc-600 dark:text-zinc-300 mt-1">Subscription</div><div />
+              <div className="text-zinc-500">{`{{subscription.next_billing_date}}`}</div><div className="text-zinc-400">e.g. April 20, 2026</div>
+              <div className="text-zinc-500">{`{{subscription.status}}`}</div><div className="text-zinc-400">active, paused, cancelled</div>
+              <div className="text-zinc-500">{`{{subscription.items}}`}</div><div className="text-zinc-400">Item titles joined</div>
+              <div className="text-zinc-500">{`{{subscription.billing_interval}}`}</div><div className="text-zinc-400">e.g. 4 week</div>
+            </div>
+          </details>
+
           {/* Config sections */}
           {(TEMPLATE_FIELDS[editing.template] || []).map((section, si) => (
             <div key={si} className="mt-6">
