@@ -7,6 +7,22 @@ export function stripEmailSignature(html: string): string {
 
   let cleaned = html;
 
+  // WiseStamp signature: contains wisestamp.com URLs — remove the entire containing table
+  // Find the first table that references wisestamp and remove everything from it onward
+  const wsIndex = cleaned.search(/wisestamp\.com/i);
+  if (wsIndex > -1) {
+    // Walk backward to find the outermost table containing WiseStamp
+    let tableStart = cleaned.lastIndexOf("<table", wsIndex);
+    // Walk further back to find the parent div/container
+    const beforeTable = cleaned.substring(0, tableStart);
+    const parentDiv = beforeTable.lastIndexOf("<div");
+    if (parentDiv > -1 && tableStart - parentDiv < 200) {
+      cleaned = cleaned.substring(0, parentDiv);
+    } else {
+      cleaned = cleaned.substring(0, tableStart);
+    }
+  }
+
   // Gmail signature: <div class="gmail_signature" ...>...</div>
   cleaned = cleaned.replace(/<div[^>]*class="gmail_signature"[^>]*>[\s\S]*?<\/div>\s*<\/div>/gi, "");
 
