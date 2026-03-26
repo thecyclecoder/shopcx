@@ -143,6 +143,7 @@ export default function SettingsPage() {
           </svg>
         </Link>
 
+        <HelpCenterEditor workspaceId={workspace.id} />
         <ResponseDelayEditor workspaceId={workspace.id} />
         <AutoCloseReplyEditor workspaceId={workspace.id} />
 
@@ -166,6 +167,64 @@ export default function SettingsPage() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function HelpCenterEditor({ workspaceId }: { workspaceId: string }) {
+  const [helpUrl, setHelpUrl] = useState("");
+  const [scraping, setScraping] = useState(false);
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspaceId}/integrations`)
+      .then(r => r.json())
+      .then(d => { setHelpUrl(d.help_center_url || ""); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [workspaceId]);
+
+  if (loading) return null;
+
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Help Center Import</h2>
+      <p className="mt-1 text-sm text-zinc-500">Enter your existing help center URL to import articles into the Knowledge Base.</p>
+      <div className="mt-3 flex items-center gap-2">
+        <input
+          value={helpUrl}
+          onChange={(e) => setHelpUrl(e.target.value)}
+          placeholder="https://help.yourcompany.com"
+          className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+        />
+        <button
+          onClick={async () => {
+            if (!helpUrl.trim()) return;
+            setScraping(true);
+            setMessage("");
+            const res = await fetch(`/api/workspaces/${workspaceId}/scrape-help-center`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ url: helpUrl }),
+            });
+            if (res.ok) {
+              setMessage("Scraping started! Check Knowledge Base for imported articles.");
+            } else {
+              setMessage("Failed to start scraping.");
+            }
+            setScraping(false);
+          }}
+          disabled={scraping || !helpUrl.trim()}
+          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+        >
+          {scraping ? "Starting..." : "Import Articles"}
+        </button>
+      </div>
+      {message && <p className="mt-2 text-sm text-indigo-600 dark:text-indigo-400">{message}</p>}
+      <p className="mt-2 text-xs text-zinc-400">
+        Articles will preserve original URL paths for SEO continuity. After import, set up a CNAME to point your help subdomain to ShopCX.
+      </p>
     </div>
   );
 }

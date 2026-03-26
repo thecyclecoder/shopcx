@@ -60,7 +60,13 @@ export async function PATCH(
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (body.title !== undefined) updates.title = body.title;
   if (body.content !== undefined) updates.content = body.content;
+  if (body.content_html !== undefined) updates.content_html = body.content_html;
   if (body.category !== undefined) updates.category = body.category;
+  if (body.slug !== undefined) updates.slug = body.slug;
+  if (body.published !== undefined) updates.published = body.published;
+  if (body.product_id !== undefined) updates.product_id = body.product_id;
+  if (body.product_name !== undefined) updates.product_name = body.product_name;
+  if (body.excerpt !== undefined) updates.excerpt = body.excerpt;
   if (body.active !== undefined) updates.active = body.active;
 
   const { data: article, error } = await admin

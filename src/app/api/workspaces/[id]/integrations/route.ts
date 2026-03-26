@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url"
     )
     .eq("id", workspaceId)
     .single();
@@ -67,6 +67,9 @@ export async function GET(
     // Auto-close + delays
     auto_close_reply: workspace.auto_close_reply || null,
     response_delays: workspace.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10 },
+
+    // Help center
+    help_center_url: workspace.help_center_url || null,
   });
 }
 

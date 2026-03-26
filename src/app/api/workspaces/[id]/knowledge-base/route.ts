@@ -57,15 +57,28 @@ export async function POST(
   }
 
   const body = await request.json();
-  const { title, content, category, active } = body;
+  const { title, content, category } = body;
 
-  if (!title || !content || !category) {
-    return NextResponse.json({ error: "Title, content, and category required" }, { status: 400 });
+  if (!title || !content) {
+    return NextResponse.json({ error: "Title and content required" }, { status: 400 });
   }
 
   const { data: article, error } = await admin
     .from("knowledge_base")
-    .insert({ workspace_id: workspaceId, title, content, category, active: active ?? true })
+    .insert({
+      workspace_id: workspaceId,
+      title,
+      content,
+      content_html: body.content_html || null,
+      category: category || "general",
+      slug: body.slug || null,
+      published: body.published || false,
+      product_id: body.product_id || null,
+      product_name: body.product_name || null,
+      excerpt: body.excerpt || content?.slice(0, 200) || null,
+      source: body.source || "manual",
+      active: body.active ?? true,
+    })
     .select()
     .single();
 
