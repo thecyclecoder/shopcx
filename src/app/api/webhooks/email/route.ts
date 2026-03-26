@@ -6,6 +6,7 @@ import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { matchPatterns } from "@/lib/pattern-matcher";
 import { inngest } from "@/lib/inngest/client";
+import { buildContext, resolveTemplate } from "@/lib/workflow-executor";
 
 // Detect short positive confirmation replies (thanks, got it, etc.)
 const POSITIVE_PHRASES = [
@@ -325,28 +326,44 @@ export async function POST(request: Request) {
         const delaySec = delays.email || 60;
         const autoReplyAt = new Date(Date.now() + delaySec * 1000).toISOString();
 
-        // Get a preview of what the workflow will send (best effort from DB data)
-        const { data: wf } = await admin.from("workflows").select("config")
+        // Build full workflow context + resolve the preview with real data
+        const { data: wf } = await admin.from("workflows").select("config, template")
           .eq("workspace_id", workspaceId).eq("trigger_tag", matched.autoTag).eq("enabled", true).single();
-        let pendingPreview = "Checking your order and preparing a response...";
-        if (wf?.config && customerId) {
-          const cfg = wf.config as Record<string, unknown>;
-          // Quick DB lookup to guess which branch the workflow will take
-          const { data: latestOrder } = await admin.from("orders").select("order_number, fulfillment_status, fulfillments")
-            .eq("customer_id", customerId).order("created_at", { ascending: false }).limit(1).single();
-          if (!latestOrder) {
-            pendingPreview = (cfg.reply_no_order as string) || pendingPreview;
-          } else if (!latestOrder.fulfillment_status || latestOrder.fulfillment_status === "UNFULFILLED") {
-            pendingPreview = (cfg.reply_preparing as string) || pendingPreview;
-          } else {
-            const fulfillments = (latestOrder.fulfillments as { trackingInfo?: { number: string }[] }[]) || [];
-            const hasTracking = fulfillments[0]?.trackingInfo?.[0]?.number;
-            if (!hasTracking) {
-              pendingPreview = (cfg.reply_no_tracking as string) || pendingPreview;
+        let pendingPreview = "Preparing a response...";
+        if (wf?.config) {
+          try {
+            const ctx = await buildContext(admin, workspaceId, ticket.id);
+            const cfg = wf.config as Record<string, unknown>;
+            const threshold = (cfg.delay_threshold_days as number) || 10;
+
+            // Follow the same logic as the workflow executor to pick the right template
+            let templateText: string | null = null;
+            if (!ctx.order) {
+              templateText = (cfg.reply_no_order as string) || null;
             } else {
-              // Has tracking — will be in_transit or delivered (Shopify API will determine)
-              pendingPreview = (cfg.reply_in_transit as string) || (cfg.reply_delivered as string) || pendingPreview;
+              const fStatus = ctx.order.fulfillment_status as string | null;
+              if (!fStatus || fStatus === "UNFULFILLED") {
+                templateText = (cfg.reply_preparing as string) || null;
+              } else if (!ctx.fulfillment?.tracking_number) {
+                templateText = (cfg.reply_no_tracking as string) || null;
+              } else {
+                const status = (ctx.fulfillment.shopify_status || "").toUpperCase();
+                if (status === "DELIVERED") {
+                  templateText = (cfg.reply_delivered as string) || null;
+                } else if (ctx.fulfillment.days_since >= threshold) {
+                  templateText = (cfg.reply_escalated as string) || null;
+                } else if (status === "OUT_FOR_DELIVERY") {
+                  templateText = (cfg.reply_out_for_delivery as string) || null;
+                } else {
+                  templateText = (cfg.reply_in_transit as string) || null;
+                }
+              }
             }
+            if (templateText) {
+              pendingPreview = resolveTemplate(templateText, ctx);
+            }
+          } catch (err) {
+            console.error("Preview generation error:", err);
           }
         }
 

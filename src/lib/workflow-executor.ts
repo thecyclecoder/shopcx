@@ -5,7 +5,7 @@ import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-interface WorkflowContext {
+export interface WorkflowContext {
   workspaceId: string;
   ticketId: string;
   ticket: Record<string, unknown>;
@@ -71,7 +71,7 @@ export async function executeWorkflow(
 
 // ── Context builder ──
 
-async function buildContext(admin: Admin, workspaceId: string, ticketId: string): Promise<WorkflowContext> {
+export async function buildContext(admin: Admin, workspaceId: string, ticketId: string): Promise<WorkflowContext> {
   const { data: ticket } = await admin.from("tickets").select("*").eq("id", ticketId).single();
 
   let customer: Record<string, unknown> | null = null;
@@ -229,7 +229,7 @@ async function getShopifyFulfillmentStatus(workspaceId: string, shopifyOrderId: 
 
 // ── Template variables ──
 
-function resolveTemplate(template: string, context: WorkflowContext): string {
+export function resolveTemplate(template: string, context: WorkflowContext): string {
   // Build delivery address from customer's default_address
   const addr = context.customer?.default_address as { address1?: string; address2?: string; city?: string; province?: string; provinceCode?: string; zip?: string; country?: string; countryCodeV2?: string } | null;
   const deliveryAddress = addr
