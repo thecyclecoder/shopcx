@@ -402,20 +402,36 @@ export default function IntegrationsPage() {
                     </div>
                   )}
                   {shopifyScopes && (
-                    <div className="flex items-center justify-between">
+                    <div>
                       <span className="text-sm text-zinc-500">Scopes</span>
-                      <span className="text-sm text-zinc-400">{shopifyScopes}</span>
+                      <p className="mt-1 break-all text-xs text-zinc-400">{shopifyScopes}</p>
                     </div>
                   )}
                 </div>
               </div>
-              <button
-                onClick={handleDisconnectShopify}
-                disabled={saving}
-                className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
-              >
-                Disconnect Shopify
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={async () => {
+                    const res = await fetch(`/api/workspaces/${workspace.id}/sync-products`, { method: "POST" });
+                    if (res.ok) {
+                      const data = await res.json();
+                      alert(`Synced ${data.synced} products from ${data.channel}`);
+                    } else {
+                      alert("Product sync failed");
+                    }
+                  }}
+                  className="rounded-md border border-indigo-300 px-4 py-2 text-sm font-medium text-indigo-600 transition-colors hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
+                >
+                  Sync Products
+                </button>
+                <button
+                  onClick={handleDisconnectShopify}
+                  disabled={saving}
+                  className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                >
+                  Disconnect Shopify
+                </button>
+              </div>
               <a
                 href="/dashboard/settings/integrations/shopify"
                 className="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"

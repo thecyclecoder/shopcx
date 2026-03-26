@@ -173,6 +173,7 @@ export default function TicketDetailPage() {
   const [sending, setSending] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"messages" | "history">("messages");
+  const [mobileSection, setMobileSection] = useState<"conversation" | "details" | "customer" | "actions">("conversation");
   const [customerEvents, setCustomerEvents] = useState<{ id: string; event_type: string; source: string; summary: string; created_at: string }[]>([]);
   const [closeWithReply, setCloseWithReply] = useState(true);
   const [editorFocused, setEditorFocused] = useState(false);
@@ -436,14 +437,31 @@ export default function TicketDetailPage() {
   }
 
   return (
-    <div className="flex h-full flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
-      {/* Left column - conversation (order-1 on mobile = always first) */}
-      <div className="order-1 flex min-h-0 flex-1 flex-col md:order-none">
-        <div className="min-h-0 flex-1 p-6 md:overflow-y-auto">
-          {/* Back button */}
+    <div className="flex h-full flex-1 flex-col overflow-hidden md:flex-row">
+      {/* Mobile section selector */}
+      <div className="flex items-center gap-2 border-b border-zinc-200 bg-white px-3 py-2 md:hidden dark:border-zinc-800 dark:bg-zinc-900">
+        <button onClick={() => router.push("/dashboard/tickets")} className="text-zinc-400">
+          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" /></svg>
+        </button>
+        <select
+          value={mobileSection}
+          onChange={(e) => setMobileSection(e.target.value as typeof mobileSection)}
+          className="flex-1 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm font-medium text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+        >
+          <option value="conversation">Conversation</option>
+          <option value="details">Ticket Details</option>
+          <option value="customer">Customer</option>
+          <option value="actions">Actions</option>
+        </select>
+      </div>
+
+      {/* Left column - conversation */}
+      <div className={`flex min-h-0 flex-1 flex-col ${mobileSection !== "conversation" ? "hidden md:flex" : ""}`}>
+        <div className="min-h-0 flex-1 overflow-y-auto p-6 pb-0 md:pb-6">
+          {/* Back button — desktop only */}
           <button
             onClick={() => router.push("/dashboard/tickets")}
-            className="mb-4 flex items-center gap-1 text-sm text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300"
+            className="mb-4 hidden items-center gap-1 text-sm text-zinc-500 transition-colors hover:text-zinc-700 md:flex dark:hover:text-zinc-300"
           >
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
@@ -648,152 +666,7 @@ export default function TicketDetailPage() {
             </div>
           )}
 
-          {/* Suggest Pattern — only show if no smart tags already applied */}
-          {!patternSuggestion && !(ticket.tags || []).some(t => t.startsWith("smart:")) && (
-            <div className="mt-2 flex items-center gap-2">
-              {patternCategories.length > 0 && (
-                <select
-                  value={suggestCategory}
-                  onChange={(e) => setSuggestCategory(e.target.value)}
-                  className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-sm text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                >
-                  <option value="">Auto-detect category</option>
-                  {patternCategories.map(c => (
-                    <option key={c.category} value={c.category}>{c.name}</option>
-                  ))}
-                </select>
-              )}
-              <button
-                onClick={async () => {
-                  setSuggestingPattern(true);
-                  try {
-                    const res = await fetch(`/api/tickets/${id}/suggest-pattern`, {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify(suggestCategory ? { category: suggestCategory } : {}),
-                    });
-                    if (res.ok) {
-                      const data = await res.json();
-                      setPatternSuggestion(data.suggestion);
-                    }
-                  } finally {
-                    setSuggestingPattern(false);
-                  }
-                }}
-                disabled={suggestingPattern}
-                className="text-sm text-indigo-600 hover:underline disabled:opacity-50 dark:text-indigo-400"
-              >
-                {suggestingPattern ? "Analyzing..." : "Suggest pattern (AI)"}
-              </button>
-            </div>
-          )}
-          {patternSuggestion && (
-            <div className="mt-2 rounded-md border border-indigo-200 bg-indigo-50 p-3 dark:border-indigo-800 dark:bg-indigo-950">
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-medium text-indigo-700 dark:text-indigo-300">AI Pattern Suggestion</p>
-                <button onClick={() => setPatternSuggestion(null)} className="text-sm text-indigo-400 hover:text-indigo-600">Dismiss</button>
-              </div>
-              <p className="mt-1 text-sm text-indigo-600 dark:text-indigo-400">{patternSuggestion.reasoning}</p>
-              <div className="mt-2 space-y-1">
-                <p className="text-sm text-zinc-500">Category: <span className="font-medium text-zinc-700 dark:text-zinc-300">{patternSuggestion.category_name}</span></p>
-                <p className="text-sm text-zinc-500">Tag: <span className="font-medium text-zinc-700 dark:text-zinc-300">{patternSuggestion.auto_tag}</span></p>
-                <div className="flex flex-wrap gap-1">
-                  {patternSuggestion.phrases.map((p, i) => (
-                    <span key={i} className="rounded bg-white px-1.5 py-0.5 text-sm text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">&ldquo;{p}&rdquo;</span>
-                  ))}
-                </div>
-              </div>
-              <div className="mt-2 flex gap-2">
-                <button
-                  onClick={async () => {
-                    // Create workspace pattern with these phrases
-                    const res = await fetch(`/api/workspaces/${workspace.id}/patterns`, {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        category: patternSuggestion.category,
-                        name: patternSuggestion.category_name,
-                        phrases: patternSuggestion.phrases,
-                        auto_tag: patternSuggestion.auto_tag,
-                        match_target: "both",
-                        priority: 50,
-                      }),
-                    });
-                    if (res.ok) {
-                      // Also tag this ticket
-                      if (patternSuggestion.auto_tag) {
-                        const tags = [...(ticket.tags || []), patternSuggestion.auto_tag];
-                        await handlePatch({ tags: [...new Set(tags)] });
-                      }
-                      setPatternSuggestion(null);
-                    }
-                  }}
-                  className="rounded bg-indigo-600 px-2 py-0.5 text-sm font-medium text-white hover:bg-indigo-500"
-                >
-                  Accept & Create Pattern
-                </button>
-                <button
-                  onClick={async () => {
-                    // Just tag this ticket, don't create pattern
-                    if (patternSuggestion.auto_tag) {
-                      const tags = [...(ticket.tags || []), patternSuggestion.auto_tag];
-                      await handlePatch({ tags: [...new Set(tags)] });
-                    }
-                    setPatternSuggestion(null);
-                  }}
-                  className="rounded border border-indigo-300 bg-white px-2 py-0.5 text-sm font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:bg-transparent dark:text-indigo-400"
-                >
-                  Just Tag This Ticket
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Run workflow manually */}
-          {availableWorkflows.length > 0 && (
-            <div className="mt-2 flex items-center gap-2">
-              <select
-                id="workflow-select"
-                defaultValue=""
-                className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-sm text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-              >
-                <option value="" disabled>Run workflow...</option>
-                {availableWorkflows.map(wf => (
-                  <option key={wf.id} value={wf.id}>{wf.name}</option>
-                ))}
-              </select>
-              <button
-                onClick={async () => {
-                  const select = document.getElementById("workflow-select") as HTMLSelectElement;
-                  const wfId = select?.value;
-                  if (!wfId) return;
-                  setRunningWorkflow(true);
-                  try {
-                    const res = await fetch(`/api/tickets/${id}/run-workflow`, {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ workflow_id: wfId }),
-                    });
-                    if (res.ok) {
-                      // Refresh ticket to see new tags + messages
-                      const ticketRes = await fetch(`/api/tickets/${id}`);
-                      if (ticketRes.ok) {
-                        const data = await ticketRes.json();
-                        setTicket(data.ticket);
-                        setMessages(data.messages);
-                      }
-                    }
-                  } finally {
-                    setRunningWorkflow(false);
-                  }
-                }}
-                disabled={runningWorkflow}
-                className="rounded bg-indigo-600 px-2 py-0.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
-              >
-                {runningWorkflow ? "Running..." : "Run"}
-              </button>
-            </div>
-          )}
+          {/* Actions moved to sidebar */}
 
           {/* Tabs */}
           <div className="mt-4 flex gap-4 border-b border-zinc-200 dark:border-zinc-800">
@@ -1226,9 +1099,165 @@ export default function TicketDetailPage() {
         </div>
       </div>
 
-      {/* Right column - details (order-2 on mobile = below conversation) */}
-      <div className="order-2 w-full shrink-0 overflow-y-auto border-t border-zinc-200 bg-zinc-50 p-6 md:order-none md:w-80 md:border-l md:border-t-0 dark:border-zinc-800 dark:bg-zinc-950">
+      {/* Right column - details */}
+      <div className={`w-full shrink-0 overflow-y-auto border-t border-zinc-200 bg-zinc-50 p-6 md:w-80 md:border-l md:border-t-0 dark:border-zinc-800 dark:bg-zinc-950 ${mobileSection === "conversation" ? "hidden md:block" : ""}`}>
+        {/* Actions card */}
+        <div className={`${mobileSection !== "actions" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
+        {(availableWorkflows.length > 0 || (!(ticket.tags || []).some(t => t.startsWith("smart:")) && !patternSuggestion)) && (
+          <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 p-4 dark:border-indigo-800 dark:bg-indigo-950">
+            <h3 className="text-xs font-medium uppercase tracking-wider text-indigo-600 dark:text-indigo-400">Actions</h3>
+            <div className="mt-3 space-y-3">
+              {/* Run workflow */}
+              {availableWorkflows.length > 0 && (
+                <div>
+                  <label className="block text-xs text-indigo-500">Run Workflow</label>
+                  <div className="mt-1 flex items-center gap-2">
+                    <select
+                      id="workflow-select"
+                      defaultValue=""
+                      className="flex-1 rounded border border-indigo-300 bg-white px-2 py-1 text-xs dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    >
+                      <option value="" disabled>Select workflow...</option>
+                      {availableWorkflows.map(wf => (
+                        <option key={wf.id} value={wf.id}>{wf.name}</option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={async () => {
+                        const select = document.getElementById("workflow-select") as HTMLSelectElement;
+                        const wfId = select?.value;
+                        if (!wfId) return;
+                        setRunningWorkflow(true);
+                        try {
+                          const res = await fetch(`/api/tickets/${id}/run-workflow`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ workflow_id: wfId }),
+                          });
+                          if (res.ok) {
+                            const ticketRes = await fetch(`/api/tickets/${id}`);
+                            if (ticketRes.ok) {
+                              const data = await ticketRes.json();
+                              setTicket(data.ticket);
+                              setMessages(data.messages);
+                            }
+                          }
+                        } finally {
+                          setRunningWorkflow(false);
+                        }
+                      }}
+                      disabled={runningWorkflow}
+                      className="rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {runningWorkflow ? "..." : "Run"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Suggest pattern */}
+              {!patternSuggestion && !(ticket.tags || []).some(t => t.startsWith("smart:")) && (
+                <div>
+                  <label className="block text-xs text-indigo-500">Suggest Pattern (AI)</label>
+                  <div className="mt-1 flex items-center gap-2">
+                    {patternCategories.length > 0 && (
+                      <select
+                        value={suggestCategory}
+                        onChange={(e) => setSuggestCategory(e.target.value)}
+                        className="flex-1 rounded border border-indigo-300 bg-white px-2 py-1 text-xs dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
+                      >
+                        <option value="">Auto-detect</option>
+                        {patternCategories.map(c => (
+                          <option key={c.category} value={c.category}>{c.name}</option>
+                        ))}
+                      </select>
+                    )}
+                    <button
+                      onClick={async () => {
+                        setSuggestingPattern(true);
+                        try {
+                          const res = await fetch(`/api/tickets/${id}/suggest-pattern`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(suggestCategory ? { category: suggestCategory } : {}),
+                          });
+                          if (res.ok) {
+                            const data = await res.json();
+                            setPatternSuggestion(data.suggestion);
+                          }
+                        } finally {
+                          setSuggestingPattern(false);
+                        }
+                      }}
+                      disabled={suggestingPattern}
+                      className="rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {suggestingPattern ? "..." : "Analyze"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Pattern suggestion result */}
+              {patternSuggestion && (
+                <div className="rounded-md border border-indigo-300 bg-white p-2.5 dark:border-indigo-700 dark:bg-zinc-800">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-medium text-indigo-700 dark:text-indigo-300">AI Suggestion</p>
+                    <button onClick={() => setPatternSuggestion(null)} className="text-xs text-indigo-400 hover:text-indigo-600">x</button>
+                  </div>
+                  <p className="mt-1 text-xs text-indigo-600 dark:text-indigo-400">{patternSuggestion.reasoning}</p>
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {patternSuggestion.phrases.map((p, i) => (
+                      <span key={i} className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] dark:bg-zinc-700">&ldquo;{p}&rdquo;</span>
+                    ))}
+                  </div>
+                  <div className="mt-2 flex gap-1.5">
+                    <button
+                      onClick={async () => {
+                        await fetch(`/api/workspaces/${workspace.id}/patterns`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            category: patternSuggestion.category,
+                            name: patternSuggestion.category_name,
+                            phrases: patternSuggestion.phrases,
+                            auto_tag: patternSuggestion.auto_tag,
+                            match_target: "both",
+                            priority: 50,
+                          }),
+                        });
+                        if (patternSuggestion.auto_tag) {
+                          const tags = [...(ticket.tags || []), patternSuggestion.auto_tag];
+                          await handlePatch({ tags: [...new Set(tags)] });
+                        }
+                        setPatternSuggestion(null);
+                      }}
+                      className="rounded bg-indigo-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-indigo-500"
+                    >
+                      Accept
+                    </button>
+                    <button
+                      onClick={async () => {
+                        if (patternSuggestion.auto_tag) {
+                          const tags = [...(ticket.tags || []), patternSuggestion.auto_tag];
+                          await handlePatch({ tags: [...new Set(tags)] });
+                        }
+                        setPatternSuggestion(null);
+                      }}
+                      className="rounded border border-indigo-300 px-2 py-0.5 text-[10px] text-indigo-600 dark:border-indigo-700 dark:text-indigo-400"
+                    >
+                      Just Tag
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        </div>
+
         {/* Ticket details card */}
+        <div className={`${mobileSection !== "details" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
           <h3 className="text-sm font-medium uppercase tracking-wider text-zinc-500">Ticket Details</h3>
           <div className="mt-3 space-y-3">
@@ -1329,7 +1358,10 @@ export default function TicketDetailPage() {
           </div>
         </div>
 
+        </div>
+
         {/* Customer card */}
+        <div className={`${mobileSection !== "customer" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
         {customer && (
           <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
             <h3 className="text-sm font-medium uppercase tracking-wider text-zinc-500">Customer</h3>
@@ -1555,6 +1587,7 @@ export default function TicketDetailPage() {
             </div>
           </div>
         )}
+        </div>
       </div>
     </div>
   );
