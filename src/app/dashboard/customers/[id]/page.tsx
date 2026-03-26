@@ -181,6 +181,7 @@ export default function CustomerDetailPage() {
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
+  const [customerTickets, setCustomerTickets] = useState<{ id: string; subject: string | null; status: string; channel: string; tags: string[]; created_at: string; last_customer_reply_at: string | null }[]>([]);
   const [linkedIdentities, setLinkedIdentities] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; is_primary: boolean }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -203,6 +204,7 @@ export default function CustomerDetailPage() {
       setCustomer(data.customer);
       setOrders(data.orders);
       setSubscriptions(data.subscriptions || []);
+      setCustomerTickets(data.tickets || []);
       setLinkedIdentities(data.linked_identities || []);
       setLoading(false);
 
@@ -569,6 +571,48 @@ export default function CustomerDetailPage() {
           </div>
         )}
       </div>
+
+      {/* Tickets */}
+      {customerTickets.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+            Tickets ({customerTickets.length})
+          </h2>
+          <div className="mt-3 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
+            {customerTickets.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => router.push(`/dashboard/tickets/${t.id}`)}
+                className="flex w-full items-center justify-between px-4 py-2.5 text-left transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${
+                      t.status === "open" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+                      : t.status === "pending" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                      : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                    }`}>
+                      {t.status}
+                    </span>
+                    <span className="truncate text-sm text-zinc-900 dark:text-zinc-100">{t.subject || "(no subject)"}</span>
+                  </div>
+                  {t.tags?.length > 0 && (
+                    <div className="mt-0.5 flex gap-1">
+                      {t.tags.slice(0, 3).map(tag => {
+                        const isSmart = tag.startsWith("smart:");
+                        return (
+                          <span key={tag} className={`rounded px-1 py-0.5 text-[8px] font-medium ${isSmart ? "bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400" : "bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400"}`}>{tag}</span>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+                <span className="ml-2 shrink-0 text-xs text-zinc-400">{formatDate(t.created_at)}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Subscriptions */}
       {subscriptions.length > 0 && (

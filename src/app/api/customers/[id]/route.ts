@@ -131,10 +131,19 @@ export async function GET(
       });
   }
 
+  // Get tickets across all linked profiles
+  const { data: tickets } = await admin
+    .from("tickets")
+    .select("id, subject, status, channel, tags, created_at, last_customer_reply_at")
+    .in("customer_id", linkedCustomerIds)
+    .order("created_at", { ascending: false })
+    .limit(20);
+
   return NextResponse.json({
     customer,
     orders: orders || [],
     subscriptions: subscriptions || [],
+    tickets: tickets || [],
     linked_identities: linkedIdentities,
     group_id: link?.group_id || null,
   });
