@@ -192,8 +192,14 @@ export default function TicketDetailPage() {
   const [feedbackReason, setFeedbackReason] = useState("");
   const [linkSuggestions, setLinkSuggestions] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; phone: string | null; match_reason: string }[]>([]);
   const [showLinkSection, setShowLinkSection] = useState(false);
-  const [aiDraft, setAiDraft] = useState<{ ai_draft: string | null; ai_confidence: number | null; ai_tier: string | null; ai_source_type: string | null; source_name: string | null; ai_drafted_at: string | null } | null>(null);
+  const [aiDraft, setAiDraft] = useState<{ ai_draft: string | null; ai_confidence: number | null; ai_tier: string | null; ai_source_type: string | null; source_name: string | null; ai_drafted_at: string | null; ai_suggested_macro_id: string | null; ai_suggested_macro_name: string | null } | null>(null);
   const [generatingDraft, setGeneratingDraft] = useState(false);
+  const [macroSearch, setMacroSearch] = useState("");
+  const [macroResults, setMacroResults] = useState<{ id: string; name: string; body_text: string; category: string | null; usage_count: number }[]>([]);
+  const [popularMacros, setPopularMacros] = useState<{ id: string; name: string; body_text: string; category: string | null; usage_count: number }[]>([]);
+  const [showMacroPanel, setShowMacroPanel] = useState(false);
+  const [applyingMacro, setApplyingMacro] = useState<string | null>(null);
+  const [allMacros, setAllMacros] = useState<{ id: string; name: string; body_text: string; category: string | null; usage_count: number }[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -234,7 +240,17 @@ export default function TicketDetailPage() {
       // Load existing AI draft
       fetch(`/api/tickets/${id}/ai-draft`)
         .then((r) => r.json())
-        .then((d) => { if (d.ai_draft) setAiDraft(d); })
+        .then((d) => { if (d.ai_draft || d.ai_suggested_macro_id) setAiDraft(d); })
+        .catch(() => {});
+
+      // Load macros for search + popular
+      fetch(`/api/workspaces/${workspace.id}/macros`)
+        .then((r) => r.json())
+        .then((m) => { if (Array.isArray(m)) setAllMacros(m); })
+        .catch(() => {});
+      fetch(`/api/workspaces/${workspace.id}/macros/popular`)
+        .then((r) => r.json())
+        .then((m) => { if (Array.isArray(m)) setPopularMacros(m); })
         .catch(() => {});
     }
     load();
@@ -316,6 +332,39 @@ export default function TicketDetailPage() {
   const isEditorEmpty = () => {
     const text = editorRef.current?.textContent?.trim() || replyBody.trim();
     return !text;
+  };
+
+  // Macro search (client-side filter)
+  useEffect(() => {
+    if (!macroSearch.trim()) {
+      setMacroResults([]);
+      return;
+    }
+    const q = macroSearch.toLowerCase();
+    const filtered = allMacros.filter((m) =>
+      m.name.toLowerCase().includes(q) || (m.body_text || "").toLowerCase().includes(q)
+    ).slice(0, 10);
+    setMacroResults(filtered);
+  }, [macroSearch, allMacros]);
+
+  // Apply macro: AI personalizes it and puts text in composer
+  const handleApplyMacro = async (macroId: string) => {
+    setApplyingMacro(macroId);
+    try {
+      const res = await fetch(`/api/tickets/${id}/apply-macro`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ macro_id: macroId }),
+      });
+      const data = await res.json();
+      if (data.personalized) {
+        setReplyBody(data.personalized);
+        setEditorFocused(true);
+        setShowMacroPanel(false);
+        setMacroSearch("");
+      }
+    } catch {}
+    setApplyingMacro(null);
   };
 
   const handleSend = async (e: React.FormEvent) => {
@@ -825,18 +874,29 @@ export default function TicketDetailPage() {
                 </div>
               );
             })}
-            {/* Pending auto-reply preview */}
-            {ticket.pending_auto_reply && ticket.auto_reply_at && new Date(ticket.auto_reply_at) > new Date() && (
-              <div className="max-w-[85%] ml-auto opacity-60">
-                <div className="rounded-lg bg-violet-100 px-4 py-3 ring-1 ring-violet-300 dark:bg-violet-900/30 dark:ring-violet-700">
-                  <div className="mb-1 flex items-center gap-2 text-sm text-violet-500">
-                    <svg className="h-3 w-3 animate-pulse" fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.828a1 1 0 101.415-1.414L11 9.586V6z" /></svg>
-                    <span>Scheduled reply — {new Date(ticket.auto_reply_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}</span>
+            {/* Pending auto-reply preview — cyan for AI, purple for workflows */}
+            {ticket.pending_auto_reply && ticket.auto_reply_at && new Date(ticket.auto_reply_at) > new Date() && (() => {
+              const isAI = !!ticket.ai_draft;
+              const bgColor = isAI ? "bg-cyan-100 dark:bg-cyan-900/30" : "bg-violet-100 dark:bg-violet-900/30";
+              const ringColor = isAI ? "ring-cyan-300 dark:ring-cyan-700" : "ring-violet-300 dark:ring-violet-700";
+              const textColor = isAI ? "text-cyan-500" : "text-violet-500";
+              const bodyColor = isAI ? "text-cyan-700 dark:text-cyan-300" : "text-violet-700 dark:text-violet-300";
+              const label = isAI ? "AI reply" : "Scheduled reply";
+              return (
+                <div className="max-w-[85%] ml-auto opacity-60">
+                  <div className={`rounded-lg px-4 py-3 ring-1 ${bgColor} ${ringColor}`}>
+                    <div className={`mb-1 flex items-center gap-2 text-sm ${textColor}`}>
+                      <svg className="h-3 w-3 animate-pulse" fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.828a1 1 0 101.415-1.414L11 9.586V6z" /></svg>
+                      <span>{label} — {new Date(ticket.auto_reply_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}</span>
+                      {isAI && ticket.ai_confidence != null && (
+                        <span className="rounded-full bg-white/50 px-1.5 py-0.5 text-sm font-medium">{Math.round(ticket.ai_confidence * 100)}%</span>
+                      )}
+                    </div>
+                    <div className={`prose prose-sm max-w-none ${bodyColor}`} dangerouslySetInnerHTML={{ __html: ticket.pending_auto_reply }} />
                   </div>
-                  <div className="prose prose-sm max-w-none text-violet-700 dark:text-violet-300" dangerouslySetInnerHTML={{ __html: ticket.pending_auto_reply }} />
                 </div>
-              </div>
-            )}
+              );
+            })()}
             <div ref={messagesEndRef} />
           </div>}
 
@@ -865,10 +925,13 @@ export default function TicketDetailPage() {
 
         {/* AI Draft Card */}
         {aiDraft?.ai_draft && aiDraft.ai_tier !== "auto" && (
-          <div className="shrink-0 border-t border-violet-200 bg-violet-50 px-4 py-3 dark:border-violet-800 dark:bg-violet-950">
+          <div className="shrink-0 border-t border-cyan-200 bg-cyan-50 px-4 py-3 dark:border-cyan-800 dark:bg-cyan-950">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-violet-700 dark:text-violet-300">AI Draft</span>
+                <svg className="h-4 w-4 text-cyan-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                </svg>
+                <span className="text-sm font-medium text-cyan-700 dark:text-cyan-300">AI Draft</span>
                 <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${
                   (aiDraft.ai_confidence || 0) >= 0.8
                     ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
@@ -879,7 +942,7 @@ export default function TicketDetailPage() {
                   {Math.round((aiDraft.ai_confidence || 0) * 100)}%
                 </span>
                 {aiDraft.ai_source_type && (
-                  <span className="text-sm text-violet-500">
+                  <span className="text-sm text-cyan-500">
                     via {aiDraft.ai_source_type === "macro" ? "Macro" : "KB"}{aiDraft.source_name ? `: ${aiDraft.source_name}` : ""}
                   </span>
                 )}
@@ -890,13 +953,13 @@ export default function TicketDetailPage() {
                     setReplyBody(aiDraft.ai_draft || "");
                     setEditorFocused(true);
                   }}
-                  className="rounded-md bg-violet-600 px-3 py-1 text-sm font-medium text-white hover:bg-violet-500"
+                  className="rounded-md bg-cyan-600 px-3 py-1 text-sm font-medium text-white hover:bg-cyan-500"
                 >
                   Use Draft
                 </button>
                 <button
                   onClick={() => setAiDraft(null)}
-                  className="text-sm text-violet-400 hover:text-violet-600 dark:hover:text-violet-300"
+                  className="text-sm text-cyan-400 hover:text-cyan-600 dark:hover:text-cyan-300"
                 >
                   Dismiss
                 </button>
@@ -908,36 +971,116 @@ export default function TicketDetailPage() {
           </div>
         )}
 
-        {/* Generate AI Draft button (when no draft exists) */}
-        {!aiDraft?.ai_draft && ticket.status !== "closed" && (
-          <div className="shrink-0 border-t border-zinc-100 bg-zinc-50 px-4 py-2 dark:border-zinc-800 dark:bg-zinc-900/50">
+        {/* AI Suggested Macro (when confidence is below threshold but AI found a match) */}
+        {aiDraft?.ai_suggested_macro_id && !aiDraft?.ai_draft && (
+          <div className="shrink-0 border-t border-amber-200 bg-amber-50 px-4 py-2.5 dark:border-amber-800 dark:bg-amber-950">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-amber-700 dark:text-amber-300">AI suggests macro:</span>
+                <span className="text-sm font-medium text-amber-900 dark:text-amber-100">{aiDraft.ai_suggested_macro_name}</span>
+              </div>
+              <button
+                onClick={() => handleApplyMacro(aiDraft.ai_suggested_macro_id!)}
+                disabled={!!applyingMacro}
+                className="rounded-md bg-amber-600 px-3 py-1 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50"
+              >
+                {applyingMacro === aiDraft.ai_suggested_macro_id ? "Personalizing..." : "Apply & Personalize"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* AI + Macro toolbar */}
+        {ticket.status !== "closed" && (
+          <div className="shrink-0 flex items-center gap-2 border-t border-zinc-100 bg-zinc-50 px-4 py-2 dark:border-zinc-800 dark:bg-zinc-900/50">
+            {!aiDraft?.ai_draft && (
+              <button
+                onClick={async () => {
+                  setGeneratingDraft(true);
+                  try {
+                    const res = await fetch(`/api/tickets/${id}/ai-draft`, { method: "POST" });
+                    const data = await res.json();
+                    if (data.draft || data.source_id) {
+                      setAiDraft({
+                        ai_draft: data.draft || null,
+                        ai_confidence: data.confidence,
+                        ai_tier: data.tier,
+                        ai_source_type: data.source_type,
+                        source_name: null,
+                        ai_drafted_at: new Date().toISOString(),
+                        ai_suggested_macro_id: data.source_type === "macro" ? data.source_id : null,
+                        ai_suggested_macro_name: null,
+                      });
+                    }
+                  } catch {}
+                  setGeneratingDraft(false);
+                }}
+                disabled={generatingDraft}
+                className="flex items-center gap-1.5 rounded-md border border-cyan-300 px-3 py-1.5 text-sm font-medium text-cyan-600 hover:bg-cyan-50 disabled:opacity-50 dark:border-cyan-700 dark:text-cyan-400 dark:hover:bg-cyan-950"
+              >
+                <svg className={`h-4 w-4 ${generatingDraft ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                </svg>
+                {generatingDraft ? "Generating..." : "AI Draft"}
+              </button>
+            )}
             <button
-              onClick={async () => {
-                setGeneratingDraft(true);
-                try {
-                  const res = await fetch(`/api/tickets/${id}/ai-draft`, { method: "POST" });
-                  const data = await res.json();
-                  if (data.draft) {
-                    setAiDraft({
-                      ai_draft: data.draft,
-                      ai_confidence: data.confidence,
-                      ai_tier: data.tier,
-                      ai_source_type: data.source_type,
-                      source_name: null,
-                      ai_drafted_at: new Date().toISOString(),
-                    });
-                  }
-                } catch {}
-                setGeneratingDraft(false);
-              }}
-              disabled={generatingDraft}
-              className="flex items-center gap-2 rounded-md border border-violet-300 px-3 py-1.5 text-sm font-medium text-violet-600 hover:bg-violet-50 disabled:opacity-50 dark:border-violet-700 dark:text-violet-400 dark:hover:bg-violet-950"
+              onClick={() => setShowMacroPanel(!showMacroPanel)}
+              className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium ${
+                showMacroPanel
+                  ? "border-indigo-400 bg-indigo-50 text-indigo-700 dark:border-indigo-600 dark:bg-indigo-950 dark:text-indigo-300"
+                  : "border-zinc-300 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+              }`}
             >
-              <svg className={`h-4 w-4 ${generatingDraft ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
               </svg>
-              {generatingDraft ? "Generating..." : "Generate AI Draft"}
+              Macros
             </button>
+          </div>
+        )}
+
+        {/* Macro search panel */}
+        {showMacroPanel && (
+          <div className="shrink-0 border-t border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900">
+            <input
+              type="text"
+              value={macroSearch}
+              onChange={(e) => setMacroSearch(e.target.value)}
+              placeholder="Search macros..."
+              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              autoFocus
+            />
+            <div className="mt-2 max-h-48 overflow-y-auto">
+              {/* Show search results or popular macros */}
+              {(macroSearch.trim() ? macroResults : popularMacros).length === 0 && (
+                <p className="py-2 text-sm text-zinc-400">{macroSearch.trim() ? "No macros found" : "No macros available"}</p>
+              )}
+              {(macroSearch.trim() ? macroResults : popularMacros).map((m) => (
+                <button
+                  key={m.id}
+                  onClick={() => handleApplyMacro(m.id)}
+                  disabled={!!applyingMacro}
+                  className="flex w-full items-center justify-between rounded-md px-3 py-2 text-left transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:hover:bg-zinc-800"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{m.name}</span>
+                      {m.usage_count > 0 && (
+                        <span className="text-sm text-zinc-400">{m.usage_count}x</span>
+                      )}
+                    </div>
+                    <p className="mt-0.5 truncate text-sm text-zinc-500">{m.body_text.slice(0, 80)}...</p>
+                  </div>
+                  <span className="ml-2 shrink-0 text-sm text-indigo-500">
+                    {applyingMacro === m.id ? "..." : "Apply"}
+                  </span>
+                </button>
+              ))}
+              {!macroSearch.trim() && popularMacros.length > 0 && (
+                <p className="mt-1 text-sm text-zinc-400">Showing most-used macros. Type to search all {allMacros.length}.</p>
+              )}
+            </div>
           </div>
         )}
 

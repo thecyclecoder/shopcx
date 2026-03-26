@@ -38,7 +38,7 @@ export async function GET(
         sandbox: true,
         instructions: "",
         max_response_length: null,
-        confidence_threshold: 0.95,
+        confidence_threshold: 0.90,
         auto_resolve: false,
         ai_personalities: null,
         created_at: null,

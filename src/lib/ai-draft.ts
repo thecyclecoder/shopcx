@@ -151,7 +151,7 @@ export async function generateAIDraft(
   const result = await callClaude(systemPrompt, query);
 
   // 9. Determine tier based on confidence and channel threshold
-  const threshold = channelConfig.confidence_threshold || 0.95;
+  const threshold = channelConfig.confidence_threshold || 0.90;
   let tier: "auto" | "review" | "human";
   if (result.confidence >= threshold && channelConfig.auto_resolve) {
     tier = "auto";
@@ -161,7 +161,20 @@ export async function generateAIDraft(
     tier = "human";
   }
 
-  // 10. Store on ticket
+  // 10. Always suggest a macro if one was found (even for human tier)
+  let suggestedMacroId: string | null = null;
+  let suggestedMacroName: string | null = null;
+  if (sourceType === "macro" && sourceId) {
+    suggestedMacroId = sourceId;
+    const { data: macroInfo } = await admin.from("macros").select("name").eq("id", sourceId).single();
+    suggestedMacroName = macroInfo?.name || null;
+  } else if (ragContext.macros.length > 0) {
+    // Even if we used KB for the draft, suggest the best matching macro
+    suggestedMacroId = ragContext.macros[0].id;
+    suggestedMacroName = ragContext.macros[0].name;
+  }
+
+  // 11. Store on ticket
   await admin
     .from("tickets")
     .update({
@@ -172,11 +185,13 @@ export async function generateAIDraft(
       ai_source_id: sourceId,
       ai_workflow_id: workflowMatch?.id || null,
       ai_drafted_at: new Date().toISOString(),
+      ai_suggested_macro_id: suggestedMacroId,
+      ai_suggested_macro_name: suggestedMacroName,
     })
     .eq("id", ticketId);
 
-  // Increment macro usage count
-  if (sourceType === "macro" && sourceId) {
+  // Increment macro usage count (only when actually used for draft, not just suggested)
+  if (sourceType === "macro" && sourceId && tier !== "human") {
     try { await admin.rpc("increment_macro_usage", { macro_id: sourceId }); } catch {}
   }
 

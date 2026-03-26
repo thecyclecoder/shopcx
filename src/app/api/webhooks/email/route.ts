@@ -382,6 +382,36 @@ export async function POST(request: Request) {
         });
       }
 
+      // AI auto-draft: only if no smart tag workflow was triggered
+      if (!matched?.autoTag) {
+        // Check if AI is enabled for email channel
+        const { data: aiConfig } = await admin
+          .from("ai_channel_config")
+          .select("enabled, sandbox, confidence_threshold, auto_resolve")
+          .eq("workspace_id", workspaceId)
+          .eq("channel", "email")
+          .single();
+
+        if (aiConfig?.enabled) {
+          // Respect per-channel delays (same as workflows)
+          const { data: wsDelay2 } = await admin.from("workspaces").select("response_delays").eq("id", workspaceId).single();
+          const delays2 = (wsDelay2?.response_delays || { email: 300 }) as Record<string, number>;
+          const aiDelaySec = delays2.email || 300;
+          const aiAutoReplyAt = new Date(Date.now() + aiDelaySec * 1000).toISOString();
+
+          await admin.from("tickets").update({
+            auto_reply_at: aiAutoReplyAt,
+            pending_auto_reply: "AI is drafting a response...",
+          }).eq("id", ticket.id);
+
+          // Fire AI draft via Inngest (respects delay inside the function)
+          await inngest.send({
+            name: "ai/draft-ticket",
+            data: { workspace_id: workspaceId, ticket_id: ticket.id, channel: "email", delay_seconds: aiDelaySec },
+          });
+        }
+      }
+
       // Evaluate rules for new ticket (tags are set, so rules can trigger on them)
       const { data: fullTicket } = await admin.from("tickets").select("*").eq("id", ticket.id).single();
       const { data: custData } = customerId

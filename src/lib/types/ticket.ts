@@ -13,6 +13,12 @@ export interface Ticket {
   subject: string | null;
   ai_confidence: number | null;
   ai_handled: boolean;
+  ai_draft: string | null;
+  ai_tier: string | null;
+  ai_source_type: string | null;
+  ai_source_id: string | null;
+  ai_suggested_macro_id: string | null;
+  ai_suggested_macro_name: string | null;
   assigned_to: string | null;
   escalated_to: string | null;
   escalated_at: string | null;

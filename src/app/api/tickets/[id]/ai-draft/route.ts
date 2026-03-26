@@ -61,7 +61,7 @@ export async function GET(
   const admin = createAdminClient();
   const { data: ticket } = await admin
     .from("tickets")
-    .select("ai_draft, ai_confidence, ai_tier, ai_source_type, ai_source_id, ai_workflow_id, ai_drafted_at")
+    .select("ai_draft, ai_confidence, ai_tier, ai_source_type, ai_source_id, ai_workflow_id, ai_drafted_at, ai_suggested_macro_id, ai_suggested_macro_name")
     .eq("id", ticketId)
     .eq("workspace_id", workspaceId)
     .single();
