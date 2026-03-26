@@ -14,8 +14,9 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   };
 }
 
-export default async function HelpCenterPage({ params }: { params: Promise<{ slug: string }> }) {
+export default async function HelpCenterPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ search?: string }> }) {
   const { slug } = await params;
+  const { search } = await searchParams;
   const admin = createAdminClient();
 
   const { data: workspace } = await admin
@@ -40,6 +41,15 @@ export default async function HelpCenterPage({ params }: { params: Promise<{ slu
     if (!byCategory[a.category]) byCategory[a.category] = [];
     byCategory[a.category]!.push(a);
   }
+
+  // Search filter
+  const searchQuery = search?.trim().toLowerCase();
+  const searchResults = searchQuery
+    ? (articles || []).filter(a =>
+        a.title.toLowerCase().includes(searchQuery) ||
+        (a.excerpt || "").toLowerCase().includes(searchQuery)
+      )
+    : null;
 
   // Get products
   const productNames = [...new Set((articles || []).filter(a => a.product_name).map(a => a.product_name!))];
@@ -68,6 +78,27 @@ export default async function HelpCenterPage({ params }: { params: Promise<{ slu
       </header>
 
       <main className="max-w-4xl mx-auto px-6 py-8">
+        {/* Search results */}
+        {searchResults && (
+          <div className="mb-8">
+            <h2 className="text-lg font-semibold text-zinc-900">
+              {searchResults.length} result{searchResults.length !== 1 ? "s" : ""} for &ldquo;{search}&rdquo;
+            </h2>
+            {searchResults.length === 0 ? (
+              <p className="mt-4 text-sm text-zinc-500">No articles found. Try a different search term or browse the categories below.</p>
+            ) : (
+              <div className="mt-4 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white">
+                {searchResults.map(a => (
+                  <Link key={a.id} href={`/help/${slug}/${a.slug}`} className="block px-4 py-3 hover:bg-zinc-50 transition-colors">
+                    <p className="text-sm font-medium text-zinc-900">{a.title}</p>
+                    {a.excerpt && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-2">{a.excerpt}</p>}
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Categories */}
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
           {Object.entries(byCategory).map(([category, categoryArticles]) => (

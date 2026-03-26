@@ -149,7 +149,7 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
             Last updated {new Date(article.updated_at).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
           </p>
 
-          <div className="prose prose-zinc mt-6 max-w-none">
+          <div className="prose mt-6 max-w-none text-zinc-800 [&_*]:!text-zinc-800 [&_a]:!text-indigo-600 [&_h1]:!text-zinc-900 [&_h2]:!text-zinc-900 [&_h3]:!text-zinc-900 [&_strong]:!text-zinc-900">
             {article.content_html ? (
               <div dangerouslySetInnerHTML={{ __html: article.content_html }} />
             ) : (
