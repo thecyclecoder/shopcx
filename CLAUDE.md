@@ -64,28 +64,85 @@ ShopCX.AI replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - Customer list page: search (Enter to submit), sortable columns, retention badges, pagination
 - Customer detail page: stats, order history, retention score
 
-### Phase 3: Basic Ticketing ✅
+### Phase 3: Ticketing ✅
 - Tickets + ticket_messages tables with RLS
-- Email inbound: Resend webhook → fetch body via /emails/receiving/{id} → create ticket
-- Email outbound: Agent replies sent via Resend with In-Reply-To threading
-- Email threading: In-Reply-To header match → message ID match → subject + sender fallback
-- Auto-transitions: agent reply → open→pending, customer reply → reopen pending/resolved
-- CSAT: Inngest sends survey 24hrs after ticket closed, HMAC-signed public rating page
-- Sandbox mode: forwarded support email tickets don't send real replies until disabled
-- Multiple support email addresses with labels (contact@, hello@, returns@, etc.)
-- Inbound email webhook auto-setup via Resend API
-- MX record check with Google DNS propagation status
-- Email signature stripping (Gmail, Outlook, Apple, RFC --) for display
-- Quoted reply stripping for display
-- Ticket queue: auto-refreshes every 10s, filterable by status/channel/assignee
-- Ticket detail: conversation thread, reply composer (Reply vs Note), customer sidebar
-- Integrations pages gated to owner/admin roles
+- Email inbound: Resend webhook → fetch body → create ticket
+- Email outbound: Agent replies via Resend with In-Reply-To threading
+- Email threading: In-Reply-To → message ID → subject + sender fallback
+- Statuses: open, pending, closed (resolved removed)
+- Auto-transitions: agent reply → pending, customer reply → reopen
+- Close with reply: checkbox on composer, closes ticket on send
+- CSAT: Inngest sends survey 24hrs after closed, HMAC-signed rating page
+- Sandbox mode, multiple support emails, MX record check
+- Rich text reply composer with formatting toolbar (bold, italic, lists, links)
+- Expandable editor: collapsed single-line, expands on focus with toolbar
+- Ticket detail polls every 10s for new messages + status updates
+- Ticket queue: auto-refreshes every 10s, filterable by status/channel/assignee/tags
+- Multi-select tag filtering on ticket queue
+- Quoted reply stripping on inbound messages
+- Customer sidebar: orders, subscriptions, LTV, retention score (live computed)
+- Lazy customer enrichment from Shopify on page view
+- last_customer_reply_at tracking, Created + Last Reply columns
+
+### Phase 3b: Rules Engine ✅
+- Rules table: compound AND/OR conditions (JSONB), ordered actions, priority
+- 8 action types: add/remove tags, set status, assign, auto-reply, internal note, update customer, Appstle subscription actions
+- Synchronous evaluation in all 6 event sources (email, ticket changes, Shopify, Appstle webhooks)
+- Template variables in auto-replies: {{customer.first_name}}, {{ticket.subject}}, etc.
+- Rule builder UI in Settings > Rules
+
+### Phase 3c: Ticket Views ✅
+- Saved views with nested hierarchy (2 levels deep)
+- Collapsible in sidebar with ▸/▾ toggle
+- Per-view ticket counts (capped at 99+)
+- Filter combos: status, channel, assigned to, tag (multi-select), search
+- Save as View from active filters
+- View editor in Settings > Ticket Views
+- Built-in Escalations submenu (personal: escalated to/by me)
+
+### Phase 3d: Escalation ✅
+- Separate escalation layer: escalated_to, escalated_at, escalation_reason
+- Independent from assignment (ticket stays with agent)
+- Amber flag on ticket list + sidebar dropdown
+- Personal escalation views in sidebar with counts
+- Workflow escalation: customer reply + person selector + status
+
+### Phase 3e: Smart Patterns ✅
+- Global pattern library: 9 categories, 220+ phrases (seeded from ticket analysis)
+- 3-layer classifier: keywords (instant) → pgvector embeddings (semantic) → Claude Haiku (fallback)
+- Auto-tags tickets on ingest with smart: prefix (violet badges)
+- Workspace-specific patterns + global pattern overrides (enable/dismiss)
+- AI pattern suggestion: Claude analyzes tickets, suggests phrases + category
+- Smart tag feedback loop: agent removal → AI analysis → admin review queue
+- Pattern review banner notification for admins
+- Settings > Smart Patterns: global library + workspace patterns + review queue
+
+### Phase 3f: Workflows ✅
+- 3 template workflows: Order Tracking, Cancel Request, Subscription Inquiry
+- Shopify fulfillment data: carrier events, delivered/in-transit/out-for-delivery, shipping address
+- 24 template variables (customer, order, fulfillment, subscription)
+- Rich text reply templates with formatting
+- Per-channel response delays (Inngest step.sleep): email 60s, chat 5s, sms 10s
+- Cancel auto-reply button on ticket detail
+- Pending auto-reply preview in conversation (purple ghost message with resolved variables)
+- Manual workflow trigger from ticket detail dropdown
+- Configurable status per reply step (pending/closed/open)
+- Positive confirmation detection + delayed auto-close
+- Configurable auto-close reply message
+
+### Phase 3g: Customer Identity ✅
+- Customer linking across profiles (email, phone, name, address matching)
+- Combined orders, subscriptions, tickets across linked profiles
+- Ticket sidebar uses linked data for LTV/order count/retention score
+- Customer merge on Shopify webhook (email-only → Shopify customer)
+- Suggestions API: auto-detects potential matches
+- Tickets list on customer detail page
 
 ## Remaining Phases (from spec)
-- **Phase 4**: AI Agent + Knowledge Base (Claude API, RAG with pgvector, confidence scoring)
+- **Phase 4**: AI Agent + Knowledge Base (foundation built: patterns, workflows, Claude integration)
 - **Phase 5**: Live Chat Widget (embeddable JS, WebSocket via Supabase Realtime)
 - **Phase 6**: Meta Social Command Center (Graph API, comment queues, moderation)
-- **Phase 7**: Native Subscription Manager (Stripe Billing, dunning, Appstle migration)
+- **Phase 7**: Native Subscription Manager (Appstle migration, dunning flows)
 - **Phase 8**: Behavioral Tracking SDK (JS SDK, customer timeline, at-risk dashboard)
 - **Phase 9**: Email & SMS Marketing (Resend + Twilio, segments, flows, campaigns)
 
@@ -98,15 +155,23 @@ ShopCX.AI replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - `src/lib/supabase/server.ts` — SSR client for auth checks
 - `src/lib/supabase/middleware.ts` — Auth + workspace + sandbox enforcement
 - `src/lib/crypto.ts` — AES-256-GCM encrypt/decrypt for API keys
-- `src/lib/shopify-sync.ts` — Bulk ops, paginated sync, counts, customer/order processing
-- `src/lib/shopify-webhooks.ts` — Customer/order webhook handlers with GraphQL enrichment
-- `src/lib/inngest/sync-shopify.ts` — Inngest function: skip/bulk/paginated strategy
+- `src/lib/shopify-sync.ts` — Bulk ops, paginated sync, per-batch customer lookups, rate limit guard
+- `src/lib/shopify-webhooks.ts` — Customer/order webhook handlers, customer merge logic
+- `src/lib/inngest/sync-shopify.ts` — Order/customer sync with memoized steps
+- `src/lib/inngest/import-subscriptions.ts` — 6-function fan-out import pipeline
+- `src/lib/inngest/workflow-delayed.ts` — Delayed workflow execution + positive-close
 - `src/lib/inngest/ticket-csat.ts` — CSAT survey 24hrs after ticket close
+- `src/lib/rules-engine.ts` — Synchronous rule evaluation with compound AND/OR conditions
+- `src/lib/rules-actions.ts` — 8 action executors (tag, status, assign, reply, note, customer, appstle)
+- `src/lib/pattern-matcher.ts` — 3-layer classifier: keywords → embeddings → Claude Haiku
+- `src/lib/workflow-executor.ts` — Template workflows with Shopify fulfillment data + 24 variables
+- `src/lib/embeddings.ts` — Multi-provider embedding generation (OpenAI, Voyage, HuggingFace)
+- `src/lib/appstle.ts` — Appstle API helper (pause/cancel/resume subscriptions)
 - `src/lib/email.ts` — Resend client, send ticket reply, send CSAT, send invite
-- `src/lib/email-utils.ts` — Signature + quoted reply stripping
+- `src/lib/email-utils.ts` — Quoted reply stripping
 - `src/lib/retention-score.ts` — Retention score calculation + batch update
-- `src/lib/access.ts` — Admin email + invite-based access gate
-- `src/lib/workspace.ts` — Workspace resolution, active workspace, auto-accept invites
+- `src/lib/workspace.ts` — Workspace resolution, PWA fallback, auto-accept invites
+- `src/lib/stores/import-store.ts` — Zustand store for import progress (localStorage)
 
 ## Environment Variables (Vercel Production)
 - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` — Supabase
@@ -115,17 +180,28 @@ ShopCX.AI replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - `NEXTAUTH_URL` — https://shopcx.ai
 - `ENCRYPTION_KEY` — 64-char hex for AES-256-GCM
 - `INNGEST_EVENT_KEY`, `INNGEST_SIGNING_KEY` — Inngest auth
+- `ANTHROPIC_API_KEY` — Claude API for pattern suggestions + Haiku classification
+- `OPENAI_API_KEY` — Embeddings via text-embedding-3-small (384 dims)
 
 ## Database Schema (Supabase)
-- `workspaces` — Multi-tenant root. Plan, Shopify/Resend/Stripe credentials (encrypted), sandbox_mode, order_source_mapping
+- `workspaces` — Multi-tenant root. Credentials (encrypted), sandbox_mode, response_delays, auto_close_reply
 - `workspace_members` — User ↔ workspace with role enum
 - `workspace_invites` — Email-based invites with expiry
 - `support_emails` — Multiple support addresses per workspace with labels
-- `customers` — Synced from Shopify. Email (or phone.local), retention_score, subscription_status, LTV, tags
-- `orders` — Synced from Shopify. Linked to customers, source_name, line_items JSONB, order_type
-- `tickets` — Channel, status workflow, assignment, CSAT, email_message_id for threading
+- `customers` — Synced from Shopify. Email, retention_score, subscription_status, LTV, tags, shopify_customer_id
+- `customer_links` — Link profiles across emails (group_id, is_primary)
+- `orders` — Synced from Shopify. shopify_customer_id, subscription_id, source_name, order_type, fulfillments JSONB
+- `subscriptions` — From Appstle CSV import + webhooks. Items JSONB, consecutive_skips
+- `tickets` — Status (open/pending/closed), tags TEXT[], escalated_to, auto_reply_at, pending_auto_reply, last_customer_reply_at
 - `ticket_messages` — Direction, visibility, author_type, email threading
-- `sync_jobs` — Track sync progress for frontend polling
+- `ticket_views` — Saved filter combos with parent_id for nesting
+- `sync_jobs` — Track Shopify sync progress
+- `import_jobs` — Track CSV import progress (6-step pipeline)
+- `rules` — Compound AND/OR conditions, ordered actions, priority, stop_processing
+- `smart_patterns` — Global + workspace patterns, phrases JSONB, embedding vector(384), auto_tag
+- `workspace_pattern_overrides` — Enable/dismiss globals per workspace
+- `pattern_feedback` — Agent feedback on smart tag removal + AI analysis
+- `workflows` — Template-based (order_tracking, cancel_request, subscription_inquiry), config JSONB
 
 ## Conventions
 - Migrations: `supabase/migrations/YYYYMMDDNNNNNN_description.sql`
