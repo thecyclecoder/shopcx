@@ -50,7 +50,52 @@ export async function setActiveWorkspace(userId: string, workspaceId: string) {
 
 export async function getActiveWorkspaceId(): Promise<string | null> {
   const cookieStore = await cookies();
-  return cookieStore.get(WORKSPACE_COOKIE)?.value ?? null;
+  const fromCookie = cookieStore.get(WORKSPACE_COOKIE)?.value;
+  if (fromCookie) return fromCookie;
+
+  // Fallback: check user's app_metadata (survives cookie loss in PWA)
+  const { createClient } = await import("@/lib/supabase/server");
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return null;
+
+  const wsId = user.app_metadata?.workspace_id;
+  if (wsId) {
+    // Re-set the cookie so subsequent requests don't need this fallback
+    cookieStore.set(WORKSPACE_COOKIE, wsId, {
+      path: "/",
+      httpOnly: false,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 60 * 60 * 24 * 365,
+    });
+    return wsId;
+  }
+
+  // Last resort: if user has exactly 1 workspace, auto-select it
+  const admin = createAdminClient();
+  const { data: memberships } = await admin
+    .from("workspace_members")
+    .select("workspace_id")
+    .eq("user_id", user.id);
+
+  if (memberships?.length === 1) {
+    const autoId = memberships[0].workspace_id;
+    // Set app_metadata + cookie
+    await admin.auth.admin.updateUserById(user.id, {
+      app_metadata: { workspace_id: autoId },
+    });
+    cookieStore.set(WORKSPACE_COOKIE, autoId, {
+      path: "/",
+      httpOnly: false,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 60 * 60 * 24 * 365,
+    });
+    return autoId;
+  }
+
+  return null;
 }
 
 export async function autoAcceptInvites(userId: string, email: string) {
