@@ -454,6 +454,7 @@ function ResponseDelayEditor({ workspaceId }: { workspaceId: string }) {
     { key: "chat", label: "Live Chat" },
     { key: "sms", label: "SMS" },
     { key: "meta_dm", label: "Social DMs" },
+    { key: "help_center", label: "Help Center" },
   ];
 
   return (
