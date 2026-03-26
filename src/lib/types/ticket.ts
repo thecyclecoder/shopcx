@@ -17,6 +17,7 @@ export interface Ticket {
   escalated_to: string | null;
   escalated_at: string | null;
   escalation_reason: string | null;
+  auto_reply_at: string | null;
   first_response_at: string | null;
   resolved_at: string | null;
   csat_score: number | null;

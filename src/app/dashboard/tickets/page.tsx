@@ -12,6 +12,7 @@ interface TicketRow {
   assigned_to: string | null;
   assigned_name: string | null;
   escalated_to: string | null;
+  auto_reply_at: string | null;
   customer_email: string | null;
   customer_name: string | null;
   tags: string[];
@@ -465,6 +466,11 @@ export default function TicketsPage() {
                   <td className="whitespace-nowrap px-4 py-3 text-sm">
                     <div className="flex items-center gap-1">
                       <StatusBadge status={t.status} />
+                      {t.auto_reply_at && new Date(t.auto_reply_at) > new Date() && (
+                        <span className="rounded bg-violet-50 px-1 py-0.5 text-[8px] font-medium text-violet-500 dark:bg-violet-900/30 dark:text-violet-400">
+                          Auto {new Date(t.auto_reply_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
+                        </span>
+                      )}
                       {t.escalated_to && (
                         <svg className="h-3.5 w-3.5 text-amber-500" fill="currentColor" viewBox="0 0 20 20">
                           <path fillRule="evenodd" d="M3 6a3 3 0 013-3h10l-4 4 4 4H6a3 3 0 01-3-3V6z" clipRule="evenodd" />

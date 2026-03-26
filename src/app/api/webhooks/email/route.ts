@@ -5,7 +5,7 @@ import { decrypt } from "@/lib/crypto";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { matchPatterns } from "@/lib/pattern-matcher";
-import { executeWorkflow } from "@/lib/workflow-executor";
+import { inngest } from "@/lib/inngest/client";
 
 // Detect short positive confirmation replies (thanks, got it, etc.)
 const POSITIVE_PHRASES = [
@@ -334,8 +334,18 @@ export async function POST(request: Request) {
 
         console.log(`Pattern matched: ${matched.category} (${matched.method}, confidence: ${matched.confidence}) → ${matched.autoTag}`);
 
-        // Execute workflow if one exists for this smart tag
-        await executeWorkflow(workspaceId, ticket.id, matched.autoTag);
+        // Fire workflow execution via Inngest (respects channel response delay)
+        // Set auto_reply_at so agents can see the ticket is queued
+        const { data: wsDelay } = await admin.from("workspaces").select("response_delays").eq("id", workspaceId).single();
+        const delays = (wsDelay?.response_delays || { email: 60 }) as Record<string, number>;
+        const delaySec = delays.email || 60;
+        const autoReplyAt = new Date(Date.now() + delaySec * 1000).toISOString();
+        await admin.from("tickets").update({ auto_reply_at: autoReplyAt }).eq("id", ticket.id);
+
+        await inngest.send({
+          name: "workflow/execute",
+          data: { workspace_id: workspaceId, ticket_id: ticket.id, trigger_tag: matched.autoTag, channel: "email" },
+        });
       }
 
       // Evaluate rules for new ticket (tags are set, so rules can trigger on them)

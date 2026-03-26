@@ -306,9 +306,9 @@ async function sendReply(admin: Admin, context: WorkflowContext, templateText: s
     });
   }
 
-  // Update ticket status (configurable — defaults to pending)
+  // Update ticket status (configurable — defaults to pending) + clear auto_reply_at
   const statusAfterReply = (statusOverride as string) || "pending";
-  const statusUpdates: Record<string, unknown> = { status: statusAfterReply, updated_at: new Date().toISOString() };
+  const statusUpdates: Record<string, unknown> = { status: statusAfterReply, auto_reply_at: null, updated_at: new Date().toISOString() };
   if (statusAfterReply === "closed") statusUpdates.resolved_at = new Date().toISOString();
   await admin.from("tickets").update(statusUpdates).eq("id", context.ticketId);
 }

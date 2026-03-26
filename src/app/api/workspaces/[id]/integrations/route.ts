@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays"
     )
     .eq("id", workspaceId)
     .single();
@@ -64,8 +64,9 @@ export async function GET(
       ? `...${decrypt(workspace.appstle_api_key_encrypted).slice(-4)}`
       : null,
 
-    // Auto-close
+    // Auto-close + delays
     auto_close_reply: workspace.auto_close_reply || null,
+    response_delays: workspace.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10 },
   });
 }
 
@@ -127,6 +128,10 @@ export async function PATCH(
 
     if ("auto_close_reply" in body) {
       updates.auto_close_reply = body.auto_close_reply || null;
+    }
+
+    if ("response_delays" in body) {
+      updates.response_delays = body.response_delays;
     }
 
     // Shopify credentials

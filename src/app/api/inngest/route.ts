@@ -10,6 +10,7 @@ import {
   importFinalizeBatch,
   importJobComplete,
 } from "@/lib/inngest/import-subscriptions";
+import { workflowDelayed } from "@/lib/inngest/workflow-delayed";
 
 export const maxDuration = 300;
 
@@ -25,5 +26,6 @@ export const { GET, POST, PUT } = serve({
     importChunksComplete,
     importFinalizeBatch,
     importJobComplete,
+    workflowDelayed,
   ],
 });

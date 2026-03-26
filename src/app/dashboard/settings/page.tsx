@@ -104,6 +104,7 @@ export default function SettingsPage() {
           </svg>
         </Link>
 
+        <ResponseDelayEditor workspaceId={workspace.id} />
         <AutoCloseReplyEditor workspaceId={workspace.id} />
 
         <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
@@ -125,6 +126,66 @@ export default function SettingsPage() {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function ResponseDelayEditor({ workspaceId }: { workspaceId: string }) {
+  const [delays, setDelays] = useState<Record<string, number>>({ email: 60, chat: 5, sms: 10, meta_dm: 10 });
+  const [saved, setSaved] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspaceId}/integrations`)
+      .then(r => r.json())
+      .then(d => { if (d.response_delays) setDelays(d.response_delays); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [workspaceId]);
+
+  const handleSave = async () => {
+    await fetch(`/api/workspaces/${workspaceId}/integrations`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ response_delays: delays }),
+    });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  if (loading) return null;
+
+  const channels = [
+    { key: "email", label: "Email" },
+    { key: "chat", label: "Live Chat" },
+    { key: "sms", label: "SMS" },
+    { key: "meta_dm", label: "Social DMs" },
+  ];
+
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Response Delay</h2>
+      <p className="mt-1 text-xs text-zinc-500">How long workflows and AI wait before sending auto-replies. Prevents instant robotic-feeling responses.</p>
+      <div className="mt-3 grid grid-cols-2 gap-3">
+        {channels.map(ch => (
+          <div key={ch.key}>
+            <label className="block text-xs text-zinc-500">{ch.label}</label>
+            <div className="mt-1 flex items-center gap-1.5">
+              <input
+                type="number"
+                value={delays[ch.key] || 0}
+                onChange={(e) => setDelays({ ...delays, [ch.key]: parseInt(e.target.value) || 0 })}
+                className="w-20 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              />
+              <span className="text-xs text-zinc-400">seconds</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 flex items-center gap-2">
+        <button onClick={handleSave} className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500">Save</button>
+        {saved && <span className="text-xs text-emerald-600">Saved!</span>}
       </div>
     </div>
   );
