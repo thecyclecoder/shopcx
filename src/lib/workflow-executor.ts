@@ -23,6 +23,7 @@ export interface WorkflowContext {
     estimated_delivery: string | null;
     in_transit_at: string | null;
     latest_location: string | null;
+    shipping_address: string | null;
   } | null;
   subscription: Record<string, unknown> | null;
 }
@@ -121,6 +122,7 @@ export async function buildContext(admin: Admin, workspaceId: string, ticketId: 
         estimated_delivery: null,
         in_transit_at: null,
         latest_location: null,
+        shipping_address: null,
       };
 
       // Try to get real-time Shopify fulfillment status with carrier events
@@ -140,6 +142,7 @@ export async function buildContext(admin: Admin, workspaceId: string, ticketId: 
             if (!fulfillment.carrier && shopifyData.carrier) fulfillment.carrier = shopifyData.carrier;
             if (!fulfillment.tracking_number && shopifyData.trackingNumber) fulfillment.tracking_number = shopifyData.trackingNumber;
             if (!fulfillment.url && shopifyData.trackingUrl) fulfillment.url = shopifyData.trackingUrl;
+            if (shopifyData.shippingAddress) fulfillment.shipping_address = shopifyData.shippingAddress;
           }
         } catch {
           // Non-critical — continue with DB data
@@ -170,6 +173,7 @@ interface ShopifyFulfillmentData {
   carrier: string | null;
   trackingNumber: string | null;
   trackingUrl: string | null;
+  shippingAddress: string | null;
 }
 
 async function getShopifyFulfillmentStatus(workspaceId: string, shopifyOrderId: string): Promise<ShopifyFulfillmentData | null> {
@@ -179,6 +183,7 @@ async function getShopifyFulfillmentStatus(workspaceId: string, shopifyOrderId: 
     const query = `{
       order(id: "${gid}") {
         displayFulfillmentStatus
+        shippingAddress { address1 address2 city provinceCode zip country }
         fulfillments(first: 1) {
           status
           createdAt
@@ -212,6 +217,12 @@ async function getShopifyFulfillmentStatus(workspaceId: string, shopifyOrderId: 
     const tracking = f.trackingInfo?.[0];
     const displayStatus = f.displayStatus || f.status;
 
+    // Build shipping address from order
+    const sa = order.shippingAddress;
+    const shippingAddr = sa
+      ? [sa.address1, sa.address2, sa.city, sa.provinceCode, sa.zip].filter(Boolean).join(", ")
+      : null;
+
     return {
       status: f.deliveredAt ? "DELIVERED" : latestEvent?.status || displayStatus || order.displayFulfillmentStatus || "UNKNOWN",
       deliveredAt: f.deliveredAt || null,
@@ -221,6 +232,7 @@ async function getShopifyFulfillmentStatus(workspaceId: string, shopifyOrderId: 
       carrier: tracking?.company || null,
       trackingNumber: tracking?.number || null,
       trackingUrl: tracking?.url || null,
+      shippingAddress: shippingAddr,
     };
   } catch {
     return null;
@@ -230,11 +242,9 @@ async function getShopifyFulfillmentStatus(workspaceId: string, shopifyOrderId: 
 // ── Template variables ──
 
 export function resolveTemplate(template: string, context: WorkflowContext): string {
-  // Build delivery address from customer's default_address
-  const addr = context.customer?.default_address as { address1?: string; address2?: string; city?: string; province?: string; provinceCode?: string; zip?: string; country?: string; countryCodeV2?: string } | null;
-  const deliveryAddress = addr
-    ? [addr.address1, addr.address2, addr.city, addr.provinceCode || addr.province, addr.zip].filter(Boolean).join(", ")
-    : "";
+  // Delivery address from Shopify order's shipping address
+  const deliveryAddress = context.fulfillment?.shipping_address || "";
+  const addr = context.customer?.default_address as { city?: string; province?: string; provinceCode?: string } | null;
   const deliveryCity = addr?.city || "";
   const deliveryState = addr?.provinceCode || addr?.province || "";
 
