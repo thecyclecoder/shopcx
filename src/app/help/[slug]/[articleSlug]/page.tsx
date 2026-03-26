@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { headers } from "next/headers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import Link from "next/link";
 import type { Metadata } from "next";
@@ -43,6 +44,11 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
     .single();
 
   if (!workspace) notFound();
+
+  const headersList = await headers();
+  const host = headersList.get("host") || "";
+  const isSubdomain = host.split(".").length >= 3 || !host.includes("shopcx.ai");
+  const basePath = isSubdomain ? "" : `/help/${slug}`;
 
   // Try direct slug match, then try with en-US prefix stripped (for old Gorgias URLs)
   let { data: article } = await admin
@@ -120,10 +126,10 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
       {/* Header */}
       <header className="border-b border-zinc-200 bg-white px-6 py-4">
         <div className="max-w-3xl mx-auto flex items-center gap-3">
-          <Link href={`/help/${slug}`}>
+          <Link href={basePath || "/"}>
             <img src={workspace.help_logo_url || "https://shopcx.ai/logo.svg"} alt={workspace.name} className="h-8 w-auto" />
           </Link>
-          <Link href={`/help/${slug}`} className="text-sm text-indigo-600 hover:underline">
+          <Link href={basePath || "/"} className="text-sm text-indigo-600 hover:underline">
             &larr; {workspace.name} Help Center
           </Link>
         </div>
@@ -132,7 +138,7 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
       <main className="max-w-3xl mx-auto px-6 py-8">
         {/* Breadcrumb */}
         <nav className="flex items-center gap-1.5 text-xs text-zinc-400">
-          <Link href={`/help/${slug}`} className="hover:text-zinc-600">Help Center</Link>
+          <Link href={basePath || "/"} className="hover:text-zinc-600">Help Center</Link>
           <span>&rsaquo;</span>
           <span className="capitalize">{article.category}</span>
           {article.product_name && (
@@ -167,7 +173,7 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
             <h2 className="text-lg font-semibold text-zinc-900">Related Articles</h2>
             <div className="mt-4 space-y-2">
               {related.map(r => (
-                <Link key={r.id} href={`/help/${slug}/${r.slug}`} className="block rounded-lg border border-zinc-200 bg-white px-4 py-3 hover:border-indigo-300 transition-colors">
+                <Link key={r.id} href={`${basePath}/${r.slug}`} className="block rounded-lg border border-zinc-200 bg-white px-4 py-3 hover:border-indigo-300 transition-colors">
                   <p className="text-sm font-medium text-zinc-900">{r.title}</p>
                   {r.excerpt && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-1">{r.excerpt}</p>}
                 </Link>
@@ -182,7 +188,7 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
         {/* Contact CTA */}
         <div className="mt-6 rounded-lg border border-zinc-200 bg-white p-6 text-center">
           <p className="text-sm text-zinc-600">Still need help?</p>
-          <Link href={`/help/${slug}#contact`} className="mt-2 inline-block rounded-md px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: workspace.help_primary_color || "#4f46e5" }}>
+          <Link href="/#contact" className="mt-2 inline-block rounded-md px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: workspace.help_primary_color || "#4f46e5" }}>
             Contact Support
           </Link>
         </div>

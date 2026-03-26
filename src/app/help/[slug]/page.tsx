@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { headers } from "next/headers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import Link from "next/link";
 import HelpSearch from "./help-search";
@@ -17,6 +18,10 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
 export default async function HelpCenterPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ search?: string; category?: string }> }) {
   const { slug } = await params;
   const { search, category: categoryFilter } = await searchParams;
+  const headersList = await headers();
+  const host = headersList.get("host") || "";
+  const isSubdomain = host.split(".").length >= 3 || !host.includes("shopcx.ai");
+  const basePath = isSubdomain ? "" : `/help/${slug}`;
   const admin = createAdminClient();
 
   const { data: workspace } = await admin
@@ -73,7 +78,7 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
         <h1 className="text-3xl font-bold text-zinc-900">{workspace.name} Help Center</h1>
         <p className="mt-2 text-zinc-500">Find answers, browse articles, or contact our support team</p>
         <div className="mt-6 max-w-lg mx-auto">
-          <HelpSearch slug={slug} />
+          <HelpSearch slug={slug} basePath={basePath} />
         </div>
       </header>
 
@@ -89,7 +94,7 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
             ) : (
               <div className="mt-4 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white">
                 {searchResults.map(a => (
-                  <Link key={a.id} href={`/help/${slug}/${a.slug}`} className="block px-4 py-3 hover:bg-zinc-50 transition-colors">
+                  <Link key={a.id} href={`${basePath}/${a.slug}`} className="block px-4 py-3 hover:bg-zinc-50 transition-colors">
                     <p className="text-sm font-medium text-zinc-900">{a.title}</p>
                     {a.excerpt && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-2">{a.excerpt}</p>}
                   </Link>
@@ -103,13 +108,13 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
         {categoryFilter && byCategory[categoryFilter] ? (
           <div className="mb-8">
             <div className="flex items-center gap-3">
-              <Link href={`/help/${slug}`} className="text-sm text-indigo-600 hover:underline">&larr; All Categories</Link>
+              <Link href={basePath || "/"} className="text-sm text-indigo-600 hover:underline">&larr; All Categories</Link>
             </div>
             <h2 className="mt-3 text-lg font-semibold text-zinc-900">{CATEGORY_LABELS[categoryFilter] || categoryFilter}</h2>
             <p className="mt-1 text-sm text-zinc-500">{byCategory[categoryFilter]?.length || 0} articles</p>
             <div className="mt-4 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white">
               {(byCategory[categoryFilter] || []).map(a => (
-                <Link key={a.id} href={`/help/${slug}/${a.slug}`} className="block px-4 py-3 hover:bg-zinc-50 transition-colors">
+                <Link key={a.id} href={`${basePath}/${a.slug}`} className="block px-4 py-3 hover:bg-zinc-50 transition-colors">
                   <p className="text-sm font-medium text-zinc-900">{a.title}</p>
                   {a.excerpt && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-2">{a.excerpt}</p>}
                 </Link>
@@ -121,7 +126,7 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
         {/* Categories */}
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
           {Object.entries(byCategory).map(([category, categoryArticles]) => (
-            <Link key={category} href={`/help/${slug}?category=${category}`} className="rounded-lg border border-zinc-200 bg-white p-4 hover:border-indigo-300 transition-colors">
+            <Link key={category} href={`${basePath}/?category=${category}`} className="rounded-lg border border-zinc-200 bg-white p-4 hover:border-indigo-300 transition-colors">
               <h2 className="text-sm font-semibold text-zinc-900">{CATEGORY_LABELS[category] || category}</h2>
               <p className="mt-1 text-xs text-zinc-400">{categoryArticles?.length || 0} articles</p>
               <ul className="mt-3 space-y-1">
@@ -162,7 +167,7 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
             <h2 className="text-lg font-semibold text-zinc-900">Most Helpful</h2>
             <div className="mt-4 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white">
               {[...(articles || [])].filter(a => (a.helpful_yes || 0) > 0).sort((a, b) => (b.helpful_yes || 0) - (a.helpful_yes || 0)).slice(0, 10).map(a => (
-                <Link key={a.id} href={`/help/${slug}/${a.slug}`} className="flex items-center justify-between px-4 py-3 hover:bg-zinc-50 transition-colors">
+                <Link key={a.id} href={`${basePath}/${a.slug}`} className="flex items-center justify-between px-4 py-3 hover:bg-zinc-50 transition-colors">
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium text-zinc-900">{a.title}</p>
                     {a.excerpt && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-1">{a.excerpt}</p>}
@@ -179,7 +184,7 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
           <h2 className="text-lg font-semibold text-zinc-900">Most Viewed</h2>
           <div className="mt-4 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white">
             {[...(articles || [])].sort((a, b) => (b.view_count || 0) - (a.view_count || 0)).slice(0, 20).map(a => (
-              <Link key={a.id} href={`/help/${slug}/${a.slug}`} className="block px-4 py-3 hover:bg-zinc-50 transition-colors">
+              <Link key={a.id} href={`${basePath}/${a.slug}`} className="block px-4 py-3 hover:bg-zinc-50 transition-colors">
                 <p className="text-sm font-medium text-zinc-900">{a.title}</p>
                 {a.excerpt && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-2">{a.excerpt}</p>}
               </Link>

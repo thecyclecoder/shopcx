@@ -180,8 +180,7 @@ export const scrapeHelpCenter = inngest.createFunction(
         .from("knowledge_base")
         .select("id, title, content, category")
         .eq("workspace_id", workspace_id)
-        .eq("source", "import")
-        .is("product_id", null);
+        .eq("source", "import");
 
       let count = 0;
       for (const article of articles || []) {
