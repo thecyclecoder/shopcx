@@ -113,6 +113,9 @@ export const scrapeHelpCenter = inngest.createFunction(
             let contentHtml = bodyMatch?.[1] || "";
             // Clean CSS-in-JS (Gorgias uses React with inline styles)
             contentHtml = contentHtml.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
+            // Strip Gorgias "Was this article helpful?" widget
+            contentHtml = contentHtml.replace(/<div[^>]*class="[^"]*article-rating[^"]*"[^>]*>[\s\S]*$/i, "");
+            contentHtml = contentHtml.replace(/Was this article helpful\?[\s\S]*$/i, "");
             const content = decodeEntities(
               contentHtml
                 .replace(/<[^>]+>/g, " ")

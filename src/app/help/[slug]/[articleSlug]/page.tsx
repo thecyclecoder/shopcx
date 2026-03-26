@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import Link from "next/link";
 import type { Metadata } from "next";
+import ArticleFeedback from "./article-feedback";
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string; articleSlug: string }> }): Promise<Metadata> {
   const { slug, articleSlug } = await params;
@@ -175,8 +176,11 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
           </div>
         )}
 
+        {/* Article feedback */}
+        <ArticleFeedback articleId={article.id} slug={slug} />
+
         {/* Contact CTA */}
-        <div className="mt-12 rounded-lg border border-zinc-200 bg-white p-6 text-center">
+        <div className="mt-6 rounded-lg border border-zinc-200 bg-white p-6 text-center">
           <p className="text-sm text-zinc-600">Still need help?</p>
           <Link href={`/help/${slug}#contact`} className="mt-2 inline-block rounded-md px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: workspace.help_primary_color || "#4f46e5" }}>
             Contact Support

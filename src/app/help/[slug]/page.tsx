@@ -29,7 +29,7 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
 
   const { data: articles } = await admin
     .from("knowledge_base")
-    .select("id, title, slug, category, excerpt, product_name, view_count")
+    .select("id, title, slug, category, excerpt, product_name, view_count, helpful_yes")
     .eq("workspace_id", workspace.id)
     .eq("published", true)
     .eq("active", true)
@@ -156,6 +156,24 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
           </div>
         )}
 
+        {/* Most helpful articles */}
+        {(articles || []).some(a => (a.helpful_yes || 0) > 0) && (
+          <div className="mt-8">
+            <h2 className="text-lg font-semibold text-zinc-900">Most Helpful</h2>
+            <div className="mt-4 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white">
+              {[...(articles || [])].filter(a => (a.helpful_yes || 0) > 0).sort((a, b) => (b.helpful_yes || 0) - (a.helpful_yes || 0)).slice(0, 10).map(a => (
+                <Link key={a.id} href={`/help/${slug}/${a.slug}`} className="flex items-center justify-between px-4 py-3 hover:bg-zinc-50 transition-colors">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-zinc-900">{a.title}</p>
+                    {a.excerpt && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-1">{a.excerpt}</p>}
+                  </div>
+                  <span className="ml-3 shrink-0 text-xs text-emerald-600">{(a.helpful_yes || 0).toLocaleString()} found helpful</span>
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Most viewed articles */}
         <div className="mt-8">
           <h2 className="text-lg font-semibold text-zinc-900">Most Viewed</h2>
@@ -172,7 +190,7 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
         )}
 
         {/* Contact / Ticket form */}
-        <div className="mt-12">
+        <div id="contact" className="mt-12">
           <h2 className="text-lg font-semibold text-zinc-900">Can&apos;t find what you&apos;re looking for?</h2>
           <p className="mt-1 text-sm text-zinc-500">Send us a message and we&apos;ll get back to you.</p>
           <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-6">
