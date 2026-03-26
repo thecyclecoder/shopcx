@@ -173,6 +173,8 @@ export default function SettingsPage() {
 
 function HelpCenterEditor({ workspaceId }: { workspaceId: string }) {
   const [helpUrl, setHelpUrl] = useState("");
+  const [helpSlug, setHelpSlug] = useState("");
+  const [slugMessage, setSlugMessage] = useState("");
   const [scraping, setScraping] = useState(false);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
@@ -180,7 +182,7 @@ function HelpCenterEditor({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     fetch(`/api/workspaces/${workspaceId}/integrations`)
       .then(r => r.json())
-      .then(d => { setHelpUrl(d.help_center_url || ""); })
+      .then(d => { setHelpUrl(d.help_center_url || ""); setHelpSlug(d.help_slug || ""); })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [workspaceId]);
@@ -222,9 +224,46 @@ function HelpCenterEditor({ workspaceId }: { workspaceId: string }) {
         </button>
       </div>
       {message && <p className="mt-2 text-sm text-indigo-600 dark:text-indigo-400">{message}</p>}
-      <p className="mt-2 text-xs text-zinc-400">
-        Articles will preserve original URL paths for SEO continuity. After import, set up a CNAME to point your help subdomain to ShopCX.
-      </p>
+
+      {/* Help center slug */}
+      <div className="mt-4 border-t border-zinc-200 pt-4 dark:border-zinc-700">
+        <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Help Center URL Slug</label>
+        <p className="mt-0.5 text-xs text-zinc-400">Your public help center will be available at <strong>{helpSlug || "yourslug"}.shopcx.ai</strong></p>
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            value={helpSlug}
+            onChange={(e) => { setHelpSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "")); setSlugMessage(""); }}
+            placeholder="e.g. superfoods"
+            className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+          />
+          <button
+            onClick={async () => {
+              if (!helpSlug.trim()) return;
+              const res = await fetch(`/api/workspaces/${workspaceId}/integrations`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ help_slug: helpSlug }),
+              });
+              if (res.ok) {
+                setSlugMessage("Saved!");
+              } else {
+                const data = await res.json();
+                setSlugMessage(data.error || "Failed to save");
+              }
+            }}
+            className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500"
+          >
+            Save
+          </button>
+        </div>
+        {slugMessage && <p className={`mt-1 text-sm ${slugMessage === "Saved!" ? "text-emerald-600" : "text-red-500"}`}>{slugMessage}</p>}
+        {helpSlug && (
+          <div className="mt-2 text-xs text-zinc-400">
+            <p>Your help center: <a href={`/help/${helpSlug}`} className="text-indigo-500 hover:underline" target="_blank">{helpSlug}.shopcx.ai</a></p>
+            <p className="mt-1">For custom domain: point a CNAME record for <code>help.yourdomain.com</code> to <code>cname.shopcx.ai</code></p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
