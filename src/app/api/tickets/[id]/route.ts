@@ -67,29 +67,39 @@ export async function GET(
       .single();
 
     if (c) {
+      // Get linked customer IDs for combined data
+      const linkedCustomerIds = [c.id];
+      const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", c.id).single();
+      if (link) {
+        const { data: groupLinks } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
+        for (const gl of groupLinks || []) {
+          if (!linkedCustomerIds.includes(gl.customer_id)) linkedCustomerIds.push(gl.customer_id);
+        }
+      }
+
       const { data: orders } = await admin
         .from("orders")
         .select("id, order_number, total_cents, currency, financial_status, fulfillment_status, source_name, order_type, line_items, fulfillments, created_at")
-        .eq("customer_id", c.id)
+        .in("customer_id", linkedCustomerIds)
         .order("created_at", { ascending: false })
         .limit(10);
 
       const { data: subscriptions } = await admin
         .from("subscriptions")
         .select("id, status, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items")
-        .eq("customer_id", c.id)
+        .in("customer_id", linkedCustomerIds)
         .order("created_at", { ascending: false });
 
-      // Compute real order count + LTV from orders table (source of truth)
+      // Compute real order count + LTV from combined linked orders
       const { count: realOrderCount } = await admin
         .from("orders")
         .select("id", { count: "exact", head: true })
-        .eq("customer_id", c.id);
+        .in("customer_id", linkedCustomerIds);
 
       const { data: ltvRows } = await admin
         .from("orders")
         .select("total_cents")
-        .eq("customer_id", c.id);
+        .in("customer_id", linkedCustomerIds);
 
       const realLtv = (ltvRows || []).reduce((sum, o) => sum + (o.total_cents || 0), 0);
 

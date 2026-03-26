@@ -132,6 +132,7 @@ export async function POST(
       workspace_id: workspaceId,
       group_id: groupId,
       customer_id: link_to,
+      is_primary: false,
     });
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   } else if (targetLink) {
@@ -141,6 +142,7 @@ export async function POST(
       workspace_id: workspaceId,
       group_id: groupId,
       customer_id: customerId,
+      is_primary: false,
     });
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   } else {
@@ -158,6 +160,7 @@ export async function POST(
         workspace_id: workspaceId,
         group_id: groupId,
         customer_id: link_to,
+        is_primary: false,
       },
     ]);
     if (insertError) {
