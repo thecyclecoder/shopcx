@@ -34,8 +34,11 @@ const DEFAULT_CONFIGS: Record<string, Record<string, unknown>> = {
     reply_delivered: "Our records show your order {{order.order_number}} was delivered on {{fulfillment.delivered_at}}. If you haven't received it, please reply and we'll investigate.",
     reply_no_order: "Hi {{customer.first_name}}, we couldn't find a recent order on your account. Could you provide your order number so we can look into this?",
     escalate_delayed: true,
-    escalate_assign_to: null,
+    reply_escalated: "Hi {{customer.first_name}}, I can see there may be an issue with the delivery of your order {{order.order_number}}. I'm escalating this to our team and we'll get back to you shortly.",
+    reply_escalated_status: "pending",
+    escalate_to: null,
     escalate_tag: "delayed-shipment",
+    escalate_status: "open",
   },
   cancel_request: {
     check_subscription: true,

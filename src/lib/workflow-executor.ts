@@ -373,12 +373,34 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
     return;
   }
 
-  // In transit — check delay
+  // In transit — check delay → escalate
   if (ctx.fulfillment.days_since >= threshold) {
     if (config.escalate_delayed !== false) {
-      await escalate(admin, ctx, (config.escalate_tag as string) || "delayed-shipment", (config.escalate_assign_to as string) || null);
+      // Send reply to customer if configured
+      const escalateReply = config.reply_escalated as string;
+      if (escalateReply) {
+        await sendReply(admin, ctx, escalateReply, config.reply_escalated_status as string);
+      }
+
+      // Escalate to the configured person
+      await escalate(
+        admin, ctx,
+        (config.escalate_tag as string) || "delayed-shipment",
+        (config.escalate_to as string) || null,
+        `Order ${ctx.order.order_number} shipped ${ctx.fulfillment.days_since} days ago (threshold: ${threshold}). Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`
+      );
+
+      // Internal note with details
       const location = ctx.fulfillment.latest_location ? ` Last seen: ${ctx.fulfillment.latest_location}.` : "";
       await addNote(admin, ctx, `Workflow escalated: order ${ctx.order.order_number} shipped ${ctx.fulfillment.days_since} days ago (threshold: ${threshold} days). Status: ${status}. Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.${location}`);
+
+      // Set ticket status if not already set by reply
+      if (!escalateReply) {
+        const escalateStatus = (config.escalate_status as string) || "open";
+        const statusUpdates: Record<string, unknown> = { status: escalateStatus, updated_at: new Date().toISOString() };
+        if (escalateStatus === "closed") statusUpdates.resolved_at = new Date().toISOString();
+        await admin.from("tickets").update(statusUpdates).eq("id", ctx.ticketId);
+      }
     }
     return;
   }

@@ -59,8 +59,11 @@ const TEMPLATE_FIELDS: Record<string, { section: string; fields: { key: string; 
     {
       section: "Escalation (delayed orders)",
       fields: [
-        { key: "escalate_delayed", label: "Escalate delayed orders to agent", type: "boolean" },
+        { key: "escalate_delayed", label: "Enable escalation for delayed orders", type: "boolean" },
+        { key: "reply_escalated", label: "Customer reply on escalation", type: "textarea", hint: "Sent to customer when order is delayed. Leave empty to skip customer reply." },
+        { key: "escalate_to", label: "Escalate to (team member)", type: "select", options: [] },
         { key: "escalate_tag", label: "Escalation tag", type: "text" },
+        { key: "escalate_status", label: "Ticket status after escalation (if no reply sent)", type: "select", options: [{ value: "open", label: "Open" }, { value: "pending", label: "Pending" }, { value: "closed", label: "Closed" }] },
       ],
     },
   ],
@@ -98,6 +101,7 @@ export default function WorkflowsPage() {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Workflow | null>(null);
   const [saving, setSaving] = useState(false);
+  const [members, setMembers] = useState<{ user_id: string; display_name: string | null; email: string | null }[]>([]);
 
   if (!["owner", "admin"].includes(workspace.role)) {
     return (
@@ -113,6 +117,10 @@ export default function WorkflowsPage() {
       .then(r => r.json())
       .then(d => { if (Array.isArray(d)) setWorkflows(d); })
       .finally(() => setLoading(false));
+    fetch(`/api/workspaces/${workspace.id}/members`)
+      .then(r => r.json())
+      .then(d => { if (Array.isArray(d)) setMembers(d); })
+      .catch(() => {});
   }, [workspace.id]);
 
   const handleCreate = async (templateId: string) => {
@@ -256,7 +264,7 @@ export default function WorkflowsPage() {
                 <p className="ml-4">If fulfilled, no tracking &rarr; Reply with shipped message</p>
                 <p className="ml-4">If out for delivery &rarr; Reply with location</p>
                 <p className="ml-4">If delivered &rarr; Reply with delivery date</p>
-                <p className="ml-4">If in transit &gt; <strong>{(editing.config.delay_threshold_days as number) || 10}</strong> days &rarr; Escalate to agent</p>
+                <p className="ml-4">If in transit &gt; <strong>{(editing.config.delay_threshold_days as number) || 10}</strong> days &rarr; {editing.config.reply_escalated ? "Reply + " : ""}Escalate{editing.config.escalate_to ? ` to ${members.find(m => m.user_id === editing.config.escalate_to)?.display_name || "agent"}` : ""}</p>
                 <p className="ml-4">If in transit &le; {(editing.config.delay_threshold_days as number) || 10} days &rarr; Reply with tracking + location</p>
               </div>
             )}
@@ -324,6 +332,18 @@ export default function WorkflowsPage() {
                         />
                         <span className="text-xs text-zinc-500">Enabled</span>
                       </label>
+                    ) : field.type === "select" ? (
+                      <select
+                        value={(editing.config[field.key] as string) || ""}
+                        onChange={(e) => setEditing({ ...editing, config: { ...editing.config, [field.key]: e.target.value || null } })}
+                        className="mt-0.5 block w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                      >
+                        <option value="">{field.key.includes("escalate_to") ? "Select team member..." : "Select..."}</option>
+                        {field.key.includes("escalate_to")
+                          ? members.map(m => <option key={m.user_id} value={m.user_id}>{m.display_name || m.email}</option>)
+                          : (field.options || []).map(o => <option key={o.value} value={o.value}>{o.label}</option>)
+                        }
+                      </select>
                     ) : (
                       <input
                         value={(editing.config[field.key] as string) || ""}
