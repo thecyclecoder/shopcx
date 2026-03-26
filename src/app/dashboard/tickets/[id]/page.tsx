@@ -335,10 +335,10 @@ export default function TicketDetailPage() {
   }
 
   return (
-    <div className="flex h-full flex-1 flex-col overflow-hidden md:flex-row">
+    <div className="flex h-full flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
       {/* Left column - conversation */}
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="min-h-0 flex-1 overflow-y-auto p-6">
+        <div className="min-h-0 flex-1 p-6 md:overflow-y-auto">
           {/* Back button */}
           <button
             onClick={() => router.push("/dashboard/tickets")}
@@ -416,21 +416,22 @@ export default function TicketDetailPage() {
                   value={tagInput}
                   onChange={(e) => { setTagInput(e.target.value); setShowTagDropdown(true); }}
                   onFocus={() => setShowTagDropdown(true)}
-                  onBlur={() => setTimeout(() => setShowTagDropdown(false), 150)}
-                  placeholder="+ tag"
-                  className="w-20 border-none bg-transparent px-1 text-[10px] text-zinc-500 placeholder-zinc-400 outline-none focus:w-28 focus:ring-0"
+                  onBlur={() => setTimeout(() => setShowTagDropdown(false), 200)}
+                  placeholder="+ add tag"
+                  className="w-24 rounded border border-transparent bg-transparent px-1.5 py-0.5 text-[10px] text-zinc-500 placeholder-zinc-400 outline-none focus:w-32 focus:border-zinc-300 focus:bg-white focus:ring-0 dark:focus:border-zinc-600 dark:focus:bg-zinc-800"
                 />
               </form>
-              {showTagDropdown && tagInput.trim() && (() => {
+              {showTagDropdown && (() => {
                 const existing = ticket.tags || [];
                 const filtered = tagSuggestions.filter(t =>
-                  t.toLowerCase().includes(tagInput.toLowerCase()) && !existing.includes(t)
+                  (!tagInput.trim() || t.toLowerCase().includes(tagInput.toLowerCase())) && !existing.includes(t)
                 );
-                const exactMatch = tagSuggestions.some(t => t.toLowerCase() === tagInput.trim().toLowerCase());
+                const exactMatch = tagInput.trim() && tagSuggestions.some(t => t.toLowerCase() === tagInput.trim().toLowerCase());
+                if (filtered.length === 0 && !tagInput.trim()) return null;
                 if (filtered.length === 0 && exactMatch) return null;
                 return (
-                  <div className="absolute left-0 top-full z-10 mt-1 max-h-32 w-40 overflow-y-auto rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
-                    {filtered.map(tag => (
+                  <div className="absolute left-0 top-full z-20 mt-1 max-h-40 w-48 overflow-y-auto rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+                    {filtered.slice(0, 10).map(tag => (
                       <button
                         key={tag}
                         type="button"
@@ -441,7 +442,7 @@ export default function TicketDetailPage() {
                           setTagInput("");
                           setShowTagDropdown(false);
                         }}
-                        className="block w-full px-2 py-1 text-left text-[10px] text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 dark:text-zinc-300 dark:hover:bg-indigo-900/30"
+                        className="block w-full px-2.5 py-1.5 text-left text-[10px] text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 dark:text-zinc-300 dark:hover:bg-indigo-900/30"
                       >
                         {tag}
                       </button>
@@ -457,7 +458,7 @@ export default function TicketDetailPage() {
                           setTagInput("");
                           setShowTagDropdown(false);
                         }}
-                        className="block w-full border-t border-zinc-100 px-2 py-1 text-left text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 dark:border-zinc-700 dark:text-indigo-400"
+                        className="block w-full border-t border-zinc-100 px-2.5 py-1.5 text-left text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 dark:border-zinc-700 dark:text-indigo-400"
                       >
                         Create &ldquo;{tagInput.trim().toLowerCase()}&rdquo;
                       </button>
