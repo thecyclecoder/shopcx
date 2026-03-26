@@ -58,7 +58,7 @@ export default function Sidebar({
       }).catch(() => {});
     };
     fetchCounts();
-    const interval = setInterval(fetchCounts, 30000);
+    const interval = setInterval(fetchCounts, 10000);
     return () => clearInterval(interval);
   }, [workspace.id, pathname]);
 
