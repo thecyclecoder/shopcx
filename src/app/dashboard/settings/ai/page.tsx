@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 
-type Tab = "knowledge-base" | "macros" | "personalities" | "channels" | "ai-workflows";
+type Tab = "personalities" | "channels" | "ai-workflows";
 
 interface KBArticle {
   id: string;
@@ -89,7 +89,7 @@ const CHANNEL_LABELS: Record<string, string> = {
 
 export default function AISettingsPage() {
   const workspace = useWorkspace();
-  const [tab, setTab] = useState<Tab>("knowledge-base");
+  const [tab, setTab] = useState<Tab>("personalities");
 
   // Knowledge Base state
   const [articles, setArticles] = useState<KBArticle[]>([]);
@@ -119,94 +119,18 @@ export default function AISettingsPage() {
 
   async function loadTab(t: Tab) {
     const base = `/api/workspaces/${workspace.id}`;
-    if (t === "knowledge-base") {
-      const res = await fetch(`${base}/knowledge-base`);
-      setArticles(await res.json());
-    } else if (t === "macros") {
-      const res = await fetch(`${base}/macros`);
-      setMacros(await res.json());
-    } else if (t === "personalities") {
+    if (t === "personalities") {
       const res = await fetch(`${base}/ai-personalities`);
       setPersonalities(await res.json());
     } else if (t === "channels") {
       const res = await fetch(`${base}/ai-config`);
       setChannels(await res.json());
-      // Also load personalities for the dropdown
       const pRes = await fetch(`${base}/ai-personalities`);
       setPersonalities(await pRes.json());
     } else if (t === "ai-workflows") {
       const res = await fetch(`${base}/ai-workflows`);
       setAIWorkflows(await res.json());
     }
-  }
-
-  // ── Knowledge Base CRUD ──
-  async function saveArticle() {
-    if (!editingArticle?.title || !editingArticle?.content || !editingArticle?.category) return;
-    setSaving(true);
-    const base = `/api/workspaces/${workspace.id}/knowledge-base`;
-
-    if (editingArticle.id) {
-      await fetch(`${base}/${editingArticle.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editingArticle),
-      });
-    } else {
-      await fetch(base, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editingArticle),
-      });
-    }
-    setEditingArticle(null);
-    setSaving(false);
-    loadTab("knowledge-base");
-  }
-
-  async function deleteArticle(id: string) {
-    if (!confirm("Delete this article?")) return;
-    await fetch(`/api/workspaces/${workspace.id}/knowledge-base/${id}`, { method: "DELETE" });
-    loadTab("knowledge-base");
-  }
-
-  async function toggleArticle(id: string, active: boolean) {
-    await fetch(`/api/workspaces/${workspace.id}/knowledge-base/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ active }),
-    });
-    setArticles((prev) => prev.map((a) => (a.id === id ? { ...a, active } : a)));
-  }
-
-  // ── Macros CRUD ──
-  async function saveMacro() {
-    if (!editingMacro?.name || !editingMacro?.body_text) return;
-    setSaving(true);
-    const base = `/api/workspaces/${workspace.id}/macros`;
-
-    if (editingMacro.id) {
-      await fetch(`${base}/${editingMacro.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editingMacro),
-      });
-    } else {
-      await fetch(base, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editingMacro),
-      });
-    }
-    setEditingMacro(null);
-    setSaving(false);
-    loadTab("macros");
-  }
-
-  async function deleteMacro(id: string) {
-    if (!confirm("Delete this macro?")) return;
-    await fetch(`/api/workspaces/${workspace.id}/macros/${id}`, { method: "DELETE" });
-    loadTab("macros");
   }
 
   // ── Personalities CRUD ──
@@ -280,8 +204,6 @@ export default function AISettingsPage() {
   }
 
   const TABS: { key: Tab; label: string }[] = [
-    { key: "knowledge-base", label: "Knowledge Base" },
-    { key: "macros", label: "Macros" },
     { key: "personalities", label: "Personalities" },
     { key: "channels", label: "Channels" },
     { key: "ai-workflows", label: "AI Workflows" },
@@ -310,210 +232,6 @@ export default function AISettingsPage() {
       </div>
 
       <div className="mt-6">
-        {/* ── Knowledge Base Tab ── */}
-        {tab === "knowledge-base" && (
-          <div>
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Articles ({articles.length})</h2>
-              <button
-                onClick={() => setEditingArticle({ title: "", content: "", category: "general", active: true })}
-                className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500"
-              >
-                Add Article
-              </button>
-            </div>
-
-            {/* Editor */}
-            {editingArticle && (
-              <div className="mt-4 rounded-lg border border-violet-200 bg-violet-50 p-4 dark:border-violet-800 dark:bg-violet-950">
-                <h3 className="text-sm font-medium text-violet-900 dark:text-violet-100">
-                  {editingArticle.id ? "Edit Article" : "New Article"}
-                </h3>
-                <div className="mt-3 space-y-3">
-                  <input
-                    type="text"
-                    value={editingArticle.title || ""}
-                    onChange={(e) => setEditingArticle({ ...editingArticle, title: e.target.value })}
-                    placeholder="Article title"
-                    className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                  />
-                  <div className="flex gap-3">
-                    <select
-                      value={editingArticle.category || "general"}
-                      onChange={(e) => setEditingArticle({ ...editingArticle, category: e.target.value })}
-                      className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                    >
-                      {CATEGORIES.map((c) => (
-                        <option key={c} value={c}>{c}</option>
-                      ))}
-                    </select>
-                    <input
-                      type="text"
-                      value={editingArticle.product_name || ""}
-                      onChange={(e) => setEditingArticle({ ...editingArticle, product_name: e.target.value })}
-                      placeholder="Product name (optional)"
-                      className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                    />
-                  </div>
-                  <textarea
-                    value={editingArticle.content || ""}
-                    onChange={(e) => setEditingArticle({ ...editingArticle, content: e.target.value })}
-                    placeholder="Article content..."
-                    rows={10}
-                    className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                  />
-                  <div className="flex gap-2">
-                    <button onClick={saveArticle} disabled={saving} className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50">
-                      {saving ? "Saving..." : "Save"}
-                    </button>
-                    <button onClick={() => setEditingArticle(null)} className="rounded-md border border-zinc-300 px-4 py-2 text-sm text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800">
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Article list */}
-            <div className="mt-4 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
-              {articles.length === 0 && (
-                <p className="p-4 text-sm text-zinc-400">No articles yet. Add your first knowledge base article.</p>
-              )}
-              {articles.map((a) => (
-                <div key={a.id} className="flex items-center justify-between p-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{a.title}</span>
-                      <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${CATEGORY_COLORS[a.category] || CATEGORY_COLORS.general}`}>
-                        {a.category}
-                      </span>
-                      {a.product_name && (
-                        <span className="text-sm text-zinc-400">{a.product_name}</span>
-                      )}
-                    </div>
-                    <p className="mt-1 text-sm text-zinc-500">
-                      {a.chunk_count} chunks | {a.active ? "Active" : "Inactive"}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => toggleArticle(a.id, !a.active)}
-                      className={`rounded-md px-3 py-1 text-sm font-medium ${a.active ? "text-emerald-600" : "text-zinc-400"}`}
-                    >
-                      {a.active ? "Active" : "Inactive"}
-                    </button>
-                    <button onClick={() => setEditingArticle(a)} className="text-sm text-indigo-600 hover:underline dark:text-indigo-400">Edit</button>
-                    <button onClick={() => deleteArticle(a.id)} className="text-sm text-red-500 hover:underline">Delete</button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* ── Macros Tab ── */}
-        {tab === "macros" && (
-          <div>
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
-                Macros ({macroSearchQuery.trim() ? `${macros.filter((m) => { const q = macroSearchQuery.toLowerCase(); return m.name.toLowerCase().includes(q) || (m.body_text || "").toLowerCase().includes(q); }).length}/` : ""}{macros.length})
-              </h2>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setEditingMacro({ name: "", body_text: "", category: "general", tags: [] })}
-                  className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500"
-                >
-                  Add Macro
-                </button>
-              </div>
-            </div>
-
-            {/* Macro editor */}
-            {/* New macro form (only when creating new, not editing existing) */}
-            {editingMacro && !editingMacro.id && (
-              <div className="mt-4 rounded-lg border border-violet-200 bg-violet-50 p-4 dark:border-violet-800 dark:bg-violet-950">
-                <h3 className="text-sm font-medium text-violet-900 dark:text-violet-100">New Macro</h3>
-                <div className="mt-3 space-y-3">
-                  <input type="text" value={editingMacro.name || ""} onChange={(e) => setEditingMacro({ ...editingMacro, name: e.target.value })} placeholder="Macro name" className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
-                  <select value={editingMacro.category || "general"} onChange={(e) => setEditingMacro({ ...editingMacro, category: e.target.value })} className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
-                    {[...CATEGORIES, "subscription"].map((c) => (<option key={c} value={c}>{c}</option>))}
-                  </select>
-                  <textarea value={editingMacro.body_text || ""} onChange={(e) => setEditingMacro({ ...editingMacro, body_text: e.target.value })} placeholder="Macro response text..." rows={6} className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
-                  <div className="flex gap-2">
-                    <button onClick={saveMacro} disabled={saving} className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50">{saving ? "Saving..." : "Save"}</button>
-                    <button onClick={() => setEditingMacro(null)} className="rounded-md border border-zinc-300 px-4 py-2 text-sm text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400">Cancel</button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Macro search */}
-            <div className="mt-4">
-              <input
-                type="text"
-                value={macroSearchQuery}
-                onChange={(e) => setMacroSearchQuery(e.target.value)}
-                placeholder="Search macros by name or content..."
-                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-              />
-            </div>
-
-            {/* Macro list */}
-            <div className="mt-3 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
-              {macros.length === 0 && (
-                <p className="p-4 text-sm text-zinc-400">No macros yet. Add macros or import from Gorgias.</p>
-              )}
-              {macros.filter((m) => {
-                if (!macroSearchQuery.trim()) return true;
-                const q = macroSearchQuery.toLowerCase();
-                return m.name.toLowerCase().includes(q) || (m.body_text || "").toLowerCase().includes(q) || (m.category || "").toLowerCase().includes(q);
-              }).map((m) => (
-                <div key={m.id}>
-                  <div className="flex items-center justify-between p-4">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{m.name}</span>
-                        {m.category && (
-                          <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${CATEGORY_COLORS[m.category] || CATEGORY_COLORS.general}`}>
-                            {m.category}
-                          </span>
-                        )}
-                      </div>
-                      <p className="mt-1 truncate text-sm text-zinc-500">{m.body_text.slice(0, 120)}...</p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-sm text-zinc-400">{m.usage_count} uses</span>
-                      <button
-                        onClick={() => setEditingMacro(editingMacro?.id === m.id ? null : m)}
-                        className="text-sm text-indigo-600 hover:underline dark:text-indigo-400"
-                      >
-                        {editingMacro?.id === m.id ? "Close" : "Edit"}
-                      </button>
-                      <button onClick={() => deleteMacro(m.id)} className="text-sm text-red-500 hover:underline">Delete</button>
-                    </div>
-                  </div>
-                  {/* Inline edit form */}
-                  {editingMacro?.id === m.id && (
-                    <div className="border-t border-violet-200 bg-violet-50 p-4 dark:border-violet-800 dark:bg-violet-950">
-                      <div className="space-y-3">
-                        <input type="text" value={editingMacro.name || ""} onChange={(e) => setEditingMacro({ ...editingMacro, name: e.target.value })} placeholder="Macro name" className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
-                        <select value={editingMacro.category || "general"} onChange={(e) => setEditingMacro({ ...editingMacro, category: e.target.value })} className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
-                          {[...CATEGORIES, "subscription"].map((c) => (<option key={c} value={c}>{c}</option>))}
-                        </select>
-                        <textarea value={editingMacro.body_text || ""} onChange={(e) => setEditingMacro({ ...editingMacro, body_text: e.target.value })} placeholder="Macro response text..." rows={6} className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
-                        <div className="flex gap-2">
-                          <button onClick={saveMacro} disabled={saving} className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50">{saving ? "Saving..." : "Save"}</button>
-                          <button onClick={() => setEditingMacro(null)} className="rounded-md border border-zinc-300 px-4 py-2 text-sm text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400">Cancel</button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
         {/* ── Personalities Tab ── */}
         {tab === "personalities" && (
           <div>
