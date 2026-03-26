@@ -291,6 +291,39 @@ function HelpCenterEditor({ workspaceId }: { workspaceId: string }) {
             className="mt-2 block text-sm text-zinc-500 file:mr-4 file:rounded-md file:border-0 file:bg-indigo-50 file:px-4 file:py-2 file:text-sm file:font-medium file:text-indigo-600 hover:file:bg-indigo-100"
           />
         </div>
+
+        {/* Primary color */}
+        <div className="mt-4 border-t border-zinc-200 pt-4 dark:border-zinc-700">
+          <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Primary Color</label>
+          <p className="mt-0.5 text-xs text-zinc-400">Used for buttons and accents on your help center.</p>
+          <div className="mt-2 flex items-center gap-3">
+            <input
+              type="color"
+              defaultValue="#4f46e5"
+              onChange={(e) => {
+                const color = e.target.value;
+                (e.target as HTMLInputElement).dataset.color = color;
+              }}
+              className="h-9 w-9 cursor-pointer rounded border border-zinc-300 dark:border-zinc-700"
+            />
+            <button
+              onClick={async (e) => {
+                const colorInput = (e.target as HTMLElement).previousElementSibling as HTMLInputElement;
+                const color = colorInput?.dataset?.color || colorInput?.value;
+                if (!color) return;
+                await fetch(`/api/workspaces/${workspaceId}/integrations`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ help_primary_color: color }),
+                });
+                alert("Primary color saved!");
+              }}
+              className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500"
+            >
+              Save
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

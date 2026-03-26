@@ -36,14 +36,17 @@ export default function KnowledgeBasePage() {
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
   const [productFilter, setProductFilter] = useState("");
+  const [helpSlug, setHelpSlug] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([
       fetch(`/api/workspaces/${workspace.id}/knowledge-base`).then(r => r.json()),
       fetch(`/api/workspaces/${workspace.id}/products`).then(r => r.json()).catch(() => []),
-    ]).then(([a, p]) => {
+      fetch(`/api/workspaces/${workspace.id}/integrations`).then(r => r.json()).catch(() => ({})),
+    ]).then(([a, p, integrations]) => {
       if (Array.isArray(a)) setArticles(a);
       if (Array.isArray(p)) setProducts(p);
+      if (integrations.help_slug) setHelpSlug(integrations.help_slug);
     }).finally(() => setLoading(false));
   }, [workspace.id]);
 
@@ -99,15 +102,27 @@ export default function KnowledgeBasePage() {
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Knowledge Base</h1>
           <p className="mt-1 text-sm text-zinc-500">{articles.length} articles ({publishedCount} published)</p>
         </div>
-        <button
-          onClick={() => {
-            setEditingId("new");
-            setEditing({ title: "", content: "", category: "general", published: false, product_id: null });
-          }}
-          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
-        >
-          New Article
-        </button>
+        <div className="flex items-center gap-2">
+          {helpSlug && (
+            <a
+              href={`https://${helpSlug}.shopcx.ai`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              View Help Center
+            </a>
+          )}
+          <button
+            onClick={() => {
+              setEditingId("new");
+              setEditing({ title: "", content: "", category: "general", published: false, product_id: null });
+            }}
+            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
+          >
+            New Article
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
