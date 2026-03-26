@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain"
     )
     .eq("id", workspaceId)
     .single();
@@ -73,6 +73,7 @@ export async function GET(
     help_slug: workspace.help_slug || null,
     help_logo_url: workspace.help_logo_url || null,
     help_primary_color: workspace.help_primary_color || "#4f46e5",
+    help_custom_domain: workspace.help_custom_domain || null,
   });
 }
 
@@ -197,6 +198,35 @@ export async function PATCH(
 
     if ("help_primary_color" in body) {
       updates.help_primary_color = body.help_primary_color || "#4f46e5";
+    }
+
+    // Custom domain — add to Vercel automatically
+    if ("help_custom_domain" in body) {
+      const domain = (body.help_custom_domain || "").toLowerCase().trim();
+      if (domain) {
+        // Add domain to Vercel project
+        const vercelToken = process.env.VERCEL_API_TOKEN;
+        const vercelProjectId = process.env.VERCEL_PROJECT_ID;
+        const vercelTeamId = process.env.VERCEL_TEAM_ID;
+        if (vercelToken && vercelProjectId) {
+          const url = `https://api.vercel.com/v10/projects/${vercelProjectId}/domains${vercelTeamId ? `?teamId=${vercelTeamId}` : ""}`;
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${vercelToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ name: domain }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            // Domain already added is fine (409 or "already exists")
+            if (res.status !== 409 && !err?.error?.code?.includes("existing")) {
+              return NextResponse.json({ error: `Failed to add domain to Vercel: ${err?.error?.message || res.status}` }, { status: 400 });
+            }
+          }
+        }
+        updates.help_custom_domain = domain;
+      } else {
+        updates.help_custom_domain = null;
+      }
     }
   } catch {
     return NextResponse.json(

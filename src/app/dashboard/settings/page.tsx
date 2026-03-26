@@ -263,20 +263,7 @@ function HelpCenterEditor({ workspaceId }: { workspaceId: string }) {
             <a href={`https://${helpSlug}.shopcx.ai`} className="mt-1 block text-sm text-indigo-600 hover:underline" target="_blank" rel="noopener noreferrer">
               {helpSlug}.shopcx.ai
             </a>
-            <div className="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-700">
-              <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Custom Domain (optional)</p>
-              <p className="mt-1 text-xs text-zinc-500">To use your own domain like <code className="rounded bg-zinc-200 px-1 dark:bg-zinc-700">help.yourdomain.com</code>:</p>
-              <ol className="mt-2 list-inside list-decimal space-y-1 text-xs text-zinc-500">
-                <li>Go to your DNS provider (e.g. Cloudflare, GoDaddy, Namecheap)</li>
-                <li>Add a <strong>CNAME</strong> record:<br />
-                  <span className="ml-4 mt-1 inline-block rounded bg-zinc-200 px-2 py-1 font-mono text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300">
-                    help.yourdomain.com → cname.vercel-dns.com
-                  </span>
-                </li>
-                <li>Add the domain in <a href="https://vercel.com" className="text-indigo-500 hover:underline" target="_blank" rel="noopener noreferrer">Vercel</a> → Settings → Domains</li>
-                <li>Wait for DNS to propagate (usually a few minutes)</li>
-              </ol>
-            </div>
+            <CustomDomainSetup workspaceId={workspaceId} />
           </div>
         )}
 
@@ -341,6 +328,98 @@ function HelpCenterEditor({ workspaceId }: { workspaceId: string }) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function CustomDomainSetup({ workspaceId }: { workspaceId: string }) {
+  const [domain, setDomain] = useState("");
+  const [savedDomain, setSavedDomain] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspaceId}/integrations`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.help_custom_domain) {
+          setDomain(d.help_custom_domain);
+          setSavedDomain(d.help_custom_domain);
+        }
+      })
+      .catch(() => {});
+  }, [workspaceId]);
+
+  const handleSave = async () => {
+    const cleaned = domain.toLowerCase().trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+    if (!cleaned || !cleaned.includes(".")) {
+      setError("Enter a valid domain like help.yourdomain.com");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    const res = await fetch(`/api/workspaces/${workspaceId}/integrations`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ help_custom_domain: cleaned }),
+    });
+    if (res.ok) {
+      setSavedDomain(cleaned);
+      setDomain(cleaned);
+    } else {
+      const data = await res.json();
+      setError(data.error || "Failed to add domain");
+    }
+    setSaving(false);
+  };
+
+  // Parse domain parts for CNAME instructions
+  const parts = (savedDomain || "").split(".");
+  const subdomain = parts.length > 2 ? parts[0] : "";
+  const parentDomain = parts.length > 2 ? parts.slice(1).join(".") : savedDomain || "";
+
+  return (
+    <div className="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-700">
+      <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Custom Domain (optional)</p>
+      <p className="mt-1 text-xs text-zinc-500">Use your own domain for the help center instead of the subdomain.</p>
+      <div className="mt-2 flex items-center gap-2">
+        <input
+          type="text"
+          value={domain}
+          onChange={(e) => setDomain(e.target.value)}
+          placeholder="help.yourdomain.com"
+          className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+        />
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+        >
+          {saving ? "Adding..." : savedDomain ? "Update" : "Add Domain"}
+        </button>
+      </div>
+      {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
+
+      {savedDomain && (
+        <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-800 dark:bg-emerald-950">
+          <p className="text-xs font-medium text-emerald-700 dark:text-emerald-400">Domain registered with Vercel. Now add this DNS record:</p>
+          <div className="mt-2 rounded bg-white p-2 dark:bg-zinc-800">
+            <table className="w-full text-xs">
+              <thead><tr className="text-left text-zinc-400"><th className="pb-1">Type</th><th className="pb-1">Name</th><th className="pb-1">Target</th></tr></thead>
+              <tbody>
+                <tr className="font-mono text-zinc-700 dark:text-zinc-300">
+                  <td>CNAME</td>
+                  <td>{subdomain || savedDomain}</td>
+                  <td>cname.vercel-dns.com</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">
+            Add this record in your DNS provider for <strong>{parentDomain}</strong>. SSL will be provisioned automatically once DNS propagates.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

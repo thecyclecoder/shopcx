@@ -16,14 +16,26 @@ export async function updateSession(request: NextRequest) {
     const isPrimaryDomain = PRIMARY_DOMAINS.some(d => hostname === d || hostname.endsWith(`.${d}`));
 
     if (!isPrimaryDomain) {
-      // Custom domain (e.g. help.superfoodscompany.com) — rewrite all paths to /help/[slug]/...
-      // The slug needs to be looked up by domain, but for now use the subdomain part
+      // Custom domain (e.g. help.superfoodscompany.com) — look up workspace by domain
       const pathname = request.nextUrl.pathname;
       if (!pathname.startsWith("/help/") && !pathname.startsWith("/api/help/") && !pathname.startsWith("/_next")) {
-        // Rewrite to help route — we'll resolve the slug from the domain in the page
-        const url = request.nextUrl.clone();
-        url.pathname = `/help/_custom${pathname}`;
-        return NextResponse.rewrite(url);
+        // Look up help_slug from custom domain via Supabase REST
+        const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+        const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+        if (supabaseUrl && serviceKey) {
+          try {
+            const res = await fetch(
+              `${supabaseUrl}/rest/v1/workspaces?help_custom_domain=eq.${encodeURIComponent(hostname)}&select=help_slug&limit=1`,
+              { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
+            );
+            const data = await res.json();
+            if (data?.[0]?.help_slug) {
+              const url = request.nextUrl.clone();
+              url.pathname = `/help/${data[0].help_slug}${pathname === "/" ? "" : pathname}`;
+              return NextResponse.rewrite(url);
+            }
+          } catch {}
+        }
       }
     } else {
       // Check for shopcx.ai subdomain (e.g. superfoods.shopcx.ai)
