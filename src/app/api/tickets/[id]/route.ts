@@ -231,3 +231,39 @@ export async function PATCH(
 
   return NextResponse.json(updated);
 }
+
+export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: ticketId } = await params;
+  void request;
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const cookieStore = await cookies();
+  const workspaceId = cookieStore.get("workspace_id")?.value;
+  if (!workspaceId) return NextResponse.json({ error: "No workspace" }, { status: 400 });
+
+  const admin = createAdminClient();
+
+  // Owner/admin only
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user.id)
+    .single();
+
+  if (!member || !["owner", "admin"].includes(member.role)) {
+    return NextResponse.json({ error: "Only owner or admin can delete tickets" }, { status: 403 });
+  }
+
+  // Delete messages first (cascade should handle this, but be explicit)
+  await admin.from("ticket_messages").delete().eq("ticket_id", ticketId);
+  await admin.from("tickets").delete().eq("id", ticketId).eq("workspace_id", workspaceId);
+
+  return NextResponse.json({ deleted: true });
+}

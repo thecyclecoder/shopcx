@@ -375,6 +375,20 @@ export default function TicketDetailPage() {
             Back to tickets
           </button>
 
+          {/* Delete ticket — owner/admin only */}
+          {["owner", "admin"].includes(workspace.role) && (
+            <button
+              onClick={async () => {
+                if (!confirm("Delete this ticket and all its messages? This cannot be undone.")) return;
+                const res = await fetch(`/api/tickets/${id}`, { method: "DELETE" });
+                if (res.ok) router.push("/dashboard/tickets");
+              }}
+              className="mb-4 text-xs text-red-500 hover:underline"
+            >
+              Delete ticket
+            </button>
+          )}
+
           {/* Sandbox banner */}
           {sandboxMode && !emailLive && (
             <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 dark:border-amber-700 dark:bg-amber-950">
