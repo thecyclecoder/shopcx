@@ -163,25 +163,25 @@ export default function PatternsPage() {
           <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{isNew ? "New Pattern" : "Edit Pattern"}</h2>
           <div className="mt-4 grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-medium text-zinc-500">Name</label>
+              <label className="block text-sm font-medium text-zinc-500">Name</label>
               <input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })}
                 className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
             </div>
             <div>
-              <label className="block text-xs font-medium text-zinc-500">Category</label>
+              <label className="block text-sm font-medium text-zinc-500">Category</label>
               <input value={editing.category} onChange={(e) => setEditing({ ...editing, category: e.target.value })}
                 placeholder="e.g. where_is_order, custom"
                 className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
             </div>
             <div>
-              <label className="block text-xs font-medium text-zinc-500">Auto-Tag</label>
+              <label className="block text-sm font-medium text-zinc-500">Auto-Tag</label>
               <input value={editing.auto_tag} onChange={(e) => setEditing({ ...editing, auto_tag: e.target.value })}
                 placeholder="e.g. where-is-order"
                 className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
             </div>
             <div className="flex gap-4">
               <div>
-                <label className="block text-xs font-medium text-zinc-500">Match Target</label>
+                <label className="block text-sm font-medium text-zinc-500">Match Target</label>
                 <select value={editing.match_target} onChange={(e) => setEditing({ ...editing, match_target: e.target.value })}
                   className="mt-1 block rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
                   <option value="both">Subject + Body</option>
@@ -190,13 +190,13 @@ export default function PatternsPage() {
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-medium text-zinc-500">Priority</label>
+                <label className="block text-sm font-medium text-zinc-500">Priority</label>
                 <input type="number" value={editing.priority} onChange={(e) => setEditing({ ...editing, priority: parseInt(e.target.value) || 50 })}
                   className="mt-1 block w-20 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
               </div>
             </div>
             <div className="col-span-2">
-              <label className="block text-xs font-medium text-zinc-500">Phrases (one per line)</label>
+              <label className="block text-sm font-medium text-zinc-500">Phrases (one per line)</label>
               <textarea rows={6} value={editing.phrases} onChange={(e) => setEditing({ ...editing, phrases: e.target.value })}
                 placeholder={"where is my order\nhaven't received\nnot received"}
                 className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
@@ -222,26 +222,26 @@ export default function PatternsPage() {
               <h2 className="text-sm font-medium text-amber-600 dark:text-amber-400">
                 Review Queue ({feedback.filter(f => f.status === "pending").length})
               </h2>
-              <p className="mt-0.5 text-xs text-zinc-400">Agent feedback on smart tags — review and apply pattern improvements.</p>
+              <p className="mt-0.5 text-sm text-zinc-400">Agent feedback on smart tags — review and apply pattern improvements.</p>
               <div className="mt-3 space-y-2">
                 {feedback.filter(f => f.status === "pending").map(f => (
                   <div key={f.id} className="rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
-                        <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-600 dark:bg-violet-900/30 dark:text-violet-400">
+                        <span className="rounded bg-violet-100 px-1.5 py-0.5 text-sm font-medium text-violet-600 dark:bg-violet-900/30 dark:text-violet-400">
                           {f.tag_removed}
                         </span>
-                        <span className="text-[10px] text-zinc-400">removed by agent</span>
+                        <span className="text-sm text-zinc-400">removed by agent</span>
                       </div>
-                      <span className="text-[9px] text-zinc-400">{new Date(f.created_at).toLocaleDateString()}</span>
+                      <span className="text-sm text-zinc-400">{new Date(f.created_at).toLocaleDateString()}</span>
                     </div>
                     {f.agent_reason && (
-                      <p className="mt-1.5 text-xs text-zinc-600 dark:text-zinc-400">
+                      <p className="mt-1.5 text-sm text-zinc-600 dark:text-zinc-400">
                         Agent: &ldquo;{f.agent_reason}&rdquo;
                       </p>
                     )}
                     {f.ai_analysis && (
-                      <div className="mt-2 rounded bg-white p-2 text-xs dark:bg-zinc-800">
+                      <div className="mt-2 rounded bg-white p-2 text-sm dark:bg-zinc-800">
                         <p className="font-medium text-zinc-700 dark:text-zinc-300">
                           AI Assessment: <span className="capitalize">{f.ai_analysis.assessment.replace(/_/g, " ")}</span>
                         </p>
@@ -264,7 +264,7 @@ export default function PatternsPage() {
                           });
                           setFeedback(prev => prev.map(fb => fb.id === f.id ? { ...fb, status: "applied" } : fb));
                         }}
-                        className="rounded bg-emerald-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-emerald-500"
+                        className="rounded bg-emerald-600 px-2 py-0.5 text-sm font-medium text-white hover:bg-emerald-500"
                       >
                         Mark Applied
                       </button>
@@ -277,7 +277,7 @@ export default function PatternsPage() {
                           });
                           setFeedback(prev => prev.map(fb => fb.id === f.id ? { ...fb, status: "dismissed" } : fb));
                         }}
-                        className="text-[10px] text-zinc-500 hover:text-zinc-700"
+                        className="text-sm text-zinc-500 hover:text-zinc-700"
                       >
                         Dismiss
                       </button>
@@ -290,7 +290,7 @@ export default function PatternsPage() {
 
           <div className="mt-8">
             <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Global Pattern Library</h2>
-            <p className="mt-0.5 text-xs text-zinc-400">Built-in patterns that ship with ShopCX. Enable or dismiss per workspace.</p>
+            <p className="mt-0.5 text-sm text-zinc-400">Built-in patterns that ship with ShopCX. Enable or dismiss per workspace.</p>
             <div className="mt-3 space-y-2">
               {globalPatterns.length === 0 ? (
                 <p className="py-4 text-center text-sm text-zinc-400">No global patterns.</p>
@@ -300,25 +300,25 @@ export default function PatternsPage() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{p.name}</span>
-                        <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${CATEGORY_COLORS[p.category] || CATEGORY_COLORS.custom}`}>
+                        <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${CATEGORY_COLORS[p.category] || CATEGORY_COLORS.custom}`}>
                           {p.category.replace(/_/g, " ")}
                         </span>
                         {p.auto_tag && (
-                          <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[9px] text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+                          <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-sm text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
                             tag: {p.auto_tag}
                           </span>
                         )}
-                        <span className="text-[9px] text-zinc-400">
+                        <span className="text-sm text-zinc-400">
                           {(p.phrases || []).length} phrases | priority {p.priority}
                         </span>
                       </div>
-                      <p className="mt-0.5 truncate text-xs text-zinc-400">
+                      <p className="mt-0.5 truncate text-sm text-zinc-400">
                         {(p.phrases || []).slice(0, 5).join(", ")}{(p.phrases || []).length > 5 ? "..." : ""}
                       </p>
                     </div>
                     <button
                       onClick={() => handleToggleGlobal(p.id, p.workspace_enabled)}
-                      className={`ml-4 shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                      className={`ml-4 shrink-0 rounded-full px-3 py-1 text-sm font-medium transition-colors ${
                         p.workspace_enabled
                           ? "bg-emerald-100 text-emerald-600 hover:bg-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400"
                           : "bg-zinc-100 text-zinc-400 hover:bg-zinc-200 dark:bg-zinc-800"
@@ -335,7 +335,7 @@ export default function PatternsPage() {
           {/* Workspace Patterns */}
           <div className="mt-8">
             <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Workspace Patterns</h2>
-            <p className="mt-0.5 text-xs text-zinc-400">Custom patterns specific to your workspace.</p>
+            <p className="mt-0.5 text-sm text-zinc-400">Custom patterns specific to your workspace.</p>
             <div className="mt-3 space-y-2">
               {workspacePatterns.length === 0 ? (
                 <p className="py-4 text-center text-sm text-zinc-400">No custom patterns yet.</p>
@@ -345,16 +345,16 @@ export default function PatternsPage() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{p.name}</span>
-                        <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${CATEGORY_COLORS[p.category] || CATEGORY_COLORS.custom}`}>
+                        <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${CATEGORY_COLORS[p.category] || CATEGORY_COLORS.custom}`}>
                           {p.category.replace(/_/g, " ")}
                         </span>
                         {p.auto_tag && (
-                          <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[9px] text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+                          <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-sm text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
                             tag: {p.auto_tag}
                           </span>
                         )}
                       </div>
-                      <p className="mt-0.5 truncate text-xs text-zinc-400">
+                      <p className="mt-0.5 truncate text-sm text-zinc-400">
                         {(p.phrases || []).slice(0, 5).join(", ")}
                       </p>
                     </div>
@@ -372,11 +372,11 @@ export default function PatternsPage() {
                             auto_tag: p.auto_tag || "",
                           });
                         }}
-                        className="text-xs text-indigo-600 hover:underline dark:text-indigo-400"
+                        className="text-sm text-indigo-600 hover:underline dark:text-indigo-400"
                       >
                         Edit
                       </button>
-                      <button onClick={() => handleDelete(p.id)} className="text-xs text-red-500 hover:underline">
+                      <button onClick={() => handleDelete(p.id)} className="text-sm text-red-500 hover:underline">
                         Delete
                       </button>
                     </div>

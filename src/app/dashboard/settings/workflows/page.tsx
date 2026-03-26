@@ -188,17 +188,17 @@ export default function WorkflowsPage() {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{wf.name}</p>
-                    <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${wf.enabled ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400" : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"}`}>
+                    <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${wf.enabled ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400" : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"}`}>
                       {wf.enabled ? "Active" : "Disabled"}
                     </span>
-                    <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[9px] text-violet-600 dark:bg-violet-900/30 dark:text-violet-400">{wf.trigger_tag}</span>
+                    <span className="rounded bg-violet-50 px-1.5 py-0.5 text-sm text-violet-600 dark:bg-violet-900/30 dark:text-violet-400">{wf.trigger_tag}</span>
                   </div>
-                  <p className="mt-0.5 text-xs text-zinc-400">{tpl?.description}</p>
+                  <p className="mt-0.5 text-sm text-zinc-400">{tpl?.description}</p>
                 </div>
                 <div className="ml-4 flex items-center gap-2">
-                  <button onClick={() => handleToggle(wf)} className="text-xs text-zinc-400 hover:text-zinc-600">{wf.enabled ? "Disable" : "Enable"}</button>
-                  <button onClick={() => setEditing(wf)} className="text-xs text-indigo-600 hover:underline dark:text-indigo-400">Configure</button>
-                  <button onClick={() => handleDelete(wf.id)} className="text-xs text-red-500 hover:underline">Delete</button>
+                  <button onClick={() => handleToggle(wf)} className="text-sm text-zinc-400 hover:text-zinc-600">{wf.enabled ? "Disable" : "Enable"}</button>
+                  <button onClick={() => setEditing(wf)} className="text-sm text-indigo-600 hover:underline dark:text-indigo-400">Configure</button>
+                  <button onClick={() => handleDelete(wf.id)} className="text-sm text-red-500 hover:underline">Delete</button>
                 </div>
               </div>
             );
@@ -221,11 +221,11 @@ export default function WorkflowsPage() {
                   </svg>
                   <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{tpl.name}</h3>
                 </div>
-                <p className="mt-2 text-xs text-zinc-500">{tpl.description}</p>
-                <p className="mt-1 text-[10px] text-violet-500">Trigger: {tpl.trigger}</p>
+                <p className="mt-2 text-sm text-zinc-500">{tpl.description}</p>
+                <p className="mt-1 text-sm text-violet-500">Trigger: {tpl.trigger}</p>
                 <button
                   onClick={() => handleCreate(tpl.id)}
-                  className="mt-3 w-full rounded-md bg-indigo-600 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
+                  className="mt-3 w-full rounded-md bg-indigo-600 py-1.5 text-sm font-medium text-white hover:bg-indigo-500"
                 >
                   Set Up
                 </button>
@@ -243,7 +243,7 @@ export default function WorkflowsPage() {
         <div className="mt-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Configure: {editing.name}</h2>
-            <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+            <label className="flex items-center gap-1.5 text-sm text-zinc-500">
               <input
                 type="checkbox"
                 checked={editing.enabled}
@@ -256,9 +256,9 @@ export default function WorkflowsPage() {
 
           {/* Visual step flow */}
           <div className="mt-4 rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800">
-            <p className="text-xs font-medium text-zinc-500">Workflow Steps</p>
+            <p className="text-sm font-medium text-zinc-500">Workflow Steps</p>
             {editing.template === "order_tracking" && (
-              <div className="mt-2 space-y-1 text-xs text-zinc-600 dark:text-zinc-400">
+              <div className="mt-2 space-y-1 text-sm text-zinc-600 dark:text-zinc-400">
                 <p>1. Find customer&apos;s most recent order</p>
                 <p className="ml-4">If unfulfilled &rarr; Reply with preparing message</p>
                 <p className="ml-4">If fulfilled, no tracking &rarr; Reply with shipped message</p>
@@ -269,7 +269,7 @@ export default function WorkflowsPage() {
               </div>
             )}
             {editing.template === "cancel_request" && (
-              <div className="mt-2 space-y-1 text-xs text-zinc-600 dark:text-zinc-400">
+              <div className="mt-2 space-y-1 text-sm text-zinc-600 dark:text-zinc-400">
                 <p>1. Look up customer&apos;s active subscription</p>
                 <p className="ml-4">If no subscription &rarr; Reply asking for details</p>
                 <p className="ml-4">If active subscription &rarr; Confirm receipt</p>
@@ -278,7 +278,7 @@ export default function WorkflowsPage() {
               </div>
             )}
             {editing.template === "subscription_inquiry" && (
-              <div className="mt-2 space-y-1 text-xs text-zinc-600 dark:text-zinc-400">
+              <div className="mt-2 space-y-1 text-sm text-zinc-600 dark:text-zinc-400">
                 <p>1. Look up customer&apos;s active subscription</p>
                 <p className="ml-4">If no subscription &rarr; Reply asking for details</p>
                 <p className="ml-4">If active &rarr; Reply with next billing date + items</p>
@@ -288,8 +288,8 @@ export default function WorkflowsPage() {
 
           {/* Variable reference */}
           <details className="mt-4 rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800">
-            <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-zinc-500">Available Variables (click to expand)</summary>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 px-3 pb-3 text-[10px]">
+            <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-zinc-500">Available Variables (click to expand)</summary>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 px-3 pb-3 text-sm">
               <div className="font-medium text-zinc-600 dark:text-zinc-300 mt-1">Customer</div><div />
               <div className="text-zinc-500">{`{{customer.first_name}}`}</div><div className="text-zinc-400">First name or &ldquo;there&rdquo;</div>
               <div className="text-zinc-500">{`{{customer.last_name}}`}</div><div className="text-zinc-400">Last name</div>
@@ -322,11 +322,11 @@ export default function WorkflowsPage() {
           {/* Config sections */}
           {(TEMPLATE_FIELDS[editing.template] || []).map((section, si) => (
             <div key={si} className="mt-6">
-              <h3 className="text-xs font-medium text-zinc-500">{section.section}</h3>
+              <h3 className="text-sm font-medium text-zinc-500">{section.section}</h3>
               <div className="mt-2 space-y-3">
                 {section.fields.map(field => (
                   <div key={field.key}>
-                    <label className="block text-xs text-zinc-600 dark:text-zinc-400">{field.label}</label>
+                    <label className="block text-sm text-zinc-600 dark:text-zinc-400">{field.label}</label>
                     {field.type === "textarea" ? (
                       <div>
                         <div className="mt-0.5 flex items-center gap-0.5 border-b border-zinc-200 pb-1 dark:border-zinc-600">
@@ -335,17 +335,17 @@ export default function WorkflowsPage() {
                             { cmd: "italic", icon: "I", cls: "italic" },
                           ].map(({ cmd, icon, cls }) => (
                             <button key={cmd} type="button" onMouseDown={(e) => { e.preventDefault(); document.execCommand(cmd); }}
-                              className={`rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-600 ${cls}`}>{icon}</button>
+                              className={`rounded px-1.5 py-0.5 text-sm text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-600 ${cls}`}>{icon}</button>
                           ))}
                           <button type="button" onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertUnorderedList"); }}
-                            className="rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-600">
+                            className="rounded px-1.5 py-0.5 text-sm text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-600">
                             <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>
                           </button>
                           <button type="button" onMouseDown={(e) => {
                             e.preventDefault();
                             const url = prompt("Enter URL:");
                             if (url) document.execCommand("createLink", false, url);
-                          }} className="rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-600">
+                          }} className="rounded px-1.5 py-0.5 text-sm text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-600">
                             <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
                           </button>
                         </div>
@@ -354,14 +354,14 @@ export default function WorkflowsPage() {
                           suppressContentEditableWarning
                           dangerouslySetInnerHTML={{ __html: (editing.config[field.key] as string) || "" }}
                           onBlur={(e) => setEditing({ ...editing, config: { ...editing.config, [field.key]: e.currentTarget.innerHTML } })}
-                          className="min-h-[60px] w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                          className="min-h-[60px] w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
                         />
                         <div className="mt-1 flex items-center gap-1.5">
-                          <span className="text-[9px] text-zinc-400">After this reply, set status to:</span>
+                          <span className="text-sm text-zinc-400">After this reply, set status to:</span>
                           <select
                             value={(editing.config[`${field.key}_status`] as string) || "pending"}
                             onChange={(e) => setEditing({ ...editing, config: { ...editing.config, [`${field.key}_status`]: e.target.value } })}
-                            className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-[10px] dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                            className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-sm dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
                           >
                             <option value="pending">Pending</option>
                             <option value="closed">Closed</option>
@@ -374,7 +374,7 @@ export default function WorkflowsPage() {
                         type="number"
                         value={(editing.config[field.key] as number) || 0}
                         onChange={(e) => setEditing({ ...editing, config: { ...editing.config, [field.key]: parseInt(e.target.value) || 0 } })}
-                        className="mt-0.5 block w-24 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                        className="mt-0.5 block w-24 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
                       />
                     ) : field.type === "boolean" ? (
                       <label className="mt-0.5 flex items-center gap-1.5">
@@ -384,13 +384,13 @@ export default function WorkflowsPage() {
                           onChange={(e) => setEditing({ ...editing, config: { ...editing.config, [field.key]: e.target.checked } })}
                           className="h-3 w-3 rounded border-zinc-300 text-indigo-600"
                         />
-                        <span className="text-xs text-zinc-500">Enabled</span>
+                        <span className="text-sm text-zinc-500">Enabled</span>
                       </label>
                     ) : field.type === "select" ? (
                       <select
                         value={(editing.config[field.key] as string) || ""}
                         onChange={(e) => setEditing({ ...editing, config: { ...editing.config, [field.key]: e.target.value || null } })}
-                        className="mt-0.5 block w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                        className="mt-0.5 block w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
                       >
                         <option value="">{field.key.includes("escalate_to") ? "Select team member..." : "Select..."}</option>
                         {field.key.includes("escalate_to")
@@ -402,10 +402,10 @@ export default function WorkflowsPage() {
                       <input
                         value={(editing.config[field.key] as string) || ""}
                         onChange={(e) => setEditing({ ...editing, config: { ...editing.config, [field.key]: e.target.value } })}
-                        className="mt-0.5 block w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                        className="mt-0.5 block w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
                       />
                     )}
-                    {field.hint && <p className="mt-0.5 text-[9px] text-zinc-400">Variables: {field.hint}</p>}
+                    {field.hint && <p className="mt-0.5 text-sm text-zinc-400">Variables: {field.hint}</p>}
                   </div>
                 ))}
               </div>

@@ -106,14 +106,14 @@ export default function ImportPage() {
       <div className="mt-8 max-w-xl">
         <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
           <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Appstle Subscriptions</h2>
-          <p className="mt-1 text-xs text-zinc-500">Upload a subscription export CSV from Appstle.</p>
+          <p className="mt-1 text-sm text-zinc-500">Upload a subscription export CSV from Appstle.</p>
 
           <div className="mt-4 space-y-4">
             <div>
-              <label className="block text-xs font-medium text-zinc-500">CSV File</label>
+              <label className="block text-sm font-medium text-zinc-500">CSV File</label>
               <input type="file" accept=".csv" onChange={(e) => setFile(e.target.files?.[0] || null)} disabled={!!isProcessing}
                 className="mt-1 block w-full text-sm text-zinc-500 file:mr-4 file:rounded-md file:border-0 file:bg-indigo-50 file:px-4 file:py-2 file:text-sm file:font-medium file:text-indigo-600 hover:file:bg-indigo-100 disabled:opacity-50 dark:file:bg-indigo-950 dark:file:text-indigo-400" />
-              {file && <p className="mt-1 text-xs text-zinc-400">{file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</p>}
+              {file && <p className="mt-1 text-sm text-zinc-400">{file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</p>}
             </div>
 
             <div className="flex gap-2">
@@ -144,7 +144,7 @@ export default function ImportPage() {
                             isComplete ? "bg-indigo-400" : "bg-zinc-300 dark:bg-zinc-700"
                           }`} />
                         )}
-                        <div className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
+                        <div className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-sm ${
                           isActive
                             ? "bg-indigo-100 text-indigo-700 font-medium dark:bg-indigo-900 dark:text-indigo-300"
                             : isComplete
@@ -172,17 +172,17 @@ export default function ImportPage() {
                   <span className="text-zinc-700 dark:text-zinc-300">
                     {job.processed_records.toLocaleString()}{job.total_records > 0 ? ` / ${job.total_records.toLocaleString()}` : ""}
                     {job.status === "processing" && job.total_chunks > 0 && (
-                      <span className="ml-2 text-xs text-zinc-400">
+                      <span className="ml-2 text-sm text-zinc-400">
                         (chunk {job.completed_chunks}/{job.total_chunks})
                       </span>
                     )}
                     {job.status === "finalizing" && job.finalize_total > 0 && (
-                      <span className="ml-2 text-xs text-zinc-400">
+                      <span className="ml-2 text-sm text-zinc-400">
                         (batch {job.finalize_completed}/{job.finalize_total})
                       </span>
                     )}
                   </span>
-                  {job.total_records > 0 && <span className="text-xs text-zinc-400">{pct}%</span>}
+                  {job.total_records > 0 && <span className="text-sm text-zinc-400">{pct}%</span>}
                 </div>
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
                   <div className={`h-full rounded-full transition-all duration-700 ${
@@ -199,7 +199,7 @@ export default function ImportPage() {
             {isDone && job && (
               <div className="flex items-center justify-between rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-400">
                 <span>Import complete! {job.processed_records.toLocaleString()} subscriptions imported.</span>
-                <button onClick={dismiss} className="ml-2 text-xs text-emerald-500 hover:text-emerald-700 dark:hover:text-emerald-300">Dismiss</button>
+                <button onClick={dismiss} className="ml-2 text-sm text-emerald-500 hover:text-emerald-700 dark:hover:text-emerald-300">Dismiss</button>
               </div>
             )}
 
@@ -208,7 +208,7 @@ export default function ImportPage() {
               <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-400">
                 {job.error || "Import failed"}
                 {job.failed_chunk_index != null && (
-                  <span className="ml-1 text-xs">(failed at chunk {job.failed_chunk_index})</span>
+                  <span className="ml-1 text-sm">(failed at chunk {job.failed_chunk_index})</span>
                 )}
               </div>
             )}

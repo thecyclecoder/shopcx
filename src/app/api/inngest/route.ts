@@ -11,6 +11,8 @@ import {
   importJobComplete,
 } from "@/lib/inngest/import-subscriptions";
 import { workflowDelayed, positiveCloseDelayed } from "@/lib/inngest/workflow-delayed";
+import { kbEmbedDocument } from "@/lib/inngest/kb-embed";
+import { aiDraftTicket, aiTriggerWorkflow } from "@/lib/inngest/ai-draft";
 
 export const maxDuration = 300;
 
@@ -28,5 +30,8 @@ export const { GET, POST, PUT } = serve({
     importJobComplete,
     workflowDelayed,
     positiveCloseDelayed,
+    kbEmbedDocument,
+    aiDraftTicket,
+    aiTriggerWorkflow,
   ],
 });

@@ -241,7 +241,7 @@ export default function IntegrationsPage() {
               <p className={`text-sm font-medium ${sandboxMode ? "text-amber-700 dark:text-amber-400" : "text-emerald-700 dark:text-emerald-400"}`}>
                 {sandboxMode ? "Sandbox Mode" : "Live Mode"}
               </p>
-              <p className={`mt-0.5 text-xs ${sandboxMode ? "text-amber-600 dark:text-amber-500" : "text-emerald-600 dark:text-emerald-500"}`}>
+              <p className={`mt-0.5 text-sm ${sandboxMode ? "text-amber-600 dark:text-amber-500" : "text-emerald-600 dark:text-emerald-500"}`}>
                 {sandboxMode
                   ? "Replies to forwarded support email tickets will not be sent to customers. Only direct inbound@ tickets get real replies."
                   : "All ticket replies will be sent to customers."}
@@ -278,11 +278,11 @@ export default function IntegrationsPage() {
               </div>
               <div>
                 <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Shopify</h2>
-                <p className="text-xs text-zinc-500">Customer data, orders, and product sync</p>
+                <p className="text-sm text-zinc-500">Customer data, orders, and product sync</p>
               </div>
             </div>
             {shopifyConnected && (
-              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
                 Connected
               </span>
             )}
@@ -293,14 +293,14 @@ export default function IntegrationsPage() {
               {/* Step 1: Enter credentials */}
               {!shopifyHasCredentials && (
                 <form onSubmit={handleSaveShopifyCredentials} className="mt-5 space-y-4">
-                  <p className="text-xs text-zinc-500">
+                  <p className="text-sm text-zinc-500">
                     Create a custom app in your Shopify Partners dashboard with scopes:{" "}
-                    <code className="rounded bg-zinc-100 px-1 py-0.5 text-[10px] dark:bg-zinc-800">
+                    <code className="rounded bg-zinc-100 px-1 py-0.5 text-sm dark:bg-zinc-800">
                       read_customers, read_orders, read_products, read_inventory
                     </code>
                   </p>
                   <div>
-                    <label className="block text-xs font-medium text-zinc-500">Client ID</label>
+                    <label className="block text-sm font-medium text-zinc-500">Client ID</label>
                     <input
                       type="text"
                       value={shopifyClientId}
@@ -311,7 +311,7 @@ export default function IntegrationsPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-zinc-500">Client Secret</label>
+                    <label className="block text-sm font-medium text-zinc-500">Client Secret</label>
                     <input
                       type="password"
                       value={shopifyClientSecret}
@@ -322,7 +322,7 @@ export default function IntegrationsPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-zinc-500">Store Subdomain</label>
+                    <label className="block text-sm font-medium text-zinc-500">Store Subdomain</label>
                     <div className="mt-1 flex items-center">
                       <input
                         type="text"
@@ -332,11 +332,11 @@ export default function IntegrationsPage() {
                         required
                         className="block w-full rounded-l-md border border-r-0 border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
                       />
-                      <span className="inline-flex items-center rounded-r-md border border-l-0 border-zinc-300 bg-zinc-50 px-3 py-2 text-xs text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400">
+                      <span className="inline-flex items-center rounded-r-md border border-l-0 border-zinc-300 bg-zinc-50 px-3 py-2 text-sm text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400">
                         .myshopify.com
                       </span>
                     </div>
-                    <p className="mt-1 text-xs text-zinc-400">
+                    <p className="mt-1 text-sm text-zinc-400">
                       Enter the subdomain you use to log in (even if your store has a custom domain)
                     </p>
                   </div>
@@ -353,13 +353,13 @@ export default function IntegrationsPage() {
               {/* Step 2: Authorize */}
               {shopifyHasCredentials && (
                 <div className="mt-5 space-y-4">
-                  <p className="text-xs text-zinc-500">
+                  <p className="text-sm text-zinc-500">
                     Credentials saved for <strong>{shopifyDomain}.myshopify.com</strong>.
                     Click below to authorize ShopCX.AI to access your store.
                   </p>
-                  <p className="text-xs text-zinc-400">
+                  <p className="text-sm text-zinc-400">
                     Make sure your app&apos;s redirect URL is set to:{" "}
-                    <code className="rounded bg-zinc-100 px-1 py-0.5 text-[10px] dark:bg-zinc-800">
+                    <code className="rounded bg-zinc-100 px-1 py-0.5 text-sm dark:bg-zinc-800">
                       {typeof window !== "undefined" ? window.location.origin : "https://shopcx.ai"}/api/shopify/callback
                     </code>
                   </p>
@@ -390,21 +390,21 @@ export default function IntegrationsPage() {
               <div className="rounded-md bg-zinc-50 p-3 dark:bg-zinc-800">
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs text-zinc-500">Store</span>
-                    <span className="text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                    <span className="text-sm text-zinc-500">Store</span>
+                    <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
                       {shopifyMyshopifyDomain || shopifyDomain}
                     </span>
                   </div>
                   {shopifyMyshopifyDomain && shopifyMyshopifyDomain !== `${shopifyDomain}.myshopify.com` && (
                     <div className="flex items-center justify-between">
-                      <span className="text-xs text-zinc-500">Canonical domain</span>
-                      <span className="font-mono text-[10px] text-zinc-400">{shopifyMyshopifyDomain}</span>
+                      <span className="text-sm text-zinc-500">Canonical domain</span>
+                      <span className="font-mono text-sm text-zinc-400">{shopifyMyshopifyDomain}</span>
                     </div>
                   )}
                   {shopifyScopes && (
                     <div className="flex items-center justify-between">
-                      <span className="text-xs text-zinc-500">Scopes</span>
-                      <span className="text-[10px] text-zinc-400">{shopifyScopes}</span>
+                      <span className="text-sm text-zinc-500">Scopes</span>
+                      <span className="text-sm text-zinc-400">{shopifyScopes}</span>
                     </div>
                   )}
                 </div>
@@ -426,7 +426,7 @@ export default function IntegrationsPage() {
           )}
 
           {!canEdit && (
-            <p className="mt-4 text-xs text-zinc-400">Only owners and admins can manage integrations.</p>
+            <p className="mt-4 text-sm text-zinc-400">Only owners and admins can manage integrations.</p>
           )}
         </div>
 
@@ -441,11 +441,11 @@ export default function IntegrationsPage() {
               </div>
               <div>
                 <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Resend</h2>
-                <p className="text-xs text-zinc-500">Email delivery for invites, notifications, and marketing</p>
+                <p className="text-sm text-zinc-500">Email delivery for invites, notifications, and marketing</p>
               </div>
             </div>
             {resendConnected && (
-              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
                 Connected
               </span>
             )}
@@ -454,7 +454,7 @@ export default function IntegrationsPage() {
           {canEdit && (
             <form onSubmit={handleSaveResend} className="mt-5 space-y-4">
               <div>
-                <label className="block text-xs font-medium text-zinc-500">API Key</label>
+                <label className="block text-sm font-medium text-zinc-500">API Key</label>
                 <input
                   type="password"
                   value={resendKey}
@@ -463,11 +463,11 @@ export default function IntegrationsPage() {
                   className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
                 />
                 {resendHint && (
-                  <p className="mt-1 text-xs text-zinc-400">Current key: {resendHint}</p>
+                  <p className="mt-1 text-sm text-zinc-400">Current key: {resendHint}</p>
                 )}
               </div>
               <div>
-                <label className="block text-xs font-medium text-zinc-500">Sending Domain</label>
+                <label className="block text-sm font-medium text-zinc-500">Sending Domain</label>
                 <input
                   type="text"
                   value={resendDomain}
@@ -475,13 +475,13 @@ export default function IntegrationsPage() {
                   placeholder="shopcx.ai"
                   className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
                 />
-                <p className="mt-1 text-xs text-zinc-400">Must be verified in your Resend dashboard</p>
+                <p className="mt-1 text-sm text-zinc-400">Must be verified in your Resend dashboard</p>
               </div>
               {/* Support emails list */}
               {resendConnected && webhookConfigured && (
                 <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800">
-                  <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">Support Email Addresses</p>
-                  <p className="text-[10px] text-zinc-400">
+                  <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Support Email Addresses</p>
+                  <p className="text-sm text-zinc-400">
                     Add email addresses that customers can contact. Forward each to <strong>inbound@{resendDomain}</strong>. The default is used as Reply-To on outbound emails.
                   </p>
 
@@ -490,10 +490,10 @@ export default function IntegrationsPage() {
                       {supportEmails.map((se) => (
                         <div key={se.id} className="flex items-center justify-between px-3 py-2">
                           <div>
-                            <span className="text-xs font-medium text-zinc-900 dark:text-zinc-100">{se.email}</span>
-                            {se.label && <span className="ml-2 text-[10px] text-zinc-400">({se.label})</span>}
+                            <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{se.email}</span>
+                            {se.label && <span className="ml-2 text-sm text-zinc-400">({se.label})</span>}
                             {se.is_default && (
-                              <span className="ml-2 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+                              <span className="ml-2 rounded bg-indigo-100 px-1.5 py-0.5 text-sm font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
                                 Reply-To
                               </span>
                             )}
@@ -504,7 +504,7 @@ export default function IntegrationsPage() {
                               await fetch(`/api/workspaces/${workspace.id}/support-emails?email_id=${se.id}`, { method: "DELETE" });
                               setSupportEmails((prev) => prev.filter((e) => e.id !== se.id));
                             }}
-                            className="text-xs text-zinc-400 hover:text-red-500"
+                            className="text-sm text-zinc-400 hover:text-red-500"
                           >
                             Remove
                           </button>
@@ -520,7 +520,7 @@ export default function IntegrationsPage() {
                         value={newSupportEmail}
                         onChange={(e) => setNewSupportEmail(e.target.value)}
                         placeholder="support@company.com"
-                        className="block w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                        className="block w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                       />
                     </div>
                     <div className="w-24">
@@ -529,7 +529,7 @@ export default function IntegrationsPage() {
                         value={newSupportLabel}
                         onChange={(e) => setNewSupportLabel(e.target.value)}
                         placeholder="Label"
-                        className="block w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                        className="block w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                       />
                     </div>
                     <button
@@ -555,7 +555,7 @@ export default function IntegrationsPage() {
                           setMessage(data.error || "Failed to add email");
                         }
                       }}
-                      className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                      className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
                     >
                       Add
                     </button>
@@ -567,10 +567,10 @@ export default function IntegrationsPage() {
               {resendConnected && (
                 <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800">
                   <div className="flex items-center justify-between">
-                    <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">Inbound Emails</p>
+                    <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Inbound Emails</p>
                     <div className="flex items-center gap-2">
                       {webhookConfigured ? (
-                        <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Webhook Active</span>
+                        <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Webhook Active</span>
                       ) : (
                         <button
                           type="button"
@@ -587,7 +587,7 @@ export default function IntegrationsPage() {
                             }
                             setWebhookLoading(false);
                           }}
-                          className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                          className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
                         >
                           {webhookLoading ? "Setting up..." : "Enable Inbound Emails"}
                         </button>
@@ -599,11 +599,11 @@ export default function IntegrationsPage() {
                     <div className="space-y-3">
                       {/* Inbound address */}
                       <div>
-                        <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Inbound Address</p>
-                        <p className="mt-0.5 rounded bg-white px-2 py-1 font-mono text-xs text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100">
+                        <p className="text-sm font-medium uppercase tracking-wider text-zinc-500">Inbound Address</p>
+                        <p className="mt-0.5 rounded bg-white px-2 py-1 font-mono text-sm text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100">
                           inbound@{resendDomain}
                         </p>
-                        <p className="mt-1 text-[10px] text-zinc-400">
+                        <p className="mt-1 text-sm text-zinc-400">
                           Forward your support emails to this address to create tickets automatically.
                         </p>
                       </div>
@@ -611,7 +611,7 @@ export default function IntegrationsPage() {
                       {/* MX Record Status */}
                       <div>
                         <div className="flex items-center justify-between">
-                          <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">DNS Status</p>
+                          <p className="text-sm font-medium uppercase tracking-wider text-zinc-500">DNS Status</p>
                           <button
                             type="button"
                             onClick={async () => {
@@ -621,7 +621,7 @@ export default function IntegrationsPage() {
                               setMxStatus(data);
                               setMxLoading(false);
                             }}
-                            className="text-[10px] text-indigo-500 hover:text-indigo-600"
+                            className="text-sm text-indigo-500 hover:text-indigo-600"
                           >
                             {mxLoading ? "Checking..." : "Refresh"}
                           </button>
@@ -638,37 +638,37 @@ export default function IntegrationsPage() {
                                 ) : (
                                   <div className="h-2 w-2 flex-shrink-0 rounded-full bg-red-500" title="No MX records — cannot receive email" />
                                 )}
-                                <span className="font-mono text-[10px] text-zinc-600 dark:text-zinc-400">{check.domain}</span>
+                                <span className="font-mono text-sm text-zinc-600 dark:text-zinc-400">{check.domain}</span>
                                 {check.can_receive && check.google_dns_propagated && (
-                                  <span className="text-[10px] text-emerald-600 dark:text-emerald-400">Ready</span>
+                                  <span className="text-sm text-emerald-600 dark:text-emerald-400">Ready</span>
                                 )}
                                 {check.can_receive && !check.google_dns_propagated && (
-                                  <span className="text-[10px] text-amber-600 dark:text-amber-400">Propagating (Google DNS pending)</span>
+                                  <span className="text-sm text-amber-600 dark:text-amber-400">Propagating (Google DNS pending)</span>
                                 )}
                                 {check.has_mx && !check.can_receive && (
-                                  <span className="text-[10px] text-amber-600 dark:text-amber-400">MX not Resend</span>
+                                  <span className="text-sm text-amber-600 dark:text-amber-400">MX not Resend</span>
                                 )}
                                 {!check.has_mx && (
-                                  <span className="text-[10px] text-red-500">No MX</span>
+                                  <span className="text-sm text-red-500">No MX</span>
                                 )}
                               </div>
                             ))}
 
                             {mxStatus.inbound_ready ? (
-                              <p className="mt-1 text-[10px] text-emerald-600 dark:text-emerald-400">
+                              <p className="mt-1 text-sm text-emerald-600 dark:text-emerald-400">
                                 Inbound email will work at <strong>{mxStatus.inbound_address}</strong>
                               </p>
                             ) : (
                               <div className="mt-1 rounded border border-red-200 bg-red-50 p-2 dark:border-red-800 dark:bg-red-950">
-                                <p className="text-[10px] font-medium text-red-600 dark:text-red-400">MX record needed</p>
-                                <p className="mt-0.5 text-[10px] text-red-500 dark:text-red-400">
+                                <p className="text-sm font-medium text-red-600 dark:text-red-400">MX record needed</p>
+                                <p className="mt-0.5 text-sm text-red-500 dark:text-red-400">
                                   {mxStatus.setup_instructions}
                                 </p>
                               </div>
                             )}
                           </div>
                         ) : (
-                          <p className="mt-1 text-[10px] text-zinc-400">Loading DNS status...</p>
+                          <p className="mt-1 text-sm text-zinc-400">Loading DNS status...</p>
                         )}
                       </div>
                     </div>
@@ -699,7 +699,7 @@ export default function IntegrationsPage() {
           )}
 
           {!canEdit && (
-            <p className="mt-4 text-xs text-zinc-400">Only owners and admins can manage integrations.</p>
+            <p className="mt-4 text-sm text-zinc-400">Only owners and admins can manage integrations.</p>
           )}
         </div>
 
@@ -714,11 +714,11 @@ export default function IntegrationsPage() {
               </div>
               <div>
                 <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Appstle</h2>
-                <p className="text-xs text-zinc-500">Subscription management webhooks</p>
+                <p className="text-sm text-zinc-500">Subscription management webhooks</p>
               </div>
             </div>
             {appstleConnected && (
-              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
                 Connected
               </span>
             )}
@@ -726,14 +726,14 @@ export default function IntegrationsPage() {
 
           {canEdit && (
             <div className="mt-5 space-y-4">
-              <p className="text-xs text-zinc-500">
+              <p className="text-sm text-zinc-500">
                 Enter the webhook signing secret from Appstle. The webhook endpoint is:{" "}
-                <code className="rounded bg-zinc-100 px-1 py-0.5 text-[10px] dark:bg-zinc-800">
+                <code className="rounded bg-zinc-100 px-1 py-0.5 text-sm dark:bg-zinc-800">
                   {typeof window !== "undefined" ? window.location.origin : "https://shopcx.ai"}/api/webhooks/appstle/{workspace.id}
                 </code>
               </p>
               <div>
-                <label className="block text-xs font-medium text-zinc-500">API Key</label>
+                <label className="block text-sm font-medium text-zinc-500">API Key</label>
                 <input
                   type="password"
                   value={appstleApiKey}
@@ -742,11 +742,11 @@ export default function IntegrationsPage() {
                   className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
                 />
                 {appstleApiKeyHint && (
-                  <p className="mt-1 text-xs text-zinc-400">Current: ...{appstleApiKeyHint}</p>
+                  <p className="mt-1 text-sm text-zinc-400">Current: ...{appstleApiKeyHint}</p>
                 )}
               </div>
               <div>
-                <label className="block text-xs font-medium text-zinc-500">Webhook Signing Secret</label>
+                <label className="block text-sm font-medium text-zinc-500">Webhook Signing Secret</label>
                 <input
                   type="password"
                   value={appstleSecret}
@@ -755,7 +755,7 @@ export default function IntegrationsPage() {
                   className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
                 />
                 {appstleSecretHint && (
-                  <p className="mt-1 text-xs text-zinc-400">Current: {appstleSecretHint}</p>
+                  <p className="mt-1 text-sm text-zinc-400">Current: {appstleSecretHint}</p>
                 )}
               </div>
               <div className="flex items-center gap-3">
@@ -802,7 +802,7 @@ export default function IntegrationsPage() {
               </div>
 
               {appstleConnected && (
-                <div className="rounded-md bg-zinc-50 p-3 text-[10px] text-zinc-500 dark:bg-zinc-800">
+                <div className="rounded-md bg-zinc-50 p-3 text-sm text-zinc-500 dark:bg-zinc-800">
                   <p className="font-medium">Events received:</p>
                   <p className="mt-1">subscription.created, .activated, .paused, .cancelled, .updated, .billing-success, .billing-failure, .billing-skipped, .billing-interval-changed, .next-order-date-changed, .upcoming-order-notification</p>
                 </div>
@@ -821,7 +821,7 @@ export default function IntegrationsPage() {
             </div>
             <div>
               <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Meta</h2>
-              <p className="text-xs text-zinc-500">Coming in Phase 6</p>
+              <p className="text-sm text-zinc-500">Coming in Phase 6</p>
             </div>
           </div>
         </div>

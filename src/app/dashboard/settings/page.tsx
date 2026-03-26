@@ -19,7 +19,7 @@ export default function SettingsPage() {
         >
           <div>
             <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Integrations</h2>
-            <p className="mt-1 text-xs text-zinc-500">Connect Resend, Shopify, Stripe, and more</p>
+            <p className="mt-1 text-sm text-zinc-500">Connect Resend, Shopify, Stripe, and more</p>
           </div>
           <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -32,9 +32,22 @@ export default function SettingsPage() {
         >
           <div>
             <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Rules</h2>
-            <p className="mt-1 text-xs text-zinc-500">Automate ticket tagging, assignment, replies, and more</p>
+            <p className="mt-1 text-sm text-zinc-500">Automate ticket tagging, assignment, replies, and more</p>
           </div>
           <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+
+        <Link
+          href="/dashboard/settings/ai"
+          className="flex items-center justify-between rounded-lg border border-violet-200 bg-violet-50 p-5 transition-colors hover:border-violet-300 dark:border-violet-800 dark:bg-violet-950 dark:hover:border-violet-700"
+        >
+          <div>
+            <h2 className="text-sm font-medium text-violet-900 dark:text-violet-100">AI Agent</h2>
+            <p className="mt-1 text-sm text-violet-600 dark:text-violet-400">Knowledge base, macros, personalities, channel config, and AI workflows</p>
+          </div>
+          <svg className="h-5 w-5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
           </svg>
         </Link>
@@ -45,7 +58,7 @@ export default function SettingsPage() {
         >
           <div>
             <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Workflows</h2>
-            <p className="mt-1 text-xs text-zinc-500">Automated multi-step responses to order tracking, cancellations, and more</p>
+            <p className="mt-1 text-sm text-zinc-500">Automated multi-step responses to order tracking, cancellations, and more</p>
           </div>
           <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -58,7 +71,7 @@ export default function SettingsPage() {
         >
           <div>
             <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Smart Patterns</h2>
-            <p className="mt-1 text-xs text-zinc-500">Auto-tag tickets based on message content patterns</p>
+            <p className="mt-1 text-sm text-zinc-500">Auto-tag tickets based on message content patterns</p>
           </div>
           <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -71,7 +84,7 @@ export default function SettingsPage() {
         >
           <div>
             <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Ticket Views</h2>
-            <p className="mt-1 text-xs text-zinc-500">Manage saved views and sidebar hierarchy</p>
+            <p className="mt-1 text-sm text-zinc-500">Manage saved views and sidebar hierarchy</p>
           </div>
           <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -84,7 +97,7 @@ export default function SettingsPage() {
         >
           <div>
             <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Tags</h2>
-            <p className="mt-1 text-xs text-zinc-500">Manage ticket tags used across your workspace</p>
+            <p className="mt-1 text-sm text-zinc-500">Manage ticket tags used across your workspace</p>
           </div>
           <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -97,7 +110,7 @@ export default function SettingsPage() {
         >
           <div>
             <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Import Data</h2>
-            <p className="mt-1 text-xs text-zinc-500">Upload CSV files for subscriptions and other data</p>
+            <p className="mt-1 text-sm text-zinc-500">Upload CSV files for subscriptions and other data</p>
           </div>
           <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -111,18 +124,18 @@ export default function SettingsPage() {
           <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Workspace</h2>
           <div className="mt-4 space-y-3">
             <div>
-              <label className="block text-xs font-medium text-zinc-500">Name</label>
+              <label className="block text-sm font-medium text-zinc-500">Name</label>
               <p className="mt-1 text-sm text-zinc-900 dark:text-zinc-100">{workspace.name}</p>
             </div>
             <div>
-              <label className="block text-xs font-medium text-zinc-500">Your Role</label>
+              <label className="block text-sm font-medium text-zinc-500">Your Role</label>
               <p className="mt-1 text-sm capitalize text-zinc-900 dark:text-zinc-100">
                 {workspace.role.replace("_", " ")}
               </p>
             </div>
             <div>
-              <label className="block text-xs font-medium text-zinc-500">Workspace ID</label>
-              <p className="mt-1 font-mono text-xs text-zinc-400">{workspace.id}</p>
+              <label className="block text-sm font-medium text-zinc-500">Workspace ID</label>
+              <p className="mt-1 font-mono text-sm text-zinc-400">{workspace.id}</p>
             </div>
           </div>
         </div>
@@ -166,11 +179,11 @@ function ResponseDelayEditor({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
       <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Response Delay</h2>
-      <p className="mt-1 text-xs text-zinc-500">How long workflows and AI wait before sending auto-replies. Prevents instant robotic-feeling responses.</p>
+      <p className="mt-1 text-sm text-zinc-500">How long workflows and AI wait before sending auto-replies. Prevents instant robotic-feeling responses.</p>
       <div className="mt-3 grid grid-cols-2 gap-3">
         {channels.map(ch => (
           <div key={ch.key}>
-            <label className="block text-xs text-zinc-500">{ch.label}</label>
+            <label className="block text-sm text-zinc-500">{ch.label}</label>
             <div className="mt-1 flex items-center gap-1.5">
               <input
                 type="number"
@@ -178,14 +191,14 @@ function ResponseDelayEditor({ workspaceId }: { workspaceId: string }) {
                 onChange={(e) => setDelays({ ...delays, [ch.key]: parseInt(e.target.value) || 0 })}
                 className="w-20 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
               />
-              <span className="text-xs text-zinc-400">seconds</span>
+              <span className="text-sm text-zinc-400">seconds</span>
             </div>
           </div>
         ))}
       </div>
       <div className="mt-3 flex items-center gap-2">
-        <button onClick={handleSave} className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500">Save</button>
-        {saved && <span className="text-xs text-emerald-600">Saved!</span>}
+        <button onClick={handleSave} className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500">Save</button>
+        {saved && <span className="text-sm text-emerald-600">Saved!</span>}
       </div>
     </div>
   );
@@ -219,7 +232,7 @@ function AutoCloseReplyEditor({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
       <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Auto-Close Reply</h2>
-      <p className="mt-1 text-xs text-zinc-500">Message sent when a customer confirms with &ldquo;thanks&rdquo; or similar after a workflow reply.</p>
+      <p className="mt-1 text-sm text-zinc-500">Message sent when a customer confirms with &ldquo;thanks&rdquo; or similar after a workflow reply.</p>
       <textarea
         rows={2}
         value={message}
@@ -227,10 +240,10 @@ function AutoCloseReplyEditor({ workspaceId }: { workspaceId: string }) {
         className="mt-3 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
       />
       <div className="mt-2 flex items-center gap-2">
-        <button onClick={handleSave} className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500">
+        <button onClick={handleSave} className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500">
           Save
         </button>
-        {saved && <span className="text-xs text-emerald-600">Saved!</span>}
+        {saved && <span className="text-sm text-emerald-600">Saved!</span>}
       </div>
     </div>
   );

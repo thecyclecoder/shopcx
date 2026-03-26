@@ -168,7 +168,7 @@ function StatusBadge({ status }: { status: string | null }) {
     "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400";
   return (
     <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium capitalize ${cls}`}
+      className={`inline-flex items-center rounded-full px-2 py-0.5 text-sm font-medium capitalize ${cls}`}
     >
       {status.replace("_", " ")}
     </span>
@@ -368,25 +368,25 @@ export default function CustomerDetailPage() {
       {/* Stats cards */}
       <div className="mt-8 grid grid-cols-2 gap-4 sm:grid-cols-4">
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <p className="text-xs font-medium uppercase text-zinc-500">LTV</p>
+          <p className="text-sm font-medium uppercase text-zinc-500">LTV</p>
           <p className="mt-1 text-xl font-semibold text-zinc-900 dark:text-zinc-100">
             {formatCents(customer.ltv_cents)}
           </p>
         </div>
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <p className="text-xs font-medium uppercase text-zinc-500">Total Orders</p>
+          <p className="text-sm font-medium uppercase text-zinc-500">Total Orders</p>
           <p className="mt-1 text-xl font-semibold text-zinc-900 dark:text-zinc-100">
             {customer.total_orders}
           </p>
         </div>
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <p className="text-xs font-medium uppercase text-zinc-500">Subscription</p>
+          <p className="text-sm font-medium uppercase text-zinc-500">Subscription</p>
           <p className="mt-1 text-xl font-semibold capitalize text-zinc-900 dark:text-zinc-100">
             {customer.subscription_status}
           </p>
         </div>
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <p className="text-xs font-medium uppercase text-zinc-500">Customer Since</p>
+          <p className="text-sm font-medium uppercase text-zinc-500">Customer Since</p>
           <p className="mt-1 text-xl font-semibold text-zinc-900 dark:text-zinc-100">
             {formatDate(customer.shopify_created_at || customer.first_order_at || customer.created_at)}
           </p>
@@ -397,25 +397,25 @@ export default function CustomerDetailPage() {
       <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
         {/* Contact */}
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <p className="text-xs font-medium uppercase text-zinc-500">Contact</p>
+          <p className="text-sm font-medium uppercase text-zinc-500">Contact</p>
           <div className="mt-2 space-y-1.5 text-sm text-zinc-700 dark:text-zinc-300">
             <p>{customer.email}</p>
             {customer.phone && <p>{customer.phone}</p>}
             {customer.default_address && (
-              <p className="text-xs text-zinc-400">
+              <p className="text-sm text-zinc-400">
                 {[customer.default_address.city, customer.default_address.province, customer.default_address.countryCodeV2].filter(Boolean).join(", ")}
                 {customer.default_address.zip && ` ${customer.default_address.zip}`}
               </p>
             )}
             {customer.locale && (
-              <p className="text-xs text-zinc-400">Locale: {customer.locale}</p>
+              <p className="text-sm text-zinc-400">Locale: {customer.locale}</p>
             )}
           </div>
         </div>
 
         {/* Marketing */}
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <p className="text-xs font-medium uppercase text-zinc-500">Marketing</p>
+          <p className="text-sm font-medium uppercase text-zinc-500">Marketing</p>
           <div className="mt-2 space-y-1.5">
             <div className="flex items-center gap-2">
               <div className={`h-2 w-2 rounded-full ${customer.email_marketing_status === "subscribed" ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-600"}`} />
@@ -436,7 +436,7 @@ export default function CustomerDetailPage() {
       {/* Payment Methods (live from Shopify) */}
       {paymentMethods.length > 0 && (
         <div className="mt-6">
-          <p className="text-xs font-medium uppercase text-zinc-500">Payment Methods</p>
+          <p className="text-sm font-medium uppercase text-zinc-500">Payment Methods</p>
           <div className="mt-2 space-y-1.5">
             {paymentMethods.map((pm, i) => (
               <div key={i} className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300">
@@ -444,14 +444,14 @@ export default function CustomerDetailPage() {
                   <>
                     <span className="capitalize">{pm.brand}</span>
                     <span className="text-zinc-400">****{pm.last_digits}</span>
-                    <span className="text-xs text-zinc-400">exp {pm.expiry}</span>
+                    <span className="text-sm text-zinc-400">exp {pm.expiry}</span>
                   </>
                 )}
                 {pm.type === "shop_pay" && (
                   <>
                     <span>Shop Pay</span>
                     <span className="text-zinc-400">****{pm.last_digits}</span>
-                    <span className="text-xs text-zinc-400">exp {pm.expiry}</span>
+                    <span className="text-sm text-zinc-400">exp {pm.expiry}</span>
                   </>
                 )}
                 {pm.type === "paypal" && (
@@ -466,10 +466,10 @@ export default function CustomerDetailPage() {
       {/* Addresses */}
       {customer.addresses && customer.addresses.length > 0 && (
         <div className="mt-6">
-          <p className="text-xs font-medium uppercase text-zinc-500">Addresses</p>
+          <p className="text-sm font-medium uppercase text-zinc-500">Addresses</p>
           <div className="mt-2 space-y-2">
             {customer.addresses.map((addr, i) => (
-              <div key={i} className="rounded border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+              <div key={i} className="rounded border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
                 {addr.address1 && <p>{addr.address1}</p>}
                 <p>{[addr.city, addr.province, addr.zip].filter(Boolean).join(", ")}</p>
                 {addr.country && <p>{addr.country}</p>}
@@ -482,7 +482,7 @@ export default function CustomerDetailPage() {
       {/* Note */}
       {customer.note && (
         <div className="mt-6">
-          <p className="text-xs font-medium uppercase text-zinc-500">Note</p>
+          <p className="text-sm font-medium uppercase text-zinc-500">Note</p>
           <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">{customer.note}</p>
         </div>
       )}
@@ -490,12 +490,12 @@ export default function CustomerDetailPage() {
       {/* Tags */}
       {customer.tags && customer.tags.length > 0 && (
         <div className="mt-6">
-          <p className="text-xs font-medium uppercase text-zinc-500">Tags</p>
+          <p className="text-sm font-medium uppercase text-zinc-500">Tags</p>
           <div className="mt-2 flex flex-wrap gap-2">
             {customer.tags.map((tag) => (
               <span
                 key={tag}
-                className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-sm font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
               >
                 {tag}
               </span>
@@ -506,12 +506,12 @@ export default function CustomerDetailPage() {
 
       {/* Linked Identities */}
       <div className="mt-6">
-        <p className="text-xs font-medium uppercase text-zinc-500">
+        <p className="text-sm font-medium uppercase text-zinc-500">
           Linked Identities{linkedIdentities.length > 0 && <span className="ml-1 normal-case text-indigo-500">({linkedIdentities.length})</span>}
         </p>
 
         {linkedIdentities.length === 0 && suggestions.length === 0 && (
-          <p className="mt-2 text-xs text-zinc-400">No linked accounts.</p>
+          <p className="mt-2 text-sm text-zinc-400">No linked accounts.</p>
         )}
 
         {linkedIdentities.length > 0 && (
@@ -526,14 +526,14 @@ export default function CustomerDetailPage() {
                     {li.email}
                   </span>
                   {(li.first_name || li.last_name) && (
-                    <span className="ml-2 text-xs text-zinc-400">
+                    <span className="ml-2 text-sm text-zinc-400">
                       {[li.first_name, li.last_name].filter(Boolean).join(" ")}
                     </span>
                   )}
                 </button>
                 <button
                   onClick={() => handleUnlink(li.id)}
-                  className="text-xs text-zinc-400 hover:text-red-500"
+                  className="text-sm text-zinc-400 hover:text-red-500"
                 >
                   Unlink
                 </button>
@@ -549,41 +549,41 @@ export default function CustomerDetailPage() {
             onChange={(e) => setLinkEmail(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleLink()}
             placeholder="Link by email..."
-            className="block flex-1 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+            className="block flex-1 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
           />
           <button
             onClick={handleLink}
             disabled={!linkEmail.trim()}
-            className="cursor-pointer rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+            className="cursor-pointer rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
           >
             Link
           </button>
         </div>
         {linkMessage && (
-          <p className="mt-1 text-xs text-indigo-600 dark:text-indigo-400">{linkMessage}</p>
+          <p className="mt-1 text-sm text-indigo-600 dark:text-indigo-400">{linkMessage}</p>
         )}
 
         {/* Auto-suggested matches */}
         {suggestions.length > 0 && (
           <div className="mt-3">
-            <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">Possible Matches</p>
+            <p className="text-sm font-medium uppercase tracking-wider text-zinc-400">Possible Matches</p>
             <div className="mt-1.5 divide-y divide-zinc-200 rounded-lg border border-amber-200 bg-amber-50 dark:divide-zinc-700 dark:border-amber-800 dark:bg-amber-950">
               {suggestions.map((s) => (
                 <div key={s.id} className="flex items-center justify-between px-3 py-2">
                   <div>
-                    <span className="text-xs font-medium text-zinc-900 dark:text-zinc-100">{s.email}</span>
+                    <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{s.email}</span>
                     {(s.first_name || s.last_name) && (
-                      <span className="ml-1.5 text-[10px] text-zinc-500">
+                      <span className="ml-1.5 text-sm text-zinc-500">
                         {[s.first_name, s.last_name].filter(Boolean).join(" ")}
                       </span>
                     )}
-                    <span className="ml-1.5 rounded bg-amber-200 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-800 dark:text-amber-300">
+                    <span className="ml-1.5 rounded bg-amber-200 px-1 py-0.5 text-sm font-medium text-amber-700 dark:bg-amber-800 dark:text-amber-300">
                       {s.match_reason}
                     </span>
                   </div>
                   <button
                     onClick={() => handleLinkById(s.id, s.email, s.first_name, s.last_name)}
-                    className="cursor-pointer rounded-md border border-indigo-300 px-2 py-1 text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
+                    className="cursor-pointer rounded-md border border-indigo-300 px-2 py-1 text-sm font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
                   >
                     Link
                   </button>
@@ -609,7 +609,7 @@ export default function CustomerDetailPage() {
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${
+                    <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${
                       t.status === "open" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
                       : t.status === "pending" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
                       : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
@@ -623,13 +623,13 @@ export default function CustomerDetailPage() {
                       {t.tags.slice(0, 3).map(tag => {
                         const isSmart = tag.startsWith("smart:");
                         return (
-                          <span key={tag} className={`rounded px-1 py-0.5 text-[8px] font-medium ${isSmart ? "bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400" : "bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400"}`}>{tag}</span>
+                          <span key={tag} className={`rounded px-1 py-0.5 text-sm font-medium ${isSmart ? "bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400" : "bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400"}`}>{tag}</span>
                         );
                       })}
                     </div>
                   )}
                 </div>
-                <span className="ml-2 shrink-0 text-xs text-zinc-400">{formatDate(t.created_at)}</span>
+                <span className="ml-2 shrink-0 text-sm text-zinc-400">{formatDate(t.created_at)}</span>
               </button>
             ))}
           </div>
@@ -647,7 +647,7 @@ export default function CustomerDetailPage() {
               <div key={sub.id} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                    <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${
                       sub.status === "active" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
                       : sub.status === "paused" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
                       : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
@@ -655,13 +655,13 @@ export default function CustomerDetailPage() {
                       {sub.status}
                     </span>
                     {sub.billing_interval && sub.billing_interval_count && (
-                      <span className="text-xs text-zinc-500">
+                      <span className="text-sm text-zinc-500">
                         Every {sub.billing_interval_count} {sub.billing_interval}{sub.billing_interval_count > 1 ? "s" : ""}
                       </span>
                     )}
                   </div>
                   {sub.last_payment_status && (
-                    <span className={`text-xs ${
+                    <span className={`text-sm ${
                       sub.last_payment_status === "succeeded" ? "text-emerald-500"
                       : sub.last_payment_status === "failed" ? "text-red-500"
                       : "text-zinc-400"
@@ -673,7 +673,7 @@ export default function CustomerDetailPage() {
                 {sub.items?.length > 0 && (
                   <div className="mt-2 space-y-0.5">
                     {sub.items.map((item, idx) => (
-                      <div key={idx} className="flex justify-between text-xs">
+                      <div key={idx} className="flex justify-between text-sm">
                         <span className="text-zinc-600 dark:text-zinc-400">{item.quantity}x {item.title}</span>
                         <span className="text-zinc-400">{formatCents(item.price_cents * item.quantity)}</span>
                       </div>
@@ -681,7 +681,7 @@ export default function CustomerDetailPage() {
                   </div>
                 )}
                 {sub.next_billing_date && (
-                  <p className="mt-1.5 text-[10px] text-zinc-400">
+                  <p className="mt-1.5 text-sm text-zinc-400">
                     Next billing: {formatDate(sub.next_billing_date)}
                   </p>
                 )}
@@ -699,7 +699,7 @@ export default function CustomerDetailPage() {
         <div className="mt-3 overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
           <table className="min-w-full divide-y divide-zinc-200 dark:divide-zinc-800">
             <thead>
-              <tr className="text-left text-xs font-medium uppercase tracking-wider text-zinc-500">
+              <tr className="text-left text-sm font-medium uppercase tracking-wider text-zinc-500">
                 <th className="px-4 py-3">Order</th>
                 <th className="px-4 py-3">Type</th>
                 <th className="px-4 py-3">Date</th>
@@ -735,13 +735,13 @@ export default function CustomerDetailPage() {
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-sm">
                         {o.order_type === "recurring" ? (
-                          <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400">Recurring</span>
+                          <span className="rounded-full bg-violet-100 px-2 py-0.5 text-sm font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400">Recurring</span>
                         ) : o.order_type === "checkout" ? (
-                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Checkout</span>
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Checkout</span>
                         ) : o.order_type === "replacement" ? (
-                          <span className="rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">Replacement</span>
+                          <span className="rounded-full bg-orange-100 px-2 py-0.5 text-sm font-medium text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">Replacement</span>
                         ) : (
-                          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-sm font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
                             {o.source_name || "--"}
                           </span>
                         )}
@@ -766,7 +766,7 @@ export default function CustomerDetailPage() {
                         <td colSpan={6} className="bg-zinc-50 px-4 py-4 dark:bg-zinc-800/30">
                           <div className="space-y-3">
                             {/* Order meta */}
-                            <div className="flex flex-wrap gap-4 text-xs text-zinc-500">
+                            <div className="flex flex-wrap gap-4 text-sm text-zinc-500">
                               {o.source_name && (
                                 <span>Source: <span className="font-medium text-zinc-700 dark:text-zinc-300">{o.source_name}</span></span>
                               )}
@@ -779,7 +779,7 @@ export default function CustomerDetailPage() {
                             {o.fulfillments && o.fulfillments.length > 0 && (
                               <div className="space-y-1.5">
                                 {o.fulfillments.map((f, fi) => (
-                                  <div key={fi} className="flex flex-wrap items-center gap-2 text-xs">
+                                  <div key={fi} className="flex flex-wrap items-center gap-2 text-sm">
                                     <span className={`rounded-full px-2 py-0.5 font-medium ${
                                       f.status === "SUCCESS" || f.status === "success"
                                         ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
@@ -815,21 +815,21 @@ export default function CustomerDetailPage() {
                             {/* Line items */}
                             {o.line_items && o.line_items.length > 0 ? (
                               <div>
-                                <p className="mb-2 text-xs font-medium uppercase tracking-wider text-zinc-500">Items</p>
+                                <p className="mb-2 text-sm font-medium uppercase tracking-wider text-zinc-500">Items</p>
                                 <div className="divide-y divide-zinc-200 rounded border border-zinc-200 bg-white dark:divide-zinc-700 dark:border-zinc-700 dark:bg-zinc-900">
                                   {o.line_items.map((item, idx) => (
                                     <div key={idx} className="flex items-center justify-between px-3 py-2">
                                       <div>
                                         <p className="text-sm text-zinc-900 dark:text-zinc-100">{item.title}</p>
                                         {item.sku && (
-                                          <p className="text-[10px] text-zinc-400">SKU: {item.sku}</p>
+                                          <p className="text-sm text-zinc-400">SKU: {item.sku}</p>
                                         )}
                                       </div>
                                       <div className="text-right">
                                         <p className="text-sm text-zinc-700 dark:text-zinc-300">
                                           {item.quantity} × {formatCents(item.price_cents)}
                                         </p>
-                                        <p className="text-xs text-zinc-400">
+                                        <p className="text-sm text-zinc-400">
                                           {formatCents(item.quantity * item.price_cents)}
                                         </p>
                                       </div>
@@ -838,7 +838,7 @@ export default function CustomerDetailPage() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-zinc-400">No line items available.</p>
+                              <p className="text-sm text-zinc-400">No line items available.</p>
                             )}
                           </div>
                         </td>
@@ -877,7 +877,7 @@ export default function CustomerDetailPage() {
                     <p className="text-sm text-zinc-900 dark:text-zinc-100">
                       {evt.summary || evt.event_type}
                     </p>
-                    <p className="mt-0.5 text-xs text-zinc-400">
+                    <p className="mt-0.5 text-sm text-zinc-400">
                       {new Date(evt.created_at).toLocaleString("en-US", {
                         month: "short", day: "numeric", year: "numeric",
                         hour: "numeric", minute: "2-digit",

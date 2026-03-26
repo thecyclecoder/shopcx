@@ -98,7 +98,7 @@ export default function ShopifySettingsPage() {
             <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
               Order Source Mapping
             </h2>
-            <p className="mt-1 text-xs text-zinc-500">
+            <p className="mt-1 text-sm text-zinc-500">
               Each order from Shopify has a source. Map each source to either &quot;Checkout&quot; (one-time) or &quot;Recurring&quot; (subscription).
             </p>
           </div>
@@ -118,7 +118,7 @@ export default function ShopifySettingsPage() {
                     <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
                       {s.friendly_name || s.source}
                     </p>
-                    <p className="text-xs text-zinc-400">
+                    <p className="text-sm text-zinc-400">
                       {s.friendly_name && s.friendly_name !== s.source && (
                         <span className="font-mono">{s.source}</span>
                       )}
@@ -153,8 +153,8 @@ export default function ShopifySettingsPage() {
           {hasReplacementMapping && (
             <div className="border-t border-zinc-200 px-5 py-3 dark:border-zinc-800">
               <div className="rounded-md border border-orange-200 bg-orange-50 p-3 dark:border-orange-800 dark:bg-orange-950">
-                <p className="text-xs font-medium text-orange-700 dark:text-orange-400">Replacement Order Threshold</p>
-                <p className="mt-1 text-[10px] text-orange-600 dark:text-orange-500">
+                <p className="text-sm font-medium text-orange-700 dark:text-orange-400">Replacement Order Threshold</p>
+                <p className="mt-1 text-sm text-orange-600 dark:text-orange-500">
                   Orders from sources mapped as &quot;Replacement&quot; will only be tagged as replacement if the order value is at or below this amount. Orders above this threshold will be tagged as &quot;Checkout&quot;.
                 </p>
                 <div className="mt-2 flex items-center gap-2">

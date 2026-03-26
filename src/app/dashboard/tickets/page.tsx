@@ -39,7 +39,7 @@ const STATUS_COLORS: Record<string, string> = {
 function StatusBadge({ status }: { status: string }) {
   const cls = STATUS_COLORS[status] || STATUS_COLORS.closed;
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium capitalize ${cls}`}>
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-sm font-medium capitalize ${cls}`}>
       {status}
     </span>
   );
@@ -247,7 +247,7 @@ export default function TicketsPage() {
             <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Create Ticket</h2>
             <form onSubmit={handleCreateTicket} className="mt-4 space-y-3">
               <div>
-                <label className="block text-xs font-medium text-zinc-500">Customer Email</label>
+                <label className="block text-sm font-medium text-zinc-500">Customer Email</label>
                 <input
                   type="email"
                   value={newTicketEmail}
@@ -257,7 +257,7 @@ export default function TicketsPage() {
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-zinc-500">Subject *</label>
+                <label className="block text-sm font-medium text-zinc-500">Subject *</label>
                 <input
                   type="text"
                   required
@@ -268,7 +268,7 @@ export default function TicketsPage() {
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-zinc-500">Message *</label>
+                <label className="block text-sm font-medium text-zinc-500">Message *</label>
                 <textarea
                   required
                   rows={4}
@@ -302,7 +302,7 @@ export default function TicketsPage() {
       {/* Filters */}
       <div className="mt-6 flex flex-wrap items-end gap-3">
         <div>
-          <label className="block text-xs font-medium text-zinc-500">Status</label>
+          <label className="block text-sm font-medium text-zinc-500">Status</label>
           <select
             value={statusFilter}
             onChange={(e) => { setStatusFilter(e.target.value); setOffset(0); clearView(); }}
@@ -314,7 +314,7 @@ export default function TicketsPage() {
           </select>
         </div>
         <div>
-          <label className="block text-xs font-medium text-zinc-500">Channel</label>
+          <label className="block text-sm font-medium text-zinc-500">Channel</label>
           <select
             value={channelFilter}
             onChange={(e) => { setChannelFilter(e.target.value); setOffset(0); clearView(); }}
@@ -326,7 +326,7 @@ export default function TicketsPage() {
           </select>
         </div>
         <div>
-          <label className="block text-xs font-medium text-zinc-500">Assigned To</label>
+          <label className="block text-sm font-medium text-zinc-500">Assigned To</label>
           <select
             value={assigneeFilter}
             onChange={(e) => { setAssigneeFilter(e.target.value); setOffset(0); clearView(); }}
@@ -340,10 +340,10 @@ export default function TicketsPage() {
         </div>
         {availableTags.length > 0 && (
           <div>
-            <label className="block text-xs font-medium text-zinc-500">Tags</label>
+            <label className="block text-sm font-medium text-zinc-500">Tags</label>
             <div className="mt-1 flex flex-wrap items-center gap-1 rounded-md border border-zinc-300 bg-white px-2 py-1.5 dark:border-zinc-700 dark:bg-zinc-800">
               {tagFilter.map(t => (
-                <span key={t} className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+                <span key={t} className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1.5 py-0.5 text-sm font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
                   {t}
                   <button onClick={() => { setTagFilter(tagFilter.filter(x => x !== t)); setOffset(0); clearView(); }} className="text-indigo-400 hover:text-indigo-600">x</button>
                 </span>
@@ -369,7 +369,7 @@ export default function TicketsPage() {
           </div>
         )}
         <form onSubmit={handleSearch} className="flex-1">
-          <label className="block text-xs font-medium text-zinc-500">Search</label>
+          <label className="block text-sm font-medium text-zinc-500">Search</label>
           <div className="relative mt-1">
             <svg className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
@@ -388,7 +388,7 @@ export default function TicketsPage() {
       {/* Active view name + Save as View */}
       <div className="mt-3 flex items-center gap-3">
         {activeViewName && (
-          <span className="rounded bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+          <span className="rounded bg-indigo-50 px-2 py-0.5 text-sm font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
             View: {activeViewName}
           </span>
         )}
@@ -420,20 +420,20 @@ export default function TicketsPage() {
                   onChange={(e) => setViewName(e.target.value)}
                   placeholder="View name..."
                   autoFocus
-                  className="rounded border border-zinc-300 bg-white px-2 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  className="rounded border border-zinc-300 bg-white px-2 py-0.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                 />
                 <select
                   value={viewParentId}
                   onChange={(e) => setViewParentId(e.target.value)}
-                  className="rounded border border-zinc-300 bg-white px-2 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  className="rounded border border-zinc-300 bg-white px-2 py-0.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                 >
                   <option value="">No parent (top level)</option>
                   {existingViews.filter(v => !v.parent_id).map(v => (
                     <option key={v.id} value={v.id}>{v.name}</option>
                   ))}
                 </select>
-                <button type="submit" className="rounded bg-indigo-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-indigo-500">Save</button>
-                <button type="button" onClick={() => setSavingView(false)} className="text-xs text-zinc-400">Cancel</button>
+                <button type="submit" className="rounded bg-indigo-600 px-2 py-0.5 text-sm font-medium text-white hover:bg-indigo-500">Save</button>
+                <button type="button" onClick={() => setSavingView(false)} className="text-sm text-zinc-400">Cancel</button>
               </form>
             ) : (
               <button onClick={() => {
@@ -441,7 +441,7 @@ export default function TicketsPage() {
                 fetch(`/api/workspaces/${workspace.id}/ticket-views`).then(r => r.json()).then(d => {
                   if (Array.isArray(d)) setExistingViews(d);
                 });
-              }} className="text-xs text-indigo-600 hover:underline dark:text-indigo-400">
+              }} className="text-sm text-indigo-600 hover:underline dark:text-indigo-400">
                 Save as View
               </button>
             )}
@@ -453,7 +453,7 @@ export default function TicketsPage() {
       <div className="mt-6 overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
         <table className="min-w-full divide-y divide-zinc-200 dark:divide-zinc-800">
           <thead>
-            <tr className="text-left text-xs font-medium uppercase tracking-wider text-zinc-500">
+            <tr className="text-left text-sm font-medium uppercase tracking-wider text-zinc-500">
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Subject</th>
               <th className="px-4 py-3">Customer</th>
@@ -485,7 +485,7 @@ export default function TicketsPage() {
                     <div className="flex items-center gap-1">
                       <StatusBadge status={t.status} />
                       {t.auto_reply_at && new Date(t.auto_reply_at) > new Date() && (
-                        <span className="rounded bg-violet-50 px-1 py-0.5 text-[8px] font-medium text-violet-500 dark:bg-violet-900/30 dark:text-violet-400">
+                        <span className="rounded bg-violet-50 px-1 py-0.5 text-sm font-medium text-violet-500 dark:bg-violet-900/30 dark:text-violet-400">
                           Auto {new Date(t.auto_reply_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
                         </span>
                       )}
@@ -503,14 +503,14 @@ export default function TicketsPage() {
                         {t.tags.slice(0, 3).map((tag) => {
                           const isSmart = tag.startsWith("smart:");
                           return (
-                            <span key={tag} className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                            <span key={tag} className={`rounded px-1.5 py-0.5 text-sm font-medium ${
                               isSmart
                                 ? "bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
                                 : "bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400"
                             }`}>{tag}</span>
                           );
                         })}
-                        {t.tags.length > 3 && <span className="text-[9px] text-zinc-400">+{t.tags.length - 3}</span>}
+                        {t.tags.length > 3 && <span className="text-sm text-zinc-400">+{t.tags.length - 3}</span>}
                       </div>
                     )}
                   </td>

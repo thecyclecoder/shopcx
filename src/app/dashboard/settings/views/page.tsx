@@ -86,22 +86,22 @@ export default function ViewsPage() {
       <>
         <div className="flex items-center justify-between px-4 py-2.5">
           <div className="flex items-center gap-2" style={{ paddingLeft: depth * 20 }}>
-            {kids.length > 0 && <span className="text-[10px] text-zinc-400">&#9662;</span>}
+            {kids.length > 0 && <span className="text-sm text-zinc-400">&#9662;</span>}
             <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{view.name}</span>
             {hasFilters && (
               <div className="flex gap-1">
                 {Object.entries(view.filters).map(([k, v]) => (
-                  <span key={k} className="rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:bg-zinc-800">
+                  <span key={k} className="rounded bg-zinc-100 px-1.5 py-0.5 text-sm text-zinc-500 dark:bg-zinc-800">
                     {k}: {v}
                   </span>
                 ))}
               </div>
             )}
-            {!hasFilters && <span className="text-[9px] text-zinc-400">(folder)</span>}
+            {!hasFilters && <span className="text-sm text-zinc-400">(folder)</span>}
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={() => setEditing(view)} className="text-xs text-indigo-600 hover:underline dark:text-indigo-400">Edit</button>
-            <button onClick={() => handleDelete(view.id)} className="text-xs text-red-500 hover:underline">Delete</button>
+            <button onClick={() => setEditing(view)} className="text-sm text-indigo-600 hover:underline dark:text-indigo-400">Edit</button>
+            <button onClick={() => handleDelete(view.id)} className="text-sm text-red-500 hover:underline">Delete</button>
           </div>
         </div>
         {kids.map(child => <ViewRow key={child.id} view={child} depth={depth + 1} />)}
@@ -144,7 +144,7 @@ export default function ViewsPage() {
           <div className="mt-4 space-y-4">
             {/* Name */}
             <div>
-              <label className="block text-xs font-medium text-zinc-500">Name</label>
+              <label className="block text-sm font-medium text-zinc-500">Name</label>
               <input
                 value={editing.name}
                 onChange={(e) => setEditing({ ...editing, name: e.target.value })}
@@ -155,7 +155,7 @@ export default function ViewsPage() {
 
             {/* Parent */}
             <div>
-              <label className="block text-xs font-medium text-zinc-500">Parent View</label>
+              <label className="block text-sm font-medium text-zinc-500">Parent View</label>
               <select
                 value={editing.parent_id || ""}
                 onChange={(e) => setEditing({ ...editing, parent_id: e.target.value || null })}
@@ -177,10 +177,10 @@ export default function ViewsPage() {
 
             {/* Filters */}
             <div>
-              <label className="block text-xs font-medium text-zinc-500">Filters (leave empty for folder-only)</label>
+              <label className="block text-sm font-medium text-zinc-500">Filters (leave empty for folder-only)</label>
               <div className="mt-2 grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[10px] text-zinc-400">Status</label>
+                  <label className="block text-sm text-zinc-400">Status</label>
                   <select
                     value={editing.filters.status || ""}
                     onChange={(e) => {
@@ -188,7 +188,7 @@ export default function ViewsPage() {
                       if (e.target.value) f.status = e.target.value; else delete f.status;
                       setEditing({ ...editing, filters: f });
                     }}
-                    className="mt-0.5 block w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    className="mt-0.5 block w-full rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                   >
                     <option value="">Any</option>
                     <option value="open">Open</option>
@@ -198,7 +198,7 @@ export default function ViewsPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-[10px] text-zinc-400">Channel</label>
+                  <label className="block text-sm text-zinc-400">Channel</label>
                   <select
                     value={editing.filters.channel || ""}
                     onChange={(e) => {
@@ -206,7 +206,7 @@ export default function ViewsPage() {
                       if (e.target.value) f.channel = e.target.value; else delete f.channel;
                       setEditing({ ...editing, filters: f });
                     }}
-                    className="mt-0.5 block w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    className="mt-0.5 block w-full rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                   >
                     <option value="">Any</option>
                     <option value="email">Email</option>
@@ -214,7 +214,7 @@ export default function ViewsPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-[10px] text-zinc-400">Assigned To</label>
+                  <label className="block text-sm text-zinc-400">Assigned To</label>
                   <select
                     value={editing.filters.assigned_to || ""}
                     onChange={(e) => {
@@ -222,7 +222,7 @@ export default function ViewsPage() {
                       if (e.target.value) f.assigned_to = e.target.value; else delete f.assigned_to;
                       setEditing({ ...editing, filters: f });
                     }}
-                    className="mt-0.5 block w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    className="mt-0.5 block w-full rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                   >
                     <option value="">Anyone</option>
                     {members.map(m => (
@@ -231,10 +231,10 @@ export default function ViewsPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-[10px] text-zinc-400">Tags</label>
+                  <label className="block text-sm text-zinc-400">Tags</label>
                   <div className="mt-0.5 flex flex-wrap items-center gap-1 rounded border border-zinc-300 bg-white px-1.5 py-1 dark:border-zinc-700 dark:bg-zinc-800">
                     {(editing.filters.tag || "").split(",").filter(Boolean).map(t => (
-                      <span key={t} className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1 py-0.5 text-[9px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+                      <span key={t} className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1 py-0.5 text-sm font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
                         {t}
                         <button type="button" onClick={() => {
                           const current = (editing.filters.tag || "").split(",").filter(Boolean);
@@ -256,7 +256,7 @@ export default function ViewsPage() {
                         }
                         e.target.value = "";
                       }}
-                      className="min-w-[60px] flex-1 border-none bg-transparent text-[10px] text-zinc-500 outline-none"
+                      className="min-w-[60px] flex-1 border-none bg-transparent text-sm text-zinc-500 outline-none"
                     >
                       <option value="">{(editing.filters.tag || "").split(",").filter(Boolean).length === 0 ? "Any" : "+"}</option>
                       {tags.filter(t => !(editing.filters.tag || "").split(",").includes(t)).map(t => (
@@ -266,7 +266,7 @@ export default function ViewsPage() {
                   </div>
                 </div>
                 <div className="col-span-2">
-                  <label className="block text-[10px] text-zinc-400">Search (subject)</label>
+                  <label className="block text-sm text-zinc-400">Search (subject)</label>
                   <input
                     value={editing.filters.search || ""}
                     onChange={(e) => {
@@ -275,7 +275,7 @@ export default function ViewsPage() {
                       setEditing({ ...editing, filters: f });
                     }}
                     placeholder="Optional subject search..."
-                    className="mt-0.5 block w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    className="mt-0.5 block w-full rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                   />
                 </div>
               </div>
@@ -283,14 +283,14 @@ export default function ViewsPage() {
 
             {/* Sort order */}
             <div>
-              <label className="block text-xs font-medium text-zinc-500">Sort Order</label>
+              <label className="block text-sm font-medium text-zinc-500">Sort Order</label>
               <input
                 type="number"
                 value={editing.sort_order}
                 onChange={(e) => setEditing({ ...editing, sort_order: parseInt(e.target.value) || 0 })}
-                className="mt-1 w-20 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                className="mt-1 w-20 rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
               />
-              <p className="mt-0.5 text-[10px] text-zinc-400">Lower numbers appear first</p>
+              <p className="mt-0.5 text-sm text-zinc-400">Lower numbers appear first</p>
             </div>
           </div>
 

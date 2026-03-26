@@ -56,7 +56,7 @@ function RetentionBadge({ score }: { score: number }) {
     classes = "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400";
   }
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${classes}`}>
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-sm font-medium ${classes}`}>
       {score}
     </span>
   );
@@ -262,7 +262,7 @@ export default function CustomersPage() {
             </button>
           </div>
         ) : syncJob?.status === "completed" && workspace.role !== "owner" ? (
-          <span className="text-xs text-zinc-400">
+          <span className="text-sm text-zinc-400">
             Synced {syncJob.synced_customers?.toLocaleString()} customers, {syncJob.synced_orders?.toLocaleString()} orders
           </span>
         ) : (workspace.role === "owner" || (workspace.role === "admin" && total === 0)) ? (
@@ -291,7 +291,7 @@ export default function CustomersPage() {
               {progressLabel}
             </span>
             {syncJob.status !== "failed" && (
-              <span className="text-xs text-zinc-400">{progressPercent}%</span>
+              <span className="text-sm text-zinc-400">{progressPercent}%</span>
             )}
           </div>
           {syncJob.status !== "failed" && (
@@ -309,7 +309,7 @@ export default function CustomersPage() {
           {(syncJob.status === "completed" || syncJob.status === "failed") && (
             <button
               onClick={() => setSyncJob(null)}
-              className="mt-2 text-xs text-zinc-400 hover:text-zinc-600"
+              className="mt-2 text-sm text-zinc-400 hover:text-zinc-600"
             >
               Dismiss
             </button>
@@ -323,7 +323,7 @@ export default function CustomersPage() {
           <div className="flex items-center gap-2 text-sm text-zinc-500">
             <div className="h-2 w-full animate-pulse rounded-full bg-indigo-200 dark:bg-indigo-900" />
           </div>
-          <p className="mt-2 text-xs text-zinc-400">Starting background sync...</p>
+          <p className="mt-2 text-sm text-zinc-400">Starting background sync...</p>
         </div>
       )}
 
@@ -347,7 +347,7 @@ export default function CustomersPage() {
       <div className="mt-6 overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
         <table className="min-w-full divide-y divide-zinc-200 dark:divide-zinc-800">
           <thead>
-            <tr className="text-left text-xs font-medium uppercase tracking-wider text-zinc-500">
+            <tr className="text-left text-sm font-medium uppercase tracking-wider text-zinc-500">
               <th className="px-4 py-3">Name</th>
               <th className="px-4 py-3">Email</th>
               <th className="cursor-pointer px-4 py-3" onClick={() => handleSort("retention_score")}>

@@ -2,12 +2,12 @@
 // Supports: OpenAI (text-embedding-3-small), Voyage AI, or HuggingFace
 // Configure via OPENAI_API_KEY, VOYAGE_API_KEY, or HF_TOKEN env vars
 
-export async function generateEmbedding(text: string): Promise<number[] | null> {
+export async function generateEmbedding(text: string, dimensions: number = 384): Promise<number[] | null> {
   const cleanText = text.slice(0, 2000);
 
   // Try OpenAI first (cheapest, most reliable)
   if (process.env.OPENAI_API_KEY) {
-    return openaiEmbed(cleanText);
+    return openaiEmbed(cleanText, dimensions);
   }
 
   // Try Voyage AI
@@ -24,7 +24,12 @@ export async function generateEmbedding(text: string): Promise<number[] | null> 
   return null;
 }
 
-async function openaiEmbed(text: string): Promise<number[] | null> {
+// 1536-dim embeddings for KB chunks and macros
+export async function generateEmbedding1536(text: string): Promise<number[] | null> {
+  return generateEmbedding(text, 1536);
+}
+
+async function openaiEmbed(text: string, dimensions: number = 384): Promise<number[] | null> {
   try {
     const res = await fetch("https://api.openai.com/v1/embeddings", {
       method: "POST",
@@ -35,7 +40,7 @@ async function openaiEmbed(text: string): Promise<number[] | null> {
       body: JSON.stringify({
         model: "text-embedding-3-small",
         input: text,
-        dimensions: 384,
+        dimensions,
       }),
     });
     if (!res.ok) { console.error("OpenAI embed error:", await res.text()); return null; }

@@ -86,7 +86,7 @@ export default function Sidebar({
           <Image src="/logo.svg" alt="ShopCX.AI" width={28} height={28} />
           <span className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
             Shop<span className="text-indigo-500">CX</span>
-            <span className="text-xs font-medium text-violet-400">.AI</span>
+            <span className="text-sm font-medium text-violet-400">.AI</span>
           </span>
         </div>
         {/* Close button - mobile only */}
@@ -102,10 +102,10 @@ export default function Sidebar({
 
       {/* Workspace name */}
       <div className="border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
-        <p className="truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+        <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
           {workspace.name}
         </p>
-        <p className="text-[10px] capitalize text-zinc-400">
+        <p className="text-sm capitalize text-zinc-400">
           {workspace.role.replace("_", " ")}
         </p>
       </div>
@@ -152,13 +152,13 @@ export default function Sidebar({
                           return next;
                         });
                       }}
-                      className="flex w-full items-center justify-between px-2 py-1 text-xs font-medium text-amber-600 dark:text-amber-400"
+                      className="flex w-full items-center justify-between px-2 py-1 text-sm font-medium text-amber-600 dark:text-amber-400"
                     >
                       <span>
                         <span className={`mr-1 inline-block transition-transform ${escCollapsed ? "" : "rotate-90"}`}>&#9656;</span>
                         Escalations
                       </span>
-                      <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-medium tabular-nums text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
+                      <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-sm font-medium tabular-nums text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
                         {totalEsc > 99 ? "99+" : totalEsc}
                       </span>
                     </button>
@@ -168,10 +168,10 @@ export default function Sidebar({
                           <Link
                             key={e.status}
                             href={`/dashboard/tickets?status=${e.status}&escalation_mine=true`}
-                            className="flex items-center justify-between rounded px-2 py-1 text-xs text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/20"
+                            className="flex items-center justify-between rounded px-2 py-1 text-sm text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/20"
                           >
                             <span>{e.label}</span>
-                            <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] tabular-nums text-amber-500 dark:bg-amber-900/20">
+                            <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-sm tabular-nums text-amber-500 dark:bg-amber-900/20">
                               {e.count > 99 ? "99+" : e.count}
                             </span>
                           </Link>
@@ -211,7 +211,7 @@ export default function Sidebar({
                   return (
                     <div>
                       {hasFilters ? (
-                        <div className={`flex items-center rounded text-xs transition-colors ${
+                        <div className={`flex items-center rounded text-sm transition-colors ${
                           isViewActive
                             ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
                             : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
@@ -228,7 +228,7 @@ export default function Sidebar({
                           <Link href={viewHref} className={`flex flex-1 items-center justify-between py-1 ${isFolder ? "pr-2" : "px-2"}`}>
                             <span>{view.name}</span>
                             {countLabel && (
-                              <span className={`ml-1 rounded-full px-1.5 py-0.5 text-[9px] font-medium tabular-nums ${
+                              <span className={`ml-1 rounded-full px-1.5 py-0.5 text-sm font-medium tabular-nums ${
                                 isViewActive
                                   ? "bg-indigo-100 text-indigo-600 dark:bg-indigo-900 dark:text-indigo-300"
                                   : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"
@@ -242,7 +242,7 @@ export default function Sidebar({
                         <button
                           type="button"
                           onClick={() => isFolder && toggleCollapse(view.id)}
-                          className="flex w-full items-center px-2 py-1 text-xs font-medium text-zinc-400 dark:text-zinc-500"
+                          className="flex w-full items-center px-2 py-1 text-sm font-medium text-zinc-400 dark:text-zinc-500"
                         >
                           {isFolder && (
                             <span className={`mr-1 inline-block transition-transform ${isCollapsed ? "" : "rotate-90"}`}>&#9656;</span>
@@ -274,11 +274,11 @@ export default function Sidebar({
       <div className="border-t border-zinc-200 px-5 py-3 dark:border-zinc-800">
         <div className="flex items-center justify-between">
           <div className="min-w-0">
-            <p className="truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+            <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
               {user.name || user.email}
             </p>
             {user.name && (
-              <p className="truncate text-[10px] text-zinc-400">{user.email}</p>
+              <p className="truncate text-sm text-zinc-400">{user.email}</p>
             )}
           </div>
           <button
@@ -310,7 +310,7 @@ export default function Sidebar({
         <Image src="/logo.svg" alt="ShopCX.AI" width={24} height={24} />
         <span className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
           Shop<span className="text-indigo-500">CX</span>
-          <span className="text-xs font-medium text-violet-400">.AI</span>
+          <span className="text-sm font-medium text-violet-400">.AI</span>
         </span>
       </div>
 

@@ -56,14 +56,14 @@ export default function TagsPage() {
             {tags.map((tag) => (
               <div key={tag} className="flex items-center justify-between px-4 py-2.5">
                 <div className="flex items-center gap-2">
-                  <span className="rounded bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+                  <span className="rounded bg-indigo-50 px-2 py-0.5 text-sm font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
                     {tag}
                   </span>
                 </div>
                 <button
                   onClick={() => handleDelete(tag)}
                   disabled={deleting === tag}
-                  className="text-xs text-red-500 hover:underline disabled:opacity-50"
+                  className="text-sm text-red-500 hover:underline disabled:opacity-50"
                 >
                   {deleting === tag ? "Deleting..." : "Delete"}
                 </button>

@@ -59,7 +59,7 @@ export default function LoginPage() {
           Continue with Google
         </button>
 
-        <p className="text-center text-xs text-zinc-400 dark:text-zinc-500">
+        <p className="text-center text-sm text-zinc-400 dark:text-zinc-500">
           By signing in, you agree to our{" "}
           <a href="/terms" className="underline hover:text-zinc-600 dark:hover:text-zinc-300">
             Terms of Service

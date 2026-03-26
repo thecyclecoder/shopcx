@@ -20,7 +20,7 @@ export default function DashboardPage() {
             key={stat.label}
             className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
           >
-            <p className="text-xs font-medium text-zinc-500">{stat.label}</p>
+            <p className="text-sm font-medium text-zinc-500">{stat.label}</p>
             <p className="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
               {stat.value}
             </p>

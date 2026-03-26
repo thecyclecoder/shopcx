@@ -43,7 +43,7 @@ export default function WorkspaceList({
         >
           <div>
             <p className="font-medium text-zinc-900 dark:text-zinc-100">{ws.name}</p>
-            <p className="text-xs text-zinc-500 capitalize">{ws.role.replace("_", " ")}</p>
+            <p className="text-sm text-zinc-500 capitalize">{ws.role.replace("_", " ")}</p>
           </div>
           <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />

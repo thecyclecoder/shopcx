@@ -93,7 +93,7 @@ const STATUS_COLORS: Record<string, string> = {
 function StatusBadge({ status }: { status: string }) {
   const cls = STATUS_COLORS[status] || STATUS_COLORS.closed;
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium capitalize ${cls}`}>
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-sm font-medium capitalize ${cls}`}>
       {status}
     </span>
   );
@@ -101,7 +101,7 @@ function StatusBadge({ status }: { status: string }) {
 
 function ChannelBadge({ channel }: { channel: string }) {
   return (
-    <span className="inline-flex items-center rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+    <span className="inline-flex items-center rounded-full bg-zinc-100 px-2 py-0.5 text-sm font-medium capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
       {channel.replace("_", " ")}
     </span>
   );
@@ -192,6 +192,8 @@ export default function TicketDetailPage() {
   const [feedbackReason, setFeedbackReason] = useState("");
   const [linkSuggestions, setLinkSuggestions] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; phone: string | null; match_reason: string }[]>([]);
   const [showLinkSection, setShowLinkSection] = useState(false);
+  const [aiDraft, setAiDraft] = useState<{ ai_draft: string | null; ai_confidence: number | null; ai_tier: string | null; ai_source_type: string | null; source_name: string | null; ai_drafted_at: string | null } | null>(null);
+  const [generatingDraft, setGeneratingDraft] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -228,6 +230,12 @@ export default function TicketDetailPage() {
           .then((s) => setLinkSuggestions(s.suggestions || []))
           .catch(() => {});
       }
+
+      // Load existing AI draft
+      fetch(`/api/tickets/${id}/ai-draft`)
+        .then((r) => r.json())
+        .then((d) => { if (d.ai_draft) setAiDraft(d); })
+        .catch(() => {});
     }
     load();
   }, [id]);
@@ -402,7 +410,7 @@ export default function TicketDetailPage() {
                 const res = await fetch(`/api/tickets/${id}`, { method: "DELETE" });
                 if (res.ok) router.push("/dashboard/tickets");
               }}
-              className="mb-4 text-xs text-red-500 hover:underline"
+              className="mb-4 text-sm text-red-500 hover:underline"
             >
               Delete ticket
             </button>
@@ -415,8 +423,8 @@ export default function TicketDetailPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
               </svg>
               <div>
-                <p className="text-xs font-medium text-amber-700 dark:text-amber-400">Sandbox Mode</p>
-                <p className="text-[10px] text-amber-600 dark:text-amber-500">
+                <p className="text-sm font-medium text-amber-700 dark:text-amber-400">Sandbox Mode</p>
+                <p className="text-sm text-amber-600 dark:text-amber-500">
                   Replies on this ticket will not be sent to the customer. This ticket was received via a forwarded support email. Disable sandbox mode in Settings to send real replies.
                 </p>
               </div>
@@ -431,7 +439,7 @@ export default function TicketDetailPage() {
             <StatusBadge status={ticket.status} />
             <ChannelBadge channel={ticket.channel} />
             {ticket.auto_reply_at && new Date(ticket.auto_reply_at) > new Date() && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-600 dark:bg-violet-900/30 dark:text-violet-400">
+              <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2 py-0.5 text-sm font-medium text-violet-600 dark:bg-violet-900/30 dark:text-violet-400">
                 <svg className="h-3 w-3 animate-pulse" fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.828a1 1 0 101.415-1.414L11 9.586V6z" /></svg>
                 Auto-reply at {new Date(ticket.auto_reply_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
                 <button
@@ -450,7 +458,7 @@ export default function TicketDetailPage() {
               const isSmart = tag.startsWith("smart:");
               const displayTag = tag;
               return (
-                <span key={tag} className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                <span key={tag} className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-sm font-medium ${
                   isSmart
                     ? "bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
                     : "bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400"
@@ -488,7 +496,7 @@ export default function TicketDetailPage() {
                   onFocus={() => setShowTagDropdown(true)}
                   onBlur={() => setTimeout(() => setShowTagDropdown(false), 200)}
                   placeholder="+ add tag"
-                  className="w-24 rounded border border-transparent bg-transparent px-1.5 py-0.5 text-[10px] text-zinc-500 placeholder-zinc-400 outline-none focus:w-32 focus:border-zinc-300 focus:bg-white focus:ring-0 dark:focus:border-zinc-600 dark:focus:bg-zinc-800"
+                  className="w-24 rounded border border-transparent bg-transparent px-1.5 py-0.5 text-sm text-zinc-500 placeholder-zinc-400 outline-none focus:w-32 focus:border-zinc-300 focus:bg-white focus:ring-0 dark:focus:border-zinc-600 dark:focus:bg-zinc-800"
                 />
               </form>
               {showTagDropdown && (() => {
@@ -512,7 +520,7 @@ export default function TicketDetailPage() {
                           setTagInput("");
                           setShowTagDropdown(false);
                         }}
-                        className="block w-full px-2.5 py-1.5 text-left text-[10px] text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 dark:text-zinc-300 dark:hover:bg-indigo-900/30"
+                        className="block w-full px-2.5 py-1.5 text-left text-sm text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 dark:text-zinc-300 dark:hover:bg-indigo-900/30"
                       >
                         {tag}
                       </button>
@@ -528,7 +536,7 @@ export default function TicketDetailPage() {
                           setTagInput("");
                           setShowTagDropdown(false);
                         }}
-                        className="block w-full border-t border-zinc-100 px-2.5 py-1.5 text-left text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 dark:border-zinc-700 dark:text-indigo-400"
+                        className="block w-full border-t border-zinc-100 px-2.5 py-1.5 text-left text-sm font-medium text-indigo-600 hover:bg-indigo-50 dark:border-zinc-700 dark:text-indigo-400"
                       >
                         Create &ldquo;{tagInput.trim().toLowerCase()}&rdquo;
                       </button>
@@ -542,7 +550,7 @@ export default function TicketDetailPage() {
           {/* Smart tag removal feedback */}
           {removingSmartTag && (
             <div className="mt-2 rounded-md border border-violet-200 bg-violet-50 p-3 dark:border-violet-800 dark:bg-violet-950">
-              <p className="text-xs font-medium text-violet-700 dark:text-violet-300">
+              <p className="text-sm font-medium text-violet-700 dark:text-violet-300">
                 Why are you removing &ldquo;{removingSmartTag}&rdquo;?
               </p>
               <textarea
@@ -550,7 +558,7 @@ export default function TicketDetailPage() {
                 value={feedbackReason}
                 onChange={(e) => setFeedbackReason(e.target.value)}
                 placeholder="e.g. This ticket is about a refund, not tracking..."
-                className="mt-1.5 w-full rounded-md border border-violet-300 bg-white px-2 py-1 text-xs text-zinc-900 dark:border-violet-700 dark:bg-zinc-800 dark:text-zinc-100"
+                className="mt-1.5 w-full rounded-md border border-violet-300 bg-white px-2 py-1 text-sm text-zinc-900 dark:border-violet-700 dark:bg-zinc-800 dark:text-zinc-100"
               />
               <div className="mt-2 flex gap-2">
                 <button
@@ -566,7 +574,7 @@ export default function TicketDetailPage() {
                     setRemovingSmartTag(null);
                     setFeedbackReason("");
                   }}
-                  className="rounded bg-violet-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-violet-500"
+                  className="rounded bg-violet-600 px-2 py-0.5 text-sm font-medium text-white hover:bg-violet-500"
                 >
                   Submit & Remove
                 </button>
@@ -577,13 +585,13 @@ export default function TicketDetailPage() {
                     await handlePatch({ tags });
                     setRemovingSmartTag(null);
                   }}
-                  className="text-[10px] text-zinc-500 hover:text-zinc-700"
+                  className="text-sm text-zinc-500 hover:text-zinc-700"
                 >
                   Skip & Remove
                 </button>
                 <button
                   onClick={() => setRemovingSmartTag(null)}
-                  className="text-[10px] text-zinc-400"
+                  className="text-sm text-zinc-400"
                 >
                   Cancel
                 </button>
@@ -598,7 +606,7 @@ export default function TicketDetailPage() {
                 <select
                   value={suggestCategory}
                   onChange={(e) => setSuggestCategory(e.target.value)}
-                  className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-[10px] text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                  className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-sm text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
                 >
                   <option value="">Auto-detect category</option>
                   {patternCategories.map(c => (
@@ -624,7 +632,7 @@ export default function TicketDetailPage() {
                   }
                 }}
                 disabled={suggestingPattern}
-                className="text-[10px] text-indigo-600 hover:underline disabled:opacity-50 dark:text-indigo-400"
+                className="text-sm text-indigo-600 hover:underline disabled:opacity-50 dark:text-indigo-400"
               >
                 {suggestingPattern ? "Analyzing..." : "Suggest pattern (AI)"}
               </button>
@@ -633,16 +641,16 @@ export default function TicketDetailPage() {
           {patternSuggestion && (
             <div className="mt-2 rounded-md border border-indigo-200 bg-indigo-50 p-3 dark:border-indigo-800 dark:bg-indigo-950">
               <div className="flex items-center justify-between">
-                <p className="text-xs font-medium text-indigo-700 dark:text-indigo-300">AI Pattern Suggestion</p>
-                <button onClick={() => setPatternSuggestion(null)} className="text-[10px] text-indigo-400 hover:text-indigo-600">Dismiss</button>
+                <p className="text-sm font-medium text-indigo-700 dark:text-indigo-300">AI Pattern Suggestion</p>
+                <button onClick={() => setPatternSuggestion(null)} className="text-sm text-indigo-400 hover:text-indigo-600">Dismiss</button>
               </div>
-              <p className="mt-1 text-[10px] text-indigo-600 dark:text-indigo-400">{patternSuggestion.reasoning}</p>
+              <p className="mt-1 text-sm text-indigo-600 dark:text-indigo-400">{patternSuggestion.reasoning}</p>
               <div className="mt-2 space-y-1">
-                <p className="text-[10px] text-zinc-500">Category: <span className="font-medium text-zinc-700 dark:text-zinc-300">{patternSuggestion.category_name}</span></p>
-                <p className="text-[10px] text-zinc-500">Tag: <span className="font-medium text-zinc-700 dark:text-zinc-300">{patternSuggestion.auto_tag}</span></p>
+                <p className="text-sm text-zinc-500">Category: <span className="font-medium text-zinc-700 dark:text-zinc-300">{patternSuggestion.category_name}</span></p>
+                <p className="text-sm text-zinc-500">Tag: <span className="font-medium text-zinc-700 dark:text-zinc-300">{patternSuggestion.auto_tag}</span></p>
                 <div className="flex flex-wrap gap-1">
                   {patternSuggestion.phrases.map((p, i) => (
-                    <span key={i} className="rounded bg-white px-1.5 py-0.5 text-[9px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">&ldquo;{p}&rdquo;</span>
+                    <span key={i} className="rounded bg-white px-1.5 py-0.5 text-sm text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">&ldquo;{p}&rdquo;</span>
                   ))}
                 </div>
               </div>
@@ -671,7 +679,7 @@ export default function TicketDetailPage() {
                       setPatternSuggestion(null);
                     }
                   }}
-                  className="rounded bg-indigo-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-indigo-500"
+                  className="rounded bg-indigo-600 px-2 py-0.5 text-sm font-medium text-white hover:bg-indigo-500"
                 >
                   Accept & Create Pattern
                 </button>
@@ -684,7 +692,7 @@ export default function TicketDetailPage() {
                     }
                     setPatternSuggestion(null);
                   }}
-                  className="rounded border border-indigo-300 bg-white px-2 py-0.5 text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:bg-transparent dark:text-indigo-400"
+                  className="rounded border border-indigo-300 bg-white px-2 py-0.5 text-sm font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:bg-transparent dark:text-indigo-400"
                 >
                   Just Tag This Ticket
                 </button>
@@ -698,7 +706,7 @@ export default function TicketDetailPage() {
               <select
                 id="workflow-select"
                 defaultValue=""
-                className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-[10px] text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-sm text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
               >
                 <option value="" disabled>Run workflow...</option>
                 {availableWorkflows.map(wf => (
@@ -731,7 +739,7 @@ export default function TicketDetailPage() {
                   }
                 }}
                 disabled={runningWorkflow}
-                className="rounded bg-indigo-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                className="rounded bg-indigo-600 px-2 py-0.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
               >
                 {runningWorkflow ? "Running..." : "Run"}
               </button>
@@ -789,7 +797,7 @@ export default function TicketDetailPage() {
               return (
                 <div key={m.id} className={`max-w-[85%] ${align}`}>
                   <div className={`rounded-lg px-4 py-3 ${bgClass}`}>
-                    <div className={`mb-1 flex items-center gap-2 text-xs ${isInbound || isInternal ? "text-zinc-500" : "text-indigo-200"}`}>
+                    <div className={`mb-1 flex items-center gap-2 text-sm ${isInbound || isInternal ? "text-zinc-500" : "text-indigo-200"}`}>
                       {isInternal && (
                         <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                           <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
@@ -806,7 +814,7 @@ export default function TicketDetailPage() {
                       dangerouslySetInnerHTML={{ __html: m.body }}
                     />
                     {(m as TicketMessage & { _sandbox_suppressed?: boolean })._sandbox_suppressed && (
-                      <div className="mt-1.5 flex items-center gap-1 text-[10px] text-amber-300">
+                      <div className="mt-1.5 flex items-center gap-1 text-sm text-amber-300">
                         <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                           <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z" />
                         </svg>
@@ -821,7 +829,7 @@ export default function TicketDetailPage() {
             {ticket.pending_auto_reply && ticket.auto_reply_at && new Date(ticket.auto_reply_at) > new Date() && (
               <div className="max-w-[85%] ml-auto opacity-60">
                 <div className="rounded-lg bg-violet-100 px-4 py-3 ring-1 ring-violet-300 dark:bg-violet-900/30 dark:ring-violet-700">
-                  <div className="mb-1 flex items-center gap-2 text-xs text-violet-500">
+                  <div className="mb-1 flex items-center gap-2 text-sm text-violet-500">
                     <svg className="h-3 w-3 animate-pulse" fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.828a1 1 0 101.415-1.414L11 9.586V6z" /></svg>
                     <span>Scheduled reply — {new Date(ticket.auto_reply_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}</span>
                   </div>
@@ -843,7 +851,7 @@ export default function TicketDetailPage() {
                     <div className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-zinc-300 dark:bg-zinc-600" />
                     <div className="min-w-0 flex-1">
                       <p className="text-sm text-zinc-700 dark:text-zinc-300">{ev.summary}</p>
-                      <div className="mt-0.5 flex items-center gap-2 text-xs text-zinc-400">
+                      <div className="mt-0.5 flex items-center gap-2 text-sm text-zinc-400">
                         <span className="capitalize">{ev.source}</span>
                         <span>{formatDateTime(ev.created_at)}</span>
                       </div>
@@ -855,6 +863,84 @@ export default function TicketDetailPage() {
           )}
         </div>
 
+        {/* AI Draft Card */}
+        {aiDraft?.ai_draft && aiDraft.ai_tier !== "auto" && (
+          <div className="shrink-0 border-t border-violet-200 bg-violet-50 px-4 py-3 dark:border-violet-800 dark:bg-violet-950">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-violet-700 dark:text-violet-300">AI Draft</span>
+                <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${
+                  (aiDraft.ai_confidence || 0) >= 0.8
+                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                    : (aiDraft.ai_confidence || 0) >= 0.6
+                    ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                    : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                }`}>
+                  {Math.round((aiDraft.ai_confidence || 0) * 100)}%
+                </span>
+                {aiDraft.ai_source_type && (
+                  <span className="text-sm text-violet-500">
+                    via {aiDraft.ai_source_type === "macro" ? "Macro" : "KB"}{aiDraft.source_name ? `: ${aiDraft.source_name}` : ""}
+                  </span>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    setReplyBody(aiDraft.ai_draft || "");
+                    setEditorFocused(true);
+                  }}
+                  className="rounded-md bg-violet-600 px-3 py-1 text-sm font-medium text-white hover:bg-violet-500"
+                >
+                  Use Draft
+                </button>
+                <button
+                  onClick={() => setAiDraft(null)}
+                  className="text-sm text-violet-400 hover:text-violet-600 dark:hover:text-violet-300"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+            <div className="mt-2 rounded-md bg-white p-3 text-sm text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+              {aiDraft.ai_draft}
+            </div>
+          </div>
+        )}
+
+        {/* Generate AI Draft button (when no draft exists) */}
+        {!aiDraft?.ai_draft && ticket.status !== "closed" && (
+          <div className="shrink-0 border-t border-zinc-100 bg-zinc-50 px-4 py-2 dark:border-zinc-800 dark:bg-zinc-900/50">
+            <button
+              onClick={async () => {
+                setGeneratingDraft(true);
+                try {
+                  const res = await fetch(`/api/tickets/${id}/ai-draft`, { method: "POST" });
+                  const data = await res.json();
+                  if (data.draft) {
+                    setAiDraft({
+                      ai_draft: data.draft,
+                      ai_confidence: data.confidence,
+                      ai_tier: data.tier,
+                      ai_source_type: data.source_type,
+                      source_name: null,
+                      ai_drafted_at: new Date().toISOString(),
+                    });
+                  }
+                } catch {}
+                setGeneratingDraft(false);
+              }}
+              disabled={generatingDraft}
+              className="flex items-center gap-2 rounded-md border border-violet-300 px-3 py-1.5 text-sm font-medium text-violet-600 hover:bg-violet-50 disabled:opacity-50 dark:border-violet-700 dark:text-violet-400 dark:hover:bg-violet-950"
+            >
+              <svg className={`h-4 w-4 ${generatingDraft ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+              </svg>
+              {generatingDraft ? "Generating..." : "Generate AI Draft"}
+            </button>
+          </div>
+        )}
+
         {/* Reply composer — pinned to bottom */}
         <div className={`shrink-0 border-t border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 ${editorFocused ? "px-3 py-3" : "px-3 py-2"}`}>
           <form onSubmit={handleSend}>
@@ -864,7 +950,7 @@ export default function TicketDetailPage() {
                 <button
                   type="button"
                   onClick={() => setReplyMode("external")}
-                  className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                  className={`rounded px-2 py-0.5 text-sm font-medium transition-colors ${
                     replyMode === "external"
                       ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400"
                       : "text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
@@ -875,7 +961,7 @@ export default function TicketDetailPage() {
                 <button
                   type="button"
                   onClick={() => setReplyMode("internal")}
-                  className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                  className={`rounded px-2 py-0.5 text-sm font-medium transition-colors ${
                     replyMode === "internal"
                       ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
                       : "text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
@@ -888,7 +974,7 @@ export default function TicketDetailPage() {
                 <button
                   type="submit"
                   disabled={sending}
-                  className="shrink-0 rounded-md bg-indigo-600 px-3 py-1 text-[10px] font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                  className="shrink-0 rounded-md bg-indigo-600 px-3 py-1 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
                 >
                   {sending ? "..." : closeWithReply && replyMode === "external" ? "Send & Close" : "Send"}
                 </button>
@@ -907,7 +993,7 @@ export default function TicketDetailPage() {
                     key={cmd}
                     type="button"
                     onMouseDown={(e) => { e.preventDefault(); document.execCommand(cmd); }}
-                    className={`rounded px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 ${cls}`}
+                    className={`rounded px-1.5 py-0.5 text-sm text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 ${cls}`}
                   >
                     {icon}
                   </button>
@@ -916,7 +1002,7 @@ export default function TicketDetailPage() {
                 <button
                   type="button"
                   onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertUnorderedList"); }}
-                  className="rounded px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  className="rounded px-1.5 py-0.5 text-sm text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
                   title="Bullet list"
                 >
                   <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -926,7 +1012,7 @@ export default function TicketDetailPage() {
                 <button
                   type="button"
                   onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertOrderedList"); }}
-                  className="rounded px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  className="rounded px-1.5 py-0.5 text-sm text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
                   title="Numbered list"
                 >
                   1.
@@ -938,7 +1024,7 @@ export default function TicketDetailPage() {
                     const url = prompt("Enter URL:");
                     if (url) document.execCommand("createLink", false, url);
                   }}
-                  className="rounded px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  className="rounded px-1.5 py-0.5 text-sm text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
                   title="Insert link"
                 >
                   <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -966,7 +1052,7 @@ export default function TicketDetailPage() {
               <div className="mt-1.5 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   {replyMode === "external" && (
-                    <label className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                    <label className="flex items-center gap-1.5 text-sm text-zinc-500">
                       <input
                         type="checkbox"
                         checked={closeWithReply}
@@ -979,7 +1065,7 @@ export default function TicketDetailPage() {
                   <button
                     type="button"
                     onClick={() => { setEditorFocused(false); if (editorRef.current && !editorRef.current.textContent?.trim()) editorRef.current.innerHTML = ""; }}
-                    className="text-[10px] text-zinc-400 hover:text-zinc-600"
+                    className="text-sm text-zinc-400 hover:text-zinc-600"
                   >
                     Collapse
                   </button>
@@ -987,7 +1073,7 @@ export default function TicketDetailPage() {
                 <button
                   type="submit"
                   disabled={sending || isEditorEmpty()}
-                  className="rounded-md bg-indigo-600 px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                  className="rounded-md bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
                 >
                   {sending ? "Sending..." : sandboxMode && !emailLive && replyMode === "external" ? "Send (Sandbox)" : closeWithReply && replyMode === "external" ? "Send & Close" : "Send"}
                 </button>
@@ -1001,10 +1087,10 @@ export default function TicketDetailPage() {
       <div className="w-full shrink-0 overflow-y-auto border-t border-zinc-200 bg-zinc-50 p-6 md:w-80 md:border-l md:border-t-0 dark:border-zinc-800 dark:bg-zinc-950">
         {/* Ticket details card */}
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-500">Ticket Details</h3>
+          <h3 className="text-sm font-medium uppercase tracking-wider text-zinc-500">Ticket Details</h3>
           <div className="mt-3 space-y-3">
             <div>
-              <label className="block text-xs text-zinc-500">Status</label>
+              <label className="block text-sm text-zinc-500">Status</label>
               <select
                 value={ticket.status}
                 onChange={(e) => handlePatch({ status: e.target.value })}
@@ -1016,7 +1102,7 @@ export default function TicketDetailPage() {
               </select>
             </div>
             <div>
-              <label className="block text-xs text-zinc-500">Assigned To</label>
+              <label className="block text-sm text-zinc-500">Assigned To</label>
               <select
                 value={ticket.assigned_to || ""}
                 onChange={(e) => handlePatch({ assigned_to: e.target.value || null })}
@@ -1030,7 +1116,7 @@ export default function TicketDetailPage() {
             </div>
             {/* Escalation */}
             <div>
-              <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+              <label className="flex items-center gap-1.5 text-sm text-zinc-500">
                 {ticket.escalated_to && (
                   <svg className="h-3 w-3 text-amber-500" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M3 6a3 3 0 013-3h10l-4 4 4 4H6a3 3 0 01-3-3V6z" clipRule="evenodd" />
@@ -1060,36 +1146,36 @@ export default function TicketDetailPage() {
                 ))}
               </select>
               {ticket.escalated_to && ticket.escalation_reason && (
-                <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">Reason: {ticket.escalation_reason}</p>
+                <p className="mt-1 text-sm text-amber-600 dark:text-amber-400">Reason: {ticket.escalation_reason}</p>
               )}
               {ticket.escalated_to && ticket.escalated_at && (
-                <p className="mt-0.5 text-[10px] text-zinc-400">Escalated {formatDate(ticket.escalated_at)}</p>
+                <p className="mt-0.5 text-sm text-zinc-400">Escalated {formatDate(ticket.escalated_at)}</p>
               )}
             </div>
             <div>
-              <label className="block text-xs text-zinc-500">Channel</label>
+              <label className="block text-sm text-zinc-500">Channel</label>
               <p className="mt-1 text-sm capitalize text-zinc-700 dark:text-zinc-300">{ticket.channel.replace("_", " ")}</p>
             </div>
             <div>
-              <label className="block text-xs text-zinc-500">Created</label>
+              <label className="block text-sm text-zinc-500">Created</label>
               <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">{formatDate(ticket.created_at)}</p>
             </div>
             <div>
-              <label className="block text-xs text-zinc-500">First Response</label>
+              <label className="block text-sm text-zinc-500">First Response</label>
               <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">{formatDate(ticket.first_response_at)}</p>
             </div>
             <div>
-              <label className="block text-xs text-zinc-500">Resolved</label>
+              <label className="block text-sm text-zinc-500">Resolved</label>
               <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">{formatDate(ticket.resolved_at)}</p>
             </div>
             {ticket.tags && ticket.tags.length > 0 && (
               <div>
-                <label className="block text-xs text-zinc-500">Tags</label>
+                <label className="block text-sm text-zinc-500">Tags</label>
                 <div className="mt-1 flex flex-wrap gap-1">
                   {ticket.tags.map((tag) => (
                     <span
                       key={tag}
-                      className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                      className="rounded-full bg-zinc-100 px-2 py-0.5 text-sm font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
                     >
                       {tag}
                     </span>
@@ -1103,7 +1189,7 @@ export default function TicketDetailPage() {
         {/* Customer card */}
         {customer && (
           <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-            <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-500">Customer</h3>
+            <h3 className="text-sm font-medium uppercase tracking-wider text-zinc-500">Customer</h3>
             <div className="mt-3 space-y-2">
               <div>
                 <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
@@ -1113,25 +1199,25 @@ export default function TicketDetailPage() {
                   <RetentionBadge score={customer.retention_score} />
                 </div>
               </div>
-              <p className="text-xs text-zinc-500">{customer.email}</p>
-              {customer.phone && <p className="text-xs text-zinc-500">{customer.phone}</p>}
+              <p className="text-sm text-zinc-500">{customer.email}</p>
+              {customer.phone && <p className="text-sm text-zinc-500">{customer.phone}</p>}
               <div className="grid grid-cols-2 gap-2 pt-1">
                 <div>
-                  <p className="text-xs text-zinc-400">LTV</p>
+                  <p className="text-sm text-zinc-400">LTV</p>
                   <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{formatCents(customer.ltv_cents)}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-zinc-400">Orders</p>
+                  <p className="text-sm text-zinc-400">Orders</p>
                   <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{customer.total_orders}</p>
                 </div>
               </div>
               <div>
-                <p className="text-xs text-zinc-400">Subscription</p>
+                <p className="text-sm text-zinc-400">Subscription</p>
                 <p className="text-sm capitalize text-zinc-700 dark:text-zinc-300">{customer.subscription_status}</p>
               </div>
               <button
                 onClick={() => router.push(`/dashboard/customers/${customer.id}`)}
-                className="mt-1 text-xs text-indigo-600 hover:underline dark:text-indigo-400"
+                className="mt-1 text-sm text-indigo-600 hover:underline dark:text-indigo-400"
               >
                 View full profile
               </button>
@@ -1141,7 +1227,7 @@ export default function TicketDetailPage() {
                 <div className="pt-2">
                   <button
                     onClick={() => setShowLinkSection(!showLinkSection)}
-                    className="flex w-full items-center justify-between text-xs font-medium text-zinc-500"
+                    className="flex w-full items-center justify-between text-sm font-medium text-zinc-500"
                   >
                     <span>Linked Profiles{customer.linked_identities?.length > 0 && ` (${customer.linked_identities.length})`}</span>
                     <svg className={`h-3 w-3 transition-transform ${showLinkSection ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -1154,25 +1240,25 @@ export default function TicketDetailPage() {
                         <button
                           key={li.id}
                           onClick={() => router.push(`/dashboard/customers/${li.id}`)}
-                          className="block w-full rounded bg-zinc-50 px-2 py-1.5 text-left text-xs transition-colors hover:bg-zinc-100 dark:bg-zinc-800 dark:hover:bg-zinc-700"
+                          className="block w-full rounded bg-zinc-50 px-2 py-1.5 text-left text-sm transition-colors hover:bg-zinc-100 dark:bg-zinc-800 dark:hover:bg-zinc-700"
                         >
                           <span className="text-indigo-600 dark:text-indigo-400">{li.email}</span>
                           {(li.first_name || li.last_name) && (
                             <span className="ml-1 text-zinc-400">{[li.first_name, li.last_name].filter(Boolean).join(" ")}</span>
                           )}
                           {li.is_primary && (
-                            <span className="ml-1 rounded bg-indigo-100 px-1 py-0.5 text-[9px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">primary</span>
+                            <span className="ml-1 rounded bg-indigo-100 px-1 py-0.5 text-sm font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">primary</span>
                           )}
                         </button>
                       ))}
                       {linkSuggestions.length > 0 && (
                         <div className="mt-1">
-                          <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">Suggested</p>
+                          <p className="text-sm font-medium uppercase tracking-wider text-zinc-400">Suggested</p>
                           {linkSuggestions.map((s) => (
                             <div key={s.id} className="mt-1 flex items-center justify-between rounded border border-amber-200 bg-amber-50 px-2 py-1.5 dark:border-amber-800 dark:bg-amber-950">
                               <div className="min-w-0 flex-1">
-                                <p className="truncate text-[11px] font-medium text-zinc-900 dark:text-zinc-100">{s.email}</p>
-                                <span className="rounded bg-amber-200 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-800 dark:text-amber-300">
+                                <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">{s.email}</p>
+                                <span className="rounded bg-amber-200 px-1 py-0.5 text-sm font-medium text-amber-700 dark:bg-amber-800 dark:text-amber-300">
                                   {s.match_reason}
                                 </span>
                               </div>
@@ -1191,7 +1277,7 @@ export default function TicketDetailPage() {
                                     setLinkSuggestions((prev) => prev.filter((x) => x.id !== s.id));
                                   }
                                 }}
-                                className="ml-2 flex-shrink-0 rounded border border-indigo-300 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
+                                className="ml-2 flex-shrink-0 rounded border border-indigo-300 px-1.5 py-0.5 text-sm font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
                               >
                                 Link
                               </button>
@@ -1207,12 +1293,12 @@ export default function TicketDetailPage() {
               {/* Subscriptions */}
               {customer.subscriptions?.length > 0 && (
                 <div className="pt-2">
-                  <p className="text-xs font-medium text-zinc-500">Subscriptions</p>
+                  <p className="text-sm font-medium text-zinc-500">Subscriptions</p>
                   <div className="mt-1 space-y-1">
                     {customer.subscriptions.map((sub) => (
-                      <div key={sub.id} className="rounded bg-zinc-50 px-2 py-1.5 text-xs dark:bg-zinc-800">
+                      <div key={sub.id} className="rounded bg-zinc-50 px-2 py-1.5 text-sm dark:bg-zinc-800">
                         <div className="flex items-center justify-between">
-                          <span className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                          <span className={`rounded px-1.5 py-0.5 text-sm font-medium ${
                             sub.status === "active" ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
                             : sub.status === "paused" ? "bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
                             : "bg-zinc-100 text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400"
@@ -1220,7 +1306,7 @@ export default function TicketDetailPage() {
                             {sub.status}
                           </span>
                           {sub.billing_interval && (
-                            <span className="text-[10px] text-zinc-400">
+                            <span className="text-sm text-zinc-400">
                               {sub.billing_interval_count}/{sub.billing_interval}
                             </span>
                           )}
@@ -1228,17 +1314,17 @@ export default function TicketDetailPage() {
                         {sub.items?.length > 0 && (
                           <div className="mt-1 space-y-0.5">
                             {sub.items.slice(0, 3).map((item, idx) => (
-                              <p key={idx} className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                              <p key={idx} className="truncate text-sm text-zinc-500 dark:text-zinc-400">
                                 {item.quantity}x {item.title}
                               </p>
                             ))}
                             {sub.items.length > 3 && (
-                              <p className="text-[10px] text-zinc-400">+{sub.items.length - 3} more</p>
+                              <p className="text-sm text-zinc-400">+{sub.items.length - 3} more</p>
                             )}
                           </div>
                         )}
                         {sub.next_billing_date && (
-                          <p className="mt-1 text-[10px] text-zinc-400">Next: {formatDate(sub.next_billing_date)}</p>
+                          <p className="mt-1 text-sm text-zinc-400">Next: {formatDate(sub.next_billing_date)}</p>
                         )}
                       </div>
                     ))}
@@ -1249,13 +1335,13 @@ export default function TicketDetailPage() {
               {/* Recent orders */}
               {customer.recent_orders.length > 0 && (
                 <div className="pt-2">
-                  <p className="text-xs font-medium text-zinc-500">Recent Orders</p>
+                  <p className="text-sm font-medium text-zinc-500">Recent Orders</p>
                   <div className="mt-1 space-y-1">
                     {customer.recent_orders.map((o) => (
                       <div key={o.id}>
                         <button
                           onClick={() => setExpandedOrderId(expandedOrderId === o.id ? null : o.id)}
-                          className="flex w-full items-center justify-between rounded bg-zinc-50 px-2 py-1.5 text-xs transition-colors hover:bg-zinc-100 dark:bg-zinc-800 dark:hover:bg-zinc-700"
+                          className="flex w-full items-center justify-between rounded bg-zinc-50 px-2 py-1.5 text-sm transition-colors hover:bg-zinc-100 dark:bg-zinc-800 dark:hover:bg-zinc-700"
                         >
                           <div className="flex items-center gap-1.5">
                             <svg className={`h-3 w-3 text-zinc-400 transition-transform ${expandedOrderId === o.id ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -1266,10 +1352,10 @@ export default function TicketDetailPage() {
                           <span className="text-zinc-500">{formatCents(o.total_cents)}</span>
                         </button>
                         {expandedOrderId === o.id && (
-                          <div className="mt-1 rounded border border-zinc-200 bg-white p-2 text-xs dark:border-zinc-700 dark:bg-zinc-900">
+                          <div className="mt-1 rounded border border-zinc-200 bg-white p-2 text-sm dark:border-zinc-700 dark:bg-zinc-900">
                             <div className="flex flex-wrap gap-1">
                               {o.order_type && (
-                                <span className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                                <span className={`rounded px-1.5 py-0.5 text-sm font-medium ${
                                   o.order_type === "recurring" ? "bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
                                   : o.order_type === "replacement" ? "bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400"
                                   : o.order_type === "checkout" ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
@@ -1279,13 +1365,13 @@ export default function TicketDetailPage() {
                                 </span>
                               )}
                               {o.financial_status && (
-                                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium capitalize text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.financial_status}</span>
+                                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-sm font-medium capitalize text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.financial_status}</span>
                               )}
                               {o.fulfillment_status && (
-                                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium capitalize text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.fulfillment_status}</span>
+                                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-sm font-medium capitalize text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.fulfillment_status}</span>
                               )}
                             </div>
-                            <p className="mt-1 text-[10px] text-zinc-400">{formatDate(o.created_at)}</p>
+                            <p className="mt-1 text-sm text-zinc-400">{formatDate(o.created_at)}</p>
                             {/* Fulfillments */}
                             {o.fulfillments?.length > 0 && (
                               <div className="mt-1.5 space-y-1">

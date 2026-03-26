@@ -70,7 +70,7 @@ export default function CsatPage() {
           </button>
         ))}
       </div>
-      <p className="mt-3 text-xs text-zinc-400">1 = Poor, 5 = Excellent</p>
+      <p className="mt-3 text-sm text-zinc-400">1 = Poor, 5 = Excellent</p>
       {error && <p className="mt-4 text-sm text-red-500">{error}</p>}
     </div>
   );

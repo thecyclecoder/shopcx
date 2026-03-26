@@ -66,7 +66,7 @@ export default function TeamPage() {
       {canManage && (
         <form onSubmit={handleInvite} className="mt-6 flex items-end gap-3">
           <div className="flex-1">
-            <label className="block text-xs font-medium text-zinc-500">Email</label>
+            <label className="block text-sm font-medium text-zinc-500">Email</label>
             <input
               type="email"
               value={inviteEmail}
@@ -77,7 +77,7 @@ export default function TeamPage() {
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-zinc-500">Role</label>
+            <label className="block text-sm font-medium text-zinc-500">Role</label>
             <select
               value={inviteRole}
               onChange={(e) => setInviteRole(e.target.value as WorkspaceRole)}
@@ -116,11 +116,11 @@ export default function TeamPage() {
                     {member.display_name || member.email}
                   </p>
                   {member.display_name && (
-                    <p className="text-xs text-zinc-400">{member.email}</p>
+                    <p className="text-sm text-zinc-400">{member.email}</p>
                   )}
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs font-medium capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                  <span className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-sm font-medium capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
                     {member.role.replace("_", " ")}
                   </span>
                   {canManage && member.role !== "owner" && (
@@ -136,7 +136,7 @@ export default function TeamPage() {
                           setMembers(prev => prev.filter(m => m.user_id !== member.user_id));
                         }
                       }}
-                      className="text-xs text-red-500 hover:underline"
+                      className="text-sm text-red-500 hover:underline"
                     >
                       Remove
                     </button>
