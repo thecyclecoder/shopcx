@@ -128,23 +128,26 @@ export async function POST(
   } else if (existingLink) {
     // Add target to existing group
     groupId = existingLink.group_id;
-    await admin.from("customer_links").insert({
+    const { error } = await admin.from("customer_links").insert({
       workspace_id: workspaceId,
       group_id: groupId,
       customer_id: link_to,
     });
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   } else if (targetLink) {
     // Add this customer to target's group
     groupId = targetLink.group_id;
-    await admin.from("customer_links").insert({
+    const { error } = await admin.from("customer_links").insert({
       workspace_id: workspaceId,
       group_id: groupId,
       customer_id: customerId,
     });
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   } else {
     // Create new group with both
-    groupId = crypto.randomUUID();
-    await admin.from("customer_links").insert([
+    const { randomUUID } = await import("crypto");
+    groupId = randomUUID();
+    const { error: insertError } = await admin.from("customer_links").insert([
       {
         workspace_id: workspaceId,
         group_id: groupId,
@@ -157,6 +160,10 @@ export async function POST(
         customer_id: link_to,
       },
     ]);
+    if (insertError) {
+      console.error("Link insert error:", insertError.message);
+      return NextResponse.json({ error: insertError.message }, { status: 500 });
+    }
   }
 
   return NextResponse.json({ group_id: groupId });
