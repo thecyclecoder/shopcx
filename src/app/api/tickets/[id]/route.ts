@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 import { inngest } from "@/lib/inngest/client";
 import { evaluateRules } from "@/lib/rules-engine";
+import { calculateRetentionScore } from "@/lib/retention-score";
 
 // GET: ticket detail with messages and customer
 export async function GET(
@@ -79,7 +80,38 @@ export async function GET(
         .eq("customer_id", c.id)
         .order("created_at", { ascending: false });
 
-      customer = { ...c, recent_orders: orders || [], subscriptions: subscriptions || [] };
+      // Compute real order count + LTV from orders table (source of truth)
+      const { count: realOrderCount } = await admin
+        .from("orders")
+        .select("id", { count: "exact", head: true })
+        .eq("customer_id", c.id);
+
+      const { data: ltvRows } = await admin
+        .from("orders")
+        .select("total_cents")
+        .eq("customer_id", c.id);
+
+      const realLtv = (ltvRows || []).reduce((sum, o) => sum + (o.total_cents || 0), 0);
+
+      // Recalculate retention score with real data
+      const lastOrder = orders?.[0];
+      const retentionInput = {
+        id: c.id,
+        last_order_at: lastOrder?.created_at || c.last_order_at,
+        total_orders: realOrderCount || c.total_orders,
+        ltv_cents: realLtv || c.ltv_cents,
+        subscription_status: c.subscription_status,
+      };
+      const realRetention = calculateRetentionScore(retentionInput);
+
+      customer = {
+        ...c,
+        total_orders: realOrderCount || c.total_orders,
+        ltv_cents: realLtv || c.ltv_cents,
+        retention_score: realRetention,
+        recent_orders: orders || [],
+        subscriptions: subscriptions || [],
+      };
     }
   }
 
