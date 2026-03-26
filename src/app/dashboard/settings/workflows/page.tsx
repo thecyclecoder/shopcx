@@ -296,11 +296,32 @@ export default function WorkflowsPage() {
                     <label className="block text-xs text-zinc-600 dark:text-zinc-400">{field.label}</label>
                     {field.type === "textarea" ? (
                       <div>
-                        <textarea
-                          rows={2}
-                          value={(editing.config[field.key] as string) || ""}
-                          onChange={(e) => setEditing({ ...editing, config: { ...editing.config, [field.key]: e.target.value } })}
-                          className="mt-0.5 block w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                        <div className="mt-0.5 flex items-center gap-0.5 border-b border-zinc-200 pb-1 dark:border-zinc-600">
+                          {[
+                            { cmd: "bold", icon: "B", cls: "font-bold" },
+                            { cmd: "italic", icon: "I", cls: "italic" },
+                          ].map(({ cmd, icon, cls }) => (
+                            <button key={cmd} type="button" onMouseDown={(e) => { e.preventDefault(); document.execCommand(cmd); }}
+                              className={`rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-600 ${cls}`}>{icon}</button>
+                          ))}
+                          <button type="button" onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertUnorderedList"); }}
+                            className="rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-600">
+                            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>
+                          </button>
+                          <button type="button" onMouseDown={(e) => {
+                            e.preventDefault();
+                            const url = prompt("Enter URL:");
+                            if (url) document.execCommand("createLink", false, url);
+                          }} className="rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-600">
+                            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                          </button>
+                        </div>
+                        <div
+                          contentEditable
+                          suppressContentEditableWarning
+                          dangerouslySetInnerHTML={{ __html: (editing.config[field.key] as string) || "" }}
+                          onBlur={(e) => setEditing({ ...editing, config: { ...editing.config, [field.key]: e.currentTarget.innerHTML } })}
+                          className="min-h-[60px] w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
                         />
                         <div className="mt-1 flex items-center gap-1.5">
                           <span className="text-[9px] text-zinc-400">After this reply, set status to:</span>
