@@ -378,7 +378,7 @@ export default function TicketDetailPage() {
           <div className="mt-2 flex flex-wrap items-center gap-1">
             {(ticket.tags || []).map((tag) => {
               const isSmart = tag.startsWith("smart:");
-              const displayTag = isSmart ? tag.slice(6) : tag;
+              const displayTag = tag;
               return (
                 <span key={tag} className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium ${
                   isSmart
@@ -473,7 +473,7 @@ export default function TicketDetailPage() {
           {removingSmartTag && (
             <div className="mt-2 rounded-md border border-violet-200 bg-violet-50 p-3 dark:border-violet-800 dark:bg-violet-950">
               <p className="text-xs font-medium text-violet-700 dark:text-violet-300">
-                Why are you removing &ldquo;{removingSmartTag.slice(6)}&rdquo;?
+                Why are you removing &ldquo;{removingSmartTag}&rdquo;?
               </p>
               <textarea
                 rows={2}

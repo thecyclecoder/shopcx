@@ -460,9 +460,16 @@ export default function TicketsPage() {
                     <p className="truncate font-medium text-zinc-900 dark:text-zinc-100">{t.subject || "(no subject)"}</p>
                     {t.tags?.length > 0 && (
                       <div className="mt-0.5 flex gap-1">
-                        {t.tags.slice(0, 3).map((tag) => (
-                          <span key={tag} className="rounded bg-indigo-50 px-1.5 py-0.5 text-[9px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">{tag}</span>
-                        ))}
+                        {t.tags.slice(0, 3).map((tag) => {
+                          const isSmart = tag.startsWith("smart:");
+                          return (
+                            <span key={tag} className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                              isSmart
+                                ? "bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
+                                : "bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400"
+                            }`}>{tag}</span>
+                          );
+                        })}
                         {t.tags.length > 3 && <span className="text-[9px] text-zinc-400">+{t.tags.length - 3}</span>}
                       </div>
                     )}

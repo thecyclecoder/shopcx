@@ -215,7 +215,7 @@ export default function PatternsPage() {
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-600 dark:bg-violet-900/30 dark:text-violet-400">
-                          {f.tag_removed.startsWith("smart:") ? f.tag_removed.slice(6) : f.tag_removed}
+                          {f.tag_removed}
                         </span>
                         <span className="text-[10px] text-zinc-400">removed by agent</span>
                       </div>
