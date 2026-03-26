@@ -28,7 +28,7 @@ export const workflowDelayed = inngest.createFunction(
         .eq("id", workspace_id)
         .single();
 
-      const delays = (ws?.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10 }) as Record<string, number>;
+      const delays = (ws?.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5 }) as Record<string, number>;
       return delays[channel] || 60;
     });
 
@@ -76,7 +76,7 @@ export const positiveCloseDelayed = inngest.createFunction(
     // Get delay
     const delaySeconds = await step.run("get-delay", async () => {
       const { data: ws } = await admin.from("workspaces").select("response_delays").eq("id", workspace_id).single();
-      const delays = (ws?.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10 }) as Record<string, number>;
+      const delays = (ws?.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5 }) as Record<string, number>;
       return delays[channel] || 60;
     });
 
