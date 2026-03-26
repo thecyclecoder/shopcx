@@ -58,6 +58,8 @@ export default function TicketsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const viewId = searchParams.get("view");
+  const urlStatus = searchParams.get("status");
+  const urlEscalationMine = searchParams.get("escalation_mine");
 
   const [tickets, setTickets] = useState<TicketRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -89,6 +91,11 @@ export default function TicketsPage() {
     }
     setActiveViewName(null);
   };
+
+  // Apply URL params (from sidebar escalation links)
+  useEffect(() => {
+    if (urlStatus && !viewId) setStatusFilter(urlStatus);
+  }, [urlStatus, viewId]);
 
   // Load view filters when viewId changes, or reset when cleared
   const [viewLoaded, setViewLoaded] = useState<string | null>(null);
@@ -152,6 +159,7 @@ export default function TicketsPage() {
       if (assigneeFilter) params.set("assigned_to", assigneeFilter);
       if (tagFilter) params.set("tag", tagFilter);
       if (search) params.set("search", search);
+      if (urlEscalationMine) params.set("escalation_mine", "true");
 
       const res = await fetch(`/api/tickets?${params}`);
       const data = await res.json();
@@ -162,7 +170,7 @@ export default function TicketsPage() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [statusFilter, channelFilter, assigneeFilter, tagFilter, search, offset]);
+  }, [statusFilter, channelFilter, assigneeFilter, tagFilter, search, offset, urlEscalationMine]);
 
   useEffect(() => {
     fetchTickets();

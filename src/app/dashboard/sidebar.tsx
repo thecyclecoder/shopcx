@@ -28,13 +28,14 @@ export default function Sidebar({
   user,
 }: {
   workspace: WorkspaceWithRole;
-  user: { email: string; name?: string };
+  user: { id: string; email: string; name?: string };
 }) {
   const pathname = usePathname();
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [ticketViews, setTicketViews] = useState<TicketView[]>([]);
   const [collapsedViews, setCollapsedViews] = useState<Set<string>>(new Set());
+  const [escalationCounts, setEscalationCounts] = useState<{ open: number; pending: number; closed: number }>({ open: 0, pending: 0, closed: 0 });
 
   // Close sidebar on route change (mobile)
   useEffect(() => {
@@ -47,6 +48,18 @@ export default function Sidebar({
       .then(r => r.json())
       .then(d => { if (Array.isArray(d)) setTicketViews(d); })
       .catch(() => {});
+    // Fetch escalation counts (tickets escalated to me OR by me)
+    Promise.all([
+      fetch(`/api/tickets?status=open&escalation_mine=true&limit=1`).then(r => r.json()),
+      fetch(`/api/tickets?status=pending&escalation_mine=true&limit=1`).then(r => r.json()),
+      fetch(`/api/tickets?status=closed&escalation_mine=true&limit=1`).then(r => r.json()),
+    ]).then(([open, pending, closed]) => {
+      setEscalationCounts({
+        open: open?.total || 0,
+        pending: pending?.total || 0,
+        closed: closed?.total || 0,
+      });
+    }).catch(() => {});
   }, [workspace.id]);
 
   // Prevent body scroll when sidebar is open on mobile
@@ -117,6 +130,58 @@ export default function Sidebar({
                 </svg>
                 {item.label}
               </Link>
+              {/* Escalations submenu */}
+              {item.href === "/dashboard/tickets" && (() => {
+                const totalEsc = escalationCounts.open + escalationCounts.pending + escalationCounts.closed;
+                if (totalEsc === 0) return null;
+                const escCollapsed = collapsedViews.has("__escalations");
+                const escItems = [
+                  { label: "Open", status: "open", count: escalationCounts.open },
+                  { label: "Pending", status: "pending", count: escalationCounts.pending },
+                  { label: "Closed", status: "closed", count: escalationCounts.closed },
+                ].filter(e => e.count > 0);
+
+                return (
+                  <div className="ml-6 mt-1 space-y-0.5 border-l border-amber-200 pl-2 dark:border-amber-800">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCollapsedViews(prev => {
+                          const next = new Set(prev);
+                          if (next.has("__escalations")) next.delete("__escalations"); else next.add("__escalations");
+                          return next;
+                        });
+                      }}
+                      className="flex w-full items-center justify-between px-2 py-1 text-xs font-medium text-amber-600 dark:text-amber-400"
+                    >
+                      <span>
+                        <span className={`mr-1 inline-block transition-transform ${escCollapsed ? "" : "rotate-90"}`}>&#9656;</span>
+                        Escalations
+                      </span>
+                      <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-medium tabular-nums text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
+                        {totalEsc > 99 ? "99+" : totalEsc}
+                      </span>
+                    </button>
+                    {!escCollapsed && (
+                      <div className="ml-3 space-y-0.5 border-l border-amber-200 pl-2 dark:border-amber-800">
+                        {escItems.map(e => (
+                          <Link
+                            key={e.status}
+                            href={`/dashboard/tickets?status=${e.status}&escalation_mine=true`}
+                            className="flex items-center justify-between rounded px-2 py-1 text-xs text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/20"
+                          >
+                            <span>{e.label}</span>
+                            <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] tabular-nums text-amber-500 dark:bg-amber-900/20">
+                              {e.count > 99 ? "99+" : e.count}
+                            </span>
+                          </Link>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* Ticket views submenu (nested) */}
               {item.href === "/dashboard/tickets" && ticketViews.length > 0 && (() => {
                 const topLevel = ticketViews.filter(v => !v.parent_id);

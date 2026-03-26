@@ -18,6 +18,7 @@ export async function GET(request: Request) {
   const channel = searchParams.get("channel");
   const assignedTo = searchParams.get("assigned_to");
   const tag = searchParams.get("tag");
+  const escalated = searchParams.get("escalated");
   const search = searchParams.get("search");
   const sort = searchParams.get("sort") || "updated_at";
   const order = searchParams.get("order") || "desc";
@@ -38,6 +39,12 @@ export async function GET(request: Request) {
   if (channel && channel !== "all") query = query.eq("channel", channel);
   if (assignedTo) query = query.eq("assigned_to", assignedTo);
   if (tag) query = query.contains("tags", [tag]);
+  if (escalated === "true") query = query.not("escalated_to", "is", null);
+  const escalationMine = searchParams.get("escalation_mine");
+  if (escalationMine === "true" && user) {
+    // Tickets escalated TO me or tickets I assigned that were escalated
+    query = query.not("escalated_to", "is", null).or(`escalated_to.eq.${user.id},assigned_to.eq.${user.id}`);
+  }
   if (search) query = query.ilike("subject", `%${search}%`);
 
   const ascending = order === "asc";
