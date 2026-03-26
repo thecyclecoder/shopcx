@@ -150,7 +150,47 @@ export const scrapeHelpCenter = inngest.createFunction(
       }
     }
 
-    // Step 3: Trigger embedding generation for all new articles
+    // Step 3: Map articles to products by title match
+    const mapped = await step.run("map-products", async () => {
+      const { data: products } = await admin
+        .from("products")
+        .select("id, title")
+        .eq("workspace_id", workspace_id);
+
+      if (!products || products.length === 0) return 0;
+
+      const { data: articles } = await admin
+        .from("knowledge_base")
+        .select("id, title, content, category")
+        .eq("workspace_id", workspace_id)
+        .eq("source", "import")
+        .is("product_id", null);
+
+      let count = 0;
+      for (const article of articles || []) {
+        const titleLower = article.title.toLowerCase();
+        const contentLower = (article.content || "").toLowerCase().slice(0, 500);
+
+        for (const product of products) {
+          const productLower = product.title.toLowerCase();
+          // Match if product name appears in article title or first 500 chars of content
+          if (titleLower.includes(productLower) || contentLower.includes(productLower)) {
+            await admin.from("knowledge_base").update({
+              product_id: product.id,
+              product_name: product.title,
+              category: article.category === "general" ? "product" : article.category,
+            }).eq("id", article.id);
+            count++;
+            break; // First match wins
+          }
+        }
+      }
+      return count;
+    });
+
+    console.log(`Mapped ${mapped} articles to products`);
+
+    // Step 4: Trigger embedding generation for all new articles
     await step.run("trigger-embeddings", async () => {
       const { data: articles } = await admin
         .from("knowledge_base")
@@ -166,6 +206,6 @@ export const scrapeHelpCenter = inngest.createFunction(
       }
     });
 
-    return { discovered: articleUrls.length, imported };
+    return { discovered: articleUrls.length, imported, mapped };
   }
 );
