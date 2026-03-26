@@ -203,40 +203,24 @@ export async function POST(request: Request) {
     const isPositiveConfirmation = hasSmartTag && isShortPositiveReply(messageBody);
 
     if (isPositiveConfirmation && ticket && (ticket.status === "pending" || ticket.status === "closed")) {
-      // Get the configurable auto-close message
-      const { data: ws } = await admin.from("workspaces").select("name, auto_close_reply").eq("id", workspaceId).single();
-      const autoCloseReply = ws?.auto_close_reply || "You're welcome! If you need anything else, we're always here to help.";
-
-      // Auto-close with friendly reply instead of reopening
-      await admin.from("ticket_messages").insert({
-        ticket_id: ticketId,
-        direction: "outbound",
-        visibility: "external",
-        author_type: "system",
-        body: autoCloseReply,
-      });
-
-      // Send the auto-close email
-      const { data: cust } = ticket.customer_id
-        ? await admin.from("customers").select("email").eq("id", ticket.customer_id).single()
-        : { data: null };
-      if (cust?.email) {
-        await sendTicketReply({
-          workspaceId,
-          toEmail: cust.email,
-          subject: (ticket.subject as string) || "Support",
-          body: autoCloseReply,
-          inReplyTo: (ticket.email_message_id as string) || null,
-          agentName: "Support",
-          workspaceName: ws?.name || "Support",
-        });
+      // Add positive-confirmation tag
+      const currentTags = (ticket.tags as string[]) || [];
+      if (!currentTags.includes("smart:positive-confirmation")) {
+        await admin.from("tickets").update({ tags: [...currentTags, "smart:positive-confirmation"] }).eq("id", ticketId);
       }
 
-      await admin.from("tickets").update({
-        status: "closed",
-        resolved_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }).eq("id", ticketId);
+      // Set auto_reply_at and fire delayed auto-close via Inngest
+      const { data: wsDelay } = await admin.from("workspaces").select("response_delays, auto_close_reply").eq("id", workspaceId).single();
+      const delays = (wsDelay?.response_delays || { email: 60 }) as Record<string, number>;
+      const delaySec = delays.email || 60;
+      const autoReplyAt = new Date(Date.now() + delaySec * 1000).toISOString();
+      const pendingPreview = wsDelay?.auto_close_reply || "You're welcome! If you need anything else, we're always here to help.";
+      await admin.from("tickets").update({ auto_reply_at: autoReplyAt, pending_auto_reply: pendingPreview }).eq("id", ticketId);
+
+      await inngest.send({
+        name: "workflow/positive-close",
+        data: { workspace_id: workspaceId, ticket_id: ticketId, channel: "email" },
+      });
     } else if (ticket && (ticket.status === "pending" || ticket.status === "closed")) {
       // Normal reopen
       await admin
@@ -335,12 +319,20 @@ export async function POST(request: Request) {
         console.log(`Pattern matched: ${matched.category} (${matched.method}, confidence: ${matched.confidence}) → ${matched.autoTag}`);
 
         // Fire workflow execution via Inngest (respects channel response delay)
-        // Set auto_reply_at so agents can see the ticket is queued
+        // Set auto_reply_at + pending preview so agents can see what's queued
         const { data: wsDelay } = await admin.from("workspaces").select("response_delays").eq("id", workspaceId).single();
         const delays = (wsDelay?.response_delays || { email: 60 }) as Record<string, number>;
         const delaySec = delays.email || 60;
         const autoReplyAt = new Date(Date.now() + delaySec * 1000).toISOString();
-        await admin.from("tickets").update({ auto_reply_at: autoReplyAt }).eq("id", ticket.id);
+
+        // Get a preview of what the workflow will send (best effort)
+        const { data: wf } = await admin.from("workflows").select("config")
+          .eq("workspace_id", workspaceId).eq("trigger_tag", matched.autoTag).eq("enabled", true).single();
+        const pendingPreview = (wf?.config as Record<string, unknown>)?.reply_preparing as string
+          || (wf?.config as Record<string, unknown>)?.reply_in_transit as string
+          || "Auto-reply pending...";
+
+        await admin.from("tickets").update({ auto_reply_at: autoReplyAt, pending_auto_reply: pendingPreview }).eq("id", ticket.id);
 
         await inngest.send({
           name: "workflow/execute",

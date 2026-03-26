@@ -765,6 +765,18 @@ export default function TicketDetailPage() {
                 </div>
               );
             })}
+            {/* Pending auto-reply preview */}
+            {ticket.pending_auto_reply && ticket.auto_reply_at && new Date(ticket.auto_reply_at) > new Date() && (
+              <div className="max-w-[85%] ml-auto opacity-60">
+                <div className="rounded-lg bg-violet-100 px-4 py-3 ring-1 ring-violet-300 dark:bg-violet-900/30 dark:ring-violet-700">
+                  <div className="mb-1 flex items-center gap-2 text-xs text-violet-500">
+                    <svg className="h-3 w-3 animate-pulse" fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.828a1 1 0 101.415-1.414L11 9.586V6z" /></svg>
+                    <span>Scheduled reply — {new Date(ticket.auto_reply_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}</span>
+                  </div>
+                  <div className="prose prose-sm max-w-none text-violet-700 dark:text-violet-300" dangerouslySetInnerHTML={{ __html: ticket.pending_auto_reply }} />
+                </div>
+              </div>
+            )}
             <div ref={messagesEndRef} />
           </div>}
 
