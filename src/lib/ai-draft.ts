@@ -139,6 +139,11 @@ export async function generateAIDraft(
   }
 
   // 8. Build prompt and call Claude
+  const topSimilarity = Math.max(
+    ...(ragContext.macros.map((m) => m.similarity) || [0]),
+    ...(ragContext.chunks.map((c) => c.similarity) || [0]),
+    0,
+  );
   const systemPrompt = buildSystemPrompt(
     channelConfig as AIChannelConfig,
     personality,
@@ -146,6 +151,7 @@ export async function generateAIDraft(
     ragContext,
     sourceContent,
     messages || [],
+    { topSimilarity, matchCount: ragContext.macros.length + ragContext.chunks.length, sourceType: sourceType },
   );
 
   const result = await callClaude(systemPrompt, query);
@@ -244,6 +250,7 @@ function buildSystemPrompt(
   ragContext: RAGContext,
   sourceContent: string,
   messages: { direction: string; body: string; author_type: string; created_at: string }[],
+  matchInfo?: { topSimilarity: number; matchCount: number; sourceType: string | null },
 ): string {
   const parts: string[] = [];
 
@@ -319,13 +326,23 @@ function buildSystemPrompt(
   if (personality?.greeting) parts.push(`\nStart messages with a greeting like: ${personality.greeting}`);
   if (personality?.sign_off) parts.push(`End messages with: ${personality.sign_off}`);
 
+  // Match quality info
+  if (matchInfo) {
+    parts.push(`\n--- MATCH QUALITY ---`);
+    parts.push(`Best match similarity: ${(matchInfo.topSimilarity * 100).toFixed(0)}%`);
+    parts.push(`Number of matching sources: ${matchInfo.matchCount}`);
+    if (matchInfo.sourceType) parts.push(`Primary source type: ${matchInfo.sourceType}`);
+    parts.push("--- END MATCH QUALITY ---");
+  }
+
   // Output format
   parts.push('\nRespond with JSON: { "draft": "your response to the customer", "confidence": 0.XX, "reasoning": "brief explanation of what you matched and why" }');
-  parts.push("Confidence guidelines:");
-  parts.push("- 0.90+ : You found an exact matching macro or KB article and the customer's question is clearly addressed");
-  parts.push("- 0.70-0.89 : You found relevant content but had to adapt or combine sources");
-  parts.push("- 0.50-0.69 : Partial match, some guessing needed");
-  parts.push("- Below 0.50 : No good source found, do not draft a response — set draft to empty string");
+  parts.push("\nConfidence guidelines — be GENEROUS with confidence when you have good source material:");
+  parts.push("- 0.92-0.98 : A macro or KB article clearly addresses the customer's question. You have the source content and customer context. This is the EXPECTED score for most tickets with a matching macro.");
+  parts.push("- 0.80-0.91 : The source is relevant but you needed to adapt it significantly, OR the customer's request is ambiguous.");
+  parts.push("- 0.60-0.79 : Weak match — the source only partially addresses the request.");
+  parts.push("- Below 0.50 : No relevant source found — set draft to empty string.");
+  parts.push("\nIMPORTANT: If you have a matching macro AND you can see the customer's account details (name, orders, subscription), your confidence should be 0.90+. Having the right macro + customer context = high confidence.");
 
   return parts.join("\n");
 }
