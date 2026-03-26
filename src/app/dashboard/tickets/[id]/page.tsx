@@ -751,7 +751,7 @@ export default function TicketDetailPage() {
                     </div>
                     <div
                       className={`prose prose-sm max-w-none ${textClass} ${!isInbound && !isInternal ? "prose-invert" : ""}`}
-                      dangerouslySetInnerHTML={{ __html: m.direction === "inbound" ? cleanEmailForDisplay(m.body) : m.body }}
+                      dangerouslySetInnerHTML={{ __html: m.body }}
                     />
                     {(m as TicketMessage & { _sandbox_suppressed?: boolean })._sandbox_suppressed && (
                       <div className="mt-1.5 flex items-center gap-1 text-[10px] text-amber-300">
