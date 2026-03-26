@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface Article {
@@ -59,7 +59,7 @@ export default function KnowledgeBasePage() {
   });
 
   const handleSave = async () => {
-    if (!editing?.title || !editing?.content) return;
+    if (!editing?.title || (!editing?.content && !editing?.content_html)) return;
     setSaving(true);
     const base = `/api/workspaces/${workspace.id}/knowledge-base`;
     const isNew = !editing.id;
@@ -202,6 +202,23 @@ function ArticleForm({ article, products, saving, onChange, onSave, onCancel }: 
   onSave: () => void;
   onCancel: () => void;
 }) {
+  const editorRef = useRef<HTMLDivElement>(null);
+  const initialized = useRef(false);
+
+  useEffect(() => {
+    if (editorRef.current && !initialized.current) {
+      editorRef.current.innerHTML = article.content_html || article.content || "";
+      initialized.current = true;
+    }
+  }, [article.content_html, article.content]);
+
+  const syncContent = () => {
+    if (!editorRef.current) return;
+    const html = editorRef.current.innerHTML;
+    const text = editorRef.current.innerText || "";
+    onChange({ ...article, content: text, content_html: html });
+  };
+
   return (
     <div className="space-y-3">
       <input type="text" value={article.title || ""} onChange={(e) => onChange({ ...article, title: e.target.value })}
@@ -226,8 +243,47 @@ function ArticleForm({ article, products, saving, onChange, onSave, onCancel }: 
           Published
         </label>
       </div>
-      <textarea value={article.content || ""} onChange={(e) => onChange({ ...article, content: e.target.value })}
-        placeholder="Article content..." rows={10} className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+
+      {/* Rich text toolbar */}
+      <div className="rounded-md border border-zinc-300 dark:border-zinc-700">
+        <div className="flex items-center gap-0.5 border-b border-zinc-300 bg-zinc-50 px-2 py-1 dark:border-zinc-700 dark:bg-zinc-800">
+          {[
+            { cmd: "bold", icon: "B", cls: "font-bold" },
+            { cmd: "italic", icon: "I", cls: "italic" },
+            { cmd: "underline", icon: "U", cls: "underline" },
+          ].map(({ cmd, icon, cls }) => (
+            <button key={cmd} type="button"
+              onMouseDown={(e) => { e.preventDefault(); document.execCommand(cmd); }}
+              className={`rounded px-2 py-0.5 text-sm text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700 ${cls}`}
+            >{icon}</button>
+          ))}
+          <span className="mx-1 h-4 w-px bg-zinc-300 dark:bg-zinc-600" />
+          <button type="button" onMouseDown={(e) => { e.preventDefault(); document.execCommand("formatBlock", false, "h2"); }}
+            className="rounded px-2 py-0.5 text-sm font-bold text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700">H2</button>
+          <button type="button" onMouseDown={(e) => { e.preventDefault(); document.execCommand("formatBlock", false, "h3"); }}
+            className="rounded px-2 py-0.5 text-sm font-bold text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700">H3</button>
+          <span className="mx-1 h-4 w-px bg-zinc-300 dark:bg-zinc-600" />
+          <button type="button" onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertUnorderedList"); }}
+            className="rounded px-2 py-0.5 text-sm text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700">• List</button>
+          <button type="button" onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertOrderedList"); }}
+            className="rounded px-2 py-0.5 text-sm text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700">1. List</button>
+          <span className="mx-1 h-4 w-px bg-zinc-300 dark:bg-zinc-600" />
+          <button type="button" onMouseDown={(e) => {
+            e.preventDefault();
+            const url = prompt("Enter URL:");
+            if (url) document.execCommand("createLink", false, url);
+          }} className="rounded px-2 py-0.5 text-sm text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700">Link</button>
+        </div>
+        <div
+          ref={editorRef}
+          contentEditable
+          onInput={syncContent}
+          onBlur={syncContent}
+          className="prose prose-sm max-w-none min-h-[250px] bg-white px-3 py-2 text-sm outline-none dark:bg-zinc-800 dark:text-zinc-100 dark:prose-invert"
+          data-placeholder="Article content..."
+        />
+      </div>
+
       <div className="flex gap-2">
         <button onClick={onSave} disabled={saving} className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50">{saving ? "Saving..." : "Save"}</button>
         <button onClick={onCancel} className="rounded-md border border-zinc-300 px-4 py-2 text-sm text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">Cancel</button>
