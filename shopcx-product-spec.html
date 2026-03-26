@@ -1,0 +1,1947 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ShopCX — Product Specification v1.0</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400;1,700&family=JetBrains+Mono:wght@300;400;500&family=Epilogue:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #111118;
+    --surface2: #1a1a24;
+    --border: #2a2a38;
+    --border-bright: #3d3d55;
+    --text: #e8e6f0;
+    --text-muted: #7a7890;
+    --text-dim: #4a4860;
+    --accent: #6ee7b7;
+    --accent-dim: #1a3d30;
+    --accent2: #f59e6b;
+    --accent2-dim: #3d2010;
+    --accent3: #a78bfa;
+    --accent3-dim: #2d1f5c;
+    --red: #f87171;
+    --red-dim: #3d1010;
+    --serif: 'Playfair Display', Georgia, serif;
+    --sans: 'Epilogue', sans-serif;
+    --mono: 'JetBrains Mono', monospace;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── NOISE OVERLAY ── */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='1'/%3E%3C/svg%3E");
+    opacity: 0.025;
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* ── SIDEBAR NAV ── */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 240px;
+    height: 100vh;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    z-index: 100;
+    overflow-y: auto;
+  }
+
+  .sidebar-logo {
+    padding: 28px 24px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo-mark {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    text-decoration: none;
+  }
+
+  .logo-icon {
+    width: 28px;
+    height: 28px;
+    background: var(--accent);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .logo-icon svg { width: 16px; height: 16px; }
+
+  .logo-text {
+    font-family: var(--sans);
+    font-weight: 800;
+    font-size: 16px;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+
+  .logo-text span { color: var(--accent); }
+
+  .sidebar-meta {
+    padding: 10px 24px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sidebar-meta p {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.06em;
+    line-height: 1.8;
+    margin: 0;
+  }
+
+  .sidebar-nav {
+    padding: 16px 0;
+    flex: 1;
+  }
+
+  .nav-section-label {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 12px 24px 6px;
+  }
+
+  .nav-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 24px;
+    text-decoration: none;
+    color: var(--text-muted);
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.15s;
+    border-left: 2px solid transparent;
+  }
+
+  .nav-link:hover {
+    color: var(--text);
+    background: var(--surface2);
+    border-left-color: var(--border-bright);
+  }
+
+  .nav-link.active {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    background: var(--accent-dim);
+  }
+
+  .nav-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+    opacity: 0.5;
+  }
+
+  .nav-num {
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--text-dim);
+    margin-left: auto;
+  }
+
+  /* ── MAIN ── */
+  .main {
+    margin-left: 240px;
+    min-height: 100vh;
+  }
+
+  /* ── COVER ── */
+  .cover {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 64px 80px;
+    border-bottom: 1px solid var(--border);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .cover-grid-bg {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 60px 60px;
+    opacity: 0.3;
+    mask-image: radial-gradient(ellipse 80% 80% at 50% 50%, black 20%, transparent 100%);
+  }
+
+  .cover-glow {
+    position: absolute;
+    top: -200px;
+    right: -200px;
+    width: 600px;
+    height: 600px;
+    background: radial-gradient(circle, rgba(110,231,183,0.08) 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  .cover-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    position: relative;
+    z-index: 1;
+  }
+
+  .cover-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--accent-dim);
+    border: 1px solid var(--accent);
+    border-radius: 100px;
+    padding: 6px 14px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+  }
+
+  .badge-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.8); }
+  }
+
+  .cover-doc-id {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    text-align: right;
+    line-height: 2;
+  }
+
+  .cover-body {
+    position: relative;
+    z-index: 1;
+    padding: 80px 0 40px;
+  }
+
+  .cover-eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 24px;
+  }
+
+  .cover-title {
+    font-family: var(--serif);
+    font-size: clamp(56px, 8vw, 108px);
+    line-height: 0.93;
+    letter-spacing: -0.02em;
+    margin-bottom: 36px;
+  }
+
+  .cover-title .t-accent { color: var(--accent); font-style: italic; }
+  .cover-title .t-dim { color: var(--text-muted); }
+
+  .cover-desc {
+    font-size: 17px;
+    color: var(--text-muted);
+    max-width: 600px;
+    line-height: 1.65;
+    font-weight: 300;
+  }
+
+  .cover-desc strong { color: var(--text); font-weight: 600; }
+
+  .cover-bottom {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding-top: 48px;
+    border-top: 1px solid var(--border);
+  }
+
+  .kpi-row {
+    display: flex;
+    gap: 48px;
+  }
+
+  .kpi { display: flex; flex-direction: column; }
+
+  .kpi-value {
+    font-family: var(--serif);
+    font-size: 44px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--accent);
+  }
+
+  .kpi-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-top: 6px;
+  }
+
+  .cover-stack {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    text-align: right;
+    line-height: 2.2;
+  }
+
+  .cover-stack span {
+    display: inline-block;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 8px;
+    margin-left: 6px;
+    color: var(--text-muted);
+  }
+
+  /* ── CONTENT SECTIONS ── */
+  .content-section {
+    padding: 80px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .section-header {
+    display: flex;
+    gap: 24px;
+    align-items: flex-start;
+    margin-bottom: 56px;
+  }
+
+  .section-num {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    padding-top: 12px;
+    min-width: 32px;
+    letter-spacing: 0.06em;
+  }
+
+  .section-title-wrap { flex: 1; }
+
+  .section-tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 10px;
+  }
+
+  .section-title {
+    font-family: var(--serif);
+    font-size: clamp(28px, 4vw, 48px);
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+  }
+
+  .section-title em { font-style: italic; color: var(--accent); }
+
+  .section-subtitle {
+    font-size: 15px;
+    color: var(--text-muted);
+    margin-top: 12px;
+    font-weight: 300;
+    max-width: 640px;
+  }
+
+  /* ── PROSE ── */
+  .prose p {
+    color: var(--text-muted);
+    margin-bottom: 16px;
+    font-size: 15px;
+    line-height: 1.8;
+    font-weight: 300;
+  }
+
+  .prose p:last-child { margin-bottom: 0; }
+  .prose strong { color: var(--text); font-weight: 600; }
+
+  /* ── CALLOUT BOX ── */
+  .callout {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    padding: 24px 28px;
+    margin: 32px 0;
+    border-radius: 0 6px 6px 0;
+  }
+
+  .callout.orange { border-left-color: var(--accent2); }
+  .callout.purple { border-left-color: var(--accent3); }
+  .callout.red { border-left-color: var(--red); }
+
+  .callout-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 10px;
+  }
+
+  .callout.orange .callout-label { color: var(--accent2); }
+  .callout.purple .callout-label { color: var(--accent3); }
+  .callout.red .callout-label { color: var(--red); }
+
+  .callout p {
+    color: var(--text-muted);
+    font-size: 14px;
+    margin: 0;
+    line-height: 1.7;
+  }
+
+  .callout strong { color: var(--text); font-weight: 600; }
+
+  /* ── TWO COL GRID ── */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 32px 0;
+  }
+
+  .col-card {
+    background: var(--surface);
+    padding: 32px;
+  }
+
+  .col-card-tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+
+  .col-card-tag.green { color: var(--accent); }
+  .col-card-tag.orange { color: var(--accent2); }
+  .col-card-tag.purple { color: var(--accent3); }
+  .col-card-tag.red { color: var(--red); }
+
+  .col-card h4 {
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: 16px;
+    margin-bottom: 12px;
+    letter-spacing: -0.01em;
+    color: var(--text);
+  }
+
+  .col-card p {
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.65;
+    font-weight: 300;
+    margin: 0;
+  }
+
+  /* ── THREE COL ── */
+  .three-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 32px 0;
+  }
+
+  /* ── TABLE ── */
+  .spec-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin: 32px 0;
+  }
+
+  .spec-table thead th {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    text-align: left;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-bright);
+    background: var(--surface);
+  }
+
+  .spec-table tbody td {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.55;
+    color: var(--text-muted);
+  }
+
+  .spec-table tbody tr:last-child td { border-bottom: none; }
+  .spec-table tbody tr:hover td { background: var(--surface); }
+
+  .spec-table td:first-child {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    white-space: nowrap;
+    font-weight: 500;
+  }
+
+  .spec-table td strong { color: var(--text); font-weight: 600; }
+
+  /* ── TIER BLOCKS ── */
+  .tier-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 32px 0;
+  }
+
+  .tier {
+    background: var(--surface);
+    padding: 28px;
+    position: relative;
+  }
+
+  .tier.highlight { background: var(--accent-dim); }
+
+  .tier-pct {
+    font-family: var(--serif);
+    font-size: 52px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+
+  .tier-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+
+  .tier h4 {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+
+  .tier p {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.6;
+    font-weight: 300;
+  }
+
+  /* ── SEQUENCE ── */
+  .sequence {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 32px 0;
+  }
+
+  .seq-item {
+    display: grid;
+    grid-template-columns: 48px 1fr;
+    gap: 24px;
+    padding: 0 0 32px;
+    position: relative;
+  }
+
+  .seq-item:last-child { padding-bottom: 0; }
+
+  .seq-item::before {
+    content: '';
+    position: absolute;
+    left: 23px;
+    top: 40px;
+    bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+
+  .seq-item:last-child::before { display: none; }
+
+  .seq-num {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--surface2);
+    border: 1px solid var(--border-bright);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    font-weight: 500;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 1;
+  }
+
+  .seq-num.active {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+  }
+
+  .seq-content { padding-top: 10px; }
+
+  .seq-phase {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+
+  .seq-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 8px;
+    letter-spacing: -0.01em;
+  }
+
+  .seq-desc {
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.65;
+    font-weight: 300;
+    margin-bottom: 12px;
+  }
+
+  .seq-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border-bright);
+    color: var(--text-muted);
+    background: var(--surface2);
+    letter-spacing: 0.04em;
+  }
+
+  .tag.green { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+  .tag.orange { border-color: var(--accent2); color: var(--accent2); background: var(--accent2-dim); }
+  .tag.purple { border-color: var(--accent3); color: var(--accent3); background: var(--accent3-dim); }
+
+  /* ── DATA MODEL ── */
+  .schema-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 24px 0;
+  }
+
+  .schema-header {
+    padding: 14px 20px;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .schema-name {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .schema-desc {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .schema-fields {
+    padding: 4px 0;
+  }
+
+  .field-row {
+    display: grid;
+    grid-template-columns: 200px 120px 1fr;
+    gap: 16px;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 12px;
+    align-items: baseline;
+  }
+
+  .field-row:last-child { border-bottom: none; }
+  .field-row:hover { background: var(--surface2); }
+
+  .field-name { color: var(--text); }
+  .field-name.pk { color: var(--accent2); }
+  .field-name.fk { color: var(--accent3); }
+
+  .field-type { color: var(--text-dim); }
+  .field-type.special { color: var(--accent); }
+
+  .field-note { color: var(--text-dim); font-size: 11px; letter-spacing: 0.02em; }
+
+  /* ── API SURFACE ── */
+  .api-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 16px 0;
+  }
+
+  .api-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface2);
+  }
+
+  .method {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.06em;
+  }
+
+  .method.GET { background: var(--accent-dim); color: var(--accent); }
+  .method.POST { background: var(--accent2-dim); color: var(--accent2); }
+  .method.PATCH { background: var(--accent3-dim); color: var(--accent3); }
+  .method.DELETE { background: var(--red-dim); color: var(--red); }
+
+  .api-path {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .api-desc {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-left: auto;
+  }
+
+  /* ── DIVIDER ── */
+  .divider {
+    height: 1px;
+    background: var(--border);
+    margin: 40px 0;
+  }
+
+  /* ── INLINE CODE ── */
+  code {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: var(--accent);
+  }
+
+  /* ── FULL-WIDTH HIGHLIGHT ── */
+  .full-highlight {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 48px 80px;
+    margin: 0;
+  }
+
+  .highlight-inner {
+    max-width: 800px;
+  }
+
+  .highlight-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 16px;
+  }
+
+  .highlight-text {
+    font-family: var(--serif);
+    font-size: clamp(24px, 3vw, 38px);
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    color: var(--text);
+  }
+
+  .highlight-text em { font-style: italic; color: var(--accent); }
+
+  /* ── RISK TABLE ── */
+  .risk-row {
+    display: grid;
+    grid-template-columns: 1fr 80px 80px 1fr;
+    gap: 16px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--border);
+    align-items: start;
+    font-size: 13px;
+  }
+
+  .risk-row.header {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding-bottom: 10px;
+  }
+
+  .risk-name { color: var(--text); font-weight: 500; }
+  .risk-note { color: var(--text-muted); font-weight: 300; }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 3px 10px;
+    border-radius: 100px;
+    letter-spacing: 0.06em;
+    font-weight: 500;
+  }
+
+  .pill.high { background: var(--red-dim); color: var(--red); }
+  .pill.med { background: var(--accent2-dim); color: var(--accent2); }
+  .pill.low { background: var(--accent-dim); color: var(--accent); }
+
+  /* ── FOOTER ── */
+  .doc-footer {
+    padding: 48px 80px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .footer-brand {
+    font-family: var(--serif);
+    font-size: 22px;
+    color: var(--text-muted);
+    font-style: italic;
+  }
+
+  .footer-brand span { color: var(--accent); }
+
+  .footer-meta {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    text-align: right;
+    line-height: 2;
+  }
+
+  /* ── SCROLL ANIMATIONS ── */
+  .fade-in {
+    opacity: 0;
+    transform: translateY(16px);
+    transition: opacity 0.5s ease, transform 0.5s ease;
+  }
+
+  .fade-in.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  /* ── RESPONSIVE ── */
+  @media (max-width: 900px) {
+    .sidebar { display: none; }
+    .main { margin-left: 0; }
+    .cover, .content-section, .full-highlight, .doc-footer { padding: 40px 32px; }
+    .two-col, .three-col, .tier-row { grid-template-columns: 1fr; }
+    .cover-bottom { flex-direction: column; gap: 32px; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+
+<!-- SIDEBAR -->
+<nav class="sidebar">
+  <div class="sidebar-logo">
+    <a href="#cover" class="logo-mark">
+      <div class="logo-icon">
+        <svg viewBox="0 0 16 16" fill="none">
+          <rect x="2" y="2" width="5" height="5" rx="1" fill="#0a0a0f"/>
+          <rect x="9" y="2" width="5" height="5" rx="1" fill="#0a0a0f"/>
+          <rect x="2" y="9" width="5" height="5" rx="1" fill="#0a0a0f"/>
+          <circle cx="11.5" cy="11.5" r="2.5" fill="#0a0a0f"/>
+        </svg>
+      </div>
+      <span class="logo-text">Shop<span>CX</span></span>
+    </a>
+  </div>
+  <div class="sidebar-meta">
+    <p>Version 1.0 — March 2026<br/>Confidential · Superfoods Co.<br/>Internal First → SaaS</p>
+  </div>
+  <div class="sidebar-nav">
+    <div class="nav-section-label">Overview</div>
+    <a href="#vision" class="nav-link active"><span class="nav-dot"></span> Vision & Thesis <span class="nav-num">01</span></a>
+    <a href="#architecture" class="nav-link"><span class="nav-dot"></span> Architecture <span class="nav-num">02</span></a>
+    <a href="#identity" class="nav-link"><span class="nav-dot"></span> Customer Identity <span class="nav-num">03</span></a>
+
+    <div class="nav-section-label">Core Features</div>
+    <a href="#ticketing" class="nav-link"><span class="nav-dot"></span> AI Support & Tickets <span class="nav-num">04</span></a>
+    <a href="#social" class="nav-link"><span class="nav-dot"></span> Social Command Center <span class="nav-num">05</span></a>
+    <a href="#subscriptions" class="nav-link"><span class="nav-dot"></span> Subscription Manager <span class="nav-num">06</span></a>
+    <a href="#tracking" class="nav-link"><span class="nav-dot"></span> Behavioral Tracking <span class="nav-num">07</span></a>
+    <a href="#marketing" class="nav-link"><span class="nav-dot"></span> Email & SMS Marketing <span class="nav-num">08</span></a>
+
+    <div class="nav-section-label">Build</div>
+    <a href="#datamodel" class="nav-link"><span class="nav-dot"></span> Data Model <span class="nav-num">09</span></a>
+    <a href="#api" class="nav-link"><span class="nav-dot"></span> API Surface <span class="nav-num">10</span></a>
+    <a href="#sequence" class="nav-link"><span class="nav-dot"></span> Build Sequence <span class="nav-num">11</span></a>
+    <a href="#risks" class="nav-link"><span class="nav-dot"></span> Risks & Mitigations <span class="nav-num">12</span></a>
+  </div>
+</nav>
+
+<!-- MAIN -->
+<main class="main">
+
+  <!-- COVER -->
+  <section class="cover" id="cover">
+    <div class="cover-grid-bg"></div>
+    <div class="cover-glow"></div>
+
+    <div class="cover-top">
+      <div class="cover-badge">
+        <div class="badge-dot"></div>
+        Internal Spec · v1.0
+      </div>
+      <div class="cover-doc-id">
+        SHOPCX-SPEC-001<br/>
+        Superfoods Company<br/>
+        March 2026
+      </div>
+    </div>
+
+    <div class="cover-body">
+      <div class="cover-eyebrow">Product Specification — Founding Document</div>
+      <h1 class="cover-title">
+        Shop<span class="t-accent">CX</span><br/>
+        <span class="t-dim">The Retention</span><br/>
+        Operating System
+      </h1>
+      <p class="cover-desc">
+        A unified platform replacing <strong>Gorgias, Siena AI, Appstle, and Klaviyo</strong> with a single purpose-built tool. Every feature exists to answer one question: <strong>does this keep the customer subscribed?</strong>
+      </p>
+    </div>
+
+    <div class="cover-bottom">
+      <div class="kpi-row">
+        <div class="kpi">
+          <div class="kpi-value">4</div>
+          <div class="kpi-label">Tools replaced</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-value">$5k</div>
+          <div class="kpi-label">Mo. savings potential</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-value">9</div>
+          <div class="kpi-label">Build phases</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-value">1</div>
+          <div class="kpi-label">North star: retention</div>
+        </div>
+      </div>
+      <div class="cover-stack">
+        Stack<br/>
+        <span>Next.js</span> <span>Vercel</span> <span>Supabase</span><br/>
+        <span>Anthropic</span> <span>Stripe</span> <span>Twilio</span><br/>
+        <span>Resend</span> <span>Meta API</span> <span>Shopify</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 01 VISION -->
+  <section class="content-section" id="vision">
+    <div class="section-header fade-in">
+      <div class="section-num">01</div>
+      <div class="section-title-wrap">
+        <div class="section-tag">Vision & Thesis</div>
+        <h2 class="section-title">One platform. One truth.<br/><em>One north star.</em></h2>
+        <p class="section-subtitle">Every tool you're replacing was built to optimize its own metric. ShopCX is built to optimize yours: subscriber retention.</p>
+      </div>
+    </div>
+
+    <div class="prose fade-in">
+      <p>The $3,000–5,000/month you're spending across Gorgias, Siena AI, Appstle, and Klaviyo isn't just expensive — it's fragmented. Each tool has its own customer record, its own definition of success, and no way to see the whole picture. A customer who opened a support ticket, ignored two emails, had a failed payment, and then cancelled is just a churn event in your analytics. It shouldn't be.</p>
+      <p>ShopCX unifies every signal — support history, subscription health, purchase behavior, social engagement, email activity — into a single customer record. The result is a <strong>Retention Score</strong>: a living number that tells you exactly how at-risk each subscriber is, and why.</p>
+    </div>
+
+    <div class="callout fade-in">
+      <div class="callout-label">The Retention Score — Core Concept</div>
+      <p>Every customer in your Shopify store has a <strong>Retention Score from 0–100</strong>, synthesized in real time from: open support tickets and resolution history, subscription payment health and tenure, email/SMS open and click engagement, behavioral signals from the storefront and subscription portal, and social interactions with your brand. This score drives prioritization across every surface of the app — from ticket routing to marketing segmentation.</p>
+    </div>
+
+    <div class="divider"></div>
+
+    <h3 style="font-family: var(--sans); font-weight: 700; font-size: 16px; margin-bottom: 24px; color: var(--text);">What ShopCX replaces — and why you can build it</h3>
+
+    <table class="spec-table fade-in">
+      <thead>
+        <tr>
+          <th>Tool</th>
+          <th>Monthly Cost</th>
+          <th>What it does</th>
+          <th>Why we can build it</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Gorgias</td>
+          <td style="color:var(--text-muted);">$300–$1,500</td>
+          <td><strong>Helpdesk & ticketing</strong> — email/chat/social unified inbox</td>
+          <td>Well-understood domain. Core value is integration breadth, which we control directly.</td>
+        </tr>
+        <tr>
+          <td>Siena AI</td>
+          <td style="color:var(--text-muted);">$2,000+</td>
+          <td><strong>AI customer service</strong> — autonomous ticket resolution</td>
+          <td>General-purpose AI. Ours will be purpose-trained on our specific products, orders, and subscription data — strictly better.</td>
+        </tr>
+        <tr>
+          <td>Appstle</td>
+          <td style="color:var(--text-muted);">$30–$100</td>
+          <td><strong>Subscription management</strong> — pause/skip/swap/cancel portal</td>
+          <td>Essentially a Stripe Billing wrapper. Complex to get right but not complex to understand. We migrate incrementally.</td>
+        </tr>
+        <tr>
+          <td>Klaviyo</td>
+          <td style="color:var(--text-muted);">$400–$2,000</td>
+          <td><strong>Email & SMS marketing</strong> — flows, campaigns, segmentation</td>
+          <td>Hardest to replace (deliverability). Build last, using Resend + Twilio. Our segmentation will be richer because we own all behavioral data.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout orange fade-in">
+      <div class="callout-label">Build Strategy</div>
+      <p><strong>Internal first, SaaS later.</strong> Phase 1 is building for Superfoods Company only. The multi-tenant workspace architecture ships from day one, but we don't open it up. Once the product is proven, the path to SaaS is adding billing, onboarding flows, and a Shopify App Store listing. The real moat is the product intelligence layer — no competitor can replicate product-specific AI training without the underlying product data.</p>
+    </div>
+  </section>
+
+  <!-- FULL HIGHLIGHT -->
+  <div class="full-highlight">
+    <div class="highlight-inner fade-in">
+      <div class="highlight-label">Founding Principle</div>
+      <div class="highlight-text">"Every feature in ShopCX exists to answer one question: <em>does this help us keep the customer subscribed?</em> If it doesn't, we don't build it."</div>
+    </div>
+  </div>
+
+  <!-- 02 ARCHITECTURE -->
+  <section class="content-section" id="architecture">
+    <div class="section-header fade-in">
+      <div class="section-num">02</div>
+      <div class="section-title-wrap">
+        <div class="section-tag">System Architecture</div>
+        <h2 class="section-title">How the pieces<br/><em>fit together</em></h2>
+        <p class="section-subtitle">A Next.js monorepo on Vercel, backed by Supabase Postgres, with a clear separation between the agent layer and the data layer.</p>
+      </div>
+    </div>
+
+    <div class="two-col fade-in">
+      <div class="col-card">
+        <div class="col-card-tag green">Frontend</div>
+        <h4>Next.js 14+ App Router · Vercel</h4>
+        <p>The main dashboard, all feature UIs, and the embeddable chat widget. App Router gives us Server Components for fast data fetching, and Vercel Edge for low-latency widget delivery. The chat widget ships as a standalone compiled bundle hosted on a CDN — installed on Shopify via a script tag.</p>
+      </div>
+      <div class="col-card">
+        <div class="col-card-tag green">Backend / Database</div>
+        <h4>Supabase · Postgres · pgvector</h4>
+        <p>Supabase gives us Postgres (structured data), Row Level Security for multi-tenant isolation, Realtime subscriptions for live ticket updates and chat, Storage for attachments, and Edge Functions for webhook processing. pgvector stores AI embeddings for the product knowledge base and semantic search.</p>
+      </div>
+      <div class="col-card">
+        <div class="col-card-tag orange">AI Layer</div>
+        <h4>Anthropic Claude · RAG · Embeddings</h4>
+        <p>Claude (via the Anthropic API) powers ticket deflection, draft generation, confidence scoring, and nightly knowledge gap analysis. Product intelligence is stored as embeddings in pgvector and retrieved via semantic similarity search before each AI call — giving the agent accurate, up-to-date product context without fine-tuning.</p>
+      </div>
+      <div class="col-card">
+        <div class="col-card-tag orange">Background Jobs</div>
+        <h4>Inngest · Vercel Cron</h4>
+        <p>Inngest handles durable background jobs with retry logic: nightly AI analysis, subscription dunning sequences, email/SMS send queues, and event-driven automation flows. Vercel Cron triggers scheduled jobs. This separates long-running work from request/response cycles cleanly.</p>
+      </div>
+      <div class="col-card">
+        <div class="col-card-tag purple">Integrations</div>
+        <h4>Shopify · Meta · Stripe · Twilio · Resend</h4>
+        <p>Shopify OAuth for customer data and orders. Meta Graph API for DMs and page comments. Stripe Billing for subscription management (replacing Appstle). Twilio for SMS. Resend for transactional and marketing email with excellent deliverability defaults and React Email templates.</p>
+      </div>
+      <div class="col-card">
+        <div class="col-card-tag purple">Multi-Tenancy</div>
+        <h4>Workspace Model · RLS · Roles</h4>
+        <p>Every resource belongs to a workspace. Supabase Row Level Security enforces isolation at the database level — not the application level. Each workspace has an owner, and can invite members with roles: Admin, Agent, Social Manager, Marketing, Read-Only. Built for Superfoods Co. first; the architecture supports adding new workspaces from day one.</p>
+      </div>
+    </div>
+
+    <div class="callout purple fade-in">
+      <div class="callout-label">Key Architectural Decision — Data Isolation</div>
+      <p>Multi-tenancy via Supabase RLS means <strong>workspace isolation is enforced by the database</strong>, not by application code. Every query automatically filters to the current workspace via a JWT claim. This is not optional — it must be architected from migration #1. Retrofitting RLS onto an existing schema is extremely painful. The rule: every table that holds workspace-specific data has a <code>workspace_id</code> column with an RLS policy that checks <code>auth.jwt() ->> 'workspace_id'</code>.</p>
+    </div>
+  </section>
+
+  <!-- 03 CUSTOMER IDENTITY -->
+  <section class="content-section" id="identity">
+    <div class="section-header fade-in">
+      <div class="section-num">03</div>
+      <div class="section-title-wrap">
+        <div class="section-tag">Customer Identity</div>
+        <h2 class="section-title">One customer.<br/><em>Every signal.</em></h2>
+        <p class="section-subtitle">Identity resolution is the most important architectural decision in the platform. Get this wrong and every other feature is weaker.</p>
+      </div>
+    </div>
+
+    <div class="prose fade-in">
+      <p>When a ticket arrives — whether via email, chat widget, Meta DM, or SMS — ShopCX resolves it to a single <code>customers</code> record. That record aggregates the customer's full history across every surface. The goal is that when a support agent opens a ticket, they see everything: recent orders, subscription status, behavioral events, past tickets, email engagement, and the Retention Score.</p>
+    </div>
+
+    <div class="three-col fade-in">
+      <div class="col-card">
+        <div class="col-card-tag green">Primary Key</div>
+        <h4>Email Address</h4>
+        <p>The canonical identifier. Every system — Shopify, Stripe, Twilio, Meta (when available) — resolves to email. When a new contact arrives, we check email first. If matched, we link. If not, we create a new customer record.</p>
+      </div>
+      <div class="col-card">
+        <div class="col-card-tag orange">Shopify Link</div>
+        <h4>shopify_customer_id</h4>
+        <p>Matched at ticket creation via Shopify Customer API lookup by email. Gives us access to full order history, tags, metafields, and any active Appstle subscription data during the migration window.</p>
+      </div>
+      <div class="col-card">
+        <div class="col-card-tag purple">Session Link</div>
+        <h4>Storefront Session Token</h4>
+        <p>The chat widget captures the Shopify storefront session token when a logged-in customer opens chat. This enables real-time order lookup mid-conversation without the customer having to identify themselves.</p>
+      </div>
+    </div>
+
+    <div class="callout fade-in">
+      <div class="callout-label">Retention Score — Calculation</div>
+      <p>The Retention Score (0–100) is recalculated on each significant event and stored on the <code>customers</code> table. Component weights (tunable): <strong>Subscription health</strong> — tenure, payment history, skip/pause frequency (30%). <strong>Support history</strong> — open tickets, unresolved issues, sentiment of past interactions (25%). <strong>Purchase behavior</strong> — recency, frequency, order value trend (20%). <strong>Email/SMS engagement</strong> — recent open/click rate, unsubscribe signals (15%). <strong>Behavioral signals</strong> — login frequency to portal, page views, add-to-cart events (10%). Score below 40 = at-risk, flagged for proactive outreach.</p>
+    </div>
+  </section>
+
+  <!-- 04 AI SUPPORT & TICKETING -->
+  <section class="content-section" id="ticketing">
+    <div class="section-header fade-in">
+      <div class="section-num">04</div>
+      <div class="section-title-wrap">
+        <div class="section-tag">Feature — AI Support & Ticketing</div>
+        <h2 class="section-title">An AI agent that<br/><em>actually knows your products.</em></h2>
+        <p class="section-subtitle">Replaces Gorgias + Siena AI. Ticket ingestion via email, live chat widget, and Meta DMs. AI attempts deflection before routing to humans.</p>
+      </div>
+    </div>
+
+    <h3 style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--text);margin-bottom:20px;">Ticket Ingestion Channels</h3>
+    <div class="three-col fade-in">
+      <div class="col-card">
+        <div class="col-card-tag green">Email</div>
+        <h4>Inbound Email Parsing</h4>
+        <p>Use Resend Inbound or a dedicated inbox via SendGrid Inbound Parse. Incoming emails to <code>support@yourdomain.com</code> POST to a webhook that creates a ticket. Thread matching by <code>In-Reply-To</code> header groups replies to the same ticket. Attachments stored in Supabase Storage.</p>
+      </div>
+      <div class="col-card">
+        <div class="col-card-tag orange">Live Chat</div>
+        <h4>Embeddable Chat Widget</h4>
+        <p>A small JS bundle (<code>shopcx-widget.js</code>) installed via Shopify theme script tag. Opens a chat window that connects to ShopCX via WebSocket (Supabase Realtime). Captures storefront session token automatically for identity resolution. Not crazy to build — this is a weekend-scale feature.</p>
+      </div>
+      <div class="col-card">
+        <div class="col-card-tag purple">Meta DMs</div>
+        <h4>Instagram & Facebook DMs</h4>
+        <p>Via the Meta Messenger API (Pages scope). Incoming DMs create tickets automatically. Outgoing replies send back through the Graph API. Requires <code>pages_messaging</code> permission — include in Meta app review submission.</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <h3 style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--text);margin-bottom:20px;">AI Agent — Confidence Tiers</h3>
+
+    <div class="tier-row fade-in">
+      <div class="tier highlight">
+        <div class="tier-pct">90%+</div>
+        <div class="tier-label">Auto-resolve</div>
+        <h4>Agent responds autonomously</h4>
+        <p>AI sends the response directly to the customer, marks ticket as pending customer reply. If no reply in 48hrs, auto-closes. CSAT survey sent on close.</p>
+      </div>
+      <div class="tier">
+        <div class="tier-pct" style="color:var(--accent2);">60–89%</div>
+        <div class="tier-label">Human review</div>
+        <h4>AI drafts, agent approves</h4>
+        <p>AI generates a draft response and surfaces relevant knowledge base articles. Ticket assigned to available agent with "Review & Send" action. Agent can edit before sending.</p>
+      </div>
+      <div class="tier">
+        <div class="tier-pct" style="color:var(--red);">&lt;60%</div>
+        <div class="tier-label">Human only</div>
+        <h4>Routes to agent queue</h4>
+        <p>AI surfaces context only — customer history, order details, subscription status, related past tickets. Agent works the ticket. AI learns from the resolution for future tickets.</p>
+      </div>
+    </div>
+
+    <div class="callout fade-in">
+      <div class="callout-label">AI Knowledge Base — RAG Architecture</div>
+      <p>Product intelligence is stored as <strong>document chunks with embeddings</strong> in Supabase pgvector. Before each AI call, we perform a semantic similarity search against the customer's message to retrieve the top 5–10 most relevant chunks. These are injected into the system prompt alongside the customer's full profile (orders, subscription status, past tickets). The AI then generates a response grounded in real product knowledge — not hallucinated. The knowledge base is managed via a simple admin UI where workspace members can add, edit, and delete product documents, FAQs, and policies.</p>
+    </div>
+
+    <div class="divider"></div>
+    <h3 style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--text);margin-bottom:20px;">Ticket Data Model — Key Fields</h3>
+
+    <table class="spec-table fade-in">
+      <thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>id</td><td style="color:var(--text-muted)">uuid</td><td>Primary key</td></tr>
+        <tr><td>workspace_id</td><td style="color:var(--text-muted)">uuid</td><td>FK → workspaces. RLS enforced.</td></tr>
+        <tr><td>customer_id</td><td style="color:var(--text-muted)">uuid</td><td>FK → customers. Resolved on creation.</td></tr>
+        <tr><td>channel</td><td style="color:var(--text-muted)">enum</td><td><code>email | chat | meta_dm | sms</code></td></tr>
+        <tr><td>status</td><td style="color:var(--text-muted)">enum</td><td><code>open | pending | resolved | closed</code></td></tr>
+        <tr><td>ai_confidence</td><td style="color:var(--text-muted)">float</td><td>0.0–1.0. Set at first AI analysis. Logged per attempt.</td></tr>
+        <tr><td>ai_handled</td><td style="color:var(--text-muted)">boolean</td><td>True if resolved without human intervention.</td></tr>
+        <tr><td>assigned_to</td><td style="color:var(--text-muted)">uuid</td><td>FK → workspace members. Null = unassigned.</td></tr>
+        <tr><td>first_response_at</td><td style="color:var(--text-muted)">timestamptz</td><td>Speed-to-respond metric. Set on first outbound message.</td></tr>
+        <tr><td>resolved_at</td><td style="color:var(--text-muted)">timestamptz</td><td>Speed-to-close metric.</td></tr>
+        <tr><td>csat_score</td><td style="color:var(--text-muted)">int (1–5)</td><td>Collected via automated follow-up email 24hrs after close.</td></tr>
+        <tr><td>churn_risk_resolved</td><td style="color:var(--text-muted)">boolean</td><td>Did this ticket resolution prevent a likely cancellation?</td></tr>
+        <tr><td>tags</td><td style="color:var(--text-muted)">text[]</td><td>Auto-tagged by AI (e.g. <code>billing</code>, <code>shipping</code>, <code>product-question</code>).</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout orange fade-in">
+      <div class="callout-label">Nightly Knowledge Gap Analysis</div>
+      <p>An Inngest cron job runs nightly at 2am. It sends the day's manually-resolved and escalated tickets to Claude in batch with the prompt: <em>"Identify which of these tickets could have been automatically resolved with additional product or policy knowledge. Cluster them by topic. For each cluster, suggest the knowledge base entry that would enable future auto-resolution."</em> Output is a structured <strong>Gaps Report</strong> surfaced in the dashboard each morning. Workspace admins review and one-click add suggested knowledge base entries.</p>
+    </div>
+  </section>
+
+  <!-- 05 SOCIAL -->
+  <section class="content-section" id="social">
+    <div class="section-header fade-in">
+      <div class="section-num">05</div>
+      <div class="section-title-wrap">
+        <div class="section-tag">Feature — Social Command Center</div>
+        <h2 class="section-title">Ads vs. organic.<br/><em>Context that matters.</em></h2>
+        <p class="section-subtitle">Meta comments and DMs, split by placement. Reply, delete, and block — all from one queue. Ad comments show the destination URL so you know exactly what product is being discussed.</p>
+      </div>
+    </div>
+
+    <div class="two-col fade-in">
+      <div class="col-card">
+        <div class="col-card-tag green">Organic Posts</div>
+        <h4>Page Comments — Standard</h4>
+        <p>Pull from the <strong>Pages API</strong> (<code>GET /{page-id}/feed</code>). Comments show post content, timestamp, user, and existing replies. Actions: Reply (posts via Graph API), Hide, Delete, Block user. Sentiment analysis run on each comment to flag potentially negative or harassing content for priority review.</p>
+      </div>
+      <div class="col-card">
+        <div class="col-card-tag orange">Paid Posts</div>
+        <h4>Ad Comments — With Context</h4>
+        <p>Pull from the <strong>Ads API</strong> (<code>GET /{ad-id}/comments</code>). Each comment is enriched with: ad name, ad set name, campaign name, destination URL, and creative preview. This tells your social manager exactly which product a comment refers to without opening Ads Manager. Critical for high-volume ad campaigns.</p>
+      </div>
+    </div>
+
+    <div class="callout fade-in">
+      <div class="callout-label">Meta API — Permissions Required</div>
+      <p>Budget 2–4 weeks for Meta's app review process. Required permissions: <code>pages_read_engagement</code> (read comments), <code>pages_manage_engagement</code> (reply/delete), <code>pages_messaging</code> (DMs), <code>ads_read</code> (ad comment context), <code>instagram_basic</code> + <code>instagram_manage_comments</code> (Instagram). Submit for review early — this is the longest external dependency in the build.</p>
+    </div>
+
+    <h3 style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--text);margin:32px 0 20px;">Moderation Rules Engine</h3>
+    <div class="prose fade-in">
+      <p>Workspace admins define moderation rules that run automatically on every incoming comment. Rules consist of a trigger (keyword match, sentiment score threshold, or AI classification) and an action (auto-hide, auto-delete, flag for review, or block user). Examples: <strong>Keyword rule</strong> — any comment containing a list of slurs → auto-delete + block. <strong>Sentiment rule</strong> — AI sentiment score below 0.2 → flag for human review. <strong>Competitor rule</strong> — mentions of competitor brands → flag for response. Rules are ordered and the first matching rule wins.</p>
+    </div>
+
+    <table class="spec-table fade-in">
+      <thead><tr><th>Action</th><th>API Call</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Reply to comment</td><td style="color:var(--text-muted)">POST /{comment-id}/comments</td><td>Posts reply as the Page. Visible publicly.</td></tr>
+        <tr><td>Hide comment</td><td style="color:var(--text-muted)">POST /{comment-id} is_hidden=true</td><td>Hidden from public but visible to commenter. Reversible.</td></tr>
+        <tr><td>Delete comment</td><td style="color:var(--text-muted)">DELETE /{comment-id}</td><td>Permanent. Requires confirmation in UI.</td></tr>
+        <tr><td>Block user</td><td style="color:var(--text-muted)">POST /{page-id}/blocked</td><td>Blocks user from the Page. User is not notified.</td></tr>
+        <tr><td>Reply to DM</td><td style="color:var(--text-muted)">POST /me/messages</td><td>Via Messenger Send API. 24hr window after last user message.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- 06 SUBSCRIPTIONS -->
+  <section class="content-section" id="subscriptions">
+    <div class="section-header fade-in">
+      <div class="section-num">06</div>
+      <div class="section-title-wrap">
+        <div class="section-tag">Feature — Subscription Manager</div>
+        <h2 class="section-title">Replace Appstle.<br/><em>Own the subscription layer.</em></h2>
+        <p class="section-subtitle">Built on Stripe Billing. Pause, skip, swap, cancel — plus a rules engine for automated responses to subscription events.</p>
+      </div>
+    </div>
+
+    <div class="callout red fade-in">
+      <div class="callout-label">Migration Strategy — Appstle → ShopCX</div>
+      <p><strong>Do not migrate all at once.</strong> Run both systems in parallel for 60 days. New subscribers go onto ShopCX subscriptions. Existing Appstle subscribers migrate in cohorts — start with the lowest-risk segment (most recent subscribers). Appstle stores subscription data in Shopify metafields; export these and import into ShopCX before switching each cohort. Zero-downtime cutover requires Stripe to have the payment method on file before the Appstle subscription is cancelled.</p>
+    </div>
+
+    <h3 style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--text);margin:32px 0 20px;">Customer Portal Actions</h3>
+    <div class="two-col fade-in">
+      <div class="col-card">
+        <div class="col-card-tag green">Self-Service</div>
+        <h4>What customers can do</h4>
+        <p>Pause subscription (1–12 weeks), skip next order, swap product variant, change frequency, update shipping address, update payment method, cancel subscription (with save offer). All actions log a behavioral event to the customer timeline.</p>
+      </div>
+      <div class="col-card">
+        <div class="col-card-tag orange">Retention Saves</div>
+        <h4>Cancel flow with save offers</h4>
+        <p>When a customer initiates cancel, present a targeted save offer based on their cancellation reason and Retention Score: <em>payment issue</em> → offer pause, <em>too much product</em> → offer frequency change or skip, <em>too expensive</em> → offer discount. Save offer acceptance/decline logged and used to refine future offers.</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <h3 style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--text);margin-bottom:20px;">Subscription Webhook Events & Automated Actions</h3>
+
+    <table class="spec-table fade-in">
+      <thead><tr><th>Event</th><th>Trigger</th><th>Automated Actions</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>payment_failed</td>
+          <td style="color:var(--text-muted)">Stripe invoice.payment_failed</td>
+          <td><strong>1.</strong> Create support ticket (type: billing, auto-tagged). <strong>2.</strong> Send dunning email #1 with payment update link. <strong>3.</strong> Reduce Retention Score. <strong>4.</strong> Queue dunning email #2 at +3 days if still unpaid.</td>
+        </tr>
+        <tr>
+          <td>payment_recovered</td>
+          <td style="color:var(--text-muted)">Stripe invoice.paid (after failure)</td>
+          <td>Close any open billing tickets. Send recovery confirmation. Restore Retention Score adjustment.</td>
+        </tr>
+        <tr>
+          <td>subscription_cancelled</td>
+          <td style="color:var(--text-muted)">Stripe customer.subscription.deleted</td>
+          <td>Tag customer as churned. Trigger win-back flow (email at +1d, +7d, +30d). Suppress from active subscriber segments.</td>
+        </tr>
+        <tr>
+          <td>subscription_paused</td>
+          <td style="color:var(--text-muted)">Custom (pause action in portal)</td>
+          <td>Log event. Suppress marketing sends during pause. Queue re-engagement email 1 week before pause end.</td>
+        </tr>
+        <tr>
+          <td>subscription_created</td>
+          <td style="color:var(--text-muted)">Stripe customer.subscription.created</td>
+          <td>Create customer record if new. Trigger onboarding flow. Set initial Retention Score (60 — new customer baseline).</td>
+        </tr>
+        <tr>
+          <td>order_shipped</td>
+          <td style="color:var(--text-muted)">Shopify fulfillment webhook</td>
+          <td>Send shipping confirmation with tracking. Log to customer timeline. Increment Retention Score slightly.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout fade-in">
+      <div class="callout-label">Rules Engine</div>
+      <p>Beyond the default event-to-action mappings above, workspace admins can build custom rules in a no-code interface: <strong>When</strong> [event] <strong>AND</strong> [conditions] <strong>THEN</strong> [actions]. Conditions can reference any customer attribute (Retention Score, subscription tenure, total orders, last CSAT score). Actions include: create ticket, send email, send SMS, add tag, assign to agent, trigger flow. This is ShopCX's automation backbone — the equivalent of Klaviyo flows but with subscription and support data as first-class triggers.</p>
+    </div>
+  </section>
+
+  <!-- 07 BEHAVIORAL TRACKING -->
+  <section class="content-section" id="tracking">
+    <div class="section-header fade-in">
+      <div class="section-num">07</div>
+      <div class="section-title-wrap">
+        <div class="section-tag">Feature — Behavioral Tracking</div>
+        <h2 class="section-title">Know everything<br/><em>before they write in.</em></h2>
+        <p class="section-subtitle">A lightweight event tracker on the Shopify storefront and subscription portal feeds the customer timeline in real time.</p>
+      </div>
+    </div>
+
+    <div class="prose fade-in">
+      <p>When a support ticket arrives, the agent should never have to ask "what's going on with this customer?" ShopCX surfaces the customer's last 30 days of activity automatically: which products they viewed, what they added to cart, how often they log into the subscription portal, whether they've tried to cancel before.</p>
+      <p>This is implemented via a lightweight JavaScript SDK (<code>shopcx-track.js</code>) installed alongside the chat widget on Shopify. Events POST to a Supabase Edge Function that appends to the <code>customer_events</code> table and updates the Retention Score.</p>
+    </div>
+
+    <table class="spec-table fade-in">
+      <thead><tr><th>Event</th><th>Source</th><th>Data Captured</th></tr></thead>
+      <tbody>
+        <tr><td>page_view</td><td style="color:var(--text-muted)">Storefront</td><td>URL, page type (product/collection/blog), product handle if applicable</td></tr>
+        <tr><td>product_viewed</td><td style="color:var(--text-muted)">Storefront</td><td>Product ID, variant, price, subscription vs. one-time toggle state</td></tr>
+        <tr><td>add_to_cart</td><td style="color:var(--text-muted)">Storefront</td><td>Product ID, variant, quantity, subscription interval if selected</td></tr>
+        <tr><td>checkout_started</td><td style="color:var(--text-muted)">Storefront</td><td>Cart value, items, subscription vs. one-time</td></tr>
+        <tr><td>portal_login</td><td style="color:var(--text-muted)">Sub. Portal</td><td>Timestamp. Frequency of portal logins is a churn signal.</td></tr>
+        <tr><td>portal_cancel_initiated</td><td style="color:var(--text-muted)">Sub. Portal</td><td>Cancellation reason (from dropdown). High churn risk signal.</td></tr>
+        <tr><td>portal_save_accepted</td><td style="color:var(--text-muted)">Sub. Portal</td><td>Which save offer was accepted (pause, skip, discount, frequency).</td></tr>
+        <tr><td>portal_product_swapped</td><td style="color:var(--text-muted)">Sub. Portal</td><td>From product, to product. Indicates product-fit issues.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- 08 MARKETING -->
+  <section class="content-section" id="marketing">
+    <div class="section-header fade-in">
+      <div class="section-num">08</div>
+      <div class="section-title-wrap">
+        <div class="section-tag">Feature — Email & SMS Marketing (Phase 9)</div>
+        <h2 class="section-title">Marketing that knows<br/><em>everything Klaviyo doesn't.</em></h2>
+        <p class="section-subtitle">Built last. Powered by Resend + Twilio. Segmentation backed by full behavioral, subscription, and support data.</p>
+      </div>
+    </div>
+
+    <div class="callout orange fade-in">
+      <div class="callout-label">Build This Last</div>
+      <p>Email/SMS marketing is the most complex feature to operate reliably. <strong>Deliverability is a craft</strong> — domain reputation, DKIM/SPF/DMARC, bounce handling, unsubscribe compliance, and IP warming all require careful attention. Build this after the retention engine is proven. Use Resend for email (excellent developer experience, great deliverability defaults, React Email for templates) and Twilio for SMS. Do not attempt to build a sending infrastructure from scratch — use these services as the transport layer and own the product layer above them.</p>
+    </div>
+
+    <div class="two-col fade-in">
+      <div class="col-card">
+        <div class="col-card-tag green">Segmentation Advantage</div>
+        <h4>Richer than Klaviyo</h4>
+        <p>Because ShopCX owns behavioral, subscription, support, and social data, segments can reference any combination: <em>"Active subscribers with Retention Score below 50 who haven't opened an email in 30 days and have viewed the product page more than twice."</em> No integration required — it's all in the same database.</p>
+      </div>
+      <div class="col-card">
+        <div class="col-card-tag orange">Flows & Campaigns</div>
+        <h4>Event-driven automations</h4>
+        <p>Flows are triggered by any event in the Rules Engine: subscription events, ticket events, behavioral events, or scheduled time-based triggers. Campaigns are one-time sends to a segment. Both use React Email templates rendered server-side and sent via Resend. SMS flows via Twilio Messaging Service with opt-in/opt-out compliance built in.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 09 DATA MODEL -->
+  <section class="content-section" id="datamodel">
+    <div class="section-header fade-in">
+      <div class="section-num">09</div>
+      <div class="section-title-wrap">
+        <div class="section-tag">Data Model</div>
+        <h2 class="section-title">The schema that<br/><em>ties it all together.</em></h2>
+        <p class="section-subtitle">Core Postgres tables. Every table with workspace-specific data has workspace_id and RLS enforced.</p>
+      </div>
+    </div>
+
+    <div class="schema-block fade-in">
+      <div class="schema-header">
+        <span class="schema-name">workspaces</span>
+        <span class="schema-desc">Top-level tenant. Every resource belongs to a workspace.</span>
+      </div>
+      <div class="schema-fields">
+        <div class="field-row"><span class="field-name pk">id</span><span class="field-type">uuid</span><span class="field-note">Primary key</span></div>
+        <div class="field-row"><span class="field-name">name</span><span class="field-type">text</span><span class="field-note">e.g. "Superfoods Company"</span></div>
+        <div class="field-row"><span class="field-name">shopify_domain</span><span class="field-type">text</span><span class="field-note">e.g. superfoods.myshopify.com</span></div>
+        <div class="field-row"><span class="field-name">shopify_access_token</span><span class="field-type">text</span><span class="field-note">Encrypted. Shopify OAuth token.</span></div>
+        <div class="field-row"><span class="field-name">meta_page_id</span><span class="field-type">text</span><span class="field-note">Connected Facebook/Instagram page</span></div>
+        <div class="field-row"><span class="field-name">stripe_account_id</span><span class="field-type">text</span><span class="field-note">Stripe Connect or direct account</span></div>
+        <div class="field-row"><span class="field-name">plan</span><span class="field-type special">enum</span><span class="field-note">internal | starter | growth | enterprise</span></div>
+        <div class="field-row"><span class="field-name">created_at</span><span class="field-type">timestamptz</span><span class="field-note"></span></div>
+      </div>
+    </div>
+
+    <div class="schema-block fade-in">
+      <div class="schema-header">
+        <span class="schema-name">customers</span>
+        <span class="schema-desc">Unified customer identity. The heart of the platform.</span>
+      </div>
+      <div class="schema-fields">
+        <div class="field-row"><span class="field-name pk">id</span><span class="field-type">uuid</span><span class="field-note">Primary key</span></div>
+        <div class="field-row"><span class="field-name fk">workspace_id</span><span class="field-type">uuid</span><span class="field-note">FK → workspaces. RLS policy on this column.</span></div>
+        <div class="field-row"><span class="field-name">email</span><span class="field-type">text</span><span class="field-note">Unique within workspace. Canonical identifier.</span></div>
+        <div class="field-row"><span class="field-name">shopify_customer_id</span><span class="field-type">text</span><span class="field-note">Nullable. Set on identity resolution.</span></div>
+        <div class="field-row"><span class="field-name">stripe_customer_id</span><span class="field-type">text</span><span class="field-note">Nullable. Set when subscription created.</span></div>
+        <div class="field-row"><span class="field-name">retention_score</span><span class="field-type">int</span><span class="field-note">0–100. Recalculated on significant events.</span></div>
+        <div class="field-row"><span class="field-name">subscription_status</span><span class="field-type special">enum</span><span class="field-note">active | paused | cancelled | never</span></div>
+        <div class="field-row"><span class="field-name">subscription_tenure_days</span><span class="field-type">int</span><span class="field-note">Days since first subscription. Computed.</span></div>
+        <div class="field-row"><span class="field-name">total_orders</span><span class="field-type">int</span><span class="field-note">Synced from Shopify.</span></div>
+        <div class="field-row"><span class="field-name">ltv_cents</span><span class="field-type">int</span><span class="field-note">Lifetime value in cents. Synced from Shopify + Stripe.</span></div>
+        <div class="field-row"><span class="field-name">tags</span><span class="field-type">text[]</span><span class="field-note">Freeform tags. e.g. vip, at-risk, win-back</span></div>
+        <div class="field-row"><span class="field-name">created_at</span><span class="field-type">timestamptz</span><span class="field-note"></span></div>
+        <div class="field-row"><span class="field-name">updated_at</span><span class="field-type">timestamptz</span><span class="field-note"></span></div>
+      </div>
+    </div>
+
+    <div class="schema-block fade-in">
+      <div class="schema-header">
+        <span class="schema-name">tickets</span>
+        <span class="schema-desc">Support tickets across all channels.</span>
+      </div>
+      <div class="schema-fields">
+        <div class="field-row"><span class="field-name pk">id</span><span class="field-type">uuid</span><span class="field-note">Primary key</span></div>
+        <div class="field-row"><span class="field-name fk">workspace_id</span><span class="field-type">uuid</span><span class="field-note">FK → workspaces</span></div>
+        <div class="field-row"><span class="field-name fk">customer_id</span><span class="field-type">uuid</span><span class="field-note">FK → customers</span></div>
+        <div class="field-row"><span class="field-name">channel</span><span class="field-type special">enum</span><span class="field-note">email | chat | meta_dm | sms</span></div>
+        <div class="field-row"><span class="field-name">status</span><span class="field-type special">enum</span><span class="field-note">open | pending | resolved | closed</span></div>
+        <div class="field-row"><span class="field-name">subject</span><span class="field-type">text</span><span class="field-note">Email subject or AI-generated summary for chat</span></div>
+        <div class="field-row"><span class="field-name">ai_confidence</span><span class="field-type">float</span><span class="field-note">0.0–1.0. Last AI confidence score.</span></div>
+        <div class="field-row"><span class="field-name">ai_handled</span><span class="field-type">bool</span><span class="field-note">Resolved without human touch</span></div>
+        <div class="field-row"><span class="field-name fk">assigned_to</span><span class="field-type">uuid</span><span class="field-note">FK → workspace_members</span></div>
+        <div class="field-row"><span class="field-name">first_response_at</span><span class="field-type">timestamptz</span><span class="field-note">Speed-to-respond metric</span></div>
+        <div class="field-row"><span class="field-name">resolved_at</span><span class="field-type">timestamptz</span><span class="field-note">Speed-to-close metric</span></div>
+        <div class="field-row"><span class="field-name">csat_score</span><span class="field-type">int</span><span class="field-note">1–5. Null until survey returned.</span></div>
+        <div class="field-row"><span class="field-name">churn_risk_resolved</span><span class="field-type">bool</span><span class="field-note">Retention flag. Used in reporting.</span></div>
+        <div class="field-row"><span class="field-name">tags</span><span class="field-type">text[]</span><span class="field-note">AI-auto-tagged on creation</span></div>
+      </div>
+    </div>
+
+    <div class="schema-block fade-in">
+      <div class="schema-header">
+        <span class="schema-name">ticket_messages</span>
+        <span class="schema-desc">Individual messages within a ticket thread.</span>
+      </div>
+      <div class="schema-fields">
+        <div class="field-row"><span class="field-name pk">id</span><span class="field-type">uuid</span><span class="field-note"></span></div>
+        <div class="field-row"><span class="field-name fk">ticket_id</span><span class="field-type">uuid</span><span class="field-note">FK → tickets</span></div>
+        <div class="field-row"><span class="field-name">direction</span><span class="field-type special">enum</span><span class="field-note">inbound | outbound</span></div>
+        <div class="field-row"><span class="field-name">visibility</span><span class="field-type special">enum</span><span class="field-note">external | internal — internal notes never sent to customer</span></div>
+        <div class="field-row"><span class="field-name">author_type</span><span class="field-type special">enum</span><span class="field-note">customer | agent | ai</span></div>
+        <div class="field-row"><span class="field-name">body</span><span class="field-type">text</span><span class="field-note">Message content (HTML for email, plaintext for chat)</span></div>
+        <div class="field-row"><span class="field-name">ai_draft</span><span class="field-type">bool</span><span class="field-note">True if this was AI-generated (even if edited by agent)</span></div>
+        <div class="field-row"><span class="field-name">created_at</span><span class="field-type">timestamptz</span><span class="field-note"></span></div>
+      </div>
+    </div>
+
+    <div class="schema-block fade-in">
+      <div class="schema-header">
+        <span class="schema-name">subscriptions</span>
+        <span class="schema-desc">Native subscription records. Mirrors Stripe Billing state.</span>
+      </div>
+      <div class="schema-fields">
+        <div class="field-row"><span class="field-name pk">id</span><span class="field-type">uuid</span><span class="field-note"></span></div>
+        <div class="field-row"><span class="field-name fk">workspace_id</span><span class="field-type">uuid</span><span class="field-note"></span></div>
+        <div class="field-row"><span class="field-name fk">customer_id</span><span class="field-type">uuid</span><span class="field-note"></span></div>
+        <div class="field-row"><span class="field-name">stripe_subscription_id</span><span class="field-type">text</span><span class="field-note">Stripe source of truth</span></div>
+        <div class="field-row"><span class="field-name">status</span><span class="field-type special">enum</span><span class="field-note">active | paused | past_due | cancelled | trialing</span></div>
+        <div class="field-row"><span class="field-name">product_id</span><span class="field-type">text</span><span class="field-note">Shopify product/variant ID</span></div>
+        <div class="field-row"><span class="field-name">interval</span><span class="field-type special">enum</span><span class="field-note">weekly | biweekly | monthly | bimonthly</span></div>
+        <div class="field-row"><span class="field-name">next_billing_date</span><span class="field-type">date</span><span class="field-note"></span></div>
+        <div class="field-row"><span class="field-name">pause_until</span><span class="field-type">date</span><span class="field-note">Nullable. Set when customer pauses.</span></div>
+        <div class="field-row"><span class="field-name">cancellation_reason</span><span class="field-type">text</span><span class="field-note">Nullable. Free text from cancel flow.</span></div>
+        <div class="field-row"><span class="field-name">failed_payment_count</span><span class="field-type">int</span><span class="field-note">Resets on successful payment.</span></div>
+      </div>
+    </div>
+
+    <div class="schema-block fade-in">
+      <div class="schema-header">
+        <span class="schema-name">customer_events</span>
+        <span class="schema-desc">Append-only behavioral event log. Every action a customer takes.</span>
+      </div>
+      <div class="schema-fields">
+        <div class="field-row"><span class="field-name pk">id</span><span class="field-type">uuid</span><span class="field-note"></span></div>
+        <div class="field-row"><span class="field-name fk">customer_id</span><span class="field-type">uuid</span><span class="field-note"></span></div>
+        <div class="field-row"><span class="field-name fk">workspace_id</span><span class="field-type">uuid</span><span class="field-note"></span></div>
+        <div class="field-row"><span class="field-name">event_type</span><span class="field-type">text</span><span class="field-note">e.g. page_view, portal_cancel_initiated, ticket_opened</span></div>
+        <div class="field-row"><span class="field-name">source</span><span class="field-type special">enum</span><span class="field-note">storefront | portal | shopify | stripe | meta | shopcx</span></div>
+        <div class="field-row"><span class="field-name">properties</span><span class="field-type special">jsonb</span><span class="field-note">Flexible event payload. Indexed for common keys.</span></div>
+        <div class="field-row"><span class="field-name">created_at</span><span class="field-type">timestamptz</span><span class="field-note">Append-only. Never updated.</span></div>
+      </div>
+    </div>
+
+    <div class="schema-block fade-in">
+      <div class="schema-header">
+        <span class="schema-name">knowledge_base</span>
+        <span class="schema-desc">Product intelligence documents. Chunked and embedded for RAG.</span>
+      </div>
+      <div class="schema-fields">
+        <div class="field-row"><span class="field-name pk">id</span><span class="field-type">uuid</span><span class="field-note"></span></div>
+        <div class="field-row"><span class="field-name fk">workspace_id</span><span class="field-type">uuid</span><span class="field-note"></span></div>
+        <div class="field-row"><span class="field-name">title</span><span class="field-type">text</span><span class="field-note">e.g. "Amazing Coffee — Product FAQ"</span></div>
+        <div class="field-row"><span class="field-name">content</span><span class="field-type">text</span><span class="field-note">Full document text. Chunked into kb_chunks on save.</span></div>
+        <div class="field-row"><span class="field-name">category</span><span class="field-type special">enum</span><span class="field-note">product | policy | shipping | billing | general</span></div>
+        <div class="field-row"><span class="field-name">active</span><span class="field-type">bool</span><span class="field-note">Inactive entries excluded from RAG retrieval.</span></div>
+      </div>
+    </div>
+
+    <div class="schema-block fade-in">
+      <div class="schema-header">
+        <span class="schema-name">kb_chunks</span>
+        <span class="schema-desc">Chunked knowledge base with pgvector embeddings. Used for semantic search.</span>
+      </div>
+      <div class="schema-fields">
+        <div class="field-row"><span class="field-name pk">id</span><span class="field-type">uuid</span><span class="field-note"></span></div>
+        <div class="field-row"><span class="field-name fk">kb_id</span><span class="field-type">uuid</span><span class="field-note">FK → knowledge_base</span></div>
+        <div class="field-row"><span class="field-name fk">workspace_id</span><span class="field-type">uuid</span><span class="field-note">Denormalized for RLS performance</span></div>
+        <div class="field-row"><span class="field-name">chunk_text</span><span class="field-type">text</span><span class="field-note">~500 token chunks with 50 token overlap</span></div>
+        <div class="field-row"><span class="field-name">embedding</span><span class="field-type special">vector(1536)</span><span class="field-note">OpenAI text-embedding-3-small or Anthropic equivalent</span></div>
+        <div class="field-row"><span class="field-name">chunk_index</span><span class="field-type">int</span><span class="field-note">Position within parent document</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 10 API SURFACE -->
+  <section class="content-section" id="api">
+    <div class="section-header fade-in">
+      <div class="section-num">10</div>
+      <div class="section-title-wrap">
+        <div class="section-tag">API Surface</div>
+        <h2 class="section-title">Key endpoints<br/><em>for Claude Code.</em></h2>
+        <p class="section-subtitle">Next.js API routes. All authenticated via Supabase JWT. Workspace context inferred from token — no need to pass workspace_id explicitly.</p>
+      </div>
+    </div>
+
+    <h3 style="font-family:var(--sans);font-weight:700;font-size:13px;color:var(--text-dim);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:16px;">Tickets</h3>
+    <div class="api-block fade-in"><div class="api-header"><span class="method GET">GET</span><span class="api-path">/api/tickets</span><span class="api-desc">List tickets with filters</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method GET">GET</span><span class="api-path">/api/tickets/[id]</span><span class="api-desc">Single ticket with messages + customer context</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/tickets</span><span class="api-desc">Create ticket (used by inbound email/chat webhooks)</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method PATCH">PATCH</span><span class="api-path">/api/tickets/[id]</span><span class="api-desc">Update status, assignment, tags</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/tickets/[id]/messages</span><span class="api-desc">Add message (internal or external)</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/tickets/[id]/ai-draft</span><span class="api-desc">Trigger AI response generation + confidence score</span></div></div>
+
+    <h3 style="font-family:var(--sans);font-weight:700;font-size:13px;color:var(--text-dim);letter-spacing:0.1em;text-transform:uppercase;margin:28px 0 16px;">Customers</h3>
+    <div class="api-block fade-in"><div class="api-header"><span class="method GET">GET</span><span class="api-path">/api/customers</span><span class="api-desc">List with retention score sorting and filtering</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method GET">GET</span><span class="api-path">/api/customers/[id]</span><span class="api-desc">Full customer profile with timeline events</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/customers/resolve</span><span class="api-desc">Resolve email → customer record (create if new)</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/customers/[id]/retention-score</span><span class="api-desc">Recalculate retention score</span></div></div>
+
+    <h3 style="font-family:var(--sans);font-weight:700;font-size:13px;color:var(--text-dim);letter-spacing:0.1em;text-transform:uppercase;margin:28px 0 16px;">Webhooks — Inbound</h3>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/webhooks/email</span><span class="api-desc">Inbound email from Resend/SendGrid. Creates ticket.</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/webhooks/stripe</span><span class="api-desc">Stripe billing events. Triggers subscription rules.</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/webhooks/shopify</span><span class="api-desc">Shopify order/fulfillment events.</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/webhooks/meta</span><span class="api-desc">Meta Graph API webhook (comments + DMs).</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/track</span><span class="api-desc">Behavioral event ingestion from widget + portal SDK.</span></div></div>
+
+    <h3 style="font-family:var(--sans);font-weight:700;font-size:13px;color:var(--text-dim);letter-spacing:0.1em;text-transform:uppercase;margin:28px 0 16px;">Subscriptions</h3>
+    <div class="api-block fade-in"><div class="api-header"><span class="method GET">GET</span><span class="api-path">/api/subscriptions/[customerId]</span><span class="api-desc">Customer's active subscriptions</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/subscriptions/[id]/pause</span><span class="api-desc">Pause subscription for N weeks</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/subscriptions/[id]/skip</span><span class="api-desc">Skip next order</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method POST">POST</span><span class="api-path">/api/subscriptions/[id]/swap</span><span class="api-desc">Swap product variant</span></div></div>
+    <div class="api-block fade-in"><div class="api-header"><span class="method DELETE">DELETE</span><span class="api-path">/api/subscriptions/[id]</span><span class="api-desc">Cancel subscription (requires reason)</span></div></div>
+  </section>
+
+  <!-- 11 BUILD SEQUENCE -->
+  <section class="content-section" id="sequence">
+    <div class="section-header fade-in">
+      <div class="section-num">11</div>
+      <div class="section-title-wrap">
+        <div class="section-tag">Build Sequence</div>
+        <h2 class="section-title">Nine phases.<br/><em>Ship in order.</em></h2>
+        <p class="section-subtitle">Each phase delivers standalone value. Never block phase N+1 on polish from phase N.</p>
+      </div>
+    </div>
+
+    <div class="sequence fade-in">
+      <div class="seq-item">
+        <div class="seq-num active">1</div>
+        <div class="seq-content">
+          <div class="seq-phase">Foundation</div>
+          <div class="seq-title">Workspace, Auth & Multi-Tenancy</div>
+          <div class="seq-desc">Supabase project setup. Auth with magic link + email/password. Workspace model. Invite flow. Role system (Owner, Admin, Agent, Social, Marketing, Read-Only). RLS policies on every table. This phase has no user-visible features beyond login — but everything else builds on top of it. Get it right.</div>
+          <div class="seq-tags">
+            <span class="tag">Supabase Auth</span>
+            <span class="tag">RLS Policies</span>
+            <span class="tag">Next.js App Router</span>
+            <span class="tag">Vercel Deploy</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="seq-item">
+        <div class="seq-num active">2</div>
+        <div class="seq-content">
+          <div class="seq-phase">Integration</div>
+          <div class="seq-title">Shopify OAuth & Customer Identity</div>
+          <div class="seq-desc">Shopify OAuth flow. Customer sync (pull all customers + orders on connect). Identity resolution function. Retention Score calculation (initial version — weighted formula). Customer profile page with timeline. This is the database that powers everything else.</div>
+          <div class="seq-tags">
+            <span class="tag">Shopify OAuth</span>
+            <span class="tag">Customer Sync</span>
+            <span class="tag green">Retention Score v1</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="seq-item">
+        <div class="seq-num active">3</div>
+        <div class="seq-content">
+          <div class="seq-phase">Core Product</div>
+          <div class="seq-title">Basic Ticketing (No AI)</div>
+          <div class="seq-desc">Email ingestion via Resend Inbound. Manual ticket creation. Internal and external messages. Assignment to agents. Status workflow. CSAT survey on close. Basic ticket queue UI. This is usable as a Gorgias replacement from day one, without AI.</div>
+          <div class="seq-tags">
+            <span class="tag">Resend Inbound</span>
+            <span class="tag">Supabase Realtime</span>
+            <span class="tag">CSAT Flow</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="seq-item">
+        <div class="seq-num active">4</div>
+        <div class="seq-content">
+          <div class="seq-phase">AI Layer</div>
+          <div class="seq-title">AI Agent + Knowledge Base</div>
+          <div class="seq-desc">Knowledge base admin UI. Document chunking and embedding pipeline (pgvector). Anthropic API integration. Confidence scoring. Three-tier routing (auto-resolve / draft / human). AI draft UI with edit-and-send. Nightly gap analysis cron job. This is the Siena AI replacement.</div>
+          <div class="seq-tags">
+            <span class="tag green">Anthropic API</span>
+            <span class="tag green">pgvector RAG</span>
+            <span class="tag">Inngest Cron</span>
+            <span class="tag">Confidence Scoring</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="seq-item">
+        <div class="seq-num">5</div>
+        <div class="seq-content">
+          <div class="seq-phase">Channel</div>
+          <div class="seq-title">Live Chat Widget</div>
+          <div class="seq-desc">Embeddable JS widget compiled as standalone bundle. WebSocket connection via Supabase Realtime. Storefront session token capture for identity resolution. Widget admin (colors, greeting message, operating hours). Install instructions for Shopify theme. AI agent handles chat tickets the same as email.</div>
+          <div class="seq-tags">
+            <span class="tag">Supabase Realtime</span>
+            <span class="tag">Shopify Storefront</span>
+            <span class="tag orange">Standalone Bundle</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="seq-item">
+        <div class="seq-num">6</div>
+        <div class="seq-content">
+          <div class="seq-phase">Social</div>
+          <div class="seq-title">Meta Social Command Center</div>
+          <div class="seq-desc">Meta app + Graph API integration. Organic comment queue. Ad comment queue with ad context (destination URL, creative). Reply/hide/delete/block actions. Moderation rules engine. DMs as tickets. Submit Meta app for review at the START of Phase 5 — their review process takes weeks. Do not wait.</div>
+          <div class="seq-tags">
+            <span class="tag">Meta Graph API</span>
+            <span class="tag orange">Start app review early</span>
+            <span class="tag">Moderation Rules</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="seq-item">
+        <div class="seq-num">7</div>
+        <div class="seq-content">
+          <div class="seq-phase">Subscriptions</div>
+          <div class="seq-title">Native Subscription Manager</div>
+          <div class="seq-desc">Stripe Billing integration. Subscription CRUD. Customer portal (pause/skip/swap/cancel with save offers). Webhook processing for all Stripe events. Dunning logic. Parallel run with Appstle — new subs on ShopCX, migrate existing in cohorts. Appstle fully deprecated at end of phase.</div>
+          <div class="seq-tags">
+            <span class="tag">Stripe Billing</span>
+            <span class="tag purple">Appstle Migration</span>
+            <span class="tag">Dunning Logic</span>
+            <span class="tag">Save Offers</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="seq-item">
+        <div class="seq-num">8</div>
+        <div class="seq-content">
+          <div class="seq-phase">Behavioral</div>
+          <div class="seq-title">Behavioral Tracking SDK</div>
+          <div class="seq-desc">JavaScript tracking SDK for Shopify storefront and subscription portal. Event ingestion API. Customer timeline view in ticket sidebar. Retention Score updated in real time based on behavioral signals. At-risk customer dashboard (Retention Score below 40).</div>
+          <div class="seq-tags">
+            <span class="tag">JS SDK</span>
+            <span class="tag">Customer Timeline</span>
+            <span class="tag green">Retention Score v2</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="seq-item">
+        <div class="seq-num">9</div>
+        <div class="seq-content">
+          <div class="seq-phase">Marketing</div>
+          <div class="seq-title">Email & SMS Marketing</div>
+          <div class="seq-desc">Resend for email (transactional + marketing). Twilio for SMS. React Email templates. Segment builder (any combination of customer, subscription, behavioral, and support attributes). Flow builder (event-triggered automations). Campaign builder (one-time broadcasts). Klaviyo fully deprecated at end of phase.</div>
+          <div class="seq-tags">
+            <span class="tag">Resend</span>
+            <span class="tag">Twilio SMS</span>
+            <span class="tag">React Email</span>
+            <span class="tag purple">Klaviyo Migration</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 12 RISKS -->
+  <section class="content-section" id="risks">
+    <div class="section-header fade-in">
+      <div class="section-num">12</div>
+      <div class="section-title-wrap">
+        <div class="section-tag">Risks & Mitigations</div>
+        <h2 class="section-title">What can go wrong<br/><em>and how to handle it.</em></h2>
+        <p class="section-subtitle">Known risks across technical, operational, and external dependency categories.</p>
+      </div>
+    </div>
+
+    <div class="risk-row header fade-in">
+      <span>Risk</span>
+      <span>Likelihood</span>
+      <span>Impact</span>
+      <span>Mitigation</span>
+    </div>
+
+    <div class="risk-row fade-in">
+      <div>
+        <div class="risk-name">RLS misconfiguration</div>
+        <div class="risk-note">Tenant data leaking across workspaces</div>
+      </div>
+      <span><span class="pill med">Med</span></span>
+      <span><span class="pill high">High</span></span>
+      <div class="risk-note">Write RLS policy tests as part of CI/CD. Use Supabase's built-in RLS testing tools. Audit all new tables before merging. Never trust application-level filtering alone.</div>
+    </div>
+
+    <div class="risk-row fade-in">
+      <div>
+        <div class="risk-name">Meta App Review delay</div>
+        <div class="risk-note">Social feature blocked for weeks</div>
+      </div>
+      <span><span class="pill high">High</span></span>
+      <span><span class="pill med">Med</span></span>
+      <div class="risk-note">Submit the Meta app for review at the START of Phase 5, not when Phase 6 begins. The review can take 2–4 weeks. Social feature is Phase 6 — 5 phases of runway if submitted early.</div>
+    </div>
+
+    <div class="risk-row fade-in">
+      <div>
+        <div class="risk-name">Appstle subscription migration</div>
+        <div class="risk-note">Customer double-billed or subscription lost</div>
+      </div>
+      <span><span class="pill med">Med</span></span>
+      <span><span class="pill high">High</span></span>
+      <div class="risk-note">Never cancel Appstle subscriptions before Stripe has the payment method. Migrate in small cohorts (50 customers). Run parallel for 60 days. Build a rollback path before migrating anyone.</div>
+    </div>
+
+    <div class="risk-row fade-in">
+      <div>
+        <div class="risk-name">AI hallucination in customer responses</div>
+        <div class="risk-note">Incorrect info sent to customers at 90%+ confidence</div>
+      </div>
+      <span><span class="pill med">Med</span></span>
+      <span><span class="pill high">High</span></span>
+      <div class="risk-note">Ground all AI responses in retrieved knowledge base chunks — never answer from model memory alone. Start confidence threshold at 95%, not 90%. Log every AI-sent response. Review weekly in early operation. Lower threshold gradually as accuracy is validated.</div>
+    </div>
+
+    <div class="risk-row fade-in">
+      <div>
+        <div class="risk-name">Email deliverability degradation</div>
+        <div class="risk-note">Marketing emails landing in spam post-Klaviyo</div>
+      </div>
+      <span><span class="pill med">Med</span></span>
+      <span><span class="pill high">High</span></span>
+      <div class="risk-note">This is why Phase 9 is last. Warm the sending domain gradually. Use Resend's dedicated IP if volume warrants. Maintain proper DKIM, SPF, DMARC. Monitor bounce rates daily in the first 30 days of migration. Keep Klaviyo running in parallel for the first 30 days.</div>
+    </div>
+
+    <div class="risk-row fade-in">
+      <div>
+        <div class="risk-name">AI token cost overrun</div>
+        <div class="risk-note">Anthropic API costs exceed savings</div>
+      </div>
+      <span><span class="pill low">Low</span></span>
+      <span><span class="pill med">Med</span></span>
+      <div class="risk-note">Track token usage per ticket from day one. Set workspace-level monthly limits. Use Claude Haiku for classification/triage, Claude Sonnet for draft generation. Cache RAG results for identical queries within a time window.</div>
+    </div>
+
+    <div class="risk-row fade-in" style="border-bottom:none;">
+      <div>
+        <div class="risk-name">Shopify API rate limits</div>
+        <div class="risk-note">Bulk operations throttled during initial sync</div>
+      </div>
+      <span><span class="pill low">Low</span></span>
+      <span><span class="pill low">Low</span></span>
+      <div class="risk-note">Use Shopify's bulk operations GraphQL API for initial customer sync. Implement exponential backoff on all Shopify API calls. The initial sync is a one-time event — throttling is acceptable if it takes a few hours.</div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="doc-footer">
+    <div class="footer-brand">Shop<span>CX</span> — Retention OS</div>
+    <div class="footer-meta">
+      Version 1.0 · March 2026<br/>
+      Superfoods Company · Confidential<br/>
+      Internal first → SaaS later<br/>
+      For use with Claude Code
+    </div>
+  </footer>
+
+</main>
+
+<script>
+  // Fade-in on scroll
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+      }
+    });
+  }, { threshold: 0.08, rootMargin: '0px 0px -40px 0px' });
+
+  document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+
+  // Active nav link on scroll
+  const sections = document.querySelectorAll('[id]');
+  const navLinks = document.querySelectorAll('.nav-link');
+
+  const scrollObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const id = entry.target.getAttribute('id');
+        navLinks.forEach(link => {
+          link.classList.remove('active');
+          if (link.getAttribute('href') === `#${id}`) {
+            link.classList.add('active');
+          }
+        });
+      }
+    });
+  }, { threshold: 0.3 });
+
+  sections.forEach(section => scrollObserver.observe(section));
+</script>
+
+</body>
+</html>

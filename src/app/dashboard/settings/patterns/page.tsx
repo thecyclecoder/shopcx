@@ -135,23 +135,6 @@ export default function PatternsPage() {
         <div className="flex gap-2">
           <button
             onClick={async () => {
-              if (!confirm("This will analyze Gorgias ticket data with Claude Sonnet to expand pattern phrases and discover new categories. Continue?")) return;
-              const res = await fetch(`/api/workspaces/${workspace.id}/patterns/bootstrap`, { method: "POST" });
-              if (res.ok) {
-                const data = await res.json();
-                alert(`Bootstrap complete!\n${data.updated_categories} patterns expanded\n${data.new_categories} new categories created\n\nNew: ${(data.new_category_names || []).join(", ") || "none"}`);
-                window.location.reload();
-              } else {
-                const err = await res.json();
-                alert(err.error || "Bootstrap failed");
-              }
-            }}
-            className="rounded-md border border-violet-300 px-4 py-2 text-sm font-medium text-violet-600 hover:bg-violet-50 dark:border-violet-700 dark:text-violet-400"
-          >
-            Bootstrap from Gorgias (AI)
-          </button>
-          <button
-            onClick={async () => {
               const res = await fetch(`/api/workspaces/${workspace.id}/patterns/generate-embeddings`, { method: "POST" });
               if (res.ok) {
                 const data = await res.json();
