@@ -38,7 +38,15 @@ export async function GET(request: Request) {
   if (status && status !== "all") query = query.eq("status", status);
   if (channel && channel !== "all") query = query.eq("channel", channel);
   if (assignedTo) query = query.eq("assigned_to", assignedTo);
-  if (tag) query = query.contains("tags", [tag]);
+  if (tag) {
+    const tagList = tag.split(",").map(t => t.trim()).filter(Boolean);
+    if (tagList.length === 1) {
+      query = query.contains("tags", tagList);
+    } else if (tagList.length > 1) {
+      // Ticket must have ALL selected tags
+      query = query.contains("tags", tagList);
+    }
+  }
   if (escalated === "true") query = query.not("escalated_to", "is", null);
   const escalationMine = searchParams.get("escalation_mine");
   if (escalationMine === "true" && user) {

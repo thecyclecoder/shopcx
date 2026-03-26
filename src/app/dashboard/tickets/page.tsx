@@ -69,7 +69,7 @@ export default function TicketsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [channelFilter, setChannelFilter] = useState("all");
   const [assigneeFilter, setAssigneeFilter] = useState("");
-  const [tagFilter, setTagFilter] = useState("");
+  const [tagFilter, setTagFilter] = useState<string[]>([]);
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [offset, setOffset] = useState(0);
   const [viewName, setViewName] = useState("");
@@ -107,7 +107,7 @@ export default function TicketsPage() {
         setStatusFilter("all");
         setChannelFilter("all");
         setAssigneeFilter("");
-        setTagFilter("");
+        setTagFilter([]);
         setSearch("");
         setOffset(0);
       }
@@ -125,7 +125,7 @@ export default function TicketsPage() {
           setStatusFilter(f.status || "all");
           setChannelFilter(f.channel || "all");
           setAssigneeFilter(f.assigned_to || "");
-          setTagFilter(f.tag || "");
+          setTagFilter(f.tag ? f.tag.split(",").map((t: string) => t.trim()) : []);
           setSearch(f.search || "");
           setOffset(0);
           setActiveViewName(view.name);
@@ -158,7 +158,7 @@ export default function TicketsPage() {
       if (statusFilter !== "all") params.set("status", statusFilter);
       if (channelFilter !== "all") params.set("channel", channelFilter);
       if (assigneeFilter) params.set("assigned_to", assigneeFilter);
-      if (tagFilter) params.set("tag", tagFilter);
+      if (tagFilter.length > 0) params.set("tag", tagFilter.join(","));
       if (search) params.set("search", search);
       if (urlEscalationMine) params.set("escalation_mine", "true");
 
@@ -338,17 +338,32 @@ export default function TicketsPage() {
         </div>
         {availableTags.length > 0 && (
           <div>
-            <label className="block text-xs font-medium text-zinc-500">Tag</label>
-            <select
-              value={tagFilter}
-              onChange={(e) => { setTagFilter(e.target.value); setOffset(0); clearView(); }}
-              className="mt-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-            >
-              <option value="">All Tags</option>
-              {availableTags.map((t) => (
-                <option key={t} value={t}>{t}</option>
+            <label className="block text-xs font-medium text-zinc-500">Tags</label>
+            <div className="mt-1 flex flex-wrap items-center gap-1 rounded-md border border-zinc-300 bg-white px-2 py-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+              {tagFilter.map(t => (
+                <span key={t} className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+                  {t}
+                  <button onClick={() => { setTagFilter(tagFilter.filter(x => x !== t)); setOffset(0); clearView(); }} className="text-indigo-400 hover:text-indigo-600">x</button>
+                </span>
               ))}
-            </select>
+              <select
+                value=""
+                onChange={(e) => {
+                  if (e.target.value && !tagFilter.includes(e.target.value)) {
+                    setTagFilter([...tagFilter, e.target.value]);
+                    setOffset(0);
+                    clearView();
+                  }
+                  e.target.value = "";
+                }}
+                className="min-w-[80px] flex-1 border-none bg-transparent text-sm text-zinc-500 outline-none dark:text-zinc-400"
+              >
+                <option value="">{tagFilter.length === 0 ? "All tags" : "+ add"}</option>
+                {availableTags.filter(t => !tagFilter.includes(t)).map((t) => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+              </select>
+            </div>
           </div>
         )}
         <form onSubmit={handleSearch} className="flex-1">
@@ -375,7 +390,7 @@ export default function TicketsPage() {
             View: {activeViewName}
           </span>
         )}
-        {(statusFilter !== "all" || channelFilter !== "all" || assigneeFilter || tagFilter || search) && !viewId && (
+        {(statusFilter !== "all" || channelFilter !== "all" || assigneeFilter || tagFilter.length > 0 || search) && !viewId && (
           <div className="flex items-center gap-1.5">
             {savingView ? (
               <form onSubmit={async (e) => {
@@ -385,7 +400,7 @@ export default function TicketsPage() {
                 if (statusFilter !== "all") filters.status = statusFilter;
                 if (channelFilter !== "all") filters.channel = channelFilter;
                 if (assigneeFilter) filters.assigned_to = assigneeFilter;
-                if (tagFilter) filters.tag = tagFilter;
+                if (tagFilter.length > 0) filters.tag = tagFilter.join(",");
                 if (search) filters.search = search;
                 const res = await fetch(`/api/workspaces/${workspace.id}/ticket-views`, {
                   method: "POST",

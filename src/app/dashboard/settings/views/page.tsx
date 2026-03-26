@@ -231,21 +231,39 @@ export default function ViewsPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-[10px] text-zinc-400">Tag</label>
-                  <select
-                    value={editing.filters.tag || ""}
-                    onChange={(e) => {
-                      const f = { ...editing.filters };
-                      if (e.target.value) f.tag = e.target.value; else delete f.tag;
-                      setEditing({ ...editing, filters: f });
-                    }}
-                    className="mt-0.5 block w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                  >
-                    <option value="">Any</option>
-                    {tags.map(t => (
-                      <option key={t} value={t}>{t}</option>
+                  <label className="block text-[10px] text-zinc-400">Tags</label>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-1 rounded border border-zinc-300 bg-white px-1.5 py-1 dark:border-zinc-700 dark:bg-zinc-800">
+                    {(editing.filters.tag || "").split(",").filter(Boolean).map(t => (
+                      <span key={t} className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1 py-0.5 text-[9px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+                        {t}
+                        <button type="button" onClick={() => {
+                          const current = (editing.filters.tag || "").split(",").filter(Boolean);
+                          const updated = current.filter(x => x !== t);
+                          const f = { ...editing.filters };
+                          if (updated.length > 0) f.tag = updated.join(","); else delete f.tag;
+                          setEditing({ ...editing, filters: f });
+                        }} className="text-indigo-400 hover:text-indigo-600">x</button>
+                      </span>
                     ))}
-                  </select>
+                    <select
+                      value=""
+                      onChange={(e) => {
+                        if (!e.target.value) return;
+                        const current = (editing.filters.tag || "").split(",").filter(Boolean);
+                        if (!current.includes(e.target.value)) {
+                          const f = { ...editing.filters, tag: [...current, e.target.value].join(",") };
+                          setEditing({ ...editing, filters: f });
+                        }
+                        e.target.value = "";
+                      }}
+                      className="min-w-[60px] flex-1 border-none bg-transparent text-[10px] text-zinc-500 outline-none"
+                    >
+                      <option value="">{(editing.filters.tag || "").split(",").filter(Boolean).length === 0 ? "Any" : "+"}</option>
+                      {tags.filter(t => !(editing.filters.tag || "").split(",").includes(t)).map(t => (
+                        <option key={t} value={t}>{t}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <div className="col-span-2">
                   <label className="block text-[10px] text-zinc-400">Search (subject)</label>
