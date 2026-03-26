@@ -160,6 +160,7 @@ export async function PATCH(
   if ("assigned_to" in body) updates.assigned_to = body.assigned_to || null;
   if ("tags" in body) updates.tags = body.tags;
   if ("csat_score" in body) updates.csat_score = body.csat_score;
+  if ("auto_reply_at" in body) updates.auto_reply_at = body.auto_reply_at;
   if ("escalated_to" in body) {
     updates.escalated_to = body.escalated_to || null;
     updates.escalated_at = body.escalated_to ? new Date().toISOString() : null;

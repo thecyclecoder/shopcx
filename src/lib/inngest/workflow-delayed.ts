@@ -36,11 +36,22 @@ export const workflowDelayed = inngest.createFunction(
       await step.sleep("response-delay", `${delaySeconds}s`);
     }
 
+    // Check if auto-reply was cancelled by an agent during the delay
+    const cancelled = await step.run("check-cancelled", async () => {
+      const admin = createAdminClient();
+      const { data: ticket } = await admin.from("tickets").select("auto_reply_at").eq("id", ticket_id).single();
+      return !ticket?.auto_reply_at;
+    });
+
+    if (cancelled) {
+      return { delayed: delaySeconds, channel, cancelled: true };
+    }
+
     // Execute the workflow
     await step.run("execute-workflow", async () => {
       await executeWorkflow(workspace_id, ticket_id, trigger_tag);
     });
 
-    return { delayed: delaySeconds, channel };
+    return { delayed: delaySeconds, channel, cancelled: false };
   }
 );
