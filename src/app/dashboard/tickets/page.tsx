@@ -13,9 +13,11 @@ interface TicketRow {
   assigned_name: string | null;
   escalated_to: string | null;
   auto_reply_at: string | null;
+  last_customer_reply_at: string | null;
   customer_email: string | null;
   customer_name: string | null;
   tags: string[];
+  created_at: string;
   updated_at: string;
 }
 
@@ -457,7 +459,8 @@ export default function TicketsPage() {
               <th className="px-4 py-3">Customer</th>
               <th className="px-4 py-3">Channel</th>
               <th className="px-4 py-3">Assigned To</th>
-              <th className="px-4 py-3">Updated</th>
+              <th className="px-4 py-3">Created</th>
+              <th className="px-4 py-3">Last Reply</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
@@ -521,7 +524,10 @@ export default function TicketsPage() {
                     {t.assigned_name || "--"}
                   </td>
                   <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500">
-                    {formatDate(t.updated_at)}
+                    {formatDate(t.created_at)}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500">
+                    {t.last_customer_reply_at ? formatDate(t.last_customer_reply_at) : "--"}
                   </td>
                 </tr>
               ))

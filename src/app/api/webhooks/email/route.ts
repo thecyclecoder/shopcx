@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getResendClient, sendTicketReply } from "@/lib/email";
+import { stripQuotedReply } from "@/lib/email-utils";
 import { decrypt } from "@/lib/crypto";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
@@ -183,13 +184,16 @@ export async function POST(request: Request) {
   }
 
   if (ticketId) {
+    // Strip quoted reply content (the previous message) from the body
+    const cleanBody = stripQuotedReply(messageBody) || messageBody;
+
     // Add message to existing ticket
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId,
       direction: "inbound",
       visibility: "external",
       author_type: "customer",
-      body: messageBody,
+      body: cleanBody,
       email_message_id: messageId,
     });
 
@@ -203,14 +207,27 @@ export async function POST(request: Request) {
     const hasSmartTag = (ticket?.tags as string[] || []).some(t => t.startsWith("smart:"));
     const isPositiveConfirmation = hasSmartTag && isShortPositiveReply(messageBody);
 
-    if (isPositiveConfirmation && ticket && (ticket.status === "pending" || ticket.status === "closed")) {
-      // Add positive-confirmation tag
+    // Always reopen closed/pending tickets on customer reply + track last reply
+    if (ticket && (ticket.status === "pending" || ticket.status === "closed")) {
+      await admin.from("tickets").update({
+        status: "open",
+        last_customer_reply_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq("id", ticketId);
+    } else {
+      await admin.from("tickets").update({
+        last_customer_reply_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq("id", ticketId);
+    }
+
+    // If positive confirmation on a smart-tagged ticket, queue auto-close
+    if (isPositiveConfirmation && ticket) {
       const currentTags = (ticket.tags as string[]) || [];
       if (!currentTags.includes("smart:positive-confirmation")) {
         await admin.from("tickets").update({ tags: [...currentTags, "smart:positive-confirmation"] }).eq("id", ticketId);
       }
 
-      // Set auto_reply_at and fire delayed auto-close via Inngest
       const { data: wsDelay } = await admin.from("workspaces").select("response_delays, auto_close_reply").eq("id", workspaceId).single();
       const delays = (wsDelay?.response_delays || { email: 60 }) as Record<string, number>;
       const delaySec = delays.email || 60;
@@ -222,17 +239,6 @@ export async function POST(request: Request) {
         name: "workflow/positive-close",
         data: { workspace_id: workspaceId, ticket_id: ticketId, channel: "email" },
       });
-    } else if (ticket && (ticket.status === "pending" || ticket.status === "closed")) {
-      // Normal reopen
-      await admin
-        .from("tickets")
-        .update({ status: "open", updated_at: new Date().toISOString() })
-        .eq("id", ticketId);
-    } else {
-      await admin
-        .from("tickets")
-        .update({ updated_at: new Date().toISOString() })
-        .eq("id", ticketId);
     }
 
     // Evaluate rules for message received on existing ticket
@@ -287,6 +293,7 @@ export async function POST(request: Request) {
         subject: subject || "(No subject)",
         email_message_id: messageId,
         received_at_email: originalTo || null,
+        last_customer_reply_at: new Date().toISOString(),
       })
       .select("id")
       .single();

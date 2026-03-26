@@ -19,6 +19,7 @@ export interface Ticket {
   escalation_reason: string | null;
   auto_reply_at: string | null;
   pending_auto_reply: string | null;
+  last_customer_reply_at: string | null;
   first_response_at: string | null;
   resolved_at: string | null;
   csat_score: number | null;
