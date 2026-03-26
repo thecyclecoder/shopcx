@@ -13,6 +13,7 @@ import {
 import { workflowDelayed, positiveCloseDelayed } from "@/lib/inngest/workflow-delayed";
 import { kbEmbedDocument } from "@/lib/inngest/kb-embed";
 import { aiDraftTicket, aiTriggerWorkflow } from "@/lib/inngest/ai-draft";
+import { journeySessionCompleted, journeySessionAbandoned } from "@/lib/inngest/journey-outcomes";
 
 export const maxDuration = 300;
 
@@ -33,5 +34,7 @@ export const { GET, POST, PUT } = serve({
     kbEmbedDocument,
     aiDraftTicket,
     aiTriggerWorkflow,
+    journeySessionCompleted,
+    journeySessionAbandoned,
   ],
 });

@@ -98,8 +98,7 @@ export default function AISettingsPage() {
   // Macros state
   const [macros, setMacros] = useState<Macro[]>([]);
   const [editingMacro, setEditingMacro] = useState<Partial<Macro> | null>(null);
-  const [_importing] = useState(false);
-  void _importing;
+  const [macroSearchQuery, setMacroSearchQuery] = useState("");
 
   // Personalities state
   const [personalities, setPersonalities] = useState<Personality[]>([]);
@@ -416,7 +415,9 @@ export default function AISettingsPage() {
         {tab === "macros" && (
           <div>
             <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Macros ({macros.length})</h2>
+              <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+                Macros ({macroSearchQuery.trim() ? `${macros.filter((m) => { const q = macroSearchQuery.toLowerCase(); return m.name.toLowerCase().includes(q) || (m.body_text || "").toLowerCase().includes(q); }).length}/` : ""}{macros.length})
+              </h2>
               <div className="flex gap-2">
                 <button
                   onClick={() => setEditingMacro({ name: "", body_text: "", category: "general", tags: [] })}
@@ -469,12 +470,27 @@ export default function AISettingsPage() {
               </div>
             )}
 
+            {/* Macro search */}
+            <div className="mt-4">
+              <input
+                type="text"
+                value={macroSearchQuery}
+                onChange={(e) => setMacroSearchQuery(e.target.value)}
+                placeholder="Search macros by name or content..."
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              />
+            </div>
+
             {/* Macro list */}
-            <div className="mt-4 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="mt-3 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
               {macros.length === 0 && (
                 <p className="p-4 text-sm text-zinc-400">No macros yet. Add macros or import from Gorgias.</p>
               )}
-              {macros.map((m) => (
+              {macros.filter((m) => {
+                if (!macroSearchQuery.trim()) return true;
+                const q = macroSearchQuery.toLowerCase();
+                return m.name.toLowerCase().includes(q) || (m.body_text || "").toLowerCase().includes(q) || (m.category || "").toLowerCase().includes(q);
+              }).map((m) => (
                 <div key={m.id} className="flex items-center justify-between p-4">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
