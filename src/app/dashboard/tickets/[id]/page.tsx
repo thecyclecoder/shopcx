@@ -437,8 +437,8 @@ export default function TicketDetailPage() {
 
   return (
     <div className="flex h-full flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
-      {/* Left column - conversation */}
-      <div className="flex min-h-0 flex-1 flex-col">
+      {/* Left column - conversation (order-1 on mobile = always first) */}
+      <div className="order-1 flex min-h-0 flex-1 flex-col md:order-none">
         <div className="min-h-0 flex-1 p-6 md:overflow-y-auto">
           {/* Back button */}
           <button
@@ -1226,8 +1226,8 @@ export default function TicketDetailPage() {
         </div>
       </div>
 
-      {/* Right column - details */}
-      <div className="w-full shrink-0 overflow-y-auto border-t border-zinc-200 bg-zinc-50 p-6 md:w-80 md:border-l md:border-t-0 dark:border-zinc-800 dark:bg-zinc-950">
+      {/* Right column - details (order-2 on mobile = below conversation) */}
+      <div className="order-2 w-full shrink-0 overflow-y-auto border-t border-zinc-200 bg-zinc-50 p-6 md:order-none md:w-80 md:border-l md:border-t-0 dark:border-zinc-800 dark:bg-zinc-950">
         {/* Ticket details card */}
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
           <h3 className="text-sm font-medium uppercase tracking-wider text-zinc-500">Ticket Details</h3>
