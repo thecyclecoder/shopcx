@@ -429,42 +429,19 @@ export default function AISettingsPage() {
             </div>
 
             {/* Macro editor */}
-            {editingMacro && (
+            {/* New macro form (only when creating new, not editing existing) */}
+            {editingMacro && !editingMacro.id && (
               <div className="mt-4 rounded-lg border border-violet-200 bg-violet-50 p-4 dark:border-violet-800 dark:bg-violet-950">
-                <h3 className="text-sm font-medium text-violet-900 dark:text-violet-100">
-                  {editingMacro.id ? "Edit Macro" : "New Macro"}
-                </h3>
+                <h3 className="text-sm font-medium text-violet-900 dark:text-violet-100">New Macro</h3>
                 <div className="mt-3 space-y-3">
-                  <input
-                    type="text"
-                    value={editingMacro.name || ""}
-                    onChange={(e) => setEditingMacro({ ...editingMacro, name: e.target.value })}
-                    placeholder="Macro name"
-                    className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                  />
-                  <select
-                    value={editingMacro.category || "general"}
-                    onChange={(e) => setEditingMacro({ ...editingMacro, category: e.target.value })}
-                    className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                  >
-                    {[...CATEGORIES, "subscription"].map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
+                  <input type="text" value={editingMacro.name || ""} onChange={(e) => setEditingMacro({ ...editingMacro, name: e.target.value })} placeholder="Macro name" className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+                  <select value={editingMacro.category || "general"} onChange={(e) => setEditingMacro({ ...editingMacro, category: e.target.value })} className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
+                    {[...CATEGORIES, "subscription"].map((c) => (<option key={c} value={c}>{c}</option>))}
                   </select>
-                  <textarea
-                    value={editingMacro.body_text || ""}
-                    onChange={(e) => setEditingMacro({ ...editingMacro, body_text: e.target.value })}
-                    placeholder="Macro response text... Use {{customer.first_name}}, {{order.order_number}}, etc."
-                    rows={6}
-                    className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                  />
+                  <textarea value={editingMacro.body_text || ""} onChange={(e) => setEditingMacro({ ...editingMacro, body_text: e.target.value })} placeholder="Macro response text..." rows={6} className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
                   <div className="flex gap-2">
-                    <button onClick={saveMacro} disabled={saving} className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50">
-                      {saving ? "Saving..." : "Save"}
-                    </button>
-                    <button onClick={() => setEditingMacro(null)} className="rounded-md border border-zinc-300 px-4 py-2 text-sm text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800">
-                      Cancel
-                    </button>
+                    <button onClick={saveMacro} disabled={saving} className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50">{saving ? "Saving..." : "Save"}</button>
+                    <button onClick={() => setEditingMacro(null)} className="rounded-md border border-zinc-300 px-4 py-2 text-sm text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400">Cancel</button>
                   </div>
                 </div>
               </div>
@@ -491,26 +468,46 @@ export default function AISettingsPage() {
                 const q = macroSearchQuery.toLowerCase();
                 return m.name.toLowerCase().includes(q) || (m.body_text || "").toLowerCase().includes(q) || (m.category || "").toLowerCase().includes(q);
               }).map((m) => (
-                <div key={m.id} className="flex items-center justify-between p-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{m.name}</span>
-                      {m.category && (
-                        <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${CATEGORY_COLORS[m.category] || CATEGORY_COLORS.general}`}>
-                          {m.category}
-                        </span>
-                      )}
-                      {m.gorgias_id && (
-                        <span className="text-sm text-zinc-400">Gorgias #{m.gorgias_id}</span>
-                      )}
+                <div key={m.id}>
+                  <div className="flex items-center justify-between p-4">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{m.name}</span>
+                        {m.category && (
+                          <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${CATEGORY_COLORS[m.category] || CATEGORY_COLORS.general}`}>
+                            {m.category}
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-1 truncate text-sm text-zinc-500">{m.body_text.slice(0, 120)}...</p>
                     </div>
-                    <p className="mt-1 truncate text-sm text-zinc-500">{m.body_text.slice(0, 120)}...</p>
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm text-zinc-400">{m.usage_count} uses</span>
+                      <button
+                        onClick={() => setEditingMacro(editingMacro?.id === m.id ? null : m)}
+                        className="text-sm text-indigo-600 hover:underline dark:text-indigo-400"
+                      >
+                        {editingMacro?.id === m.id ? "Close" : "Edit"}
+                      </button>
+                      <button onClick={() => deleteMacro(m.id)} className="text-sm text-red-500 hover:underline">Delete</button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-sm text-zinc-400">{m.usage_count} uses</span>
-                    <button onClick={() => setEditingMacro(m)} className="text-sm text-indigo-600 hover:underline dark:text-indigo-400">Edit</button>
-                    <button onClick={() => deleteMacro(m.id)} className="text-sm text-red-500 hover:underline">Delete</button>
-                  </div>
+                  {/* Inline edit form */}
+                  {editingMacro?.id === m.id && (
+                    <div className="border-t border-violet-200 bg-violet-50 p-4 dark:border-violet-800 dark:bg-violet-950">
+                      <div className="space-y-3">
+                        <input type="text" value={editingMacro.name || ""} onChange={(e) => setEditingMacro({ ...editingMacro, name: e.target.value })} placeholder="Macro name" className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+                        <select value={editingMacro.category || "general"} onChange={(e) => setEditingMacro({ ...editingMacro, category: e.target.value })} className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
+                          {[...CATEGORIES, "subscription"].map((c) => (<option key={c} value={c}>{c}</option>))}
+                        </select>
+                        <textarea value={editingMacro.body_text || ""} onChange={(e) => setEditingMacro({ ...editingMacro, body_text: e.target.value })} placeholder="Macro response text..." rows={6} className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+                        <div className="flex gap-2">
+                          <button onClick={saveMacro} disabled={saving} className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50">{saving ? "Saving..." : "Save"}</button>
+                          <button onClick={() => setEditingMacro(null)} className="rounded-md border border-zinc-300 px-4 py-2 text-sm text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400">Cancel</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
