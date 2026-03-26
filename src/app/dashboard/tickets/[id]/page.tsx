@@ -213,6 +213,25 @@ export default function TicketDetailPage() {
     load();
   }, [id]);
 
+  // Poll for new messages + ticket updates every 10s
+  useEffect(() => {
+    if (loading) return;
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/tickets/${id}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setTicket(data.ticket);
+        // Only update messages if count changed (avoid scroll jumps)
+        if (data.messages?.length !== messages.length) {
+          setMessages(data.messages);
+        }
+        if (data.customer) setCustomer(data.customer);
+      } catch {}
+    }, 10000);
+    return () => clearInterval(poll);
+  }, [id, loading, messages.length]);
+
   useEffect(() => {
     fetch(`/api/workspaces/${workspace.id}/members`)
       .then((res) => res.json())
