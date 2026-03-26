@@ -1,6 +1,16 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&rsquo;/g, "\u2019")
+    .replace(/&lsquo;/g, "\u2018").replace(/&rdquo;/g, "\u201D").replace(/&ldquo;/g, "\u201C")
+    .replace(/&ndash;/g, "\u2013").replace(/&mdash;/g, "\u2014").replace(/&nbsp;/g, " ");
+}
+
 export const scrapeHelpCenter = inngest.createFunction(
   {
     id: "kb-scrape-help-center",
@@ -91,6 +101,8 @@ export const scrapeHelpCenter = inngest.createFunction(
               title = titleMatch?.[1]?.replace(/\s*[-|].*$/, "").trim() || "";
             }
 
+            title = decodeEntities(title);
+
             if (!title || title.length < 3) continue;
 
             // Extract main content — prefer <article>, fallback to <main>
@@ -101,11 +113,13 @@ export const scrapeHelpCenter = inngest.createFunction(
             let contentHtml = bodyMatch?.[1] || "";
             // Clean CSS-in-JS (Gorgias uses React with inline styles)
             contentHtml = contentHtml.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
-            const content = contentHtml
-              .replace(/<[^>]+>/g, " ")
-              .replace(/\.css-[a-z0-9]+\{[^}]+\}/g, "")
-              .replace(/\s+/g, " ")
-              .trim();
+            const content = decodeEntities(
+              contentHtml
+                .replace(/<[^>]+>/g, " ")
+                .replace(/\.css-[a-z0-9]+\{[^}]+\}/g, "")
+                .replace(/\s+/g, " ")
+                .trim()
+            );
 
             if (content.length < 50) continue;
 

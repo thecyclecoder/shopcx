@@ -14,9 +14,9 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   };
 }
 
-export default async function HelpCenterPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ search?: string }> }) {
+export default async function HelpCenterPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ search?: string; category?: string }> }) {
   const { slug } = await params;
-  const { search } = await searchParams;
+  const { search, category: categoryFilter } = await searchParams;
   const admin = createAdminClient();
 
   const { data: workspace } = await admin
@@ -99,25 +99,42 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
           </div>
         )}
 
+        {/* Category page — when a category is selected */}
+        {categoryFilter && byCategory[categoryFilter] ? (
+          <div className="mb-8">
+            <div className="flex items-center gap-3">
+              <Link href={`/help/${slug}`} className="text-sm text-indigo-600 hover:underline">&larr; All Categories</Link>
+            </div>
+            <h2 className="mt-3 text-lg font-semibold text-zinc-900">{CATEGORY_LABELS[categoryFilter] || categoryFilter}</h2>
+            <p className="mt-1 text-sm text-zinc-500">{byCategory[categoryFilter]?.length || 0} articles</p>
+            <div className="mt-4 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white">
+              {(byCategory[categoryFilter] || []).map(a => (
+                <Link key={a.id} href={`/help/${slug}/${a.slug}`} className="block px-4 py-3 hover:bg-zinc-50 transition-colors">
+                  <p className="text-sm font-medium text-zinc-900">{a.title}</p>
+                  {a.excerpt && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-2">{a.excerpt}</p>}
+                </Link>
+              ))}
+            </div>
+          </div>
+        ) : !searchResults && (
+        <>
         {/* Categories */}
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
           {Object.entries(byCategory).map(([category, categoryArticles]) => (
-            <div key={category} className="rounded-lg border border-zinc-200 bg-white p-4 hover:border-indigo-300 transition-colors">
+            <Link key={category} href={`/help/${slug}?category=${category}`} className="rounded-lg border border-zinc-200 bg-white p-4 hover:border-indigo-300 transition-colors">
               <h2 className="text-sm font-semibold text-zinc-900">{CATEGORY_LABELS[category] || category}</h2>
               <p className="mt-1 text-xs text-zinc-400">{categoryArticles?.length || 0} articles</p>
               <ul className="mt-3 space-y-1">
-                {(categoryArticles || []).slice(0, 5).map(a => (
-                  <li key={a.id}>
-                    <Link href={`/help/${slug}/${a.slug}`} className="text-sm text-indigo-600 hover:underline">
-                      {a.title}
-                    </Link>
+                {(categoryArticles || []).slice(0, 3).map(a => (
+                  <li key={a.id} className="text-sm text-indigo-600 truncate">
+                    {a.title}
                   </li>
                 ))}
-                {(categoryArticles?.length || 0) > 5 && (
-                  <li className="text-xs text-zinc-400">+{(categoryArticles?.length || 0) - 5} more</li>
+                {(categoryArticles?.length || 0) > 3 && (
+                  <li className="text-xs text-zinc-400">+{(categoryArticles?.length || 0) - 3} more</li>
                 )}
               </ul>
-            </div>
+            </Link>
           ))}
         </div>
 
@@ -151,6 +168,8 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
             ))}
           </div>
         </div>
+        </>
+        )}
 
         {/* Contact / Ticket form */}
         <div className="mt-12">
