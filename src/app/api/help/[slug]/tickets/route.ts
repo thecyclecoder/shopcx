@@ -55,7 +55,7 @@ export async function POST(
     .insert({
       workspace_id: workspace.id,
       customer_id: customerId,
-      channel: "help_center",
+      channel: "chat",
       status: "open",
       subject: subject || `Help request from ${email}`,
       tags,
@@ -79,7 +79,7 @@ export async function POST(
     // Fire pattern matching + workflow via Inngest
     await inngest.send({
       name: "workflow/execute",
-      data: { workspace_id: workspace.id, ticket_id: ticket.id, trigger_tag: tags[0] || "", channel: "help_center" },
+      data: { workspace_id: workspace.id, ticket_id: ticket.id, trigger_tag: tags[0] || "", channel: "chat" },
     });
   }
 
