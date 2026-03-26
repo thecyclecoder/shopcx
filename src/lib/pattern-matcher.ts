@@ -139,14 +139,15 @@ async function matchEmbeddings(
     const { data: matches } = await admin.rpc("match_pattern_embeddings", {
       query_embedding: JSON.stringify(embedding),
       ws_id: workspaceId,
-      match_threshold: 0.65,
+      match_threshold: 0.40,
       match_count: 3,
     });
 
     if (!matches || matches.length === 0) return null;
 
     const best = matches[0];
-    if (best.similarity >= 0.65) {
+    // Similarity >= 0.50 = confident match, 0.40-0.50 = lower confidence
+    if (best.similarity >= 0.40) {
       return {
         patternId: best.id,
         category: best.category,

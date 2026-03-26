@@ -1,11 +1,37 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getResendClient } from "@/lib/email";
+import { getResendClient, sendTicketReply } from "@/lib/email";
 import { decrypt } from "@/lib/crypto";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { matchPatterns } from "@/lib/pattern-matcher";
 import { executeWorkflow } from "@/lib/workflow-executor";
+
+// Detect short positive confirmation replies (thanks, got it, etc.)
+const POSITIVE_PHRASES = [
+  "thanks", "thank you", "thank u", "thx", "ty", "got it", "great",
+  "perfect", "awesome", "wonderful", "appreciate", "that helps",
+  "all good", "all set", "sounds good", "ok great", "ok thanks",
+  "ok thank you", "ok cool", "understood", "noted", "good to know",
+  "excellent", "much appreciated", "cool thanks", "love it",
+  "problem solved", "no further", "that worked",
+];
+
+function isShortPositiveReply(body: string): boolean {
+  const cleaned = body
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\n/g, " ")
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .split(/(?:sent from|get outlook|on .+ wrote:|from:|----)/)[0]
+    .trim();
+
+  // Must be short (under 50 words) — long replies are real messages
+  const wordCount = cleaned.split(/\s+/).length;
+  if (wordCount > 50) return false;
+
+  return POSITIVE_PHRASES.some(phrase => cleaned.includes(phrase));
+}
 
 // Fetch email body from Resend's receiving API
 async function fetchEmailBody(
@@ -166,14 +192,50 @@ export async function POST(request: Request) {
       email_message_id: messageId,
     });
 
-    // Reopen if pending or resolved
+    // Check if this is a positive confirmation on a smart-tagged ticket
     const { data: ticket } = await admin
       .from("tickets")
-      .select("status")
+      .select("id, status, tags, workspace_id, subject, customer_id, email_message_id")
       .eq("id", ticketId)
       .single();
 
-    if (ticket && (ticket.status === "pending" || ticket.status === "closed")) {
+    const hasSmartTag = (ticket?.tags as string[] || []).some(t => t.startsWith("smart:"));
+    const isPositiveConfirmation = hasSmartTag && isShortPositiveReply(messageBody);
+
+    if (isPositiveConfirmation && ticket && (ticket.status === "pending" || ticket.status === "closed")) {
+      // Auto-close with friendly reply instead of reopening
+      await admin.from("ticket_messages").insert({
+        ticket_id: ticketId,
+        direction: "outbound",
+        visibility: "external",
+        author_type: "system",
+        body: "You're welcome! If you need anything else, we're always here to help.",
+      });
+
+      // Send the auto-close email
+      const { data: cust } = ticket.customer_id
+        ? await admin.from("customers").select("email").eq("id", ticket.customer_id).single()
+        : { data: null };
+      if (cust?.email) {
+        const { data: ws } = await admin.from("workspaces").select("name").eq("id", workspaceId).single();
+        await sendTicketReply({
+          workspaceId,
+          toEmail: cust.email,
+          subject: (ticket.subject as string) || "Support",
+          body: "You're welcome! If you need anything else, we're always here to help.",
+          inReplyTo: (ticket.email_message_id as string) || null,
+          agentName: "Support",
+          workspaceName: ws?.name || "Support",
+        });
+      }
+
+      await admin.from("tickets").update({
+        status: "closed",
+        resolved_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq("id", ticketId);
+    } else if (ticket && (ticket.status === "pending" || ticket.status === "closed")) {
+      // Normal reopen
       await admin
         .from("tickets")
         .update({ status: "open", updated_at: new Date().toISOString() })
