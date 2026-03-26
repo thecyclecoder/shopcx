@@ -114,6 +114,22 @@ export async function GET(
       };
       const realRetention = calculateRetentionScore(retentionInput);
 
+      // Get linked identities for sidebar
+      let linkedIdentities: { id: string; email: string; first_name: string | null; last_name: string | null; is_primary: boolean }[] = [];
+      if (link) {
+        const { data: groupLinks } = await admin
+          .from("customer_links")
+          .select("customer_id, is_primary, customers(id, email, first_name, last_name)")
+          .eq("group_id", link.group_id);
+
+        linkedIdentities = (groupLinks || [])
+          .filter((l) => l.customer_id !== c.id)
+          .map((l) => {
+            const cust = l.customers as unknown as { id: string; email: string; first_name: string | null; last_name: string | null };
+            return { id: cust.id, email: cust.email, first_name: cust.first_name, last_name: cust.last_name, is_primary: l.is_primary };
+          });
+      }
+
       customer = {
         ...c,
         total_orders: realOrderCount || c.total_orders,
@@ -121,6 +137,7 @@ export async function GET(
         retention_score: realRetention,
         recent_orders: orders || [],
         subscriptions: subscriptions || [],
+        linked_identities: linkedIdentities,
       };
     }
   }

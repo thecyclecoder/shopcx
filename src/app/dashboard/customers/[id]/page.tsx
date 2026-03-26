@@ -191,6 +191,8 @@ export default function CustomerDetailPage() {
   const [suggestions, setSuggestions] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; phone: string | null; match_reason: string }[]>([]);
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [events, setEvents] = useState<CustomerEvent[]>([]);
+  const [isPrimary, setIsPrimary] = useState(true);
+  const [primaryCustomer, setPrimaryCustomer] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null } | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -206,6 +208,8 @@ export default function CustomerDetailPage() {
       setSubscriptions(data.subscriptions || []);
       setCustomerTickets(data.tickets || []);
       setLinkedIdentities(data.linked_identities || []);
+      setIsPrimary(data.is_primary ?? true);
+      setPrimaryCustomer(data.primary_customer || null);
       setLoading(false);
 
       // Auto-enrich if missing personalization
@@ -328,6 +332,24 @@ export default function CustomerDetailPage() {
         </svg>
         Back to customers
       </button>
+
+      {/* Linked profile banner for secondary profiles */}
+      {!isPrimary && primaryCustomer && (
+        <div className="mb-4 flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2.5 dark:border-indigo-800 dark:bg-indigo-950">
+          <svg className="h-4 w-4 flex-shrink-0 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m9.86-2.502a4.5 4.5 0 00-1.242-7.244l-4.5-4.5a4.5 4.5 0 00-6.364 6.364L4.34 8.374" />
+          </svg>
+          <p className="text-sm text-indigo-700 dark:text-indigo-300">
+            Secondary profile — linked to{" "}
+            <button
+              onClick={() => router.push(`/dashboard/customers/${primaryCustomer.id}`)}
+              className="font-medium underline hover:text-indigo-900 dark:hover:text-indigo-100"
+            >
+              {[primaryCustomer.first_name, primaryCustomer.last_name].filter(Boolean).join(" ") || primaryCustomer.email}
+            </button>
+          </p>
+        </div>
+      )}
 
       {/* Header */}
       <div className="flex items-start justify-between">

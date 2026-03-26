@@ -55,6 +55,14 @@ interface CustomerSubscription {
   items: SubscriptionItem[];
 }
 
+interface LinkedIdentity {
+  id: string;
+  email: string;
+  first_name: string | null;
+  last_name: string | null;
+  is_primary: boolean;
+}
+
 interface CustomerDetail {
   id: string;
   email: string;
@@ -67,6 +75,7 @@ interface CustomerDetail {
   subscription_status: string;
   recent_orders: RecentOrder[];
   subscriptions: CustomerSubscription[];
+  linked_identities: LinkedIdentity[];
 }
 
 interface TicketDetail extends Ticket {
@@ -181,6 +190,8 @@ export default function TicketDetailPage() {
   } | null>(null);
   const [removingSmartTag, setRemovingSmartTag] = useState<string | null>(null);
   const [feedbackReason, setFeedbackReason] = useState("");
+  const [linkSuggestions, setLinkSuggestions] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; phone: string | null; match_reason: string }[]>([]);
+  const [showLinkSection, setShowLinkSection] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -207,6 +218,14 @@ export default function TicketDetailPage() {
               setCustomer((prev) => prev ? { ...prev, ...enriched.customer } : prev);
             }
           })
+          .catch(() => {});
+      }
+
+      // Load link suggestions for customer
+      if (data.customer) {
+        fetch(`/api/customers/${data.customer.id}/suggestions`)
+          .then((r) => r.json())
+          .then((s) => setLinkSuggestions(s.suggestions || []))
           .catch(() => {});
       }
     }
@@ -1116,6 +1135,74 @@ export default function TicketDetailPage() {
               >
                 View full profile
               </button>
+
+              {/* Linked Identities */}
+              {(customer.linked_identities?.length > 0 || linkSuggestions.length > 0) && (
+                <div className="pt-2">
+                  <button
+                    onClick={() => setShowLinkSection(!showLinkSection)}
+                    className="flex w-full items-center justify-between text-xs font-medium text-zinc-500"
+                  >
+                    <span>Linked Profiles{customer.linked_identities?.length > 0 && ` (${customer.linked_identities.length})`}</span>
+                    <svg className={`h-3 w-3 transition-transform ${showLinkSection ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                    </svg>
+                  </button>
+                  {showLinkSection && (
+                    <div className="mt-1.5 space-y-1">
+                      {customer.linked_identities?.map((li) => (
+                        <button
+                          key={li.id}
+                          onClick={() => router.push(`/dashboard/customers/${li.id}`)}
+                          className="block w-full rounded bg-zinc-50 px-2 py-1.5 text-left text-xs transition-colors hover:bg-zinc-100 dark:bg-zinc-800 dark:hover:bg-zinc-700"
+                        >
+                          <span className="text-indigo-600 dark:text-indigo-400">{li.email}</span>
+                          {(li.first_name || li.last_name) && (
+                            <span className="ml-1 text-zinc-400">{[li.first_name, li.last_name].filter(Boolean).join(" ")}</span>
+                          )}
+                          {li.is_primary && (
+                            <span className="ml-1 rounded bg-indigo-100 px-1 py-0.5 text-[9px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">primary</span>
+                          )}
+                        </button>
+                      ))}
+                      {linkSuggestions.length > 0 && (
+                        <div className="mt-1">
+                          <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">Suggested</p>
+                          {linkSuggestions.map((s) => (
+                            <div key={s.id} className="mt-1 flex items-center justify-between rounded border border-amber-200 bg-amber-50 px-2 py-1.5 dark:border-amber-800 dark:bg-amber-950">
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-[11px] font-medium text-zinc-900 dark:text-zinc-100">{s.email}</p>
+                                <span className="rounded bg-amber-200 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-800 dark:text-amber-300">
+                                  {s.match_reason}
+                                </span>
+                              </div>
+                              <button
+                                onClick={async () => {
+                                  const res = await fetch(`/api/customers/${customer.id}/links`, {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ link_to: s.id }),
+                                  });
+                                  if (res.ok) {
+                                    setCustomer((prev) => prev ? {
+                                      ...prev,
+                                      linked_identities: [...(prev.linked_identities || []), { id: s.id, email: s.email, first_name: s.first_name, last_name: s.last_name, is_primary: false }],
+                                    } : prev);
+                                    setLinkSuggestions((prev) => prev.filter((x) => x.id !== s.id));
+                                  }
+                                }}
+                                className="ml-2 flex-shrink-0 rounded border border-indigo-300 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
+                              >
+                                Link
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Subscriptions */}
               {customer.subscriptions?.length > 0 && (

@@ -149,6 +149,31 @@ export async function GET(
     .order("created_at", { ascending: false })
     .limit(20);
 
+  // Check if current customer is primary in their link group
+  let isPrimary = true; // default if not linked
+  if (link) {
+    const { data: selfLink } = await admin
+      .from("customer_links")
+      .select("is_primary")
+      .eq("customer_id", customerId)
+      .single();
+    isPrimary = selfLink?.is_primary ?? true;
+  }
+
+  // Find primary customer info for banner on secondary profiles
+  let primaryCustomer: { id: string; email: string; first_name: string | null; last_name: string | null } | null = null;
+  if (link && !isPrimary) {
+    const { data: primaryLink } = await admin
+      .from("customer_links")
+      .select("customer_id, customers(id, email, first_name, last_name)")
+      .eq("group_id", link.group_id)
+      .eq("is_primary", true)
+      .single();
+    if (primaryLink) {
+      primaryCustomer = primaryLink.customers as unknown as { id: string; email: string; first_name: string | null; last_name: string | null };
+    }
+  }
+
   return NextResponse.json({
     customer,
     orders: orders || [],
@@ -156,5 +181,7 @@ export async function GET(
     tickets: tickets || [],
     linked_identities: linkedIdentities,
     group_id: link?.group_id || null,
+    is_primary: isPrimary,
+    primary_customer: primaryCustomer,
   });
 }
