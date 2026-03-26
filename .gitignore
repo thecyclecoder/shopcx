@@ -36,6 +36,11 @@ yarn-error.log*
 # vercel
 .vercel
 
+# local data files
+/tmp/
+/gorgias*
+/shopcx-product-spec.html
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
