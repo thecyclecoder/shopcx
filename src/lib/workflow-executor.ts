@@ -230,12 +230,33 @@ async function getShopifyFulfillmentStatus(workspaceId: string, shopifyOrderId: 
 // ── Template variables ──
 
 function resolveTemplate(template: string, context: WorkflowContext): string {
+  // Build delivery address from customer's default_address
+  const addr = context.customer?.default_address as { address1?: string; address2?: string; city?: string; province?: string; provinceCode?: string; zip?: string; country?: string; countryCodeV2?: string } | null;
+  const deliveryAddress = addr
+    ? [addr.address1, addr.address2, addr.city, addr.provinceCode || addr.province, addr.zip].filter(Boolean).join(", ")
+    : "";
+  const deliveryCity = addr?.city || "";
+  const deliveryState = addr?.provinceCode || addr?.province || "";
+
+  // Order line items summary
+  const lineItems = ((context.order?.line_items as { title: string; quantity: number }[]) || [])
+    .map(li => `${li.quantity}x ${li.title}`).join(", ");
+
   const vars: Record<string, string> = {
+    // Customer
     "customer.first_name": (context.customer?.first_name as string) || "there",
+    "customer.last_name": (context.customer?.last_name as string) || "",
     "customer.email": (context.customer?.email as string) || "",
+    "customer.phone": (context.customer?.phone as string) || "",
+    "customer.delivery_address": deliveryAddress,
+    "customer.city": deliveryCity,
+    "customer.state": deliveryState,
+    // Order
     "order.order_number": (context.order?.order_number as string) || "",
     "order.total": context.order?.total_cents ? `$${((context.order.total_cents as number) / 100).toFixed(2)}` : "",
     "order.created_at": context.order?.created_at ? new Date(context.order.created_at as string).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "",
+    "order.line_items": lineItems,
+    // Fulfillment
     "fulfillment.date": context.fulfillment?.date || "",
     "fulfillment.carrier": context.fulfillment?.carrier || "the carrier",
     "fulfillment.tracking_number": context.fulfillment?.tracking_number || "",
@@ -245,9 +266,12 @@ function resolveTemplate(template: string, context: WorkflowContext): string {
     "fulfillment.estimated_delivery": context.fulfillment?.estimated_delivery ? new Date(context.fulfillment.estimated_delivery).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "",
     "fulfillment.latest_location": context.fulfillment?.latest_location || "",
     "fulfillment.days_since": context.fulfillment ? String(context.fulfillment.days_since) : "",
+    "fulfillment.delivery_address": deliveryAddress,
+    // Subscription
     "subscription.next_billing_date": context.subscription?.next_billing_date ? new Date(context.subscription.next_billing_date as string).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "",
     "subscription.status": (context.subscription?.status as string) || "",
     "subscription.items": ((context.subscription?.items as { title: string }[]) || []).map(i => i.title).filter(Boolean).join(", ") || "",
+    "subscription.billing_interval": context.subscription?.billing_interval_count ? `${context.subscription.billing_interval_count} ${context.subscription.billing_interval || ""}` : "",
   };
 
   return template.replace(/\{\{(\w+(?:\.\w+)*)\}\}/g, (_, key: string) => vars[key] || "");

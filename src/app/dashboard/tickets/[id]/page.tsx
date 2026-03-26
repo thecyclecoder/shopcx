@@ -172,6 +172,8 @@ export default function TicketDetailPage() {
   const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
   const [showTagDropdown, setShowTagDropdown] = useState(false);
   const [suggestingPattern, setSuggestingPattern] = useState(false);
+  const [availableWorkflows, setAvailableWorkflows] = useState<{ id: string; name: string; template: string; trigger_tag: string }[]>([]);
+  const [runningWorkflow, setRunningWorkflow] = useState(false);
   const [suggestCategory, setSuggestCategory] = useState("");
   const [patternCategories, setPatternCategories] = useState<{ category: string; name: string }[]>([]);
   const [patternSuggestion, setPatternSuggestion] = useState<{
@@ -219,6 +221,10 @@ export default function TicketDetailPage() {
     fetch(`/api/workspaces/${workspace.id}/tags`)
       .then((res) => res.json())
       .then((data) => { if (Array.isArray(data)) setTagSuggestions(data); })
+      .catch(() => {});
+    fetch(`/api/workspaces/${workspace.id}/workflows`)
+      .then((res) => res.json())
+      .then((data) => { if (Array.isArray(data)) setAvailableWorkflows(data.filter((w: { enabled: boolean }) => w.enabled)); })
       .catch(() => {});
     fetch(`/api/workspaces/${workspace.id}/patterns`)
       .then((res) => res.json())
@@ -619,6 +625,52 @@ export default function TicketDetailPage() {
                   Just Tag This Ticket
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* Run workflow manually */}
+          {availableWorkflows.length > 0 && (
+            <div className="mt-2 flex items-center gap-2">
+              <select
+                id="workflow-select"
+                defaultValue=""
+                className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-[10px] text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              >
+                <option value="" disabled>Run workflow...</option>
+                {availableWorkflows.map(wf => (
+                  <option key={wf.id} value={wf.id}>{wf.name}</option>
+                ))}
+              </select>
+              <button
+                onClick={async () => {
+                  const select = document.getElementById("workflow-select") as HTMLSelectElement;
+                  const wfId = select?.value;
+                  if (!wfId) return;
+                  setRunningWorkflow(true);
+                  try {
+                    const res = await fetch(`/api/tickets/${id}/run-workflow`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ workflow_id: wfId }),
+                    });
+                    if (res.ok) {
+                      // Refresh ticket to see new tags + messages
+                      const ticketRes = await fetch(`/api/tickets/${id}`);
+                      if (ticketRes.ok) {
+                        const data = await ticketRes.json();
+                        setTicket(data.ticket);
+                        setMessages(data.messages);
+                      }
+                    }
+                  } finally {
+                    setRunningWorkflow(false);
+                  }
+                }}
+                disabled={runningWorkflow}
+                className="rounded bg-indigo-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {runningWorkflow ? "Running..." : "Run"}
+              </button>
             </div>
           )}
 
