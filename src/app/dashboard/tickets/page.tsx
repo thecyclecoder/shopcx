@@ -11,6 +11,7 @@ interface TicketRow {
   channel: string;
   assigned_to: string | null;
   assigned_name: string | null;
+  escalated_to: string | null;
   customer_email: string | null;
   customer_name: string | null;
   tags: string[];
@@ -454,7 +455,14 @@ export default function TicketsPage() {
                   className="cursor-pointer transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
                 >
                   <td className="whitespace-nowrap px-4 py-3 text-sm">
-                    <StatusBadge status={t.status} />
+                    <div className="flex items-center gap-1">
+                      <StatusBadge status={t.status} />
+                      {t.escalated_to && (
+                        <svg className="h-3.5 w-3.5 text-amber-500" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M3 6a3 3 0 013-3h10l-4 4 4 4H6a3 3 0 01-3-3V6z" clipRule="evenodd" />
+                        </svg>
+                      )}
+                    </div>
                   </td>
                   <td className="max-w-xs px-4 py-3 text-sm">
                     <p className="truncate font-medium text-zinc-900 dark:text-zinc-100">{t.subject || "(no subject)"}</p>

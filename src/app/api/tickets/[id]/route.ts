@@ -160,6 +160,11 @@ export async function PATCH(
   if ("assigned_to" in body) updates.assigned_to = body.assigned_to || null;
   if ("tags" in body) updates.tags = body.tags;
   if ("csat_score" in body) updates.csat_score = body.csat_score;
+  if ("escalated_to" in body) {
+    updates.escalated_to = body.escalated_to || null;
+    updates.escalated_at = body.escalated_to ? new Date().toISOString() : null;
+    if ("escalation_reason" in body) updates.escalation_reason = body.escalation_reason || null;
+  }
 
   const { data: updated, error } = await admin
     .from("tickets")

@@ -900,6 +900,44 @@ export default function TicketDetailPage() {
                 ))}
               </select>
             </div>
+            {/* Escalation */}
+            <div>
+              <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+                {ticket.escalated_to && (
+                  <svg className="h-3 w-3 text-amber-500" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M3 6a3 3 0 013-3h10l-4 4 4 4H6a3 3 0 01-3-3V6z" clipRule="evenodd" />
+                  </svg>
+                )}
+                Escalated To
+              </label>
+              <select
+                value={ticket.escalated_to || ""}
+                onChange={(e) => {
+                  if (e.target.value && !ticket.escalated_to) {
+                    const reason = prompt("Escalation reason (optional):");
+                    handlePatch({ escalated_to: e.target.value, escalation_reason: reason || null });
+                  } else {
+                    handlePatch({ escalated_to: e.target.value || null, escalation_reason: null });
+                  }
+                }}
+                className={`mt-1 w-full rounded-md border px-2 py-1.5 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 ${
+                  ticket.escalated_to
+                    ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-300"
+                    : "border-zinc-300 bg-white text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                }`}
+              >
+                <option value="">Not escalated</option>
+                {members.map((m) => (
+                  <option key={m.user_id} value={m.user_id}>{m.display_name || m.email}</option>
+                ))}
+              </select>
+              {ticket.escalated_to && ticket.escalation_reason && (
+                <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">Reason: {ticket.escalation_reason}</p>
+              )}
+              {ticket.escalated_to && ticket.escalated_at && (
+                <p className="mt-0.5 text-[10px] text-zinc-400">Escalated {formatDate(ticket.escalated_at)}</p>
+              )}
+            </div>
             <div>
               <label className="block text-xs text-zinc-500">Channel</label>
               <p className="mt-1 text-sm capitalize text-zinc-700 dark:text-zinc-300">{ticket.channel.replace("_", " ")}</p>

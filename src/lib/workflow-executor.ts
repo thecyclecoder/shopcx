@@ -286,9 +286,15 @@ async function sendReply(admin: Admin, context: WorkflowContext, templateText: s
   await admin.from("tickets").update({ status: "pending", updated_at: new Date().toISOString() }).eq("id", context.ticketId);
 }
 
-async function escalate(admin: Admin, context: WorkflowContext, tag: string, assignTo: string | null): Promise<void> {
+async function escalate(admin: Admin, context: WorkflowContext, tag: string, assignTo: string | null, reason?: string): Promise<void> {
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
-  if (assignTo) updates.assigned_to = assignTo;
+
+  // Set escalation (separate from assignment)
+  if (assignTo) {
+    updates.escalated_to = assignTo;
+    updates.escalated_at = new Date().toISOString();
+    updates.escalation_reason = reason || `Workflow escalation: ${tag}`;
+  }
 
   // Add escalation tag
   const { data: ticket } = await admin.from("tickets").select("tags").eq("id", context.ticketId).single();

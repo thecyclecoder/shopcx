@@ -14,6 +14,9 @@ export interface Ticket {
   ai_confidence: number | null;
   ai_handled: boolean;
   assigned_to: string | null;
+  escalated_to: string | null;
+  escalated_at: string | null;
+  escalation_reason: string | null;
   first_response_at: string | null;
   resolved_at: string | null;
   csat_score: number | null;
