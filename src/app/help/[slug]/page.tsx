@@ -28,7 +28,7 @@ export default async function HelpCenterPage({ params }: { params: Promise<{ slu
 
   const { data: articles } = await admin
     .from("knowledge_base")
-    .select("id, title, slug, category, excerpt, product_name")
+    .select("id, title, slug, category, excerpt, product_name, view_count")
     .eq("workspace_id", workspace.id)
     .eq("published", true)
     .eq("active", true)
@@ -108,11 +108,11 @@ export default async function HelpCenterPage({ params }: { params: Promise<{ slu
           </div>
         )}
 
-        {/* All articles */}
+        {/* Most viewed articles */}
         <div className="mt-8">
-          <h2 className="text-lg font-semibold text-zinc-900">All Articles</h2>
+          <h2 className="text-lg font-semibold text-zinc-900">Most Viewed</h2>
           <div className="mt-4 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white">
-            {(articles || []).map(a => (
+            {[...(articles || [])].sort((a, b) => (b.view_count || 0) - (a.view_count || 0)).slice(0, 20).map(a => (
               <Link key={a.id} href={`/help/${slug}/${a.slug}`} className="block px-4 py-3 hover:bg-zinc-50 transition-colors">
                 <p className="text-sm font-medium text-zinc-900">{a.title}</p>
                 {a.excerpt && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-2">{a.excerpt}</p>}

@@ -258,9 +258,25 @@ function HelpCenterEditor({ workspaceId }: { workspaceId: string }) {
         </div>
         {slugMessage && <p className={`mt-1 text-sm ${slugMessage === "Saved!" ? "text-emerald-600" : "text-red-500"}`}>{slugMessage}</p>}
         {helpSlug && (
-          <div className="mt-2 text-xs text-zinc-400">
-            <p>Your help center: <a href={`/help/${helpSlug}`} className="text-indigo-500 hover:underline" target="_blank">{helpSlug}.shopcx.ai</a></p>
-            <p className="mt-1">For custom domain: point a CNAME record for <code>help.yourdomain.com</code> to <code>cname.shopcx.ai</code></p>
+          <div className="mt-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800">
+            <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Your Help Center</p>
+            <a href={`https://${helpSlug}.shopcx.ai`} className="mt-1 block text-sm text-indigo-600 hover:underline" target="_blank" rel="noopener noreferrer">
+              {helpSlug}.shopcx.ai
+            </a>
+            <div className="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-700">
+              <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Custom Domain (optional)</p>
+              <p className="mt-1 text-xs text-zinc-500">To use your own domain like <code className="rounded bg-zinc-200 px-1 dark:bg-zinc-700">help.yourdomain.com</code>:</p>
+              <ol className="mt-2 list-inside list-decimal space-y-1 text-xs text-zinc-500">
+                <li>Go to your DNS provider (e.g. Cloudflare, GoDaddy, Namecheap)</li>
+                <li>Add a <strong>CNAME</strong> record:<br />
+                  <span className="ml-4 mt-1 inline-block rounded bg-zinc-200 px-2 py-1 font-mono text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300">
+                    help.yourdomain.com → cname.vercel-dns.com
+                  </span>
+                </li>
+                <li>Add the domain in <a href="https://vercel.com" className="text-indigo-500 hover:underline" target="_blank" rel="noopener noreferrer">Vercel</a> → Settings → Domains</li>
+                <li>Wait for DNS to propagate (usually a few minutes)</li>
+              </ol>
+            </div>
           </div>
         )}
 

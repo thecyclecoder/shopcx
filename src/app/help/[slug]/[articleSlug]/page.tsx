@@ -67,6 +67,9 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
 
   if (!article) notFound();
 
+  // Increment view count (fire and forget)
+  admin.from("knowledge_base").update({ view_count: (article.view_count || 0) + 1 }).eq("id", article.id).then(() => {});
+
   // Get related articles in same category
   const { data: related } = await admin
     .from("knowledge_base")
