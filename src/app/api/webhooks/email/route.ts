@@ -325,12 +325,30 @@ export async function POST(request: Request) {
         const delaySec = delays.email || 60;
         const autoReplyAt = new Date(Date.now() + delaySec * 1000).toISOString();
 
-        // Get a preview of what the workflow will send (best effort)
+        // Get a preview of what the workflow will send (best effort from DB data)
         const { data: wf } = await admin.from("workflows").select("config")
           .eq("workspace_id", workspaceId).eq("trigger_tag", matched.autoTag).eq("enabled", true).single();
-        const pendingPreview = (wf?.config as Record<string, unknown>)?.reply_preparing as string
-          || (wf?.config as Record<string, unknown>)?.reply_in_transit as string
-          || "Auto-reply pending...";
+        let pendingPreview = "Checking your order and preparing a response...";
+        if (wf?.config && customerId) {
+          const cfg = wf.config as Record<string, unknown>;
+          // Quick DB lookup to guess which branch the workflow will take
+          const { data: latestOrder } = await admin.from("orders").select("order_number, fulfillment_status, fulfillments")
+            .eq("customer_id", customerId).order("created_at", { ascending: false }).limit(1).single();
+          if (!latestOrder) {
+            pendingPreview = (cfg.reply_no_order as string) || pendingPreview;
+          } else if (!latestOrder.fulfillment_status || latestOrder.fulfillment_status === "UNFULFILLED") {
+            pendingPreview = (cfg.reply_preparing as string) || pendingPreview;
+          } else {
+            const fulfillments = (latestOrder.fulfillments as { trackingInfo?: { number: string }[] }[]) || [];
+            const hasTracking = fulfillments[0]?.trackingInfo?.[0]?.number;
+            if (!hasTracking) {
+              pendingPreview = (cfg.reply_no_tracking as string) || pendingPreview;
+            } else {
+              // Has tracking — will be in_transit or delivered (Shopify API will determine)
+              pendingPreview = (cfg.reply_in_transit as string) || (cfg.reply_delivered as string) || pendingPreview;
+            }
+          }
+        }
 
         await admin.from("tickets").update({ auto_reply_at: autoReplyAt, pending_auto_reply: pendingPreview }).eq("id", ticket.id);
 

@@ -31,7 +31,7 @@ const DEFAULT_CONFIGS: Record<string, Record<string, unknown>> = {
     reply_no_tracking: "Your order {{order.order_number}} has shipped! Tracking details should be available within 24 hours.",
     reply_in_transit: "Your order {{order.order_number}} shipped on {{fulfillment.date}} via {{fulfillment.carrier}}. Track it here: {{fulfillment.url}}",
     reply_out_for_delivery: "Great news! Your order {{order.order_number}} is out for delivery in {{fulfillment.latest_location}}. It should arrive today!",
-    reply_delivered: "Our records show your order {{order.order_number}} was delivered on {{fulfillment.delivered_at}}. If you haven't received it, please reply and we'll investigate.",
+    reply_delivered: "I checked on your order ({{order.order_number}}) and it looks like it was delivered on {{fulfillment.delivered_at}}. If you haven't received it, please reply and we'll investigate. The tracking number we have for that order is {{fulfillment.url}}. Your order was shipped to {{fulfillment.delivery_address}} via {{fulfillment.carrier}}.",
     reply_no_order: "Hi {{customer.first_name}}, we couldn't find a recent order on your account. Could you provide your order number so we can look into this?",
     escalate_delayed: true,
     reply_escalated: "Hi {{customer.first_name}}, I can see there may be an issue with the delivery of your order {{order.order_number}}. I'm escalating this to our team and we'll get back to you shortly.",
