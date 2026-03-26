@@ -176,6 +176,23 @@ export const scrapeHelpCenter = inngest.createFunction(
 
       if (!products || products.length === 0) return 0;
 
+      // Build search keywords for each product:
+      // "Ashwavana Guru Focus" → ["ashwavana guru focus", "ashwavana guru", "ashwavana"]
+      // "Apple Cider Vinegar Gummies" → ["apple cider vinegar gummies", "apple cider vinegar", "apple cider"]
+      const STOP_WORDS = new Set(["the", "a", "an", "and", "or", "of", "for", "with", "in", "on", "to", "by"]);
+      const productKeywords = products.map(p => {
+        const words = p.title.toLowerCase().replace(/[™®©]/g, "").split(/\s+/).filter((w: string) => w.length > 1 && !STOP_WORDS.has(w));
+        const phrases: string[] = [];
+        // Full name first, then progressively shorter prefixes (min 1 word)
+        for (let len = words.length; len >= 1; len--) {
+          phrases.push(words.slice(0, len).join(" "));
+        }
+        return { product: p, phrases };
+      });
+
+      // Sort by longest keyword first so more specific matches win
+      productKeywords.sort((a, b) => (b.phrases[0]?.length || 0) - (a.phrases[0]?.length || 0));
+
       const { data: articles } = await admin
         .from("knowledge_base")
         .select("id, title, content, category")
@@ -184,21 +201,28 @@ export const scrapeHelpCenter = inngest.createFunction(
 
       let count = 0;
       for (const article of articles || []) {
-        const titleLower = article.title.toLowerCase();
-        const contentLower = (article.content || "").toLowerCase().slice(0, 500);
+        const titleLower = article.title.toLowerCase().replace(/[™®©]/g, "");
+        const contentLower = (article.content || "").toLowerCase().replace(/[™®©]/g, "").slice(0, 1000);
+        const searchText = titleLower + " " + contentLower;
 
-        for (const product of products) {
-          const productLower = product.title.toLowerCase();
-          // Match if product name appears in article title or first 500 chars of content
-          if (titleLower.includes(productLower) || contentLower.includes(productLower)) {
-            await admin.from("knowledge_base").update({
-              product_id: product.id,
-              product_name: product.title,
-              category: article.category === "general" ? "product" : article.category,
-            }).eq("id", article.id);
-            count++;
-            break; // First match wins
+        let matched = false;
+        for (const { product, phrases } of productKeywords) {
+          // Try each phrase from most specific to least
+          for (const phrase of phrases) {
+            // Require at least 4 chars to avoid false positives on short words
+            if (phrase.length < 4) continue;
+            if (searchText.includes(phrase)) {
+              await admin.from("knowledge_base").update({
+                product_id: product.id,
+                product_name: product.title,
+                category: article.category === "general" ? "product" : article.category,
+              }).eq("id", article.id);
+              count++;
+              matched = true;
+              break;
+            }
           }
+          if (matched) break;
         }
       }
       return count;
