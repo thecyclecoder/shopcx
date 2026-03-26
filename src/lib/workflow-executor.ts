@@ -255,17 +255,17 @@ function resolveTemplate(template: string, context: WorkflowContext): string {
 
 // ── Actions ──
 
-async function sendReply(admin: Admin, context: WorkflowContext, templateText: string): Promise<void> {
+async function sendReply(admin: Admin, context: WorkflowContext, templateText: string, statusOverride?: string): Promise<void> {
   const body = resolveTemplate(templateText, context);
 
-  await admin.from("ticket_messages").insert({
+  const { error: msgError } = await admin.from("ticket_messages").insert({
     ticket_id: context.ticketId,
-    workspace_id: context.workspaceId,
     direction: "outbound",
     visibility: "external",
     author_type: "system",
     body,
   });
+  if (msgError) console.error("Workflow message insert error:", msgError.message);
 
   // Send email
   const customerEmail = context.customer?.email as string | undefined;
@@ -282,8 +282,11 @@ async function sendReply(admin: Admin, context: WorkflowContext, templateText: s
     });
   }
 
-  // Update ticket status to pending
-  await admin.from("tickets").update({ status: "pending", updated_at: new Date().toISOString() }).eq("id", context.ticketId);
+  // Update ticket status (configurable — defaults to pending)
+  const statusAfterReply = (statusOverride as string) || "pending";
+  const statusUpdates: Record<string, unknown> = { status: statusAfterReply, updated_at: new Date().toISOString() };
+  if (statusAfterReply === "closed") statusUpdates.resolved_at = new Date().toISOString();
+  await admin.from("tickets").update(statusUpdates).eq("id", context.ticketId);
 }
 
 async function escalate(admin: Admin, context: WorkflowContext, tag: string, assignTo: string | null, reason?: string): Promise<void> {
@@ -307,7 +310,6 @@ async function escalate(admin: Admin, context: WorkflowContext, tag: string, ass
 async function addNote(admin: Admin, context: WorkflowContext, body: string): Promise<void> {
   await admin.from("ticket_messages").insert({
     ticket_id: context.ticketId,
-    workspace_id: context.workspaceId,
     direction: "outbound",
     visibility: "internal",
     author_type: "system",
@@ -321,7 +323,7 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
   const threshold = (config.delay_threshold_days as number) || 10;
 
   if (!ctx.order) {
-    await sendReply(admin, ctx, (config.reply_no_order as string) || "Hi {{customer.first_name}}, we couldn't find a recent order on your account. Could you provide your order number so we can look into this?");
+    await sendReply(admin, ctx, (config.reply_no_order as string) || "Hi {{customer.first_name}}, we couldn't find a recent order on your account. Could you provide your order number so we can look into this?", config.reply_no_order_status as string);
     return;
   }
 
@@ -329,13 +331,13 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
 
   // Unfulfilled
   if (!fulfillmentStatus || fulfillmentStatus === "UNFULFILLED" || fulfillmentStatus === "null") {
-    await sendReply(admin, ctx, (config.reply_preparing as string) || "Hi {{customer.first_name}}, your order {{order.order_number}} is being prepared and should ship within 2-3 business days.");
+    await sendReply(admin, ctx, (config.reply_preparing as string) || "Hi {{customer.first_name}}, your order {{order.order_number}} is being prepared and should ship within 2-3 business days.", config.reply_preparing_status as string);
     return;
   }
 
   // Fulfilled but no tracking
   if (!ctx.fulfillment?.tracking_number) {
-    await sendReply(admin, ctx, (config.reply_no_tracking as string) || "Your order {{order.order_number}} has shipped! Tracking details should be available within 24 hours.");
+    await sendReply(admin, ctx, (config.reply_no_tracking as string) || "Your order {{order.order_number}} has shipped! Tracking details should be available within 24 hours.", config.reply_no_tracking_status as string);
     return;
   }
 
@@ -343,13 +345,12 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
   const status = (ctx.fulfillment.shopify_status || "").toUpperCase();
 
   if (status === "DELIVERED") {
-    await sendReply(admin, ctx, (config.reply_delivered as string) || "Our records show your order {{order.order_number}} was delivered on {{fulfillment.delivered_at}}. If you haven't received it, please reply and we'll investigate.");
+    await sendReply(admin, ctx, (config.reply_delivered as string) || "Our records show your order {{order.order_number}} was delivered on {{fulfillment.delivered_at}}. If you haven't received it, please reply and we'll investigate.", config.reply_delivered_status as string);
     return;
   }
 
   // In transit — check delay
   if (ctx.fulfillment.days_since >= threshold) {
-    // Escalate
     if (config.escalate_delayed !== false) {
       await escalate(admin, ctx, (config.escalate_tag as string) || "delayed-shipment", (config.escalate_assign_to as string) || null);
       const location = ctx.fulfillment.latest_location ? ` Last seen: ${ctx.fulfillment.latest_location}.` : "";
@@ -360,35 +361,34 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
 
   // Out for delivery
   if (status === "OUT_FOR_DELIVERY") {
-    await sendReply(admin, ctx, (config.reply_out_for_delivery as string) || "Great news! Your order {{order.order_number}} is out for delivery in {{fulfillment.latest_location}}. It should arrive today!");
+    await sendReply(admin, ctx, (config.reply_out_for_delivery as string) || "Great news! Your order {{order.order_number}} is out for delivery in {{fulfillment.latest_location}}. It should arrive today!", config.reply_out_for_delivery_status as string);
     return;
   }
 
   // In transit, within threshold
   const locationInfo = ctx.fulfillment.latest_location ? ` It was last seen in {{fulfillment.latest_location}}.` : "";
   const estimateInfo = ctx.fulfillment.estimated_delivery ? ` Estimated delivery: {{fulfillment.estimated_delivery}}.` : "";
-  await sendReply(admin, ctx, (config.reply_in_transit as string) || `Your order {{order.order_number}} shipped on {{fulfillment.date}} via {{fulfillment.carrier}}.${locationInfo}${estimateInfo} Track it here: {{fulfillment.url}}`);
+  await sendReply(admin, ctx, (config.reply_in_transit as string) || `Your order {{order.order_number}} shipped on {{fulfillment.date}} via {{fulfillment.carrier}}.${locationInfo}${estimateInfo} Track it here: {{fulfillment.url}}`, config.reply_in_transit_status as string);
 }
 
 async function executeCancelRequest(admin: Admin, config: Record<string, unknown>, ctx: WorkflowContext): Promise<void> {
   if (!ctx.subscription) {
-    await sendReply(admin, ctx, (config.reply_no_subscription as string) || "Hi {{customer.first_name}}, we couldn't find an active subscription on your account. Can you provide more details so we can help?");
+    await sendReply(admin, ctx, (config.reply_no_subscription as string) || "Hi {{customer.first_name}}, we couldn't find an active subscription on your account. Can you provide more details so we can help?", config.reply_no_subscription_status as string);
     return;
   }
 
-  // Auto-cancel if configured
   if (config.auto_cancel_via_appstle && ctx.subscription.shopify_contract_id) {
     try {
       const { appstleSubscriptionAction } = await import("@/lib/appstle");
       await appstleSubscriptionAction(ctx.workspaceId, ctx.subscription.shopify_contract_id as string, "cancel");
-      await sendReply(admin, ctx, (config.reply_cancelled as string) || "Hi {{customer.first_name}}, your subscription has been cancelled as requested. If you change your mind, just let us know!");
+      await sendReply(admin, ctx, (config.reply_cancelled as string) || "Hi {{customer.first_name}}, your subscription has been cancelled as requested. If you change your mind, just let us know!", config.reply_cancelled_status as string);
       return;
     } catch {
       // Fall through to escalation
     }
   }
 
-  await sendReply(admin, ctx, (config.reply_confirm_cancel as string) || "We've received your cancellation request for your subscription. Our team will process this shortly.");
+  await sendReply(admin, ctx, (config.reply_confirm_cancel as string) || "We've received your cancellation request for your subscription. Our team will process this shortly.", config.reply_confirm_cancel_status as string);
 
   if (config.escalate_to_agent !== false) {
     await escalate(admin, ctx, (config.escalate_tag as string) || "cancel-request", (config.escalate_assign_to as string) || null);
@@ -397,9 +397,9 @@ async function executeCancelRequest(admin: Admin, config: Record<string, unknown
 
 async function executeSubscriptionInquiry(admin: Admin, config: Record<string, unknown>, ctx: WorkflowContext): Promise<void> {
   if (!ctx.subscription) {
-    await sendReply(admin, ctx, (config.reply_no_subscription as string) || "Hi {{customer.first_name}}, we couldn't find an active subscription for your account. Can you provide more details?");
+    await sendReply(admin, ctx, (config.reply_no_subscription as string) || "Hi {{customer.first_name}}, we couldn't find an active subscription for your account. Can you provide more details?", config.reply_no_subscription_status as string);
     return;
   }
 
-  await sendReply(admin, ctx, (config.reply_next_date as string) || "Hi {{customer.first_name}}, your next shipment is scheduled for {{subscription.next_billing_date}}. Your subscription includes: {{subscription.items}}.");
+  await sendReply(admin, ctx, (config.reply_next_date as string) || "Hi {{customer.first_name}}, your next shipment is scheduled for {{subscription.next_billing_date}}. Your subscription includes: {{subscription.items}}.", config.reply_next_date_status as string);
 }

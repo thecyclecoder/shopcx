@@ -287,12 +287,26 @@ export default function WorkflowsPage() {
                   <div key={field.key}>
                     <label className="block text-xs text-zinc-600 dark:text-zinc-400">{field.label}</label>
                     {field.type === "textarea" ? (
-                      <textarea
-                        rows={2}
-                        value={(editing.config[field.key] as string) || ""}
-                        onChange={(e) => setEditing({ ...editing, config: { ...editing.config, [field.key]: e.target.value } })}
-                        className="mt-0.5 block w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
-                      />
+                      <div>
+                        <textarea
+                          rows={2}
+                          value={(editing.config[field.key] as string) || ""}
+                          onChange={(e) => setEditing({ ...editing, config: { ...editing.config, [field.key]: e.target.value } })}
+                          className="mt-0.5 block w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                        />
+                        <div className="mt-1 flex items-center gap-1.5">
+                          <span className="text-[9px] text-zinc-400">After this reply, set status to:</span>
+                          <select
+                            value={(editing.config[`${field.key}_status`] as string) || "pending"}
+                            onChange={(e) => setEditing({ ...editing, config: { ...editing.config, [`${field.key}_status`]: e.target.value } })}
+                            className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-[10px] dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                          >
+                            <option value="pending">Pending</option>
+                            <option value="closed">Closed</option>
+                            <option value="open">Open</option>
+                          </select>
+                        </div>
+                      </div>
                     ) : field.type === "number" ? (
                       <input
                         type="number"

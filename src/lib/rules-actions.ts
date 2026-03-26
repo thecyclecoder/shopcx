@@ -133,7 +133,6 @@ async function autoReply(admin: Admin, workspaceId: string, params: Record<strin
   // Insert message
   await admin.from("ticket_messages").insert({
     ticket_id: ticketId,
-    workspace_id: workspaceId,
     direction: "outbound",
     visibility: "external",
     author_type: "system",
@@ -176,7 +175,6 @@ async function internalNote(admin: Admin, params: Record<string, unknown>, conte
 
   await admin.from("ticket_messages").insert({
     ticket_id: ticketId,
-    workspace_id: workspaceId,
     direction: "outbound",
     visibility: "internal",
     author_type: "system",
