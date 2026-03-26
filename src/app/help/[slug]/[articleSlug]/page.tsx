@@ -37,7 +37,7 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
 
   const { data: workspace } = await admin
     .from("workspaces")
-    .select("id, name, help_slug")
+    .select("id, name, help_slug, help_logo_url, help_primary_color")
     .eq("help_slug", slug)
     .single();
 
@@ -116,6 +116,9 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
       {/* Header */}
       <header className="border-b border-zinc-200 bg-white px-6 py-4">
         <div className="max-w-3xl mx-auto flex items-center gap-3">
+          <Link href={`/help/${slug}`}>
+            <img src={workspace.help_logo_url || "https://shopcx.ai/logo.svg"} alt={workspace.name} className="h-8 w-auto" />
+          </Link>
           <Link href={`/help/${slug}`} className="text-sm text-indigo-600 hover:underline">
             &larr; {workspace.name} Help Center
           </Link>
@@ -172,7 +175,7 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
         {/* Contact CTA */}
         <div className="mt-12 rounded-lg border border-zinc-200 bg-white p-6 text-center">
           <p className="text-sm text-zinc-600">Still need help?</p>
-          <Link href={`/help/${slug}#contact`} className="mt-2 inline-block rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">
+          <Link href={`/help/${slug}#contact`} className="mt-2 inline-block rounded-md px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: workspace.help_primary_color || "#4f46e5" }}>
             Contact Support
           </Link>
         </div>

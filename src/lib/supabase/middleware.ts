@@ -1,11 +1,47 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula", "/coming-soon", "/api/shopify/callback", "/api/webhooks", "/api/inngest", "/csat", "/api/csat"];
+const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula", "/coming-soon", "/api/shopify/callback", "/api/webhooks", "/api/inngest", "/csat", "/api/csat", "/help", "/api/help"];
 const WORKSPACE_SETUP_ROUTES = ["/workspace/new", "/workspace/select"];
 const ADMIN_EMAIL = "dylan@superfoodscompany.com";
+const PRIMARY_DOMAINS = ["shopcx.ai", "www.shopcx.ai", "localhost"];
 
 export async function updateSession(request: NextRequest) {
+  // ── Subdomain routing for help center mini-sites ──
+  const hostname = request.headers.get("host") || "";
+  const isLocalhost = hostname.includes("localhost") || hostname.includes("127.0.0.1");
+
+  if (!isLocalhost) {
+    // Check if this is a help center subdomain (e.g. superfoods.shopcx.ai or help.superfoodscompany.com)
+    const isPrimaryDomain = PRIMARY_DOMAINS.some(d => hostname === d || hostname.endsWith(`.${d}`));
+
+    if (!isPrimaryDomain) {
+      // Custom domain (e.g. help.superfoodscompany.com) — rewrite all paths to /help/[slug]/...
+      // The slug needs to be looked up by domain, but for now use the subdomain part
+      const pathname = request.nextUrl.pathname;
+      if (!pathname.startsWith("/help/") && !pathname.startsWith("/api/help/") && !pathname.startsWith("/_next")) {
+        // Rewrite to help route — we'll resolve the slug from the domain in the page
+        const url = request.nextUrl.clone();
+        url.pathname = `/help/_custom${pathname}`;
+        return NextResponse.rewrite(url);
+      }
+    } else {
+      // Check for shopcx.ai subdomain (e.g. superfoods.shopcx.ai)
+      const parts = hostname.split(".");
+      if (parts.length >= 3) {
+        const subdomain = parts[0];
+        if (subdomain !== "www" && subdomain !== "app") {
+          const pathname = request.nextUrl.pathname;
+          if (!pathname.startsWith("/help/") && !pathname.startsWith("/api/") && !pathname.startsWith("/_next")) {
+            const url = request.nextUrl.clone();
+            url.pathname = `/help/${subdomain}${pathname === "/" ? "" : pathname}`;
+            return NextResponse.rewrite(url);
+          }
+        }
+      }
+    }
+  }
+
   let supabaseResponse = NextResponse.next({ request });
 
   const supabase = createServerClient(

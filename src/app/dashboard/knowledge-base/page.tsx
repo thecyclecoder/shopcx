@@ -35,6 +35,7 @@ export default function KnowledgeBasePage() {
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
+  const [productFilter, setProductFilter] = useState("");
 
   useEffect(() => {
     Promise.all([
@@ -48,6 +49,7 @@ export default function KnowledgeBasePage() {
 
   const filtered = articles.filter(a => {
     if (categoryFilter && a.category !== categoryFilter) return false;
+    if (productFilter && a.product_id !== productFilter) return false;
     if (!search.trim()) return true;
     const q = search.toLowerCase();
     return a.title.toLowerCase().includes(q) || a.content.toLowerCase().includes(q);
@@ -117,6 +119,13 @@ export default function KnowledgeBasePage() {
           <option value="">All categories</option>
           {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
+        {products.length > 0 && (
+          <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)}
+            className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
+            <option value="">All products</option>
+            {products.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+          </select>
+        )}
       </div>
 
       {/* New article form */}

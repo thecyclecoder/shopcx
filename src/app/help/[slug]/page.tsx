@@ -20,7 +20,7 @@ export default async function HelpCenterPage({ params }: { params: Promise<{ slu
 
   const { data: workspace } = await admin
     .from("workspaces")
-    .select("id, name, help_slug")
+    .select("id, name, help_slug, help_logo_url, help_primary_color")
     .eq("help_slug", slug)
     .single();
 
@@ -59,6 +59,7 @@ export default async function HelpCenterPage({ params }: { params: Promise<{ slu
     <div className="min-h-screen bg-zinc-50">
       {/* Header */}
       <header className="bg-white border-b border-zinc-200 px-6 py-8 text-center">
+        <img src={workspace.help_logo_url || "https://shopcx.ai/logo.svg"} alt={workspace.name} className="mx-auto mb-4 h-12 w-auto" />
         <h1 className="text-3xl font-bold text-zinc-900">{workspace.name} Help Center</h1>
         <p className="mt-2 text-zinc-500">Find answers, browse articles, or contact our support team</p>
         <div className="mt-6 max-w-lg mx-auto">

@@ -263,6 +263,34 @@ function HelpCenterEditor({ workspaceId }: { workspaceId: string }) {
             <p className="mt-1">For custom domain: point a CNAME record for <code>help.yourdomain.com</code> to <code>cname.shopcx.ai</code></p>
           </div>
         )}
+
+        {/* Logo upload */}
+        <div className="mt-4 border-t border-zinc-200 pt-4 dark:border-zinc-700">
+          <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Help Center Logo</label>
+          <p className="mt-0.5 text-xs text-zinc-400">Upload your logo for the branded help center mini-site.</p>
+          <input
+            type="file"
+            accept="image/*"
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              const { createClient } = await import("@/lib/supabase/client");
+              const supabase = createClient();
+              const fileName = `${workspaceId}/help-logo-${Date.now()}.${file.name.split(".").pop()}`;
+              const { error } = await supabase.storage.from("imports").upload(fileName, file, { upsert: true });
+              if (!error) {
+                const { data: { publicUrl } } = supabase.storage.from("imports").getPublicUrl(fileName);
+                await fetch(`/api/workspaces/${workspaceId}/integrations`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ help_logo_url: publicUrl }),
+                });
+                alert("Logo uploaded!");
+              }
+            }}
+            className="mt-2 block text-sm text-zinc-500 file:mr-4 file:rounded-md file:border-0 file:bg-indigo-50 file:px-4 file:py-2 file:text-sm file:font-medium file:text-indigo-600 hover:file:bg-indigo-100"
+          />
+        </div>
       </div>
     </div>
   );

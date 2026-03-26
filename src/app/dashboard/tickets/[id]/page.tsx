@@ -437,7 +437,7 @@ export default function TicketDetailPage() {
   }
 
   return (
-    <div className="flex h-full flex-1 flex-col overflow-hidden md:flex-row">
+    <div className="flex h-full flex-1 flex-col overflow-x-hidden overflow-y-hidden md:flex-row">
       {/* Mobile section selector */}
       <div className="flex items-center gap-2 border-b border-zinc-200 bg-white px-3 py-2 md:hidden dark:border-zinc-800 dark:bg-zinc-900">
         <button onClick={() => router.push("/dashboard/tickets")} className="text-zinc-400">
@@ -457,7 +457,7 @@ export default function TicketDetailPage() {
 
       {/* Left column - conversation */}
       <div className={`flex min-h-0 flex-1 flex-col ${mobileSection !== "conversation" ? "hidden md:flex" : ""}`}>
-        <div className="min-h-0 flex-1 overflow-y-auto p-6 pb-0 md:pb-6">
+        <div className="min-h-0 flex-1 overflow-y-auto p-6 pb-0 scrollbar-hidden md:pb-6" style={{ WebkitOverflowScrolling: "touch" }}>
           {/* Back button — desktop only */}
           <button
             onClick={() => router.push("/dashboard/tickets")}
@@ -468,20 +468,6 @@ export default function TicketDetailPage() {
             </svg>
             Back to tickets
           </button>
-
-          {/* Delete ticket — owner/admin only */}
-          {["owner", "admin"].includes(workspace.role) && (
-            <button
-              onClick={async () => {
-                if (!confirm("Delete this ticket and all its messages? This cannot be undone.")) return;
-                const res = await fetch(`/api/tickets/${id}`, { method: "DELETE" });
-                if (res.ok) router.push("/dashboard/tickets");
-              }}
-              className="mb-4 text-sm text-red-500 hover:underline"
-            >
-              Delete ticket
-            </button>
-          )}
 
           {/* Sandbox banner */}
           {sandboxMode && !emailLive && (
@@ -732,7 +718,7 @@ export default function TicketDetailPage() {
                       <span>{formatDateTime(m.created_at)}</span>
                     </div>
                     <div
-                      className={`prose prose-sm max-w-none ${textClass} ${!isInbound && !isInternal ? "prose-invert" : ""}`}
+                      className={`prose prose-sm max-w-none break-words overflow-hidden [overflow-wrap:anywhere] ${textClass} ${!isInbound && !isInternal ? "prose-invert" : ""}`}
                       dangerouslySetInnerHTML={{ __html: m.body }}
                     />
                     {(m as TicketMessage & { _sandbox_suppressed?: boolean })._sandbox_suppressed && (
@@ -958,7 +944,7 @@ export default function TicketDetailPage() {
         )}
 
         {/* Reply composer — pinned to bottom */}
-        <div className={`shrink-0 border-t border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 ${editorFocused ? "px-3 py-3" : "px-3 py-2"}`}>
+        <div className={`shrink-0 border-t border-zinc-200 bg-white pb-[env(safe-area-inset-bottom,16px)] dark:border-zinc-800 dark:bg-zinc-900 ${editorFocused ? "px-3 py-3" : "px-3 py-2"}`}>
           <form onSubmit={handleSend}>
             {/* Mode toggle row */}
             <div className="mb-1.5 flex items-center justify-between">
@@ -1115,7 +1101,7 @@ export default function TicketDetailPage() {
                     <select
                       id="workflow-select"
                       defaultValue=""
-                      className="flex-1 rounded border border-indigo-300 bg-white px-2 py-1 text-xs dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
+                      className="min-w-0 flex-1 truncate rounded border border-indigo-300 bg-white px-2 py-1 text-xs dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
                     >
                       <option value="" disabled>Select workflow...</option>
                       {availableWorkflows.map(wf => (
@@ -1147,7 +1133,7 @@ export default function TicketDetailPage() {
                         }
                       }}
                       disabled={runningWorkflow}
-                      className="rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                      className="shrink-0 rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
                     >
                       {runningWorkflow ? "..." : "Run"}
                     </button>
@@ -1164,7 +1150,7 @@ export default function TicketDetailPage() {
                       <select
                         value={suggestCategory}
                         onChange={(e) => setSuggestCategory(e.target.value)}
-                        className="flex-1 rounded border border-indigo-300 bg-white px-2 py-1 text-xs dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
+                        className="min-w-0 flex-1 truncate rounded border border-indigo-300 bg-white px-2 py-1 text-xs dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
                       >
                         <option value="">Auto-detect</option>
                         {patternCategories.map(c => (
@@ -1190,7 +1176,7 @@ export default function TicketDetailPage() {
                         }
                       }}
                       disabled={suggestingPattern}
-                      className="rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                      className="shrink-0 rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
                     >
                       {suggestingPattern ? "..." : "Analyze"}
                     </button>
@@ -1252,6 +1238,22 @@ export default function TicketDetailPage() {
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* Delete ticket — owner/admin only */}
+        {["owner", "admin"].includes(workspace.role) && (
+          <div className="mb-4">
+            <button
+              onClick={async () => {
+                if (!confirm("Delete this ticket and all its messages? This cannot be undone.")) return;
+                const res = await fetch(`/api/tickets/${id}`, { method: "DELETE" });
+                if (res.ok) router.push("/dashboard/tickets");
+              }}
+              className="text-xs text-red-500 hover:underline"
+            >
+              Delete ticket
+            </button>
           </div>
         )}
         </div>
