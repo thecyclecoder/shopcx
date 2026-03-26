@@ -42,25 +42,25 @@ export default function Sidebar({
     setOpen(false);
   }, [pathname]);
 
-  // Load ticket views
+  // Load ticket views + counts — refetch on navigation + poll every 30s
   useEffect(() => {
-    fetch(`/api/workspaces/${workspace.id}/ticket-views`)
-      .then(r => r.json())
-      .then(d => { if (Array.isArray(d)) setTicketViews(d); })
-      .catch(() => {});
-    // Fetch escalation counts (tickets escalated to me OR by me)
-    Promise.all([
-      fetch(`/api/tickets?status=open&escalation_mine=true&limit=1`).then(r => r.json()),
-      fetch(`/api/tickets?status=pending&escalation_mine=true&limit=1`).then(r => r.json()),
-      fetch(`/api/tickets?status=closed&escalation_mine=true&limit=1`).then(r => r.json()),
-    ]).then(([open, pending, closed]) => {
-      setEscalationCounts({
-        open: open?.total || 0,
-        pending: pending?.total || 0,
-        closed: closed?.total || 0,
-      });
-    }).catch(() => {});
-  }, [workspace.id]);
+    const fetchCounts = () => {
+      fetch(`/api/workspaces/${workspace.id}/ticket-views`)
+        .then(r => r.json())
+        .then(d => { if (Array.isArray(d)) setTicketViews(d); })
+        .catch(() => {});
+      Promise.all([
+        fetch(`/api/tickets?status=open&escalation_mine=true&limit=1`).then(r => r.json()),
+        fetch(`/api/tickets?status=pending&escalation_mine=true&limit=1`).then(r => r.json()),
+        fetch(`/api/tickets?status=closed&escalation_mine=true&limit=1`).then(r => r.json()),
+      ]).then(([o, p, c]) => {
+        setEscalationCounts({ open: o?.total || 0, pending: p?.total || 0, closed: c?.total || 0 });
+      }).catch(() => {});
+    };
+    fetchCounts();
+    const interval = setInterval(fetchCounts, 30000);
+    return () => clearInterval(interval);
+  }, [workspace.id, pathname]);
 
   // Prevent body scroll when sidebar is open on mobile
   useEffect(() => {
