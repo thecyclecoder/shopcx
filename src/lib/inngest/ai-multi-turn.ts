@@ -369,7 +369,7 @@ export const aiMultiTurn = inngest.createFunction(
         .single();
 
       if (!ticket) return { handled: false };
-      const isChatChannel = ticket.channel === "chat" || ticket.channel === "help_center";
+      const isJourneyChannel = ticket.channel !== "social_comments";
 
       // If journey is already active, continue it
       if (ticket.journey_id && ticket.journey_step < 99) {
@@ -402,8 +402,7 @@ export const aiMultiTurn = inngest.createFunction(
 
       // Check if this message should start a journey (all channels except social_comments)
       // chat = inline forms, everything else = CTA → mini-site
-      const journeyEligibleChannels = ["chat", "help_center", "email", "meta_dm", "sms"];
-      if (journeyEligibleChannels.includes(ticket?.channel || "")) {
+      if (isJourneyChannel) {
         // Look up enabled chat journeys for this channel
         const { data: chatJourneys } = await admin
           .from("journey_definitions")
