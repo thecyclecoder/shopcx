@@ -13,7 +13,7 @@ export async function GET(
 
   const { data: session } = await admin
     .from("journey_sessions")
-    .select("*, journey_definitions(name, config), customers(first_name)")
+    .select("*, journey_definitions(name, config), customers(first_name), workspaces(name, help_logo_url, help_primary_color)")
     .eq("token", token)
     .single();
 
@@ -51,12 +51,24 @@ export async function GET(
   // Use config_snapshot (frozen at session creation) or fall back to definition
   const config = session.config_snapshot || (session.journey_definitions as { config: unknown })?.config || {};
 
+  // Merge workspace branding into config if not already present
+  const ws = session.workspaces as { name?: string; help_logo_url?: string; help_primary_color?: string } | null;
+  const mergedConfig = { ...config as Record<string, unknown> };
+  if (ws && !(mergedConfig.branding as Record<string, unknown>)?.logoUrl) {
+    mergedConfig.branding = {
+      ...(mergedConfig.branding as Record<string, unknown> || {}),
+      ...(ws.help_logo_url ? { logoUrl: ws.help_logo_url } : {}),
+      ...(ws.help_primary_color ? { primaryColor: ws.help_primary_color } : {}),
+    };
+  }
+
   return NextResponse.json({
     status: session.status === "pending" ? "in_progress" : session.status,
     currentStep: session.current_step,
     responses: session.responses,
-    config,
+    config: mergedConfig,
     journeyName: (session.journey_definitions as { name: string })?.name || "",
     customerFirstName: (session.customers as { first_name: string | null })?.first_name || null,
+    workspaceName: ws?.name || "",
   });
 }

@@ -151,3 +151,57 @@ export async function sendCsatEmail({
   if (error) return { error: error.message };
   return {};
 }
+
+export async function sendJourneyCTA({
+  workspaceId,
+  toEmail,
+  customerName,
+  journeyToken,
+  contextMessage,
+  workspaceName,
+  logoUrl,
+  primaryColor,
+}: {
+  workspaceId: string;
+  toEmail: string;
+  customerName: string;
+  journeyToken: string;
+  contextMessage?: string;
+  workspaceName: string;
+  logoUrl?: string;
+  primaryColor?: string;
+}): Promise<{ error?: string }> {
+  const client = await getResendClient(workspaceId);
+  if (!client) return { error: "Resend not configured" };
+
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
+  const journeyUrl = `${siteUrl}/journey/${journeyToken}`;
+  const color = primaryColor || "#4f46e5";
+  const greeting = customerName ? `Hi ${customerName},` : "Hi there,";
+
+  const { error } = await client.resend.emails.send({
+    from: `${workspaceName} <support@${client.domain}>`,
+    to: toEmail,
+    subject: `Complete your request — ${workspaceName}`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+        ${logoUrl ? `<div style="text-align: center; margin-bottom: 24px;"><img src="${logoUrl}" alt="${workspaceName}" style="height: 40px; width: auto;" /></div>` : ""}
+        <h2 style="color: #18181b; font-size: 20px; margin-bottom: 8px;">${greeting}</h2>
+        <p style="color: #71717a; font-size: 14px; line-height: 1.6;">
+          ${contextMessage || "We'd love to help you with your request. Please click the button below to continue."}
+        </p>
+        <div style="text-align: center; margin-top: 32px;">
+          <a href="${journeyUrl}" style="display: inline-block; padding: 14px 32px; background: ${color}; color: white; text-decoration: none; border-radius: 10px; font-size: 15px; font-weight: 600;">
+            Complete your request &rarr;
+          </a>
+        </div>
+        <p style="color: #a1a1aa; font-size: 12px; margin-top: 32px; text-align: center;">
+          This link expires in 24 hours. If you didn't expect this email, you can safely ignore it.
+        </p>
+      </div>
+    `,
+  });
+
+  if (error) return { error: error.message };
+  return {};
+}

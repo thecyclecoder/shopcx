@@ -18,6 +18,7 @@ interface JourneyStep {
   question: string;
   subtitle?: string;
   options?: JourneyOption[];
+  placeholder?: string;
   isTerminal?: boolean;
 }
 
@@ -34,11 +35,14 @@ export default function JourneyPage() {
   const [responses, setResponses] = useState<Record<string, { value: string; label: string }>>({});
   const [status, setStatus] = useState<"loading" | "active" | "completed" | "expired" | "error">("loading");
   const [selectedValue, setSelectedValue] = useState<string | null>(null);
+  const [checkedValues, setCheckedValues] = useState<Set<string>>(new Set());
+  const [textValue, setTextValue] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [completedMessage, setCompletedMessage] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [pendingOutcome, setPendingOutcome] = useState<string | null>(null);
   const [slideDirection, setSlideDirection] = useState<"in" | "out">("in");
+  const [workspaceName, setWorkspaceName] = useState("");
 
   useEffect(() => {
     async function load() {
@@ -52,6 +56,7 @@ export default function JourneyPage() {
         setCompletedMessage(data.outcome?.startsWith("saved_")
           ? data.config?.messages?.completedSave || "Thank you!"
           : data.config?.messages?.completedCancel || "Your request has been processed.");
+        if (data.config) setConfig(data.config);
         return;
       }
 
@@ -59,6 +64,7 @@ export default function JourneyPage() {
       setCurrentStepIndex(data.currentStep || 0);
       setResponses(data.responses || {});
       setCustomerName(data.customerFirstName || "");
+      setWorkspaceName(data.workspaceName || "");
       setStatus("active");
     }
     load();
@@ -73,13 +79,10 @@ export default function JourneyPage() {
 
   const currentStep = useCallback((): JourneyStep | null => {
     if (!config) return null;
-    // Find step by navigating through config based on responses
     const steps = config.steps;
 
-    // If we're at step 0, return first step
     if (Object.keys(responses).length === 0) return steps[0] || null;
 
-    // Find the current step by following the response chain
     const lastResponse = Object.entries(responses).pop();
     if (!lastResponse) return steps[0];
 
@@ -89,13 +92,11 @@ export default function JourneyPage() {
 
     const chosenOption = lastStep.options?.find((o) => o.value === lastVal.value);
 
-    // Check for outcome on the option (terminal)
     if (chosenOption?.outcome) {
       setPendingOutcome(chosenOption.outcome);
       return steps.find((s) => s.key === "journey_end") || null;
     }
 
-    // Navigate to next step
     const nextKey = chosenOption?.rebuttalStepKey || chosenOption?.nextStepKey || lastStep.options?.[0]?.nextStepKey;
     if (nextKey) {
       return steps.find((s) => s.key === nextKey) || null;
@@ -106,60 +107,63 @@ export default function JourneyPage() {
 
   const step = currentStep();
 
-  const handleSelect = async (option: JourneyOption) => {
-    if (submitting) return;
-    setSelectedValue(option.value);
-
-    // If this is a confirmation step with an outcome, complete immediately
-    if (option.outcome && step?.type === "confirmation") {
-      await handleComplete(option.outcome, option);
-      return;
-    }
-
-    // If option has an outcome (from rebuttal), set it and go to terminal
-    if (option.outcome) {
-      setPendingOutcome(option.outcome);
-    }
-
-    // Submit step
+  const submitStep = async (value: string, label: string) => {
     setSubmitting(true);
     await fetch(`/api/journey/${token}/step`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        stepKey: step?.key,
-        responseValue: option.value,
-        responseLabel: option.label,
-      }),
+      body: JSON.stringify({ stepKey: step?.key, responseValue: value, responseLabel: label }),
     });
 
-    // Animate transition
     setSlideDirection("out");
     setTimeout(() => {
-      setResponses((prev) => ({
-        ...prev,
-        [step!.key]: { value: option.value, label: option.label },
-      }));
+      setResponses((prev) => ({ ...prev, [step!.key]: { value, label } }));
       setCurrentStepIndex((i) => i + 1);
       setSelectedValue(null);
+      setCheckedValues(new Set());
+      setTextValue("");
       setSubmitting(false);
       setSlideDirection("in");
     }, 200);
   };
 
+  const handleSelect = async (option: JourneyOption) => {
+    if (submitting) return;
+    setSelectedValue(option.value);
+
+    if (option.outcome && step?.type === "confirmation") {
+      await handleComplete(option.outcome, option);
+      return;
+    }
+
+    if (option.outcome) {
+      setPendingOutcome(option.outcome);
+    }
+
+    await submitStep(option.value, option.label);
+  };
+
+  const handleChecklistSubmit = async () => {
+    if (checkedValues.size === 0 || submitting) return;
+    const values = Array.from(checkedValues);
+    const labels = step?.options?.filter((o) => checkedValues.has(o.value)).map((o) => o.label) || values;
+    await submitStep(values.join(","), labels.join(", "));
+  };
+
+  const handleTextSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!textValue.trim() || submitting) return;
+    await submitStep(textValue.trim(), textValue.trim());
+  };
+
   const handleComplete = async (outcome: string, option?: JourneyOption) => {
     setSubmitting(true);
 
-    // Submit final step if applicable
     if (step && option) {
       await fetch(`/api/journey/${token}/step`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          stepKey: step.key,
-          responseValue: option.value,
-          responseLabel: option.label,
-        }),
+        body: JSON.stringify({ stepKey: step.key, responseValue: option.value, responseLabel: option.label }),
       });
     }
 
@@ -179,16 +183,18 @@ export default function JourneyPage() {
     if (step?.isTerminal && pendingOutcome) {
       handleComplete(pendingOutcome);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, pendingOutcome]);
 
   const primaryColor = config?.branding?.primaryColor || "#4f46e5";
+  const logoUrl = config?.branding?.logoUrl;
 
   // ── Expired ──
   if (status === "expired") {
     return (
-      <JourneyShell>
+      <JourneyShell logoUrl={logoUrl} workspaceName={workspaceName}>
         <div className="text-center">
-          <p className="text-5xl">⏰</p>
+          <p className="text-5xl">&#x23F0;</p>
           <h2 className="mt-4 text-xl font-semibold text-zinc-900">This link has expired</h2>
           <p className="mt-2 text-sm text-zinc-500">Please contact our support team for help with your request.</p>
         </div>
@@ -199,7 +205,7 @@ export default function JourneyPage() {
   // ── Error ──
   if (status === "error") {
     return (
-      <JourneyShell>
+      <JourneyShell logoUrl={logoUrl} workspaceName={workspaceName}>
         <div className="text-center">
           <h2 className="text-xl font-semibold text-zinc-900">Something went wrong</h2>
           <p className="mt-2 text-sm text-zinc-500">Please try again or contact support.</p>
@@ -211,10 +217,14 @@ export default function JourneyPage() {
   // ── Completed ──
   if (status === "completed") {
     return (
-      <JourneyShell>
+      <JourneyShell logoUrl={logoUrl} workspaceName={workspaceName}>
         <div className="text-center">
-          <p className="text-5xl">✅</p>
-          <h2 className="mt-4 text-xl font-semibold text-zinc-900">You're all set!</h2>
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full" style={{ backgroundColor: `${primaryColor}15` }}>
+            <svg className="h-7 w-7" style={{ color: primaryColor }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+          </div>
+          <h2 className="mt-4 text-xl font-semibold text-zinc-900">You&apos;re all set!</h2>
           <p className="mt-3 text-sm text-zinc-600">{completedMessage}</p>
         </div>
       </JourneyShell>
@@ -224,7 +234,7 @@ export default function JourneyPage() {
   // ── Loading ──
   if (status === "loading" || !step || !config) {
     return (
-      <JourneyShell>
+      <JourneyShell logoUrl={logoUrl} workspaceName={workspaceName}>
         <div className="flex items-center justify-center py-12">
           <div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
         </div>
@@ -233,12 +243,18 @@ export default function JourneyPage() {
   }
 
   // ── Active Step ──
-  const totalSteps = config.steps.filter((s) => !s.isTerminal).length;
+  const nonTerminalSteps = config.steps.filter((s) => !s.isTerminal);
+  const totalSteps = nonTerminalSteps.length;
   const progressSteps = Object.keys(responses).length;
+  const stepNumber = progressSteps + 1;
 
   return (
-    <JourneyShell>
-      {/* Progress bar */}
+    <JourneyShell logoUrl={logoUrl} workspaceName={workspaceName}>
+      {/* Progress indicator */}
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-xs font-medium text-zinc-400">Step {stepNumber} of {totalSteps}</span>
+        <span className="text-xs text-zinc-400">{Math.round((progressSteps / Math.max(totalSteps - 1, 1)) * 100)}%</span>
+      </div>
       <div className="mb-6 h-1.5 w-full overflow-hidden rounded-full bg-zinc-200">
         <div
           className="h-full rounded-full transition-all duration-300"
@@ -263,8 +279,8 @@ export default function JourneyPage() {
         <h2 className="text-lg font-semibold text-zinc-900">{step.question}</h2>
         {step.subtitle && <p className="mt-1 text-sm text-zinc-500">{step.subtitle}</p>}
 
-        {/* Options */}
-        {(step.type === "single_choice" || step.type === "confirmation") && step.options && (
+        {/* Single choice / Confirmation */}
+        {(step.type === "single_choice" || step.type === "confirmation" || step.type === "radio") && step.options && (
           <div className="mt-5 space-y-3">
             {step.options.map((option) => {
               const isSelected = selectedValue === option.value;
@@ -291,18 +307,126 @@ export default function JourneyPage() {
             })}
           </div>
         )}
+
+        {/* Checklist (multi-select) */}
+        {step.type === "checklist" && step.options && (
+          <div className="mt-5 space-y-3">
+            {step.options.map((option) => {
+              const isChecked = checkedValues.has(option.value);
+              return (
+                <button
+                  key={option.value}
+                  onClick={() => {
+                    setCheckedValues((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(option.value)) next.delete(option.value);
+                      else next.add(option.value);
+                      return next;
+                    });
+                  }}
+                  disabled={submitting}
+                  className={`flex w-full items-center gap-3 rounded-xl border-2 px-4 py-4 text-left transition-all ${
+                    isChecked
+                      ? "border-transparent text-white shadow-md"
+                      : "border-zinc-200 text-zinc-800 hover:border-zinc-300 hover:bg-zinc-50"
+                  } disabled:opacity-60`}
+                  style={isChecked ? { backgroundColor: primaryColor } : undefined}
+                >
+                  <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border-2 ${
+                    isChecked ? "border-white/40 bg-white/20" : "border-zinc-300"
+                  }`}>
+                    {isChecked && (
+                      <svg className="h-3 w-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </span>
+                  {option.emoji && <span className="text-xl">{option.emoji}</span>}
+                  <span className="text-sm font-medium">{option.label}</span>
+                </button>
+              );
+            })}
+            <button
+              onClick={handleChecklistSubmit}
+              disabled={checkedValues.size === 0 || submitting}
+              className="mt-2 w-full rounded-xl px-4 py-3 text-sm font-semibold text-white transition-opacity disabled:opacity-40"
+              style={{ backgroundColor: primaryColor }}
+            >
+              {submitting ? "Submitting..." : "Continue"}
+            </button>
+          </div>
+        )}
+
+        {/* Text input */}
+        {step.type === "text_input" && (
+          <form onSubmit={handleTextSubmit} className="mt-5">
+            <textarea
+              value={textValue}
+              onChange={(e) => setTextValue(e.target.value)}
+              placeholder={step.placeholder || "Type your response..."}
+              rows={3}
+              className="w-full rounded-xl border-2 border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-900 outline-none transition-colors focus:border-indigo-400"
+              style={{ "--tw-ring-color": primaryColor } as React.CSSProperties}
+            />
+            <button
+              type="submit"
+              disabled={!textValue.trim() || submitting}
+              className="mt-3 w-full rounded-xl px-4 py-3 text-sm font-semibold text-white transition-opacity disabled:opacity-40"
+              style={{ backgroundColor: primaryColor }}
+            >
+              {submitting ? "Submitting..." : "Continue"}
+            </button>
+          </form>
+        )}
+
+        {/* Confirm step (simple yes/no buttons) */}
+        {step.type === "confirm" && (
+          <div className="mt-5 flex gap-3">
+            <button
+              onClick={() => submitStep("yes", "Yes")}
+              disabled={submitting}
+              className="flex-1 rounded-xl px-4 py-3 text-sm font-semibold text-white transition-opacity disabled:opacity-60"
+              style={{ backgroundColor: primaryColor }}
+            >
+              Yes
+            </button>
+            <button
+              onClick={() => submitStep("no", "No")}
+              disabled={submitting}
+              className="flex-1 rounded-xl border-2 border-zinc-200 px-4 py-3 text-sm font-semibold text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-60"
+            >
+              No
+            </button>
+          </div>
+        )}
       </div>
     </JourneyShell>
   );
 }
 
-function JourneyShell({ children }: { children: React.ReactNode }) {
+function JourneyShell({ children, logoUrl, workspaceName }: { children: React.ReactNode; logoUrl?: string; workspaceName?: string }) {
   return (
     <>
       <meta name="robots" content="noindex" />
       <div className="flex min-h-screen items-center justify-center bg-zinc-50 p-4">
-        <div className="w-full max-w-[480px] rounded-2xl bg-white p-6 shadow-lg sm:p-8">
-          {children}
+        <div className="w-full max-w-[480px]">
+          {/* Branding header */}
+          {(logoUrl || workspaceName) && (
+            <div className="mb-4 flex items-center justify-center gap-2">
+              {logoUrl && (
+                <img src={logoUrl} alt="" className="h-8 w-auto" />
+              )}
+              {workspaceName && !logoUrl && (
+                <span className="text-sm font-medium text-zinc-400">{workspaceName}</span>
+              )}
+            </div>
+          )}
+          <div className="rounded-2xl bg-white p-6 shadow-lg sm:p-8">
+            {children}
+          </div>
+          <p className="mt-3 text-center text-[11px] text-zinc-400">
+            Powered by <a href="https://shopcx.ai" className="underline hover:text-zinc-500" target="_blank" rel="noopener noreferrer">ShopCX.ai</a>
+          </p>
         </div>
       </div>
     </>

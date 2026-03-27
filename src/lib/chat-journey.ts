@@ -4,6 +4,8 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { subscribeToEmailMarketing, subscribeToSmsMarketing } from "@/lib/shopify-marketing";
+import { sendJourneyCTA } from "@/lib/email";
+import crypto from "crypto";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -13,6 +15,77 @@ interface JourneyContext {
   ticketId: string;
   customerId: string;
   journeyData: Record<string, unknown>;
+  channel?: string;
+}
+
+/**
+ * For email-channel tickets, create a journey_session and send a CTA email
+ * instead of embedding forms inline.
+ */
+async function sendEmailJourneyCTA(
+  ctx: JourneyContext,
+  journeyType: string,
+  contextMessage?: string,
+): Promise<boolean> {
+  // CTA mini-site for channels that don't support inline forms
+  // Only chat gets inline forms; all others get CTA → mini-site
+  const inlineChannels = ["chat"];
+  if (!ctx.channel || inlineChannels.includes(ctx.channel)) return false;
+
+  const { data: customer } = await ctx.admin
+    .from("customers")
+    .select("email, first_name")
+    .eq("id", ctx.customerId)
+    .single();
+  if (!customer?.email) return false;
+
+  // Find or create journey definition for this type
+  const { data: journeyDef } = await ctx.admin
+    .from("journey_definitions")
+    .select("id, config")
+    .eq("workspace_id", ctx.workspaceId)
+    .eq("trigger_intent", journeyType)
+    .eq("is_active", true)
+    .limit(1)
+    .single();
+
+  if (!journeyDef) return false;
+
+  // Create session token
+  const token = crypto.randomBytes(24).toString("hex");
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+  await ctx.admin.from("journey_sessions").insert({
+    workspace_id: ctx.workspaceId,
+    journey_id: journeyDef.id,
+    customer_id: ctx.customerId,
+    ticket_id: ctx.ticketId,
+    token,
+    token_expires_at: expiresAt,
+    status: "pending",
+    config_snapshot: journeyDef.config,
+  });
+
+  // Get workspace branding
+  const { data: ws } = await ctx.admin
+    .from("workspaces")
+    .select("name, help_logo_url, help_primary_color")
+    .eq("id", ctx.workspaceId)
+    .single();
+
+  await sendJourneyCTA({
+    workspaceId: ctx.workspaceId,
+    toEmail: customer.email,
+    customerName: customer.first_name || "",
+    journeyToken: token,
+    contextMessage,
+    workspaceName: ws?.name || "Support",
+    logoUrl: ws?.help_logo_url || undefined,
+    primaryColor: ws?.help_primary_color || undefined,
+  });
+
+  await sendInternalNote(ctx, `[System] Sent journey CTA email to ${customer.email} for ${journeyType}`);
+  return true;
 }
 
 // Send a message in the chat (external, visible in widget)
@@ -52,12 +125,13 @@ export async function executeAccountLinkingJourney(
   workspaceId: string,
   ticketId: string,
   customerMessage: string,
+  channel?: string,
 ): Promise<{ completed: boolean; linkedIds: string[] }> {
   const admin = createAdminClient();
 
   const { data: ticket } = await admin
     .from("tickets")
-    .select("customer_id, journey_step, journey_data")
+    .select("customer_id, journey_step, journey_data, channel")
     .eq("id", ticketId)
     .single();
 
@@ -67,6 +141,7 @@ export async function executeAccountLinkingJourney(
     admin, workspaceId, ticketId,
     customerId: ticket.customer_id,
     journeyData: (ticket.journey_data as Record<string, unknown>) || {},
+    channel: channel || ticket.channel,
   };
 
   const step = ticket.journey_step || 0;
@@ -119,7 +194,18 @@ export async function executeAccountLinkingJourney(
 
     if (unlinked.length === 0) return { completed: true, linkedIds: alreadyLinkedIds };
 
-    // Send checklist form
+    // For non-inline channels, send CTA email instead
+    const sentCTA = await sendEmailJourneyCTA(
+      ctx,
+      "account_linking",
+      "We noticed you might have multiple profiles. Click below to confirm which emails belong to you.",
+    );
+    if (sentCTA) {
+      await updateJourneyStep(ctx, 1, { unlinkedMatches: unlinked, existingGroupId: groupId });
+      return { completed: false, linkedIds: [] };
+    }
+
+    // Send checklist form (inline for chat/help_center)
     const options = unlinked.map(m => ({ value: m.id, label: m.email }));
     const formPayload = JSON.stringify({
       type: "checklist",
@@ -215,12 +301,13 @@ export async function executeDiscountJourney(
   workspaceId: string,
   ticketId: string,
   customerMessage: string,
+  channel?: string,
 ): Promise<{ completed: boolean; waitingForForm: boolean }> {
   const admin = createAdminClient();
 
   const { data: ticket } = await admin
     .from("tickets")
-    .select("customer_id, journey_step, journey_data")
+    .select("customer_id, journey_step, journey_data, channel")
     .eq("id", ticketId)
     .single();
 
@@ -230,6 +317,7 @@ export async function executeDiscountJourney(
     admin, workspaceId, ticketId,
     customerId: ticket.customer_id,
     journeyData: (ticket.journey_data as Record<string, unknown>) || {},
+    channel: channel || ticket.channel,
   };
 
   const step = ticket.journey_step || 0;
@@ -283,6 +371,16 @@ export async function executeDiscountJourney(
         return executeDiscountJourney(workspaceId, ticketId, customerMessage);
       }
       // Multiple emails — ask which one
+      const sentCTA = await sendEmailJourneyCTA(
+        ctx,
+        "discount_signup",
+        "We run exclusive promotions for our email and SMS subscribers! Click below to choose your preferred email and get your coupon.",
+      );
+      if (sentCTA) {
+        await updateJourneyStep(ctx, 1);
+        return { completed: false, waitingForForm: true };
+      }
+
       const options = emails.map(e => ({ value: e, label: e }));
       const formPayload = JSON.stringify({
         type: "radio",
@@ -337,6 +435,16 @@ export async function executeDiscountJourney(
       return executeDiscountJourney(workspaceId, ticketId, customerMessage);
     }
     // Multiple phones — ask
+    const sentSMSCTA = await sendEmailJourneyCTA(
+      ctx,
+      "discount_signup",
+      "Which phone number would you like to receive coupon notifications on? Click below to choose.",
+    );
+    if (sentSMSCTA) {
+      await updateJourneyStep(ctx, 6);
+      return { completed: false, waitingForForm: true };
+    }
+
     const options = phones.map(p => ({ value: p as string, label: p as string }));
     const formPayload = JSON.stringify({
       type: "radio",
@@ -419,6 +527,16 @@ export async function executeDiscountJourney(
           { value: "checkout", label: "I'll use it at checkout" },
         ],
       });
+
+      const sentSubCTA = await sendEmailJourneyCTA(
+        ctx,
+        "discount_signup",
+        `You're all set! Use code ${couponCode} (${couponSummary}) at checkout. You also have an active subscription — click below to apply the coupon to it.`,
+      );
+      if (sentSubCTA) {
+        await updateJourneyStep(ctx, 12, { subContractId: sub.shopify_contract_id });
+        return { completed: false, waitingForForm: true };
+      }
 
       await sendChatMessage(ctx, `You're all set! Use code <strong>${couponCode}</strong> (${couponSummary}) at checkout.\n\nI also noticed you have an active subscription for ${items} renewing ${nextDate}. Would you like me to apply the coupon there too?<!--FORM:${formPayload}-->`);
       await updateJourneyStep(ctx, 12, { subContractId: sub.shopify_contract_id });
