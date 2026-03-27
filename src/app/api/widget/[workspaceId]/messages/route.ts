@@ -100,7 +100,7 @@ export async function POST(
         customer_id: customerId,
         channel: "chat",
         status: "open",
-        subject: "Live Chat",
+        subject: message.slice(0, 80) || "Live Chat",
         last_customer_reply_at: new Date().toISOString(),
       })
       .select("id")

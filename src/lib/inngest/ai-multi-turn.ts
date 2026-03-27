@@ -128,6 +128,131 @@ export const aiMultiTurn = inngest.createFunction(
       return { action: "escalated", reason: decision.reason };
     }
 
+    // Step 1c: Profile linking check (first message only, doesn't count as a turn)
+    const linkResult = await step.run("check-profile-links", async () => {
+      const admin = createAdminClient();
+      const { data: ticket } = await admin
+        .from("tickets")
+        .select("profile_link_completed, customer_id")
+        .eq("id", ticket_id)
+        .single();
+
+      if (ticket?.profile_link_completed || !ticket?.customer_id) return { action: "skip" };
+
+      // Get customer info
+      const { data: cust } = await admin
+        .from("customers")
+        .select("id, email, first_name, last_name")
+        .eq("id", ticket.customer_id)
+        .single();
+      if (!cust?.first_name || !cust?.last_name) {
+        await admin.from("tickets").update({ profile_link_completed: true }).eq("id", ticket_id);
+        return { action: "skip" };
+      }
+
+      // Check if already linked
+      const { data: existingLinks } = await admin
+        .from("customer_links")
+        .select("group_id")
+        .eq("customer_id", cust.id);
+      if (existingLinks?.length) {
+        await admin.from("tickets").update({ profile_link_completed: true }).eq("id", ticket_id);
+        return { action: "skip" };
+      }
+
+      // Find potential matches by name
+      const { data: matches } = await admin
+        .from("customers")
+        .select("id, email")
+        .eq("workspace_id", workspace_id)
+        .eq("first_name", cust.first_name)
+        .eq("last_name", cust.last_name)
+        .neq("id", cust.id)
+        .neq("email", cust.email)
+        .limit(1);
+
+      if (!matches?.length) {
+        await admin.from("tickets").update({ profile_link_completed: true }).eq("id", ticket_id);
+        return { action: "skip" };
+      }
+
+      return { action: "ask", matchEmail: matches[0].email, matchId: matches[0].id, customerId: cust.id };
+    });
+
+    // If we need to ask about profile linking
+    if (linkResult.action === "ask") {
+      // Check if we're already in a linking conversation (customer is responding to our question)
+      const bodyLower = message_body.toLowerCase().trim();
+      const isConfirming = /^(yes|yeah|yep|that's me|that is me|correct|yup|sure)/.test(bodyLower);
+      const isDenying = /^(no|nope|not me|not mine|different|wrong)/.test(bodyLower);
+
+      // Check if we already asked (look for the linking question in messages)
+      const alreadyAsked = await step.run("check-link-asked", async () => {
+        const admin = createAdminClient();
+        const { data: msgs } = await admin
+          .from("ticket_messages")
+          .select("body")
+          .eq("ticket_id", ticket_id)
+          .eq("author_type", "ai")
+          .order("created_at", { ascending: false })
+          .limit(3);
+        return (msgs || []).some(m => (m.body || "").includes("also your email"));
+      });
+
+      const matchId = (linkResult as { matchId?: string }).matchId;
+      const matchEmail = (linkResult as { matchEmail?: string }).matchEmail;
+      const linkCustomerId = (linkResult as { customerId?: string }).customerId;
+
+      if (alreadyAsked && isConfirming && matchId && linkCustomerId) {
+        // Customer confirmed — link the profiles
+        await step.run("link-profiles", async () => {
+          const admin = createAdminClient();
+          const groupId = crypto.randomUUID();
+          await admin.from("customer_links").insert([
+            { customer_id: linkCustomerId, group_id: groupId, is_primary: true },
+            { customer_id: matchId, group_id: groupId, is_primary: false },
+          ]);
+          await admin.from("ticket_messages").insert({
+            ticket_id,
+            direction: "outbound",
+            body: "Perfect, I've linked your accounts so I can see your full order history. Let me help you with your question now!",
+            author_type: "ai",
+            visibility: "external",
+          });
+          await admin.from("ticket_messages").insert({
+            ticket_id,
+            direction: "outbound",
+            body: `[System] Profiles linked: ${linkCustomerId} + ${matchId} (group: ${groupId})`,
+            author_type: "system",
+            visibility: "internal",
+          });
+          await admin.from("tickets").update({ profile_link_completed: true }).eq("id", ticket_id);
+        });
+        // Don't count this as a turn — return and let the next message trigger real support
+        return { action: "profiles_linked" };
+      } else if (alreadyAsked && isDenying) {
+        // Customer said no — mark as checked and continue
+        await step.run("skip-link", async () => {
+          const admin = createAdminClient();
+          await admin.from("tickets").update({ profile_link_completed: true }).eq("id", ticket_id);
+        });
+        // Fall through to normal AI handling
+      } else if (!alreadyAsked) {
+        // Ask the customer about the match (doesn't count as a turn)
+        await step.run("ask-about-link", async () => {
+          const admin = createAdminClient();
+          await admin.from("ticket_messages").insert({
+            ticket_id,
+            direction: "outbound",
+            body: `Before I look into that for you — I want to make sure I have your complete account pulled up. Is ${matchEmail} also your email address?`,
+            author_type: "ai",
+            visibility: "external",
+          });
+        });
+        return { action: "asked_about_link" };
+      }
+    }
+
     // Step 2: Assemble context
     const context = await step.run("assemble-context", async () => {
       return assembleTicketContext(workspace_id, ticket_id);

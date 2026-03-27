@@ -110,32 +110,87 @@ export async function assembleTicketContext(
     }
   }
 
-  // 4. Build customer profile
+  // 4. Build customer profile — include linked profiles
   const customerParts: string[] = [];
+  let linkedCustomerIds: string[] = [];
   if (customer) {
+    // Check for linked profiles
+    const { data: links } = await admin
+      .from("customer_links")
+      .select("group_id")
+      .eq("customer_id", customer.id);
+
+    if (links?.length && links[0].group_id) {
+      const { data: linkedProfiles } = await admin
+        .from("customer_links")
+        .select("customer_id, customers(email, first_name, last_name)")
+        .eq("group_id", links[0].group_id);
+
+      linkedCustomerIds = (linkedProfiles || [])
+        .map(lp => lp.customer_id)
+        .filter((id: string) => id !== customer.id);
+
+      if (linkedCustomerIds.length > 0) {
+        const linkedEmails = (linkedProfiles || [])
+          .filter(lp => lp.customer_id !== customer.id)
+          .map(lp => (lp.customers as unknown as { email: string })?.email)
+          .filter(Boolean);
+        customerParts.push(`Linked Profiles: ${linkedEmails.join(", ")} (combined data shown below)`);
+      }
+    }
+
+    // All customer IDs to query across (current + linked)
+    const allCustomerIds = [customer.id, ...linkedCustomerIds];
+
     const name = [customer.first_name, customer.last_name].filter(Boolean).join(" ");
     if (name) customerParts.push(`Name: ${name}`);
     customerParts.push(`Email: ${customer.email}`);
     if (customer.phone) customerParts.push(`Phone: ${customer.phone}`);
-    customerParts.push(`Retention Score: ${customer.retention_score}/100`);
-    customerParts.push(`Total Orders: ${customer.total_orders}`);
-    customerParts.push(`Lifetime Value: $${(customer.ltv_cents / 100).toFixed(2)}`);
-    if (customer.subscription_status !== "none") {
-      customerParts.push(`Subscription: ${customer.subscription_status}`);
+
+    // Compute combined stats across linked profiles
+    if (linkedCustomerIds.length > 0) {
+      const { data: allCusts } = await admin
+        .from("customers")
+        .select("retention_score, total_orders, ltv_cents, subscription_status")
+        .in("id", allCustomerIds);
+
+      const combinedOrders = (allCusts || []).reduce((sum, c) => sum + (c.total_orders || 0), 0);
+      const combinedLtv = (allCusts || []).reduce((sum, c) => sum + (c.ltv_cents || 0), 0);
+      const maxRetention = Math.max(...(allCusts || []).map(c => c.retention_score || 0));
+      const hasActiveSub = (allCusts || []).some(c => c.subscription_status === "active");
+
+      customerParts.push(`Retention Score: ${maxRetention}/100`);
+      customerParts.push(`Total Orders (combined): ${combinedOrders}`);
+      customerParts.push(`Lifetime Value (combined): $${(combinedLtv / 100).toFixed(2)}`);
+      if (hasActiveSub) customerParts.push(`Subscription: active`);
+    } else {
+      customerParts.push(`Retention Score: ${customer.retention_score}/100`);
+      customerParts.push(`Total Orders: ${customer.total_orders}`);
+      customerParts.push(`Lifetime Value: $${(customer.ltv_cents / 100).toFixed(2)}`);
+      if (customer.subscription_status !== "none") {
+        customerParts.push(`Subscription: ${customer.subscription_status}`);
+      }
     }
+
     const emailMktg = customer.email_marketing_status === "subscribed";
     const smsMktg = customer.sms_marketing_status === "subscribed";
     customerParts.push(`Email Marketing: ${emailMktg ? "subscribed" : "not subscribed"}`);
     customerParts.push(`SMS Marketing: ${smsMktg ? "subscribed" : "not subscribed"}`);
 
-    // Fetch recent orders
-    const { data: orders } = await admin
+    // Fetch recent orders (across linked profiles)
+    // allCustomerIds already defined above
+    let ordersQuery = admin
       .from("orders")
       .select("order_number, financial_status, fulfillment_status, total_cents, currency, created_at, fulfillments")
       .eq("workspace_id", workspaceId)
-      .eq("customer_id", customer.id)
       .order("created_at", { ascending: false })
       .limit(3);
+    if (allCustomerIds.length === 1) {
+      ordersQuery = ordersQuery.eq("customer_id", customer.id);
+    } else {
+      ordersQuery = ordersQuery.in("customer_id", allCustomerIds);
+    }
+    const { data: orders } = await ordersQuery;
 
     if (orders?.length) {
       customerParts.push("\nRecent Orders:");
@@ -158,14 +213,19 @@ export async function assembleTicketContext(
       }
     }
 
-    // Fetch active subscriptions
-    const { data: subs } = await admin
+    // Fetch active subscriptions (across linked profiles)
+    let subsQuery = admin
       .from("subscriptions")
       .select("status, billing_interval, billing_interval_count, next_billing_date, items")
       .eq("workspace_id", workspaceId)
-      .eq("customer_id", customer.id)
       .in("status", ["active", "paused"])
       .limit(3);
+    if (allCustomerIds.length === 1) {
+      subsQuery = subsQuery.eq("customer_id", customer.id);
+    } else {
+      subsQuery = subsQuery.in("customer_id", allCustomerIds);
+    }
+    const { data: subs } = await subsQuery;
 
     if (subs?.length) {
       customerParts.push("\nSubscriptions:");
@@ -177,13 +237,18 @@ export async function assembleTicketContext(
       }
     }
 
-    // Count open tickets for this customer
-    const { count: openTickets } = await admin
+    // Count open tickets for this customer (across linked profiles)
+    let openQuery = admin
       .from("tickets")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
-      .eq("customer_id", customer.id)
       .eq("status", "open");
+    if (allCustomerIds.length === 1) {
+      openQuery = openQuery.eq("customer_id", customer.id);
+    } else {
+      openQuery = openQuery.in("customer_id", allCustomerIds);
+    }
+    const { count: openTickets } = await openQuery;
     if (openTickets && openTickets > 1) customerParts.push(`\nNote: Customer has ${openTickets} open tickets`);
   }
 

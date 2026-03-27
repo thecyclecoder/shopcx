@@ -49,18 +49,27 @@ export async function GET(
       .eq("status", "closed"),
   ]);
 
-  // Compute avg retention via simple query if RPC doesn't exist
+  // Compute avg retention — exclude secondary linked profiles to avoid double-counting
   let avgRetention = (retention as { data: number | null }).data;
   if (avgRetention == null) {
+    // Get secondary profile IDs to exclude
+    const { data: secondaryLinks } = await admin
+      .from("customer_links")
+      .select("customer_id")
+      .eq("is_primary", false);
+    const excludeIds = (secondaryLinks || []).map(l => l.customer_id);
+
     const { data: retData } = await admin
       .from("customers")
-      .select("retention_score")
+      .select("id, retention_score")
       .eq("workspace_id", workspaceId)
       .not("retention_score", "is", null)
       .gt("total_orders", 0)
       .limit(1000);
-    if (retData && retData.length > 0) {
-      avgRetention = retData.reduce((sum: number, c: { retention_score: number }) => sum + (c.retention_score || 0), 0) / retData.length;
+
+    const filtered = (retData || []).filter(c => !excludeIds.includes(c.id));
+    if (filtered.length > 0) {
+      avgRetention = filtered.reduce((sum: number, c: { retention_score: number }) => sum + (c.retention_score || 0), 0) / filtered.length;
     }
   }
 
