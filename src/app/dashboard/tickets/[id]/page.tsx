@@ -99,10 +99,19 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+const CHANNEL_LABELS: Record<string, string> = {
+  email: "Email",
+  chat: "Live Chat",
+  help_center: "Help Center",
+  social_comments: "Social Comments",
+  meta_dm: "Social DMs",
+  sms: "SMS",
+};
+
 function ChannelBadge({ channel }: { channel: string }) {
   return (
-    <span className="inline-flex items-center rounded-full bg-zinc-100 px-2 py-0.5 text-sm font-medium capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-      {channel.replace("_", " ")}
+    <span className="inline-flex items-center rounded-full bg-zinc-100 px-2 py-0.5 text-sm font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+      {CHANNEL_LABELS[channel] || channel.replace(/_/g, " ")}
     </span>
   );
 }

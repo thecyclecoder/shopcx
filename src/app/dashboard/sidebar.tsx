@@ -36,11 +36,13 @@ export default function Sidebar({
   const [open, setOpen] = useState(false);
   const [ticketViews, setTicketViews] = useState<TicketView[]>([]);
   const [collapsedViews, setCollapsedViews] = useState<Set<string>>(new Set());
+  const [ticketsExpanded, setTicketsExpanded] = useState(false);
   const [escalationCounts, setEscalationCounts] = useState<{ open: number; pending: number; closed: number }>({ open: 0, pending: 0, closed: 0 });
 
-  // Close sidebar on route change (mobile)
+  // Close sidebar on route change (mobile), auto-expand tickets when on tickets page
   useEffect(() => {
     setOpen(false);
+    if (pathname.startsWith("/dashboard/tickets")) setTicketsExpanded(true);
   }, [pathname]);
 
   // Load ticket views + counts — refetch on navigation + poll every 30s
@@ -116,23 +118,42 @@ export default function Sidebar({
         {NAV_ITEMS.map((item) => {
           const isActive = pathname === item.href ||
             (item.href !== "/dashboard" && pathname.startsWith(item.href));
+          const isTickets = item.href === "/dashboard/tickets";
           return (
             <div key={item.href}>
-              <Link
-                href={item.href}
-                className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${
-                  isActive
-                    ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
-                    : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
-                }`}
-              >
-                <svg className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
-                </svg>
-                {item.label}
-              </Link>
+              {isTickets ? (
+                <button
+                  type="button"
+                  onClick={() => setTicketsExpanded(prev => !prev)}
+                  className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${
+                    isActive
+                      ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
+                      : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                  }`}
+                >
+                  <svg className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
+                  </svg>
+                  <span className="flex-1 text-left">{item.label}</span>
+                  <span className={`text-zinc-400 transition-transform ${ticketsExpanded ? "rotate-90" : ""}`}>&#9656;</span>
+                </button>
+              ) : (
+                <Link
+                  href={item.href}
+                  className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${
+                    isActive
+                      ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
+                      : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                  }`}
+                >
+                  <svg className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
+                  </svg>
+                  {item.label}
+                </Link>
+              )}
               {/* Escalations submenu */}
-              {item.href === "/dashboard/tickets" && (() => {
+              {isTickets && ticketsExpanded && (() => {
                 const totalEsc = escalationCounts.open + escalationCounts.pending + escalationCounts.closed;
                 if (totalEsc === 0) return null;
                 const escCollapsed = collapsedViews.has("__escalations");
@@ -184,7 +205,7 @@ export default function Sidebar({
               })()}
 
               {/* Ticket views submenu (nested) */}
-              {item.href === "/dashboard/tickets" && ticketViews.length > 0 && (() => {
+              {isTickets && ticketsExpanded && ticketViews.length > 0 && (() => {
                 const topLevel = ticketViews.filter(v => !v.parent_id);
                 const children = (parentId: string) => ticketViews.filter(v => v.parent_id === parentId);
                 const grandChildren = (parentId: string) => ticketViews.filter(v => v.parent_id === parentId);
@@ -266,6 +287,21 @@ export default function Sidebar({
                   </div>
                 );
               })()}
+              {/* View All link — always visible when tickets expanded */}
+              {isTickets && ticketsExpanded && (
+                <div className="ml-6 border-l border-zinc-200 pl-2 dark:border-zinc-800">
+                  <Link
+                    href="/dashboard/tickets"
+                    className={`flex items-center px-2 py-1 text-sm transition-colors ${
+                      pathname === "/dashboard/tickets" && !new URLSearchParams(typeof window !== "undefined" ? window.location.search : "").get("view") && !new URLSearchParams(typeof window !== "undefined" ? window.location.search : "").get("escalation_mine")
+                        ? "font-medium text-indigo-600 dark:text-indigo-400"
+                        : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+                    }`}
+                  >
+                    View All
+                  </Link>
+                </div>
+              )}
             </div>
           );
         })}

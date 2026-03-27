@@ -425,7 +425,7 @@ function CustomDomainSetup({ workspaceId }: { workspaceId: string }) {
 }
 
 function ResponseDelayEditor({ workspaceId }: { workspaceId: string }) {
-  const [delays, setDelays] = useState<Record<string, number>>({ email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5 });
+  const [delays, setDelays] = useState<Record<string, number>>({ email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5, social_comments: 10 });
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -455,6 +455,7 @@ function ResponseDelayEditor({ workspaceId }: { workspaceId: string }) {
     { key: "sms", label: "SMS" },
     { key: "meta_dm", label: "Social DMs" },
     { key: "help_center", label: "Help Center" },
+    { key: "social_comments", label: "Social Comments" },
   ];
 
   return (

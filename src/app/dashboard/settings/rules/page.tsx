@@ -59,7 +59,7 @@ const TRIGGER_OPTIONS = [
 const FIELD_OPTIONS = [
   { value: "ticket.subject", label: "Ticket Subject", type: "text" },
   { value: "ticket.status", label: "Ticket Status", type: "select", options: ["open", "pending", "closed"] },
-  { value: "ticket.channel", label: "Ticket Channel", type: "select", options: ["email", "chat", "meta_dm", "sms"] },
+  { value: "ticket.channel", label: "Ticket Channel", type: "select", options: ["email", "chat", "meta_dm", "sms", "help_center", "social_comments"] },
   { value: "ticket.tags", label: "Ticket Tags", type: "array" },
   { value: "message.body", label: "Message Body", type: "text" },
   { value: "message.direction", label: "Message Direction", type: "select", options: ["inbound", "outbound"] },

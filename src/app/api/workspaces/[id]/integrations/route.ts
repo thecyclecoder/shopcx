@@ -66,7 +66,7 @@ export async function GET(
 
     // Auto-close + delays
     auto_close_reply: workspace.auto_close_reply || null,
-    response_delays: workspace.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5 },
+    response_delays: workspace.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5, social_comments: 10 },
 
     // Help center
     help_center_url: workspace.help_center_url || null,
