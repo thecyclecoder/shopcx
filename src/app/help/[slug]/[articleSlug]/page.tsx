@@ -100,15 +100,32 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
     .single();
   const shopDomain = wsStore?.shopify_domain || "";
 
-  // Get related articles in same category
-  const { data: related } = await admin
-    .from("knowledge_base")
-    .select("id, title, slug, excerpt")
-    .eq("workspace_id", workspace.id)
-    .eq("category", article.category)
-    .eq("published", true)
-    .neq("id", article.id)
-    .limit(5);
+  // Get related articles — same product first, then same category
+  let related: { id: string; title: string; slug: string; excerpt: string | null }[] | null = null;
+  if (article.product_id) {
+    const { data } = await admin
+      .from("knowledge_base")
+      .select("id, title, slug, excerpt")
+      .eq("workspace_id", workspace.id)
+      .eq("product_id", article.product_id)
+      .eq("published", true)
+      .neq("id", article.id)
+      .order("view_count", { ascending: false })
+      .limit(5);
+    related = data;
+  }
+  if (!related || related.length === 0) {
+    const { data } = await admin
+      .from("knowledge_base")
+      .select("id, title, slug, excerpt")
+      .eq("workspace_id", workspace.id)
+      .eq("category", article.category)
+      .eq("published", true)
+      .neq("id", article.id)
+      .order("view_count", { ascending: false })
+      .limit(5);
+    related = data;
+  }
 
   // FAQ structured data for SEO/LLM
   const faqSchema = {
