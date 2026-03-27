@@ -9,8 +9,8 @@ export const chargebackReceived = inngest.createFunction(
     id: "chargeback-received",
     retries: 2,
     concurrency: [{ limit: 1, key: "event.data.chargebackEventId" }],
+    triggers: [{ event: "chargeback/received" }],
   },
-  { event: "chargeback/received" },
   async ({ event, step }) => {
     const { chargebackEventId, workspaceId } = event.data as {
       chargebackEventId: string;
@@ -28,10 +28,7 @@ export const chargebackReceived = inngest.createFunction(
 
       const { data: ws } = await admin
         .from("workspaces")
-        .select(
-          "id, chargeback_auto_cancel, chargeback_notify, chargeback_auto_ticket, " +
-          "chargeback_auto_cancel_reasons"
-        )
+        .select("id, chargeback_auto_cancel, chargeback_notify, chargeback_auto_ticket, chargeback_auto_cancel_reasons")
         .eq("id", workspaceId)
         .single();
 
@@ -396,8 +393,8 @@ export const chargebackWon = inngest.createFunction(
   {
     id: "chargeback-won",
     retries: 2,
+    triggers: [{ event: "chargeback/won" }],
   },
-  { event: "chargeback/won" },
   async ({ event, step }) => {
     const { chargebackEventId, workspaceId } = event.data as {
       chargebackEventId: string;
@@ -470,8 +467,8 @@ export const chargebackLost = inngest.createFunction(
   {
     id: "chargeback-lost",
     retries: 2,
+    triggers: [{ event: "chargeback/lost" }],
   },
-  { event: "chargeback/lost" },
   async ({ event, step }) => {
     const { chargebackEventId, workspaceId } = event.data as {
       chargebackEventId: string;
@@ -527,8 +524,8 @@ export const chargebackEvidenceReminder = inngest.createFunction(
   {
     id: "chargeback-evidence-reminder",
     retries: 2,
+    triggers: [{ cron: "0 9 * * *" }], // 9am UTC daily
   },
-  { cron: "0 9 * * *" }, // 9am UTC daily
   async ({ step }) => {
     const admin = createAdminClient();
 

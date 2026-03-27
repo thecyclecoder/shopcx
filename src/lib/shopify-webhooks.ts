@@ -192,7 +192,7 @@ export async function handleDisputeEvent(
     // disputes/update — update existing row
     const { data: existing } = await admin
       .from("chargeback_events")
-      .select("id, status as old_status, auto_action_taken")
+      .select("id, status, auto_action_taken")
       .eq("workspace_id", workspaceId)
       .eq("shopify_dispute_id", disputeId)
       .maybeSingle();
