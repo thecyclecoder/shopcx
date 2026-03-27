@@ -70,20 +70,29 @@ export async function assembleTicketContext(
 
   // Build conversation history
   const conversationHistory: ConversationMessage[] = [];
-  for (const m of messages || []) {
-    const role = m.direction === "inbound" ? "user" : "assistant";
-    const content = (m.body || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-    if (content) conversationHistory.push({ role, content });
-  }
+  const allMessages = messages || [];
 
-  // Token management: keep last 4 messages verbatim, summarize older
-  if (conversationHistory.length > 6) {
-    const older = conversationHistory.slice(0, -4);
-    const recent = conversationHistory.slice(-4);
-    const summary = older.map((m, i) => `${m.role === "user" ? "Customer" : "Agent"} (message ${i + 1}): ${m.content.slice(0, 200)}`).join("\n");
-    conversationHistory.length = 0;
-    conversationHistory.push({ role: "user", content: `[Earlier in this conversation:\n${summary}]` });
-    conversationHistory.push(...recent);
+  // For multi-turn (turn 2+), prepend context summary and only include recent messages
+  if (ticket.ai_turn_count > 0 && allMessages.length > 2) {
+    // Summarize all but the last customer message as context
+    const olderMsgs = allMessages.slice(0, -1);
+    const summary = olderMsgs.map((m, i) => {
+      const who = m.direction === "inbound" ? "Customer" : "Agent";
+      const text = (m.body || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 150);
+      return `${who} (msg ${i + 1}): ${text}`;
+    }).join("\n");
+
+    conversationHistory.push({
+      role: "user",
+      content: `[Conversation history for context — do NOT re-address these topics:\n${summary}]\n\n---\nMy new question (RESPOND ONLY TO THIS):\n${(allMessages[allMessages.length - 1].body || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()}`,
+    });
+  } else {
+    // First turn: include all messages normally
+    for (const m of allMessages) {
+      const role = m.direction === "inbound" ? "user" : "assistant";
+      const content = (m.body || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      if (content) conversationHistory.push({ role, content });
+    }
   }
 
   // 4. Build customer profile
