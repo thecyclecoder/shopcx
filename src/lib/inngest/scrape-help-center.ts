@@ -120,6 +120,7 @@ export const scrapeHelpCenter = inngest.createFunction(
               contentHtml
                 .replace(/<[^>]+>/g, " ")
                 .replace(/\.css-[a-z0-9]+\{[^}]+\}/g, "")
+                .replace(/Updated\s+\d+\s+\w+\s+ago/gi, "")
                 .replace(/\s+/g, " ")
                 .trim()
             );
