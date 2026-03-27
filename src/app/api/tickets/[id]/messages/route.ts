@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 import { sendTicketReply } from "@/lib/email";
+import { sendSMS } from "@/lib/twilio";
 import { evaluateRules } from "@/lib/rules-engine";
 import { sendMetaDM, replyToComment } from "@/lib/meta";
 import { decrypt } from "@/lib/crypto";
@@ -31,7 +32,7 @@ export async function POST(
   // Get ticket with customer info
   const { data: ticket } = await admin
     .from("tickets")
-    .select("*, customers(email)")
+    .select("*, customers(email, phone)")
     .eq("id", ticketId)
     .eq("workspace_id", workspaceId)
     .single();

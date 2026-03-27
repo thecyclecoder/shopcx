@@ -57,6 +57,12 @@ export default function IntegrationsPage() {
   } | null>(null);
   const [mxLoading, setMxLoading] = useState(false);
 
+  // Twilio SMS
+  const [twilioConnected, setTwilioConnected] = useState(false);
+  const [twilioPhone, setTwilioPhone] = useState("");
+  const [testSmsNumber, setTestSmsNumber] = useState("");
+  const [testSmsStatus, setTestSmsStatus] = useState("");
+
   // Sandbox
   const [sandboxMode, setSandboxMode] = useState(true);
 
