@@ -9,15 +9,7 @@ export default function IntegrationsPage() {
   const searchParams = useSearchParams();
   const canEdit = ["owner", "admin"].includes(workspace.role);
 
-  if (!canEdit) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center p-8">
-        <p className="text-sm text-zinc-400">You don&apos;t have permission to view this page.</p>
-      </div>
-    );
-  }
-
-  // Resend state
+  // All hooks must be called before any early return
   const [resendKey, setResendKey] = useState("");
   const [resendDomain, setResendDomain] = useState("");
   const [resendHint, setResendHint] = useState<string | null>(null);
@@ -279,6 +271,14 @@ export default function IntegrationsPage() {
     return (
       <div className="p-8">
         <p className="text-sm text-zinc-400">Loading...</p>
+      </div>
+    );
+  }
+
+  if (!canEdit) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center p-8">
+        <p className="text-sm text-zinc-400">You don&apos;t have permission to view this page.</p>
       </div>
     );
   }
