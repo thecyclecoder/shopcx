@@ -4,6 +4,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 import { sendTicketReply } from "@/lib/email";
 import { evaluateRules } from "@/lib/rules-engine";
+import { sendMetaDM, replyToComment } from "@/lib/meta";
+import { decrypt } from "@/lib/crypto";
 
 export async function POST(
   request: Request,
@@ -46,40 +48,71 @@ export async function POST(
     body: messageBody,
   };
 
-  // Send email if external reply
+  // Send reply via appropriate channel
   let emailError: string | undefined;
   let emailSuppressed = false;
+  let metaError: string | undefined;
 
-  if (visibility === "external" && ticket.customers?.email) {
-    const { data: workspace } = await admin
-      .from("workspaces")
-      .select("name, sandbox_mode, resend_domain")
-      .eq("id", workspaceId)
-      .single();
+  if (visibility === "external") {
+    const isMetaChannel = ticket.channel === "meta_dm" || ticket.channel === "social_comments";
 
-    // In sandbox mode, only send emails for tickets received at the inbound@ address
-    const isSandbox = workspace?.sandbox_mode ?? true;
-    const inboundAddress = workspace?.resend_domain ? `inbound@${workspace.resend_domain}` : null;
-    const isInboundTicket = ticket.received_at_email === inboundAddress || !ticket.received_at_email;
-    const shouldSendEmail = !isSandbox || isInboundTicket;
+    if (isMetaChannel && ticket.meta_sender_id) {
+      // Send via Meta Graph API
+      const { data: workspace } = await admin
+        .from("workspaces")
+        .select("meta_page_access_token_encrypted, sandbox_mode")
+        .eq("id", workspaceId)
+        .single();
 
-    if (!shouldSendEmail) {
-      emailSuppressed = true;
-    } else {
-      const result = await sendTicketReply({
-        workspaceId,
-        toEmail: ticket.customers.email,
-        subject: ticket.subject || "Support Request",
-        body: messageBody,
-        inReplyTo: ticket.email_message_id,
-        agentName: user.user_metadata?.full_name || user.user_metadata?.name || "Support",
-        workspaceName: workspace?.name || "ShopCX",
-      });
+      const isSandbox = workspace?.sandbox_mode ?? true;
+      if (isSandbox) {
+        emailSuppressed = true;
+      } else if (workspace?.meta_page_access_token_encrypted) {
+        const pageToken = decrypt(workspace.meta_page_access_token_encrypted);
 
-      if (result.error) {
-        emailError = result.error;
-      } else if (result.messageId) {
-        message.email_message_id = result.messageId;
+        if (ticket.channel === "meta_dm") {
+          const result = await sendMetaDM(pageToken, ticket.meta_sender_id, messageBody);
+          if (result.error) metaError = result.error;
+          else if (result.messageId) message.meta_message_id = result.messageId;
+        } else if (ticket.channel === "social_comments" && ticket.meta_comment_id) {
+          const result = await replyToComment(pageToken, ticket.meta_comment_id, messageBody);
+          if (result.error) metaError = result.error;
+          else if (result.commentId) message.meta_message_id = result.commentId;
+        }
+      } else {
+        metaError = "Meta not connected";
+      }
+    } else if (ticket.customers?.email) {
+      // Send via email
+      const { data: workspace } = await admin
+        .from("workspaces")
+        .select("name, sandbox_mode, resend_domain")
+        .eq("id", workspaceId)
+        .single();
+
+      const isSandbox = workspace?.sandbox_mode ?? true;
+      const inboundAddress = workspace?.resend_domain ? `inbound@${workspace.resend_domain}` : null;
+      const isInboundTicket = ticket.received_at_email === inboundAddress || !ticket.received_at_email;
+      const shouldSendEmail = !isSandbox || isInboundTicket;
+
+      if (!shouldSendEmail) {
+        emailSuppressed = true;
+      } else {
+        const result = await sendTicketReply({
+          workspaceId,
+          toEmail: ticket.customers.email,
+          subject: ticket.subject || "Support Request",
+          body: messageBody,
+          inReplyTo: ticket.email_message_id,
+          agentName: user.user_metadata?.full_name || user.user_metadata?.name || "Support",
+          workspaceName: workspace?.name || "ShopCX",
+        });
+
+        if (result.error) {
+          emailError = result.error;
+        } else if (result.messageId) {
+          message.email_message_id = result.messageId;
+        }
       }
     }
   }
@@ -125,8 +158,9 @@ export async function POST(
 
   return NextResponse.json({
     message: created,
-    email_sent: visibility === "external" && !emailError && !emailSuppressed,
+    email_sent: visibility === "external" && !emailError && !metaError && !emailSuppressed,
     email_suppressed: emailSuppressed,
     email_error: emailError,
+    meta_error: metaError,
   });
 }
