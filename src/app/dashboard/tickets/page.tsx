@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 
@@ -86,6 +86,18 @@ export default function TicketsPage() {
   const [newTicketSubject, setNewTicketSubject] = useState("");
   const [newTicketMessage, setNewTicketMessage] = useState("");
   const [creating, setCreating] = useState(false);
+
+  // Bulk selection state
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const [bulkMessage, setBulkMessage] = useState<string | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showAssignDropdown, setShowAssignDropdown] = useState(false);
+  const [showTagDropdown, setShowTagDropdown] = useState(false);
+  const [showStatusDropdown, setShowStatusDropdown] = useState(false);
+  const [newBulkTag, setNewBulkTag] = useState("");
+  const lastClickedIndex = useRef<number | null>(null);
+  const isAdmin = workspace.role === "owner" || workspace.role === "admin";
 
   // Clear view when filters change manually
   const clearView = () => {
@@ -187,6 +199,28 @@ export default function TicketsPage() {
     return () => clearInterval(interval);
   }, [fetchTickets]);
 
+  // Escape to clear selection
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && selected.size > 0) {
+        setSelected(new Set());
+        setShowAssignDropdown(false);
+        setShowTagDropdown(false);
+        setShowStatusDropdown(false);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [selected.size]);
+
+  // Auto-dismiss bulk message
+  useEffect(() => {
+    if (bulkMessage) {
+      const timer = setTimeout(() => setBulkMessage(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [bulkMessage]);
+
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setOffset(0);
@@ -217,6 +251,72 @@ export default function TicketsPage() {
       }
     } finally {
       setCreating(false);
+    }
+  };
+
+  // Bulk action handler
+  const executeBulkAction = async (action: string, value?: string) => {
+    if (selected.size === 0) return;
+    setBulkLoading(true);
+    setShowAssignDropdown(false);
+    setShowTagDropdown(false);
+    setShowStatusDropdown(false);
+    try {
+      const res = await fetch("/api/tickets/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ticket_ids: Array.from(selected),
+          action,
+          value,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const actionLabels: Record<string, string> = {
+          close: "closed",
+          assign: "assigned",
+          set_status: `set to ${value}`,
+          add_tag: `tagged "${value}"`,
+          remove_tag: `untagged "${value}"`,
+          delete: "deleted",
+        };
+        setBulkMessage(`${data.updated} ticket${data.updated !== 1 ? "s" : ""} ${actionLabels[action] || action}`);
+        setSelected(new Set());
+        lastClickedIndex.current = null;
+        fetchTickets();
+      } else {
+        setBulkMessage(data.error || "Bulk action failed");
+      }
+    } catch {
+      setBulkMessage("Bulk action failed");
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
+  // Selection helpers
+  const toggleSelect = (id: string, index: number, shiftKey: boolean) => {
+    const next = new Set(selected);
+    if (shiftKey && lastClickedIndex.current !== null) {
+      const start = Math.min(lastClickedIndex.current, index);
+      const end = Math.max(lastClickedIndex.current, index);
+      for (let i = start; i <= end; i++) {
+        next.add(tickets[i].id);
+      }
+    } else {
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+    }
+    lastClickedIndex.current = index;
+    setSelected(next);
+  };
+
+  const toggleSelectAll = () => {
+    if (selected.size === tickets.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(tickets.map(t => t.id)));
     }
   };
 
@@ -296,6 +396,39 @@ export default function TicketsPage() {
               </div>
             </form>
           </div>
+        </div>
+      )}
+
+      {/* Delete Confirm Modal */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="mx-4 w-full max-w-sm rounded-lg border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-800 dark:bg-zinc-900">
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Delete Tickets</h2>
+            <p className="mt-2 text-sm text-zinc-500">
+              Are you sure you want to delete {selected.size} ticket{selected.size !== 1 ? "s" : ""}? This action cannot be undone.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setShowDeleteConfirm(false)}
+                className="rounded-md border border-zinc-300 px-3 py-2 text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setShowDeleteConfirm(false); executeBulkAction("delete"); }}
+                className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-500"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Message Toast */}
+      {bulkMessage && (
+        <div className="fixed right-8 top-8 z-50 rounded-lg border border-zinc-200 bg-white px-4 py-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+          <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{bulkMessage}</p>
         </div>
       )}
 
@@ -451,11 +584,136 @@ export default function TicketsPage() {
         )}
       </div>
 
+      {/* Bulk Action Bar */}
+      {selected.size > 0 && (
+        <div className="sticky top-0 z-30 mt-4 flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2.5 shadow-sm dark:border-indigo-800 dark:bg-indigo-950/50">
+          <span className="text-sm font-medium text-indigo-700 dark:text-indigo-300">
+            {selected.size} selected
+          </span>
+          <div className="mx-2 h-4 w-px bg-indigo-200 dark:bg-indigo-800" />
+          <button
+            onClick={() => executeBulkAction("close")}
+            disabled={bulkLoading}
+            className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+          >
+            Close
+          </button>
+
+          {/* Assign Dropdown */}
+          <div className="relative">
+            <button
+              onClick={() => { setShowAssignDropdown(!showAssignDropdown); setShowTagDropdown(false); setShowStatusDropdown(false); }}
+              disabled={bulkLoading}
+              className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+            >
+              Assign &#9662;
+            </button>
+            {showAssignDropdown && (
+              <div className="absolute left-0 top-full z-40 mt-1 w-48 rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+                {members.map(m => (
+                  <button
+                    key={m.user_id}
+                    onClick={() => executeBulkAction("assign", m.user_id)}
+                    className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                  >
+                    {m.display_name || m.email}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Tag Dropdown */}
+          <div className="relative">
+            <button
+              onClick={() => { setShowTagDropdown(!showTagDropdown); setShowAssignDropdown(false); setShowStatusDropdown(false); }}
+              disabled={bulkLoading}
+              className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+            >
+              Tag &#9662;
+            </button>
+            {showTagDropdown && (
+              <div className="absolute left-0 top-full z-40 mt-1 w-56 rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+                <div className="border-b border-zinc-100 px-3 py-1.5 dark:border-zinc-700">
+                  <form onSubmit={(e) => { e.preventDefault(); if (newBulkTag.trim()) { executeBulkAction("add_tag", newBulkTag.trim()); setNewBulkTag(""); } }}>
+                    <input
+                      value={newBulkTag}
+                      onChange={(e) => setNewBulkTag(e.target.value)}
+                      placeholder="New tag..."
+                      autoFocus
+                      className="w-full border-none bg-transparent text-sm text-zinc-900 outline-none placeholder:text-zinc-400 dark:text-zinc-100"
+                    />
+                  </form>
+                </div>
+                {availableTags.map(tag => (
+                  <button
+                    key={tag}
+                    onClick={() => executeBulkAction("add_tag", tag)}
+                    className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                  >
+                    + {tag}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Status Dropdown */}
+          <div className="relative">
+            <button
+              onClick={() => { setShowStatusDropdown(!showStatusDropdown); setShowAssignDropdown(false); setShowTagDropdown(false); }}
+              disabled={bulkLoading}
+              className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+            >
+              Status &#9662;
+            </button>
+            {showStatusDropdown && (
+              <div className="absolute left-0 top-full z-40 mt-1 w-36 rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+                {(["open", "pending", "closed"] as const).map(s => (
+                  <button
+                    key={s}
+                    onClick={() => executeBulkAction("set_status", s)}
+                    className="block w-full px-3 py-1.5 text-left text-sm capitalize text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {isAdmin && (
+            <button
+              onClick={() => setShowDeleteConfirm(true)}
+              disabled={bulkLoading}
+              className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-red-600 shadow-sm transition-colors hover:bg-red-50 disabled:opacity-50 dark:bg-zinc-800 dark:text-red-400 dark:hover:bg-zinc-700"
+            >
+              Delete
+            </button>
+          )}
+
+          <button
+            onClick={() => { setSelected(new Set()); lastClickedIndex.current = null; }}
+            className="ml-auto text-sm text-indigo-600 hover:underline dark:text-indigo-400"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
       {/* Table */}
-      <div className="mt-6 overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+      <div className={`${selected.size > 0 ? "mt-2" : "mt-6"} overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900`}>
         <table className="min-w-full divide-y divide-zinc-200 dark:divide-zinc-800">
           <thead>
             <tr className="text-left text-sm font-medium uppercase tracking-wider text-zinc-500">
+              <th className="px-3 py-3 w-10">
+                <input
+                  type="checkbox"
+                  checked={tickets.length > 0 && selected.size === tickets.length}
+                  onChange={toggleSelectAll}
+                  className="h-4 w-4 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500 dark:border-zinc-600"
+                />
+              </th>
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Subject</th>
               <th className="px-4 py-3">Customer</th>
@@ -468,22 +726,37 @@ export default function TicketsPage() {
           <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
             {loading ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-sm text-zinc-400">Loading...</td>
+                <td colSpan={8} className="px-4 py-8 text-center text-sm text-zinc-400">Loading...</td>
               </tr>
             ) : tickets.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-sm text-zinc-400">
+                <td colSpan={8} className="px-4 py-8 text-center text-sm text-zinc-400">
                   No tickets found.
                 </td>
               </tr>
             ) : (
-              tickets.map((t) => (
+              tickets.map((t, idx) => (
                 <tr
                   key={t.id}
-                  onClick={() => router.push(`/dashboard/tickets/${t.id}`)}
-                  className="cursor-pointer transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                  className={`cursor-pointer transition-colors ${
+                    selected.has(t.id)
+                      ? "bg-indigo-50 dark:bg-indigo-950/30"
+                      : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                  }`}
                 >
-                  <td className="whitespace-nowrap px-4 py-3 text-sm">
+                  <td className="px-3 py-3 text-sm" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selected.has(t.id)}
+                      onChange={() => {}}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSelect(t.id, idx, e.shiftKey);
+                      }}
+                      className="h-4 w-4 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500 dark:border-zinc-600"
+                    />
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 text-sm" onClick={() => router.push(`/dashboard/tickets/${t.id}`)}>
                     <div className="flex items-center gap-1">
                       <StatusBadge status={t.status} />
                       {t.auto_reply_at && new Date(t.auto_reply_at) > new Date() && (
@@ -498,7 +771,7 @@ export default function TicketsPage() {
                       )}
                     </div>
                   </td>
-                  <td className="max-w-xs px-4 py-3 text-sm">
+                  <td className="max-w-xs px-4 py-3 text-sm" onClick={() => router.push(`/dashboard/tickets/${t.id}`)}>
                     <p className="truncate font-medium text-zinc-900 dark:text-zinc-100">{t.subject || "(no subject)"}</p>
                     {t.tags?.length > 0 && (
                       <div className="mt-0.5 flex gap-1">
@@ -516,19 +789,19 @@ export default function TicketsPage() {
                       </div>
                     )}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500">
+                  <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500" onClick={() => router.push(`/dashboard/tickets/${t.id}`)}>
                     {t.customer_name || t.customer_email || "--"}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-sm capitalize text-zinc-500">
+                  <td className="whitespace-nowrap px-4 py-3 text-sm capitalize text-zinc-500" onClick={() => router.push(`/dashboard/tickets/${t.id}`)}>
                     {t.channel}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500">
+                  <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500" onClick={() => router.push(`/dashboard/tickets/${t.id}`)}>
                     {t.assigned_name || "--"}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500">
+                  <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500" onClick={() => router.push(`/dashboard/tickets/${t.id}`)}>
                     {formatDate(t.created_at)}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500">
+                  <td className="whitespace-nowrap px-4 py-3 text-sm text-zinc-500" onClick={() => router.push(`/dashboard/tickets/${t.id}`)}>
                     {t.last_customer_reply_at ? formatDate(t.last_customer_reply_at) : "--"}
                   </td>
                 </tr>
