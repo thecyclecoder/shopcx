@@ -20,15 +20,36 @@ export async function handleEscalation(
   if (!ticket) return;
 
   const turnCount = ticket.ai_turn_count || 0;
+  const channel = ticket.channel || "email";
+  const isChatChannel = channel === "chat" || channel === "help_center";
+  const customer = ticket.customers as unknown as { email: string; first_name: string | null } | null;
 
-  // Always: clear AI handling state
+  // Always: clear AI handling state. If chat channel, switch to email for agent follow-up.
   await admin.from("tickets").update({
     ai_handled: false,
     handled_by: null,
     escalation_reason: reason,
     auto_reply_at: null,
     pending_auto_reply: null,
+    status: "pending",
+    ...(isChatChannel ? { channel: "email" } : {}),
   }).eq("id", ticketId);
+
+  // If chat channel, send a message in the chat telling customer they'll get an email
+  if (isChatChannel && customer) {
+    const firstName = customer.first_name || "";
+    const escalateMsg = firstName
+      ? `Thanks ${firstName}! I'm going to escalate this internally, and our team will reach out to you at ${customer.email} shortly.`
+      : `Thanks for reaching out! I'm going to escalate this internally, and our team will follow up with you at ${customer.email} shortly.`;
+
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      body: escalateMsg,
+      author_type: "ai",
+      visibility: "external",
+    });
+  }
 
   // Branch on reason
   switch (reason) {
@@ -48,33 +69,8 @@ export async function handleEscalation(
     }
 
     case "human_requested": {
-      await addInternalNote(admin, ticketId, `Customer requested human on turn ${turnCount}. Connecting to agent.`);
+      await addInternalNote(admin, ticketId, `Customer requested human on turn ${turnCount}. Assigned to agent.`);
       await assignToAgent(admin, workspaceId, ticketId);
-      // Send holding message to customer
-      const customer = ticket.customers as unknown as { email: string; first_name: string | null } | null;
-      if (customer?.first_name) {
-        try {
-          const { data: ws } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", workspaceId).single();
-          if (ws && !ws.sandbox_mode) {
-            await sendTicketReply({
-              workspaceId,
-              toEmail: customer.email,
-              subject: ticket.subject ? `Re: ${ticket.subject}` : "Re: Your request",
-              body: `Of course, ${customer.first_name}! I'm connecting you with a member of our team right now. You'll hear from us shortly!`,
-              inReplyTo: null,
-              agentName: "Support",
-              workspaceName: ws.name,
-            });
-            await admin.from("ticket_messages").insert({
-              ticket_id: ticketId,
-              direction: "outbound",
-              body: `Of course, ${customer.first_name}! I'm connecting you with a member of our team right now. You'll hear from us shortly!`,
-              author_type: "ai",
-              visibility: "external",
-            });
-          }
-        } catch {}
-      }
       break;
     }
 
