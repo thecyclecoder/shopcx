@@ -40,6 +40,13 @@ export default function IntegrationsPage() {
   const [shopifyMyshopifyDomain, setShopifyMyshopifyDomain] = useState<string | null>(null);
   const [shopifyScopes, setShopifyScopes] = useState<string | null>(null);
 
+  // Meta state
+  const [metaConnected, setMetaConnected] = useState(false);
+  const [metaPageName, setMetaPageName] = useState<string | null>(null);
+  const [metaPageId, setMetaPageId] = useState<string | null>(null);
+  const [metaInstagramId, setMetaInstagramId] = useState<string | null>(null);
+  const [metaWebhookToken, setMetaWebhookToken] = useState<string | null>(null);
+
   // Support emails + webhook
   const [supportEmail, setSupportEmail] = useState("");
   const [supportEmails, setSupportEmails] = useState<{ id: string; email: string; label: string | null; is_default: boolean }[]>([]);
@@ -95,6 +102,11 @@ export default function IntegrationsPage() {
         setAppstleHasApiKey(data.appstle_has_api_key);
         setAppstleSecretHint(data.appstle_secret_hint);
         setAppstleApiKeyHint(data.appstle_api_key_hint);
+        setMetaConnected(data.meta_connected);
+        setMetaPageName(data.meta_page_name);
+        setMetaPageId(data.meta_page_id);
+        setMetaInstagramId(data.meta_instagram_id);
+        setMetaWebhookToken(data.meta_webhook_verify_token);
         setLoading(false);
       });
   }, [workspace.id]);
@@ -105,7 +117,6 @@ export default function IntegrationsPage() {
     if (shopifyStatus === "connected") {
       setMessage("Shopify connected successfully!");
       setShopifyConnected(true);
-      // Refresh to get latest data
       fetch(`/api/workspaces/${workspace.id}/integrations`)
         .then((res) => res.json())
         .then((data) => {
@@ -115,6 +126,24 @@ export default function IntegrationsPage() {
     } else if (shopifyStatus === "error") {
       const reason = searchParams.get("reason") || "unknown";
       setMessage(`Shopify connection failed: ${reason}`);
+    }
+
+    // Handle Meta OAuth return
+    const metaStatus = searchParams.get("meta");
+    if (metaStatus === "connected") {
+      setMessage("Meta connected successfully!");
+      setMetaConnected(true);
+      fetch(`/api/workspaces/${workspace.id}/integrations`)
+        .then((res) => res.json())
+        .then((data) => {
+          setMetaPageName(data.meta_page_name);
+          setMetaPageId(data.meta_page_id);
+          setMetaInstagramId(data.meta_instagram_id);
+          setMetaWebhookToken(data.meta_webhook_verify_token);
+        });
+    } else if (metaStatus === "error") {
+      const reason = searchParams.get("reason") || "unknown";
+      setMessage(`Meta connection failed: ${reason}`);
     }
   }, [searchParams, workspace.id]);
 
@@ -209,6 +238,40 @@ export default function IntegrationsPage() {
       setShopifyScopes(null);
       setShopifyDomain("");
       setMessage("Shopify disconnected");
+    }
+  };
+
+  // Meta handlers
+  const handleConnectMeta = async () => {
+    setSaving(true);
+    setMessage("");
+    const res = await fetch("/api/meta/auth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_id: workspace.id }),
+    });
+    if (res.ok) {
+      const { url } = await res.json();
+      window.location.href = url;
+    } else {
+      try {
+        const data = await res.json();
+        setMessage(data.error || "Failed to start Meta OAuth");
+      } catch {
+        setMessage("Failed to start Meta OAuth");
+      }
+      setSaving(false);
+    }
+  };
+
+  const handleDisconnectMeta = async () => {
+    if (await patchIntegrations({ meta_disconnect: true })) {
+      setMetaConnected(false);
+      setMetaPageName(null);
+      setMetaPageId(null);
+      setMetaInstagramId(null);
+      setMetaWebhookToken(null);
+      setMessage("Meta disconnected");
     }
   };
 
@@ -827,19 +890,92 @@ export default function IntegrationsPage() {
           )}
         </div>
 
-        {/* ── Meta — placeholder ── */}
-        <div className="rounded-lg border border-zinc-200 bg-white p-6 opacity-60 dark:border-zinc-800 dark:bg-zinc-900">
+        {/* ── Meta (Facebook + Instagram) ── */}
+        <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-zinc-100 dark:bg-zinc-800">
-              <svg className="h-5 w-5 text-zinc-600 dark:text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 dark:bg-blue-900/30">
+              <svg className="h-5 w-5 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
               </svg>
             </div>
-            <div>
-              <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Meta</h2>
-              <p className="text-sm text-zinc-500">Coming in Phase 6</p>
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Meta (Facebook + Instagram)</h2>
+                {metaConnected ? (
+                  <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Connected</span>
+                ) : (
+                  <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-sm font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">Not connected</span>
+                )}
+              </div>
+              <p className="text-sm text-zinc-500">
+                Facebook Page DMs + Instagram DMs + comment moderation
+              </p>
             </div>
           </div>
+
+          {metaConnected ? (
+            <div className="mt-4 space-y-3">
+              <div className="rounded-md bg-zinc-50 p-3 text-sm dark:bg-zinc-800">
+                <div className="space-y-1">
+                  <p className="text-zinc-700 dark:text-zinc-300">
+                    <span className="font-medium">Page:</span> {metaPageName || metaPageId}
+                  </p>
+                  {metaInstagramId && (
+                    <p className="text-zinc-700 dark:text-zinc-300">
+                      <span className="font-medium">Instagram:</span> Connected (ID: {metaInstagramId})
+                    </p>
+                  )}
+                  <p className="text-zinc-700 dark:text-zinc-300">
+                    <span className="font-medium">Channels:</span> meta_dm, social_comments
+                  </p>
+                </div>
+              </div>
+
+              {metaWebhookToken && (
+                <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950">
+                  <p className="font-medium text-amber-700 dark:text-amber-400">Webhook Setup</p>
+                  <p className="mt-1 text-amber-600 dark:text-amber-500">
+                    Configure this in your Meta App Dashboard under Webhooks:
+                  </p>
+                  <div className="mt-2 space-y-1">
+                    <p className="font-mono text-amber-700 dark:text-amber-400">
+                      Callback URL: https://shopcx.ai/api/webhooks/meta
+                    </p>
+                    <p className="font-mono text-amber-700 dark:text-amber-400">
+                      Verify Token: {metaWebhookToken}
+                    </p>
+                  </div>
+                  <p className="mt-2 text-amber-600 dark:text-amber-500">
+                    Subscribe to: messages, feed, mention
+                  </p>
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={handleDisconnectMeta}
+                disabled={saving}
+                className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+              >
+                Disconnect
+              </button>
+            </div>
+          ) : (
+            <div className="mt-4">
+              <p className="mb-3 text-sm text-zinc-500">
+                Connect your Facebook Page to receive and respond to DMs and comments directly from ShopCX.
+                You&apos;ll need a Meta App with the required permissions configured.
+              </p>
+              <button
+                type="button"
+                onClick={handleConnectMeta}
+                disabled={saving}
+                className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-50"
+              >
+                {saving ? "Connecting..." : "Connect Facebook Page"}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token"
     )
     .eq("id", workspaceId)
     .single();
@@ -74,6 +74,13 @@ export async function GET(
     help_logo_url: workspace.help_logo_url || null,
     help_primary_color: workspace.help_primary_color || "#4f46e5",
     help_custom_domain: workspace.help_custom_domain || null,
+
+    // Meta
+    meta_connected: !!workspace.meta_page_access_token_encrypted,
+    meta_page_id: workspace.meta_page_id,
+    meta_page_name: workspace.meta_page_name,
+    meta_instagram_id: workspace.meta_instagram_id,
+    meta_webhook_verify_token: workspace.meta_webhook_verify_token,
   });
 }
 
@@ -189,6 +196,16 @@ export async function PATCH(
       updates.appstle_api_key_encrypted = body.appstle_api_key
         ? encrypt(body.appstle_api_key)
         : null;
+    }
+
+    // Meta disconnect
+    if (body.meta_disconnect === true) {
+      updates.meta_page_id = null;
+      updates.meta_page_access_token_encrypted = null;
+      updates.meta_instagram_id = null;
+      updates.meta_webhook_verify_token = null;
+      updates.meta_page_name = null;
+      updates.meta_oauth_state = null;
     }
 
     // VIP threshold
