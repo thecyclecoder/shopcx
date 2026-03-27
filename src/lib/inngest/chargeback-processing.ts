@@ -28,10 +28,7 @@ export const chargebackReceived = inngest.createFunction(
 
       const { data: ws } = await admin
         .from("workspaces")
-        .select(
-          "id, chargeback_auto_cancel, chargeback_notify, chargeback_auto_ticket, " +
-          "chargeback_auto_cancel_reasons"
-        )
+        .select("id, chargeback_auto_cancel, chargeback_notify, chargeback_auto_ticket, chargeback_auto_cancel_reasons")
         .eq("id", workspaceId)
         .single();
 
