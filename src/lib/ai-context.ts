@@ -60,17 +60,31 @@ export async function assembleTicketContext(
 
   const turnLimit = channel === "social_comments" ? 1 : (channelConfig?.ai_turn_limit || ticket.ai_turn_limit || 4);
 
-  // 3. Fetch all messages (exclude internal notes)
+  // 3. Fetch all messages — include external + AI sandbox drafts (so AI knows what it already said)
   const { data: messages } = await admin
     .from("ticket_messages")
     .select("direction, body, author_type, visibility, created_at")
     .eq("ticket_id", ticketId)
-    .eq("visibility", "external")
+    .or("visibility.eq.external,author_type.eq.ai")
     .order("created_at", { ascending: true });
 
-  // Build conversation history
+  // Build conversation history — strip sandbox prefixes from AI messages
   const conversationHistory: ConversationMessage[] = [];
-  const allMessages = messages || [];
+  const allMessages = (messages || []).map(m => {
+    if (m.author_type === "ai" && m.visibility === "internal") {
+      // Strip sandbox prefix so AI sees its own clean responses
+      const cleaned = (m.body || "")
+        .replace(/\[AI Draft.*?(?:Turn \d+|Close)\]\s*/i, "")
+        .replace(/\s*Confidence:.*?Source:.*$/i, "")
+        .trim();
+      return { ...m, body: cleaned, direction: "outbound" as const };
+    }
+    return m;
+  }).filter(m => {
+    // Exclude system notes and non-AI internal notes
+    if (m.visibility === "internal" && m.author_type !== "ai") return false;
+    return true;
+  });
 
   // For multi-turn (turn 2+), prepend context summary and only include recent messages
   if (ticket.ai_turn_count > 0 && allMessages.length > 2) {
