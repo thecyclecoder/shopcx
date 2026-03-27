@@ -303,9 +303,12 @@ export async function assembleTicketContext(
   promptParts.push("- Do NOT reference or acknowledge topics from earlier in the conversation unless the customer explicitly brings them up again.");
   promptParts.push("- VOICE: Mirror the customer's own words and phrasing. If they say 'stock up', you say 'stock up', not 'place a large order'. Match their energy and vocabulary.");
   promptParts.push("- ACTIONS: When the system has performed an action (like signing someone up), lead with a direct confirmation: 'Done!', 'You're all set!', 'Got it, I've signed you up!'. Then briefly explain what happened. Do not re-explain what the action is — they already know.");
-  if (ticket.ai_turn_count > 0) {
-    promptParts.push("- This is a follow-up message. Keep it brief and conversational. Just answer the question directly.");
-    promptParts.push("- Do NOT start with flattery, compliments about their loyalty, or 'pat on the back' openers like 'I'm so glad' or 'It's wonderful'. Just get to the point.");
+  // Check if there are already outbound messages (workflow or AI already greeted)
+  const hasExistingReplies = allMessages.some(m => m.direction === "outbound");
+  if (ticket.ai_turn_count > 0 || hasExistingReplies) {
+    promptParts.push("- This is a follow-up in an ongoing conversation. Keep it brief and conversational. Just answer the question directly.");
+    promptParts.push("- Do NOT greet the customer again (no 'Hi [name]'). They've already been greeted earlier in this thread.");
+    promptParts.push("- Do NOT start with flattery, compliments about their loyalty, or 'pat on the back' openers. Just get to the point.");
     promptParts.push("- Do NOT include a sign-off or team signature. Just end naturally.");
   } else {
     promptParts.push("- Sign-off should be on its own line, separated by a blank line from the rest of the message.");
