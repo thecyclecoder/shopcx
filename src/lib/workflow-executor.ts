@@ -26,6 +26,7 @@ export interface WorkflowContext {
     shipping_address: string | null;
   } | null;
   subscription: Record<string, unknown> | null;
+  workflowSandbox?: boolean;
 }
 
 // ── Main entry point ──
@@ -48,8 +49,11 @@ export async function executeWorkflow(
 
   if (!workflow) return;
 
+  const workflowSandbox: boolean | undefined = workflow.sandbox_mode ?? undefined;
+
   // Build context
   const context = await buildContext(admin, workspaceId, ticketId);
+  context.workflowSandbox = workflowSandbox;
 
   try {
     switch (workflow.template) {
@@ -295,9 +299,9 @@ async function sendReply(admin: Admin, context: WorkflowContext, templateText: s
   const body = resolveTemplate(templateText, context);
   const channel = (context.ticket.channel as string) || "email";
 
-  // Check sandbox mode
+  // Check sandbox — per-workflow setting takes priority, falls back to global
   const { data: ws } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", context.workspaceId).single();
-  const isSandbox = ws?.sandbox_mode ?? true;
+  const isSandbox = context.workflowSandbox ?? ws?.sandbox_mode ?? true;
 
   if (isSandbox) {
     // Sandbox: internal note only, not visible to customer on any channel, don't close

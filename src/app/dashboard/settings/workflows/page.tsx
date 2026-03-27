@@ -9,6 +9,7 @@ interface Workflow {
   template: string;
   trigger_tag: string;
   enabled: boolean;
+  sandbox_mode: boolean;
   config: Record<string, unknown>;
 }
 
@@ -192,10 +193,24 @@ export default function WorkflowsPage() {
                       {wf.enabled ? "Active" : "Disabled"}
                     </span>
                     <span className="rounded bg-violet-50 px-1.5 py-0.5 text-sm text-violet-600 dark:bg-violet-900/30 dark:text-violet-400">{wf.trigger_tag}</span>
+                    {wf.sandbox_mode && <span className="rounded bg-amber-100 px-1.5 py-0.5 text-sm font-medium text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">Sandbox</span>}
                   </div>
                   <p className="mt-0.5 text-sm text-zinc-400">{tpl?.description}</p>
                 </div>
                 <div className="ml-4 flex items-center gap-2">
+                  <button
+                    onClick={async () => {
+                      await fetch(`/api/workspaces/${workspace.id}/workflows/${wf.id}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ sandbox_mode: !wf.sandbox_mode }),
+                      });
+                      setWorkflows(prev => prev.map(w => w.id === wf.id ? { ...w, sandbox_mode: !w.sandbox_mode } : w));
+                    }}
+                    className={`text-sm ${wf.sandbox_mode ? "text-amber-500 hover:text-amber-700" : "text-zinc-400 hover:text-zinc-600"}`}
+                  >
+                    {wf.sandbox_mode ? "Go Live" : "Sandbox"}
+                  </button>
                   <button onClick={() => handleToggle(wf)} className="text-sm text-zinc-400 hover:text-zinc-600">{wf.enabled ? "Disable" : "Enable"}</button>
                   <button onClick={() => setEditing(wf)} className="text-sm text-indigo-600 hover:underline dark:text-indigo-400">Configure</button>
                   <button onClick={() => handleDelete(wf.id)} className="text-sm text-red-500 hover:underline">Delete</button>

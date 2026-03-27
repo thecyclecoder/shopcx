@@ -75,13 +75,21 @@ export async function POST(
       // Check ticket is still open/pending
       const { data: ticket } = await admin
         .from("tickets")
-        .select("id, status")
+        .select("id, status, channel")
         .eq("id", session.ticket_id)
         .single();
 
-      if (ticket && (ticket.status === "open" || ticket.status === "pending")) {
+      if (ticket && ticket.channel === "chat") {
         ticketId = ticket.id;
+        // Reopen if closed (customer reply reopens the conversation)
+        if (ticket.status === "closed") {
+          await admin.from("tickets").update({
+            status: "open",
+            last_customer_reply_at: new Date().toISOString(),
+          }).eq("id", ticket.id);
+        }
       }
+      // If ticket was escalated to email (channel switched), don't reuse — new chat needed
 
       // Update session activity
       await admin
