@@ -327,33 +327,30 @@ export const aiMultiTurn = inngest.createFunction(
         if (activeSubs?.length && activeSubs[0].shopify_contract_id) {
           subContractId = activeSubs[0].shopify_contract_id;
 
-          // Check Appstle for existing discount on subscription
+          // Check Appstle raw contract for existing discounts
           try {
             canApplyToSub = true;
 
-            // Call Appstle to check subscription details for existing discounts
             const { data: ws } = await admin
               .from("workspaces")
-              .select("appstle_api_key_encrypted, shopify_myshopify_domain")
+              .select("appstle_api_key_encrypted")
               .eq("id", workspace_id)
               .single();
 
-            if (ws?.appstle_api_key_encrypted && cust.shopify_customer_id) {
+            if (ws?.appstle_api_key_encrypted) {
               const { decrypt } = await import("@/lib/crypto");
               const apiKey = decrypt(ws.appstle_api_key_encrypted);
-              const detailsRes = await fetch(
-                `https://subscription-admin.appstle.com/api/external/v2/customer-subscription-details?customerShopifyId=${cust.shopify_customer_id}`,
+              const rawRes = await fetch(
+                `https://subscription-admin.appstle.com/api/external/v2/contract-raw-response?contractId=${subContractId}&api_key=${apiKey}`,
                 { headers: { "X-API-Key": apiKey } }
               );
-              if (detailsRes.ok) {
-                const details = await detailsRes.json();
-                // Check if any active contract has a discount code
-                const contracts = details?.subscriptionContracts || details?.contracts || [];
-                for (const contract of contracts) {
-                  if (String(contract.contractId || contract.id) === subContractId) {
-                    const hasDiscount = contract.discountCode || contract.appliedDiscount || (contract.discountCodes && contract.discountCodes.length > 0);
-                    if (hasDiscount) canApplyToSub = false;
-                    break;
+              if (rawRes.ok) {
+                const rawText = await rawRes.text();
+                // Check if discounts.nodes has any entries
+                if (rawText.includes('"discounts"')) {
+                  const nodesMatch = rawText.match(/"discounts"[^}]*"nodes"\s*:\s*\[([^\]]*)\]/);
+                  if (nodesMatch && nodesMatch[1].trim().length > 0) {
+                    canApplyToSub = false; // Already has a discount
                   }
                 }
               }
@@ -373,7 +370,7 @@ export const aiMultiTurn = inngest.createFunction(
         await admin.from("ticket_messages").insert({
           ticket_id,
           direction: "outbound",
-          body: `[System] Customer already subscribed to email + SMS marketing. Provided discount code FAMILY.${subNote}`,
+          body: `[System] Customer already subscribed to email + SMS marketing. Provided discount code SHOPCX.${subNote}`,
           author_type: "system",
           visibility: "internal",
         });
@@ -392,8 +389,8 @@ export const aiMultiTurn = inngest.createFunction(
 
               // Apply discount code
               const applyRes = await fetch(
-                `https://subscription-admin.appstle.com/api/external/v2/subscription-discount-apply?contractId=${subContractId}&discountCode=FAMILY`,
-                { method: "POST", headers: { "X-API-Key": apiKey } }
+                `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-apply-discount?contractId=${subContractId}&discountCode=SHOPCX&api_key=${apiKey}`,
+                { method: "PUT", headers: { "X-API-Key": apiKey } }
               );
 
               // Verify no duplicate codes — re-check subscription details
@@ -410,10 +407,10 @@ export const aiMultiTurn = inngest.createFunction(
                       // Check for duplicate discount codes
                       const codes = contract.discountCodes || contract.appliedDiscounts || [];
                       if (Array.isArray(codes) && codes.length > 1) {
-                        // Remove any code that isn't FAMILY
+                        // Remove any code that isn't SHOPCX
                         for (const code of codes) {
                           const codeName = code.code || code.discountCode || code;
-                          if (typeof codeName === "string" && codeName.toUpperCase() !== "FAMILY") {
+                          if (typeof codeName === "string" && codeName.toUpperCase() !== "SHOPCX") {
                             try {
                               await fetch(
                                 `https://subscription-admin.appstle.com/api/external/v2/subscription-discount-remove?contractId=${subContractId}&discountCode=${codeName}`,
@@ -431,7 +428,7 @@ export const aiMultiTurn = inngest.createFunction(
               await admin.from("ticket_messages").insert({
                 ticket_id,
                 direction: "outbound",
-                body: `[System] Discount code FAMILY applied to subscription contract ${subContractId} via Appstle.`,
+                body: `[System] Discount code SHOPCX applied to subscription contract ${subContractId} via Appstle.`,
                 author_type: "system",
                 visibility: "internal",
               });

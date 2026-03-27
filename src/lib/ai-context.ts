@@ -262,7 +262,7 @@ export async function assembleTicketContext(
       promptParts.push(`  Trigger keywords: ${(wf.match_patterns || []).join(", ")}`);
     }
     promptParts.push("- When a customer confirms they want an action, acknowledge it and let them know it's being processed.");
-    promptParts.push("- DISCOUNT FLOW: If a customer asks about discounts, check their marketing status in the customer context above. If they are ALREADY subscribed to both email AND SMS, give them the code FAMILY and tell them to use it at checkout. If they have an active subscription, offer to apply FAMILY to their next subscription order too. If they are NOT subscribed, offer to sign them up for email and SMS to get exclusive promotions.");
+    promptParts.push("- DISCOUNT FLOW: If a customer asks about discounts, check their marketing status in the customer context above. If they are ALREADY subscribed to both email AND SMS, give them the code SHOPCX and tell them to use it at checkout. If they have an active subscription, offer to apply SHOPCX to their next subscription order too. If they are NOT subscribed, offer to sign them up for email and SMS to get exclusive promotions.");
     promptParts.push("- NEVER ask the customer to verify information you already have. Check the customer context first.");
     promptParts.push("- NEVER claim you performed an action (like applying a coupon or signing someone up) unless a [System] note in the conversation confirms it was done. If the customer asks you to do something, say you are processing it — the system will handle the action.");
   }
