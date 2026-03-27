@@ -29,6 +29,7 @@ export interface Ticket {
   first_response_at: string | null;
   resolved_at: string | null;
   csat_score: number | null;
+  snoozed_until: string | null;
   tags: string[];
   email_message_id: string | null;
   created_at: string;

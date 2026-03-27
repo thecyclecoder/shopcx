@@ -239,14 +239,17 @@ export default function TicketDetailPage() {
   const [orderActionLoading, setOrderActionLoading] = useState(false);
   const [orderActionError, setOrderActionError] = useState<string | null>(null);
   const [orderActionSuccess, setOrderActionSuccess] = useState<string | null>(null);
-  // Refund form
   const [refundFull, setRefundFull] = useState(true);
-  // Cancel form
   const [cancelReason, setCancelReason] = useState<"CUSTOMER" | "INVENTORY" | "OTHER">("CUSTOMER");
   const [cancelRefund, setCancelRefund] = useState(true);
   const [cancelRestock, setCancelRestock] = useState(true);
-  // Address form
   const [addressForm, setAddressForm] = useState({ address1: "", address2: "", city: "", province: "", zip: "", country: "US" });
+
+  // Snooze state
+  const [showSnoozeMenu, setShowSnoozeMenu] = useState(false);
+  const [showSnoozeCustom, setShowSnoozeCustom] = useState(false);
+  const [snoozeCustomDate, setSnoozeCustomDate] = useState("");
+  const [snoozeCustomTime, setSnoozeCustomTime] = useState("09:00");
 
   useEffect(() => {
     async function load() {
@@ -406,6 +409,48 @@ export default function TicketDetailPage() {
     if (res.ok) {
       const updated = await res.json();
       setTicket((prev) => (prev ? { ...prev, ...updated } : prev));
+    }
+  };
+
+  const handleSnooze = async (until: Date) => {
+    setShowSnoozeMenu(false);
+    setShowSnoozeCustom(false);
+    await handlePatch({ snoozed_until: until.toISOString(), status: "pending" });
+    // Add internal note
+    await fetch(`/api/tickets/${id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: `Ticket snoozed until ${until.toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}`,
+      }),
+    });
+    // Refresh messages
+    const res = await fetch(`/api/tickets/${id}`);
+    if (res.ok) {
+      const data = await res.json();
+      setMessages(data.messages);
+    }
+  };
+
+  const handleUnsnooze = async () => {
+    await handlePatch({ snoozed_until: null, status: "open" });
+    await fetch(`/api/tickets/${id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: "Ticket unsnoozed manually",
+      }),
+    });
+    const res = await fetch(`/api/tickets/${id}`);
+    if (res.ok) {
+      const data = await res.json();
+      setMessages(data.messages);
     }
   };
 
@@ -590,6 +635,26 @@ export default function TicketDetailPage() {
                   {(ticket as TicketDetail & { ai_turn_count?: number }).ai_turn_count ? ` after ${(ticket as TicketDetail & { ai_turn_count?: number }).ai_turn_count} turn${(ticket as TicketDetail & { ai_turn_count?: number }).ai_turn_count !== 1 ? "s" : ""}` : ""}
                 </p>
               </div>
+            </div>
+          )}
+
+          {/* Snooze banner */}
+          {ticket.snoozed_until && new Date(ticket.snoozed_until) > new Date() && (
+            <div className="mb-4 flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2.5 dark:border-indigo-800 dark:bg-indigo-950">
+              <svg className="h-4 w-4 flex-shrink-0 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div className="flex-1">
+                <p className="text-sm font-medium text-indigo-700 dark:text-indigo-400">
+                  Snoozed until {new Date(ticket.snoozed_until).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                </p>
+              </div>
+              <button
+                onClick={handleUnsnooze}
+                className="rounded-md bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-500"
+              >
+                Unsnooze
+              </button>
             </div>
           )}
 
@@ -1407,6 +1472,120 @@ export default function TicketDetailPage() {
             </div>
           </div>
         )}
+
+        {/* Snooze */}
+        <div className="mb-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+          <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-500">Snooze</h3>
+          {ticket.snoozed_until && new Date(ticket.snoozed_until) > new Date() ? (
+            <div className="mt-2">
+              <p className="text-xs text-zinc-500">
+                Snoozed until {new Date(ticket.snoozed_until).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+              </p>
+              <button
+                onClick={handleUnsnooze}
+                className="mt-2 w-full rounded bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
+              >
+                Unsnooze
+              </button>
+            </div>
+          ) : (
+            <div className="relative mt-2">
+              <button
+                onClick={() => setShowSnoozeMenu(!showSnoozeMenu)}
+                className="flex w-full items-center justify-center gap-1.5 rounded bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+              >
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Snooze
+              </button>
+              {showSnoozeMenu && (
+                <div className="absolute left-0 right-0 top-full z-20 mt-1 rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+                  <button
+                    onClick={() => {
+                      const d = new Date();
+                      d.setHours(d.getHours() + 4);
+                      handleSnooze(d);
+                    }}
+                    className="block w-full px-3 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                  >
+                    Later today (4 hours)
+                  </button>
+                  <button
+                    onClick={() => {
+                      const d = new Date();
+                      d.setDate(d.getDate() + 1);
+                      d.setHours(9, 0, 0, 0);
+                      handleSnooze(d);
+                    }}
+                    className="block w-full px-3 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                  >
+                    Tomorrow morning (9 AM)
+                  </button>
+                  <button
+                    onClick={() => {
+                      const d = new Date();
+                      const daysUntilMonday = ((1 - d.getDay()) + 7) % 7 || 7;
+                      d.setDate(d.getDate() + daysUntilMonday);
+                      d.setHours(9, 0, 0, 0);
+                      handleSnooze(d);
+                    }}
+                    className="block w-full px-3 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                  >
+                    Next Monday (9 AM)
+                  </button>
+                  <hr className="my-1 border-zinc-200 dark:border-zinc-700" />
+                  <button
+                    onClick={() => {
+                      setShowSnoozeMenu(false);
+                      setShowSnoozeCustom(true);
+                      const tomorrow = new Date();
+                      tomorrow.setDate(tomorrow.getDate() + 1);
+                      setSnoozeCustomDate(tomorrow.toISOString().split("T")[0]);
+                    }}
+                    className="block w-full px-3 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                  >
+                    Custom date/time...
+                  </button>
+                </div>
+              )}
+              {showSnoozeCustom && (
+                <div className="mt-2 space-y-2 rounded-md border border-zinc-200 bg-zinc-50 p-2.5 dark:border-zinc-700 dark:bg-zinc-800">
+                  <input
+                    type="date"
+                    value={snoozeCustomDate}
+                    onChange={(e) => setSnoozeCustomDate(e.target.value)}
+                    className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                  />
+                  <input
+                    type="time"
+                    value={snoozeCustomTime}
+                    onChange={(e) => setSnoozeCustomTime(e.target.value)}
+                    className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                  />
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={() => {
+                        if (!snoozeCustomDate) return;
+                        const d = new Date(`${snoozeCustomDate}T${snoozeCustomTime}`);
+                        if (d > new Date()) handleSnooze(d);
+                      }}
+                      className="flex-1 rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-500"
+                    >
+                      Snooze
+                    </button>
+                    <button
+                      onClick={() => setShowSnoozeCustom(false)}
+                      className="rounded border border-zinc-300 px-2 py-1 text-xs text-zinc-500 dark:border-zinc-600"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Delete ticket — owner/admin only */}
         {["owner", "admin"].includes(workspace.role) && (

@@ -225,6 +225,9 @@ export async function PATCH(
     updates.escalated_at = body.escalated_to ? new Date().toISOString() : null;
     if ("escalation_reason" in body) updates.escalation_reason = body.escalation_reason || null;
   }
+  if ("snoozed_until" in body) {
+    updates.snoozed_until = body.snoozed_until || null;
+  }
 
   const { data: updated, error } = await admin
     .from("tickets")
