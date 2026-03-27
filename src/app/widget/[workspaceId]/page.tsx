@@ -61,6 +61,7 @@ export default function ChatWidgetPage() {
   const [articleLoading, setArticleLoading] = useState(false);
   const [view, setView] = useState<"articles" | "chat">("articles");
   const [articleVoted, setArticleVoted] = useState<Record<string, "up" | "down">>({});
+  const [chatEnded, setChatEnded] = useState(false);
 
   // Load config
   useEffect(() => {
@@ -105,6 +106,29 @@ export default function ChatWidgetPage() {
       if (data.title) setViewingArticle(data);
     } catch {}
     setArticleLoading(false);
+  };
+
+  // Detect chat ended (escalation or closure)
+  useEffect(() => {
+    if (!messages.length || chatEnded) return;
+    const lastAgentMsg = [...messages].reverse().find(m => m.direction === "outbound" && m.author_type === "ai");
+    if (lastAgentMsg) {
+      const body = (lastAgentMsg.body || "").toLowerCase();
+      const isEscalated = body.includes("escalate") || body.includes("reach out to you at") || body.includes("follow up with you at") || body.includes("team will");
+      if (isEscalated) setChatEnded(true);
+    }
+  }, [messages, chatEnded]);
+
+  const handleNewChat = () => {
+    // Clear session and reset everything
+    localStorage.removeItem(`${STORAGE_KEY_PREFIX}${workspaceId}`);
+    setSessionId(null);
+    setTicketId(null);
+    setMessages([]);
+    setStarted(false);
+    setChatEnded(false);
+    setInput("");
+    setView("articles");
   };
 
   // Restore session from localStorage
@@ -459,8 +483,8 @@ export default function ChatWidgetPage() {
       </div>
       )}
 
-      {/* Input — only show in chat view */}
-      {view === "chat" && started && (
+      {/* Input — only show in chat view when chat is active */}
+      {view === "chat" && started && !chatEnded && (
         <form onSubmit={handleSend} className="flex items-center gap-2 border-t border-zinc-200 px-3 py-2">
           <input
             type="text"
@@ -481,6 +505,20 @@ export default function ChatWidgetPage() {
             </svg>
           </button>
         </form>
+      )}
+
+      {/* Chat ended — escalated or closed */}
+      {view === "chat" && chatEnded && (
+        <div className="border-t border-zinc-200 px-4 py-3 text-center">
+          <p className="text-xs text-zinc-500">This conversation has ended.</p>
+          <button
+            onClick={handleNewChat}
+            className="mt-2 rounded-full px-4 py-1.5 text-xs font-medium text-white"
+            style={{ backgroundColor: primaryColor }}
+          >
+            Start a new chat
+          </button>
+        </div>
       )}
 
       {/* Footer */}
