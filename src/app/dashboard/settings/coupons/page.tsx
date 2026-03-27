@@ -58,6 +58,7 @@ export default function CouponsPage() {
   const [syncing, setSyncing] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [search, setSearch] = useState("");
 
   const loadData = async (sync = false) => {
     const res = await fetch(`/api/workspaces/${workspace.id}/coupons${sync ? "?sync=true" : ""}`);
@@ -128,8 +129,11 @@ export default function CouponsPage() {
 
   if (loading) return <div className="p-8 text-zinc-500">Loading...</div>;
 
-  // Discounts not yet mapped
-  const unmapped = shopifyDiscounts.filter(d => !mappings.some(m => m.code === d.code));
+  // Filter by search
+  const q = search.toLowerCase();
+  const unmapped = shopifyDiscounts.filter(d => !mappings.some(m => m.code === d.code))
+    .filter(d => !q || d.code.toLowerCase().includes(q) || d.title.toLowerCase().includes(q));
+  const filteredMappings = mappings.filter(m => !q || m.code.toLowerCase().includes(q) || (m.title || "").toLowerCase().includes(q) || m.use_cases.some(uc => uc.includes(q)));
 
   return (
     <div className="mx-auto max-w-4xl p-8">
@@ -193,12 +197,22 @@ export default function CouponsPage() {
         </div>
       )}
 
+      {/* Search */}
+      <div className="mt-4">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search coupons by code, title, or use case..."
+          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+        />
+      </div>
+
       {/* Mapped coupons list */}
-      <div className="mt-4 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
-        {mappings.length === 0 && (
-          <p className="p-4 text-sm text-zinc-400">No coupons mapped yet. Sync from Shopify to get started.</p>
+      <div className="mt-3 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
+        {filteredMappings.length === 0 && (
+          <p className="p-4 text-sm text-zinc-400">{mappings.length === 0 ? "No coupons mapped yet. Sync from Shopify to get started." : "No coupons match your search."}</p>
         )}
-        {mappings.map(m => (
+        {filteredMappings.map(m => (
           <div key={m.id}>
             <div className="flex items-center justify-between p-4">
               <div className="min-w-0 flex-1">

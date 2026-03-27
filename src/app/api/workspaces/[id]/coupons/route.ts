@@ -74,9 +74,11 @@ export async function GET(
         const d = node.codeDiscount;
         if (!d) continue;
 
-        // Only include active, reusable codes
+        // Only include active, reusable, non-free codes
         if (d.status !== "ACTIVE") continue;
         if (d.appliesOncePerCustomer) continue; // Skip one-per-customer codes
+        // Skip 100% off codes
+        if (d.customerGets?.value?.percentage != null && d.customerGets.value.percentage >= 1.0) continue;
 
         const code = d.codes?.nodes?.[0]?.code || "";
         if (!code) continue;
