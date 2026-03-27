@@ -93,6 +93,7 @@ export async function GET(request: Request) {
       .update({
         shopify_access_token_encrypted: encrypt(access_token),
         shopify_myshopify_domain: shopDetails.myshopify_domain,
+        shopify_domain: shopDetails.domain || shopDetails.myshopify_domain,
         shopify_scopes: scope,
       })
       .eq("id", workspaceId);
