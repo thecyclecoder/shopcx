@@ -204,7 +204,8 @@ export default function ChatWidgetPage() {
         },
         (payload) => {
           const newMsg = payload.new as Message;
-          if (newMsg.visibility === "external") {
+          // Only add outbound messages from Realtime — inbound already added optimistically
+          if (newMsg.visibility === "external" && newMsg.direction === "outbound") {
             setMessages((prev) => {
               if (prev.some((m) => m.id === newMsg.id)) return prev;
               return [...prev, newMsg];
