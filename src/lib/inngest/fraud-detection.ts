@@ -1,6 +1,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { runAllFraudRules, checkOrderForFraud, checkCustomerForFraud } from "@/lib/fraud-detector";
+import { decrypt } from "@/lib/crypto";
 
 // ── Nightly full scan ──
 
@@ -29,6 +30,89 @@ export const fraudNightlyScan = inngest.createFunction(
         const totalUpdated = results.reduce((s, r) => s + r.updated_cases, 0);
         console.log(`Fraud scan for ${ws.id}: ${totalNew} new, ${totalUpdated} updated`);
         return { new_cases: totalNew, updated_cases: totalUpdated };
+      });
+
+      // Poll Shopify for new disputes/chargebacks
+      await step.run(`poll-disputes-${ws.id}`, async () => {
+        const admin = createAdminClient();
+        const { data: workspace } = await admin
+          .from("workspaces")
+          .select("shopify_myshopify_domain, shopify_access_token_encrypted")
+          .eq("id", ws.id)
+          .single();
+
+        if (!workspace?.shopify_access_token_encrypted) return { disputes: 0 };
+
+        const shop = workspace.shopify_myshopify_domain;
+        const accessToken = decrypt(workspace.shopify_access_token_encrypted);
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+        try {
+          const res = await fetch(
+            `https://${shop}/admin/api/2025-01/shopify_payments/disputes.json?limit=50&initiated_at_min=${oneDayAgo}`,
+            { headers: { "X-Shopify-Access-Token": accessToken } }
+          );
+
+          if (!res.ok) return { disputes: 0, error: `${res.status}` };
+          const data = await res.json();
+
+          const REASON_MAP: Record<string, string> = {
+            subscription_canceled: "subscription_cancelled",
+            fraudulent: "fraudulent",
+            unrecognized: "unrecognized",
+            duplicate: "duplicate",
+            product_unacceptable: "product_unacceptable",
+            product_not_received: "product_not_received",
+            credit_not_processed: "credit_not_processed",
+          };
+          const STATUS_MAP: Record<string, string> = {
+            needs_response: "under_review",
+            under_review: "under_review",
+            accepted: "accepted",
+            won: "won",
+            lost: "lost",
+          };
+
+          let imported = 0;
+          for (const d of data.disputes || []) {
+            const { data: order } = await admin
+              .from("orders")
+              .select("customer_id")
+              .eq("workspace_id", ws.id)
+              .eq("shopify_order_id", String(d.order_id))
+              .single();
+
+            const { error } = await admin.from("chargeback_events").upsert({
+              workspace_id: ws.id,
+              shopify_dispute_id: String(d.id),
+              shopify_order_id: String(d.order_id),
+              customer_id: order?.customer_id || null,
+              dispute_type: d.type || "chargeback",
+              reason: REASON_MAP[d.reason] || null,
+              network_reason_code: d.network_reason_code,
+              amount_cents: Math.round(parseFloat(d.amount) * 100),
+              currency: d.currency,
+              status: STATUS_MAP[d.status] || "under_review",
+              evidence_due_by: d.evidence_due_by,
+              evidence_sent_on: d.evidence_sent_on,
+              finalized_on: d.finalized_on,
+              initiated_at: d.initiated_at,
+              raw_payload: d,
+            }, { onConflict: "workspace_id,shopify_dispute_id" });
+
+            if (!error) {
+              imported++;
+              await inngest.send({
+                name: "chargeback/received",
+                data: { chargebackEventId: String(d.id), workspaceId: ws.id },
+              });
+            }
+          }
+
+          return { disputes: imported };
+        } catch {
+          return { disputes: 0, error: "fetch failed" };
+        }
       });
     }
   }
