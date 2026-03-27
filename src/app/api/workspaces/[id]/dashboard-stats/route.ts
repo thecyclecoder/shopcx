@@ -68,6 +68,26 @@ export async function GET(
   const closedCount = (totalClosed as { count: number | null }).count || 0;
   const aiResolutionRate = closedCount > 0 ? aiCount / closedCount : null;
 
+  // Cancels + payment failures (today vs yesterday)
+  const todayStart = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
+  const yesterdayStart = new Date(new Date().setHours(-24, 0, 0, 0)).toISOString();
+
+  const [cancelsToday, cancelsYesterday, failuresToday, failuresYesterday] = await Promise.all([
+    admin.from("subscriptions").select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId).eq("status", "cancelled").gte("updated_at", todayStart),
+    admin.from("subscriptions").select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId).eq("status", "cancelled").gte("updated_at", yesterdayStart).lt("updated_at", todayStart),
+    admin.from("subscriptions").select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId).eq("last_payment_status", "failed").gte("updated_at", todayStart),
+    admin.from("subscriptions").select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId).eq("last_payment_status", "failed").gte("updated_at", yesterdayStart).lt("updated_at", todayStart),
+  ]);
+
+  const cancTodayCount = (cancelsToday as { count: number | null }).count || 0;
+  const cancYestCount = (cancelsYesterday as { count: number | null }).count || 0;
+  const failTodayCount = (failuresToday as { count: number | null }).count || 0;
+  const failYestCount = (failuresYesterday as { count: number | null }).count || 0;
+
   return NextResponse.json({
     customers: (customers as { count: number | null }).count || 0,
     avg_retention: avgRetention,
@@ -75,5 +95,9 @@ export async function GET(
     tickets_today: (ticketsToday as { count: number | null }).count || 0,
     kb_articles: (kbArticles as { count: number | null }).count || 0,
     macros: (macros as { count: number | null }).count || 0,
+    cancels_today: cancTodayCount,
+    cancels_yesterday: cancYestCount,
+    failures_today: failTodayCount,
+    failures_yesterday: failYestCount,
   });
 }
