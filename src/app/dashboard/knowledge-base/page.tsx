@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
+import { useSearchParams } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface Article {
@@ -37,6 +38,23 @@ export default function KnowledgeBasePage() {
   const [categoryFilter, setCategoryFilter] = useState("");
   const [productFilter, setProductFilter] = useState("");
   const [helpSlug, setHelpSlug] = useState<string | null>(null);
+  const [showGenerate, setShowGenerate] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [genTopic, setGenTopic] = useState("");
+  const [genRawMaterial, setGenRawMaterial] = useState("");
+  const [genCategory, setGenCategory] = useState("general");
+  const [genProductId, setGenProductId] = useState("");
+  const [genError, setGenError] = useState("");
+  const searchParams = useSearchParams();
+
+  // Pre-fill generate form from knowledge_gap notification query param
+  useEffect(() => {
+    const generateQuery = searchParams.get("generate");
+    if (generateQuery) {
+      setShowGenerate(true);
+      setGenTopic(generateQuery);
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     Promise.all([
@@ -91,6 +109,52 @@ export default function KnowledgeBasePage() {
     setArticles(prev => prev.filter(a => a.id !== id));
   };
 
+  const handleGenerate = async () => {
+    if (!genTopic.trim() || !genRawMaterial.trim()) return;
+    setGenerating(true);
+    setGenError("");
+    try {
+      const res = await fetch(`/api/workspaces/${workspace.id}/knowledge-base/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic: genTopic,
+          raw_material: genRawMaterial,
+          category: genCategory,
+          product_id: genProductId || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        setGenError(err.error || "Generation failed");
+        return;
+      }
+      const generated = await res.json();
+      // Open the article editor with the generated content for review
+      setShowGenerate(false);
+      setGenTopic("");
+      setGenRawMaterial("");
+      setGenCategory("general");
+      setGenProductId("");
+      setEditingId("new");
+      setEditing({
+        title: generated.title,
+        content: generated.content,
+        content_html: generated.content_html,
+        category: generated.category,
+        slug: generated.slug,
+        excerpt: generated.excerpt,
+        product_id: generated.product_id,
+        published: false,
+        source: "ai_generated",
+      });
+    } catch {
+      setGenError("Failed to generate article");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   if (loading) return <div className="p-8 text-sm text-zinc-400">Loading...</div>;
 
   const publishedCount = articles.filter(a => a.published).length;
@@ -113,6 +177,12 @@ export default function KnowledgeBasePage() {
               View Help Center
             </a>
           )}
+          <button
+            onClick={() => setShowGenerate(!showGenerate)}
+            className="rounded-md border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100 dark:border-indigo-700 dark:bg-indigo-950 dark:text-indigo-300 dark:hover:bg-indigo-900"
+          >
+            AI Generate
+          </button>
           <button
             onClick={() => {
               setEditingId("new");
@@ -142,6 +212,65 @@ export default function KnowledgeBasePage() {
           </select>
         )}
       </div>
+
+      {/* AI Generate form */}
+      {showGenerate && (
+        <div className="mt-4 rounded-lg border border-purple-200 bg-purple-50 p-4 dark:border-purple-800 dark:bg-purple-950">
+          <h3 className="text-sm font-semibold text-purple-900 dark:text-purple-200">AI Article Generator</h3>
+          <p className="mb-3 text-xs text-purple-600 dark:text-purple-400">Paste raw product info and let AI write a polished KB article.</p>
+          <div className="space-y-3">
+            <input
+              type="text"
+              value={genTopic}
+              onChange={(e) => setGenTopic(e.target.value)}
+              placeholder="Article topic (e.g. 'Is Ashwavana safe during pregnancy?')"
+              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+            />
+            <textarea
+              value={genRawMaterial}
+              onChange={(e) => setGenRawMaterial(e.target.value)}
+              placeholder="Paste raw material here: product specs, ingredient lists, notes, FAQs, marketing copy..."
+              rows={6}
+              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+            />
+            <div className="flex gap-3">
+              <select
+                value={genCategory}
+                onChange={(e) => setGenCategory(e.target.value)}
+                className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              >
+                {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              {products.length > 0 && (
+                <select
+                  value={genProductId}
+                  onChange={(e) => setGenProductId(e.target.value)}
+                  className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                >
+                  <option value="">No product</option>
+                  {products.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+                </select>
+              )}
+            </div>
+            {genError && <p className="text-xs text-red-600">{genError}</p>}
+            <div className="flex gap-2">
+              <button
+                onClick={handleGenerate}
+                disabled={generating || !genTopic.trim() || !genRawMaterial.trim()}
+                className="rounded-md bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-500 disabled:opacity-50"
+              >
+                {generating ? "Generating..." : "Generate"}
+              </button>
+              <button
+                onClick={() => { setShowGenerate(false); setGenError(""); }}
+                className="rounded-md border border-zinc-300 px-4 py-2 text-sm text-zinc-600 dark:border-zinc-700 dark:text-zinc-400"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* New article form */}
       {editingId === "new" && editing && (
@@ -203,14 +332,16 @@ function ArticleForm({ article, products, saving, onChange, onSave, onCancel }: 
   onCancel: () => void;
 }) {
   const editorRef = useRef<HTMLDivElement>(null);
-  const initialized = useRef(false);
+  const lastArticleId = useRef<string | undefined>(undefined);
 
   useEffect(() => {
-    if (editorRef.current && !initialized.current) {
+    // Re-initialize editor when switching to a different article (or new article with different content)
+    const articleKey = article.id || article.title || "";
+    if (editorRef.current && lastArticleId.current !== articleKey) {
       editorRef.current.innerHTML = article.content_html || article.content || "";
-      initialized.current = true;
+      lastArticleId.current = articleKey;
     }
-  }, [article.content_html, article.content]);
+  }, [article.id, article.title, article.content_html, article.content]);
 
   const syncContent = () => {
     if (!editorRef.current) return;
@@ -285,7 +416,14 @@ function ArticleForm({ article, products, saving, onChange, onSave, onCancel }: 
       </div>
 
       <div className="flex gap-2">
-        <button onClick={onSave} disabled={saving} className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50">{saving ? "Saving..." : "Save"}</button>
+        <button onClick={() => { onChange({ ...article, published: false }); onSave(); }} disabled={saving}
+          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50">
+          {saving ? "Saving..." : "Save as Draft"}
+        </button>
+        <button onClick={() => { onChange({ ...article, published: true }); onSave(); }} disabled={saving}
+          className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50">
+          Publish
+        </button>
         <button onClick={onCancel} className="rounded-md border border-zinc-300 px-4 py-2 text-sm text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">Cancel</button>
       </div>
     </div>
