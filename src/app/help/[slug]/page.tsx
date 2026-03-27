@@ -208,6 +208,9 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
       <footer className="border-t border-zinc-200 bg-white px-6 py-4 text-center text-xs text-zinc-400">
         Powered by <a href="https://shopcx.ai" className="text-indigo-500 hover:underline">ShopCX.ai</a>
       </footer>
+
+      {/* Live Chat Widget */}
+      <script src="https://shopcx.ai/widget.js" data-workspace={workspace.id} async />
     </div>
   );
 }
