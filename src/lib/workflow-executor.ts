@@ -293,7 +293,28 @@ export function resolveTemplate(template: string, context: WorkflowContext): str
 
 async function sendReply(admin: Admin, context: WorkflowContext, templateText: string, statusOverride?: string): Promise<void> {
   const body = resolveTemplate(templateText, context);
+  const channel = (context.ticket.channel as string) || "email";
 
+  // Check sandbox mode
+  const { data: ws } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", context.workspaceId).single();
+  const isSandbox = ws?.sandbox_mode ?? true;
+
+  if (isSandbox) {
+    // Sandbox: internal note only, not visible to customer on any channel, don't close
+    await admin.from("ticket_messages").insert({
+      ticket_id: context.ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Workflow Draft — Sandbox Mode]\n\n${body}`,
+    });
+
+    // Clear auto-reply but don't change status
+    await admin.from("tickets").update({ auto_reply_at: null, pending_auto_reply: null, updated_at: new Date().toISOString() }).eq("id", context.ticketId);
+    return;
+  }
+
+  // Live mode: create external message
   const { error: msgError } = await admin.from("ticket_messages").insert({
     ticket_id: context.ticketId,
     direction: "outbound",
@@ -303,22 +324,18 @@ async function sendReply(admin: Admin, context: WorkflowContext, templateText: s
   });
   if (msgError) console.error("Workflow message insert error:", msgError.message);
 
-  // Send email — only on email channel, respect sandbox
-  const channel = (context.ticket.channel as string) || "email";
+  // Send email — only on email channel
   const customerEmail = context.customer?.email as string | undefined;
   if (channel === "email" && customerEmail) {
-    const { data: ws } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", context.workspaceId).single();
-    if (!ws?.sandbox_mode) {
-      await sendTicketReply({
-        workspaceId: context.workspaceId,
-        toEmail: customerEmail,
-        subject: (context.ticket.subject as string) || "Support",
-        body,
-        inReplyTo: (context.ticket.email_message_id as string) || null,
-        agentName: "Support",
-        workspaceName: ws?.name || "Support",
-      });
-    }
+    await sendTicketReply({
+      workspaceId: context.workspaceId,
+      toEmail: customerEmail,
+      subject: (context.ticket.subject as string) || "Support",
+      body,
+      inReplyTo: (context.ticket.email_message_id as string) || null,
+      agentName: "Support",
+      workspaceName: ws?.name || "Support",
+    });
   }
   // Chat/help_center/sms/social — message is already inserted as external, visible in widget
 
