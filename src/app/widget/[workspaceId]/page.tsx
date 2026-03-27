@@ -552,7 +552,7 @@ export default function ChatWidgetPage() {
                     }`}
                     style={isCustomer ? { backgroundColor: primaryColor } : undefined}
                   >
-                    <div className="prose prose-sm max-w-none [&_a]:text-inherit [&_a]:underline" dangerouslySetInnerHTML={{ __html: msg.body }} />
+                    <div className="prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:text-inherit [&_a]:underline" dangerouslySetInnerHTML={{ __html: msg.body }} />
                     <p className={`mt-0.5 text-[10px] ${isCustomer ? "text-white/60" : "text-zinc-400"}`}>
                       {new Date(msg.created_at).toLocaleTimeString([], {
                         hour: "numeric",

@@ -358,9 +358,9 @@ export default function WorkflowsPage() {
                           </button>
                           <button type="button" onMouseDown={(e) => {
                             e.preventDefault();
-                            const url = prompt("Enter URL:");
+                            const url = prompt("Enter URL (supports template variables like {{fulfillment.url}}):");
                             if (url) document.execCommand("createLink", false, url);
-                          }} className="rounded px-1.5 py-0.5 text-sm text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-600">
+                          }} className="rounded px-1.5 py-0.5 text-sm text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-600" title="Insert link">
                             <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
                           </button>
                         </div>
@@ -369,7 +369,7 @@ export default function WorkflowsPage() {
                           suppressContentEditableWarning
                           dangerouslySetInnerHTML={{ __html: (editing.config[field.key] as string) || "" }}
                           onBlur={(e) => setEditing({ ...editing, config: { ...editing.config, [field.key]: e.currentTarget.innerHTML } })}
-                          className="min-h-[60px] w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                          className="min-h-[60px] w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100 [&_a]:text-indigo-600 [&_a]:underline [&_a]:cursor-pointer"
                         />
                         <div className="mt-1 flex items-center gap-1.5">
                           <span className="text-sm text-zinc-400">After this reply, set status to:</span>
