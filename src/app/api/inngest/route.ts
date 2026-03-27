@@ -16,6 +16,19 @@ import { aiDraftTicket, aiTriggerWorkflow } from "@/lib/inngest/ai-draft";
 import { journeySessionCompleted, journeySessionAbandoned } from "@/lib/inngest/journey-outcomes";
 import { scrapeHelpCenter } from "@/lib/inngest/scrape-help-center";
 import { aiMultiTurn } from "@/lib/inngest/ai-multi-turn";
+import {
+  fraudNightlyScan,
+  fraudGenerateSummary,
+  fraudCheckOrder,
+  fraudCheckCustomer,
+  fraudRerunRule,
+} from "@/lib/inngest/fraud-detection";
+import {
+  chargebackReceived,
+  chargebackWon,
+  chargebackLost,
+  chargebackEvidenceReminder,
+} from "@/lib/inngest/chargeback-processing";
 
 export const maxDuration = 300;
 
@@ -40,5 +53,14 @@ export const { GET, POST, PUT } = serve({
     journeySessionAbandoned,
     scrapeHelpCenter,
     aiMultiTurn,
+    fraudNightlyScan,
+    fraudGenerateSummary,
+    fraudCheckOrder,
+    fraudCheckCustomer,
+    fraudRerunRule,
+    chargebackReceived,
+    chargebackWon,
+    chargebackLost,
+    chargebackEvidenceReminder,
   ],
 });

@@ -20,6 +20,7 @@ const NAV_ITEMS = [
   { href: "/dashboard", label: "Overview", icon: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1" },
   { href: "/dashboard/tickets", label: "Tickets", icon: "M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" },
   { href: "/dashboard/customers", label: "Customers", icon: "M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" },
+  { href: "/dashboard/fraud", label: "Fraud Monitor", icon: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" },
   { href: "/dashboard/knowledge-base", label: "Knowledge Base", icon: "M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" },
   { href: "/dashboard/settings", label: "Settings", icon: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z" },
 ];
@@ -38,6 +39,7 @@ export default function Sidebar({
   const [collapsedViews, setCollapsedViews] = useState<Set<string>>(new Set());
   const [ticketsExpanded, setTicketsExpanded] = useState(false);
   const [escalationCounts, setEscalationCounts] = useState<{ open: number; pending: number; closed: number }>({ open: 0, pending: 0, closed: 0 });
+  const [fraudCount, setFraudCount] = useState<{ count: number; maxSeverity: string }>({ count: 0, maxSeverity: "low" });
 
   // Close sidebar on route change (mobile), auto-expand tickets when on tickets page
   useEffect(() => {
@@ -59,6 +61,18 @@ export default function Sidebar({
       ]).then(([o, p, c]) => {
         setEscalationCounts({ open: o?.total || 0, pending: p?.total || 0, closed: c?.total || 0 });
       }).catch(() => {});
+      // Fraud case count (admin/owner only)
+      fetch(`/api/workspaces/${workspace.id}/fraud-cases?status=open&limit=1`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => {
+          if (!d) return;
+          const count = d.total || 0;
+          const cases = d.cases || [];
+          const maxSeverity = cases.some((c: { severity: string }) => c.severity === "high") ? "high"
+            : cases.some((c: { severity: string }) => c.severity === "medium") ? "medium" : "low";
+          setFraudCount({ count, maxSeverity });
+        })
+        .catch(() => {});
     };
     fetchCounts();
     const interval = setInterval(fetchCounts, 10000);
@@ -152,7 +166,18 @@ export default function Sidebar({
                   <svg className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
                   </svg>
-                  {item.label}
+                  <span className="flex-1">{item.label}</span>
+                  {item.href === "/dashboard/fraud" && fraudCount.count > 0 && (
+                    <span className={`rounded-full px-1.5 py-0.5 text-xs font-medium tabular-nums ${
+                      fraudCount.maxSeverity === "high"
+                        ? "bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
+                        : fraudCount.maxSeverity === "medium"
+                        ? "bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400"
+                        : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-500"
+                    }`}>
+                      {fraudCount.count > 99 ? "99+" : fraudCount.count}
+                    </span>
+                  )}
                 </Link>
               )}
               {/* Escalations submenu */}

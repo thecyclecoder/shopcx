@@ -5,6 +5,8 @@ import { calculateRetentionScore } from "@/lib/retention-score";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
+import { normalizeShopifyShippingAddress } from "@/lib/address-normalize";
+import { inngest } from "@/lib/inngest/client";
 
 // ── HMAC verification ──
 
@@ -118,6 +120,128 @@ async function getShopCredentials(workspaceId: string): Promise<{ shop: string; 
     shop: workspace.shopify_myshopify_domain,
     accessToken: decrypt(workspace.shopify_access_token_encrypted),
   };
+}
+
+// ── Dispute (chargeback) handler ──
+
+export async function handleDisputeEvent(
+  workspaceId: string,
+  payload: Record<string, unknown>,
+  topic: string
+) {
+  const admin = createAdminClient();
+  const disputeId = String(payload.id);
+  const isCreate = topic === "disputes/create";
+
+  // Map Shopify dispute fields
+  const disputeType = (payload.type as string) === "inquiry" ? "inquiry" : "chargeback";
+  const reason = (payload.reason as string) || null;
+  const status = mapDisputeStatus((payload.status as string) || "");
+  const amountCents = dollarsToCents(payload.amount as string);
+  const currency = (payload.currency as string) || "USD";
+  const networkReasonCode = (payload.network_reason_code as string) || null;
+  const evidenceDueBy = (payload.evidence_due_by as string) || null;
+  const evidenceSentOn = (payload.evidence_sent_on as string) || null;
+  const finalizedOn = (payload.finalized_on as string) || null;
+  const shopifyOrderId = payload.order_id ? String(payload.order_id) : null;
+  const initiatedAt = (payload.initiated_at as string) || new Date().toISOString();
+
+  if (isCreate) {
+    // Check idempotency — don't insert duplicates
+    const { data: existing } = await admin
+      .from("chargeback_events")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_dispute_id", disputeId)
+      .maybeSingle();
+
+    if (existing) {
+      console.log(`Duplicate disputes/create for ${disputeId}, skipping`);
+      return;
+    }
+
+    const { data: inserted } = await admin
+      .from("chargeback_events")
+      .insert({
+        workspace_id: workspaceId,
+        shopify_dispute_id: disputeId,
+        shopify_order_id: shopifyOrderId,
+        dispute_type: disputeType,
+        reason,
+        network_reason_code: networkReasonCode,
+        amount_cents: amountCents,
+        currency,
+        status,
+        evidence_due_by: evidenceDueBy,
+        evidence_sent_on: evidenceSentOn,
+        finalized_on: finalizedOn,
+        raw_payload: payload,
+        initiated_at: initiatedAt,
+      })
+      .select("id")
+      .single();
+
+    if (inserted) {
+      // Fire Inngest event for async processing
+      inngest.send({
+        name: "chargeback/received",
+        data: { chargebackEventId: inserted.id, workspaceId },
+      }).catch(() => {});
+    }
+  } else {
+    // disputes/update — update existing row
+    const { data: existing } = await admin
+      .from("chargeback_events")
+      .select("id, status as old_status, auto_action_taken")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_dispute_id", disputeId)
+      .maybeSingle();
+
+    if (!existing) {
+      console.error(`disputes/update for unknown dispute ${disputeId}`);
+      return;
+    }
+
+    await admin
+      .from("chargeback_events")
+      .update({
+        status,
+        evidence_sent_on: evidenceSentOn,
+        finalized_on: finalizedOn,
+        raw_payload: payload,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", existing.id);
+
+    // Fire outcome events
+    if (status === "won") {
+      inngest.send({
+        name: "chargeback/won",
+        data: { chargebackEventId: existing.id, workspaceId },
+      }).catch(() => {});
+    } else if (status === "lost") {
+      inngest.send({
+        name: "chargeback/lost",
+        data: { chargebackEventId: existing.id, workspaceId },
+      }).catch(() => {});
+    }
+  }
+}
+
+function mapDisputeStatus(shopifyStatus: string): string {
+  switch (shopifyStatus) {
+    case "needs_response":
+    case "under_review":
+      return "under_review";
+    case "accepted":
+      return "accepted";
+    case "won":
+      return "won";
+    case "lost":
+      return "lost";
+    default:
+      return "under_review";
+  }
 }
 
 // ── Customer update handler ──
@@ -297,6 +421,7 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
   }));
 
   // Upsert order
+  const shippingAddr = payload.shipping_address as Record<string, unknown> | null;
   const { error: orderError } = await admin.from("orders").upsert(
     {
       workspace_id: workspaceId,
@@ -321,6 +446,8 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
         status: f.status || null,
         createdAt: f.created_at || null,
       })),
+      shipping_address: shippingAddr || null,
+      normalized_shipping_address: normalizeShopifyShippingAddress(shippingAddr),
       created_at: (payload.created_at as string) || new Date().toISOString(),
     },
     { onConflict: "workspace_id,shopify_order_id" }
@@ -328,6 +455,24 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
 
   if (orderError) {
     console.error("Order webhook upsert error:", orderError.message);
+  }
+
+  // Fire fraud check for the new order (async, non-blocking)
+  if (!orderError) {
+    // Look up the order UUID for the fraud check
+    const { data: savedOrder } = await admin
+      .from("orders")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_order_id", shopifyOrderId)
+      .single();
+
+    if (savedOrder) {
+      inngest.send({
+        name: "fraud/order.check",
+        data: { orderId: savedOrder.id, customerId, workspaceId },
+      }).catch(() => {}); // fire and forget
+    }
   }
 
   // Update customer stats from DB (not payload — payload may be incomplete)

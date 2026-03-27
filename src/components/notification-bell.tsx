@@ -17,6 +17,7 @@ const TYPE_ICONS: Record<string, string> = {
   macro_suggestion: "M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z",
   pattern_review: "M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z",
   knowledge_gap: "M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25",
+  fraud_alert: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z",
   system: "M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z",
 };
 
@@ -124,13 +125,25 @@ export default function NotificationBell() {
                 You&apos;re all caught up
               </div>
             ) : (
-              notifications.map(n => (
+              // Sort fraud alerts first, then by read status and date
+              [...notifications].sort((a, b) => {
+                if (a.type === "fraud_alert" && b.type !== "fraud_alert") return -1;
+                if (b.type === "fraud_alert" && a.type !== "fraud_alert") return 1;
+                return 0;
+              }).map(n => (
                 <button
                   key={n.id}
                   onClick={() => handleClick(n)}
-                  className={`flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700 ${!n.read ? "bg-indigo-50/50 dark:bg-indigo-950/30" : ""}`}
+                  className={`flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700 ${
+                    !n.read && n.type === "fraud_alert"
+                      ? "bg-red-50/50 dark:bg-red-950/20"
+                      : !n.read
+                      ? "bg-indigo-50/50 dark:bg-indigo-950/30"
+                      : ""
+                  }`}
                 >
-                  {!n.read && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-indigo-500" />}
+                  {!n.read && n.type === "fraud_alert" && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-red-500" />}
+                  {!n.read && n.type !== "fraud_alert" && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-indigo-500" />}
                   {n.read && <span className="mt-1.5 h-2 w-2 shrink-0" />}
                   <svg className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d={TYPE_ICONS[n.type] || TYPE_ICONS.system} />

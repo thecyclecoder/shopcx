@@ -1,6 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
+import { normalizeShopifyShippingAddress } from "@/lib/address-normalize";
 
 interface ShopifyCredentials {
   shop: string;
@@ -239,6 +240,7 @@ export async function startBulkOperationWithQuery(
     totalPriceSet { shopMoney { amount currencyCode } }
     displayFinancialStatus displayFulfillmentStatus createdAt
     customer { id }
+    shippingAddress { address1 address2 city province provinceCode country countryCodeV2 zip firstName lastName }
     lineItems(first: 20) {
       edges { node { title quantity sku originalUnitPriceSet { shopMoney { amount } } } }
     }
@@ -316,6 +318,7 @@ const BULK_ORDERS_QUERY = `
               displayFulfillmentStatus
               createdAt
               customer { id }
+              shippingAddress { address1 address2 city province provinceCode country countryCodeV2 zip firstName lastName }
               lineItems(first: 20) {
                 edges {
                   node {
@@ -423,6 +426,7 @@ export async function upsertOrderChunk(
 
     const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
 
+    const shippingAddr = o.shippingAddress as Record<string, unknown> | null;
     records.push({
       workspace_id: workspaceId,
       shopify_order_id: shopifyOrderId,
@@ -438,6 +442,8 @@ export async function upsertOrderChunk(
       source_name: (o.sourceName as string) || null,
       tags: (o.tags as string[])?.join(", ") || null,
       fulfillments: (o.fulfillments as unknown[]) || [],
+      shipping_address: shippingAddr || null,
+      normalized_shipping_address: normalizeShopifyShippingAddress(shippingAddr),
       created_at: (o.createdAt as string) || new Date().toISOString(),
     });
   }
@@ -901,6 +907,7 @@ export async function syncOrderPages(
         sku: li.sku || null,
       }));
 
+      const shippingAddr = o.shipping_address as Record<string, unknown> | null;
       return {
         workspace_id: workspaceId,
         shopify_order_id: shopifyOrderId,
@@ -916,6 +923,8 @@ export async function syncOrderPages(
         source_name: (o.source_name as string) || null,
         app_id: (o.app_id as number) || null,
         tags: (o.tags as string) || null,
+        shipping_address: shippingAddr || null,
+        normalized_shipping_address: normalizeShopifyShippingAddress(shippingAddr),
         created_at: (o.created_at as string) || new Date().toISOString(),
       };
     });
@@ -1113,6 +1122,7 @@ export async function syncOrderBatch(
             totalPriceSet { shopMoney { amount currencyCode } }
             displayFinancialStatus displayFulfillmentStatus createdAt
             customer { id }
+            shippingAddress { address1 address2 city province provinceCode country countryCodeV2 zip firstName lastName }
             lineItems(first: 20) {
               edges { node { title quantity sku originalUnitPriceSet { shopMoney { amount } } } }
             }
@@ -1205,6 +1215,7 @@ export async function syncOrderBatch(
     }));
 
     const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
+    const shippingAddr = o.shippingAddress as Record<string, unknown> | null;
 
     return {
       workspace_id: workspaceId,
@@ -1221,6 +1232,8 @@ export async function syncOrderBatch(
       source_name: (o.sourceName as string) || null,
       tags: (o.tags as string[])?.join(", ") || null,
       fulfillments: (o.fulfillments as unknown[]) || [],
+      shipping_address: shippingAddr || null,
+      normalized_shipping_address: normalizeShopifyShippingAddress(shippingAddr),
       created_at: (o.createdAt as string) || new Date().toISOString(),
     };
   });
@@ -1381,6 +1394,7 @@ export async function syncOrderMonth(
             totalPriceSet { shopMoney { amount currencyCode } }
             displayFinancialStatus displayFulfillmentStatus createdAt
             customer { id }
+            shippingAddress { address1 address2 city province provinceCode country countryCodeV2 zip firstName lastName }
             lineItems(first: 20) {
               edges { node { title quantity sku originalUnitPriceSet { shopMoney { amount } } } }
             }
@@ -1426,6 +1440,7 @@ export async function syncOrderMonth(
       }));
 
       const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
+      const shippingAddr = o.shippingAddress as Record<string, unknown> | null;
 
       return {
         workspace_id: workspaceId,
@@ -1442,6 +1457,8 @@ export async function syncOrderMonth(
         source_name: (o.sourceName as string) || null,
         tags: (o.tags as string[])?.join(", ") || null,
         fulfillments: (o.fulfillments as unknown[]) || [],
+        shipping_address: shippingAddr || null,
+        normalized_shipping_address: normalizeShopifyShippingAddress(shippingAddr),
         created_at: (o.createdAt as string) || new Date().toISOString(),
       };
     });

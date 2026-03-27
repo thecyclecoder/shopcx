@@ -105,6 +105,19 @@ export default function SettingsPage() {
         </Link>
 
         <Link
+          href="/dashboard/settings/fraud"
+          className="flex items-center justify-between rounded-lg border border-red-200 bg-red-50 p-5 transition-colors hover:border-red-300 dark:border-red-800 dark:bg-red-950 dark:hover:border-red-700"
+        >
+          <div>
+            <h2 className="text-sm font-medium text-red-900 dark:text-red-100">Fraud Detection</h2>
+            <p className="mt-1 text-sm text-red-600 dark:text-red-400">Configure fraud detection rules, thresholds, and severity levels</p>
+          </div>
+          <svg className="h-5 w-5 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+
+        <Link
           href="/dashboard/settings/views"
           className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
         >

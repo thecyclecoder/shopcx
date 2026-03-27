@@ -5,6 +5,8 @@ const WEBHOOK_TOPICS = [
   "customers/update",
   "orders/create",
   "orders/updated",
+  "disputes/create",
+  "disputes/update",
 ];
 
 export async function registerShopifyWebhooks(

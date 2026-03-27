@@ -9,6 +9,16 @@ import { handleEscalation } from "@/lib/escalation";
 import { sendTicketReply } from "@/lib/email";
 import { subscribeToMarketing } from "@/lib/shopify-marketing";
 
+// Convert plain text AI response to light HTML paragraphs
+function toHtmlParagraphs(text: string): string {
+  return text
+    .split(/\n\n+/)
+    .map(p => p.trim())
+    .filter(Boolean)
+    .map(p => `<p>${p.replace(/\n/g, "<br>")}</p>`)
+    .join("");
+}
+
 export const aiMultiTurn = inngest.createFunction(
   {
     id: "ai-multi-turn",
@@ -62,11 +72,12 @@ export const aiMultiTurn = inngest.createFunction(
         const customerEmail = (ticket?.customers as unknown as { email: string })?.email;
 
         if (ws && !ws.sandbox_mode && customerEmail) {
+          const htmlClose = `<p>${closeMsg}</p>`;
           await sendTicketReply({
             workspaceId: workspace_id,
             toEmail: customerEmail,
             subject: ticket?.subject ? `Re: ${ticket.subject}` : "Re: Your request",
-            body: closeMsg,
+            body: htmlClose,
             inReplyTo: null,
             agentName: "AI Agent",
             workspaceName: ws.name,
@@ -75,7 +86,7 @@ export const aiMultiTurn = inngest.createFunction(
           await admin.from("ticket_messages").insert({
             ticket_id,
             direction: "outbound",
-            body: closeMsg,
+            body: htmlClose,
             author_type: "ai",
             visibility: "external",
           });
@@ -332,22 +343,25 @@ export const aiMultiTurn = inngest.createFunction(
       const { data: ws } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", workspace_id).single();
 
       if (!context.sandbox && ws && !ws.sandbox_mode && customerEmail) {
+        // Convert to HTML paragraphs for email
+        const htmlBody = toHtmlParagraphs(aiResponse.responseText);
+
         // Send real reply
         await sendTicketReply({
           workspaceId: workspace_id,
           toEmail: customerEmail,
           subject: ticket.subject ? `Re: ${ticket.subject}` : "Re: Your request",
-          body: aiResponse.responseText,
+          body: htmlBody,
           inReplyTo: ticket.email_message_id || null,
           agentName: "AI Agent",
           workspaceName: ws.name,
         });
 
-        // Create outbound message
+        // Create outbound message (store HTML for display)
         await admin.from("ticket_messages").insert({
           ticket_id,
           direction: "outbound",
-          body: aiResponse.responseText,
+          body: htmlBody,
           author_type: "ai",
           visibility: "external",
           ai_personalized: true,

@@ -4,6 +4,7 @@ import {
   verifyShopifyWebhook,
   handleCustomerUpdate,
   handleOrderEvent,
+  handleDisputeEvent,
 } from "@/lib/shopify-webhooks";
 
 export async function POST(request: Request) {
@@ -49,6 +50,11 @@ export async function POST(request: Request) {
       case "orders/create":
       case "orders/updated":
         await handleOrderEvent(workspace.id, payload);
+        break;
+
+      case "disputes/create":
+      case "disputes/update":
+        await handleDisputeEvent(workspace.id, payload, topic);
         break;
 
       default:
