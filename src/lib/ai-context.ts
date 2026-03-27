@@ -209,10 +209,29 @@ export async function assembleTicketContext(
   promptParts.push("- FOCUS: Only answer the customer's LATEST message. The conversation history is for context only — do NOT repeat or re-address anything from previous turns. Treat the latest customer message as the ONLY thing you need to respond to.");
   promptParts.push("- Do NOT reference or acknowledge topics from earlier in the conversation unless the customer explicitly brings them up again.");
   if (ticket.ai_turn_count > 0) {
-    promptParts.push("- This is a follow-up message. Keep it brief and conversational — no need for a long greeting or sign-off. Just answer the question directly.");
+    promptParts.push("- This is a follow-up message. Keep it brief and conversational. Just answer the question directly.");
+    promptParts.push("- Do NOT start with flattery, compliments about their loyalty, or 'pat on the back' openers like 'I'm so glad' or 'It's wonderful'. Just get to the point.");
     promptParts.push("- Do NOT include a sign-off or team signature. Just end naturally.");
   } else {
     promptParts.push("- Sign-off should be on its own line, separated by a blank line from the rest of the message.");
+  }
+
+  // AI Workflows — tell the AI what actions it can offer
+  const { data: aiWorkflows } = await admin
+    .from("ai_workflows")
+    .select("name, description, trigger_intent, match_patterns, config")
+    .eq("workspace_id", workspaceId)
+    .eq("enabled", true);
+
+  if (aiWorkflows?.length) {
+    promptParts.push("\nAVAILABLE ACTIONS:");
+    for (const wf of aiWorkflows) {
+      const config = wf.config as Record<string, unknown>;
+      promptParts.push(`- ${wf.name}: ${wf.description || ""}`);
+      if (config.offer_message) promptParts.push(`  When relevant, offer: "${config.offer_message}"`);
+      promptParts.push(`  Trigger keywords: ${(wf.match_patterns || []).join(", ")}`);
+    }
+    promptParts.push("- When a customer confirms they want an action, acknowledge it and let them know it's being processed.");
   }
 
   // KB context

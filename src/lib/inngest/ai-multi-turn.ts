@@ -7,6 +7,7 @@ import { assembleTicketContext } from "@/lib/ai-context";
 import { routeInboundReply } from "@/lib/turn-router";
 import { handleEscalation } from "@/lib/escalation";
 import { sendTicketReply } from "@/lib/email";
+import { subscribeToMarketing } from "@/lib/shopify-marketing";
 
 export const aiMultiTurn = inngest.createFunction(
   {
@@ -148,6 +149,78 @@ export const aiMultiTurn = inngest.createFunction(
       });
       return { action: "draft_for_review", reason: decision.reason };
     }
+
+    // Step 5b: Execute AI workflow actions (e.g., marketing signup)
+    const actionResult = await step.run("execute-actions", async () => {
+      const admin = createAdminClient();
+      const bodyLower = message_body.toLowerCase();
+
+      // Check for marketing signup confirmation
+      const signupKeywords = ["sign me up", "subscribe", "yes", "sign up", "opt in", "i'd love to", "please do", "go ahead"];
+      const marketingKeywords = ["email", "sms", "marketing", "newsletter", "promo", "notification", "coupon"];
+      const hasSignupIntent = signupKeywords.some(k => bodyLower.includes(k));
+      const hasMarketingContext = marketingKeywords.some(k => bodyLower.includes(k));
+
+      if (hasSignupIntent && hasMarketingContext) {
+        // Get ticket to find customer
+        const { data: ticket } = await admin
+          .from("tickets")
+          .select("customer_id")
+          .eq("id", ticket_id)
+          .single();
+
+        if (ticket?.customer_id) {
+          // Check existing marketing status first
+          const { data: cust } = await admin
+            .from("customers")
+            .select("shopify_customer_id, email, phone, tags")
+            .eq("id", ticket.customer_id)
+            .single();
+
+          // Check if already subscribed via Shopify tags or status
+          const tags = (cust?.tags as string[]) || [];
+          const alreadyEmailSubscribed = tags.some(t => t.toLowerCase().includes("email_subscriber") || t.toLowerCase().includes("accepts_marketing"));
+          const alreadySmsSubscribed = tags.some(t => t.toLowerCase().includes("sms_subscriber"));
+
+          // Prioritize SMS (higher value subscriber) — always try both unless already subscribed
+          const channels: ("email" | "sms")[] = [];
+          if (!alreadySmsSubscribed && cust?.phone) channels.push("sms");
+          if (!alreadyEmailSubscribed) channels.push("email");
+
+          if (channels.length === 0) {
+            // Already subscribed to everything they asked for
+            return { action: "marketing_already_subscribed", success: true };
+          }
+
+          const result = await subscribeToMarketing(workspace_id, ticket.customer_id, channels);
+
+          if (result.success) {
+            // Log the action
+            await admin.from("ticket_messages").insert({
+              ticket_id,
+              direction: "outbound",
+              body: `[System] Marketing subscription updated: ${channels.join(" + ")} — ${result.email_subscribed ? "Email: subscribed" : ""}${result.sms_subscribed ? " SMS: subscribed" : ""}${result.error ? ` (Note: ${result.error})` : ""}`,
+              author_type: "system",
+              visibility: "internal",
+            });
+
+            // Track workflow completion
+            await admin.from("dashboard_notifications").insert({
+              workspace_id,
+              type: "system",
+              title: "Marketing signup completed by AI",
+              body: `Customer subscribed to ${channels.join(" + ")} marketing via AI conversation`,
+              link: `/dashboard/tickets/${ticket_id}`,
+              metadata: { ticket_id, channels, action: "marketing_signup" },
+            });
+
+            return { action: "marketing_signup", channels, success: true };
+          }
+          return { action: "marketing_signup", channels, success: false, error: result.error };
+        }
+      }
+      return null;
+    });
 
     // Step 6: Send response
     await step.run("send-response", async () => {
