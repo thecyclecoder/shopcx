@@ -369,6 +369,7 @@ export default function TicketDetailPage() {
       const data = await res.json();
       if (data.personalized) {
         setReplyBody(data.personalized);
+        if (editorRef.current) editorRef.current.innerHTML = data.personalized;
         setEditorFocused(true);
         setShowMacroPanel(false);
         setMacroSearch("");
@@ -855,6 +856,7 @@ export default function TicketDetailPage() {
                 <button
                   onClick={() => {
                     setReplyBody(aiDraft.ai_draft || "");
+                    if (editorRef.current) editorRef.current.innerHTML = aiDraft.ai_draft || "";
                     setEditorFocused(true);
                     // Log macro usage: accepted
                     if (aiDraft.ai_suggested_macro_id) {
@@ -922,9 +924,11 @@ export default function TicketDetailPage() {
                   try {
                     const res = await fetch(`/api/tickets/${id}/ai-draft`, { method: "POST" });
                     const data = await res.json();
-                    if (data.draft || data.source_id) {
+                    if (!res.ok) {
+                      alert(data.error || "AI draft failed");
+                    } else if (data.draft) {
                       setAiDraft({
-                        ai_draft: data.draft || null,
+                        ai_draft: data.draft,
                         ai_confidence: data.confidence,
                         ai_tier: data.tier,
                         ai_source_type: data.source_type,
@@ -933,8 +937,12 @@ export default function TicketDetailPage() {
                         ai_suggested_macro_id: data.source_type === "macro" ? data.source_id : null,
                         ai_suggested_macro_name: null,
                       });
+                    } else {
+                      alert("AI couldn't generate a draft for this ticket. No matching macros or KB articles found.");
                     }
-                  } catch {}
+                  } catch (err) {
+                    alert(`AI draft error: ${err}`);
+                  }
                   setGeneratingDraft(false);
                 }}
                 disabled={generatingDraft}
