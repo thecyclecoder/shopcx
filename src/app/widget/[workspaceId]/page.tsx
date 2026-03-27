@@ -386,7 +386,7 @@ export default function ChatWidgetPage() {
           {viewingArticle.product_name && (
             <span className="mt-1 inline-block rounded-full bg-indigo-50 px-2 py-0.5 text-xs text-indigo-600">{viewingArticle.product_name}</span>
           )}
-          <div className="prose prose-sm mt-3 max-w-none text-zinc-700 [&_*]:!text-zinc-700 [&_a]:!text-indigo-600">
+          <div className="prose prose-sm mt-3 max-w-none text-zinc-700 [&_*]:!text-zinc-700 [&_a]:!text-indigo-600 [&_img]:!max-w-full [&_img]:!h-auto [&_video]:!max-w-full [&_video]:!h-auto [&_iframe]:!max-w-full">
             {viewingArticle.content_html ? (
               <div dangerouslySetInnerHTML={{ __html: viewingArticle.content_html }} />
             ) : (
