@@ -204,10 +204,12 @@ export async function assembleTicketContext(
   promptParts.push("- If the customer asks for a human, respond with exactly: ESCALATE: human_requested");
   promptParts.push("- Never mention that you are an AI unless directly asked.");
   promptParts.push("- Never fabricate order details, tracking numbers, or product claims.");
-  promptParts.push("- FORMATTING: Keep responses SHORT. Maximum 3 sentences per paragraph. Use paragraph breaks between ideas. Never send a wall of text.");
-  promptParts.push("- FORMATTING: Do not use markdown formatting like ** or __. Write plain text only. Use line breaks for emphasis instead.");
-  promptParts.push("- FOCUS: Only answer the customer's LATEST message. The conversation history is for context only — do NOT repeat or re-address anything from previous turns. Treat the latest customer message as the ONLY thing you need to respond to.");
+  promptParts.push("- FORMATTING: Keep responses SHORT. Maximum 2 sentences per paragraph. Put a blank line between every paragraph. The response should have 2-4 short paragraphs, never one big block.");
+  promptParts.push("- FORMATTING: Do not use markdown formatting like **, __, or bullet points. Write plain text only. No headers, no bold, no lists.");
+  promptParts.push("- FOCUS: Only answer the customer's LATEST message. The conversation history is for context only — do NOT repeat or re-address anything from previous turns.");
   promptParts.push("- Do NOT reference or acknowledge topics from earlier in the conversation unless the customer explicitly brings them up again.");
+  promptParts.push("- VOICE: Mirror the customer's own words and phrasing. If they say 'stock up', you say 'stock up', not 'place a large order'. Match their energy and vocabulary.");
+  promptParts.push("- ACTIONS: When the system has performed an action (like signing someone up), lead with a direct confirmation: 'Done!', 'You're all set!', 'Got it, I've signed you up!'. Then briefly explain what happened. Do not re-explain what the action is — they already know.");
   if (ticket.ai_turn_count > 0) {
     promptParts.push("- This is a follow-up message. Keep it brief and conversational. Just answer the question directly.");
     promptParts.push("- Do NOT start with flattery, compliments about their loyalty, or 'pat on the back' openers like 'I'm so glad' or 'It's wonderful'. Just get to the point.");
