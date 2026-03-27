@@ -457,16 +457,7 @@ export default function ChatWidgetPage() {
                   onClick={() => openChat(chat.ticket_id, chat.id)}
                   className="mb-2 w-full rounded-lg border border-zinc-200 bg-white p-3 text-left transition-colors hover:border-zinc-300 hover:bg-zinc-50"
                 >
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-medium text-zinc-900 line-clamp-1">{chat.subject}</p>
-                    <span className={`ml-2 shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
-                      chat.status === "open" ? "bg-blue-100 text-blue-600"
-                      : chat.status === "pending" ? "bg-amber-100 text-amber-600"
-                      : "bg-zinc-100 text-zinc-500"
-                    }`}>
-                      {chat.status}
-                    </span>
-                  </div>
+                  <p className="text-sm font-medium text-zinc-900 line-clamp-1">{chat.subject}</p>
                   {chat.last_message && (
                     <p className="mt-1 text-xs text-zinc-500 line-clamp-1">{chat.last_message}</p>
                   )}

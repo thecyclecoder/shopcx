@@ -35,12 +35,13 @@ export async function GET(
 
   if (!sessions?.length) return NextResponse.json([]);
 
-  // Enrich with ticket data
+  // Enrich with ticket data — only show tickets still on chat channel
   const ticketIds = sessions.map(s => s.ticket_id).filter(Boolean);
   const { data: tickets } = await admin
     .from("tickets")
-    .select("id, subject, status, updated_at")
-    .in("id", ticketIds);
+    .select("id, subject, status, channel, updated_at")
+    .in("id", ticketIds)
+    .eq("channel", "chat");
 
   const ticketMap = new Map((tickets || []).map(t => [t.id, t]));
 
