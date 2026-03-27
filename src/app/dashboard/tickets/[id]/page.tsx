@@ -5,6 +5,8 @@ import { useParams, useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 import type { Ticket, TicketMessage, TicketStatus } from "@/lib/types/ticket";
 import { cleanEmailForDisplay } from "@/lib/email-utils";
+import TicketPresenceBanner, { useTicketPresence } from "@/components/ticket-presence";
+import { createClient } from "@/lib/supabase/client";
 
 interface Member {
   user_id: string;
@@ -211,6 +213,26 @@ export default function TicketDetailPage() {
   const [showMacroPanel, setShowMacroPanel] = useState(false);
   const [applyingMacro, setApplyingMacro] = useState<string | null>(null);
   const [allMacros, setAllMacros] = useState<{ id: string; name: string; body_text: string; category: string | null; usage_count: number }[]>([]);
+  const [currentUser, setCurrentUser] = useState<{ id: string; name: string } | null>(null);
+
+  // Fetch current user for presence
+  useEffect(() => {
+    const supabase = createClient();
+    supabase.auth.getUser().then(({ data }) => {
+      if (data.user) {
+        setCurrentUser({
+          id: data.user.id,
+          name: data.user.user_metadata?.full_name || data.user.email || "Agent",
+        });
+      }
+    });
+  }, []);
+
+  const presence = useTicketPresence({
+    ticketId: id,
+    currentUserId: currentUser?.id || "",
+    currentUserName: currentUser?.name || "",
+  });
 
   // Order actions state
   const [orderActionPanel, setOrderActionPanel] = useState<{ orderId: string; action: "refund" | "cancel" | "edit_address" } | null>(null);
@@ -552,6 +574,9 @@ export default function TicketDetailPage() {
               </div>
             </div>
           )}
+
+          {/* Presence banner */}
+          <TicketPresenceBanner others={presence.others} />
 
           {/* Escalation banner */}
           {(ticket as TicketDetail & { escalation_reason?: string; ai_turn_count?: number }).escalation_reason && (
@@ -1183,7 +1208,8 @@ export default function TicketDetailPage() {
               contentEditable
               suppressContentEditableWarning
               onFocus={() => setEditorFocused(true)}
-              onInput={() => setReplyBody(editorRef.current?.textContent || "")}
+              onBlur={() => presence.onEditorBlur()}
+              onInput={() => { setReplyBody(editorRef.current?.textContent || ""); presence.onEditorInput(); }}
               data-placeholder={replyMode === "external" ? "Type your reply..." : "Internal note..."}
               className={`w-full rounded-md border border-zinc-300 bg-white text-sm text-zinc-900 placeholder-zinc-400 outline-none transition-all focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 ${
                 editorFocused ? "min-h-[120px] px-3 py-2" : "min-h-[32px] px-2.5 py-1.5"
