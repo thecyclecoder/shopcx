@@ -26,49 +26,36 @@ export async function GET(
     try {
       const { shop, accessToken } = await getShopifyCredentials(workspaceId);
 
-      // Query discount codes via GraphQL — filter for subscription-applicable ones
-      const query = `{
-        codeDiscountNodes(first: 100, query: "status:active") {
-          nodes {
-            id
-            codeDiscount {
-              ... on DiscountCodeBasic {
-                title
-                status
-                usageLimit
-                codes(first: 1) { nodes { code } }
-                customerGets {
-                  value {
-                    ... on DiscountPercentage { percentage }
-                    ... on DiscountAmount { amount { amount currencyCode } }
-                  }
-                }
-                appliesOncePerCustomer
-                combinesWith { orderDiscounts productDiscounts shippingDiscounts }
-              }
-              ... on DiscountCodeFreeShipping {
-                title
-                status
-                usageLimit
-                codes(first: 1) { nodes { code } }
-                appliesOncePerCustomer
-              }
-            }
-          }
-        }
-      }`;
+      // Paginate through all active discount codes
+      let hasNextPage = true;
+      let cursor: string | null = null;
 
-      const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
-        method: "POST",
-        headers: {
-          "X-Shopify-Access-Token": accessToken,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ query }),
-      });
+      while (hasNextPage) {
+        const afterArg: string = cursor ? ", after: " + JSON.stringify(cursor) : "";
+        const query = [
+          "{ codeDiscountNodes(first: 250, query: " + JSON.stringify("status:active") + afterArg + ") {",
+          "  nodes { id codeDiscount {",
+          "    ... on DiscountCodeBasic { title status usageLimit codes(first: 1) { nodes { code } } customerGets { value { ... on DiscountPercentage { percentage } ... on DiscountAmount { amount { amount currencyCode } } } } appliesOncePerCustomer }",
+          "    ... on DiscountCodeFreeShipping { title status usageLimit codes(first: 1) { nodes { code } } appliesOncePerCustomer }",
+          "  } }",
+          "  pageInfo { hasNextPage endCursor }",
+          "} }",
+        ].join("\n");
 
-      const data = await res.json();
-      const nodes = data?.data?.codeDiscountNodes?.nodes || [];
+        const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+          method: "POST",
+          headers: {
+            "X-Shopify-Access-Token": accessToken,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ query }),
+        });
+
+        const data = await res.json();
+        const result = data?.data?.codeDiscountNodes;
+        const nodes = result?.nodes || [];
+        hasNextPage = result?.pageInfo?.hasNextPage || false;
+        cursor = result?.pageInfo?.endCursor || null;
 
       for (const node of nodes) {
         const d = node.codeDiscount;
@@ -105,6 +92,7 @@ export async function GET(
           value,
         });
       }
+      } // end while pagination
     } catch (err) {
       console.error("Shopify discount sync error:", err);
     }
