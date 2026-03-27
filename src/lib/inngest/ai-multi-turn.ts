@@ -28,15 +28,77 @@ export const aiMultiTurn = inngest.createFunction(
       return routeInboundReply(ticket_id, message_body);
     });
 
-    // Handle close check — hand off to existing positive-close flow
+    // Handle close check — AI sends a brief closing message and closes the ticket
     if (decision.action === "close_check") {
-      await step.run("trigger-close-check", async () => {
-        await inngest.send({
-          name: "workflow/positive-close",
-          data: { workspace_id, ticket_id },
-        });
+      await step.run("ai-positive-close", async () => {
+        const admin = createAdminClient();
+
+        const { data: ticket } = await admin
+          .from("tickets")
+          .select("subject, customers(email, first_name), handled_by")
+          .eq("id", ticket_id)
+          .single();
+
+        const isAIHandled = ticket?.handled_by === "AI Agent";
+        const firstName = (ticket?.customers as unknown as { first_name: string | null })?.first_name;
+
+        // Only do AI closure if this was an AI-handled ticket
+        if (!isAIHandled) {
+          // Fall back to existing workflow for non-AI tickets
+          await inngest.send({
+            name: "workflow/positive-close",
+            data: { workspace_id, ticket_id },
+          });
+          return;
+        }
+
+        // Brief closing message
+        const closeMsg = firstName
+          ? `Happy to help, ${firstName}! Don't hesitate to reach out if you need anything else.`
+          : "Happy to help! Don't hesitate to reach out if you need anything else.";
+
+        // Get workspace for sandbox check
+        const { data: ws } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", workspace_id).single();
+        const customerEmail = (ticket?.customers as unknown as { email: string })?.email;
+
+        if (ws && !ws.sandbox_mode && customerEmail) {
+          await sendTicketReply({
+            workspaceId: workspace_id,
+            toEmail: customerEmail,
+            subject: ticket?.subject ? `Re: ${ticket.subject}` : "Re: Your request",
+            body: closeMsg,
+            inReplyTo: null,
+            agentName: "AI Agent",
+            workspaceName: ws.name,
+          });
+
+          await admin.from("ticket_messages").insert({
+            ticket_id,
+            direction: "outbound",
+            body: closeMsg,
+            author_type: "ai",
+            visibility: "external",
+          });
+        } else {
+          // Sandbox mode
+          await admin.from("ticket_messages").insert({
+            ticket_id,
+            direction: "outbound",
+            body: `[AI Draft — Sandbox Mode — Close]\n\n${closeMsg}`,
+            author_type: "ai",
+            visibility: "internal",
+          });
+        }
+
+        // Close the ticket
+        await admin.from("tickets").update({
+          status: "closed",
+          resolved_at: new Date().toISOString(),
+          auto_reply_at: null,
+          pending_auto_reply: null,
+        }).eq("id", ticket_id);
       });
-      return { action: "close_check", reason: decision.reason };
+      return { action: "closed", reason: decision.reason };
     }
 
     // Handle escalation
@@ -259,9 +321,9 @@ export const aiMultiTurn = inngest.createFunction(
           ai_personalized: true,
         });
 
-        // Update ticket
+        // Update ticket — keep open (AI is handling, not waiting for agent)
         await admin.from("tickets").update({
-          status: "pending",
+          status: "open",
           ai_turn_count: context.turnCount + 1,
           last_ai_turn_at: new Date().toISOString(),
           handled_by: "AI Agent",
