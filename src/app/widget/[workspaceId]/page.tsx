@@ -687,92 +687,124 @@ function InteractiveForm({ form, primaryColor, onSubmit }: {
   primaryColor: string;
   onSubmit: (response: string) => void;
 }) {
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmed, setConfirmed] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState("");
   const [textValue, setTextValue] = useState("");
 
-  const handleToggle = (value: string) => {
-    setSelected(prev => {
-      const next = new Set(prev);
-      if (form.type === "radio" || form.type === "confirm") {
-        next.clear();
-        next.add(value);
-      } else {
-        if (next.has(value)) next.delete(value); else next.add(value);
+  // Checklist: instant action per click, fade out confirmed items
+  if (form.type === "checklist") {
+    const remaining = form.options.filter(o => !confirmed.has(o.value));
+
+    // Auto-finish when all confirmed
+    useEffect(() => {
+      if (remaining.length === 0 && confirmed.size > 0) {
+        const labels = form.options.filter(o => confirmed.has(o.value)).map(o => o.label);
+        onSubmit(`Yes, these are mine: ${labels.join(", ")}`);
       }
-      return next;
-    });
-  };
+    }, [remaining.length, confirmed.size]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleSubmit = () => {
-    if (form.type === "text_input") {
-      if (textValue.trim()) onSubmit(textValue.trim());
-      return;
-    }
-    if (selected.size === 0) return;
-    const labels = form.options.filter(o => selected.has(o.value)).map(o => o.label);
-    if (form.type === "confirm") {
-      onSubmit(labels[0] || "");
-    } else {
-      onSubmit(labels.join(", "));
-    }
-  };
-
-  const handleSkip = () => {
-    onSubmit("I'll skip this for now");
-  };
-
-  return (
-    <div className="mt-2 space-y-2">
-      {form.type === "text_input" ? (
-        <input
-          type="text"
-          value={textValue}
-          onChange={(e) => setTextValue(e.target.value)}
-          placeholder={form.prompt || "Type here..."}
-          className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-indigo-400"
-          onKeyDown={(e) => { if (e.key === "Enter") handleSubmit(); }}
-        />
-      ) : (
-        form.options.map(option => (
+    return (
+      <div className="mt-2 space-y-1.5">
+        {form.options.map(option => (
           <button
             key={option.value}
             type="button"
-            onClick={() => handleToggle(option.value)}
-            className={`flex w-full items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
-              selected.has(option.value)
-                ? "border-indigo-400 bg-indigo-50 text-indigo-700"
-                : "border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300"
+            disabled={confirmed.has(option.value)}
+            onClick={() => {
+              setConfirmed(prev => new Set([...prev, option.value]));
+              // Each check triggers the action immediately
+            }}
+            className={`flex w-full items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-sm transition-all ${
+              confirmed.has(option.value)
+                ? "border-emerald-300 bg-emerald-50 opacity-50"
+                : "border-zinc-200 bg-white text-zinc-700 hover:border-indigo-300 hover:bg-indigo-50"
             }`}
           >
-            {/* Checkbox or radio indicator */}
-            <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-${form.type === "radio" || form.type === "confirm" ? "full" : "sm"} border ${
-              selected.has(option.value)
-                ? "border-indigo-500 bg-indigo-500 text-white"
+            <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border transition-colors ${
+              confirmed.has(option.value)
+                ? "border-emerald-500 bg-emerald-500 text-white"
                 : "border-zinc-300"
             }`}>
-              {selected.has(option.value) && (
+              {confirmed.has(option.value) && (
                 <svg className="h-2.5 w-2.5" fill="currentColor" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                 </svg>
               )}
             </span>
             <span className="break-words [overflow-wrap:anywhere]">{option.label}</span>
+            {confirmed.has(option.value) && <span className="ml-auto text-xs text-emerald-600">Linked</span>}
           </button>
-        ))
-      )}
+        ))}
+        {remaining.length > 0 && confirmed.size > 0 && (
+          <button
+            onClick={() => {
+              // Finish — confirmed ones are linked, remaining are rejected
+              const labels = form.options.filter(o => confirmed.has(o.value)).map(o => o.label);
+              const rejected = remaining.map(o => o.label);
+              onSubmit(labels.length > 0
+                ? `Yes, these are mine: ${labels.join(", ")}. The rest are not mine.`
+                : `None of these are mine`);
+            }}
+            className="w-full rounded-lg border border-zinc-200 py-2 text-xs text-zinc-500 hover:bg-zinc-50"
+          >
+            I&apos;m finished
+          </button>
+        )}
+        {confirmed.size === 0 && (
+          <button
+            onClick={() => onSubmit("None of these are mine")}
+            className="w-full rounded-lg border border-zinc-200 py-2 text-xs text-zinc-500 hover:bg-zinc-50"
+          >
+            None of these are mine
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  // Radio / Confirm: pick one
+  if (form.type === "radio" || form.type === "confirm") {
+    return (
+      <div className="mt-2 space-y-1.5">
+        {form.options.map(option => (
+          <button
+            key={option.value}
+            type="button"
+            onClick={() => onSubmit(option.label)}
+            className="flex w-full items-center gap-2.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:border-indigo-300 hover:bg-indigo-50"
+          >
+            <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-zinc-300" />
+            <span>{option.label}</span>
+          </button>
+        ))}
+        <button onClick={() => onSubmit("I'll skip this for now")}
+          className="w-full rounded-lg border border-zinc-200 py-2 text-xs text-zinc-500 hover:bg-zinc-50">
+          Skip
+        </button>
+      </div>
+    );
+  }
+
+  // Text input
+  return (
+    <div className="mt-2 space-y-2">
+      <input
+        type="text"
+        value={textValue}
+        onChange={(e) => setTextValue(e.target.value)}
+        placeholder={form.prompt || "Type here..."}
+        className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-indigo-400"
+        onKeyDown={(e) => { if (e.key === "Enter" && textValue.trim()) onSubmit(textValue.trim()); }}
+      />
       <div className="flex gap-2">
-        <button
-          onClick={handleSubmit}
-          disabled={form.type === "text_input" ? !textValue.trim() : selected.size === 0}
+        <button onClick={() => { if (textValue.trim()) onSubmit(textValue.trim()); }}
+          disabled={!textValue.trim()}
           className="flex-1 rounded-lg py-2 text-xs font-medium text-white disabled:opacity-40"
-          style={{ backgroundColor: primaryColor }}
-        >
+          style={{ backgroundColor: primaryColor }}>
           Submit
         </button>
-        <button
-          onClick={handleSkip}
-          className="rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-500 hover:bg-zinc-50"
-        >
+        <button onClick={() => onSubmit("I'll skip this for now")}
+          className="rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-500 hover:bg-zinc-50">
           Skip
         </button>
       </div>
