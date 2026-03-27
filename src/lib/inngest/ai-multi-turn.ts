@@ -74,8 +74,10 @@ export const aiMultiTurn = inngest.createFunction(
         const { data: ws } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", workspace_id).single();
         const customerEmail = (ticket?.customers as unknown as { email: string })?.email;
 
-        const closeSandbox = ws?.sandbox_mode ?? true;
         const channel = ticket?.channel || "email";
+        // Chat/help_center are never sandboxed — messages are just DB rows, no external delivery
+        const isChatChannel = channel === "chat" || channel === "help_center";
+        const closeSandbox = isChatChannel ? false : (ws?.sandbox_mode ?? true);
 
         if (!closeSandbox) {
           // Live mode — only send email if email channel
