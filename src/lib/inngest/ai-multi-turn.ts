@@ -8,6 +8,8 @@ import { routeInboundReply } from "@/lib/turn-router";
 import { handleEscalation } from "@/lib/escalation";
 import { sendTicketReply } from "@/lib/email";
 import { subscribeToMarketing } from "@/lib/shopify-marketing";
+import { appstleSkipNextOrder, appstleUpdateBillingInterval } from "@/lib/appstle";
+import { updateShippingAddress } from "@/lib/shopify-order-actions";
 
 // Convert plain text AI response to light HTML paragraphs
 function toHtmlParagraphs(text: string): string {
@@ -502,6 +504,272 @@ export const aiMultiTurn = inngest.createFunction(
         return { action: "marketing_signup", channels, success: true };
       }
       return { action: "marketing_signup", channels, success: false, error: result.error };
+    });
+
+    // Step 5c: Execute new AI workflow actions (return, address, subscription, order status)
+    await step.run("execute-workflow-actions", async () => {
+      const admin = createAdminClient();
+      const bodyLower = message_body.toLowerCase();
+
+      // Get ticket + customer
+      const { data: ticket } = await admin
+        .from("tickets")
+        .select("customer_id, tags")
+        .eq("id", ticket_id)
+        .single();
+      if (!ticket?.customer_id) return null;
+
+      const { data: cust } = await admin
+        .from("customers")
+        .select("id, shopify_customer_id")
+        .eq("id", ticket.customer_id)
+        .single();
+      if (!cust) return null;
+
+      // Check enabled workflows for this workspace
+      const { data: workflows } = await admin
+        .from("ai_workflows")
+        .select("trigger_intent, match_patterns")
+        .eq("workspace_id", workspace_id)
+        .eq("enabled", true);
+
+      const enabledIntents = new Set((workflows || []).map(w => w.trigger_intent));
+
+      // --- Return Request: detect return/exchange intent, tag + escalate ---
+      if (enabledIntents.has("return_request")) {
+        const returnKeywords = ["return", "exchange", "wrong item", "damaged", "broken", "not what i ordered", "send back", "send it back"];
+        const hasReturnIntent = returnKeywords.some(k => bodyLower.includes(k));
+
+        if (hasReturnIntent) {
+          const tags = [...new Set([...(ticket.tags || []), "return-request"])];
+          await admin.from("tickets").update({ tags }).eq("id", ticket_id);
+
+          await admin.from("ticket_messages").insert({
+            ticket_id,
+            direction: "outbound",
+            body: `[System] Return/exchange request detected. Tagged ticket with "return-request". AI will gather details before escalating.`,
+            author_type: "system",
+            visibility: "internal",
+          });
+
+          return { action: "return_request_tagged" };
+        }
+      }
+
+      // --- Address Change: detect address update confirmation with address in message ---
+      if (enabledIntents.has("address_change")) {
+        const addressKeywords = ["change address", "update address", "new address", "change my address", "ship to", "shipping address"];
+        const hasAddressIntent = addressKeywords.some(k => bodyLower.includes(k));
+
+        if (hasAddressIntent) {
+          // Check if the customer's most recent order is unfulfilled
+          const { data: recentOrder } = await admin
+            .from("orders")
+            .select("id, order_number, fulfillment_status, shopify_order_id")
+            .eq("workspace_id", workspace_id)
+            .eq("customer_id", cust.id)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .single();
+
+          if (recentOrder && (!recentOrder.fulfillment_status || recentOrder.fulfillment_status === "unfulfilled")) {
+            // Parse address from the AI response (the AI should have asked and customer provided)
+            // We'll note the intent; actual address parsing happens when AI confirms with customer
+            await admin.from("ticket_messages").insert({
+              ticket_id,
+              direction: "outbound",
+              body: `[System] Address change requested for order #${recentOrder.order_number || recentOrder.id} (unfulfilled). AI will confirm new address with customer before updating.`,
+              author_type: "system",
+              visibility: "internal",
+            });
+
+            return { action: "address_change_detected", orderId: recentOrder.id, canUpdate: true };
+          } else if (recentOrder) {
+            await admin.from("ticket_messages").insert({
+              ticket_id,
+              direction: "outbound",
+              body: `[System] Address change requested but most recent order #${recentOrder.order_number || recentOrder.id} is already ${recentOrder.fulfillment_status || "fulfilled"}. AI will inform customer.`,
+              author_type: "system",
+              visibility: "internal",
+            });
+
+            return { action: "address_change_detected", canUpdate: false };
+          }
+        }
+
+        // Detect address confirmation with actual address data (follow-up turn)
+        // Look for patterns like "123 Main St" or structured address
+        const addressLinePattern = /\d+\s+\w+\s+(st|street|ave|avenue|blvd|boulevard|dr|drive|rd|road|ln|lane|ct|court|way|pl|place)\b/i;
+        const hasAddressData = addressLinePattern.test(message_body);
+        const confirmKeywords = ["yes", "correct", "that's right", "update it", "please update", "go ahead"];
+        const isConfirming = confirmKeywords.some(k => bodyLower.includes(k));
+
+        if (hasAddressData || isConfirming) {
+          // Check previous messages for address context
+          const { data: prevMsgs } = await admin
+            .from("ticket_messages")
+            .select("body, author_type")
+            .eq("ticket_id", ticket_id)
+            .eq("visibility", "internal")
+            .eq("author_type", "system")
+            .order("created_at", { ascending: false })
+            .limit(5);
+
+          const hasAddressNote = prevMsgs?.some(m => (m.body || "").includes("Address change requested") && (m.body || "").includes("unfulfilled"));
+
+          if (hasAddressNote && hasAddressData) {
+            // Get the unfulfilled order
+            const { data: order } = await admin
+              .from("orders")
+              .select("shopify_order_id, order_number")
+              .eq("workspace_id", workspace_id)
+              .eq("customer_id", cust.id)
+              .or("fulfillment_status.is.null,fulfillment_status.eq.unfulfilled")
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .single();
+
+            if (order?.shopify_order_id) {
+              // Try to parse address components from message
+              // This is a best-effort parse — the AI response will confirm success/failure
+              const lines = message_body.split(/[,\n]/).map(l => l.trim()).filter(Boolean);
+              if (lines.length >= 2) {
+                const result = await updateShippingAddress(workspace_id, order.shopify_order_id, {
+                  address1: lines[0],
+                  city: lines[1] || "",
+                  province: lines[2] || "",
+                  zip: lines[3] || "",
+                  country: lines[4] || "US",
+                });
+
+                await admin.from("ticket_messages").insert({
+                  ticket_id,
+                  direction: "outbound",
+                  body: `[System] Shipping address update for order #${order.order_number}: ${result.success ? "Success" : `Failed — ${result.error}`}`,
+                  author_type: "system",
+                  visibility: "internal",
+                });
+
+                return { action: "address_updated", success: result.success };
+              }
+            }
+          }
+        }
+      }
+
+      // --- Subscription Skip: detect skip confirmation ---
+      if (enabledIntents.has("subscription_change")) {
+        const skipKeywords = ["skip", "skip next", "skip my next", "hold next"];
+        const swapKeywords = ["swap", "switch", "change product", "switch flavor", "different flavor"];
+        const frequencyKeywords = ["change frequency", "every 2 weeks", "every month", "every week", "bi-weekly", "monthly", "weekly"];
+        const confirmKeywords = ["yes", "please", "go ahead", "do it", "confirm", "sure", "yeah"];
+
+        const hasSkipIntent = skipKeywords.some(k => bodyLower.includes(k));
+        const hasSwapIntent = swapKeywords.some(k => bodyLower.includes(k));
+        const hasFrequencyIntent = frequencyKeywords.some(k => bodyLower.includes(k));
+        const isConfirming = confirmKeywords.some(k => bodyLower.includes(k));
+
+        // Get active subscription
+        const { data: activeSub } = await admin
+          .from("subscriptions")
+          .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count")
+          .eq("workspace_id", workspace_id)
+          .eq("customer_id", cust.id)
+          .eq("status", "active")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .single();
+
+        if (activeSub?.shopify_contract_id) {
+          // Skip next order
+          if (hasSkipIntent && (isConfirming || hasSkipIntent)) {
+            const result = await appstleSkipNextOrder(workspace_id, activeSub.shopify_contract_id);
+
+            await admin.from("ticket_messages").insert({
+              ticket_id,
+              direction: "outbound",
+              body: `[System] Subscription skip for contract ${activeSub.shopify_contract_id}: ${result.success ? "Next order skipped successfully" : `Failed — ${result.error}`}`,
+              author_type: "system",
+              visibility: "internal",
+            });
+
+            if (result.success) {
+              await admin.from("dashboard_notifications").insert({
+                workspace_id,
+                type: "system",
+                title: "Subscription order skipped by AI",
+                body: `Customer's next subscription order was skipped via AI conversation`,
+                link: `/dashboard/tickets/${ticket_id}`,
+                metadata: { ticket_id, contract_id: activeSub.shopify_contract_id, action: "subscription_skip" },
+              });
+            }
+
+            return { action: "subscription_skip", success: result.success };
+          }
+
+          // Change frequency
+          if (hasFrequencyIntent) {
+            // Parse desired frequency
+            let interval: "WEEK" | "MONTH" = "MONTH";
+            let intervalCount = 1;
+
+            if (bodyLower.includes("every 2 weeks") || bodyLower.includes("bi-weekly") || bodyLower.includes("biweekly")) {
+              interval = "WEEK"; intervalCount = 2;
+            } else if (bodyLower.includes("every week") || bodyLower.includes("weekly")) {
+              interval = "WEEK"; intervalCount = 1;
+            } else if (bodyLower.includes("every month") || bodyLower.includes("monthly")) {
+              interval = "MONTH"; intervalCount = 1;
+            } else if (bodyLower.includes("every 2 months")) {
+              interval = "MONTH"; intervalCount = 2;
+            } else if (bodyLower.includes("every 3 months") || bodyLower.includes("quarterly")) {
+              interval = "MONTH"; intervalCount = 3;
+            }
+
+            const result = await appstleUpdateBillingInterval(
+              workspace_id,
+              activeSub.shopify_contract_id,
+              interval,
+              intervalCount,
+            );
+
+            await admin.from("ticket_messages").insert({
+              ticket_id,
+              direction: "outbound",
+              body: `[System] Subscription frequency update to every ${intervalCount} ${interval.toLowerCase()}(s) for contract ${activeSub.shopify_contract_id}: ${result.success ? "Success" : `Failed — ${result.error}`}`,
+              author_type: "system",
+              visibility: "internal",
+            });
+
+            if (result.success) {
+              await admin.from("dashboard_notifications").insert({
+                workspace_id,
+                type: "system",
+                title: "Subscription frequency changed by AI",
+                body: `Customer's subscription changed to every ${intervalCount} ${interval.toLowerCase()}(s)`,
+                link: `/dashboard/tickets/${ticket_id}`,
+                metadata: { ticket_id, contract_id: activeSub.shopify_contract_id, action: "subscription_frequency_change" },
+              });
+            }
+
+            return { action: "subscription_frequency_change", success: result.success };
+          }
+
+          // Swap product — just note intent, product swap requires variant selection
+          if (hasSwapIntent) {
+            await admin.from("ticket_messages").insert({
+              ticket_id,
+              direction: "outbound",
+              body: `[System] Product swap requested for subscription contract ${activeSub.shopify_contract_id}. AI will confirm product selection with customer. Current items: ${JSON.stringify((activeSub.items as { title: string }[] | null)?.map(i => i.title))}`,
+              author_type: "system",
+              visibility: "internal",
+            });
+
+            return { action: "subscription_swap_detected" };
+          }
+        }
+      }
+
+      return null;
     });
 
     // Step 6: Send response

@@ -265,6 +265,13 @@ export async function assembleTicketContext(
       promptParts.push(`  Trigger keywords: ${(wf.match_patterns || []).join(", ")}`);
     }
     promptParts.push("- When a customer confirms they want an action, acknowledge it and let them know it's being processed.");
+
+    // Workflow-specific instructions
+    promptParts.push("\nWORKFLOW INSTRUCTIONS:");
+    promptParts.push("- RETURN FLOW: If customer wants to return or exchange, ask what's wrong (wrong item, damaged, don't like it). Then escalate to an agent for return processing. Do NOT promise refunds or return labels — say the team will follow up with return instructions.");
+    promptParts.push("- ADDRESS FLOW: If customer wants to change their shipping address, ask for the new full address. If their most recent order is unfulfilled, confirm and say you're updating it. If it's already fulfilled/shipped, explain it's already on its way and provide tracking info.");
+    promptParts.push("- SUBSCRIPTION FLOW: If customer wants to skip their next subscription order, confirm the change and say you're processing it. If they want to swap a product, ask which product they'd like instead. If they want to change frequency, ask what frequency they prefer.");
+    promptParts.push("- ORDER STATUS FLOW: If customer asks where their order is, check the order info in the customer context. If unfulfilled, say it's being prepared. If fulfilled, provide the tracking info. If delivered, confirm the delivery.");
     // Load mapped coupons for AI
     const { data: coupons } = await admin
       .from("coupon_mappings")
