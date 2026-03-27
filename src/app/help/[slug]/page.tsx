@@ -231,17 +231,17 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
         </div>
 
         {/* Products section */}
-        {productNames.length > 0 && (
+        {productsWithArticles.length > 0 && (
           <div className="mt-8">
             <h2 className="text-lg font-semibold text-zinc-900">By Product</h2>
             <div className="mt-4 flex flex-wrap gap-2">
-              {productNames.map(name => (
+              {productsWithArticles.map(p => (
                 <Link
-                  key={name}
-                  href={`/help/${slug}?product=${encodeURIComponent(name)}`}
+                  key={p.id}
+                  href={`${basePath}/?product=${p.id}`}
                   className="rounded-full border border-zinc-200 bg-white px-4 py-2 text-sm text-zinc-700 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
                 >
-                  {name}
+                  {p.title}
                 </Link>
               ))}
             </div>
