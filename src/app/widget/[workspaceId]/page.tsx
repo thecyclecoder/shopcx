@@ -64,6 +64,7 @@ export default function ChatWidgetPage() {
   const [articleVoted, setArticleVoted] = useState<Record<string, "up" | "down">>({});
   const [chatEnded, setChatEnded] = useState(false);
   const [waitingForReply, setWaitingForReply] = useState(false);
+  const [formSubmitted, setFormSubmitted] = useState<Set<string>>(new Set());
   const [chatList, setChatList] = useState<{ id: string; ticket_id: string; subject: string; status: string; last_message: string; updated_at: string }[]>([]);
   const [showChatList, setShowChatList] = useState(true);
 
@@ -525,20 +526,63 @@ export default function ChatWidgetPage() {
           <>
             {messages.map((msg) => {
               const isCustomer = msg.direction === "inbound" && msg.author_type === "customer";
+
+              // Check for interactive form in message
+              const formMatch = msg.body.match(/<!--FORM:([\s\S]*?)-->/);
+              let formData: { type: string; prompt: string; options: { value: string; label: string }[]; id: string } | null = null;
+              let bodyWithoutForm = msg.body;
+              if (formMatch) {
+                try {
+                  formData = JSON.parse(formMatch[1]);
+                  bodyWithoutForm = msg.body.replace(formMatch[0], "").trim();
+                } catch {}
+              }
+
               return (
                 <div
                   key={msg.id}
                   className={`mb-2 flex ${isCustomer ? "justify-end" : "justify-start"}`}
                 >
                   <div
-                    className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm ${
+                    className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${
                       isCustomer
                         ? "rounded-tr-sm text-white"
                         : "rounded-tl-sm bg-zinc-100 text-zinc-900"
                     }`}
                     style={isCustomer ? { backgroundColor: primaryColor } : undefined}
                   >
-                    <div className="prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:text-inherit [&_a]:underline" dangerouslySetInnerHTML={{ __html: msg.body }} />
+                    {bodyWithoutForm && (
+                      <div className="prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:text-inherit [&_a]:underline" dangerouslySetInnerHTML={{ __html: bodyWithoutForm }} />
+                    )}
+
+                    {/* Interactive form */}
+                    {formData && !formSubmitted.has(formData.id) && (
+                      <InteractiveForm
+                        form={formData}
+                        primaryColor={primaryColor}
+                        onSubmit={async (response) => {
+                          setFormSubmitted(prev => new Set([...prev, formData!.id]));
+                          // Send response as a message
+                          const tempMsg: Message = { id: `temp-${Date.now()}`, direction: "inbound", author_type: "customer", body: response, created_at: new Date().toISOString() };
+                          setMessages(prev => [...prev, tempMsg]);
+                          setWaitingForReply(false);
+                          try {
+                            const res = await fetch(`/api/widget/${workspaceId}/messages`, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ email: email.trim(), message: response, session_id: sessionId }),
+                            });
+                            const data = await res.json();
+                            if (data.message_id) setMessages(prev => prev.map(m => m.id === tempMsg.id ? { ...m, id: data.message_id } : m));
+                          } catch {}
+                          setTimeout(() => setWaitingForReply(true), 5000);
+                        }}
+                      />
+                    )}
+                    {formData && formSubmitted.has(formData.id) && (
+                      <p className="mt-1 text-xs text-zinc-500 italic">Response submitted</p>
+                    )}
+
                     <p className={`mt-0.5 text-[10px] ${isCustomer ? "text-white/60" : "text-zinc-400"}`}>
                       {new Date(msg.created_at).toLocaleTimeString([], {
                         hour: "numeric",
@@ -567,8 +611,17 @@ export default function ChatWidgetPage() {
       </div>
       )}
 
-      {/* Input — only show in chat view when chat is active */}
-      {view === "chat" && !showChatList && started && !chatEnded && (
+      {/* Input — hide when interactive form is active */}
+      {view === "chat" && !showChatList && started && !chatEnded && (() => {
+        // Check for active unanswered form
+        const hasActiveForm = messages.some(m => {
+          const match = m.body.match(/<!--FORM:([\s\S]*?)-->/);
+          if (!match) return false;
+          try { const f = JSON.parse(match[1]); return !formSubmitted.has(f.id); } catch { return false; }
+        });
+        if (hasActiveForm) return null; // Hide input when form is active
+        return true;
+      })() && (
         <form onSubmit={handleSend} className="flex items-center gap-2 border-t border-zinc-200 px-3 py-2">
           <input
             type="text"
@@ -623,6 +676,105 @@ export default function ChatWidgetPage() {
         >
           Powered by ShopCX.ai
         </a>
+      </div>
+    </div>
+  );
+}
+
+// Interactive form component for checklist, radio, confirm, text input
+function InteractiveForm({ form, primaryColor, onSubmit }: {
+  form: { type: string; prompt?: string; options: { value: string; label: string }[]; id: string };
+  primaryColor: string;
+  onSubmit: (response: string) => void;
+}) {
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [textValue, setTextValue] = useState("");
+
+  const handleToggle = (value: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (form.type === "radio" || form.type === "confirm") {
+        next.clear();
+        next.add(value);
+      } else {
+        if (next.has(value)) next.delete(value); else next.add(value);
+      }
+      return next;
+    });
+  };
+
+  const handleSubmit = () => {
+    if (form.type === "text_input") {
+      if (textValue.trim()) onSubmit(textValue.trim());
+      return;
+    }
+    if (selected.size === 0) return;
+    const labels = form.options.filter(o => selected.has(o.value)).map(o => o.label);
+    if (form.type === "confirm") {
+      onSubmit(labels[0] || "");
+    } else {
+      onSubmit(labels.join(", "));
+    }
+  };
+
+  const handleSkip = () => {
+    onSubmit("I'll skip this for now");
+  };
+
+  return (
+    <div className="mt-2 space-y-2">
+      {form.type === "text_input" ? (
+        <input
+          type="text"
+          value={textValue}
+          onChange={(e) => setTextValue(e.target.value)}
+          placeholder={form.prompt || "Type here..."}
+          className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-indigo-400"
+          onKeyDown={(e) => { if (e.key === "Enter") handleSubmit(); }}
+        />
+      ) : (
+        form.options.map(option => (
+          <button
+            key={option.value}
+            type="button"
+            onClick={() => handleToggle(option.value)}
+            className={`flex w-full items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+              selected.has(option.value)
+                ? "border-indigo-400 bg-indigo-50 text-indigo-700"
+                : "border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300"
+            }`}
+          >
+            {/* Checkbox or radio indicator */}
+            <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-${form.type === "radio" || form.type === "confirm" ? "full" : "sm"} border ${
+              selected.has(option.value)
+                ? "border-indigo-500 bg-indigo-500 text-white"
+                : "border-zinc-300"
+            }`}>
+              {selected.has(option.value) && (
+                <svg className="h-2.5 w-2.5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                </svg>
+              )}
+            </span>
+            <span className="break-words [overflow-wrap:anywhere]">{option.label}</span>
+          </button>
+        ))
+      )}
+      <div className="flex gap-2">
+        <button
+          onClick={handleSubmit}
+          disabled={form.type === "text_input" ? !textValue.trim() : selected.size === 0}
+          className="flex-1 rounded-lg py-2 text-xs font-medium text-white disabled:opacity-40"
+          style={{ backgroundColor: primaryColor }}
+        >
+          Submit
+        </button>
+        <button
+          onClick={handleSkip}
+          className="rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-500 hover:bg-zinc-50"
+        >
+          Skip
+        </button>
       </div>
     </div>
   );

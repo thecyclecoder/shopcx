@@ -344,10 +344,11 @@ export const aiMultiTurn = inngest.createFunction(
             ticket_id,
             direction: "outbound",
             body: (() => {
-              const allEmails = (linkResult as { allMatchEmails?: string[] }).allMatchEmails || [matchEmail || ""];
-              const emailList = allEmails.map((e: string) => `<li style="word-break:break-all">${e}</li>`).join("");
-              const plural = allEmails.length > 1;
-              return `I'm looking into that for you! By the way, I noticed we might have multiple profiles for you in our system. ${plural ? "Do these emails" : "Does this email"} also belong to you?<ul>${emailList}</ul>`;
+              const allEmails = ((linkResult as { allMatchEmails?: string[] }).allMatchEmails || [matchEmail || ""]) as string[];
+              const formId = `link-${ticket_id}`;
+              const options = allEmails.map((e: string) => ({ value: e, label: e }));
+              const formPayload = JSON.stringify({ type: "checklist", id: formId, prompt: "Select all emails that belong to you", options });
+              return `I'm looking into that for you! By the way, I noticed we might have multiple profiles for you in our system. Which of these emails also belong to you?<!--FORM:${formPayload}-->`;
             })(),
             author_type: "ai",
             visibility: "external",
