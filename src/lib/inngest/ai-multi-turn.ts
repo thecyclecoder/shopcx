@@ -279,76 +279,164 @@ export const aiMultiTurn = inngest.createFunction(
       return { action: "draft_for_review", reason: decision.reason };
     }
 
-    // Step 5b: Execute AI workflow actions (e.g., marketing signup)
+    // Step 5b: Execute AI workflow actions (marketing signup OR discount code)
     await step.run("execute-actions", async () => {
       const admin = createAdminClient();
       const bodyLower = message_body.toLowerCase();
 
-      // Check for marketing signup confirmation
-      const signupKeywords = ["sign me up", "subscribe", "yes", "sign up", "opt in", "i'd love to", "please do", "go ahead"];
-      const marketingKeywords = ["email", "sms", "marketing", "newsletter", "promo", "notification", "coupon"];
+      // Check for marketing signup / discount confirmation
+      const signupKeywords = ["sign me up", "subscribe", "yes", "sign up", "opt in", "i'd love to", "please do", "go ahead", "yes please", "yeah"];
+      const marketingKeywords = ["email", "sms", "marketing", "newsletter", "promo", "notification", "coupon", "discount", "deal", "both"];
       const hasSignupIntent = signupKeywords.some(k => bodyLower.includes(k));
       const hasMarketingContext = marketingKeywords.some(k => bodyLower.includes(k));
 
-      if (hasSignupIntent && hasMarketingContext) {
-        // Get ticket to find customer
-        const { data: ticket } = await admin
-          .from("tickets")
-          .select("customer_id")
-          .eq("id", ticket_id)
-          .single();
+      if (!hasSignupIntent || !hasMarketingContext) return null;
 
-        if (ticket?.customer_id) {
-          // Check existing marketing status first
-          const { data: cust } = await admin
-            .from("customers")
-            .select("shopify_customer_id, email, phone, tags")
-            .eq("id", ticket.customer_id)
-            .single();
+      // Get ticket + customer
+      const { data: ticket } = await admin
+        .from("tickets")
+        .select("customer_id")
+        .eq("id", ticket_id)
+        .single();
+      if (!ticket?.customer_id) return null;
 
-          // Check if already subscribed via Shopify tags or status
-          const tags = (cust?.tags as string[]) || [];
-          const alreadyEmailSubscribed = tags.some(t => t.toLowerCase().includes("email_subscriber") || t.toLowerCase().includes("accepts_marketing"));
-          const alreadySmsSubscribed = tags.some(t => t.toLowerCase().includes("sms_subscriber"));
+      const { data: cust } = await admin
+        .from("customers")
+        .select("id, shopify_customer_id, email, phone, email_marketing_status, sms_marketing_status")
+        .eq("id", ticket.customer_id)
+        .single();
+      if (!cust) return null;
 
-          // Prioritize SMS (higher value subscriber) — always try both unless already subscribed
-          const channels: ("email" | "sms")[] = [];
-          if (!alreadySmsSubscribed && cust?.phone) channels.push("sms");
-          if (!alreadyEmailSubscribed) channels.push("email");
+      const emailSubscribed = cust.email_marketing_status === "subscribed";
+      const smsSubscribed = cust.sms_marketing_status === "subscribed";
 
-          if (channels.length === 0) {
-            // Already subscribed to everything they asked for
-            return { action: "marketing_already_subscribed", success: true };
+      // If already subscribed to both → give discount code
+      if (emailSubscribed && smsSubscribed) {
+        // Check if they have an active subscription we can apply the coupon to
+        const { data: activeSubs } = await admin
+          .from("subscriptions")
+          .select("id, shopify_contract_id, status, items")
+          .eq("workspace_id", workspace_id)
+          .eq("customer_id", cust.id)
+          .eq("status", "active")
+          .limit(1);
+
+        let canApplyToSub = false;
+        let subContractId: string | null = null;
+
+        if (activeSubs?.length && activeSubs[0].shopify_contract_id) {
+          subContractId = activeSubs[0].shopify_contract_id;
+
+          // Check Appstle for existing discount on subscription
+          try {
+            canApplyToSub = true;
+
+            // Call Appstle to check subscription details for existing discounts
+            const { data: ws } = await admin
+              .from("workspaces")
+              .select("appstle_api_key_encrypted, shopify_myshopify_domain")
+              .eq("id", workspace_id)
+              .single();
+
+            if (ws?.appstle_api_key_encrypted && cust.shopify_customer_id) {
+              const { decrypt } = await import("@/lib/crypto");
+              const apiKey = decrypt(ws.appstle_api_key_encrypted);
+              const detailsRes = await fetch(
+                `https://subscription-admin.appstle.com/api/external/v2/customer-subscription-details?customerShopifyId=${cust.shopify_customer_id}`,
+                { headers: { "X-API-Key": apiKey } }
+              );
+              if (detailsRes.ok) {
+                const details = await detailsRes.json();
+                // Check if any active contract has a discount code
+                const contracts = details?.subscriptionContracts || details?.contracts || [];
+                for (const contract of contracts) {
+                  if (String(contract.contractId || contract.id) === subContractId) {
+                    const hasDiscount = contract.discountCode || contract.appliedDiscount || (contract.discountCodes && contract.discountCodes.length > 0);
+                    if (hasDiscount) canApplyToSub = false;
+                    break;
+                  }
+                }
+              }
+            }
+          } catch {
+            canApplyToSub = false;
           }
-
-          const result = await subscribeToMarketing(workspace_id, ticket.customer_id, channels);
-
-          if (result.success) {
-            // Log the action
-            await admin.from("ticket_messages").insert({
-              ticket_id,
-              direction: "outbound",
-              body: `[System] Marketing subscription updated: ${channels.join(" + ")} — ${result.email_subscribed ? "Email: subscribed" : ""}${result.sms_subscribed ? " SMS: subscribed" : ""}${result.error ? ` (Note: ${result.error})` : ""}`,
-              author_type: "system",
-              visibility: "internal",
-            });
-
-            // Track workflow completion
-            await admin.from("dashboard_notifications").insert({
-              workspace_id,
-              type: "system",
-              title: "Marketing signup completed by AI",
-              body: `Customer subscribed to ${channels.join(" + ")} marketing via AI conversation`,
-              link: `/dashboard/tickets/${ticket_id}`,
-              metadata: { ticket_id, channels, action: "marketing_signup" },
-            });
-
-            return { action: "marketing_signup", channels, success: true };
-          }
-          return { action: "marketing_signup", channels, success: false, error: result.error };
         }
+
+        // Log the discount code action
+        const subNote = canApplyToSub && subContractId
+          ? " Offered to apply to active subscription."
+          : activeSubs?.length
+            ? " Subscription already has a discount applied."
+            : " No active subscription to apply coupon to.";
+
+        await admin.from("ticket_messages").insert({
+          ticket_id,
+          direction: "outbound",
+          body: `[System] Customer already subscribed to email + SMS marketing. Provided discount code FAMILY.${subNote}`,
+          author_type: "system",
+          visibility: "internal",
+        });
+
+        // If we can apply to subscription, do it via Appstle
+        if (canApplyToSub && subContractId) {
+          try {
+            const { data: ws } = await admin
+              .from("workspaces")
+              .select("appstle_api_key_encrypted")
+              .eq("id", workspace_id)
+              .single();
+            if (ws?.appstle_api_key_encrypted) {
+              const { decrypt } = await import("@/lib/crypto");
+              const apiKey = decrypt(ws.appstle_api_key_encrypted);
+              await fetch(
+                `https://subscription-admin.appstle.com/api/external/v2/subscription-discount-apply?contractId=${subContractId}&discountCode=FAMILY`,
+                { method: "POST", headers: { "X-API-Key": apiKey } }
+              );
+              await admin.from("ticket_messages").insert({
+                ticket_id,
+                direction: "outbound",
+                body: `[System] Discount code FAMILY applied to subscription contract ${subContractId} via Appstle.`,
+                author_type: "system",
+                visibility: "internal",
+              });
+            }
+          } catch {}
+        }
+
+        return { action: "discount_code_given", alreadySubscribed: true, canApplyToSub };
       }
-      return null;
+
+      // Not fully subscribed → sign them up
+      const channels: ("email" | "sms")[] = [];
+      if (!smsSubscribed && cust.phone) channels.push("sms");
+      if (!emailSubscribed) channels.push("email");
+
+      if (channels.length === 0) return { action: "marketing_already_subscribed", success: true };
+
+      const result = await subscribeToMarketing(workspace_id, cust.id, channels);
+
+      if (result.success) {
+        await admin.from("ticket_messages").insert({
+          ticket_id,
+          direction: "outbound",
+          body: `[System] Marketing subscription updated: ${channels.join(" + ")} — ${result.email_subscribed ? "Email: subscribed " : ""}${result.sms_subscribed ? "SMS: subscribed " : ""}${result.error ? `(Note: ${result.error})` : ""}`,
+          author_type: "system",
+          visibility: "internal",
+        });
+
+        await admin.from("dashboard_notifications").insert({
+          workspace_id,
+          type: "system",
+          title: "Marketing signup completed by AI",
+          body: `Customer subscribed to ${channels.join(" + ")} marketing via AI conversation`,
+          link: `/dashboard/tickets/${ticket_id}`,
+          metadata: { ticket_id, channels, action: "marketing_signup" },
+        });
+
+        return { action: "marketing_signup", channels, success: true };
+      }
+      return { action: "marketing_signup", channels, success: false, error: result.error };
     });
 
     // Step 6: Send response

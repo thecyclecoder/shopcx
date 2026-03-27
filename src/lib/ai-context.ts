@@ -257,6 +257,7 @@ export async function assembleTicketContext(
       promptParts.push(`  Trigger keywords: ${(wf.match_patterns || []).join(", ")}`);
     }
     promptParts.push("- When a customer confirms they want an action, acknowledge it and let them know it's being processed.");
+    promptParts.push("- DISCOUNT FLOW: If a customer asks about discounts and is already subscribed to email and SMS marketing, give them the code FAMILY and tell them to use it at checkout. If they have an active subscription, offer to apply it to their next subscription order.");
   }
 
   // KB context
