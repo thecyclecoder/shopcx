@@ -9,9 +9,9 @@ export const chargebackReceived = inngest.createFunction(
     id: "chargeback-received",
     retries: 2,
     concurrency: [{ limit: 1, key: "event.data.chargebackEventId" }],
+    triggers: [{ event: "chargeback/received" }],
   },
-  { event: "chargeback/received" },
-  async ({ event, step }) => {
+  async ({ event, step }: { event: any; step: any }) => {
     const { chargebackEventId, workspaceId } = event.data as {
       chargebackEventId: string;
       workspaceId: string;
@@ -396,9 +396,9 @@ export const chargebackWon = inngest.createFunction(
   {
     id: "chargeback-won",
     retries: 2,
+    triggers: [{ event: "chargeback/won" }],
   },
-  { event: "chargeback/won" },
-  async ({ event, step }) => {
+  async ({ event, step }: { event: any; step: any }) => {
     const { chargebackEventId, workspaceId } = event.data as {
       chargebackEventId: string;
       workspaceId: string;
@@ -470,9 +470,9 @@ export const chargebackLost = inngest.createFunction(
   {
     id: "chargeback-lost",
     retries: 2,
+    triggers: [{ event: "chargeback/lost" }],
   },
-  { event: "chargeback/lost" },
-  async ({ event, step }) => {
+  async ({ event, step }: { event: any; step: any }) => {
     const { chargebackEventId, workspaceId } = event.data as {
       chargebackEventId: string;
       workspaceId: string;
@@ -527,9 +527,9 @@ export const chargebackEvidenceReminder = inngest.createFunction(
   {
     id: "chargeback-evidence-reminder",
     retries: 2,
+    triggers: [{ cron: "0 9 * * *" }], // 9am UTC daily
   },
-  { cron: "0 9 * * *" }, // 9am UTC daily
-  async ({ step }) => {
+  async ({ step }: { step: any }) => {
     const admin = createAdminClient();
 
     const workspaces = await step.run("load-workspaces", async () => {

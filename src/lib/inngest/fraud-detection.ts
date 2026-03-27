@@ -9,9 +9,9 @@ export const fraudNightlyScan = inngest.createFunction(
     id: "fraud-nightly-scan",
     retries: 2,
     concurrency: [{ limit: 1, key: "event.data.workspaceId" }],
+    triggers: [{ cron: "0 3 * * *" }], // 3am UTC daily
   },
-  { cron: "0 3 * * *" }, // 3am UTC daily
-  async ({ step }) => {
+  async ({ step }: { step: any }) => {
     const admin = createAdminClient();
 
     const workspaces = await step.run("load-workspaces", async () => {
@@ -40,9 +40,9 @@ export const fraudGenerateSummary = inngest.createFunction(
   {
     id: "fraud-generate-summary",
     retries: 2,
+    triggers: [{ event: "fraud/case.created" }],
   },
-  { event: "fraud/case.created" },
-  async ({ event, step }) => {
+  async ({ event, step }: { event: any; step: any }) => {
     const { caseId, workspaceId } = event.data as { caseId: string; workspaceId: string };
     const admin = createAdminClient();
 
@@ -130,9 +130,9 @@ export const fraudCheckOrder = inngest.createFunction(
     id: "fraud-check-order",
     retries: 2,
     concurrency: [{ limit: 3, key: "event.data.workspaceId" }],
+    triggers: [{ event: "fraud/order.check" }],
   },
-  { event: "fraud/order.check" },
-  async ({ event, step }) => {
+  async ({ event, step }: { event: any; step: any }) => {
     const { orderId, customerId, workspaceId } = event.data as {
       orderId: string;
       customerId: string | null;
@@ -152,9 +152,9 @@ export const fraudCheckCustomer = inngest.createFunction(
     id: "fraud-check-customer",
     retries: 2,
     concurrency: [{ limit: 3, key: "event.data.workspaceId" }],
+    triggers: [{ event: "fraud/customer.check" }],
   },
-  { event: "fraud/customer.check" },
-  async ({ event, step }) => {
+  async ({ event, step }: { event: any; step: any }) => {
     const { customerId, workspaceId } = event.data as {
       customerId: string;
       workspaceId: string;
@@ -173,9 +173,9 @@ export const fraudRerunRule = inngest.createFunction(
     id: "fraud-rerun-rule",
     retries: 2,
     concurrency: [{ limit: 1, key: "event.data.workspaceId" }],
+    triggers: [{ event: "fraud/rule.updated" }],
   },
-  { event: "fraud/rule.updated" },
-  async ({ event, step }) => {
+  async ({ event, step }: { event: any; step: any }) => {
     const { workspaceId } = event.data as { workspaceId: string };
 
     await step.run("rerun-detection", async () => {
