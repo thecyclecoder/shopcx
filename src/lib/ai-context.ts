@@ -244,6 +244,9 @@ export async function assembleTicketContext(
     promptParts.push("- Do NOT include a sign-off or team signature. Just end naturally.");
   } else {
     promptParts.push("- Sign-off should be on its own line, separated by a blank line from the rest of the message.");
+    if (customer && customer.retention_score >= ((await admin.from("workspaces").select("vip_retention_threshold").eq("id", workspaceId).single()).data?.vip_retention_threshold || 85)) {
+      promptParts.push("- This customer is a VIP! Start with a warm acknowledgment like 'Thanks for being such a valued member of our family!' or similar. Make them feel special.");
+    }
   }
 
   // AI Workflows — tell the AI what actions it can offer
@@ -262,7 +265,33 @@ export async function assembleTicketContext(
       promptParts.push(`  Trigger keywords: ${(wf.match_patterns || []).join(", ")}`);
     }
     promptParts.push("- When a customer confirms they want an action, acknowledge it and let them know it's being processed.");
-    promptParts.push("- DISCOUNT FLOW: If a customer asks about discounts, check their marketing status in the customer context above. If they are ALREADY subscribed to both email AND SMS, give them the code SHOPCX and tell them to use it at checkout. If they have an active subscription, offer to apply SHOPCX to their next subscription order too. If they are NOT subscribed, offer to sign them up for email and SMS to get exclusive promotions.");
+    // Load mapped coupons for AI
+    const { data: coupons } = await admin
+      .from("coupon_mappings")
+      .select("code, summary, use_cases, customer_tier, value_type, value, notes")
+      .eq("workspace_id", workspaceId)
+      .eq("ai_enabled", true);
+
+    const isVip = customer && customer.retention_score >= ((await admin.from("workspaces").select("vip_retention_threshold").eq("id", workspaceId).single()).data?.vip_retention_threshold || 85);
+
+    if (coupons?.length) {
+      // Filter by customer tier
+      const available = coupons.filter(c =>
+        c.customer_tier === "all" ||
+        (c.customer_tier === "vip" && isVip) ||
+        (c.customer_tier === "non_vip" && !isVip)
+      );
+      if (available.length > 0) {
+        promptParts.push(`\nAVAILABLE COUPONS (customer is ${isVip ? "VIP" : "non-VIP"}):`);
+        for (const c of available) {
+          promptParts.push(`- Code: ${c.code} — ${c.summary || `${c.value}${c.value_type === "percentage" ? "%" : "$"} off`}`);
+          promptParts.push(`  Use cases: ${c.use_cases.join(", ")}`);
+          if (c.notes) promptParts.push(`  Note: ${c.notes}`);
+        }
+        promptParts.push("- DISCOUNT FLOW: When a customer asks about discounts, offer the appropriate coupon based on the use case. If they are NOT subscribed to email+SMS marketing, offer signup first. If they have an active subscription, offer to apply the coupon to their next order too.");
+      }
+    }
+
     promptParts.push("- NEVER ask the customer to verify information you already have. Check the customer context first.");
     promptParts.push("- NEVER claim you performed an action (like applying a coupon or signing someone up) unless a [System] note in the conversation confirms it was done. If the customer asks you to do something, say you are processing it — the system will handle the action.");
   }

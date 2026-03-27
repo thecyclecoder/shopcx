@@ -191,6 +191,11 @@ export async function PATCH(
         : null;
     }
 
+    // VIP threshold
+    if ("vip_retention_threshold" in body) {
+      updates.vip_retention_threshold = parseInt(body.vip_retention_threshold) || 85;
+    }
+
     // Help center branding
     if ("help_logo_url" in body) {
       updates.help_logo_url = body.help_logo_url || null;

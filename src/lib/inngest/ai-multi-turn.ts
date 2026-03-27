@@ -310,8 +310,32 @@ export const aiMultiTurn = inngest.createFunction(
       const emailSubscribed = cust.email_marketing_status === "subscribed";
       const smsSubscribed = cust.sms_marketing_status === "subscribed";
 
-      // If already subscribed to both → give discount code
+      // If already subscribed to both → find the right coupon from mappings
       if (emailSubscribed && smsSubscribed) {
+        // Look up the best coupon for this use case + customer tier
+        const { data: wsSettings } = await admin.from("workspaces").select("vip_retention_threshold").eq("id", workspace_id).single();
+        const vipThreshold = wsSettings?.vip_retention_threshold || 85;
+        const { data: custFull } = await admin.from("customers").select("retention_score").eq("id", cust.id).single();
+        const isVip = (custFull?.retention_score || 0) >= vipThreshold;
+
+        const { data: coupons } = await admin
+          .from("coupon_mappings")
+          .select("code, use_cases, customer_tier, value_type, value, summary")
+          .eq("workspace_id", workspace_id)
+          .eq("ai_enabled", true);
+
+        // Find coupon matching "discount_request" use case and customer tier
+        const eligible = (coupons || []).filter(c =>
+          c.use_cases.includes("discount_request") &&
+          (c.customer_tier === "all" || (c.customer_tier === "vip" && isVip) || (c.customer_tier === "non_vip" && !isVip))
+        );
+        const couponCode = eligible.length > 0 ? eligible[0].code : null;
+
+        if (!couponCode) {
+          // No mapped coupon available
+          return { action: "no_coupon_available" };
+        }
+
         // Check if they have an active subscription we can apply the coupon to
         const { data: activeSubs } = await admin
           .from("subscriptions")
@@ -381,7 +405,7 @@ export const aiMultiTurn = inngest.createFunction(
         await admin.from("ticket_messages").insert({
           ticket_id,
           direction: "outbound",
-          body: `[System] Customer already subscribed to email + SMS marketing. Provided discount code SHOPCX.${subNote}`,
+          body: `[System] Customer already subscribed to email + SMS marketing. Provided discount code ${couponCode}.${subNote}`,
           author_type: "system",
           visibility: "internal",
         });
@@ -400,7 +424,7 @@ export const aiMultiTurn = inngest.createFunction(
 
               // Apply discount code
               const applyRes = await fetch(
-                `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-apply-discount?contractId=${subContractId}&discountCode=SHOPCX&api_key=${apiKey}`,
+                `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-apply-discount?contractId=${subContractId}&discountCode=${couponCode}&api_key=${apiKey}`,
                 { method: "PUT", headers: { "X-API-Key": apiKey } }
               );
 
@@ -417,10 +441,10 @@ export const aiMultiTurn = inngest.createFunction(
                   if (nodesMatch && nodesMatch[1].trim()) {
                     try {
                       const nodes = JSON.parse(`[${nodesMatch[1]}]`);
-                      // If more than one discount, remove any that aren't SHOPCX
+                      // If more than one discount, remove any that aren't the one we just applied
                       if (nodes.length > 1) {
                         for (const node of nodes) {
-                          if (node.title && node.title.toUpperCase() !== "SHOPCX" && node.id) {
+                          if (node.title && node.title.toUpperCase() !== couponCode.toUpperCase() && node.id) {
                             const encodedId = encodeURIComponent(node.id);
                             await fetch(
                               `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${subContractId}&discountId=${encodedId}&api_key=${apiKey}`,
@@ -437,7 +461,7 @@ export const aiMultiTurn = inngest.createFunction(
               await admin.from("ticket_messages").insert({
                 ticket_id,
                 direction: "outbound",
-                body: `[System] Discount code SHOPCX applied to subscription contract ${subContractId} via Appstle.`,
+                body: `[System] Discount code ${couponCode} applied to subscription contract ${subContractId} via Appstle.`,
                 author_type: "system",
                 visibility: "internal",
               });

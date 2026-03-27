@@ -1,0 +1,208 @@
+import { NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { getShopifyCredentials } from "@/lib/shopify-sync";
+import { SHOPIFY_API_VERSION } from "@/lib/shopify";
+
+// GET: List coupon mappings + optionally sync from Shopify
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: workspaceId } = await params;
+  const url = new URL(request.url);
+  const sync = url.searchParams.get("sync") === "true";
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const admin = createAdminClient();
+
+  // If sync requested, pull discounts from Shopify
+  const shopifyDiscounts: { id: string; code: string; title: string; valueType: string; value: number; appliesOnSubscription: boolean; createdBy: string }[] = [];
+
+  if (sync) {
+    try {
+      const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+
+      // Query discount codes via GraphQL — filter for subscription-applicable ones
+      const query = `{
+        codeDiscountNodes(first: 100, query: "status:active") {
+          nodes {
+            id
+            codeDiscount {
+              ... on DiscountCodeBasic {
+                title
+                status
+                usageLimit
+                codes(first: 1) { nodes { code } }
+                customerGets {
+                  value {
+                    ... on DiscountPercentage { percentage }
+                    ... on DiscountAmount { amount { amount currencyCode } }
+                  }
+                }
+                appliesOncePerCustomer
+                appliesOnSubscription
+                createdBy { id }
+              }
+              ... on DiscountCodeFreeShipping {
+                title
+                status
+                usageLimit
+                codes(first: 1) { nodes { code } }
+                appliesOncePerCustomer
+                appliesOnSubscription
+                createdBy { id }
+              }
+            }
+          }
+        }
+      }`;
+
+      const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+        method: "POST",
+        headers: {
+          "X-Shopify-Access-Token": accessToken,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query }),
+      });
+
+      const data = await res.json();
+      const nodes = data?.data?.codeDiscountNodes?.nodes || [];
+
+      for (const node of nodes) {
+        const d = node.codeDiscount;
+        if (!d) continue;
+
+        // Skip loyalty app created discounts
+        const createdById = d.createdBy?.id || "";
+        const isLoyaltyApp = createdById.includes("LoyaltyLion") || createdById.includes("Smile") || createdById.includes("Yotpo") || createdById.includes("Stamped") || createdById.includes("Joy");
+        if (isLoyaltyApp) continue;
+
+        // Only include subscription-applicable, active, reusable
+        if (!d.appliesOnSubscription) continue;
+        if (d.status !== "ACTIVE") continue;
+        if (d.appliesOncePerCustomer) continue; // Skip one-per-customer codes
+
+        const code = d.codes?.nodes?.[0]?.code || "";
+        if (!code) continue;
+
+        const valueObj = d.customerGets?.value;
+        let valueType = "percentage";
+        let value = 0;
+        if (valueObj?.percentage != null) {
+          valueType = "percentage";
+          value = valueObj.percentage * 100;
+        } else if (valueObj?.amount?.amount != null) {
+          valueType = "fixed_amount";
+          value = parseFloat(valueObj.amount.amount);
+        } else {
+          valueType = "free_shipping";
+          value = 0;
+        }
+
+        shopifyDiscounts.push({
+          id: node.id,
+          code,
+          title: d.title || code,
+          valueType,
+          value,
+          appliesOnSubscription: true,
+          createdBy: createdById,
+        });
+      }
+    } catch (err) {
+      console.error("Shopify discount sync error:", err);
+    }
+  }
+
+  // Get existing mappings
+  const { data: mappings } = await admin
+    .from("coupon_mappings")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false });
+
+  // Get VIP threshold
+  const { data: ws } = await admin
+    .from("workspaces")
+    .select("vip_retention_threshold")
+    .eq("id", workspaceId)
+    .single();
+
+  return NextResponse.json({
+    mappings: mappings || [],
+    shopify_discounts: shopifyDiscounts,
+    vip_threshold: ws?.vip_retention_threshold || 85,
+  });
+}
+
+// POST: Create or update a coupon mapping
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: workspaceId } = await params;
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const admin = createAdminClient();
+  const body = await request.json();
+
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user.id)
+    .single();
+
+  if (!member || !["owner", "admin"].includes(member.role)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const { error } = await admin.from("coupon_mappings").upsert({
+    workspace_id: workspaceId,
+    shopify_discount_id: body.shopify_discount_id,
+    code: body.code,
+    title: body.title || null,
+    value_type: body.value_type,
+    value: body.value,
+    summary: body.summary || null,
+    use_cases: body.use_cases || [],
+    customer_tier: body.customer_tier || "all",
+    ai_enabled: body.ai_enabled ?? true,
+    agent_enabled: body.agent_enabled ?? true,
+    applies_to_subscriptions: body.applies_to_subscriptions ?? true,
+    max_uses_per_customer: body.max_uses_per_customer || null,
+    notes: body.notes || null,
+  }, { onConflict: "workspace_id,code" });
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  return NextResponse.json({ ok: true });
+}
+
+// DELETE: Remove a coupon mapping
+export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: workspaceId } = await params;
+  const url = new URL(request.url);
+  const couponId = url.searchParams.get("id");
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const admin = createAdminClient();
+
+  await admin.from("coupon_mappings").delete().eq("id", couponId).eq("workspace_id", workspaceId);
+
+  return NextResponse.json({ ok: true });
+}
