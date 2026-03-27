@@ -16,19 +16,21 @@ Inbound SMS creates tickets with `channel: "sms"`. Outbound replies send via Twi
 
 ## Twilio Setup
 
-### Credentials (per workspace)
-- `twilio_account_sid_encrypted`
-- `twilio_auth_token_encrypted`
-- `twilio_phone_number` — the Twilio phone number for sending
+### Master Account (ShopCX-owned, NOT per-workspace)
+ShopCX owns one Twilio account. Each workspace gets an assigned phone number.
+- `TWILIO_ACCOUNT_SID` — env var (Vercel), NOT per-workspace
+- `TWILIO_AUTH_TOKEN` — env var (Vercel), NOT per-workspace
+- `twilio_phone_number` — per workspace, assigned by ShopCX admin
 
 ### Webhook
 Twilio sends POST to `https://shopcx.ai/api/webhooks/sms` when an SMS is received.
+The webhook identifies the workspace by the `To` phone number (lookup which workspace owns that number).
 
 ## Database Changes
 ```sql
-ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS twilio_account_sid_encrypted TEXT;
-ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS twilio_auth_token_encrypted TEXT;
+-- Only the phone number is per-workspace, credentials are global env vars
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS twilio_phone_number TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_twilio_phone ON workspaces(twilio_phone_number) WHERE twilio_phone_number IS NOT NULL;
 ```
 
 ## Files to Create
@@ -46,7 +48,8 @@ ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS twilio_phone_number TEXT;
 ```typescript
 export async function sendSMS(workspaceId: string, to: string, body: string): Promise<{ success: boolean; error?: string }>
 ```
-- Uses workspace's Twilio credentials
+- Uses global `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` from env vars
+- Looks up workspace's `twilio_phone_number` as the sender
 - Sends via Twilio Messages API
 - Returns message SID on success
 
@@ -56,9 +59,10 @@ export async function sendSMS(workspaceId: string, to: string, body: string): Pr
 - Customer's phone is the "address", not email
 
 ### Settings UI
-- Twilio credentials input (Account SID, Auth Token, Phone Number)
-- Test SMS button
-- Similar pattern to Resend integration
+- SMS phone number display (assigned by ShopCX, not editable by user)
+- Test SMS button (send test to a number)
+- Enable/disable SMS channel toggle
+- No credentials input — Twilio is managed globally by ShopCX
 
 ## SMS-Specific Behavior
 - SMS messages are short — AI responses should be extra concise (max 160 chars ideally, 320 max)
