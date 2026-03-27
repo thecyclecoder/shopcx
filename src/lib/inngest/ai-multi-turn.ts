@@ -47,7 +47,7 @@ export const aiMultiTurn = inngest.createFunction(
 
         const { data: ticket } = await admin
           .from("tickets")
-          .select("subject, customers(email, first_name), handled_by")
+          .select("subject, channel, customers(email, first_name), handled_by")
           .eq("id", ticket_id)
           .single();
 
@@ -73,27 +73,41 @@ export const aiMultiTurn = inngest.createFunction(
         const { data: ws } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", workspace_id).single();
         const customerEmail = (ticket?.customers as unknown as { email: string })?.email;
 
-        if (ws && !ws.sandbox_mode && customerEmail) {
-          const htmlClose = `<p>${closeMsg}</p>`;
-          await sendTicketReply({
-            workspaceId: workspace_id,
-            toEmail: customerEmail,
-            subject: ticket?.subject ? `Re: ${ticket.subject}` : "Re: Your request",
-            body: htmlClose,
-            inReplyTo: null,
-            agentName: "AI Agent",
-            workspaceName: ws.name,
-          });
+        const closeSandbox = ws?.sandbox_mode ?? true;
+        const channel = ticket?.channel || "email";
+
+        if (!closeSandbox) {
+          // Live mode — only send email if email channel
+          if (channel === "email" && customerEmail) {
+            const htmlClose = `<p>${closeMsg}</p>`;
+            await sendTicketReply({
+              workspaceId: workspace_id,
+              toEmail: customerEmail,
+              subject: ticket?.subject ? `Re: ${ticket.subject}` : "Re: Your request",
+              body: htmlClose,
+              inReplyTo: null,
+              agentName: "AI Agent",
+              workspaceName: ws?.name || "Support",
+            });
+          }
 
           await admin.from("ticket_messages").insert({
             ticket_id,
             direction: "outbound",
-            body: htmlClose,
+            body: `<p>${closeMsg}</p>`,
             author_type: "ai",
             visibility: "external",
           });
+
+          // Close ticket — live reply went out
+          await admin.from("tickets").update({
+            status: "closed",
+            resolved_at: new Date().toISOString(),
+            auto_reply_at: null,
+            pending_auto_reply: null,
+          }).eq("id", ticket_id);
         } else {
-          // Sandbox mode
+          // Sandbox — internal note, don't close
           await admin.from("ticket_messages").insert({
             ticket_id,
             direction: "outbound",
@@ -102,14 +116,6 @@ export const aiMultiTurn = inngest.createFunction(
             visibility: "internal",
           });
         }
-
-        // Close the ticket
-        await admin.from("tickets").update({
-          status: "closed",
-          resolved_at: new Date().toISOString(),
-          auto_reply_at: null,
-          pending_auto_reply: null,
-        }).eq("id", ticket_id);
       });
       return { action: "closed", reason: decision.reason };
     }
@@ -826,10 +832,11 @@ export const aiMultiTurn = inngest.createFunction(
         });
       }
 
-      // Update ticket regardless of sandbox
+      // Update ticket — only close if live reply went out (not sandbox)
+      const shouldClose = !isSandbox && finalContext.autoResolve;
       await admin.from("tickets").update({
-        status: finalContext.autoResolve ? "closed" : "open",
-        resolved_at: finalContext.autoResolve ? new Date().toISOString() : undefined,
+        status: shouldClose ? "closed" : "open",
+        resolved_at: shouldClose ? new Date().toISOString() : undefined,
         ai_turn_count: finalContext.turnCount + 1,
         last_ai_turn_at: new Date().toISOString(),
         handled_by: "AI Agent",
