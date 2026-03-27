@@ -16,6 +16,7 @@ import { aiDraftTicket, aiTriggerWorkflow } from "@/lib/inngest/ai-draft";
 import { journeySessionCompleted, journeySessionAbandoned } from "@/lib/inngest/journey-outcomes";
 import { scrapeHelpCenter } from "@/lib/inngest/scrape-help-center";
 import { aiMultiTurn } from "@/lib/inngest/ai-multi-turn";
+import { aiNightlyAnalysis } from "@/lib/inngest/ai-nightly-analysis";
 import {
   fraudNightlyScan,
   fraudGenerateSummary,
@@ -54,6 +55,7 @@ export const { GET, POST, PUT } = serve({
     journeySessionAbandoned,
     scrapeHelpCenter,
     aiMultiTurn,
+    aiNightlyAnalysis,
     fraudNightlyScan,
     fraudGenerateSummary,
     fraudCheckOrder,

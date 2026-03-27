@@ -1,0 +1,173 @@
+// Nightly AI Agent Performance Analysis
+// Analyzes all AI-handled tickets from the past 24 hours
+// Scores accuracy, detects frustration, identifies issues
+// Creates action items for low-scoring conversations
+
+import { inngest } from "./client";
+import { createAdminClient } from "@/lib/supabase/admin";
+
+export const aiNightlyAnalysis = inngest.createFunction(
+  {
+    id: "ai-nightly-analysis",
+    retries: 1,
+    triggers: [{ cron: "0 6 * * *" }], // 6am UTC daily
+  },
+  async ({ step }) => {
+    const admin = createAdminClient();
+
+    // Step 1: Find all workspaces with nightly analysis enabled
+    const workspaces = await step.run("find-workspaces", async () => {
+      const { data } = await admin
+        .from("ai_channel_config")
+        .select("workspace_id")
+        .eq("enabled", true);
+      return [...new Set((data || []).map(d => d.workspace_id))];
+    });
+
+    let totalAnalyzed = 0;
+
+    for (const workspaceId of workspaces) {
+      const results = await step.run(`analyze-${workspaceId}`, async () => {
+        const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+        // Get AI-handled tickets from last 24 hours
+        const { data: tickets } = await admin
+          .from("tickets")
+          .select("id, subject, channel, ai_turn_count, escalation_reason, status")
+          .eq("workspace_id", workspaceId)
+          .eq("handled_by", "AI Agent")
+          .gte("updated_at", yesterday);
+
+        if (!tickets?.length) return { analyzed: 0 };
+
+        // For each ticket, get the conversation
+        const conversations: { ticketId: string; channel: string; subject: string; turns: number; escalated: boolean; messages: { role: string; body: string }[] }[] = [];
+
+        for (const ticket of tickets.slice(0, 50)) { // Cap at 50 per workspace
+          const { data: msgs } = await admin
+            .from("ticket_messages")
+            .select("direction, author_type, body, visibility")
+            .eq("ticket_id", ticket.id)
+            .eq("visibility", "external")
+            .order("created_at", { ascending: true });
+
+          if (!msgs?.length) continue;
+
+          conversations.push({
+            ticketId: ticket.id,
+            channel: ticket.channel,
+            subject: ticket.subject || "",
+            turns: ticket.ai_turn_count || 0,
+            escalated: !!ticket.escalation_reason,
+            messages: msgs.map(m => ({
+              role: m.direction === "inbound" ? "customer" : "agent",
+              body: (m.body || "").replace(/<[^>]+>/g, " ").trim().slice(0, 300),
+            })),
+          });
+        }
+
+        if (!conversations.length) return { analyzed: 0 };
+
+        // Send batch to Claude for analysis
+        const apiKey = process.env.ANTHROPIC_API_KEY;
+        if (!apiKey) return { analyzed: 0, error: "No API key" };
+
+        const analysisPrompt = conversations.map((c, i) => {
+          const thread = c.messages.map(m => `${m.role}: ${m.body}`).join("\n");
+          return `--- Ticket ${i + 1} (${c.channel}, ${c.turns} AI turns${c.escalated ? ", ESCALATED" : ""}) ---\nSubject: ${c.subject}\n${thread}`;
+        }).join("\n\n");
+
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 2000,
+            system: `You are an AI quality analyst reviewing customer support conversations handled by an AI agent.
+
+Analyze each conversation and provide:
+1. Overall score (1-10) for the batch
+2. Per-channel breakdown (email, chat, etc.)
+3. Issues found: inaccurate responses, robotic tone, customer frustration, missed opportunities
+4. Action items: specific improvements needed
+
+Only grade AI agent messages, not human agent messages.
+
+Return JSON:
+{
+  "overall_score": number,
+  "total_conversations": number,
+  "channel_scores": { "email": number, "chat": number, ... },
+  "issues": [{ "ticket_index": number, "type": "inaccuracy"|"robotic"|"frustration"|"missed_opportunity"|"kb_gap", "description": string }],
+  "action_items": [{ "priority": "high"|"medium"|"low", "description": string }],
+  "summary": string
+}`,
+            messages: [{ role: "user", content: `Analyze these ${conversations.length} AI-handled support conversations from the last 24 hours:\n\n${analysisPrompt}` }],
+          }),
+        });
+
+        if (!res.ok) return { analyzed: conversations.length, error: "Claude API error" };
+
+        const data = await res.json();
+        const analysisText = data.content?.[0]?.text || "";
+
+        let analysis;
+        try {
+          // Extract JSON from response
+          const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
+          analysis = jsonMatch ? JSON.parse(jsonMatch[0]) : null;
+        } catch {
+          analysis = null;
+        }
+
+        if (!analysis) return { analyzed: conversations.length, error: "Failed to parse analysis" };
+
+        // Create notification with results
+        const scoreColor = analysis.overall_score >= 8 ? "high" : analysis.overall_score >= 6 ? "medium" : "low";
+        const hasIssues = (analysis.issues?.length || 0) > 0;
+        const highPriorityActions = (analysis.action_items || []).filter((a: { priority: string }) => a.priority === "high");
+
+        await admin.from("dashboard_notifications").insert({
+          workspace_id: workspaceId,
+          type: "system",
+          title: `AI Agent Daily Report: ${analysis.overall_score}/10`,
+          body: `${analysis.total_conversations} conversations analyzed. ${analysis.issues?.length || 0} issues found. ${highPriorityActions.length} high-priority actions.${analysis.summary ? " " + analysis.summary : ""}`,
+          link: "/dashboard/settings/ai",
+          metadata: {
+            type: "ai_nightly_analysis",
+            overall_score: analysis.overall_score,
+            channel_scores: analysis.channel_scores,
+            issues: analysis.issues,
+            action_items: analysis.action_items,
+            conversations_analyzed: conversations.length,
+            date: new Date().toISOString().split("T")[0],
+          },
+        });
+
+        // If score is low, create high-priority notification
+        if (analysis.overall_score < 6 || highPriorityActions.length > 0) {
+          for (const action of highPriorityActions) {
+            await admin.from("dashboard_notifications").insert({
+              workspace_id: workspaceId,
+              type: "system",
+              title: `AI Action Required: ${action.description.slice(0, 60)}`,
+              body: action.description,
+              link: "/dashboard/settings/ai",
+              metadata: { type: "ai_action_item", priority: action.priority },
+            });
+          }
+        }
+
+        return { analyzed: conversations.length, score: analysis.overall_score };
+      });
+
+      totalAnalyzed += results.analyzed || 0;
+    }
+
+    return { workspaces: workspaces.length, totalAnalyzed };
+  }
+);

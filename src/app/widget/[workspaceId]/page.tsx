@@ -60,6 +60,7 @@ export default function ChatWidgetPage() {
   const [viewingArticle, setViewingArticle] = useState<ArticleDetail | null>(null);
   const [articleLoading, setArticleLoading] = useState(false);
   const [view, setView] = useState<"articles" | "chat">("articles");
+  const [articleVoted, setArticleVoted] = useState<Record<string, "up" | "down">>({});
 
   // Load config
   useEffect(() => {
@@ -342,8 +343,43 @@ export default function ChatWidgetPage() {
             )}
           </div>
           {articleLoading && <p className="mt-2 text-xs text-zinc-400">Loading...</p>}
+
+          {/* Helpful vote */}
+          <div className="mt-4 rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-center">
+            {articleVoted[viewingArticle.id] ? (
+              <p className="text-xs text-zinc-500">
+                {articleVoted[viewingArticle.id] === "up" ? "Glad this helped!" : "Thanks for the feedback."}
+              </p>
+            ) : (
+              <>
+                <p className="text-xs text-zinc-500">Was this article helpful?</p>
+                <div className="mt-2 flex justify-center gap-3">
+                  {(["up", "down"] as const).map(vote => (
+                    <button key={vote} onClick={async () => {
+                      setArticleVoted(prev => ({ ...prev, [viewingArticle.id]: vote }));
+                      const urlParams = new URLSearchParams(window.location.search);
+                      const helpSlug = urlParams.get("help_slug") || "";
+                      fetch(`/api/help/${helpSlug || "default"}/feedback`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ article_id: viewingArticle.id, vote }),
+                      }).catch(() => {});
+                    }}
+                      className={`flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs transition-colors ${
+                        vote === "up"
+                          ? "border-zinc-200 text-zinc-600 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700"
+                          : "border-zinc-200 text-zinc-600 hover:border-red-300 hover:bg-red-50 hover:text-red-700"
+                      }`}>
+                      {vote === "up" ? "Yes" : "No"}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
           <button onClick={() => setView("chat")}
-            className="mt-4 w-full rounded-lg py-2 text-sm font-medium text-white"
+            className="mt-3 w-full rounded-lg py-2 text-sm font-medium text-white"
             style={{ backgroundColor: primaryColor }}>
             Still need help? Start a chat
           </button>
