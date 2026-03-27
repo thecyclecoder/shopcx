@@ -218,6 +218,25 @@ export default function ChatWidgetPage() {
     };
   }, [ticketId]);
 
+  // Poll for new messages as fallback (Realtime may not work with anon key)
+  useEffect(() => {
+    if (!ticketId || !sessionId || !started) return;
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/widget/${workspaceId}/messages?session_id=${sessionId}`);
+        const data = await res.json();
+        if (data.messages && Array.isArray(data.messages)) {
+          setMessages(prev => {
+            const prevIds = new Set(prev.map(m => m.id));
+            const newMsgs = data.messages.filter((m: Message) => !prevIds.has(m.id));
+            return newMsgs.length > 0 ? [...prev, ...newMsgs] : prev;
+          });
+        }
+      } catch {}
+    }, 3000);
+    return () => clearInterval(poll);
+  }, [ticketId, sessionId, started, workspaceId]);
+
   // Auto-scroll on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
