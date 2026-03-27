@@ -20,7 +20,7 @@ export async function GET(
   const admin = createAdminClient();
 
   // If sync requested, pull discounts from Shopify
-  const shopifyDiscounts: { id: string; code: string; title: string; valueType: string; value: number; appliesOnSubscription: boolean; createdBy: string }[] = [];
+  const shopifyDiscounts: { id: string; code: string; title: string; valueType: string; value: number }[] = [];
 
   if (sync) {
     try {
@@ -44,8 +44,7 @@ export async function GET(
                   }
                 }
                 appliesOncePerCustomer
-                appliesOnSubscription
-                createdBy { id }
+                combinesWith { orderDiscounts productDiscounts shippingDiscounts }
               }
               ... on DiscountCodeFreeShipping {
                 title
@@ -53,8 +52,6 @@ export async function GET(
                 usageLimit
                 codes(first: 1) { nodes { code } }
                 appliesOncePerCustomer
-                appliesOnSubscription
-                createdBy { id }
               }
             }
           }
@@ -77,13 +74,7 @@ export async function GET(
         const d = node.codeDiscount;
         if (!d) continue;
 
-        // Skip loyalty app created discounts
-        const createdById = d.createdBy?.id || "";
-        const isLoyaltyApp = createdById.includes("LoyaltyLion") || createdById.includes("Smile") || createdById.includes("Yotpo") || createdById.includes("Stamped") || createdById.includes("Joy");
-        if (isLoyaltyApp) continue;
-
-        // Only include subscription-applicable, active, reusable
-        if (!d.appliesOnSubscription) continue;
+        // Only include active, reusable codes
         if (d.status !== "ACTIVE") continue;
         if (d.appliesOncePerCustomer) continue; // Skip one-per-customer codes
 
@@ -110,8 +101,6 @@ export async function GET(
           title: d.title || code,
           valueType,
           value,
-          appliesOnSubscription: true,
-          createdBy: createdById,
         });
       }
     } catch (err) {
