@@ -27,18 +27,21 @@ export async function appstleSubscriptionAction(
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
-  const endpoint = `https://subscription-admin.appstle.com/api/subscription-contracts/${contractId}/${action}`;
+  // Appstle v2 API: PUT with query params
+  const statusMap: Record<string, string> = { pause: "PAUSED", cancel: "CANCELLED", resume: "ACTIVE" };
+  const appstleStatus = statusMap[action];
+  const endpoint = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-status?contractId=${contractId}&status=${appstleStatus}`;
 
   try {
     const res = await fetch(endpoint, {
-      method: "POST",
+      method: "PUT",
       headers: {
-        "token": creds.apiKey,
-        "Content-Type": "application/json",
+        "X-API-Key": creds.apiKey,
       },
     });
 
-    if (!res.ok) {
+    // 204 = success (no content body)
+    if (!res.ok && res.status !== 204) {
       const text = await res.text();
       console.error(`Appstle ${action} error for contract ${contractId}:`, text);
       return { success: false, error: `Appstle API error: ${res.status}` };
@@ -46,10 +49,10 @@ export async function appstleSubscriptionAction(
 
     // Update local subscription status
     const admin = createAdminClient();
-    const statusMap: Record<string, string> = { pause: "paused", cancel: "cancelled", resume: "active" };
+    const localStatusMap: Record<string, string> = { pause: "paused", cancel: "cancelled", resume: "active" };
     await admin
       .from("subscriptions")
-      .update({ status: statusMap[action], updated_at: new Date().toISOString() })
+      .update({ status: localStatusMap[action], updated_at: new Date().toISOString() })
       .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId);
 
