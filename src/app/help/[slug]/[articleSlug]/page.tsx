@@ -77,16 +77,28 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
   // Increment view count (fire and forget)
   admin.from("knowledge_base").update({ view_count: (article.view_count || 0) + 1 }).eq("id", article.id).then(() => {});
 
-  // Get Shopify product ID if article is tagged to a product
+  // Get product details if article is tagged to a product
   let shopifyProductId: string | null = null;
+  let productCard: { title: string; handle: string; image_url: string | null; description: string | null } | null = null;
   if (article.product_id) {
     const { data: product } = await admin
       .from("products")
-      .select("shopify_product_id")
+      .select("shopify_product_id, title, handle, image_url, description")
       .eq("id", article.product_id)
       .single();
     shopifyProductId = product?.shopify_product_id || null;
+    if (product) {
+      productCard = { title: product.title, handle: product.handle, image_url: product.image_url, description: product.description };
+    }
   }
+
+  // Get the Shopify store domain for product link
+  const { data: wsStore } = await admin
+    .from("workspaces")
+    .select("shopify_domain")
+    .eq("id", workspace.id)
+    .single();
+  const shopDomain = wsStore?.shopify_domain || "";
 
   // Get related articles in same category
   const { data: related } = await admin
@@ -198,6 +210,37 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
                   {r.excerpt && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-1">{r.excerpt}</p>}
                 </Link>
               ))}
+            </div>
+          </div>
+        )}
+
+        {/* Product callout card — only on KB minisite, not in widget */}
+        {productCard && (
+          <div className="mt-8 overflow-hidden rounded-xl border border-zinc-200 bg-white">
+            <div className="flex flex-col sm:flex-row">
+              {productCard.image_url && (
+                <div className="aspect-square w-full sm:w-48 shrink-0 overflow-hidden bg-zinc-100">
+                  <img src={productCard.image_url} alt={productCard.title} className="h-full w-full object-cover" />
+                </div>
+              )}
+              <div className="flex flex-1 flex-col justify-center p-5">
+                <p className="text-xs font-medium uppercase tracking-wider text-zinc-400">Featured Product</p>
+                <h3 className="mt-1 text-lg font-bold text-zinc-900">{productCard.title}</h3>
+                {productCard.description && (
+                  <p className="mt-1 text-sm text-zinc-600 line-clamp-2">{productCard.description}</p>
+                )}
+                {shopDomain && productCard.handle && (
+                  <a
+                    href={`https://${shopDomain}/products/${productCard.handle}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-3 inline-block rounded-md px-4 py-2 text-sm font-medium text-white"
+                    style={{ backgroundColor: workspace.help_primary_color || "#4f46e5" }}
+                  >
+                    View Product →
+                  </a>
+                )}
+              </div>
             </div>
           </div>
         )}

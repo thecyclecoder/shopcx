@@ -34,7 +34,7 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
 
   const { data: articles } = await admin
     .from("knowledge_base")
-    .select("id, title, slug, category, excerpt, product_name, view_count, helpful_yes")
+    .select("id, title, slug, category, excerpt, product_name, product_id, view_count, helpful_yes")
     .eq("workspace_id", workspace.id)
     .eq("published", true)
     .eq("active", true)
@@ -56,7 +56,22 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
       )
     : null;
 
-  // Get products
+  // Get products with articles — for the "Learn more about our products" section
+  const productIds = [...new Set((articles || []).filter(a => a.product_id).map(a => a.product_id!))];
+  let productsWithArticles: { id: string; title: string; handle: string; image_url: string | null; description: string | null; articles: typeof articles }[] = [];
+  if (productIds.length > 0) {
+    const { data: products } = await admin
+      .from("products")
+      .select("id, title, handle, image_url, description")
+      .in("id", productIds)
+      .order("title");
+
+    productsWithArticles = (products || []).map(p => ({
+      ...p,
+      articles: (articles || []).filter(a => a.product_id === p.id).slice(0, 5),
+    })).filter(p => p.articles.length > 0);
+  }
+
   const productNames = [...new Set((articles || []).filter(a => a.product_name).map(a => a.product_name!))];
 
   const CATEGORY_LABELS: Record<string, string> = {
@@ -83,6 +98,44 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
       </header>
 
       <main className="max-w-4xl mx-auto px-6 py-8">
+        {/* Learn more about our products */}
+        {!searchResults && !categoryFilter && productsWithArticles.length > 0 && (
+          <div className="mb-10">
+            <h2 className="text-xl font-bold text-zinc-900">Learn more about our products</h2>
+            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {productsWithArticles.map(p => (
+                <div key={p.id} className="overflow-hidden rounded-xl border border-zinc-200 bg-white transition-shadow hover:shadow-md">
+                  {p.image_url && (
+                    <div className="aspect-square overflow-hidden bg-zinc-100">
+                      <img src={p.image_url} alt={p.title} className="h-full w-full object-cover" />
+                    </div>
+                  )}
+                  <div className="p-4">
+                    <h3 className="text-sm font-bold text-zinc-900">{p.title}</h3>
+                    {p.description && (
+                      <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{p.description}</p>
+                    )}
+                    <ul className="mt-3 space-y-1">
+                      {(p.articles || []).map(a => (
+                        <li key={a.id}>
+                          <Link href={`${basePath}/${a.slug}`} className="text-xs text-indigo-600 hover:underline line-clamp-1">
+                            {a.title}
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                    {(articles || []).filter(a => a.product_id === p.id).length > 5 && (
+                      <Link href={`${basePath}/?category=product`} className="mt-2 inline-block text-xs font-medium text-indigo-600 hover:underline">
+                        View all articles →
+                      </Link>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Search results */}
         {searchResults && (
           <div className="mb-8">
