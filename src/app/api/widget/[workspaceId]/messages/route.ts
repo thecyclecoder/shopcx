@@ -187,9 +187,11 @@ export async function POST(
       .single();
 
     const isAIHandled = ticket?.handled_by === "AI Agent";
+    const isWorkflowHandled = (ticket?.handled_by || "").startsWith("Workflow:");
     const isUnassigned = !ticket?.assigned_to && !ticket?.handled_by;
 
-    if (isAIHandled || isUnassigned) {
+    // Trigger AI for: AI-handled, workflow-handled (follow-up after workflow), or unassigned
+    if (isAIHandled || isWorkflowHandled || isUnassigned) {
       await inngest.send({
         name: "ai/reply-received",
         data: {
