@@ -327,7 +327,7 @@ export const aiMultiTurn = inngest.createFunction(
         if (activeSubs?.length && activeSubs[0].shopify_contract_id) {
           subContractId = activeSubs[0].shopify_contract_id;
 
-          // Check Appstle raw contract for existing discounts
+          // Check for existing discounts — remove them before applying SHOPCX
           try {
             canApplyToSub = true;
 
@@ -340,18 +340,29 @@ export const aiMultiTurn = inngest.createFunction(
             if (ws?.appstle_api_key_encrypted) {
               const { decrypt } = await import("@/lib/crypto");
               const apiKey = decrypt(ws.appstle_api_key_encrypted);
+
+              // Check raw contract for existing discounts and remove them
               const rawRes = await fetch(
                 `https://subscription-admin.appstle.com/api/external/v2/contract-raw-response?contractId=${subContractId}&api_key=${apiKey}`,
                 { headers: { "X-API-Key": apiKey } }
               );
               if (rawRes.ok) {
                 const rawText = await rawRes.text();
-                // Check if discounts.nodes has any entries
-                if (rawText.includes('"discounts"')) {
-                  const nodesMatch = rawText.match(/"discounts"[^}]*"nodes"\s*:\s*\[([^\]]*)\]/);
-                  if (nodesMatch && nodesMatch[1].trim().length > 0) {
-                    canApplyToSub = false; // Already has a discount
-                  }
+                const nodesMatch = rawText.match(/"discounts"[^}]*"nodes"\s*:\s*\[([^\]]*)\]/s);
+                if (nodesMatch && nodesMatch[1].trim()) {
+                  try {
+                    const nodes = JSON.parse(`[${nodesMatch[1]}]`);
+                    // Remove any existing discounts before applying SHOPCX
+                    for (const node of nodes) {
+                      if (node.id) {
+                        const encodedId = encodeURIComponent(node.id);
+                        await fetch(
+                          `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${subContractId}&discountId=${encodedId}&api_key=${apiKey}`,
+                          { method: "PUT", headers: { "X-API-Key": apiKey } }
+                        );
+                      }
+                    }
+                  } catch {}
                 }
               }
             }
@@ -393,34 +404,32 @@ export const aiMultiTurn = inngest.createFunction(
                 { method: "PUT", headers: { "X-API-Key": apiKey } }
               );
 
-              // Verify no duplicate codes — re-check subscription details
-              if (applyRes.ok && cust.shopify_customer_id) {
+              // Verify no duplicate codes — check raw contract for extra discounts
+              if (applyRes.ok) {
                 const verifyRes = await fetch(
-                  `https://subscription-admin.appstle.com/api/external/v2/customer-subscription-details?customerShopifyId=${cust.shopify_customer_id}`,
+                  `https://subscription-admin.appstle.com/api/external/v2/contract-raw-response?contractId=${subContractId}&api_key=${apiKey}`,
                   { headers: { "X-API-Key": apiKey } }
                 );
                 if (verifyRes.ok) {
-                  const verifyData = await verifyRes.json();
-                  const contracts = verifyData?.subscriptionContracts || verifyData?.contracts || [];
-                  for (const contract of contracts) {
-                    if (String(contract.contractId || contract.id) === subContractId) {
-                      // Check for duplicate discount codes
-                      const codes = contract.discountCodes || contract.appliedDiscounts || [];
-                      if (Array.isArray(codes) && codes.length > 1) {
-                        // Remove any code that isn't SHOPCX
-                        for (const code of codes) {
-                          const codeName = code.code || code.discountCode || code;
-                          if (typeof codeName === "string" && codeName.toUpperCase() !== "SHOPCX") {
-                            try {
-                              await fetch(
-                                `https://subscription-admin.appstle.com/api/external/v2/subscription-discount-remove?contractId=${subContractId}&discountCode=${codeName}`,
-                                { method: "DELETE", headers: { "X-API-Key": apiKey } }
-                              );
-                            } catch {}
+                  const rawText = await verifyRes.text();
+                  // Parse discount nodes from raw response
+                  const nodesMatch = rawText.match(/"discounts"[^}]*"nodes"\s*:\s*\[([^\]]*)\]/s);
+                  if (nodesMatch && nodesMatch[1].trim()) {
+                    try {
+                      const nodes = JSON.parse(`[${nodesMatch[1]}]`);
+                      // If more than one discount, remove any that aren't SHOPCX
+                      if (nodes.length > 1) {
+                        for (const node of nodes) {
+                          if (node.title && node.title.toUpperCase() !== "SHOPCX" && node.id) {
+                            const encodedId = encodeURIComponent(node.id);
+                            await fetch(
+                              `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${subContractId}&discountId=${encodedId}&api_key=${apiKey}`,
+                              { method: "PUT", headers: { "X-API-Key": apiKey } }
+                            );
                           }
                         }
                       }
-                    }
+                    } catch {}
                   }
                 }
               }
