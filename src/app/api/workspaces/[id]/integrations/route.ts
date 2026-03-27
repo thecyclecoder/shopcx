@@ -106,7 +106,7 @@ export async function PATCH(
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const updates: Record<string, string | boolean | null> = {};
+  const updates: Record<string, string | boolean | number | null> = {};
 
   try {
     // Resend
