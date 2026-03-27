@@ -170,17 +170,41 @@ export const aiMultiTurn = inngest.createFunction(
       await step.sleep("response-delay", `${delay}s`);
     }
 
-    // Check if agent cancelled the auto-reply
-    const cancelled = await step.run("check-cancelled", async () => {
+    // Check if agent cancelled OR new messages arrived during delay
+    const postDelayCheck = await step.run("check-after-delay", async () => {
       const admin = createAdminClient();
-      const { data: ticket } = await admin.from("tickets").select("auto_reply_at, assigned_to, agent_intervened").eq("id", ticket_id).single();
-      // If agent has been assigned or intervened, stop AI
-      if (ticket?.assigned_to || ticket?.agent_intervened) return true;
-      return false;
+      const { data: ticket } = await admin.from("tickets").select("assigned_to, agent_intervened").eq("id", ticket_id).single();
+
+      if (ticket?.assigned_to || ticket?.agent_intervened) {
+        return { cancelled: true, newMessages: false };
+      }
+
+      // Check if customer sent more messages during the delay
+      const { data: recentInbound } = await admin
+        .from("ticket_messages")
+        .select("body")
+        .eq("ticket_id", ticket_id)
+        .eq("direction", "inbound")
+        .eq("visibility", "external")
+        .order("created_at", { ascending: false })
+        .limit(3);
+
+      const latest = (recentInbound || [])[0]?.body?.trim();
+      const hasNew = latest && latest !== message_body.trim();
+
+      return { cancelled: false, newMessages: !!hasNew };
     });
 
-    if (cancelled) {
+    if (postDelayCheck.cancelled) {
       return { action: "cancelled", reason: "agent_intervened" };
+    }
+
+    // If new messages arrived during delay, re-assemble context with all messages
+    let finalContext = context;
+    if (postDelayCheck.newMessages) {
+      finalContext = await step.run("reassemble-with-new-messages", async () => {
+        return assembleTicketContext(workspace_id, ticket_id);
+      });
     }
 
     // Step 4: Generate response
@@ -189,7 +213,7 @@ export const aiMultiTurn = inngest.createFunction(
       if (!apiKey) throw new Error("No ANTHROPIC_API_KEY");
 
       // Use Haiku for turns 1-2, Sonnet for 3+
-      const model = context.turnCount < 2
+      const model = finalContext.turnCount < 2
         ? "claude-haiku-4-5-20251001"
         : "claude-sonnet-4-20250514";
 
@@ -203,8 +227,8 @@ export const aiMultiTurn = inngest.createFunction(
         body: JSON.stringify({
           model,
           max_tokens: 1024,
-          system: context.systemPrompt,
-          messages: context.conversationHistory.map(m => ({
+          system: finalContext.systemPrompt,
+          messages: finalContext.conversationHistory.map(m => ({
             role: m.role,
             content: m.content,
           })),
@@ -256,7 +280,7 @@ export const aiMultiTurn = inngest.createFunction(
     }
 
     // Step 5b: Execute AI workflow actions (e.g., marketing signup)
-    const actionResult = await step.run("execute-actions", async () => {
+    await step.run("execute-actions", async () => {
       const admin = createAdminClient();
       const bodyLower = message_body.toLowerCase();
 
@@ -342,7 +366,7 @@ export const aiMultiTurn = inngest.createFunction(
       const customerEmail = (ticket.customers as unknown as { email: string })?.email;
       const { data: ws } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", workspace_id).single();
 
-      if (!context.sandbox && ws && !ws.sandbox_mode && customerEmail) {
+      if (!finalContext.sandbox && ws && !ws.sandbox_mode && customerEmail) {
         // Convert to HTML paragraphs for email
         const htmlBody = toHtmlParagraphs(aiResponse.responseText);
 
@@ -369,9 +393,9 @@ export const aiMultiTurn = inngest.createFunction(
 
         // Update ticket — close if auto_resolve enabled (reply will reopen)
         await admin.from("tickets").update({
-          status: context.autoResolve ? "closed" : "open",
-          resolved_at: context.autoResolve ? new Date().toISOString() : undefined,
-          ai_turn_count: context.turnCount + 1,
+          status: finalContext.autoResolve ? "closed" : "open",
+          resolved_at: finalContext.autoResolve ? new Date().toISOString() : undefined,
+          ai_turn_count: finalContext.turnCount + 1,
           last_ai_turn_at: new Date().toISOString(),
           handled_by: "AI Agent",
           auto_reply_at: null,
@@ -382,16 +406,16 @@ export const aiMultiTurn = inngest.createFunction(
         await admin.from("ticket_messages").insert({
           ticket_id,
           direction: "outbound",
-          body: `[AI Draft — Sandbox Mode — Turn ${context.turnCount + 1}]\n\n${aiResponse.responseText}`,
+          body: `[AI Draft — Sandbox Mode — Turn ${finalContext.turnCount + 1}]\n\n${aiResponse.responseText}`,
           author_type: "ai",
           visibility: "internal",
           ai_personalized: true,
         });
 
         await admin.from("tickets").update({
-          status: context.autoResolve ? "closed" : "open",
-          resolved_at: context.autoResolve ? new Date().toISOString() : undefined,
-          ai_turn_count: context.turnCount + 1,
+          status: finalContext.autoResolve ? "closed" : "open",
+          resolved_at: finalContext.autoResolve ? new Date().toISOString() : undefined,
+          ai_turn_count: finalContext.turnCount + 1,
           last_ai_turn_at: new Date().toISOString(),
           handled_by: "AI Agent",
           auto_reply_at: null,
@@ -402,7 +426,7 @@ export const aiMultiTurn = inngest.createFunction(
 
     return {
       action: "ai_responded",
-      turn: context.turnCount + 1,
+      turn: finalContext.turnCount + 1,
       model: aiResponse.model,
     };
   }

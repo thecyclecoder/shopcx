@@ -88,8 +88,11 @@ export default function NotificationBell() {
 
   const handleClick = (n: Notification) => {
     if (!n.read) markAsRead(n.id);
-    if (n.link) window.location.href = n.link;
     setIsOpen(false);
+    if (n.link) {
+      const target = n.link;
+      setTimeout(() => { window.location.assign(target); }, 0);
+    }
   };
 
   return (
