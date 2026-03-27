@@ -52,11 +52,11 @@ export const aiMultiTurn = inngest.createFunction(
           .eq("id", ticket_id)
           .single();
 
-        const isAIHandled = ticket?.handled_by === "AI Agent";
+        const isAutoHandled = ticket?.handled_by === "AI Agent" || (ticket?.handled_by || "").startsWith("Workflow:");
         const firstName = (ticket?.customers as unknown as { first_name: string | null })?.first_name;
 
-        // Only do AI closure if this was an AI-handled ticket
-        if (!isAIHandled) {
+        // Only do AI closure if this was an AI or workflow handled ticket
+        if (!isAutoHandled) {
           // Fall back to existing workflow for non-AI tickets
           await inngest.send({
             name: "workflow/positive-close",

@@ -343,8 +343,20 @@ async function sendReply(admin: Admin, context: WorkflowContext, templateText: s
   }
   // Chat/help_center/sms/social — message is already inserted as external, visible in widget
 
-  // Update ticket status (configurable — defaults to pending) + clear auto_reply_at
-  const statusAfterReply = (statusOverride as string) || "pending";
+  // Update ticket status — check channel auto_resolve setting
+  let statusAfterReply = (statusOverride as string) || "pending";
+
+  // If channel has auto_resolve, close instead of pending
+  const { data: channelConfig } = await admin
+    .from("ai_channel_config")
+    .select("auto_resolve")
+    .eq("workspace_id", context.workspaceId)
+    .eq("channel", channel)
+    .single();
+  if (channelConfig?.auto_resolve && statusAfterReply !== "closed") {
+    statusAfterReply = "closed";
+  }
+
   const statusUpdates: Record<string, unknown> = { status: statusAfterReply, auto_reply_at: null, pending_auto_reply: null, updated_at: new Date().toISOString() };
   if (statusAfterReply === "closed") statusUpdates.resolved_at = new Date().toISOString();
   await admin.from("tickets").update(statusUpdates).eq("id", context.ticketId);
