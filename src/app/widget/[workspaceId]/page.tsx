@@ -8,6 +8,7 @@ interface Message {
   id: string;
   direction: string;
   author_type: string;
+  visibility?: string;
   body: string;
   created_at: string;
 }
@@ -62,6 +63,7 @@ export default function ChatWidgetPage() {
   const [view, setView] = useState<"articles" | "chat">("articles");
   const [articleVoted, setArticleVoted] = useState<Record<string, "up" | "down">>({});
   const [chatEnded, setChatEnded] = useState(false);
+  const [waitingForReply, setWaitingForReply] = useState(false);
   const [chatList, setChatList] = useState<{ id: string; ticket_id: string; subject: string; status: string; last_message: string; updated_at: string }[]>([]);
   const [showChatList, setShowChatList] = useState(true);
 
@@ -202,23 +204,21 @@ export default function ChatWidgetPage() {
         },
         (payload) => {
           const newMsg = payload.new as Message;
-          // Only show external messages, skip customer's own (they're already in state)
-          if (newMsg.direction === "outbound" || newMsg.author_type !== "customer") {
+          if (newMsg.visibility === "external") {
             setMessages((prev) => {
               if (prev.some((m) => m.id === newMsg.id)) return prev;
               return [...prev, newMsg];
             });
+            setWaitingForReply(false);
           }
         }
       )
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => { supabase.removeChannel(channel); };
   }, [ticketId]);
 
-  // Poll for new messages as fallback (Realtime may not work with anon key)
+  // Poll as fallback (in case Realtime subscription fails)
   useEffect(() => {
     if (!ticketId || !sessionId || !started) return;
     const poll = setInterval(async () => {
@@ -229,6 +229,7 @@ export default function ChatWidgetPage() {
           setMessages(prev => {
             const prevIds = new Set(prev.map(m => m.id));
             const newMsgs = data.messages.filter((m: Message) => !prevIds.has(m.id));
+            if (newMsgs.some((m: Message) => m.direction === "outbound")) setWaitingForReply(false);
             return newMsgs.length > 0 ? [...prev, ...newMsgs] : prev;
           });
         }
@@ -310,6 +311,7 @@ export default function ChatWidgetPage() {
       setInput(msg);
     } finally {
       setSending(false);
+      setWaitingForReply(true);
     }
   };
 
@@ -550,7 +552,7 @@ export default function ChatWidgetPage() {
                     }`}
                     style={isCustomer ? { backgroundColor: primaryColor } : undefined}
                   >
-                    <p className="whitespace-pre-wrap">{msg.body}</p>
+                    <div className="prose prose-sm max-w-none [&_a]:text-inherit [&_a]:underline" dangerouslySetInnerHTML={{ __html: msg.body }} />
                     <p className={`mt-0.5 text-[10px] ${isCustomer ? "text-white/60" : "text-zinc-400"}`}>
                       {new Date(msg.created_at).toLocaleTimeString([], {
                         hour: "numeric",
@@ -562,6 +564,18 @@ export default function ChatWidgetPage() {
               );
             })}
           </>
+        )}
+        {/* Typing indicator */}
+        {waitingForReply && !chatEnded && (
+          <div className="mb-2 flex gap-2">
+            <div className="rounded-2xl rounded-tl-sm bg-zinc-100 px-4 py-3">
+              <div className="flex items-center gap-1">
+                <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400" style={{ animationDelay: "0ms" }} />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400" style={{ animationDelay: "150ms" }} />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400" style={{ animationDelay: "300ms" }} />
+              </div>
+            </div>
+          </div>
         )}
         <div ref={messagesEndRef} />
       </div>
