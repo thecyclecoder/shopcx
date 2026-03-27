@@ -321,9 +321,10 @@ export const aiMultiTurn = inngest.createFunction(
           ai_personalized: true,
         });
 
-        // Update ticket — keep open (AI is handling, not waiting for agent)
+        // Update ticket — close if auto_resolve enabled (reply will reopen)
         await admin.from("tickets").update({
-          status: "open",
+          status: context.autoResolve ? "closed" : "open",
+          resolved_at: context.autoResolve ? new Date().toISOString() : undefined,
           ai_turn_count: context.turnCount + 1,
           last_ai_turn_at: new Date().toISOString(),
           handled_by: "AI Agent",
@@ -342,6 +343,8 @@ export const aiMultiTurn = inngest.createFunction(
         });
 
         await admin.from("tickets").update({
+          status: context.autoResolve ? "closed" : "open",
+          resolved_at: context.autoResolve ? new Date().toISOString() : undefined,
           ai_turn_count: context.turnCount + 1,
           last_ai_turn_at: new Date().toISOString(),
           handled_by: "AI Agent",
