@@ -83,6 +83,21 @@ export async function POST(
       } else {
         metaError = "Meta not connected";
       }
+    } else if (ticket.channel === "sms" && ticket.customers?.phone) {
+      // Send via Twilio SMS
+      const { sendSMS } = await import("@/lib/twilio");
+      const { data: workspace } = await admin
+        .from("workspaces")
+        .select("sandbox_mode")
+        .eq("id", workspaceId)
+        .single();
+
+      if (workspace?.sandbox_mode) {
+        emailSuppressed = true;
+      } else {
+        const result = await sendSMS(workspaceId, ticket.customers.phone, messageBody);
+        if (result.error) metaError = result.error;
+      }
     } else if (ticket.customers?.email) {
       // Send via email
       const { data: workspace } = await admin
