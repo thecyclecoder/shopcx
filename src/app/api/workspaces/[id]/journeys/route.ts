@@ -35,7 +35,22 @@ export async function GET(
     });
   }
 
-  return NextResponse.json(enriched);
+  // Also include chat journeys
+  const { data: chatJourneys } = await admin
+    .from("chat_journeys")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false });
+
+  const chatEnriched = (chatJourneys || []).map(j => ({
+    ...j,
+    journey_type: "chat",
+    slug: j.trigger_intent,
+    config: { channels: j.channels, match_patterns: j.match_patterns },
+    stats: { sent: 0, completed: 0, saved: 0, cancelled: 0 },
+  }));
+
+  return NextResponse.json([...enriched, ...chatEnriched]);
 }
 
 export async function POST(

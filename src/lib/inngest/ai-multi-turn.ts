@@ -375,7 +375,7 @@ export const aiMultiTurn = inngest.createFunction(
       if (ticket.journey_id && ticket.journey_step < 99) {
         // Determine which journey type
         const { data: journey } = await admin
-          .from("chat_journeys")
+          .from("journey_definitions")
           .select("trigger_intent")
           .eq("id", ticket.journey_id)
           .single();
@@ -400,13 +400,26 @@ export const aiMultiTurn = inngest.createFunction(
         return { handled: false };
       }
 
-      // Check if this message should start a discount journey on chat
+      // Check if this message should start a chat journey
       if (isChatChannel) {
-        const bodyLower = message_body.toLowerCase();
-        const discountKeywords = ["discount", "coupon", "deal", "promo", "promotion", "save", "code", "sale"];
-        const isDiscountIntent = discountKeywords.some(k => bodyLower.includes(k));
+        // Look up enabled chat journeys for this channel
+        const { data: chatJourneys } = await admin
+          .from("journey_definitions")
+          .select("id, trigger_intent, match_patterns, channels")
+          .eq("workspace_id", workspace_id)
+          .eq("is_active", true)
+          .not("trigger_intent", "is", null)
+          .order("priority", { ascending: false });
 
-        if (isDiscountIntent) {
+        const bodyLower = message_body.toLowerCase();
+
+        // Find matching journey by patterns
+        const matchedJourney = (chatJourneys || []).find(j => {
+          if (j.channels?.length && !j.channels.includes(ticket?.channel)) return false;
+          return (j.match_patterns || []).some((p: string) => bodyLower.includes(p.toLowerCase()));
+        });
+
+        if (matchedJourney) {
           // Start account linking journey first (if needed), then discount
           const { data: cust } = await admin
             .from("customers")
