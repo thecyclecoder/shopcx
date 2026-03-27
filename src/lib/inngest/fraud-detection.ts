@@ -11,7 +11,7 @@ export const fraudNightlyScan = inngest.createFunction(
     concurrency: [{ limit: 1, key: "event.data.workspaceId" }],
     triggers: [{ cron: "0 3 * * *" }], // 3am UTC daily
   },
-  async ({ step }: { step: any }) => {
+  async ({ step }) => {
     const admin = createAdminClient();
 
     const workspaces = await step.run("load-workspaces", async () => {
@@ -42,7 +42,7 @@ export const fraudGenerateSummary = inngest.createFunction(
     retries: 2,
     triggers: [{ event: "fraud/case.created" }],
   },
-  async ({ event, step }: { event: any; step: any }) => {
+  async ({ event, step }) => {
     const { caseId, workspaceId } = event.data as { caseId: string; workspaceId: string };
     const admin = createAdminClient();
 
@@ -132,7 +132,7 @@ export const fraudCheckOrder = inngest.createFunction(
     concurrency: [{ limit: 3, key: "event.data.workspaceId" }],
     triggers: [{ event: "fraud/order.check" }],
   },
-  async ({ event, step }: { event: any; step: any }) => {
+  async ({ event, step }) => {
     const { orderId, customerId, workspaceId } = event.data as {
       orderId: string;
       customerId: string | null;
@@ -154,7 +154,7 @@ export const fraudCheckCustomer = inngest.createFunction(
     concurrency: [{ limit: 3, key: "event.data.workspaceId" }],
     triggers: [{ event: "fraud/customer.check" }],
   },
-  async ({ event, step }: { event: any; step: any }) => {
+  async ({ event, step }) => {
     const { customerId, workspaceId } = event.data as {
       customerId: string;
       workspaceId: string;
@@ -175,7 +175,7 @@ export const fraudRerunRule = inngest.createFunction(
     concurrency: [{ limit: 1, key: "event.data.workspaceId" }],
     triggers: [{ event: "fraud/rule.updated" }],
   },
-  async ({ event, step }: { event: any; step: any }) => {
+  async ({ event, step }) => {
     const { workspaceId } = event.data as { workspaceId: string };
 
     await step.run("rerun-detection", async () => {
