@@ -11,6 +11,7 @@ import { subscribeToMarketing } from "@/lib/shopify-marketing";
 import { matchPatterns } from "@/lib/pattern-matcher";
 import { appstleSkipNextOrder, appstleUpdateBillingInterval } from "@/lib/appstle";
 import { updateShippingAddress } from "@/lib/shopify-order-actions";
+import { executeAccountLinkingJourney, executeDiscountJourney } from "@/lib/chat-journey";
 
 // Convert plain text AI response to light HTML paragraphs
 function toHtmlParagraphs(text: string): string {
@@ -356,6 +357,89 @@ export const aiMultiTurn = inngest.createFunction(
         });
         return { action: "asked_about_link" };
       }
+    }
+
+    // Step 1d: Check for active chat journey or start one
+    const journeyResult = await step.run("check-journey", async () => {
+      const admin = createAdminClient();
+      const { data: ticket } = await admin
+        .from("tickets")
+        .select("journey_id, journey_step, channel")
+        .eq("id", ticket_id)
+        .single();
+
+      if (!ticket) return { handled: false };
+      const isChatChannel = ticket.channel === "chat" || ticket.channel === "help_center";
+
+      // If journey is already active, continue it
+      if (ticket.journey_id && ticket.journey_step < 99) {
+        // Determine which journey type
+        const { data: journey } = await admin
+          .from("chat_journeys")
+          .select("trigger_intent")
+          .eq("id", ticket.journey_id)
+          .single();
+
+        if (journey?.trigger_intent === "account_linking") {
+          const result = await executeAccountLinkingJourney(workspace_id, ticket_id, message_body);
+          if (!result.completed) return { handled: true };
+          // Linking done — start discount journey
+          await admin.from("tickets").update({
+            journey_step: 0,
+            journey_data: {},
+          }).eq("id", ticket_id);
+          const discResult = await executeDiscountJourney(workspace_id, ticket_id, message_body);
+          return { handled: !discResult.completed };
+        }
+
+        if (journey?.trigger_intent === "discount_signup") {
+          const result = await executeDiscountJourney(workspace_id, ticket_id, message_body);
+          return { handled: !result.completed };
+        }
+
+        return { handled: false };
+      }
+
+      // Check if this message should start a discount journey on chat
+      if (isChatChannel) {
+        const bodyLower = message_body.toLowerCase();
+        const discountKeywords = ["discount", "coupon", "deal", "promo", "promotion", "save", "code", "sale"];
+        const isDiscountIntent = discountKeywords.some(k => bodyLower.includes(k));
+
+        if (isDiscountIntent) {
+          // Start account linking journey first (if needed), then discount
+          const { data: cust } = await admin
+            .from("customers")
+            .select("first_name, last_name")
+            .eq("id", (await admin.from("tickets").select("customer_id").eq("id", ticket_id).single()).data?.customer_id || "")
+            .single();
+
+          if (cust?.first_name && cust?.last_name) {
+            // Check if there are unlinked matches
+            const linkResult = await executeAccountLinkingJourney(workspace_id, ticket_id, message_body);
+            if (!linkResult.completed) {
+              // Save journey reference
+              await admin.from("tickets").update({ handled_by: "Journey: Discount Signup" }).eq("id", ticket_id);
+              return { handled: true };
+            }
+          }
+
+          // No linking needed — go straight to discount journey
+          await admin.from("tickets").update({
+            journey_step: 0,
+            journey_data: {},
+            handled_by: "Journey: Discount Signup",
+          }).eq("id", ticket_id);
+          const discResult = await executeDiscountJourney(workspace_id, ticket_id, message_body);
+          return { handled: !discResult.completed };
+        }
+      }
+
+      return { handled: false };
+    });
+
+    if (journeyResult.handled) {
+      return { action: "journey_active" };
     }
 
     // Step 2: Assemble context
