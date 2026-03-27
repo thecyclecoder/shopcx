@@ -204,7 +204,16 @@ export async function assembleTicketContext(
   promptParts.push("- If the customer asks for a human, respond with exactly: ESCALATE: human_requested");
   promptParts.push("- Never mention that you are an AI unless directly asked.");
   promptParts.push("- Never fabricate order details, tracking numbers, or product claims.");
-  promptParts.push("- Keep responses concise and helpful.");
+  promptParts.push("- FORMATTING: Keep responses SHORT. Maximum 3 sentences per paragraph. Use paragraph breaks between ideas. Never send a wall of text.");
+  promptParts.push("- FORMATTING: Do not use markdown formatting like ** or __. Write plain text only. Use line breaks for emphasis instead.");
+  promptParts.push("- FOCUS: Only answer the customer's LATEST message. The conversation history is for context only — do NOT repeat or re-address anything from previous turns. Treat the latest customer message as the ONLY thing you need to respond to.");
+  promptParts.push("- Do NOT reference or acknowledge topics from earlier in the conversation unless the customer explicitly brings them up again.");
+  if (ticket.ai_turn_count > 0) {
+    promptParts.push("- This is a follow-up message. Keep it brief and conversational — no need for a long greeting or sign-off. Just answer the question directly.");
+    promptParts.push("- Do NOT include a sign-off or team signature. Just end naturally.");
+  } else {
+    promptParts.push("- Sign-off should be on its own line, separated by a blank line from the rest of the message.");
+  }
 
   // KB context
   if (ragContext.chunks.length > 0) {
