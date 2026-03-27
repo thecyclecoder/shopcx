@@ -210,6 +210,7 @@ export default function ChatWidgetPage() {
               return [...prev, newMsg];
             });
             setWaitingForReply(false);
+            clearTimeout((window as unknown as Record<string, unknown>).__shopcxTypingTimer as number);
           }
         }
       )
@@ -292,7 +293,10 @@ export default function ChatWidgetPage() {
       setInput(msg);
     } finally {
       setSending(false);
-      setWaitingForReply(true);
+      // Delay typing indicator by 5s — feels like someone is reading the message first
+      const timer = setTimeout(() => setWaitingForReply(true), 5000);
+      // Store timer so we can cancel if reply arrives before 5s
+      (window as unknown as Record<string, unknown>).__shopcxTypingTimer = timer;
     }
   };
 

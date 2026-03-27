@@ -163,6 +163,8 @@ export default function TicketsPage() {
   }, [workspace.id]);
 
   const fetchTickets = useCallback(async (silent = false) => {
+    // Don't fetch until view filters are loaded (prevents flash of unfiltered results)
+    if (viewId && viewLoaded !== viewId) return;
     if (!silent) setLoading(true);
     try {
       const params = new URLSearchParams({
@@ -188,7 +190,7 @@ export default function TicketsPage() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [statusFilter, channelFilter, assigneeFilter, tagFilter, snoozedFilter, search, offset, urlEscalationMine]);
+  }, [statusFilter, channelFilter, assigneeFilter, tagFilter, snoozedFilter, search, offset, urlEscalationMine, viewId, viewLoaded]);
 
   useEffect(() => {
     fetchTickets();
