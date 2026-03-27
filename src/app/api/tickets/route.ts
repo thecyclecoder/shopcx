@@ -19,6 +19,7 @@ export async function GET(request: Request) {
   const assignedTo = searchParams.get("assigned_to");
   const tag = searchParams.get("tag");
   const escalated = searchParams.get("escalated");
+  const snoozed = searchParams.get("snoozed");
   const search = searchParams.get("search");
   const sort = searchParams.get("sort") || "updated_at";
   const order = searchParams.get("order") || "desc";
@@ -54,6 +55,12 @@ export async function GET(request: Request) {
     }
   }
   if (escalated === "true") query = query.not("escalated_to", "is", null);
+  if (snoozed === "true") {
+    query = query.gt("snoozed_until", new Date().toISOString());
+  } else if (snoozed !== "all") {
+    // Default: exclude snoozed tickets
+    query = query.or("snoozed_until.is.null,snoozed_until.lte." + new Date().toISOString());
+  }
   const escalationMine = searchParams.get("escalation_mine");
   if (escalationMine === "true" && user) {
     // Tickets escalated TO me or tickets I assigned that were escalated
@@ -91,6 +98,7 @@ export async function GET(request: Request) {
     customer_email: t.customers?.email,
     customer_name: [t.customers?.first_name, t.customers?.last_name].filter(Boolean).join(" ") || null,
     assigned_name: t.handled_by || (t.assigned_to ? assignedMap.get(t.assigned_to) || null : null),
+    snoozed_until: t.snoozed_until || null,
     customers: undefined,
   }));
 

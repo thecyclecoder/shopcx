@@ -16,6 +16,7 @@ interface TicketRow {
   last_customer_reply_at: string | null;
   customer_email: string | null;
   customer_name: string | null;
+  snoozed_until: string | null;
   tags: string[];
   created_at: string;
   updated_at: string;
@@ -72,6 +73,7 @@ export default function TicketsPage() {
   const [channelFilter, setChannelFilter] = useState("all");
   const [assigneeFilter, setAssigneeFilter] = useState("");
   const [tagFilter, setTagFilter] = useState<string[]>([]);
+  const [snoozedFilter, setSnoozedFilter] = useState(false);
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [offset, setOffset] = useState(0);
   const [viewName, setViewName] = useState("");
@@ -161,6 +163,7 @@ export default function TicketsPage() {
       if (channelFilter !== "all") params.set("channel", channelFilter);
       if (assigneeFilter) params.set("assigned_to", assigneeFilter);
       if (tagFilter.length > 0) params.set("tag", tagFilter.join(","));
+      if (snoozedFilter) params.set("snoozed", "true");
       if (search) params.set("search", search);
       if (urlEscalationMine) params.set("escalation_mine", "true");
 
@@ -173,7 +176,7 @@ export default function TicketsPage() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [statusFilter, channelFilter, assigneeFilter, tagFilter, search, offset, urlEscalationMine]);
+  }, [statusFilter, channelFilter, assigneeFilter, tagFilter, snoozedFilter, search, offset, urlEscalationMine]);
 
   useEffect(() => {
     fetchTickets();
@@ -370,6 +373,22 @@ export default function TicketsPage() {
             </div>
           </div>
         )}
+        <div>
+          <label className="block text-sm font-medium text-zinc-500">Snoozed</label>
+          <button
+            onClick={() => { setSnoozedFilter(!snoozedFilter); setOffset(0); clearView(); }}
+            className={`mt-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
+              snoozedFilter
+                ? "border-indigo-300 bg-indigo-50 text-indigo-700 dark:border-indigo-700 dark:bg-indigo-950 dark:text-indigo-400"
+                : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+            }`}
+          >
+            <svg className="inline-block h-4 w-4 mr-1 -mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            Snoozed
+          </button>
+        </div>
         <form onSubmit={handleSearch} className="flex-1">
           <label className="block text-sm font-medium text-zinc-500">Search</label>
           <div className="relative mt-1">
@@ -489,6 +508,14 @@ export default function TicketsPage() {
                       {t.auto_reply_at && new Date(t.auto_reply_at) > new Date() && (
                         <span className="rounded bg-violet-50 px-1 py-0.5 text-sm font-medium text-violet-500 dark:bg-violet-900/30 dark:text-violet-400">
                           Auto {new Date(t.auto_reply_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
+                        </span>
+                      )}
+                      {t.snoozed_until && new Date(t.snoozed_until) > new Date() && (
+                        <span className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1 py-0.5 text-[10px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+                          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                          {new Date(t.snoozed_until).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
                         </span>
                       )}
                       {t.escalated_to && (
