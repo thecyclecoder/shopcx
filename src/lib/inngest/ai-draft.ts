@@ -132,6 +132,7 @@ export const aiDraftTicket = inngest.createFunction(
           .update({
             status: "pending",
             ai_handled: true,
+            handled_by: "AI Agent",
             auto_reply_at: null,
             pending_auto_reply: null,
           })

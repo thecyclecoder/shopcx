@@ -37,7 +37,13 @@ export async function GET(request: Request) {
 
   if (status && status !== "all") query = query.eq("status", status);
   if (channel && channel !== "all") query = query.eq("channel", channel);
-  if (assignedTo) query = query.eq("assigned_to", assignedTo);
+  if (assignedTo === "__ai_agent") {
+    query = query.eq("handled_by", "AI Agent");
+  } else if (assignedTo === "__workflow") {
+    query = query.ilike("handled_by", "Workflow:%");
+  } else if (assignedTo) {
+    query = query.eq("assigned_to", assignedTo);
+  }
   if (tag) {
     const tagList = tag.split(",").map(t => t.trim()).filter(Boolean);
     if (tagList.length === 1) {
@@ -84,7 +90,7 @@ export async function GET(request: Request) {
     ...t,
     customer_email: t.customers?.email,
     customer_name: [t.customers?.first_name, t.customers?.last_name].filter(Boolean).join(" ") || null,
-    assigned_name: t.assigned_to ? assignedMap.get(t.assigned_to) || null : null,
+    assigned_name: t.handled_by || (t.assigned_to ? assignedMap.get(t.assigned_to) || null : null),
     customers: undefined,
   }));
 

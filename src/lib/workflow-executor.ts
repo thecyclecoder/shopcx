@@ -63,6 +63,8 @@ export async function executeWorkflow(
         await executeSubscriptionInquiry(admin, workflow.config as Record<string, unknown>, context);
         break;
     }
+    // Mark ticket as handled by workflow
+    await admin.from("tickets").update({ handled_by: `Workflow: ${workflow.name}` }).eq("id", ticketId);
   } catch (err) {
     console.error(`Workflow "${workflow.name}" error:`, err);
     // Add internal note about the failure

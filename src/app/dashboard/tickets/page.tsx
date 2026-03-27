@@ -333,6 +333,8 @@ export default function TicketsPage() {
             className="mt-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
           >
             <option value="">Anyone</option>
+            <option value="__ai_agent">AI Agent</option>
+            <option value="__workflow">Workflow</option>
             {members.map((m) => (
               <option key={m.user_id} value={m.user_id}>{m.display_name || m.email}</option>
             ))}

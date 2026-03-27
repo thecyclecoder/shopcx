@@ -1340,9 +1340,25 @@ export default function TicketDetailPage() {
             </div>
             <div>
               <label className="block text-sm text-zinc-500">Assigned To</label>
+              {(ticket as TicketDetail & { handled_by?: string }).handled_by && (
+                <div className="mt-1 mb-1 flex items-center gap-1.5">
+                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
+                    (ticket as TicketDetail & { handled_by?: string }).handled_by?.startsWith("AI")
+                      ? "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400"
+                      : "bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-400"
+                  }`}>
+                    {(ticket as TicketDetail & { handled_by?: string }).handled_by?.startsWith("AI") ? (
+                      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" /></svg>
+                    ) : (
+                      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" /></svg>
+                    )}
+                    {(ticket as TicketDetail & { handled_by?: string }).handled_by}
+                  </span>
+                </div>
+              )}
               <select
                 value={ticket.assigned_to || ""}
-                onChange={(e) => handlePatch({ assigned_to: e.target.value || null })}
+                onChange={(e) => handlePatch({ assigned_to: e.target.value || null, handled_by: null })}
                 className="mt-1 w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
               >
                 <option value="">Unassigned</option>
