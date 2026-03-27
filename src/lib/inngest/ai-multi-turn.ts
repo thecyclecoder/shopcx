@@ -348,7 +348,7 @@ export const aiMultiTurn = inngest.createFunction(
               );
               if (rawRes.ok) {
                 const rawText = await rawRes.text();
-                const nodesMatch = rawText.match(/"discounts"[^}]*"nodes"\s*:\s*\[([^\]]*)\]/s);
+                const nodesMatch = rawText.match(/"discounts"[\s\S]*?"nodes"\s*:\s*\[([\s\S]*?)\]/);
                 if (nodesMatch && nodesMatch[1].trim()) {
                   try {
                     const nodes = JSON.parse(`[${nodesMatch[1]}]`);
@@ -413,7 +413,7 @@ export const aiMultiTurn = inngest.createFunction(
                 if (verifyRes.ok) {
                   const rawText = await verifyRes.text();
                   // Parse discount nodes from raw response
-                  const nodesMatch = rawText.match(/"discounts"[^}]*"nodes"\s*:\s*\[([^\]]*)\]/s);
+                  const nodesMatch = rawText.match(/"discounts"[\s\S]*?"nodes"\s*:\s*\[([\s\S]*?)\]/);
                   if (nodesMatch && nodesMatch[1].trim()) {
                     try {
                       const nodes = JSON.parse(`[${nodesMatch[1]}]`);
