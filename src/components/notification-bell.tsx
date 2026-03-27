@@ -154,7 +154,23 @@ export default function NotificationBell() {
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{n.title}</p>
                     {n.body && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-2">{n.body}</p>}
-                    <p className="mt-1 text-xs text-zinc-400">{timeAgo(n.created_at)}</p>
+                    <div className="mt-1 flex items-center gap-2">
+                      <p className="text-xs text-zinc-400">{timeAgo(n.created_at)}</p>
+                      {n.type === "knowledge_gap" && (
+                        <span
+                          className="text-xs text-purple-600 hover:underline dark:text-purple-400"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!n.read) markAsRead(n.id);
+                            setIsOpen(false);
+                            const query = encodeURIComponent(n.body || n.title);
+                            window.location.assign(`/dashboard/knowledge-base?generate=${query}`);
+                          }}
+                        >
+                          Generate Article
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </button>
               ))
