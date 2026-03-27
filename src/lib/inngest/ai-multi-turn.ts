@@ -400,8 +400,9 @@ export const aiMultiTurn = inngest.createFunction(
         return { handled: false };
       }
 
-      // Check if this message should start a chat journey
-      if (isChatChannel) {
+      // Check if this message should start a journey (all channels except social_comments)
+      const journeyEligibleChannels = ["chat", "help_center", "email", "meta_dm", "sms"];
+      if (journeyEligibleChannels.includes(ticket?.channel || "")) {
         // Look up enabled chat journeys for this channel
         const { data: chatJourneys } = await admin
           .from("journey_definitions")
