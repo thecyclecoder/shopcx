@@ -162,7 +162,16 @@ export const aiMultiTurn = inngest.createFunction(
             .single();
 
           if (workflow) {
-            // Fire the workflow instead of AI
+            // Set auto_reply_at so the workflow's cancel check doesn't block it
+            const { data: wsDelays } = await admin.from("workspaces").select("response_delays").eq("id", workspace_id).single();
+            const delays = (wsDelays?.response_delays || {}) as Record<string, number>;
+            const delaySec = delays.chat || delays.email || 60;
+            await admin.from("tickets").update({
+              auto_reply_at: new Date(Date.now() + delaySec * 1000).toISOString(),
+              handled_by: `Workflow: ${workflow.name}`,
+            }).eq("id", ticket_id);
+
+            // Fire the workflow
             await inngest.send({
               name: "workflow/execute",
               data: { workspace_id, ticket_id, trigger_tag: match.autoTag, channel: "chat" },

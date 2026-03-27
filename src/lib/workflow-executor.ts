@@ -303,20 +303,24 @@ async function sendReply(admin: Admin, context: WorkflowContext, templateText: s
   });
   if (msgError) console.error("Workflow message insert error:", msgError.message);
 
-  // Send email
+  // Send email — only on email channel, respect sandbox
+  const channel = (context.ticket.channel as string) || "email";
   const customerEmail = context.customer?.email as string | undefined;
-  if (customerEmail) {
-    const { data: ws } = await admin.from("workspaces").select("name").eq("id", context.workspaceId).single();
-    await sendTicketReply({
-      workspaceId: context.workspaceId,
-      toEmail: customerEmail,
-      subject: (context.ticket.subject as string) || "Support",
-      body,
-      inReplyTo: (context.ticket.email_message_id as string) || null,
-      agentName: "Support",
-      workspaceName: ws?.name || "Support",
-    });
+  if (channel === "email" && customerEmail) {
+    const { data: ws } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", context.workspaceId).single();
+    if (!ws?.sandbox_mode) {
+      await sendTicketReply({
+        workspaceId: context.workspaceId,
+        toEmail: customerEmail,
+        subject: (context.ticket.subject as string) || "Support",
+        body,
+        inReplyTo: (context.ticket.email_message_id as string) || null,
+        agentName: "Support",
+        workspaceName: ws?.name || "Support",
+      });
+    }
   }
+  // Chat/help_center/sms/social — message is already inserted as external, visible in widget
 
   // Update ticket status (configurable — defaults to pending) + clear auto_reply_at
   const statusAfterReply = (statusOverride as string) || "pending";
