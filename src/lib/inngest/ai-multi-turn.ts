@@ -280,7 +280,7 @@ export const aiMultiTurn = inngest.createFunction(
     }
 
     // Step 5b: Execute AI workflow actions (e.g., marketing signup)
-    const actionResult = await step.run("execute-actions", async () => {
+    await step.run("execute-actions", async () => {
       const admin = createAdminClient();
       const bodyLower = message_body.toLowerCase();
 
