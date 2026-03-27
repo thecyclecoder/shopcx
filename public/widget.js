@@ -3,8 +3,16 @@
   var workspaceId = script && script.getAttribute("data-workspace");
   if (!workspaceId) return;
 
+  var customerId = script.getAttribute("data-customer-id") || "";
+  var customerEmail = script.getAttribute("data-customer-email") || "";
+  var customerName = script.getAttribute("data-customer-name") || "";
+
   var BASE = script.src.replace(/\/widget\.js.*$/, "");
-  var IFRAME_URL = BASE + "/widget/" + workspaceId;
+  var params = [];
+  if (customerId) params.push("cid=" + encodeURIComponent(customerId));
+  if (customerEmail) params.push("email=" + encodeURIComponent(customerEmail));
+  if (customerName) params.push("name=" + encodeURIComponent(customerName));
+  var IFRAME_URL = BASE + "/widget/" + workspaceId + (params.length ? "?" + params.join("&") : "");
 
   // Create container
   var container = document.createElement("div");
