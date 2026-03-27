@@ -284,13 +284,13 @@ export const aiMultiTurn = inngest.createFunction(
       const admin = createAdminClient();
       const bodyLower = message_body.toLowerCase();
 
-      // Check for marketing signup / discount confirmation
-      const signupKeywords = ["sign me up", "subscribe", "yes", "sign up", "opt in", "i'd love to", "please do", "go ahead", "yes please", "yeah"];
-      const marketingKeywords = ["email", "sms", "marketing", "newsletter", "promo", "notification", "coupon", "discount", "deal", "both"];
-      const hasSignupIntent = signupKeywords.some(k => bodyLower.includes(k));
-      const hasMarketingContext = marketingKeywords.some(k => bodyLower.includes(k));
+      // Check for marketing signup / discount / coupon apply confirmation
+      const confirmKeywords = ["sign me up", "subscribe", "yes", "sign up", "opt in", "i'd love to", "please do", "go ahead", "yes please", "yeah", "apply", "add it", "do it", "sure"];
+      const contextKeywords = ["email", "sms", "marketing", "newsletter", "promo", "notification", "coupon", "discount", "deal", "both", "family", "subscription", "code"];
+      const hasConfirmIntent = confirmKeywords.some(k => bodyLower.includes(k));
+      const hasContext = contextKeywords.some(k => bodyLower.includes(k));
 
-      if (!hasSignupIntent || !hasMarketingContext) return null;
+      if (!hasConfirmIntent || !hasContext) return null;
 
       // Get ticket + customer
       const { data: ticket } = await admin
