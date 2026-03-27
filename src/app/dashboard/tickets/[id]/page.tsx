@@ -745,6 +745,35 @@ export default function TicketDetailPage() {
                         Sandbox — not sent to customer
                       </div>
                     )}
+                    {/* Approve & Send for AI sandbox drafts */}
+                    {isInternal && m.author_type === "ai" && m.body.includes("[AI Draft") && (
+                      <button
+                        onClick={async () => {
+                          if (!confirm("Send this AI draft to the customer?")) return;
+                          // Strip the sandbox prefix from the body
+                          const cleanBody = m.body
+                            .replace(/\[AI Draft.*?Sandbox Mode\]\s*/i, "")
+                            .replace(/\s*Confidence:.*?Source:.*$/i, "")
+                            .trim();
+                          const res = await fetch(`/api/tickets/${id}/messages`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ body: cleanBody, visibility: "external" }),
+                          });
+                          if (res.ok) {
+                            const ticketRes = await fetch(`/api/tickets/${id}`);
+                            if (ticketRes.ok) {
+                              const data = await ticketRes.json();
+                              setTicket(data.ticket);
+                              setMessages(data.messages);
+                            }
+                          }
+                        }}
+                        className="mt-2 rounded-md bg-emerald-600 px-3 py-1 text-sm font-medium text-white hover:bg-emerald-500"
+                      >
+                        Approve &amp; Send to Customer
+                      </button>
+                    )}
                   </div>
                 </div>
               );
