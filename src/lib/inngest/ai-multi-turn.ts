@@ -114,6 +114,36 @@ export const aiMultiTurn = inngest.createFunction(
       return assembleTicketContext(workspace_id, ticket_id);
     });
 
+    // Step 2b: KB gap check — if no KB chunks or macros matched, don't wing it
+    if (context.ragContext.chunks.length === 0 && context.ragContext.macros.length === 0) {
+      await step.run("kb-gap-detected", async () => {
+        const admin = createAdminClient();
+
+        // Create internal note about the gap
+        await admin.from("ticket_messages").insert({
+          ticket_id,
+          direction: "outbound",
+          body: `[Knowledge Base Gap Detected]\n\nNo matching KB articles or macros found for this question. Suggested KB article: "${message_body.slice(0, 100)}"\n\nTicket left for human agent.`,
+          author_type: "system",
+          visibility: "internal",
+        });
+
+        // Create notification for admins
+        await admin.from("dashboard_notifications").insert({
+          workspace_id,
+          type: "knowledge_gap",
+          title: "Knowledge base gap detected",
+          body: `AI couldn't find relevant content for: "${message_body.slice(0, 120)}"`,
+          link: `/dashboard/knowledge-base`,
+          metadata: { ticket_id, query: message_body.slice(0, 500) },
+        });
+
+        // Assign to agent
+        await handleEscalation(workspace_id, ticket_id, "knowledge_gap");
+      });
+      return { action: "kb_gap", reason: "No matching KB articles or macros" };
+    }
+
     // Step 3: Get response delay
     const delay = await step.run("get-delay", async () => {
       const admin = createAdminClient();
@@ -180,7 +210,7 @@ export const aiMultiTurn = inngest.createFunction(
     });
 
     // Check for ESCALATE: prefix
-    if (aiResponse.responseText.startsWith("ESCALATE:")) {
+    if (aiResponse.responseText.includes("ESCALATE:")) {
       const reason = aiResponse.responseText.replace("ESCALATE:", "").trim();
       await step.run("ai-requested-escalation", async () => {
         await handleEscalation(workspace_id, ticket_id, reason || "ai_unsure");
