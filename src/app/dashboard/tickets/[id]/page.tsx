@@ -501,6 +501,21 @@ export default function TicketDetailPage() {
             </div>
           )}
 
+          {/* Escalation banner */}
+          {(ticket as TicketDetail & { escalation_reason?: string; ai_turn_count?: number }).escalation_reason && (
+            <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 dark:border-red-800 dark:bg-red-950">
+              <svg className="h-4 w-4 flex-shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+              <div>
+                <p className="text-sm font-medium text-red-700 dark:text-red-400">
+                  {((ticket as TicketDetail & { escalation_reason?: string }).escalation_reason || "").replace(/_/g, " ")} — AI paused
+                  {(ticket as TicketDetail & { ai_turn_count?: number }).ai_turn_count ? ` after ${(ticket as TicketDetail & { ai_turn_count?: number }).ai_turn_count} turn${(ticket as TicketDetail & { ai_turn_count?: number }).ai_turn_count !== 1 ? "s" : ""}` : ""}
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Header */}
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-100">
@@ -732,6 +747,9 @@ export default function TicketDetailPage() {
                         {isInternal && "(Internal note) "}
                         {m.author_name || m.author_type}
                       </span>
+                      {m.author_type === "ai" && !isInternal && (
+                        <span className="rounded bg-cyan-100 px-1 py-0.5 text-[10px] font-medium text-cyan-600 dark:bg-cyan-900/30 dark:text-cyan-400">AI</span>
+                      )}
                       <span>{formatDateTime(m.created_at)}</span>
                     </div>
                     <div

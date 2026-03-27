@@ -251,6 +251,32 @@ export async function POST(request: Request) {
       customer: custData || undefined,
       message: { body: messageBody, direction: "inbound", author_type: "customer" },
     });
+
+    // Multi-turn AI: if ticket was AI-handled or has no assignee, let AI continue
+    if (!isPositiveConfirmation && ticketData) {
+      const isAIHandled = ticketData.handled_by === "AI Agent" || ticketData.ai_handled;
+      const isUnassigned = !ticketData.assigned_to;
+      const channel = ticketData.channel || "email";
+
+      // Check if AI is enabled for this channel
+      const { data: aiConfig } = await admin
+        .from("ai_channel_config")
+        .select("enabled")
+        .eq("workspace_id", workspaceId)
+        .eq("channel", channel)
+        .single();
+
+      if (aiConfig?.enabled && (isAIHandled || isUnassigned)) {
+        await inngest.send({
+          name: "ai/reply-received",
+          data: {
+            workspace_id: workspaceId,
+            ticket_id: ticketId,
+            message_body: cleanBody,
+          },
+        });
+      }
+    }
   } else {
     // New ticket — resolve or create customer
     let customerId: string | null = null;

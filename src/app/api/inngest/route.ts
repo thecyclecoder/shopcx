@@ -15,6 +15,7 @@ import { kbEmbedDocument } from "@/lib/inngest/kb-embed";
 import { aiDraftTicket, aiTriggerWorkflow } from "@/lib/inngest/ai-draft";
 import { journeySessionCompleted, journeySessionAbandoned } from "@/lib/inngest/journey-outcomes";
 import { scrapeHelpCenter } from "@/lib/inngest/scrape-help-center";
+import { aiMultiTurn } from "@/lib/inngest/ai-multi-turn";
 
 export const maxDuration = 300;
 
@@ -38,5 +39,6 @@ export const { GET, POST, PUT } = serve({
     journeySessionCompleted,
     journeySessionAbandoned,
     scrapeHelpCenter,
+    aiMultiTurn,
   ],
 });

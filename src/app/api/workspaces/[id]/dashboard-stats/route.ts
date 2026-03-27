@@ -57,6 +57,7 @@ export async function GET(
       .select("retention_score")
       .eq("workspace_id", workspaceId)
       .not("retention_score", "is", null)
+      .gt("total_orders", 0)
       .limit(1000);
     if (retData && retData.length > 0) {
       avgRetention = retData.reduce((sum: number, c: { retention_score: number }) => sum + (c.retention_score || 0), 0) / retData.length;

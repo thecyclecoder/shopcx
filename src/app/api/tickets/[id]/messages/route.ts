@@ -105,6 +105,11 @@ export async function POST(
     ticketUpdates.status = "pending";
   }
 
+  // Mark agent intervention for multi-turn AI awareness
+  if (visibility === "external") {
+    ticketUpdates.agent_intervened = true;
+  }
+
   await admin.from("tickets").update(ticketUpdates).eq("id", ticketId);
 
   // Evaluate rules on message sent

@@ -1,0 +1,225 @@
+// Multi-turn AI conversation handler
+// Triggered when a customer replies to a ticket where AI is active
+
+import { inngest } from "./client";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { assembleTicketContext } from "@/lib/ai-context";
+import { routeInboundReply } from "@/lib/turn-router";
+import { handleEscalation } from "@/lib/escalation";
+import { sendTicketReply } from "@/lib/email";
+
+export const aiMultiTurn = inngest.createFunction(
+  {
+    id: "ai-multi-turn",
+    retries: 1,
+    concurrency: [{ limit: 1, key: "event.data.ticket_id" }],
+    triggers: [{ event: "ai/reply-received" }],
+  },
+  async ({ event, step }) => {
+    const { workspace_id, ticket_id, message_body } = event.data as {
+      workspace_id: string;
+      ticket_id: string;
+      message_body: string;
+    };
+
+    // Step 1: Route the reply
+    const decision = await step.run("route-reply", async () => {
+      return routeInboundReply(ticket_id, message_body);
+    });
+
+    // Handle close check — hand off to existing positive-close flow
+    if (decision.action === "close_check") {
+      await step.run("trigger-close-check", async () => {
+        await inngest.send({
+          name: "workflow/positive-close",
+          data: { workspace_id, ticket_id },
+        });
+      });
+      return { action: "close_check", reason: decision.reason };
+    }
+
+    // Handle escalation
+    if (decision.action === "escalate") {
+      await step.run("escalate", async () => {
+        await handleEscalation(workspace_id, ticket_id, decision.reason);
+      });
+      return { action: "escalated", reason: decision.reason };
+    }
+
+    // Step 2: Assemble context
+    const context = await step.run("assemble-context", async () => {
+      return assembleTicketContext(workspace_id, ticket_id);
+    });
+
+    // Step 3: Get response delay
+    const delay = await step.run("get-delay", async () => {
+      const admin = createAdminClient();
+      const { data: ws } = await admin.from("workspaces").select("response_delays").eq("id", workspace_id).single();
+      const delays = (ws?.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5, social_comments: 10 }) as Record<string, number>;
+      return delays[context.channel] || 60;
+    });
+
+    // Wait for response delay
+    if (delay > 0) {
+      await step.sleep("response-delay", `${delay}s`);
+    }
+
+    // Check if agent cancelled the auto-reply
+    const cancelled = await step.run("check-cancelled", async () => {
+      const admin = createAdminClient();
+      const { data: ticket } = await admin.from("tickets").select("auto_reply_at, assigned_to, agent_intervened").eq("id", ticket_id).single();
+      // If agent has been assigned or intervened, stop AI
+      if (ticket?.assigned_to || ticket?.agent_intervened) return true;
+      return false;
+    });
+
+    if (cancelled) {
+      return { action: "cancelled", reason: "agent_intervened" };
+    }
+
+    // Step 4: Generate response
+    const aiResponse = await step.run("generate-response", async () => {
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) throw new Error("No ANTHROPIC_API_KEY");
+
+      // Use Haiku for turns 1-2, Sonnet for 3+
+      const model = context.turnCount < 2
+        ? "claude-haiku-4-5-20251001"
+        : "claude-sonnet-4-20250514";
+
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 1024,
+          system: context.systemPrompt,
+          messages: context.conversationHistory.map(m => ({
+            role: m.role,
+            content: m.content,
+          })),
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`Claude API error: ${res.status} ${err}`);
+      }
+
+      const data = await res.json();
+      const responseText = data.content?.[0]?.text || "";
+
+      return { responseText, model };
+    });
+
+    // Check for ESCALATE: prefix
+    if (aiResponse.responseText.startsWith("ESCALATE:")) {
+      const reason = aiResponse.responseText.replace("ESCALATE:", "").trim();
+      await step.run("ai-requested-escalation", async () => {
+        await handleEscalation(workspace_id, ticket_id, reason || "ai_unsure");
+      });
+      return { action: "escalated", reason: `ai_requested: ${reason}` };
+    }
+
+    // Step 5: Confidence check for draft-review decisions
+    if (decision.action === "ai_draft_review") {
+      await step.run("save-draft-for-review", async () => {
+        const admin = createAdminClient();
+        await admin.from("tickets").update({
+          ai_draft: aiResponse.responseText,
+          ai_confidence: 0.5,
+          ai_tier: "review",
+          ai_drafted_at: new Date().toISOString(),
+        }).eq("id", ticket_id);
+
+        await admin.from("ticket_messages").insert({
+          ticket_id,
+          direction: "outbound",
+          body: `[AI Draft — Needs Review]\n\n${aiResponse.responseText}\n\nReason: ${decision.reason}`,
+          author_type: "ai",
+          visibility: "internal",
+        });
+
+        await handleEscalation(workspace_id, ticket_id, decision.reason);
+      });
+      return { action: "draft_for_review", reason: decision.reason };
+    }
+
+    // Step 6: Send response
+    await step.run("send-response", async () => {
+      const admin = createAdminClient();
+
+      const { data: ticket } = await admin
+        .from("tickets")
+        .select("subject, email_message_id, customers(email)")
+        .eq("id", ticket_id)
+        .single();
+
+      if (!ticket) return;
+
+      const customerEmail = (ticket.customers as unknown as { email: string })?.email;
+      const { data: ws } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", workspace_id).single();
+
+      if (!context.sandbox && ws && !ws.sandbox_mode && customerEmail) {
+        // Send real reply
+        await sendTicketReply({
+          workspaceId: workspace_id,
+          toEmail: customerEmail,
+          subject: ticket.subject ? `Re: ${ticket.subject}` : "Re: Your request",
+          body: aiResponse.responseText,
+          inReplyTo: ticket.email_message_id || null,
+          agentName: "AI Agent",
+          workspaceName: ws.name,
+        });
+
+        // Create outbound message
+        await admin.from("ticket_messages").insert({
+          ticket_id,
+          direction: "outbound",
+          body: aiResponse.responseText,
+          author_type: "ai",
+          visibility: "external",
+          ai_personalized: true,
+        });
+
+        // Update ticket
+        await admin.from("tickets").update({
+          status: "pending",
+          ai_turn_count: context.turnCount + 1,
+          last_ai_turn_at: new Date().toISOString(),
+          handled_by: "AI Agent",
+          auto_reply_at: null,
+          pending_auto_reply: null,
+        }).eq("id", ticket_id);
+      } else {
+        // Sandbox: save as internal note
+        await admin.from("ticket_messages").insert({
+          ticket_id,
+          direction: "outbound",
+          body: `[AI Draft — Sandbox Mode — Turn ${context.turnCount + 1}]\n\n${aiResponse.responseText}`,
+          author_type: "ai",
+          visibility: "internal",
+          ai_personalized: true,
+        });
+
+        await admin.from("tickets").update({
+          ai_turn_count: context.turnCount + 1,
+          last_ai_turn_at: new Date().toISOString(),
+          handled_by: "AI Agent",
+          auto_reply_at: null,
+          pending_auto_reply: null,
+        }).eq("id", ticket_id);
+      }
+    });
+
+    return {
+      action: "ai_responded",
+      turn: context.turnCount + 1,
+      model: aiResponse.model,
+    };
+  }
+);
