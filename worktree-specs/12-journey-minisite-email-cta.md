@@ -39,10 +39,18 @@ Beautiful HTML email with:
 - "This link expires in 24 hours" footer
 - Mobile responsive
 
+### Channel → Delivery Method
+- `chat` → inline interactive forms in widget (ONLY channel with inline forms)
+- `email` → CTA button email → journey mini-site
+- `help_center` → CTA button email → journey mini-site (help center is a contact form, like email)
+- `meta_dm` → CTA button in DM → journey mini-site
+- `sms` → CTA link in SMS → journey mini-site
+- `social_comments` → NEVER (no journeys, no workflows, 1-turn AI only)
+
 ### Integration Points
 - `chat-journey.ts` executors need a channel check:
   - If chat → send form message in widget
-  - If email → create journey_session + send CTA email
+  - If anything else → create journey_session + send CTA via appropriate channel
 - Token expiry: 24 hours by default
 - Journey session tracks which ticket triggered it
 

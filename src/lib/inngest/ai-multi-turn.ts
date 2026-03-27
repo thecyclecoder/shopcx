@@ -401,6 +401,7 @@ export const aiMultiTurn = inngest.createFunction(
       }
 
       // Check if this message should start a journey (all channels except social_comments)
+      // chat = inline forms, everything else = CTA → mini-site
       const journeyEligibleChannels = ["chat", "help_center", "email", "meta_dm", "sms"];
       if (journeyEligibleChannels.includes(ticket?.channel || "")) {
         // Look up enabled chat journeys for this channel
