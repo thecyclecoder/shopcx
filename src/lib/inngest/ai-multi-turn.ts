@@ -219,17 +219,24 @@ export const aiMultiTurn = inngest.createFunction(
         return { action: "skip" };
       }
 
-      // Check if already linked
+      // Get existing link group (if any)
       const { data: existingLinks } = await admin
         .from("customer_links")
         .select("group_id")
         .eq("customer_id", cust.id);
-      if (existingLinks?.length) {
-        await admin.from("tickets").update({ profile_link_completed: true }).eq("id", ticket_id);
-        return { action: "skip" };
+      const groupId = existingLinks?.[0]?.group_id || null;
+
+      // Get IDs already in this link group
+      let alreadyLinkedIds: string[] = [];
+      if (groupId) {
+        const { data: groupMembers } = await admin
+          .from("customer_links")
+          .select("customer_id")
+          .eq("group_id", groupId);
+        alreadyLinkedIds = (groupMembers || []).map(m => m.customer_id);
       }
 
-      // Find potential matches by name
+      // Find potential matches by name that are NOT already linked
       const { data: matches } = await admin
         .from("customers")
         .select("id, email")
@@ -238,14 +245,30 @@ export const aiMultiTurn = inngest.createFunction(
         .eq("last_name", cust.last_name)
         .neq("id", cust.id)
         .neq("email", cust.email)
-        .limit(1);
+        .limit(5);
 
-      if (!matches?.length) {
+      // Get previously rejected suggestions
+      const { data: rejections } = await admin
+        .from("customer_link_rejections")
+        .select("rejected_customer_id")
+        .eq("customer_id", cust.id);
+      const rejectedIds = (rejections || []).map(r => r.rejected_customer_id);
+
+      // Filter out already linked AND previously rejected
+      const unlinked = (matches || []).filter(m => !alreadyLinkedIds.includes(m.id) && !rejectedIds.includes(m.id));
+      if (unlinked.length === 0) {
         await admin.from("tickets").update({ profile_link_completed: true }).eq("id", ticket_id);
         return { action: "skip" };
       }
 
-      return { action: "ask", matchEmail: matches[0].email, matchId: matches[0].id, customerId: cust.id };
+      return {
+        action: "ask",
+        matchEmail: unlinked[0].email,
+        matchId: unlinked[0].id,
+        allMatchEmails: unlinked.map(m => m.email),
+        allMatchIds: unlinked.map(m => m.id),
+        customerId: cust.id,
+      };
     });
 
     // If we need to ask about profile linking
@@ -300,10 +323,17 @@ export const aiMultiTurn = inngest.createFunction(
         // Don't count this as a turn — return and let the next message trigger real support
         return { action: "profiles_linked" };
       } else if (alreadyAsked && isDenying) {
-        // Customer said no — mark as checked and continue
-        await step.run("skip-link", async () => {
+        // Customer said no — record rejection so we never offer this match again
+        await step.run("reject-link", async () => {
           const admin = createAdminClient();
           await admin.from("tickets").update({ profile_link_completed: true }).eq("id", ticket_id);
+          if (matchId && linkCustomerId) {
+            await admin.from("customer_link_rejections").upsert({
+              workspace_id,
+              customer_id: linkCustomerId,
+              rejected_customer_id: matchId,
+            }, { onConflict: "customer_id,rejected_customer_id" });
+          }
         });
         // Fall through to normal AI handling
       } else if (!alreadyAsked) {
@@ -313,7 +343,12 @@ export const aiMultiTurn = inngest.createFunction(
           await admin.from("ticket_messages").insert({
             ticket_id,
             direction: "outbound",
-            body: `Before I look into that for you — I want to make sure I have your complete account pulled up. Is ${matchEmail} also your email address?`,
+            body: (() => {
+              const allEmails = (linkResult as { allMatchEmails?: string[] }).allMatchEmails || [matchEmail || ""];
+              const emailList = allEmails.map((e: string) => `<li style="word-break:break-all">${e}</li>`).join("");
+              const plural = allEmails.length > 1;
+              return `I'm looking into that for you! By the way, I noticed we might have multiple profiles for you in our system. ${plural ? "Do these emails" : "Does this email"} also belong to you?<ul>${emailList}</ul>`;
+            })(),
             author_type: "ai",
             visibility: "external",
           });

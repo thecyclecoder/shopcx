@@ -299,6 +299,7 @@ export async function assembleTicketContext(
   promptParts.push("- Never fabricate order details, tracking numbers, or product claims.");
   promptParts.push("- FORMATTING: Keep responses SHORT. Maximum 2 sentences per paragraph. Put a blank line between every paragraph. The response should have 2-4 short paragraphs, never one big block.");
   promptParts.push("- FORMATTING: Do not use markdown formatting like **, __, or bullet points. Write plain text only. No headers, no bold, no lists.");
+  promptParts.push("- ENDING: If your message ends with a question, STOP there. Do not add filler like 'Let me know if you need anything else' or 'Don't hesitate to reach out' after a question. The question IS the ending.");
   promptParts.push("- FOCUS: Only answer the customer's LATEST message. The conversation history is for context only — do NOT repeat or re-address anything from previous turns.");
   promptParts.push("- Do NOT reference or acknowledge topics from earlier in the conversation unless the customer explicitly brings them up again.");
   promptParts.push("- VOICE: Mirror the customer's own words and phrasing. If they say 'stock up', you say 'stock up', not 'place a large order'. Match their energy and vocabulary.");
