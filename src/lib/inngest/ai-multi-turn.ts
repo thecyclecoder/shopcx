@@ -114,8 +114,10 @@ export const aiMultiTurn = inngest.createFunction(
       return assembleTicketContext(workspace_id, ticket_id);
     });
 
-    // Step 2b: KB gap check — if no KB chunks or macros matched, don't wing it
-    if (context.ragContext.chunks.length === 0 && context.ragContext.macros.length === 0) {
+    // Step 2b: KB gap check — if no KB chunks or macros matched AND it's a question, don't wing it
+    // Skip gap check for action confirmations (yes, sign me up, etc.)
+    const isActionConfirmation = /^(yes|yeah|sure|ok|please|go ahead|sign me up|do it|absolutely)/i.test(message_body.trim());
+    if (!isActionConfirmation && context.ragContext.chunks.length === 0 && context.ragContext.macros.length === 0) {
       await step.run("kb-gap-detected", async () => {
         const admin = createAdminClient();
 
