@@ -389,10 +389,45 @@ export const aiMultiTurn = inngest.createFunction(
             if (ws?.appstle_api_key_encrypted) {
               const { decrypt } = await import("@/lib/crypto");
               const apiKey = decrypt(ws.appstle_api_key_encrypted);
-              await fetch(
+
+              // Apply discount code
+              const applyRes = await fetch(
                 `https://subscription-admin.appstle.com/api/external/v2/subscription-discount-apply?contractId=${subContractId}&discountCode=FAMILY`,
                 { method: "POST", headers: { "X-API-Key": apiKey } }
               );
+
+              // Verify no duplicate codes — re-check subscription details
+              if (applyRes.ok && cust.shopify_customer_id) {
+                const verifyRes = await fetch(
+                  `https://subscription-admin.appstle.com/api/external/v2/customer-subscription-details?customerShopifyId=${cust.shopify_customer_id}`,
+                  { headers: { "X-API-Key": apiKey } }
+                );
+                if (verifyRes.ok) {
+                  const verifyData = await verifyRes.json();
+                  const contracts = verifyData?.subscriptionContracts || verifyData?.contracts || [];
+                  for (const contract of contracts) {
+                    if (String(contract.contractId || contract.id) === subContractId) {
+                      // Check for duplicate discount codes
+                      const codes = contract.discountCodes || contract.appliedDiscounts || [];
+                      if (Array.isArray(codes) && codes.length > 1) {
+                        // Remove any code that isn't FAMILY
+                        for (const code of codes) {
+                          const codeName = code.code || code.discountCode || code;
+                          if (typeof codeName === "string" && codeName.toUpperCase() !== "FAMILY") {
+                            try {
+                              await fetch(
+                                `https://subscription-admin.appstle.com/api/external/v2/subscription-discount-remove?contractId=${subContractId}&discountCode=${codeName}`,
+                                { method: "DELETE", headers: { "X-API-Key": apiKey } }
+                              );
+                            } catch {}
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
               await admin.from("ticket_messages").insert({
                 ticket_id,
                 direction: "outbound",
