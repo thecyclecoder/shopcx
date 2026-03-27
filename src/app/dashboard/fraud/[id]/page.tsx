@@ -86,10 +86,7 @@ export default function FraudCaseDetailPage() {
   const [dismissalReason, setDismissalReason] = useState("");
   const [assignTo, setAssignTo] = useState("");
 
-  const fetchCase = async () => {
-    const res = await fetch(`/api/workspaces/${workspace.id}/fraud-cases/${caseId}`);
-    if (!res.ok) { router.push("/dashboard/fraud"); return; }
-    const data = await res.json();
+  const applyData = (data: { case: FraudCaseDetail; history: HistoryEntry[]; members: Member[] }) => {
     setFraudCase(data.case);
     setHistory(data.history || []);
     setMembers(data.members || []);
@@ -100,7 +97,22 @@ export default function FraudCaseDetailPage() {
     setLoading(false);
   };
 
-  useEffect(() => { fetchCase(); }, [caseId, workspace.id]);
+  const refreshCase = async () => {
+    const res = await fetch(`/api/workspaces/${workspace.id}/fraud-cases/${caseId}`);
+    if (!res.ok) { router.push("/dashboard/fraud"); return; }
+    applyData(await res.json());
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await fetch(`/api/workspaces/${workspace.id}/fraud-cases/${caseId}`);
+      if (cancelled) return;
+      if (!res.ok) { router.push("/dashboard/fraud"); return; }
+      applyData(await res.json());
+    })();
+    return () => { cancelled = true; };
+  }, [caseId, workspace.id, router]);
 
   const updateCase = async (updates: Record<string, unknown>) => {
     setSaving(true);
@@ -109,7 +121,7 @@ export default function FraudCaseDetailPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updates),
     });
-    await fetchCase();
+    await refreshCase();
     setSaving(false);
   };
 
@@ -168,10 +180,10 @@ export default function FraudCaseDetailPage() {
 
           {/* Evidence */}
           {fraudCase.rule_type === "shared_address" && (
-            <SharedAddressEvidence evidence={evidence} workspaceId={workspace.id} />
+            <SharedAddressEvidence evidence={evidence} />
           )}
           {fraudCase.rule_type === "high_velocity" && (
-            <HighVelocityEvidence evidence={evidence} workspaceId={workspace.id} />
+            <HighVelocityEvidence evidence={evidence} />
           )}
 
           {/* Case History */}
@@ -317,7 +329,7 @@ export default function FraudCaseDetailPage() {
 
 // ── Evidence Components ──
 
-function SharedAddressEvidence({ evidence, workspaceId }: { evidence: Record<string, unknown>; workspaceId: string }) {
+function SharedAddressEvidence({ evidence }: { evidence: Record<string, unknown> }) {
   const e = evidence as {
     address: string;
     customer_count: number;
@@ -379,7 +391,7 @@ function SharedAddressEvidence({ evidence, workspaceId }: { evidence: Record<str
   );
 }
 
-function HighVelocityEvidence({ evidence }: { evidence: Record<string, unknown>; workspaceId: string }) {
+function HighVelocityEvidence({ evidence }: { evidence: Record<string, unknown> }) {
   const e = evidence as {
     customer_id: string;
     customer_name: string;

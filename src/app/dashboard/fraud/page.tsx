@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 
@@ -93,26 +93,32 @@ export default function FraudMonitorPage() {
   const [ruleTypeFilter, setRuleTypeFilter] = useState(searchParams.get("rule_type") || "");
   const [severityFilter, setSeverityFilter] = useState(searchParams.get("severity") || "");
 
-  const fetchCases = useCallback(async () => {
-    setLoading(true);
-    const params = new URLSearchParams();
-    params.set("limit", String(PAGE_SIZE));
-    params.set("offset", String(offset));
-    if (statusFilter) params.set("status", statusFilter);
-    if (ruleTypeFilter) params.set("rule_type", ruleTypeFilter);
-    if (severityFilter) params.set("severity", severityFilter);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const params = new URLSearchParams();
+        params.set("limit", String(PAGE_SIZE));
+        params.set("offset", String(offset));
+        if (statusFilter) params.set("status", statusFilter);
+        if (ruleTypeFilter) params.set("rule_type", ruleTypeFilter);
+        if (severityFilter) params.set("severity", severityFilter);
 
-    const res = await fetch(`/api/workspaces/${workspace.id}/fraud-cases?${params}`);
-    if (res.ok) {
-      const data = await res.json();
-      setCases(data.cases || []);
-      setTotal(data.total || 0);
-      setStats(data.stats || stats);
-    }
-    setLoading(false);
+        const res = await fetch(`/api/workspaces/${workspace.id}/fraud-cases?${params}`);
+        if (cancelled) return;
+        if (res.ok) {
+          const data = await res.json();
+          setCases(data.cases || []);
+          setTotal(data.total || 0);
+          setStats((prev) => data.stats || prev);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [workspace.id, offset, statusFilter, ruleTypeFilter, severityFilter]);
-
-  useEffect(() => { fetchCases(); }, [fetchCases]);
 
   // Open case from URL param
   useEffect(() => {
