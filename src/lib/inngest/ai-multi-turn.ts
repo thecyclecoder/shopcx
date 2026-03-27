@@ -787,22 +787,25 @@ export const aiMultiTurn = inngest.createFunction(
       const customerEmail = (ticket.customers as unknown as { email: string })?.email;
       const { data: ws } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", workspace_id).single();
 
-      if (!finalContext.sandbox && ws && !ws.sandbox_mode && customerEmail) {
-        // Convert to HTML paragraphs for email
-        const htmlBody = toHtmlParagraphs(aiResponse.responseText);
+      const isSandbox = finalContext.sandbox || (ws?.sandbox_mode ?? true);
+      const htmlBody = toHtmlParagraphs(aiResponse.responseText);
 
-        // Send real reply
-        await sendTicketReply({
-          workspaceId: workspace_id,
-          toEmail: customerEmail,
-          subject: ticket.subject ? `Re: ${ticket.subject}` : "Re: Your request",
-          body: htmlBody,
-          inReplyTo: ticket.email_message_id || null,
-          agentName: "AI Agent",
-          workspaceName: ws.name,
-        });
+      if (!isSandbox) {
+        // Live mode — send via appropriate channel (email only sends on email channel)
+        if (finalContext.channel === "email" && customerEmail) {
+          await sendTicketReply({
+            workspaceId: workspace_id,
+            toEmail: customerEmail,
+            subject: ticket.subject ? `Re: ${ticket.subject}` : "Re: Your request",
+            body: htmlBody,
+            inReplyTo: ticket.email_message_id || null,
+            agentName: "AI Agent",
+            workspaceName: ws?.name || "Support",
+          });
+        }
+        // Chat, help_center, sms, meta — no email sent, message just appears in the channel
 
-        // Create outbound message (store HTML for display)
+        // Create external message (visible to customer in widget/thread)
         await admin.from("ticket_messages").insert({
           ticket_id,
           direction: "outbound",
@@ -811,19 +814,8 @@ export const aiMultiTurn = inngest.createFunction(
           visibility: "external",
           ai_personalized: true,
         });
-
-        // Update ticket — close if auto_resolve enabled (reply will reopen)
-        await admin.from("tickets").update({
-          status: finalContext.autoResolve ? "closed" : "open",
-          resolved_at: finalContext.autoResolve ? new Date().toISOString() : undefined,
-          ai_turn_count: finalContext.turnCount + 1,
-          last_ai_turn_at: new Date().toISOString(),
-          handled_by: "AI Agent",
-          auto_reply_at: null,
-          pending_auto_reply: null,
-        }).eq("id", ticket_id);
       } else {
-        // Sandbox: save as internal note
+        // Sandbox: save as internal note (not visible to customer on any channel)
         await admin.from("ticket_messages").insert({
           ticket_id,
           direction: "outbound",
@@ -832,17 +824,18 @@ export const aiMultiTurn = inngest.createFunction(
           visibility: "internal",
           ai_personalized: true,
         });
-
-        await admin.from("tickets").update({
-          status: finalContext.autoResolve ? "closed" : "open",
-          resolved_at: finalContext.autoResolve ? new Date().toISOString() : undefined,
-          ai_turn_count: finalContext.turnCount + 1,
-          last_ai_turn_at: new Date().toISOString(),
-          handled_by: "AI Agent",
-          auto_reply_at: null,
-          pending_auto_reply: null,
-        }).eq("id", ticket_id);
       }
+
+      // Update ticket regardless of sandbox
+      await admin.from("tickets").update({
+        status: finalContext.autoResolve ? "closed" : "open",
+        resolved_at: finalContext.autoResolve ? new Date().toISOString() : undefined,
+        ai_turn_count: finalContext.turnCount + 1,
+        last_ai_turn_at: new Date().toISOString(),
+        handled_by: "AI Agent",
+        auto_reply_at: null,
+        pending_auto_reply: null,
+      }).eq("id", ticket_id);
     });
 
     return {
