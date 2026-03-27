@@ -30,7 +30,7 @@ export async function assembleTicketContext(
   // 1. Fetch ticket
   const { data: ticket } = await admin
     .from("tickets")
-    .select("*, customers(id, email, first_name, last_name, phone, retention_score, subscription_status, total_orders, ltv_cents, shopify_customer_id)")
+    .select("*, customers(id, email, first_name, last_name, phone, retention_score, subscription_status, total_orders, ltv_cents, shopify_customer_id, email_marketing_status, sms_marketing_status)")
     .eq("id", ticketId)
     .single();
 
@@ -40,6 +40,7 @@ export async function assembleTicketContext(
     id: string; email: string; first_name: string | null; last_name: string | null;
     phone: string | null; retention_score: number; subscription_status: string;
     total_orders: number; ltv_cents: number; shopify_customer_id: string | null;
+    email_marketing_status: string | null; sms_marketing_status: string | null;
   } | null;
 
   const channel = ticket.channel || "email";
@@ -122,6 +123,10 @@ export async function assembleTicketContext(
     if (customer.subscription_status !== "none") {
       customerParts.push(`Subscription: ${customer.subscription_status}`);
     }
+    const emailMktg = customer.email_marketing_status === "subscribed";
+    const smsMktg = customer.sms_marketing_status === "subscribed";
+    customerParts.push(`Email Marketing: ${emailMktg ? "subscribed" : "not subscribed"}`);
+    customerParts.push(`SMS Marketing: ${smsMktg ? "subscribed" : "not subscribed"}`);
 
     // Fetch recent orders
     const { data: orders } = await admin
@@ -257,7 +262,8 @@ export async function assembleTicketContext(
       promptParts.push(`  Trigger keywords: ${(wf.match_patterns || []).join(", ")}`);
     }
     promptParts.push("- When a customer confirms they want an action, acknowledge it and let them know it's being processed.");
-    promptParts.push("- DISCOUNT FLOW: If a customer asks about discounts and is already subscribed to email and SMS marketing, give them the code FAMILY and tell them to use it at checkout. If they have an active subscription, offer to apply it to their next subscription order.");
+    promptParts.push("- DISCOUNT FLOW: If a customer asks about discounts, check their marketing status in the customer context above. If they are ALREADY subscribed to both email AND SMS, give them the code FAMILY and tell them to use it at checkout. If they have an active subscription, offer to apply FAMILY to their next subscription order too. If they are NOT subscribed, offer to sign them up for email and SMS to get exclusive promotions.");
+    promptParts.push("- NEVER ask the customer to verify information you already have. Check the customer context first.");
   }
 
   // KB context
