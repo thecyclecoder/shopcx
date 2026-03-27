@@ -83,8 +83,9 @@ const CHANNEL_LABELS: Record<string, string> = {
   email: "Email",
   chat: "Live Chat",
   sms: "SMS",
-  meta_dm: "Meta DM",
-  phone: "Phone",
+  meta_dm: "Social DMs",
+  help_center: "Help Center",
+  social_comments: "Social Comments",
 };
 
 export default function AISettingsPage() {

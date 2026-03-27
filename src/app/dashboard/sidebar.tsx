@@ -6,6 +6,7 @@ import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import type { WorkspaceWithRole } from "@/lib/types/workspace";
+import NotificationBell from "@/components/notification-bell";
 
 interface TicketView {
   id: string;
@@ -92,7 +93,9 @@ export default function Sidebar({
             <span className="text-sm font-medium text-violet-400">.ai</span>
           </span>
         </div>
-        {/* Close button - mobile only */}
+        <div className="flex items-center gap-1">
+          <NotificationBell />
+          {/* Close button - mobile only */}
         <button
           onClick={() => setOpen(false)}
           className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 md:hidden dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
@@ -101,6 +104,7 @@ export default function Sidebar({
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
           </svg>
         </button>
+        </div>
       </div>
 
       {/* Workspace name */}

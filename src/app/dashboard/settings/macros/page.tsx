@@ -12,6 +12,9 @@ interface Macro {
   product_id: string | null;
   usage_count: number;
   active: boolean;
+  ai_suggest_count: number;
+  ai_accept_count: number;
+  ai_reject_count: number;
 }
 
 interface Product {
@@ -151,6 +154,17 @@ export default function MacrosPage() {
               </div>
               <div className="ml-3 flex shrink-0 items-center gap-2">
                 <span className="text-xs text-zinc-400">{m.usage_count} uses</span>
+                {m.ai_suggest_count > 0 && (
+                  <span className={`rounded-full px-1.5 py-0.5 text-xs font-medium ${
+                    m.ai_suggest_count > 0 && m.ai_accept_count / m.ai_suggest_count >= 0.7
+                      ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
+                      : m.ai_suggest_count > 0 && m.ai_accept_count / m.ai_suggest_count >= 0.4
+                        ? "bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
+                        : "bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
+                  }`}>
+                    {Math.round((m.ai_accept_count / m.ai_suggest_count) * 100)}% accepted
+                  </span>
+                )}
                 <button
                   onClick={() => {
                     if (editingId === m.id) { setEditingId(null); setEditingMacro(null); }

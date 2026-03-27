@@ -372,6 +372,13 @@ export default function TicketDetailPage() {
         setEditorFocused(true);
         setShowMacroPanel(false);
         setMacroSearch("");
+        // Log macro usage
+        const isAISuggested = aiDraft?.ai_suggested_macro_id === macroId;
+        fetch(`/api/workspaces/${workspace.id}/macro-usage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ macro_id: macroId, ticket_id: id, source: isAISuggested ? "ai_suggested" : "manual", outcome: "personalized" }),
+        }).catch(() => {});
       }
     } catch {}
     setApplyingMacro(null);
@@ -820,13 +827,31 @@ export default function TicketDetailPage() {
                   onClick={() => {
                     setReplyBody(aiDraft.ai_draft || "");
                     setEditorFocused(true);
+                    // Log macro usage: accepted
+                    if (aiDraft.ai_suggested_macro_id) {
+                      fetch(`/api/workspaces/${workspace.id}/macro-usage`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ macro_id: aiDraft.ai_suggested_macro_id, ticket_id: id, source: "ai_suggested", outcome: "applied", ai_confidence: aiDraft.ai_confidence }),
+                      }).catch(() => {});
+                    }
                   }}
                   className="rounded-md bg-cyan-600 px-3 py-1 text-sm font-medium text-white hover:bg-cyan-500"
                 >
                   Use Draft
                 </button>
                 <button
-                  onClick={() => setAiDraft(null)}
+                  onClick={() => {
+                    // Log macro usage: rejected
+                    if (aiDraft.ai_suggested_macro_id) {
+                      fetch(`/api/workspaces/${workspace.id}/macro-usage`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ macro_id: aiDraft.ai_suggested_macro_id, ticket_id: id, source: "ai_suggested", outcome: "rejected", ai_confidence: aiDraft.ai_confidence }),
+                      }).catch(() => {});
+                    }
+                    setAiDraft(null);
+                  }}
                   className="text-sm text-cyan-400 hover:text-cyan-600 dark:hover:text-cyan-300"
                 >
                   Dismiss

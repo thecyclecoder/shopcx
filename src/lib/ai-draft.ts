@@ -201,6 +201,25 @@ export async function generateAIDraft(
     try { await admin.rpc("increment_macro_usage", { macro_id: sourceId }); } catch {}
   }
 
+  // Track macro suggestion for analytics
+  if (suggestedMacroId) {
+    try {
+      await admin.rpc("record_macro_suggestion_outcome", {
+        p_macro_id: suggestedMacroId,
+        p_outcome: "suggested",
+      });
+      // Create notification for workspace admins
+      await admin.from("dashboard_notifications").insert({
+        workspace_id: workspaceId,
+        type: "macro_suggestion",
+        title: `AI suggested macro: ${suggestedMacroName}`,
+        body: `Confidence: ${Math.round(result.confidence * 100)}% — ${result.reasoning}`,
+        link: `/dashboard/settings/macros`,
+        metadata: { macro_id: suggestedMacroId, ticket_id: ticketId },
+      });
+    } catch {}
+  }
+
   return {
     draft: result.draft,
     confidence: result.confidence,

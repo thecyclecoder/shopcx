@@ -137,9 +137,19 @@ export const aiDraftTicket = inngest.createFunction(
           })
           .eq("id", ticket_id);
 
-        // Increment macro usage
+        // Increment macro usage + log
         if (result.source_type === "macro" && result.source_id) {
           try { await admin.rpc("increment_macro_usage", { macro_id: result.source_id }); } catch {}
+          try {
+            await admin.from("macro_usage_log").insert({
+              workspace_id,
+              macro_id: result.source_id,
+              ticket_id,
+              source: "ai_auto",
+              outcome: "auto_sent",
+              ai_confidence: result.confidence,
+            });
+          } catch {}
         }
       });
 
