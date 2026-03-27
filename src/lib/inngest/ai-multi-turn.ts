@@ -8,6 +8,7 @@ import { routeInboundReply } from "@/lib/turn-router";
 import { handleEscalation } from "@/lib/escalation";
 import { sendTicketReply } from "@/lib/email";
 import { subscribeToMarketing } from "@/lib/shopify-marketing";
+import { matchPatterns } from "@/lib/pattern-matcher";
 import { appstleSkipNextOrder, appstleUpdateBillingInterval } from "@/lib/appstle";
 import { updateShippingAddress } from "@/lib/shopify-order-actions";
 
@@ -126,6 +127,58 @@ export const aiMultiTurn = inngest.createFunction(
         await handleEscalation(workspace_id, ticket_id, decision.reason);
       });
       return { action: "escalated", reason: decision.reason };
+    }
+
+    // Step 1b: Smart pattern matching — check if a workflow should handle this first
+    const patternResult = await step.run("check-patterns", async () => {
+      const admin = createAdminClient();
+      const { data: ticket } = await admin
+        .from("tickets")
+        .select("tags, ai_turn_count, subject")
+        .eq("id", ticket_id)
+        .single();
+
+      // Only run pattern matching on first turn (turn 0) — follow-up turns stay with AI
+      if (!ticket || (ticket.ai_turn_count || 0) > 0) return { matched: false };
+
+      // Already has a smart tag — don't re-match
+      const hasSmart = (ticket.tags as string[] || []).some(t => t.startsWith("smart:"));
+      if (hasSmart) return { matched: false };
+
+      try {
+        const match = await matchPatterns(workspace_id, ticket.subject || "", message_body);
+        if (match && match.autoTag) {
+          // Add smart tag
+          const tags = [...new Set([...(ticket.tags as string[] || []), match.autoTag])];
+          await admin.from("tickets").update({ tags }).eq("id", ticket_id);
+
+          // Check if there's a workflow for this tag
+          const { data: workflow } = await admin
+            .from("workflows")
+            .select("id, name")
+            .eq("workspace_id", workspace_id)
+            .eq("trigger_tag", match.autoTag)
+            .eq("enabled", true)
+            .single();
+
+          if (workflow) {
+            // Fire the workflow instead of AI
+            await inngest.send({
+              name: "workflow/execute",
+              data: { workspace_id, ticket_id, trigger_tag: match.autoTag, channel: "chat" },
+            });
+            return { matched: true, tag: match.autoTag, workflow: workflow.name };
+          }
+
+          return { matched: true, tag: match.autoTag, workflow: null };
+        }
+      } catch {}
+
+      return { matched: false };
+    });
+
+    if (patternResult.matched && (patternResult as { workflow?: string }).workflow) {
+      return { action: "workflow_triggered", tag: (patternResult as { tag?: string }).tag, workflow: (patternResult as { workflow?: string }).workflow };
     }
 
     // Step 1c: Profile linking check (first message only, doesn't count as a turn)
