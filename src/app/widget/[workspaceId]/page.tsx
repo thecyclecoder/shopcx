@@ -62,6 +62,8 @@ export default function ChatWidgetPage() {
   const [view, setView] = useState<"articles" | "chat">("articles");
   const [articleVoted, setArticleVoted] = useState<Record<string, "up" | "down">>({});
   const [chatEnded, setChatEnded] = useState(false);
+  const [chatList, setChatList] = useState<{ id: string; ticket_id: string; subject: string; status: string; last_message: string; updated_at: string }[]>([]);
+  const [showChatList, setShowChatList] = useState(true);
 
   // Load config
   useEffect(() => {
@@ -120,7 +122,7 @@ export default function ChatWidgetPage() {
   }, [messages, chatEnded]);
 
   const handleNewChat = () => {
-    // Clear session and reset everything
+    // Clear session and start fresh
     localStorage.removeItem(`${STORAGE_KEY_PREFIX}${workspaceId}`);
     setSessionId(null);
     setTicketId(null);
@@ -128,7 +130,32 @@ export default function ChatWidgetPage() {
     setStarted(false);
     setChatEnded(false);
     setInput("");
-    setView("articles");
+    setShowChatList(false);
+    setView("chat");
+  };
+
+  const loadChatList = async () => {
+    const storedEmail = email || (() => {
+      try { const s = localStorage.getItem(`${STORAGE_KEY_PREFIX}${workspaceId}`); return s ? JSON.parse(s).email : ""; } catch { return ""; }
+    })();
+    if (!storedEmail) return;
+    const res = await fetch(`/api/widget/${workspaceId}/chats?email=${encodeURIComponent(storedEmail)}`);
+    const data = await res.json();
+    if (Array.isArray(data)) setChatList(data);
+  };
+
+  const openChat = async (chatTicketId: string, chatSessionId: string) => {
+    setTicketId(chatTicketId);
+    setSessionId(chatSessionId);
+    setShowChatList(false);
+    setStarted(true);
+    setChatEnded(false);
+    // Load messages for this ticket
+    const res = await fetch(`/api/widget/${workspaceId}/messages?session_id=${chatSessionId}`);
+    const data = await res.json();
+    if (data.messages) setMessages(data.messages);
+    // Save to localStorage
+    localStorage.setItem(`${STORAGE_KEY_PREFIX}${workspaceId}`, JSON.stringify({ sessionId: chatSessionId, email, name, ticketId: chatTicketId }));
   };
 
   // Restore session from localStorage
@@ -308,7 +335,7 @@ export default function ChatWidgetPage() {
           style={view === "articles" ? { borderColor: primaryColor, color: primaryColor } : {}}>
           Help Articles
         </button>
-        <button onClick={() => setView("chat")}
+        <button onClick={() => { setView("chat"); setShowChatList(true); loadChatList(); }}
           className={`flex-1 py-2 text-xs font-medium transition-colors ${view === "chat" ? "border-b-2 text-zinc-900" : "text-zinc-400"}`}
           style={view === "chat" ? { borderColor: primaryColor, color: primaryColor } : {}}>
           Chat
@@ -410,8 +437,55 @@ export default function ChatWidgetPage() {
         </div>
       )}
 
+      {/* Chat list view */}
+      {view === "chat" && showChatList && (
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          <button
+            onClick={handleNewChat}
+            className="mb-3 w-full rounded-lg py-2.5 text-sm font-medium text-white"
+            style={{ backgroundColor: primaryColor }}
+          >
+            Start a new chat
+          </button>
+
+          {chatList.length > 0 && (
+            <>
+              <p className="mb-2 text-xs font-medium text-zinc-400">Your conversations</p>
+              {chatList.map(chat => (
+                <button
+                  key={chat.id}
+                  onClick={() => openChat(chat.ticket_id, chat.id)}
+                  className="mb-2 w-full rounded-lg border border-zinc-200 bg-white p-3 text-left transition-colors hover:border-zinc-300 hover:bg-zinc-50"
+                >
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-zinc-900 line-clamp-1">{chat.subject}</p>
+                    <span className={`ml-2 shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                      chat.status === "open" ? "bg-blue-100 text-blue-600"
+                      : chat.status === "pending" ? "bg-amber-100 text-amber-600"
+                      : "bg-zinc-100 text-zinc-500"
+                    }`}>
+                      {chat.status}
+                    </span>
+                  </div>
+                  {chat.last_message && (
+                    <p className="mt-1 text-xs text-zinc-500 line-clamp-1">{chat.last_message}</p>
+                  )}
+                  <p className="mt-1 text-[10px] text-zinc-400">
+                    {new Date(chat.updated_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                  </p>
+                </button>
+              ))}
+            </>
+          )}
+
+          {chatList.length === 0 && (
+            <p className="py-4 text-center text-xs text-zinc-400">No previous conversations</p>
+          )}
+        </div>
+      )}
+
       {/* Chat view - Messages area */}
-      {view === "chat" && (
+      {view === "chat" && !showChatList && (
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {/* Greeting */}
         <div className="mb-3 flex gap-2">
@@ -484,7 +558,7 @@ export default function ChatWidgetPage() {
       )}
 
       {/* Input — only show in chat view when chat is active */}
-      {view === "chat" && started && !chatEnded && (
+      {view === "chat" && !showChatList && started && !chatEnded && (
         <form onSubmit={handleSend} className="flex items-center gap-2 border-t border-zinc-200 px-3 py-2">
           <input
             type="text"
@@ -508,16 +582,24 @@ export default function ChatWidgetPage() {
       )}
 
       {/* Chat ended — escalated or closed */}
-      {view === "chat" && chatEnded && (
+      {view === "chat" && !showChatList && chatEnded && (
         <div className="border-t border-zinc-200 px-4 py-3 text-center">
           <p className="text-xs text-zinc-500">This conversation has ended.</p>
-          <button
-            onClick={handleNewChat}
-            className="mt-2 rounded-full px-4 py-1.5 text-xs font-medium text-white"
-            style={{ backgroundColor: primaryColor }}
-          >
-            Start a new chat
-          </button>
+          <div className="mt-2 flex justify-center gap-2">
+            <button
+              onClick={handleNewChat}
+              className="rounded-full px-4 py-1.5 text-xs font-medium text-white"
+              style={{ backgroundColor: primaryColor }}
+            >
+              New chat
+            </button>
+            <button
+              onClick={() => { setShowChatList(true); loadChatList(); }}
+              className="rounded-full border border-zinc-300 px-4 py-1.5 text-xs font-medium text-zinc-600"
+            >
+              View history
+            </button>
+          </div>
         </div>
       )}
 
