@@ -7,11 +7,37 @@
   var customerEmail = script.getAttribute("data-customer-email") || "";
   var customerName = script.getAttribute("data-customer-name") || "";
 
+  // Detect product context from JSON-LD or URL
+  var productId = "";
+  var productHandle = "";
+  try {
+    var ldScripts = document.querySelectorAll('script[type="application/ld+json"]');
+    for (var i = 0; i < ldScripts.length; i++) {
+      var ld = JSON.parse(ldScripts[i].textContent || "{}");
+      if (ld["@type"] === "Product" && ld.productID) {
+        productId = String(ld.productID);
+        break;
+      }
+      if (ld["@type"] === "Product" && ld.sku) {
+        productId = String(ld.sku);
+        break;
+      }
+    }
+  } catch (e) {}
+  // Fallback: parse /products/handle from URL
+  if (!productId) {
+    var match = window.location.pathname.match(/\/products\/([^/?#]+)/);
+    if (match) productHandle = match[1];
+  }
+
   var BASE = script.src.replace(/\/widget\.js.*$/, "");
   var params = [];
   if (customerId) params.push("cid=" + encodeURIComponent(customerId));
   if (customerEmail) params.push("email=" + encodeURIComponent(customerEmail));
   if (customerName) params.push("name=" + encodeURIComponent(customerName));
+  if (productId) params.push("pid=" + encodeURIComponent(productId));
+  if (productHandle) params.push("handle=" + encodeURIComponent(productHandle));
+  params.push("path=" + encodeURIComponent(window.location.pathname));
   var IFRAME_URL = BASE + "/widget/" + workspaceId + (params.length ? "?" + params.join("&") : "");
 
   // Create container

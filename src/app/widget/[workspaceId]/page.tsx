@@ -19,6 +19,26 @@ interface WidgetConfig {
   position: string;
 }
 
+interface KBArticle {
+  id: string;
+  title: string;
+  slug: string;
+  excerpt: string | null;
+  category: string;
+  product_name: string | null;
+  view_count: number;
+  helpful_yes: number;
+}
+
+interface ArticleDetail {
+  id: string;
+  title: string;
+  content: string;
+  content_html: string | null;
+  excerpt: string | null;
+  product_name: string | null;
+}
+
 const STORAGE_KEY_PREFIX = "shopcx_chat_";
 
 export default function ChatWidgetPage() {
@@ -35,6 +55,11 @@ export default function ChatWidgetPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [articles, setArticles] = useState<KBArticle[]>([]);
+  const [articleSearch, setArticleSearch] = useState("");
+  const [viewingArticle, setViewingArticle] = useState<ArticleDetail | null>(null);
+  const [articleLoading, setArticleLoading] = useState(false);
+  const [view, setView] = useState<"articles" | "chat">("articles");
 
   // Load config
   useEffect(() => {
@@ -53,6 +78,33 @@ export default function ChatWidgetPage() {
         setLoading(false);
       });
   }, [workspaceId]);
+
+  // Load contextual KB articles
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const pid = urlParams.get("pid") || "";
+    const handle = urlParams.get("handle") || "";
+    const params = new URLSearchParams();
+    if (pid) params.set("pid", pid);
+    if (handle) params.set("handle", handle);
+    if (articleSearch) params.set("search", articleSearch);
+
+    fetch(`/api/widget/${workspaceId}/articles?${params}`)
+      .then(r => r.json())
+      .then(data => { if (data.articles) setArticles(data.articles); })
+      .catch(() => {});
+  }, [workspaceId, articleSearch]);
+
+  // Load full article for inline viewing
+  const openArticle = async (articleId: string) => {
+    setArticleLoading(true);
+    try {
+      const res = await fetch(`/api/widget/${workspaceId}/articles/${articleId}`);
+      const data = await res.json();
+      if (data.title) setViewingArticle(data);
+    } catch {}
+    setArticleLoading(false);
+  };
 
   // Restore session from localStorage
   useEffect(() => {
@@ -224,7 +276,82 @@ export default function ChatWidgetPage() {
         </div>
       </div>
 
-      {/* Messages area */}
+      {/* View switcher tabs */}
+      <div className="flex border-b border-zinc-200 bg-zinc-50">
+        <button onClick={() => { setView("articles"); setViewingArticle(null); }}
+          className={`flex-1 py-2 text-xs font-medium transition-colors ${view === "articles" ? "border-b-2 text-zinc-900" : "text-zinc-400"}`}
+          style={view === "articles" ? { borderColor: primaryColor, color: primaryColor } : {}}>
+          Help Articles
+        </button>
+        <button onClick={() => setView("chat")}
+          className={`flex-1 py-2 text-xs font-medium transition-colors ${view === "chat" ? "border-b-2 text-zinc-900" : "text-zinc-400"}`}
+          style={view === "chat" ? { borderColor: primaryColor, color: primaryColor } : {}}>
+          Chat
+        </button>
+      </div>
+
+      {/* Articles view */}
+      {view === "articles" && !viewingArticle && (
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          <input
+            value={articleSearch}
+            onChange={(e) => setArticleSearch(e.target.value)}
+            placeholder="Search help articles..."
+            className="mb-3 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 outline-none focus:border-indigo-500"
+          />
+          {articles.length === 0 && !articleSearch && (
+            <p className="py-4 text-center text-xs text-zinc-400">No articles available</p>
+          )}
+          {articles.length === 0 && articleSearch && (
+            <p className="py-4 text-center text-xs text-zinc-400">No articles match your search</p>
+          )}
+          {articles.map(a => (
+            <button key={a.id} onClick={() => openArticle(a.id)}
+              className="mb-2 w-full rounded-lg border border-zinc-200 bg-white p-3 text-left transition-colors hover:border-zinc-300 hover:bg-zinc-50">
+              <p className="text-sm font-medium text-zinc-900">{a.title}</p>
+              {a.excerpt && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-2">{a.excerpt}</p>}
+              <div className="mt-1 flex gap-2 text-xs text-zinc-400">
+                {a.product_name && <span className="text-indigo-500">{a.product_name}</span>}
+                {a.helpful_yes > 0 && <span>{a.helpful_yes} found helpful</span>}
+              </div>
+            </button>
+          ))}
+          <button onClick={() => setView("chat")}
+            className="mt-3 w-full rounded-lg py-2 text-sm font-medium text-white"
+            style={{ backgroundColor: primaryColor }}>
+            Still need help? Start a chat
+          </button>
+        </div>
+      )}
+
+      {/* Inline article view */}
+      {view === "articles" && viewingArticle && (
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          <button onClick={() => setViewingArticle(null)} className="mb-2 text-xs text-indigo-600 hover:underline">
+            &larr; Back to articles
+          </button>
+          <h2 className="text-sm font-bold text-zinc-900">{viewingArticle.title}</h2>
+          {viewingArticle.product_name && (
+            <span className="mt-1 inline-block rounded-full bg-indigo-50 px-2 py-0.5 text-xs text-indigo-600">{viewingArticle.product_name}</span>
+          )}
+          <div className="prose prose-sm mt-3 max-w-none text-zinc-700 [&_*]:!text-zinc-700 [&_a]:!text-indigo-600">
+            {viewingArticle.content_html ? (
+              <div dangerouslySetInnerHTML={{ __html: viewingArticle.content_html }} />
+            ) : (
+              viewingArticle.content.split("\n\n").map((p: string, i: number) => <p key={i}>{p}</p>)
+            )}
+          </div>
+          {articleLoading && <p className="mt-2 text-xs text-zinc-400">Loading...</p>}
+          <button onClick={() => setView("chat")}
+            className="mt-4 w-full rounded-lg py-2 text-sm font-medium text-white"
+            style={{ backgroundColor: primaryColor }}>
+            Still need help? Start a chat
+          </button>
+        </div>
+      )}
+
+      {/* Chat view - Messages area */}
+      {view === "chat" && (
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {/* Greeting */}
         <div className="mb-3 flex gap-2">
@@ -294,9 +421,10 @@ export default function ChatWidgetPage() {
         )}
         <div ref={messagesEndRef} />
       </div>
+      )}
 
-      {/* Input */}
-      {started && (
+      {/* Input — only show in chat view */}
+      {view === "chat" && started && (
         <form onSubmit={handleSend} className="flex items-center gap-2 border-t border-zinc-200 px-3 py-2">
           <input
             type="text"

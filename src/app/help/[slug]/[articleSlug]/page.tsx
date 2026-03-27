@@ -77,6 +77,17 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
   // Increment view count (fire and forget)
   admin.from("knowledge_base").update({ view_count: (article.view_count || 0) + 1 }).eq("id", article.id).then(() => {});
 
+  // Get Shopify product ID if article is tagged to a product
+  let shopifyProductId: string | null = null;
+  if (article.product_id) {
+    const { data: product } = await admin
+      .from("products")
+      .select("shopify_product_id")
+      .eq("id", article.product_id)
+      .single();
+    shopifyProductId = product?.shopify_product_id || null;
+  }
+
   // Get related articles in same category
   const { data: related } = await admin
     .from("knowledge_base")
@@ -103,6 +114,14 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
     ],
   };
 
+  // Product structured data (for widget product context detection)
+  const productSchema = shopifyProductId ? {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    productID: shopifyProductId,
+    name: article.product_name || "",
+  } : null;
+
   // Article structured data
   const articleSchema = {
     "@context": "https://schema.org",
@@ -121,6 +140,7 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
     <div className="min-h-screen bg-zinc-50">
       {/* Structured data for SEO + LLM */}
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(faqSchema) }} />
+      {productSchema && <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(productSchema) }} />}
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(articleSchema) }} />
 
       {/* Header */}

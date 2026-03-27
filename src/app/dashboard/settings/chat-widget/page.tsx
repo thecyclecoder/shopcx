@@ -208,6 +208,9 @@ export default function ChatWidgetSettingsPage() {
           </div>
         )}
 
+        {/* Path → Category Mappings */}
+        {enabled && <PathMappings workspaceId={workspace.id} />}
+
         {/* Save */}
         <button
           onClick={handleSave}
@@ -215,6 +218,94 @@ export default function ChatWidgetSettingsPage() {
           className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
         >
           {saving ? "Saving..." : saved ? "Saved!" : "Save Settings"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const CATEGORIES = ["product", "policy", "shipping", "billing", "subscription", "general", "faq", "troubleshooting"];
+
+function PathMappings({ workspaceId }: { workspaceId: string }) {
+  const [mappings, setMappings] = useState<{ id: string; path: string; match_type: string; category: string }[]>([]);
+  const [newPath, setNewPath] = useState("");
+  const [newMatchType, setNewMatchType] = useState("prefix");
+  const [newCategory, setNewCategory] = useState("general");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspaceId}/widget-path-mappings`)
+      .then(r => r.json())
+      .then(data => { if (Array.isArray(data)) setMappings(data); })
+      .catch(() => {});
+  }, [workspaceId]);
+
+  const handleAdd = async () => {
+    if (!newPath.trim()) return;
+    setSaving(true);
+    await fetch(`/api/workspaces/${workspaceId}/widget-path-mappings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: newPath.trim(), match_type: newMatchType, category: newCategory }),
+    });
+    const res = await fetch(`/api/workspaces/${workspaceId}/widget-path-mappings`);
+    setMappings(await res.json());
+    setNewPath("");
+    setSaving(false);
+  };
+
+  const handleDelete = async (id: string) => {
+    await fetch(`/api/workspaces/${workspaceId}/widget-path-mappings?id=${id}`, { method: "DELETE" });
+    setMappings(prev => prev.filter(m => m.id !== id));
+  };
+
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <label className="mb-2 block text-sm font-medium text-zinc-900 dark:text-zinc-100">Page → Article Category Mappings</label>
+      <p className="mb-3 text-sm text-zinc-500">Map URL paths to KB article categories. The widget shows matching articles when a customer is on that page.</p>
+
+      {/* Existing mappings */}
+      {mappings.length > 0 && (
+        <div className="mb-3 divide-y divide-zinc-100 rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-700">
+          {mappings.map(m => (
+            <div key={m.id} className="flex items-center justify-between px-3 py-2">
+              <div className="text-sm">
+                <span className="font-mono text-zinc-900 dark:text-zinc-100">{m.path}</span>
+                <span className="mx-2 text-zinc-400">{m.match_type === "prefix" ? "(wildcard)" : "(exact)"}</span>
+                <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-xs text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">{m.category}</span>
+              </div>
+              <button onClick={() => handleDelete(m.id)} className="text-xs text-red-500 hover:underline">Remove</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add new mapping */}
+      <div className="flex items-end gap-2">
+        <div className="flex-1">
+          <label className="block text-xs text-zinc-500">Path</label>
+          <input type="text" value={newPath} onChange={(e) => setNewPath(e.target.value)}
+            placeholder="/pages/portal"
+            className="mt-1 w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+        </div>
+        <div>
+          <label className="block text-xs text-zinc-500">Match</label>
+          <select value={newMatchType} onChange={(e) => setNewMatchType(e.target.value)}
+            className="mt-1 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
+            <option value="prefix">Wildcard</option>
+            <option value="exact">Exact</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-zinc-500">Category</label>
+          <select value={newCategory} onChange={(e) => setNewCategory(e.target.value)}
+            className="mt-1 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
+            {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <button onClick={handleAdd} disabled={saving || !newPath.trim()}
+          className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50">
+          {saving ? "..." : "Map"}
         </button>
       </div>
     </div>
