@@ -35,22 +35,7 @@ export async function GET(
     });
   }
 
-  // Also include chat journeys
-  const { data: chatJourneys } = await admin
-    .from("chat_journeys")
-    .select("*")
-    .eq("workspace_id", workspaceId)
-    .order("created_at", { ascending: false });
-
-  const chatEnriched = (chatJourneys || []).map(j => ({
-    ...j,
-    journey_type: "chat",
-    slug: j.trigger_intent,
-    config: { channels: j.channels, match_patterns: j.match_patterns },
-    stats: { sent: 0, completed: 0, saved: 0, cancelled: 0 },
-  }));
-
-  return NextResponse.json([...enriched, ...chatEnriched]);
+  return NextResponse.json(enriched);
 }
 
 export async function POST(

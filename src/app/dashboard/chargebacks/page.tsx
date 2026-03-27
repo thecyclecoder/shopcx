@@ -285,6 +285,7 @@ export default function ChargebacksPage() {
           onClose={() => setSelected(null)}
           onReinstate={handleReinstate}
           reinstating={reinstating}
+          onRefresh={() => { fetchChargebacks(); fetchStats(); }}
         />
       )}
     </div>
@@ -317,17 +318,61 @@ function StatCard({ label, value, accent }: { label: string; value: string; acce
   );
 }
 
+interface Subscription {
+  id: string;
+  shopify_contract_id: string;
+  status: string;
+  items: string;
+  next_billing_date: string | null;
+  billing_interval: string | null;
+  customer_email: string;
+  customer_name: string;
+  is_linked: boolean;
+}
+
 function DetailPanel({
   cb,
   onClose,
   onReinstate,
   reinstating,
+  onRefresh,
 }: {
   cb: ChargebackEvent;
   onClose: () => void;
   onReinstate: (id: string) => void;
   reinstating: boolean;
+  onRefresh: () => void;
 }) {
+  const [subs, setSubs] = useState<Subscription[]>([]);
+  const [subsLoading, setSubsLoading] = useState(true);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSubsLoading(true);
+    fetch(`/api/chargebacks/${cb.id}/subscriptions`)
+      .then((r) => r.json())
+      .then((d) => setSubs(d.subscriptions || []))
+      .finally(() => setSubsLoading(false));
+  }, [cb.id]);
+
+  const handleCancelSub = async (subId: string) => {
+    if (!confirm("Cancel this subscription? This will stop all future billing via Appstle.")) return;
+    setCancellingId(subId);
+    try {
+      const res = await fetch(`/api/chargebacks/${cb.id}/cancel-subscription`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subscriptionId: subId }),
+      });
+      if (res.ok) {
+        setSubs((prev) => prev.filter((s) => s.id !== subId));
+        onRefresh();
+      }
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
   const reason = REASON_BADGES[cb.reason || ""];
   const status = STATUS_BADGES[cb.status];
   const action = cb.auto_action_taken ? ACTION_BADGES[cb.auto_action_taken] : null;
@@ -389,6 +434,57 @@ function DetailPanel({
             )}
           </div>
         )}
+
+        {/* Active Subscriptions */}
+        <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+          <p className="text-xs font-medium text-zinc-500">Active Subscriptions</p>
+          {subsLoading ? (
+            <div className="mt-2 flex items-center gap-2">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600" />
+              <span className="text-xs text-zinc-400">Loading...</span>
+            </div>
+          ) : subs.length === 0 ? (
+            <p className="mt-2 text-sm text-zinc-400">No active subscriptions found</p>
+          ) : (
+            <div className="mt-2 space-y-3">
+              {subs.map((sub) => (
+                <div key={sub.id} className="rounded-md border border-zinc-100 bg-zinc-50 p-3 dark:border-zinc-700 dark:bg-zinc-800/50">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                        {sub.items || "Subscription"}
+                      </p>
+                      <p className="mt-0.5 text-xs text-zinc-500">
+                        {sub.customer_email}
+                        {sub.is_linked && (
+                          <span className="ml-1 rounded bg-blue-100 px-1 py-0.5 text-[10px] font-medium text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">
+                            linked
+                          </span>
+                        )}
+                      </p>
+                      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-zinc-400">
+                        <span className={sub.status === "active" ? "text-green-600 dark:text-green-400" : "text-yellow-600 dark:text-yellow-400"}>
+                          {sub.status}
+                        </span>
+                        {sub.next_billing_date && (
+                          <span>Next: {new Date(sub.next_billing_date).toLocaleDateString()}</span>
+                        )}
+                        {sub.billing_interval && <span>{sub.billing_interval}</span>}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleCancelSub(sub.id)}
+                      disabled={cancellingId === sub.id}
+                      className="shrink-0 rounded-md border border-red-200 bg-white px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50 dark:border-red-900 dark:bg-zinc-900 dark:text-red-400 dark:hover:bg-red-900/20"
+                    >
+                      {cancellingId === sub.id ? "Cancelling..." : "Cancel"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* Auto action */}
         {action && (

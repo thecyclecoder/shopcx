@@ -27,7 +27,7 @@ export async function PATCH(
 
   const body = await request.json();
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
-  for (const key of ["name", "slug", "journey_type", "config", "is_active"]) {
+  for (const key of ["name", "slug", "journey_type", "config", "is_active", "channels", "description", "trigger_intent", "match_patterns", "priority"]) {
     if (body[key] !== undefined) updates[key] = body[key];
   }
 
