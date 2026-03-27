@@ -15,9 +15,9 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   };
 }
 
-export default async function HelpCenterPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ search?: string; category?: string }> }) {
+export default async function HelpCenterPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ search?: string; category?: string; product?: string }> }) {
   const { slug } = await params;
-  const { search, category: categoryFilter } = await searchParams;
+  const { search, category: categoryFilter, product: productFilter } = await searchParams;
   const headersList = await headers();
   const host = headersList.get("host") || "";
   const isSubdomain = host.split(".").length >= 3 || !host.includes("shopcx.ai");
@@ -99,7 +99,7 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
 
       <main className="max-w-4xl mx-auto px-6 py-8">
         {/* Learn more about our products */}
-        {!searchResults && !categoryFilter && productsWithArticles.length > 0 && (
+        {!searchResults && !categoryFilter && !productFilter && productsWithArticles.length > 0 && (
           <div className="mb-10">
             <h2 className="text-xl font-bold text-zinc-900">Learn more about our products</h2>
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -125,7 +125,7 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
                       ))}
                     </ul>
                     {(articles || []).filter(a => a.product_id === p.id).length > 5 && (
-                      <Link href={`${basePath}/?category=product`} className="mt-2 inline-block text-xs font-medium text-indigo-600 hover:underline">
+                      <Link href={`${basePath}/?product=${p.id}`} className="mt-2 inline-block text-xs font-medium text-indigo-600 hover:underline">
                         View all articles →
                       </Link>
                     )}
@@ -157,8 +157,42 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
           </div>
         )}
 
+        {/* Product articles page — when a product is selected */}
+        {productFilter && (() => {
+          const product = productsWithArticles.find(p => p.id === productFilter);
+          const productArticleList = (articles || []).filter(a => a.product_id === productFilter);
+          if (!product && productArticleList.length === 0) return null;
+          return (
+            <div className="mb-8">
+              <Link href={basePath || "/"} className="text-sm text-indigo-600 hover:underline">&larr; Back</Link>
+              {product && (
+                <div className="mt-3 flex items-center gap-4">
+                  {product.image_url && (
+                    <div className="h-16 w-16 shrink-0 overflow-hidden rounded-lg bg-zinc-100">
+                      <img src={product.image_url} alt={product.title} className="h-full w-full object-cover" />
+                    </div>
+                  )}
+                  <div>
+                    <h2 className="text-lg font-semibold text-zinc-900">{product.title}</h2>
+                    {product.description && <p className="mt-0.5 text-sm text-zinc-500 line-clamp-2">{product.description}</p>}
+                  </div>
+                </div>
+              )}
+              <p className="mt-3 text-sm text-zinc-500">{productArticleList.length} article{productArticleList.length !== 1 ? "s" : ""}</p>
+              <div className="mt-3 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white">
+                {productArticleList.map(a => (
+                  <Link key={a.id} href={`${basePath}/${a.slug}`} className="block px-4 py-3 hover:bg-zinc-50 transition-colors">
+                    <p className="text-sm font-medium text-zinc-900">{a.title}</p>
+                    {a.excerpt && <p className="mt-0.5 text-xs text-zinc-500 line-clamp-2">{a.excerpt}</p>}
+                  </Link>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Category page — when a category is selected */}
-        {categoryFilter && byCategory[categoryFilter] ? (
+        {!productFilter && categoryFilter && byCategory[categoryFilter] ? (
           <div className="mb-8">
             <div className="flex items-center gap-3">
               <Link href={basePath || "/"} className="text-sm text-indigo-600 hover:underline">&larr; All Categories</Link>
