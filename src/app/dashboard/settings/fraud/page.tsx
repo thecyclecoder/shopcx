@@ -34,16 +34,27 @@ export default function FraudSettingsPage() {
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
 
-  const fetchRules = async () => {
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await fetch(`/api/workspaces/${workspace.id}/fraud-rules`);
+      if (cancelled) return;
+      if (res.ok) {
+        const data = await res.json();
+        setRules(data.rules || []);
+      }
+      setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [workspace.id]);
+
+  const reloadRules = async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/fraud-rules`);
     if (res.ok) {
       const data = await res.json();
       setRules(data.rules || []);
     }
-    setLoading(false);
   };
-
-  useEffect(() => { fetchRules(); }, [workspace.id]);
 
   const updateRule = async (ruleId: string, updates: Record<string, unknown>) => {
     setSavingId(ruleId);
@@ -52,7 +63,7 @@ export default function FraudSettingsPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updates),
     });
-    await fetchRules();
+    await reloadRules();
     setSavingId(null);
   };
 
