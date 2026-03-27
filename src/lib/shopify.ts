@@ -2,7 +2,7 @@ import { createHmac, randomBytes } from "crypto";
 
 export const SHOPIFY_API_VERSION = "2025-01";
 export const SHOPIFY_SCOPES =
-  "read_customers,read_orders,read_products,read_inventory";
+  "read_customers,read_orders,write_orders,read_products,read_inventory";
 
 export function generateNonce(): string {
   return randomBytes(32).toString("hex");

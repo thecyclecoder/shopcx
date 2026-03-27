@@ -27,6 +27,7 @@ interface OrderFulfillment {
 
 interface RecentOrder {
   id: string;
+  shopify_order_id: string | null;
   order_number: string | null;
   total_cents: number;
   currency: string;
@@ -211,6 +212,20 @@ export default function TicketDetailPage() {
   const [applyingMacro, setApplyingMacro] = useState<string | null>(null);
   const [allMacros, setAllMacros] = useState<{ id: string; name: string; body_text: string; category: string | null; usage_count: number }[]>([]);
 
+  // Order actions state
+  const [orderActionPanel, setOrderActionPanel] = useState<{ orderId: string; action: "refund" | "cancel" | "edit_address" } | null>(null);
+  const [orderActionLoading, setOrderActionLoading] = useState(false);
+  const [orderActionError, setOrderActionError] = useState<string | null>(null);
+  const [orderActionSuccess, setOrderActionSuccess] = useState<string | null>(null);
+  // Refund form
+  const [refundFull, setRefundFull] = useState(true);
+  // Cancel form
+  const [cancelReason, setCancelReason] = useState<"CUSTOMER" | "INVENTORY" | "OTHER">("CUSTOMER");
+  const [cancelRefund, setCancelRefund] = useState(true);
+  const [cancelRestock, setCancelRestock] = useState(true);
+  // Address form
+  const [addressForm, setAddressForm] = useState({ address1: "", address2: "", city: "", province: "", zip: "", country: "US" });
+
   useEffect(() => {
     async function load() {
       const res = await fetch(`/api/tickets/${id}`);
@@ -322,6 +337,43 @@ export default function TicketDetailPage() {
       .then((data) => { if (Array.isArray(data)) setCustomerEvents(data); })
       .catch(() => {});
   }, [activeTab, customer?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleOrderAction = async (order: RecentOrder, action: string, payload: Record<string, unknown>) => {
+    setOrderActionLoading(true);
+    setOrderActionError(null);
+    setOrderActionSuccess(null);
+    try {
+      const res = await fetch(`/api/tickets/${id}/order-actions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          order_id: order.shopify_order_id,
+          order_number: order.order_number,
+          ...payload,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setOrderActionSuccess(data.note);
+        setOrderActionPanel(null);
+        // Refresh ticket data to get updated order + new internal note
+        const refreshRes = await fetch(`/api/tickets/${id}`);
+        if (refreshRes.ok) {
+          const refreshData = await refreshRes.json();
+          setTicket(refreshData.ticket);
+          setMessages(refreshData.messages);
+          setCustomer(refreshData.customer);
+        }
+      } else {
+        setOrderActionError(data.error || "Action failed");
+      }
+    } catch {
+      setOrderActionError("Network error");
+    } finally {
+      setOrderActionLoading(false);
+    }
+  };
 
   const handlePatch = async (updates: Record<string, unknown>) => {
     const res = await fetch(`/api/tickets/${id}`, {
@@ -1682,6 +1734,173 @@ export default function TicketDetailPage() {
                                     <span className="text-zinc-400">{formatCents(li.price_cents * li.quantity)}</span>
                                   </div>
                                 ))}
+                              </div>
+                            )}
+
+                            {/* Order Action Buttons */}
+                            {o.shopify_order_id && (
+                              <div className="mt-2 flex flex-wrap gap-1.5 border-t border-zinc-200 pt-2 dark:border-zinc-700">
+                                {(o.financial_status === "paid" || o.financial_status === "partially_refunded") && (
+                                  <button
+                                    onClick={() => { setOrderActionPanel({ orderId: o.id, action: "refund" }); setRefundFull(true); setOrderActionError(null); setOrderActionSuccess(null); }}
+                                    className="rounded bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/40"
+                                  >
+                                    Refund
+                                  </button>
+                                )}
+                                {(!o.fulfillment_status || o.fulfillment_status === "unfulfilled") && (
+                                  <>
+                                    <button
+                                      onClick={() => { setOrderActionPanel({ orderId: o.id, action: "cancel" }); setCancelReason("CUSTOMER"); setCancelRefund(true); setCancelRestock(true); setOrderActionError(null); setOrderActionSuccess(null); }}
+                                      className="rounded bg-amber-50 px-2 py-1 text-xs font-medium text-amber-600 hover:bg-amber-100 dark:bg-amber-900/20 dark:text-amber-400 dark:hover:bg-amber-900/40"
+                                    >
+                                      Cancel
+                                    </button>
+                                    <button
+                                      onClick={() => { setOrderActionPanel({ orderId: o.id, action: "edit_address" }); setAddressForm({ address1: "", address2: "", city: "", province: "", zip: "", country: "US" }); setOrderActionError(null); setOrderActionSuccess(null); }}
+                                      className="rounded bg-blue-50 px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-400 dark:hover:bg-blue-900/40"
+                                    >
+                                      Edit Address
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Order Action Success */}
+                            {orderActionSuccess && orderActionPanel === null && (
+                              <p className="mt-1.5 text-xs text-emerald-600 dark:text-emerald-400">{orderActionSuccess}</p>
+                            )}
+
+                            {/* Refund Form */}
+                            {orderActionPanel?.orderId === o.id && orderActionPanel.action === "refund" && (
+                              <div className="mt-2 space-y-2 rounded border border-red-200 bg-red-50/50 p-2 dark:border-red-800 dark:bg-red-900/10">
+                                <p className="text-xs font-medium text-red-700 dark:text-red-400">Refund Order #{o.order_number}</p>
+                                <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+                                  <input type="checkbox" checked={refundFull} onChange={(e) => setRefundFull(e.target.checked)} className="rounded" />
+                                  Full refund ({formatCents(o.total_cents)})
+                                </label>
+                                {orderActionError && <p className="text-xs text-red-600">{orderActionError}</p>}
+                                <div className="flex gap-1.5">
+                                  <button
+                                    disabled={orderActionLoading}
+                                    onClick={() => {
+                                      if (confirm(`Refund ${refundFull ? formatCents(o.total_cents) : "selected items"} to customer?`)) {
+                                        handleOrderAction(o, "refund", { full: refundFull });
+                                      }
+                                    }}
+                                    className="rounded bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                                  >
+                                    {orderActionLoading ? "Processing..." : "Confirm Refund"}
+                                  </button>
+                                  <button onClick={() => setOrderActionPanel(null)} className="rounded px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Cancel Form */}
+                            {orderActionPanel?.orderId === o.id && orderActionPanel.action === "cancel" && (
+                              <div className="mt-2 space-y-2 rounded border border-amber-200 bg-amber-50/50 p-2 dark:border-amber-800 dark:bg-amber-900/10">
+                                <p className="text-xs font-medium text-amber-700 dark:text-amber-400">Cancel Order #{o.order_number}</p>
+                                <div>
+                                  <label className="block text-xs text-zinc-500 mb-1">Reason</label>
+                                  <select
+                                    value={cancelReason}
+                                    onChange={(e) => setCancelReason(e.target.value as "CUSTOMER" | "INVENTORY" | "OTHER")}
+                                    className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                                  >
+                                    <option value="CUSTOMER">Customer request</option>
+                                    <option value="INVENTORY">Out of stock</option>
+                                    <option value="OTHER">Other</option>
+                                  </select>
+                                </div>
+                                <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+                                  <input type="checkbox" checked={cancelRefund} onChange={(e) => setCancelRefund(e.target.checked)} className="rounded" />
+                                  Refund payment
+                                </label>
+                                <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+                                  <input type="checkbox" checked={cancelRestock} onChange={(e) => setCancelRestock(e.target.checked)} className="rounded" />
+                                  Restock items
+                                </label>
+                                {orderActionError && <p className="text-xs text-red-600">{orderActionError}</p>}
+                                <div className="flex gap-1.5">
+                                  <button
+                                    disabled={orderActionLoading}
+                                    onClick={() => {
+                                      if (confirm(`Cancel order #${o.order_number}?`)) {
+                                        handleOrderAction(o, "cancel", { reason: cancelReason, refund: cancelRefund, restock: cancelRestock });
+                                      }
+                                    }}
+                                    className="rounded bg-amber-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+                                  >
+                                    {orderActionLoading ? "Processing..." : "Confirm Cancel"}
+                                  </button>
+                                  <button onClick={() => setOrderActionPanel(null)} className="rounded px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                                    Back
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Edit Address Form */}
+                            {orderActionPanel?.orderId === o.id && orderActionPanel.action === "edit_address" && (
+                              <div className="mt-2 space-y-2 rounded border border-blue-200 bg-blue-50/50 p-2 dark:border-blue-800 dark:bg-blue-900/10">
+                                <p className="text-xs font-medium text-blue-700 dark:text-blue-400">Edit Shipping Address</p>
+                                <input
+                                  placeholder="Address line 1"
+                                  value={addressForm.address1}
+                                  onChange={(e) => setAddressForm((f) => ({ ...f, address1: e.target.value }))}
+                                  className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                                />
+                                <input
+                                  placeholder="Address line 2 (optional)"
+                                  value={addressForm.address2}
+                                  onChange={(e) => setAddressForm((f) => ({ ...f, address2: e.target.value }))}
+                                  className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                                />
+                                <div className="flex gap-1.5">
+                                  <input
+                                    placeholder="City"
+                                    value={addressForm.city}
+                                    onChange={(e) => setAddressForm((f) => ({ ...f, city: e.target.value }))}
+                                    className="flex-1 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                                  />
+                                  <input
+                                    placeholder="State"
+                                    value={addressForm.province}
+                                    onChange={(e) => setAddressForm((f) => ({ ...f, province: e.target.value }))}
+                                    className="w-16 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                                  />
+                                </div>
+                                <div className="flex gap-1.5">
+                                  <input
+                                    placeholder="ZIP"
+                                    value={addressForm.zip}
+                                    onChange={(e) => setAddressForm((f) => ({ ...f, zip: e.target.value }))}
+                                    className="w-24 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                                  />
+                                  <input
+                                    placeholder="Country (US)"
+                                    value={addressForm.country}
+                                    onChange={(e) => setAddressForm((f) => ({ ...f, country: e.target.value }))}
+                                    className="flex-1 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                                  />
+                                </div>
+                                {orderActionError && <p className="text-xs text-red-600">{orderActionError}</p>}
+                                <div className="flex gap-1.5">
+                                  <button
+                                    disabled={orderActionLoading || !addressForm.address1 || !addressForm.city || !addressForm.province || !addressForm.zip}
+                                    onClick={() => handleOrderAction(o, "update_address", { address: addressForm })}
+                                    className="rounded bg-blue-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                                  >
+                                    {orderActionLoading ? "Saving..." : "Save Address"}
+                                  </button>
+                                  <button onClick={() => setOrderActionPanel(null)} className="rounded px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                                    Cancel
+                                  </button>
+                                </div>
                               </div>
                             )}
                           </div>

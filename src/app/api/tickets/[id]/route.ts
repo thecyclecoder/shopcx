@@ -79,7 +79,7 @@ export async function GET(
 
       const { data: orders } = await admin
         .from("orders")
-        .select("id, order_number, total_cents, currency, financial_status, fulfillment_status, source_name, order_type, line_items, fulfillments, created_at")
+        .select("id, shopify_order_id, order_number, total_cents, currency, financial_status, fulfillment_status, source_name, order_type, line_items, fulfillments, created_at")
         .in("customer_id", linkedCustomerIds)
         .order("created_at", { ascending: false })
         .limit(10);
