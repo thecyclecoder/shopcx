@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, twilio_phone_number"
     )
     .eq("id", workspaceId)
     .single();
@@ -74,6 +74,10 @@ export async function GET(
     help_logo_url: workspace.help_logo_url || null,
     help_primary_color: workspace.help_primary_color || "#4f46e5",
     help_custom_domain: workspace.help_custom_domain || null,
+
+    // Twilio SMS (credentials are global env vars, only phone number is per-workspace)
+    twilio_connected: !!workspace.twilio_phone_number,
+    twilio_phone_number: workspace.twilio_phone_number || null,
   });
 }
 
@@ -189,6 +193,11 @@ export async function PATCH(
       updates.appstle_api_key_encrypted = body.appstle_api_key
         ? encrypt(body.appstle_api_key)
         : null;
+    }
+
+    // Twilio SMS (phone number only — credentials are global env vars)
+    if ("twilio_phone_number" in body) {
+      updates.twilio_phone_number = body.twilio_phone_number || null;
     }
 
     // VIP threshold

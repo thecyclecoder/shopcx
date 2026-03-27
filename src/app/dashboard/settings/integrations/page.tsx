@@ -58,6 +58,12 @@ export default function IntegrationsPage() {
   } | null>(null);
   const [mxLoading, setMxLoading] = useState(false);
 
+  // Twilio SMS
+  const [twilioConnected, setTwilioConnected] = useState(false);
+  const [twilioPhone, setTwilioPhone] = useState("");
+  const [testSmsNumber, setTestSmsNumber] = useState("");
+  const [testSmsStatus, setTestSmsStatus] = useState("");
+
   // Sandbox
   const [sandboxMode, setSandboxMode] = useState(true);
 
@@ -95,6 +101,8 @@ export default function IntegrationsPage() {
         setAppstleHasApiKey(data.appstle_has_api_key);
         setAppstleSecretHint(data.appstle_secret_hint);
         setAppstleApiKeyHint(data.appstle_api_key_hint);
+        setTwilioConnected(data.twilio_connected);
+        setTwilioPhone(data.twilio_phone_number || "");
         setLoading(false);
       });
   }, [workspace.id]);
@@ -822,6 +830,89 @@ export default function IntegrationsPage() {
                   <p className="font-medium">Events received:</p>
                   <p className="mt-1">subscription.created, .activated, .paused, .cancelled, .updated, .billing-success, .billing-failure, .billing-skipped, .billing-interval-changed, .next-order-date-changed, .upcoming-order-notification</p>
                 </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ── Twilio SMS ── */}
+        <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-zinc-100 dark:bg-zinc-800">
+                <svg className="h-5 w-5 text-zinc-600 dark:text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Twilio SMS</h2>
+                <p className="text-sm text-zinc-500">Inbound &amp; outbound SMS messaging</p>
+              </div>
+            </div>
+            {twilioConnected && (
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                Connected
+              </span>
+            )}
+          </div>
+
+          {canEdit && (
+            <div className="mt-5 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">Assigned Phone Number</label>
+                {twilioConnected ? (
+                  <p className="mt-1 text-sm font-mono text-zinc-900 dark:text-zinc-100">{twilioPhone}</p>
+                ) : (
+                  <p className="mt-1 text-sm text-zinc-400">No phone number assigned. Contact ShopCX admin to provision one.</p>
+                )}
+                <p className="mt-1 text-sm text-zinc-400">
+                  Twilio credentials are managed globally by ShopCX. Phone numbers are assigned per workspace.
+                </p>
+              </div>
+
+              {twilioConnected && (
+                <>
+                  <div className="rounded-md bg-zinc-50 p-3 dark:bg-zinc-800">
+                    <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Webhook URL</p>
+                    <p className="mt-1 font-mono text-sm text-zinc-500">https://shopcx.ai/api/webhooks/sms</p>
+                    <p className="mt-1 text-sm text-zinc-400">Configure this in the Twilio console for your phone number.</p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="block text-sm font-medium text-zinc-500">Send Test SMS</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="tel"
+                        value={testSmsNumber}
+                        onChange={(e) => setTestSmsNumber(e.target.value)}
+                        placeholder="+15551234567"
+                        className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                      />
+                      <button
+                        onClick={async () => {
+                          if (!testSmsNumber) return;
+                          setTestSmsStatus("Sending...");
+                          try {
+                            const res = await fetch(`/api/workspaces/${workspace.id}/sms/test`, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ to: testSmsNumber }),
+                            });
+                            const data = await res.json();
+                            setTestSmsStatus(data.success ? "Test SMS sent!" : `Error: ${data.error}`);
+                          } catch {
+                            setTestSmsStatus("Failed to send");
+                          }
+                        }}
+                        disabled={saving || !testSmsNumber}
+                        className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                      >
+                        Send Test
+                      </button>
+                    </div>
+                    {testSmsStatus && <p className="text-sm text-zinc-500">{testSmsStatus}</p>}
+                  </div>
+                </>
               )}
             </div>
           )}

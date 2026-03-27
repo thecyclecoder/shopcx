@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 import { sendTicketReply } from "@/lib/email";
+import { sendSMS } from "@/lib/twilio";
 import { evaluateRules } from "@/lib/rules-engine";
 
 export async function POST(
@@ -29,7 +30,7 @@ export async function POST(
   // Get ticket with customer info
   const { data: ticket } = await admin
     .from("tickets")
-    .select("*, customers(email)")
+    .select("*, customers(email, phone)")
     .eq("id", ticketId)
     .eq("workspace_id", workspaceId)
     .single();
@@ -46,11 +47,23 @@ export async function POST(
     body: messageBody,
   };
 
-  // Send email if external reply
+  // Send reply via appropriate channel
   let emailError: string | undefined;
   let emailSuppressed = false;
+  let smsError: string | undefined;
 
-  if (visibility === "external" && ticket.customers?.email) {
+  if (visibility === "external" && ticket.channel === "sms" && ticket.customers?.phone) {
+    // SMS channel: send via Twilio
+    // Strip HTML tags for SMS
+    const plainBody = messageBody.replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim();
+    const result = await sendSMS(workspaceId, ticket.customers.phone, plainBody);
+    if (result.error) {
+      smsError = result.error;
+    } else if (result.messageSid) {
+      message.sms_message_id = result.messageSid;
+    }
+  } else if (visibility === "external" && ticket.customers?.email) {
+    // Email/other channels: send via Resend
     const { data: workspace } = await admin
       .from("workspaces")
       .select("name, sandbox_mode, resend_domain")
@@ -125,8 +138,10 @@ export async function POST(
 
   return NextResponse.json({
     message: created,
-    email_sent: visibility === "external" && !emailError && !emailSuppressed,
+    email_sent: visibility === "external" && ticket.channel !== "sms" && !emailError && !emailSuppressed,
     email_suppressed: emailSuppressed,
     email_error: emailError,
+    sms_sent: visibility === "external" && ticket.channel === "sms" && !smsError,
+    sms_error: smsError,
   });
 }
