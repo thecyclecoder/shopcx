@@ -154,6 +154,15 @@ export const aiMultiTurn = inngest.createFunction(
       const wasReopened = turnCount > 0 && !!ticket.resolved_at;
       if (turnCount > 0 && !wasReopened) return { matched: false };
 
+      // Reset turn count on conversation drift (new topic after closure)
+      if (wasReopened) {
+        await admin.from("tickets").update({
+          ai_turn_count: 0,
+          resolved_at: null,
+          handled_by: "AI Agent",
+        }).eq("id", ticket_id);
+      }
+
       // Already has a smart tag (and wasn't reopened) — don't re-match
       const hasSmart = (ticket.tags as string[] || []).some(t => t.startsWith("smart:"));
       if (hasSmart && !wasReopened) return { matched: false };
@@ -182,6 +191,7 @@ export const aiMultiTurn = inngest.createFunction(
             await admin.from("tickets").update({
               auto_reply_at: new Date(Date.now() + delaySec * 1000).toISOString(),
               handled_by: `Workflow: ${workflow.name}`,
+              ai_turn_count: 0,
             }).eq("id", ticket_id);
 
             // Fire the workflow
@@ -278,6 +288,7 @@ export const aiMultiTurn = inngest.createFunction(
             // Linking in progress — set handled_by so we know which journey to chain into after
             await admin.from("tickets").update({
               handled_by: `Journey: ${matchedJourney.trigger_intent}`,
+              ai_turn_count: 0,
             }).eq("id", ticket_id);
             return { handled: true };
           }
@@ -291,6 +302,7 @@ export const aiMultiTurn = inngest.createFunction(
           journey_data: {},
           journey_id: matchedJourney.id,
           handled_by: `Journey: ${matchedJourney.trigger_intent}`,
+          ai_turn_count: 0,
         }).eq("id", ticket_id);
 
         if (matchedJourney.trigger_intent === "discount_signup") {
