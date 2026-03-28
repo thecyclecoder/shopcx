@@ -30,6 +30,7 @@ interface ChargebackEvent {
   ticket_id: string | null;
   initiated_at: string;
   created_at: string;
+  active_sub_count: number;
 }
 
 interface Stats {
@@ -88,12 +89,26 @@ export default function ChargebacksPage() {
   const [selected, setSelected] = useState<ChargebackEvent | null>(null);
   const [reinstating, setReinstating] = useState(false);
   const [page, setPage] = useState(0);
+  const [sortCol, setSortCol] = useState("created_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const limit = 25;
+
+  function handleSort(col: string) {
+    if (sortCol === col) {
+      setSortOrder((o) => (o === "desc" ? "asc" : "desc"));
+    } else {
+      setSortCol(col);
+      setSortOrder("desc");
+    }
+    setPage(0);
+  }
 
   const fetchChargebacks = useCallback(async () => {
     const params = new URLSearchParams();
     if (statusFilter !== "all") params.set("status", statusFilter);
     if (reasonFilter !== "all") params.set("reason", reasonFilter);
+    params.set("sort", sortCol);
+    params.set("order", sortOrder);
     params.set("limit", String(limit));
     params.set("offset", String(page * limit));
 
@@ -104,7 +119,7 @@ export default function ChargebacksPage() {
       setTotal(data.total || 0);
     }
     setLoading(false);
-  }, [statusFilter, reasonFilter, page]);
+  }, [statusFilter, reasonFilter, page, sortCol, sortOrder]);
 
   const fetchStats = useCallback(async () => {
     const res = await fetch("/api/chargebacks/stats");
@@ -195,21 +210,22 @@ export default function ChargebacksPage() {
         <table className="w-full text-left text-sm">
           <thead className="border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
             <tr>
-              <th className="px-4 py-3 font-medium text-zinc-500">Date</th>
+              <SortHeader label="Date" col="created_at" current={sortCol} order={sortOrder} onSort={handleSort} />
               <th className="px-4 py-3 font-medium text-zinc-500">Order</th>
               <th className="px-4 py-3 font-medium text-zinc-500">Customer</th>
-              <th className="px-4 py-3 font-medium text-zinc-500">Amount</th>
+              <SortHeader label="Amount" col="amount_cents" current={sortCol} order={sortOrder} onSort={handleSort} />
               <th className="px-4 py-3 font-medium text-zinc-500">Reason</th>
               <th className="px-4 py-3 font-medium text-zinc-500">Status</th>
+              <SortHeader label="Active Subs" col="active_sub_count" current={sortCol} order={sortOrder} onSort={handleSort} />
               <th className="px-4 py-3 font-medium text-zinc-500">Action</th>
-              <th className="px-4 py-3 font-medium text-zinc-500">Evidence Due</th>
+              <SortHeader label="Evidence Due" col="evidence_due_by" current={sortCol} order={sortOrder} onSort={handleSort} />
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
             {loading ? (
-              <tr><td colSpan={8} className="px-4 py-8 text-center text-zinc-400">Loading...</td></tr>
+              <tr><td colSpan={9} className="px-4 py-8 text-center text-zinc-400">Loading...</td></tr>
             ) : chargebacks.length === 0 ? (
-              <tr><td colSpan={8} className="px-4 py-8 text-center text-zinc-400">No chargebacks found</td></tr>
+              <tr><td colSpan={9} className="px-4 py-8 text-center text-zinc-400">No chargebacks found</td></tr>
             ) : chargebacks.map((cb) => (
               <tr
                 key={cb.id}
@@ -235,6 +251,15 @@ export default function ChargebacksPage() {
                 </td>
                 <td className="px-4 py-3">
                   <Badge {...(STATUS_BADGES[cb.status] || { label: cb.status, color: "bg-zinc-100 text-zinc-500" })} />
+                </td>
+                <td className="whitespace-nowrap px-4 py-3 text-center">
+                  {cb.active_sub_count > 0 ? (
+                    <span className="inline-flex min-w-[1.5rem] items-center justify-center rounded-full bg-amber-100 px-1.5 py-0.5 text-xs font-semibold text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                      {cb.active_sub_count}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-zinc-300 dark:text-zinc-600">0</span>
+                  )}
                 </td>
                 <td className="px-4 py-3">
                   {cb.auto_action_taken ? (
@@ -660,5 +685,30 @@ function DetailRow({ label, value, className }: { label: string; value: string; 
       <span className="text-zinc-500">{label}</span>
       <span className={className || "text-zinc-900 dark:text-zinc-100"}>{value}</span>
     </div>
+  );
+}
+
+function SortHeader({ label, col, current, order, onSort }: { label: string; col: string; current: string; order: string; onSort: (col: string) => void }) {
+  const active = current === col;
+  return (
+    <th
+      onClick={() => onSort(col)}
+      className="cursor-pointer select-none px-4 py-3 font-medium text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+    >
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {active ? (
+          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            {order === "desc"
+              ? <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+              : <path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7" />}
+          </svg>
+        ) : (
+          <svg className="h-3 w-3 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M8 9l4-4 4 4M8 15l4 4 4-4" />
+          </svg>
+        )}
+      </span>
+    </th>
   );
 }
