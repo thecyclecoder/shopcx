@@ -86,15 +86,23 @@ async function sendEmailJourneyCTA(
     .eq("id", ctx.workspaceId)
     .single();
 
+  // Step-specific subject to prevent Gmail clipping in threaded emails
+  const stepSubjects: Record<string, string> = {
+    account_linking: "Confirm your email addresses",
+    discount_signup: "Your exclusive coupon is ready",
+  };
+  const wsName = ws?.name || "Support";
+
   await sendJourneyCTA({
     workspaceId: ctx.workspaceId,
     toEmail: customer.email,
     customerName: customer.first_name || "",
     journeyToken: token,
     contextMessage,
-    workspaceName: ws?.name || "Support",
-    logoUrl: ws?.help_logo_url || undefined,
+    workspaceName: wsName,
     primaryColor: ws?.help_primary_color || undefined,
+    subject: `${stepSubjects[journeyType] || "Action needed"} — ${wsName}`,
+    buttonLabel: currentForm?.type === "checklist" ? "Select your emails &rarr;" : currentForm?.type === "confirm" ? "Respond &rarr;" : "Continue &rarr;",
   });
 
   await sendInternalNote(ctx, `[System] Sent journey CTA email to ${customer.email} for ${journeyType}`);

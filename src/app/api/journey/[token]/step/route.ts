@@ -57,11 +57,10 @@ export async function POST(
       body: responseValue,
     });
 
-    // Reopen ticket if closed
+    // Reopen ticket if closed + reset nudge count (customer completed the step)
     await admin.from("tickets")
-      .update({ status: "open", resolved_at: null })
-      .eq("id", session.ticket_id)
-      .in("status", ["closed"]);
+      .update({ status: "open", resolved_at: null, journey_nudge_count: 0 })
+      .eq("id", session.ticket_id);
 
     // Fire event to trigger the journey executor
     await inngest.send({

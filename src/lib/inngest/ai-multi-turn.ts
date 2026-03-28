@@ -251,6 +251,87 @@ export const aiMultiTurn = inngest.createFunction(
           .eq("id", ticket.journey_id)
           .single();
 
+        // For non-chat channels: customer replied via email instead of clicking CTA
+        // Re-nudge them to complete the journey step, or give up after 2 nudges
+        const isInlineChannel = ticket.channel === "chat";
+        if (!isInlineChannel && journey?.trigger_intent) {
+          const { data: ticketFull } = await admin
+            .from("tickets")
+            .select("journey_nudge_count, customer_id")
+            .eq("id", ticket_id)
+            .single();
+
+          const nudgeCount = ticketFull?.journey_nudge_count || 0;
+
+          if (nudgeCount >= 2) {
+            // Give up — clear journey, let AI take over
+            await admin.from("tickets").update({
+              journey_id: null, journey_step: 99, journey_data: {},
+              journey_nudge_count: 0, handled_by: "AI Agent",
+            }).eq("id", ticket_id);
+            return { handled: false }; // Fall through to AI
+          }
+
+          // Re-nudge: resend the CTA with a nudge message
+          const nudgeMessages: Record<string, string> = {
+            account_linking: "I'm working on your request! But first, I need you to confirm which email addresses belong to you so I can pull up your full account details.",
+            discount_signup: "I'm working on getting you that coupon! But first, I need you to complete the step below.",
+          };
+          const nudgeMsg = nudgeMessages[journey.trigger_intent] || "I'm working on your request, but I need you to complete the step below first.";
+
+          // Re-run the journey executor which will send a new CTA
+          if (journey.trigger_intent === "account_linking") {
+            // Reset step to 0 to re-trigger CTA send
+            await admin.from("tickets").update({ journey_step: 0, journey_nudge_count: nudgeCount + 1 }).eq("id", ticket_id);
+            const result = await executeAccountLinkingJourney(workspace_id, ticket_id, "", ticket.channel);
+            if (!result.completed) {
+              // Send the nudge as a reply
+              const { sendTicketReply: sendReply } = await import("@/lib/email");
+              const { data: ws } = await admin.from("workspaces").select("name").eq("id", workspace_id).single();
+              const { data: cust } = await admin.from("customers").select("email").eq("id", ticketFull?.customer_id || "").single();
+              if (cust?.email) {
+                const { data: t } = await admin.from("tickets").select("subject").eq("id", ticket_id).single();
+                await sendReply({
+                  workspaceId: workspace_id, toEmail: cust.email,
+                  subject: t?.subject ? `Re: ${t.subject}` : "Re: Your request",
+                  body: `<p>${nudgeMsg}</p><p style="color:#71717a;font-size:13px">Check your email for a link to continue.</p>`,
+                  inReplyTo: null, agentName: "Support", workspaceName: ws?.name || "Support",
+                });
+                await admin.from("ticket_messages").insert({
+                  ticket_id, direction: "outbound", body: `<p>${nudgeMsg}</p>`,
+                  author_type: "system", visibility: "external",
+                });
+              }
+              return { handled: true };
+            }
+          } else if (journey.trigger_intent === "discount_signup") {
+            await admin.from("tickets").update({ journey_step: 0, journey_nudge_count: nudgeCount + 1 }).eq("id", ticket_id);
+            const result = await executeDiscountJourney(workspace_id, ticket_id, "", ticket.channel);
+            if (!result.completed) {
+              const { sendTicketReply: sendReply } = await import("@/lib/email");
+              const { data: ws } = await admin.from("workspaces").select("name").eq("id", workspace_id).single();
+              const { data: cust } = await admin.from("customers").select("email").eq("id", ticketFull?.customer_id || "").single();
+              if (cust?.email) {
+                const { data: t } = await admin.from("tickets").select("subject").eq("id", ticket_id).single();
+                await sendReply({
+                  workspaceId: workspace_id, toEmail: cust.email,
+                  subject: t?.subject ? `Re: ${t.subject}` : "Re: Your request",
+                  body: `<p>${nudgeMsg}</p><p style="color:#71717a;font-size:13px">Check your email for a link to continue.</p>`,
+                  inReplyTo: null, agentName: "Support", workspaceName: ws?.name || "Support",
+                });
+                await admin.from("ticket_messages").insert({
+                  ticket_id, direction: "outbound", body: `<p>${nudgeMsg}</p>`,
+                  author_type: "system", visibility: "external",
+                });
+              }
+              return { handled: true };
+            }
+          }
+
+          // Journey completed on re-run (e.g., linking not needed anymore)
+          return { handled: false };
+        }
+
         if (journey?.trigger_intent === "account_linking") {
           const result = await executeAccountLinkingJourney(workspace_id, ticket_id, message_body, ticket.channel);
           if (!result.completed) return { handled: true };
