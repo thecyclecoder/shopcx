@@ -530,15 +530,19 @@ export default function ChatWidgetPage() {
             {messages.map((msg) => {
               const isCustomer = msg.direction === "inbound" && msg.author_type === "customer";
 
+              // Check for journey multi-step form
+              const journeyMatch = msg.body.match(/<!--JOURNEY:([\s\S]*?)-->/);
+              let journeyData: { token: string; steps: { key: string; type: string; question: string; subtitle?: string; placeholder?: string; options?: { value: string; label: string }[] }[] } | null = null;
+              if (journeyMatch) {
+                try { journeyData = JSON.parse(journeyMatch[1]); } catch {}
+              }
+
               // Check for interactive form in message
               const formMatch = msg.body.match(/<!--FORM:([\s\S]*?)-->/);
               let formData: { type: string; prompt: string; options: { value: string; label: string }[]; id: string } | null = null;
-              let bodyWithoutForm = msg.body;
+              let bodyWithoutForm = msg.body.replace(/<!--JOURNEY:[\s\S]*?-->/g, "").replace(/<!--FORM:[\s\S]*?-->/g, "").trim();
               if (formMatch) {
-                try {
-                  formData = JSON.parse(formMatch[1]);
-                  bodyWithoutForm = msg.body.replace(formMatch[0], "").trim();
-                } catch {}
+                try { formData = JSON.parse(formMatch[1]); } catch {}
               }
 
               return (
@@ -599,6 +603,23 @@ export default function ChatWidgetPage() {
                     )}
                     {formData && formSubmitted.has(formData.id) && (
                       <p className="mt-1 text-xs text-zinc-500 italic">Response submitted</p>
+                    )}
+
+                    {/* Inline multi-step journey form */}
+                    {journeyData && !formSubmitted.has(journeyData.token) && (
+                      <InlineJourneyForm
+                        token={journeyData.token}
+                        steps={journeyData.steps}
+                        primaryColor={primaryColor}
+                        onComplete={async (humanResponse) => {
+                          setFormSubmitted(prev => new Set([...prev, journeyData!.token]));
+                          const tempMsg: Message = { id: `temp-${Date.now()}`, direction: "inbound", author_type: "customer", body: humanResponse, created_at: new Date().toISOString() };
+                          setMessages(prev => [...prev, tempMsg]);
+                        }}
+                      />
+                    )}
+                    {journeyData && formSubmitted.has(journeyData.token) && (
+                      <p className="mt-1 text-xs text-zinc-500 italic">Completed</p>
                     )}
 
                     <p className={`mt-0.5 text-[10px] ${isCustomer ? "text-white/60" : "text-zinc-400"}`}>
@@ -700,6 +721,201 @@ export default function ChatWidgetPage() {
 }
 
 // Interactive form component for checklist, radio, confirm, text input
+function buildHumanResponse(steps: { key: string; type: string; question: string; options?: { value: string; label: string }[] }[], responses: Record<string, { value: string; label: string }>): string {
+  const parts: string[] = [];
+  for (const step of steps) {
+    const r = responses[step.key];
+    if (!r) continue;
+    if (step.key === "account_linking") {
+      const selected = r.label;
+      if (selected.includes("these are mine")) {
+        const emails = selected.replace("Yes, these are mine: ", "").replace(". The rest are not mine.", "");
+        parts.push(`Yes, ${emails} is also my email.`);
+      } else {
+        parts.push("None of those emails are mine.");
+      }
+    } else if (step.key === "consent") {
+      parts.push(r.value === "Yes" ? "Add me to the email and SMS marketing list." : "No thanks on the marketing signup.");
+    } else if (step.key === "phone_input") {
+      parts.push(`${r.value} is my phone number.`);
+    } else if (step.key === "apply_subscription") {
+      parts.push(r.value === "Yes" ? "Apply the coupon to my subscription." : "I'll use the coupon at checkout instead.");
+    } else {
+      parts.push(r.label);
+    }
+  }
+  return parts.join(" ");
+}
+
+function InlineJourneyForm({
+  token,
+  steps,
+  primaryColor,
+  onComplete,
+}: {
+  token: string;
+  steps: { key: string; type: string; question: string; subtitle?: string; placeholder?: string; options?: { value: string; label: string }[] }[];
+  primaryColor: string;
+  onComplete: (humanResponse: string) => void;
+}) {
+  const [currentIdx, setCurrentIdx] = useState(0);
+  const [responses, setResponses] = useState<Record<string, { value: string; label: string }>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const step = steps[currentIdx];
+
+  const handleStepSubmit = async (value: string, label: string) => {
+    const updated = { ...responses, [step.key]: { value, label } };
+    setResponses(updated);
+
+    // "No" on consent — re-nudge once, then close
+    if (step.key === "consent" && value === "No") {
+      if (!updated._nudged) {
+        updated._nudged = { value: "true", label: "nudged" };
+        setResponses(updated);
+        return; // Stay on consent, UI shows nudge variant
+      }
+      setSubmitting(true);
+      await fetch(`/api/journey/${token}/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outcome: "declined", responses: updated }),
+      });
+      setDone(true);
+      setSubmitting(false);
+      onComplete(buildHumanResponse(steps, updated));
+      return;
+    }
+
+    if (currentIdx < steps.length - 1) {
+      setCurrentIdx(i => i + 1);
+      return;
+    }
+
+    // Last step — submit all
+    setSubmitting(true);
+    await fetch(`/api/journey/${token}/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ outcome: "completed", responses: updated }),
+    });
+    setDone(true);
+    setSubmitting(false);
+    onComplete(buildHumanResponse(steps, updated));
+  };
+
+  if (done) return null;
+  if (!step) return null;
+
+  const isNudge = step.key === "consent" && !!responses._nudged;
+  const displayQuestion = isNudge ? "Want to try again?" : step.question;
+  const displaySubtitle = isNudge
+    ? "We can't send you a coupon unless you sign up for our email list. We only send coupons, sales, and latest product drops — never spam."
+    : step.subtitle;
+
+  return (
+    <div className="mt-2">
+      {steps.length > 1 && (
+        <div className="mb-2 flex items-center gap-2">
+          <div className="h-1 flex-1 overflow-hidden rounded-full bg-zinc-200">
+            <div className="h-full rounded-full transition-all" style={{ width: `${((currentIdx + 1) / steps.length) * 100}%`, backgroundColor: primaryColor }} />
+          </div>
+          <span className="text-[10px] text-zinc-400">{currentIdx + 1}/{steps.length}</span>
+        </div>
+      )}
+      <p className="mb-1.5 text-xs font-medium text-zinc-700">{displayQuestion}</p>
+      {displaySubtitle && <p className="mb-2 text-[11px] text-zinc-400">{displaySubtitle}</p>}
+
+      {step.type === "confirm" && (
+        <div className="flex gap-2">
+          <button onClick={() => handleStepSubmit("Yes", "Yes, please!")} disabled={submitting}
+            className="flex-1 rounded-lg py-2 text-xs font-medium text-white disabled:opacity-60" style={{ backgroundColor: primaryColor }}>
+            {isNudge ? "Yes, get my coupon" : "Yes"}
+          </button>
+          <button onClick={() => handleStepSubmit("No", "No thanks")} disabled={submitting}
+            className="flex-1 rounded-lg border border-zinc-200 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-60">No thanks</button>
+        </div>
+      )}
+
+      {step.type === "radio" && step.options && (
+        <div className="space-y-1.5">
+          {step.options.map(opt => (
+            <button key={opt.value} onClick={() => handleStepSubmit(opt.value, opt.label)} disabled={submitting}
+              className="flex w-full items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-left text-xs text-zinc-700 hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-60">
+              <span className="flex h-3.5 w-3.5 shrink-0 rounded-full border border-zinc-300" />
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {step.type === "checklist" && step.options && (
+        <InlineChecklist
+          options={step.options}
+          primaryColor={primaryColor}
+          submitting={submitting}
+          onSubmit={(value, label) => handleStepSubmit(value, label)}
+        />
+      )}
+
+      {step.type === "text_input" && step.key.startsWith("phone") && (
+        <PhoneInputForm primaryColor={primaryColor} onSubmit={(v) => handleStepSubmit(v, v)} />
+      )}
+    </div>
+  );
+}
+
+function InlineChecklist({
+  options,
+  primaryColor,
+  submitting,
+  onSubmit,
+}: {
+  options: { value: string; label: string }[];
+  primaryColor: string;
+  submitting: boolean;
+  onSubmit: (value: string, label: string) => void;
+}) {
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  return (
+    <div className="space-y-1.5">
+      {options.map(opt => {
+        const isChecked = checked.has(opt.value);
+        return (
+          <button key={opt.value}
+            onClick={() => setChecked(prev => { const n = new Set(prev); if (n.has(opt.value)) n.delete(opt.value); else n.add(opt.value); return n; })}
+            disabled={submitting}
+            className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all ${
+              isChecked ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-zinc-200 bg-white text-zinc-700 hover:border-indigo-300"
+            } disabled:opacity-60`}>
+            <span className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border ${
+              isChecked ? "border-emerald-500 bg-emerald-500 text-white" : "border-zinc-300"
+            }`}>
+              {isChecked && <svg className="h-2 w-2" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>}
+            </span>
+            {opt.label}
+          </button>
+        );
+      })}
+      <button
+        onClick={() => {
+          const selectedLabels = options.filter(o => checked.has(o.value)).map(o => o.label);
+          const remaining = options.filter(o => !checked.has(o.value));
+          const label = selectedLabels.length > 0
+            ? (remaining.length > 0 ? `Yes, these are mine: ${selectedLabels.join(", ")}. The rest are not mine.` : `Yes, these are mine: ${selectedLabels.join(", ")}`)
+            : "None of these are mine";
+          onSubmit(Array.from(checked).join(","), label);
+        }}
+        disabled={submitting}
+        className="w-full rounded-lg py-2 text-xs font-medium text-white disabled:opacity-40"
+        style={{ backgroundColor: primaryColor }}>
+        {checked.size === 0 ? "None are mine" : "Continue"}
+      </button>
+    </div>
+  );
+}
+
 function formatPhoneDisplay(raw: string): string {
   const digits = raw.replace(/\D/g, "").slice(0, 10);
   if (digits.length <= 3) return digits;

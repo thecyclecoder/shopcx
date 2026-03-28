@@ -226,6 +226,26 @@ export async function POST(
     }
   }
 
+  // Handle declined — close ticket, clear journey so AI takes over on next reply
+  if (outcome === "declined" && session.ticket_id) {
+    await admin.from("tickets").update({
+      status: "closed",
+      resolved_at: new Date().toISOString(),
+      journey_id: null,
+      journey_step: 99,
+      journey_data: {},
+      handled_by: null,
+    }).eq("id", session.ticket_id);
+
+    await admin.from("ticket_messages").insert({
+      ticket_id: session.ticket_id,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: "[System] Customer declined marketing signup. Journey ended. AI will handle next reply.",
+    });
+  }
+
   // Mark session completed
   await admin
     .from("journey_sessions")

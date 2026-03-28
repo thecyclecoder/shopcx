@@ -358,45 +358,16 @@ export const aiMultiTurn = inngest.createFunction(
         return j.match_patterns.some((p: string) => bodyLower.includes(p.toLowerCase()));
       });
 
-      if (matchedJourney) {
+      if (matchedJourney && matchedJourney.trigger_intent === "discount_signup" && ticket.customer_id) {
         console.log(`[Journey] Matched ${matchedJourney.trigger_intent} for ticket ${ticket_id}`);
         try {
-          // A journey pattern matched — always try account linking first (if not completed)
-          if (!ticket.profile_link_completed && ticket.customer_id) {
-            const linkingDef = (journeyDefs || []).find(j => j.trigger_intent === "account_linking");
-            if (linkingDef) {
-              await admin.from("tickets").update({ journey_id: linkingDef.id }).eq("id", ticket_id);
-            }
-            const linkResult = await executeAccountLinkingJourney(workspace_id, ticket_id, message_body, ticket.channel);
-            if (!linkResult.completed) {
-              await admin.from("tickets").update({
-                handled_by: `Journey: ${matchedJourney.trigger_intent}`,
-                ai_turn_count: 0,
-              }).eq("id", ticket_id);
-              return { handled: true };
-            }
-            await admin.from("tickets").update({ profile_link_completed: true, journey_id: null }).eq("id", ticket_id);
-          }
-
-          // Account linking done or not needed — start the matched journey
-          await admin.from("tickets").update({
-            journey_step: 0,
-            journey_data: {},
-            journey_id: matchedJourney.id,
-            handled_by: `Journey: ${matchedJourney.trigger_intent}`,
-            ai_turn_count: 0,
-          }).eq("id", ticket_id);
-
-          if (matchedJourney.trigger_intent === "discount_signup") {
-            const discResult = await executeDiscountJourney(workspace_id, ticket_id, message_body, ticket.channel);
-            return { handled: !discResult.completed };
-          }
-
-          return { handled: false };
+          const { launchDiscountJourney } = await import("@/lib/journey-launcher");
+          const result = await launchDiscountJourney(
+            workspace_id, ticket_id, ticket.customer_id, ticket.channel, matchedJourney.id,
+          );
+          if (result.launched) return { handled: true };
         } catch (err) {
-          console.error(`[Journey] Error executing ${matchedJourney.trigger_intent}:`, err);
-          // Fall through to AI if journey fails
-          return { handled: false };
+          console.error(`[Journey] Error launching ${matchedJourney.trigger_intent}:`, err);
         }
       }
 

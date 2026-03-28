@@ -456,9 +456,16 @@ function CodeDrivenJourney({
     setResponses(stepResponses);
 
     if (isMultiStep && currentStepIdx < multiSteps.length - 1) {
-      // Check if user said "No" on consent — skip to completion
+      // "No" on consent — re-nudge once, then close on second decline
       if (form.id === "consent" && value === "No") {
-        // Submit all at once with declined consent
+        if (!stepResponses._nudged) {
+          // First decline — re-nudge
+          stepResponses._nudged = { value: "true", label: "nudged" };
+          setResponses(stepResponses);
+          setSubmitting(false);
+          return; // Stay on same step, UI will show nudge variant
+        }
+        // Second decline — close
         await fetch(`/api/journey/${token}/complete`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -466,7 +473,7 @@ function CodeDrivenJourney({
         });
         setSubmitted(true);
         setSubmitting(false);
-        setTimeout(() => onComplete("No problem! You can always sign up later."), 500);
+        setTimeout(() => onComplete("No problem! Keep an eye on your inbox for future deals."), 500);
         return;
       }
 
@@ -522,16 +529,25 @@ function CodeDrivenJourney({
         </>
       )}
 
-      {form && !submitted && (
+      {form && !submitted && (() => {
+        const isNudge = form.id === "consent" && !!responses._nudged;
+        const question = isNudge
+          ? "Want to try again?"
+          : (form.prompt || (form as { question?: string }).question);
+        const subtitle = isNudge
+          ? "We can't send you a coupon unless you sign up for our email list. We only send coupons, sales, and latest product drops — never spam."
+          : (form as { subtitle?: string }).subtitle;
+
+        return (
         <div>
-          {(form.prompt || (form as { question?: string }).question) && <h2 className="mb-2 text-lg font-semibold text-zinc-900">{form.prompt || (form as { question?: string }).question}</h2>}
-          {(form as { subtitle?: string }).subtitle && <p className="mb-4 text-sm text-zinc-500">{(form as { subtitle?: string }).subtitle}</p>}
+          {question && <h2 className="mb-2 text-lg font-semibold text-zinc-900">{question}</h2>}
+          {subtitle && <p className="mb-4 text-sm text-zinc-500">{subtitle}</p>}
 
           {form.type === "confirm" && (
             <div className="flex gap-3">
               <button onClick={() => handleSubmit("Yes", "Yes, please!")} disabled={submitting}
                 className="flex-1 rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-60" style={{ backgroundColor: primaryColor }}>
-                Yes
+                {isNudge ? "Yes, get my coupon" : "Yes"}
               </button>
               <button onClick={() => handleSubmit("No", "No thanks")} disabled={submitting}
                 className="flex-1 rounded-xl border-2 border-zinc-200 px-4 py-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-60">
@@ -566,7 +582,8 @@ function CodeDrivenJourney({
             />
           )}
         </div>
-      )}
+        );
+      })()}
 
       {submitted && (
         <div className="flex items-center justify-center py-8">
