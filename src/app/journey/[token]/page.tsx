@@ -442,17 +442,17 @@ function CodeDrivenJourney({
   const [submitted, setSubmitted] = useState(false);
   const form = config.currentForm;
 
-  const handleSubmit = async (value: string) => {
+  const handleSubmit = async (value: string, label?: string) => {
     setSubmitting(true);
 
-    // Post response to the journey step API which will create a ticket message
+    // Post response — value is for the executor, label is for the ticket message
     await fetch(`/api/journey/${token}/step`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         stepKey: form?.id || "response",
         responseValue: value,
-        responseLabel: value,
+        responseLabel: label || value,
         codeDriven: true,
       }),
     });
@@ -479,7 +479,7 @@ function CodeDrivenJourney({
           {form.type === "confirm" && (
             <div className="flex gap-3">
               <button
-                onClick={() => handleSubmit("Yes")}
+                onClick={() => handleSubmit("Yes", "Yes, please!")}
                 disabled={submitting}
                 className="flex-1 rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-60"
                 style={{ backgroundColor: primaryColor }}
@@ -487,7 +487,7 @@ function CodeDrivenJourney({
                 Yes
               </button>
               <button
-                onClick={() => handleSubmit("No")}
+                onClick={() => handleSubmit("No", "No thanks")}
                 disabled={submitting}
                 className="flex-1 rounded-xl border-2 border-zinc-200 px-4 py-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-60"
               >
@@ -502,7 +502,7 @@ function CodeDrivenJourney({
               {form.options.map((opt) => (
                 <button
                   key={opt.value}
-                  onClick={() => handleSubmit(opt.value)}
+                  onClick={() => handleSubmit(opt.value, opt.label)}
                   disabled={submitting}
                   className="flex w-full items-center gap-3 rounded-xl border-2 border-zinc-200 px-4 py-4 text-left text-sm font-medium text-zinc-800 transition-all hover:border-zinc-300 hover:bg-zinc-50 disabled:opacity-60"
                 >
@@ -519,7 +519,7 @@ function CodeDrivenJourney({
               options={form.options}
               primaryColor={primaryColor}
               submitting={submitting}
-              onSubmit={(vals) => handleSubmit(vals.join(", "))}
+              onSubmit={(value, label) => handleSubmit(value, label)}
             />
           )}
         </div>
@@ -548,7 +548,7 @@ function ChecklistForm({
   options: { value: string; label: string }[];
   primaryColor: string;
   submitting: boolean;
-  onSubmit: (values: string[]) => void;
+  onSubmit: (value: string, label: string) => void;
 }) {
   const [checked, setChecked] = useState<Set<string>>(new Set());
 
@@ -580,7 +580,15 @@ function ChecklistForm({
         );
       })}
       <button
-        onClick={() => onSubmit(Array.from(checked))}
+        onClick={() => {
+          const selectedLabels = options.filter(o => checked.has(o.value)).map(o => o.label);
+          const selectedValues = Array.from(checked);
+          const remaining = options.filter(o => !checked.has(o.value));
+          const label = remaining.length > 0
+            ? `Yes, these are mine: ${selectedLabels.join(", ")}. The rest are not mine.`
+            : `Yes, these are mine: ${selectedLabels.join(", ")}`;
+          onSubmit(selectedValues.join(","), label);
+        }}
         disabled={checked.size === 0 || submitting}
         className="mt-2 w-full rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-40"
         style={{ backgroundColor: primaryColor }}
