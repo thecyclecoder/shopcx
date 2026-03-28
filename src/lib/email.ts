@@ -162,6 +162,7 @@ export async function sendJourneyCTA({
   primaryColor,
   subject,
   buttonLabel,
+  inReplyTo,
 }: {
   workspaceId: string;
   toEmail: string;
@@ -172,6 +173,7 @@ export async function sendJourneyCTA({
   primaryColor?: string;
   subject?: string;
   buttonLabel?: string;
+  inReplyTo?: string | null;
 }): Promise<{ error?: string }> {
   const client = await getResendClient(workspaceId);
   if (!client) return { error: "Resend not configured" };
@@ -184,10 +186,17 @@ export async function sendJourneyCTA({
   // Unique subject per email to prevent Gmail clipping in threads
   const emailSubject = subject || `Action needed — ${workspaceName}`;
 
+  const headers: Record<string, string> = {};
+  if (inReplyTo) {
+    headers["In-Reply-To"] = inReplyTo;
+    headers["References"] = inReplyTo;
+  }
+
   const { error } = await client.resend.emails.send({
     from: `${workspaceName} <support@${client.domain}>`,
     to: toEmail,
     subject: emailSubject,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
     html: `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
         <h2 style="color: #18181b; font-size: 20px; margin-bottom: 8px;">${greeting}</h2>

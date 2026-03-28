@@ -236,19 +236,8 @@ export default function JourneyPage() {
     );
   }
 
-  // ── Loading ──
-  if (status === "loading" || !step || !config) {
-    return (
-      <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
-        <div className="flex items-center justify-center py-12">
-          <div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
-        </div>
-      </JourneyShell>
-    );
-  }
-
-  // ── Code-driven journey ──
-  if (config.codeDriven) {
+  // ── Code-driven journey (must check before loading since step is always null) ──
+  if (status !== "loading" && config?.codeDriven) {
     return (
       <CodeDrivenJourney
         config={config}
@@ -258,6 +247,17 @@ export default function JourneyPage() {
         workspaceName={workspaceName}
         onComplete={(msg) => { setCompletedMessage(msg); setStatus("completed"); }}
       />
+    );
+  }
+
+  // ── Loading ──
+  if (status === "loading" || !step || !config) {
+    return (
+      <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
+        <div className="flex items-center justify-center py-12">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
+        </div>
+      </JourneyShell>
     );
   }
 

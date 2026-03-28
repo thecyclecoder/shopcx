@@ -227,11 +227,8 @@ export const aiMultiTurn = inngest.createFunction(
       return { matched: false };
     });
 
-    if (patternResult.matched && (patternResult as { workflow?: string }).workflow) {
-      return { action: "workflow_triggered", tag: (patternResult as { tag?: string }).tag, workflow: (patternResult as { workflow?: string }).workflow };
-    }
-
-    // Step 1c: Check for active chat journey, account linking, or start a new journey
+    // Step 1c: Check for active journey or start a new one
+    // Priority: Journey > Workflow > AI/Macros
     const journeyResult = await step.run("check-journey", async () => {
       const admin = createAdminClient();
       const { data: ticket } = await admin
@@ -417,6 +414,11 @@ export const aiMultiTurn = inngest.createFunction(
 
     if (journeyResult.handled) {
       return { action: "journey_active" };
+    }
+
+    // Step 1d: If no journey matched but a workflow did, trigger it now
+    if (patternResult.matched && (patternResult as { workflow?: string }).workflow) {
+      return { action: "workflow_triggered", tag: (patternResult as { tag?: string }).tag, workflow: (patternResult as { workflow?: string }).workflow };
     }
 
     // Step 2: Assemble context

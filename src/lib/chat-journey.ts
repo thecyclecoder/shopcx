@@ -86,12 +86,27 @@ async function sendEmailJourneyCTA(
     .eq("id", ctx.workspaceId)
     .single();
 
-  // Step-specific subject to prevent Gmail clipping in threaded emails
-  const stepSubjects: Record<string, string> = {
-    account_linking: "Confirm your email addresses",
-    discount_signup: "Your exclusive coupon is ready",
-  };
   const wsName = ws?.name || "Support";
+
+  // Get ticket subject + last message ID for email threading
+  const { data: ticketData } = await ctx.admin
+    .from("tickets")
+    .select("subject")
+    .eq("id", ctx.ticketId)
+    .single();
+
+  // Get the last inbound message's Resend ID for In-Reply-To threading
+  const { data: lastMsg } = await ctx.admin
+    .from("ticket_messages")
+    .select("resend_id")
+    .eq("ticket_id", ctx.ticketId)
+    .eq("direction", "inbound")
+    .not("resend_id", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const ticketSubject = ticketData?.subject || "Your request";
 
   await sendJourneyCTA({
     workspaceId: ctx.workspaceId,
@@ -101,8 +116,9 @@ async function sendEmailJourneyCTA(
     contextMessage,
     workspaceName: wsName,
     primaryColor: ws?.help_primary_color || undefined,
-    subject: `${stepSubjects[journeyType] || "Action needed"} — ${wsName}`,
+    subject: `Re: ${ticketSubject}`,
     buttonLabel: currentForm?.type === "checklist" ? "Select your emails &rarr;" : currentForm?.type === "confirm" ? "Respond &rarr;" : "Continue &rarr;",
+    inReplyTo: lastMsg?.resend_id || null,
   });
 
   await sendInternalNote(ctx, `[System] Sent journey CTA email to ${customer.email} for ${journeyType}`);
