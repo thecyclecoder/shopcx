@@ -91,20 +91,24 @@ async function sendEmailJourneyCTA(
   // Get ticket subject + last message ID for email threading
   const { data: ticketData } = await ctx.admin
     .from("tickets")
-    .select("subject")
+    .select("subject, email_message_id")
     .eq("id", ctx.ticketId)
     .single();
 
-  // Get the last inbound message's Resend ID for In-Reply-To threading
-  const { data: lastMsg } = await ctx.admin
-    .from("ticket_messages")
-    .select("resend_id")
-    .eq("ticket_id", ctx.ticketId)
-    .eq("direction", "inbound")
-    .not("resend_id", "is", null)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // Get the original email Message-ID for threading (In-Reply-To header)
+  // Try ticket-level first (original inbound), then last message with an email_message_id
+  let inReplyToId: string | null = ticketData?.email_message_id || null;
+  if (!inReplyToId) {
+    const { data: lastMsg } = await ctx.admin
+      .from("ticket_messages")
+      .select("email_message_id")
+      .eq("ticket_id", ctx.ticketId)
+      .not("email_message_id", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    inReplyToId = lastMsg?.email_message_id || null;
+  }
 
   const ticketSubject = ticketData?.subject || "Your request";
 
@@ -118,7 +122,7 @@ async function sendEmailJourneyCTA(
     primaryColor: ws?.help_primary_color || undefined,
     subject: `Re: ${ticketSubject}`,
     buttonLabel: currentForm?.type === "checklist" ? "Select your emails &rarr;" : currentForm?.type === "confirm" ? "Respond &rarr;" : "Continue &rarr;",
-    inReplyTo: lastMsg?.resend_id || null,
+    inReplyTo: inReplyToId,
   });
 
   await sendInternalNote(ctx, `[System] Sent journey CTA email to ${customer.email} for ${journeyType}`);
