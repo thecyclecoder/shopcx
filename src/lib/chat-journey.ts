@@ -272,7 +272,7 @@ export async function executeAccountLinkingJourney(
     const sentCTA = await sendEmailJourneyCTA(
       ctx,
       "account_linking",
-      "I got your message and I'm going to help you today! I noticed you might have multiple profiles in our system. Can you tell me which ones are yours?",
+      "I got your message and I'm going to help you. I noticed you might have multiple profiles in our system. Can you tell me which ones are yours?",
       linkForm,
     );
     if (sentCTA) {
@@ -289,7 +289,7 @@ export async function executeAccountLinkingJourney(
       options,
     });
 
-    await sendChatMessage(ctx, `I got your message and I'm going to help you today! I noticed you might have multiple profiles in our system. Can you tell me which ones are yours?<!--FORM:${formPayload}-->`);
+    await sendChatMessage(ctx, `I got your message and I'm going to help you. I noticed you might have multiple profiles in our system. Can you tell me which ones are yours?<!--FORM:${formPayload}-->`);
     await updateJourneyStep(ctx, 1, { unlinkedMatches: unlinked, existingGroupId: groupId });
     return { completed: false, linkedIds: [] };
   }
