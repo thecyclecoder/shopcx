@@ -185,10 +185,9 @@ function MemberRow({
             </p>
             <button
               onClick={() => { setNameValue(member.display_name || ""); setEditing(true); }}
-              className="text-[10px] text-zinc-400 hover:text-indigo-500"
-              title="Edit display name"
+              className="rounded border border-zinc-200 px-1.5 py-0.5 text-[11px] text-zinc-400 hover:border-indigo-300 hover:text-indigo-500 dark:border-zinc-700"
             >
-              edit
+              edit name
             </button>
           </div>
         )}
