@@ -207,3 +207,42 @@ export async function PATCH(
 
   return NextResponse.json({ ok: true });
 }
+
+// DELETE: Remove a fraud case (admin/owner only)
+export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ id: string; caseId: string }> }
+) {
+  const { id: workspaceId, caseId } = await params;
+  void request;
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const admin = createAdminClient();
+
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user.id)
+    .single();
+
+  if (!member || !["owner", "admin"].includes(member.role)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // Clear fraud_case_id references on chargeback_events
+  await admin
+    .from("chargeback_events")
+    .update({ fraud_case_id: null })
+    .eq("fraud_case_id", caseId);
+
+  // Delete related records first
+  await admin.from("fraud_case_history").delete().eq("case_id", caseId);
+  await admin.from("fraud_rule_matches").delete().eq("case_id", caseId);
+  await admin.from("fraud_cases").delete().eq("id", caseId).eq("workspace_id", workspaceId);
+
+  return NextResponse.json({ deleted: true });
+}

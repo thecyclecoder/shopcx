@@ -206,81 +206,10 @@ export const chargebackReceived = inngest.createFunction(
       });
     }
 
-    // Step 5: Create fraud case
-    const fraudCaseId = await step.run("create-fraud-case", async () => {
-      // Look up order number for the title
-      const { data: order } = cb.shopify_order_id
-        ? await admin
-            .from("orders")
-            .select("order_number")
-            .eq("workspace_id", workspaceId)
-            .eq("shopify_order_id", cb.shopify_order_id)
-            .maybeSingle()
-        : { data: null };
-
-      const orderLabel = order?.order_number || cb.shopify_order_id || "Unknown";
-
-      // Get the default chargeback fraud rule (or first active rule)
-      const { data: rule } = await admin
-        .from("fraud_rules")
-        .select("id")
-        .eq("workspace_id", workspaceId)
-        .eq("is_active", true)
-        .limit(1)
-        .maybeSingle();
-
-      if (!rule) return null;
-
-      // Check for existing fraud case for this chargeback
-      const { data: existingCase } = await admin
-        .from("fraud_cases")
-        .select("id")
-        .eq("workspace_id", workspaceId)
-        .eq("rule_type", "chargeback")
-        .contains("evidence", { dispute_id: cb.shopify_dispute_id })
-        .maybeSingle();
-
-      if (existingCase) return existingCase.id;
-
-      const { data: customer } = await admin
-        .from("customers")
-        .select("email")
-        .eq("id", customerId)
-        .maybeSingle();
-
-      const severity = (cb.reason === "fraudulent" || cb.reason === "unrecognized") ? "high" : "medium";
-
-      const { data: newCase } = await admin
-        .from("fraud_cases")
-        .insert({
-          workspace_id: workspaceId,
-          rule_id: rule.id,
-          rule_type: "chargeback",
-          status: "open",
-          severity,
-          title: `Chargeback — ${cb.reason || "unknown"} — Order ${orderLabel}`,
-          evidence: {
-            dispute_id: cb.shopify_dispute_id,
-            order_id: cb.shopify_order_id,
-            reason: cb.reason,
-            amount_cents: cb.amount_cents,
-            evidence_due_by: cb.evidence_due_by,
-            customer_email: customer?.email,
-          },
-          customer_ids: [customerId],
-        })
-        .select("id")
-        .single();
-
-      if (newCase) {
-        await admin
-          .from("chargeback_events")
-          .update({ fraud_case_id: newCase.id })
-          .eq("id", chargebackEventId);
-      }
-
-      return newCase?.id || null;
-    });
+    // Chargebacks no longer create fraud cases — fraud cases come only from
+    // actual fraud rules (shared_address, high_velocity, etc.) in Settings → Fraud.
+    // Chargebacks are tracked in the Chargebacks system instead.
+    const fraudCaseId: string | null = null;
 
     // Step 6: Create ticket + notifications
     await step.run("notify-and-ticket", async () => {

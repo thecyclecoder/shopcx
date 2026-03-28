@@ -165,6 +165,16 @@ export default function FraudCaseDetailPage() {
             </span>
           </div>
         </div>
+        <button
+          onClick={async () => {
+            if (!confirm("Delete this fraud case? This cannot be undone.")) return;
+            const res = await fetch(`/api/workspaces/${workspace.id}/fraud-cases/${caseId}`, { method: "DELETE" });
+            if (res.ok) router.push("/dashboard/fraud");
+          }}
+          className="rounded-md border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-900/20"
+        >
+          Delete Case
+        </button>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-3">
