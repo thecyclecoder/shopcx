@@ -483,7 +483,8 @@ export async function executeDiscountJourney(
 
   // Step 2: Process phone input
   if (step === 2) {
-    const phone = customerMessage.trim();
+    const rawPhone = customerMessage.trim().replace(/[\s\-\(\)\.]/g, "");
+    const phone = rawPhone && !rawPhone.startsWith("+") ? `+1${rawPhone.replace(/^1/, "")}` : rawPhone;
     if (phone && customer.shopify_customer_id) {
       await admin.from("customers").update({ phone }).eq("id", customer.id);
       await subscribeToSmsMarketing(workspaceId, customer.shopify_customer_id, phone);

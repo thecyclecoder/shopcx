@@ -99,7 +99,8 @@ export async function POST(
       actionLog.push(`Email marketing: subscribed ${customerEmail}`);
 
       // Subscribe SMS — use phone from input or existing phone on file
-      const phoneInput = responses.phone_input?.value?.trim();
+      const rawPhone = responses.phone_input?.value?.trim().replace(/[\s\-\(\)\.]/g, "") || "";
+      const phoneInput = rawPhone && !rawPhone.startsWith("+") ? `+1${rawPhone.replace(/^1/, "")}` : rawPhone || undefined;
       const existingPhone = metadata.customerPhone as string | undefined;
       const phone = phoneInput || existingPhone;
 
