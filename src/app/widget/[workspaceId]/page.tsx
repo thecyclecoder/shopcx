@@ -701,7 +701,7 @@ export default function ChatWidgetPage() {
 
 // Interactive form component for checklist, radio, confirm, text input
 function InteractiveForm({ form, primaryColor, onSubmit }: {
-  form: { type: string; prompt?: string; options: { value: string; label: string }[]; id: string };
+  form: { type: string; prompt?: string; options?: { value: string; label: string }[]; id: string };
   primaryColor: string;
   onSubmit: (response: string) => void;
 }) {
@@ -711,19 +711,19 @@ function InteractiveForm({ form, primaryColor, onSubmit }: {
 
   // Checklist: instant action per click, fade out confirmed items
   if (form.type === "checklist") {
-    const remaining = form.options.filter(o => !confirmed.has(o.value));
+    const remaining = (form.options || []).filter(o => !confirmed.has(o.value));
 
     // Auto-finish when all confirmed
     useEffect(() => {
       if (remaining.length === 0 && confirmed.size > 0) {
-        const labels = form.options.filter(o => confirmed.has(o.value)).map(o => o.label);
+        const labels = (form.options || []).filter(o => confirmed.has(o.value)).map(o => o.label);
         onSubmit(`Yes, these are mine: ${labels.join(", ")}`);
       }
     }, [remaining.length, confirmed.size]); // eslint-disable-line react-hooks/exhaustive-deps
 
     return (
       <div className="mt-2 space-y-1.5">
-        {form.options.map(option => (
+        {(form.options || []).map(option => (
           <button
             key={option.value}
             type="button"
@@ -757,7 +757,7 @@ function InteractiveForm({ form, primaryColor, onSubmit }: {
           <button
             onClick={() => {
               // Finish — confirmed ones are linked, remaining are rejected
-              const labels = form.options.filter(o => confirmed.has(o.value)).map(o => o.label);
+              const labels = (form.options || []).filter(o => confirmed.has(o.value)).map(o => o.label);
               const rejected = remaining.map(o => o.label);
               onSubmit(labels.length > 0
                 ? `Yes, these are mine: ${labels.join(", ")}. The rest are not mine.`
@@ -780,11 +780,34 @@ function InteractiveForm({ form, primaryColor, onSubmit }: {
     );
   }
 
-  // Radio / Confirm: pick one
-  if (form.type === "radio" || form.type === "confirm") {
+  // Confirm: Yes / No buttons
+  if (form.type === "confirm") {
+    return (
+      <div className="mt-2 flex gap-2">
+        <button
+          type="button"
+          onClick={() => onSubmit("Yes")}
+          className="flex-1 rounded-lg px-4 py-2.5 text-sm font-medium text-white transition-colors hover:opacity-90"
+          style={{ backgroundColor: primaryColor }}
+        >
+          Yes
+        </button>
+        <button
+          type="button"
+          onClick={() => onSubmit("No")}
+          className="flex-1 rounded-lg border border-zinc-200 bg-white px-4 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50"
+        >
+          No thanks
+        </button>
+      </div>
+    );
+  }
+
+  // Radio: pick one
+  if (form.type === "radio") {
     return (
       <div className="mt-2 space-y-1.5">
-        {form.options.map(option => (
+        {(form.options || []).map(option => (
           <button
             key={option.value}
             type="button"
