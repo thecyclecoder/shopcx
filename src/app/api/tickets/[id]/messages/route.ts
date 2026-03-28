@@ -161,10 +161,12 @@ export async function POST(
 
   await admin.from("tickets").update(ticketUpdates).eq("id", ticketId);
 
-  // Mark first touch for agent replies
+  // Mark first touch + agent tag for agent replies
   if (visibility === "external") {
     const { markFirstTouch } = await import("@/lib/first-touch");
     await markFirstTouch(ticketId, "agent");
+    const { addTicketTag } = await import("@/lib/ticket-tags");
+    await addTicketTag(ticketId, "agent");
   }
 
   // Evaluate rules on message sent

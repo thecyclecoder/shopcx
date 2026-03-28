@@ -234,6 +234,7 @@ export async function POST(
       .single();
 
     const nudgeCount = ticketData?.journey_nudge_count || 0;
+    const nudgeWsId = session.workspace_id;
 
     if (nudgeCount === 0) {
       // First decline — send re-nudge CTA email with new combined journey
@@ -254,7 +255,7 @@ export async function POST(
       // Send re-nudge CTA email
       if (ticketData?.customer_id) {
         const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", ticketData.customer_id).single();
-        const { data: ws } = await admin.from("workspaces").select("name, help_primary_color").eq("id", wsId).single();
+        const { data: ws } = await admin.from("workspaces").select("name, help_primary_color").eq("id", session.workspace_id).single();
 
         if (cust?.email) {
           // Build a new combined journey session
@@ -265,24 +266,24 @@ export async function POST(
           const { buildDiscountJourneySteps } = await import("@/lib/discount-journey-builder");
           const crypto = await import("crypto");
 
-          const { steps, metadata } = await buildDiscountJourneySteps(wsId, ticketData.customer_id);
+          const { steps, metadata } = await buildDiscountJourneySteps(nudgeWsId, ticketData.customer_id);
           if (steps.length > 0) {
             const nudgeToken = crypto.randomBytes(24).toString("hex");
             const journeyId = session.journey_id;
 
             await admin.from("journey_sessions").insert({
-              workspace_id: wsId,
+              workspace_id: nudgeWsId,
               journey_id: journeyId,
               customer_id: ticketData.customer_id,
               ticket_id: session.ticket_id,
               token: nudgeToken,
               token_expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
               status: "pending",
-              config_snapshot: { codeDriven: true, multiStep: true, steps, metadata: { ...metadata, ticketId: session.ticket_id, workspaceId: wsId }, needsLinking: false },
+              config_snapshot: { codeDriven: true, multiStep: true, steps, metadata: { ...metadata, ticketId: session.ticket_id, workspaceId: nudgeWsId }, needsLinking: false },
             });
 
             await sendJourneyCTA({
-              workspaceId: wsId,
+              workspaceId: nudgeWsId,
               toEmail: cust.email,
               customerName: cust.first_name || "",
               journeyToken: nudgeToken,
