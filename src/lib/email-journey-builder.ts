@@ -171,6 +171,10 @@ export async function buildCombinedEmailJourney({
     await markFirstTouch(ticketId, "journey");
   }
 
+  // Tag ticket with journey type
+  const { addTicketTag } = await import("@/lib/ticket-tags");
+  await addTicketTag(ticketId, `j:${matchedJourneyIntent}`);
+
   // Apply step ticket status
   const { data: journeyDef } = await admin.from("journey_definitions")
     .select("step_ticket_status")

@@ -441,6 +441,11 @@ export async function POST(request: Request) {
           name: "workflow/execute",
           data: { workspace_id: workspaceId, ticket_id: ticket.id, trigger_tag: matched.autoTag, channel: "email" },
         });
+
+        // Tag ticket with workflow type
+        const { addTicketTag } = await import("@/lib/ticket-tags");
+        const wfShort = matched.autoTag.replace("smart:", "").replace("order-", "").replace("-request", "").replace("-inquiry", "");
+        await addTicketTag(ticket.id, `w:${wfShort}`);
       }
 
       // AI auto-draft: only if no journey or workflow was triggered

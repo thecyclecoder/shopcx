@@ -301,6 +301,9 @@ export async function POST(
               author_type: "system",
               body: `[System] Sent re-nudge CTA email to ${cust.email}`,
             });
+
+            const { addTicketTag } = await import("@/lib/ticket-tags");
+            await addTicketTag(session.ticket_id, "jr:discount");
           }
         }
       }

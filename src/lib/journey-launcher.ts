@@ -149,5 +149,8 @@ export async function launchDiscountJourney(
 
   await markFirstTouch(ticketId, "journey");
 
+  const { addTicketTag } = await import("@/lib/ticket-tags");
+  await addTicketTag(ticketId, "j:discount");
+
   return { launched: true };
 }

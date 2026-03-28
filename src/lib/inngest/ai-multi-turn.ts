@@ -397,6 +397,11 @@ export const aiMultiTurn = inngest.createFunction(
           name: "workflow/execute",
           data: { workspace_id, ticket_id, trigger_tag: pr.tag, channel },
         });
+
+        // Tag ticket with workflow type (e.g., w:tracking from smart:order-tracking)
+        const { addTicketTag } = await import("@/lib/ticket-tags");
+        const wfShort = (pr.tag || "").replace("smart:", "").replace("order-", "").replace("-request", "").replace("-inquiry", "") || "workflow";
+        await addTicketTag(ticket_id, `w:${wfShort}`);
       });
       return { action: "workflow_triggered", tag: (patternResult as { tag?: string }).tag, workflow: (patternResult as { workflow?: string }).workflow };
     }
