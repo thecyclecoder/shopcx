@@ -142,16 +142,21 @@ export const aiMultiTurn = inngest.createFunction(
       const admin = createAdminClient();
       const { data: ticket } = await admin
         .from("tickets")
-        .select("tags, ai_turn_count, subject")
+        .select("tags, ai_turn_count, subject, resolved_at")
         .eq("id", ticket_id)
         .single();
 
-      // Only run pattern matching on first turn (turn 0) — follow-up turns stay with AI
-      if (!ticket || (ticket.ai_turn_count || 0) > 0) return { matched: false };
+      if (!ticket) return { matched: false };
 
-      // Already has a smart tag — don't re-match
+      // Run pattern matching on turn 0 OR after conversation drift
+      // (ticket was previously resolved then customer sent a new message)
+      const turnCount = ticket.ai_turn_count || 0;
+      const wasReopened = turnCount > 0 && !!ticket.resolved_at;
+      if (turnCount > 0 && !wasReopened) return { matched: false };
+
+      // Already has a smart tag (and wasn't reopened) — don't re-match
       const hasSmart = (ticket.tags as string[] || []).some(t => t.startsWith("smart:"));
-      if (hasSmart) return { matched: false };
+      if (hasSmart && !wasReopened) return { matched: false };
 
       try {
         const match = await matchPatterns(workspace_id, ticket.subject || "", message_body);
@@ -198,173 +203,12 @@ export const aiMultiTurn = inngest.createFunction(
       return { action: "workflow_triggered", tag: (patternResult as { tag?: string }).tag, workflow: (patternResult as { workflow?: string }).workflow };
     }
 
-    // Step 1c: Profile linking check (first message only, doesn't count as a turn)
-    const linkResult = await step.run("check-profile-links", async () => {
-      const admin = createAdminClient();
-      const { data: ticket } = await admin
-        .from("tickets")
-        .select("profile_link_completed, customer_id")
-        .eq("id", ticket_id)
-        .single();
-
-      if (ticket?.profile_link_completed || !ticket?.customer_id) return { action: "skip" };
-
-      // Get customer info
-      const { data: cust } = await admin
-        .from("customers")
-        .select("id, email, first_name, last_name")
-        .eq("id", ticket.customer_id)
-        .single();
-      if (!cust?.first_name || !cust?.last_name) {
-        await admin.from("tickets").update({ profile_link_completed: true }).eq("id", ticket_id);
-        return { action: "skip" };
-      }
-
-      // Get existing link group (if any)
-      const { data: existingLinks } = await admin
-        .from("customer_links")
-        .select("group_id")
-        .eq("customer_id", cust.id);
-      const groupId = existingLinks?.[0]?.group_id || null;
-
-      // Get IDs already in this link group
-      let alreadyLinkedIds: string[] = [];
-      if (groupId) {
-        const { data: groupMembers } = await admin
-          .from("customer_links")
-          .select("customer_id")
-          .eq("group_id", groupId);
-        alreadyLinkedIds = (groupMembers || []).map(m => m.customer_id);
-      }
-
-      // Find potential matches by name that are NOT already linked
-      const { data: matches } = await admin
-        .from("customers")
-        .select("id, email")
-        .eq("workspace_id", workspace_id)
-        .eq("first_name", cust.first_name)
-        .eq("last_name", cust.last_name)
-        .neq("id", cust.id)
-        .neq("email", cust.email)
-        .limit(5);
-
-      // Get previously rejected suggestions
-      const { data: rejections } = await admin
-        .from("customer_link_rejections")
-        .select("rejected_customer_id")
-        .eq("customer_id", cust.id);
-      const rejectedIds = (rejections || []).map(r => r.rejected_customer_id);
-
-      // Filter out already linked AND previously rejected
-      const unlinked = (matches || []).filter(m => !alreadyLinkedIds.includes(m.id) && !rejectedIds.includes(m.id));
-      if (unlinked.length === 0) {
-        await admin.from("tickets").update({ profile_link_completed: true }).eq("id", ticket_id);
-        return { action: "skip" };
-      }
-
-      return {
-        action: "ask",
-        matchEmail: unlinked[0].email,
-        matchId: unlinked[0].id,
-        allMatchEmails: unlinked.map(m => m.email),
-        allMatchIds: unlinked.map(m => m.id),
-        customerId: cust.id,
-      };
-    });
-
-    // If we need to ask about profile linking
-    if (linkResult.action === "ask") {
-      // Check if we're already in a linking conversation (customer is responding to our question)
-      const bodyLower = message_body.toLowerCase().trim();
-      const isConfirming = /^(yes|yeah|yep|that's me|that is me|correct|yup|sure)/.test(bodyLower);
-      const isDenying = /^(no|nope|not me|not mine|different|wrong)/.test(bodyLower);
-
-      // Check if we already asked (look for the linking question in messages)
-      const alreadyAsked = await step.run("check-link-asked", async () => {
-        const admin = createAdminClient();
-        const { data: msgs } = await admin
-          .from("ticket_messages")
-          .select("body")
-          .eq("ticket_id", ticket_id)
-          .eq("author_type", "ai")
-          .order("created_at", { ascending: false })
-          .limit(3);
-        return (msgs || []).some(m => (m.body || "").includes("also your email"));
-      });
-
-      const matchId = (linkResult as { matchId?: string }).matchId;
-      const matchEmail = (linkResult as { matchEmail?: string }).matchEmail;
-      const linkCustomerId = (linkResult as { customerId?: string }).customerId;
-
-      if (alreadyAsked && isConfirming && matchId && linkCustomerId) {
-        // Customer confirmed — link the profiles
-        await step.run("link-profiles", async () => {
-          const admin = createAdminClient();
-          const groupId = crypto.randomUUID();
-          await admin.from("customer_links").insert([
-            { customer_id: linkCustomerId, group_id: groupId, is_primary: true },
-            { customer_id: matchId, group_id: groupId, is_primary: false },
-          ]);
-          await admin.from("ticket_messages").insert({
-            ticket_id,
-            direction: "outbound",
-            body: "Perfect, I've linked your accounts so I can see your full order history. Let me help you with your question now!",
-            author_type: "ai",
-            visibility: "external",
-          });
-          await admin.from("ticket_messages").insert({
-            ticket_id,
-            direction: "outbound",
-            body: `[System] Profiles linked: ${linkCustomerId} + ${matchId} (group: ${groupId})`,
-            author_type: "system",
-            visibility: "internal",
-          });
-          await admin.from("tickets").update({ profile_link_completed: true }).eq("id", ticket_id);
-        });
-        // Don't count this as a turn — return and let the next message trigger real support
-        return { action: "profiles_linked" };
-      } else if (alreadyAsked && isDenying) {
-        // Customer said no — record rejection so we never offer this match again
-        await step.run("reject-link", async () => {
-          const admin = createAdminClient();
-          await admin.from("tickets").update({ profile_link_completed: true }).eq("id", ticket_id);
-          if (matchId && linkCustomerId) {
-            await admin.from("customer_link_rejections").upsert({
-              workspace_id,
-              customer_id: linkCustomerId,
-              rejected_customer_id: matchId,
-            }, { onConflict: "customer_id,rejected_customer_id" });
-          }
-        });
-        // Fall through to normal AI handling
-      } else if (!alreadyAsked) {
-        // Ask the customer about the match (doesn't count as a turn)
-        await step.run("ask-about-link", async () => {
-          const admin = createAdminClient();
-          await admin.from("ticket_messages").insert({
-            ticket_id,
-            direction: "outbound",
-            body: (() => {
-              const allEmails = ((linkResult as { allMatchEmails?: string[] }).allMatchEmails || [matchEmail || ""]) as string[];
-              const formId = `link-${ticket_id}`;
-              const options = allEmails.map((e: string) => ({ value: e, label: e }));
-              const formPayload = JSON.stringify({ type: "checklist", id: formId, prompt: "Select all emails that belong to you", options });
-              return `I'm looking into that for you! By the way, I noticed we might have multiple profiles for you in our system. Which of these emails also belong to you?<!--FORM:${formPayload}-->`;
-            })(),
-            author_type: "ai",
-            visibility: "external",
-          });
-        });
-        return { action: "asked_about_link" };
-      }
-    }
-
-    // Step 1d: Check for active chat journey or start one
+    // Step 1c: Check for active chat journey, account linking, or start a new journey
     const journeyResult = await step.run("check-journey", async () => {
       const admin = createAdminClient();
       const { data: ticket } = await admin
         .from("tickets")
-        .select("journey_id, journey_step, channel")
+        .select("journey_id, journey_step, channel, profile_link_completed, customer_id")
         .eq("id", ticket_id)
         .single();
 
@@ -373,7 +217,6 @@ export const aiMultiTurn = inngest.createFunction(
 
       // If journey is already active, continue it
       if (ticket.journey_id && ticket.journey_step < 99) {
-        // Determine which journey type
         const { data: journey } = await admin
           .from("journey_definitions")
           .select("trigger_intent")
@@ -381,72 +224,81 @@ export const aiMultiTurn = inngest.createFunction(
           .single();
 
         if (journey?.trigger_intent === "account_linking") {
-          const result = await executeAccountLinkingJourney(workspace_id, ticket_id, message_body);
+          const result = await executeAccountLinkingJourney(workspace_id, ticket_id, message_body, ticket.channel);
           if (!result.completed) return { handled: true };
-          // Linking done — start discount journey
+          // Linking done — chain into discount journey
+          const discDef = await admin.from("journey_definitions")
+            .select("id").eq("workspace_id", workspace_id).eq("trigger_intent", "discount_signup").eq("is_active", true).single();
           await admin.from("tickets").update({
-            journey_step: 0,
-            journey_data: {},
+            journey_step: 0, journey_data: {}, profile_link_completed: true,
+            journey_id: discDef?.data?.id || null,
           }).eq("id", ticket_id);
-          const discResult = await executeDiscountJourney(workspace_id, ticket_id, message_body);
+          const discResult = await executeDiscountJourney(workspace_id, ticket_id, message_body, ticket.channel);
           return { handled: !discResult.completed };
         }
 
         if (journey?.trigger_intent === "discount_signup") {
-          const result = await executeDiscountJourney(workspace_id, ticket_id, message_body);
+          const result = await executeDiscountJourney(workspace_id, ticket_id, message_body, ticket.channel);
           return { handled: !result.completed };
         }
 
         return { handled: false };
       }
 
-      // Check if this message should start a journey (all channels except social_comments)
-      // chat = inline forms, everything else = CTA → mini-site
-      if (isJourneyChannel) {
-        // Look up enabled chat journeys for this channel
-        const { data: chatJourneys } = await admin
-          .from("journey_definitions")
-          .select("id, trigger_intent, match_patterns, channels")
-          .eq("workspace_id", workspace_id)
-          .eq("is_active", true)
-          .not("trigger_intent", "is", null)
-          .order("priority", { ascending: false });
+      if (!isJourneyChannel) return { handled: false };
 
-        const bodyLower = message_body.toLowerCase();
+      // Look up enabled journeys for this channel
+      const { data: journeyDefs } = await admin
+        .from("journey_definitions")
+        .select("id, trigger_intent, match_patterns, channels")
+        .eq("workspace_id", workspace_id)
+        .eq("is_active", true)
+        .not("trigger_intent", "is", null)
+        .order("priority", { ascending: false });
 
-        // Find matching journey by patterns
-        const matchedJourney = (chatJourneys || []).find(j => {
-          if (j.channels?.length && !j.channels.includes(ticket?.channel)) return false;
-          return (j.match_patterns || []).some((p: string) => bodyLower.includes(p.toLowerCase()));
-        });
+      const bodyLower = message_body.toLowerCase();
 
-        if (matchedJourney) {
-          // Start account linking journey first (if needed), then discount
-          const { data: cust } = await admin
-            .from("customers")
-            .select("first_name, last_name")
-            .eq("id", (await admin.from("tickets").select("customer_id").eq("id", ticket_id).single()).data?.customer_id || "")
-            .single();
+      // Find matching journey by patterns (e.g., discount keywords)
+      const matchedJourney = (journeyDefs || []).find(j => {
+        if (!j.match_patterns?.length) return false; // Skip journeys without patterns (like account_linking)
+        if (j.channels?.length && !j.channels.includes(ticket.channel)) return false;
+        return j.match_patterns.some((p: string) => bodyLower.includes(p.toLowerCase()));
+      });
 
-          if (cust?.first_name && cust?.last_name) {
-            // Check if there are unlinked matches
-            const linkResult = await executeAccountLinkingJourney(workspace_id, ticket_id, message_body);
-            if (!linkResult.completed) {
-              // Save journey reference
-              await admin.from("tickets").update({ handled_by: "Journey: Discount Signup" }).eq("id", ticket_id);
-              return { handled: true };
-            }
+      if (matchedJourney) {
+        // A journey pattern matched — always try account linking first (if not completed)
+        if (!ticket.profile_link_completed && ticket.customer_id) {
+          // Find the account_linking journey definition to set journey_id
+          const linkingDef = (journeyDefs || []).find(j => j.trigger_intent === "account_linking");
+          if (linkingDef) {
+            await admin.from("tickets").update({ journey_id: linkingDef.id }).eq("id", ticket_id);
           }
+          const linkResult = await executeAccountLinkingJourney(workspace_id, ticket_id, message_body, ticket.channel);
+          if (!linkResult.completed) {
+            // Linking in progress — set handled_by so we know which journey to chain into after
+            await admin.from("tickets").update({
+              handled_by: `Journey: ${matchedJourney.trigger_intent}`,
+            }).eq("id", ticket_id);
+            return { handled: true };
+          }
+          // Linking done — mark completed and clear journey_id for next journey
+          await admin.from("tickets").update({ profile_link_completed: true, journey_id: null }).eq("id", ticket_id);
+        }
 
-          // No linking needed — go straight to discount journey
-          await admin.from("tickets").update({
-            journey_step: 0,
-            journey_data: {},
-            handled_by: "Journey: Discount Signup",
-          }).eq("id", ticket_id);
-          const discResult = await executeDiscountJourney(workspace_id, ticket_id, message_body);
+        // Account linking done or not needed — start the matched journey
+        await admin.from("tickets").update({
+          journey_step: 0,
+          journey_data: {},
+          journey_id: matchedJourney.id,
+          handled_by: `Journey: ${matchedJourney.trigger_intent}`,
+        }).eq("id", ticket_id);
+
+        if (matchedJourney.trigger_intent === "discount_signup") {
+          const discResult = await executeDiscountJourney(workspace_id, ticket_id, message_body, ticket.channel);
           return { handled: !discResult.completed };
         }
+
+        return { handled: false };
       }
 
       return { handled: false };
