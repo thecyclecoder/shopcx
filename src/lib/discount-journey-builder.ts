@@ -103,7 +103,7 @@ export async function buildDiscountJourneySteps(
     steps.push({
       key: "email_choice",
       type: "radio",
-      question: "Which email would you like to receive coupons at?",
+      question: "Which email do you want to receive the coupon?",
       options: emails.map(e => ({ value: e, label: e })),
     });
     metadata.emails = emails;
@@ -116,7 +116,7 @@ export async function buildDiscountJourneySteps(
     steps.push({
       key: "phone_choice",
       type: "radio",
-      question: "Which phone number would you like coupon notifications sent to?",
+      question: "Which phone number do you want to have coupons delivered to?",
       options: phones.map(p => ({ value: p as string, label: p as string })),
     });
     metadata.phones = phones;

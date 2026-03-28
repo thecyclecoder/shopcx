@@ -524,7 +524,7 @@ function CodeDrivenJourney({
 
       {form && !submitted && (
         <div>
-          {form.prompt && <h2 className="mb-2 text-lg font-semibold text-zinc-900">{form.prompt}</h2>}
+          {(form.prompt || (form as { question?: string }).question) && <h2 className="mb-2 text-lg font-semibold text-zinc-900">{form.prompt || (form as { question?: string }).question}</h2>}
           {(form as { subtitle?: string }).subtitle && <p className="mb-4 text-sm text-zinc-500">{(form as { subtitle?: string }).subtitle}</p>}
 
           {form.type === "confirm" && (

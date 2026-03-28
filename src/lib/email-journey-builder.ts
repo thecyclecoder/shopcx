@@ -86,8 +86,8 @@ export async function buildCombinedEmailJourney({
         steps.push({
           key: "account_linking",
           type: "checklist",
-          question: "I noticed you might have multiple profiles in our system.",
-          subtitle: "Select all emails that belong to you so I can pull up your full account details.",
+          question: "Do any of these emails also belong to you?",
+          subtitle: "This helps us pull up your full account details.",
           options: unlinked.map(m => ({ value: m.id, label: m.email })),
         });
         metadata.unlinkedMatches = unlinked;
