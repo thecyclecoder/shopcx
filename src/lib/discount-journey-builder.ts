@@ -43,8 +43,10 @@ export async function buildDiscountJourneySteps(
 
   const profiles = allProfiles || [];
 
-  const anyEmailSubscribed = profiles.some(p => p.email_marketing_status === "subscribed");
-  const anySmsSubscribed = profiles.some(p => p.sms_marketing_status === "subscribed");
+  // Check if the primary customer (not linked accounts) is already subscribed
+  const primaryProfile = profiles.find(p => p.id === customerId) || profiles[0];
+  const primaryEmailSubscribed = primaryProfile?.email_marketing_status === "subscribed";
+  const primarySmsSubscribed = primaryProfile?.sms_marketing_status === "subscribed";
   const emails = [...new Set(profiles.map(p => p.email).filter(Boolean))];
   const phones = [...new Set(profiles.map(p => p.phone).filter(Boolean))];
 
@@ -88,8 +90,8 @@ export async function buildDiscountJourneySteps(
     isVip,
   };
 
-  // Step 1: Consent (skip if already subscribed to both)
-  if (!anyEmailSubscribed || !anySmsSubscribed) {
+  // Step 1: Consent (only skip if primary customer is subscribed to BOTH email AND sms)
+  if (!primaryEmailSubscribed || !primarySmsSubscribed) {
     steps.push({
       key: "consent",
       type: "confirm",
@@ -98,8 +100,8 @@ export async function buildDiscountJourneySteps(
     });
   }
 
-  // Step 2: Which email? (only if not subscribed + multiple emails)
-  if (!anyEmailSubscribed && emails.length > 1) {
+  // Step 2: Which email? (only if primary not subscribed + multiple emails across accounts)
+  if (!primaryEmailSubscribed && emails.length > 1) {
     steps.push({
       key: "email_choice",
       type: "radio",
@@ -107,12 +109,12 @@ export async function buildDiscountJourneySteps(
       options: emails.map(e => ({ value: e, label: e })),
     });
     metadata.emails = emails;
-  } else if (!anyEmailSubscribed && emails.length === 1) {
+  } else if (!primaryEmailSubscribed && emails.length === 1) {
     metadata.autoEmail = emails[0];
   }
 
-  // Step 3: Which phone? (only if not subscribed + multiple phones)
-  if (!anySmsSubscribed && phones.length > 1) {
+  // Step 3: Which phone? (only if primary not subscribed + multiple phones across accounts)
+  if (!primarySmsSubscribed && phones.length > 1) {
     steps.push({
       key: "phone_choice",
       type: "radio",
@@ -120,7 +122,7 @@ export async function buildDiscountJourneySteps(
       options: phones.map(p => ({ value: p as string, label: p as string })),
     });
     metadata.phones = phones;
-  } else if (!anySmsSubscribed && phones.length === 1) {
+  } else if (!primarySmsSubscribed && phones.length === 1) {
     metadata.autoPhone = phones[0];
   }
 
