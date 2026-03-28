@@ -255,7 +255,6 @@ export default function JourneyPage() {
         token={token}
         customerName={customerName}
         primaryColor={primaryColor}
-        logoUrl={logoUrl}
         workspaceName={workspaceName}
         onComplete={(msg) => { setCompletedMessage(msg); setStatus("completed"); }}
       />
@@ -429,7 +428,6 @@ function CodeDrivenJourney({
   token,
   customerName,
   primaryColor,
-  logoUrl,
   workspaceName,
   onComplete,
 }: {
@@ -437,7 +435,6 @@ function CodeDrivenJourney({
   token: string;
   customerName: string;
   primaryColor: string;
-  logoUrl?: string;
   workspaceName: string;
   onComplete: (msg: string) => void;
 }) {
