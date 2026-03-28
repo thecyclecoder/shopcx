@@ -202,22 +202,9 @@ export const aiMultiTurn = inngest.createFunction(
             .single();
 
           if (workflow) {
-            // Set auto_reply_at so the workflow's cancel check doesn't block it
-            const { data: wsDelays } = await admin.from("workspaces").select("response_delays").eq("id", workspace_id).single();
-            const delays = (wsDelays?.response_delays || {}) as Record<string, number>;
-            const delaySec = delays.chat || delays.email || 60;
-            await admin.from("tickets").update({
-              auto_reply_at: new Date(Date.now() + delaySec * 1000).toISOString(),
-              handled_by: `Workflow: ${workflow.name}`,
-              ai_turn_count: 0,
-            }).eq("id", ticket_id);
-
-            // Fire the workflow
-            await inngest.send({
-              name: "workflow/execute",
-              data: { workspace_id, ticket_id, trigger_tag: match.autoTag, channel: "chat" },
-            });
-            return { matched: true, tag: match.autoTag, workflow: workflow.name };
+            // Don't fire the workflow yet — let journeys check first (priority: journey > workflow)
+            // Just record what matched; workflow fires later if no journey claims it
+            return { matched: true, tag: match.autoTag, workflow: workflow.name, workflowId: workflow.id };
           }
 
           return { matched: true, tag: match.autoTag, workflow: null };
@@ -418,6 +405,24 @@ export const aiMultiTurn = inngest.createFunction(
 
     // Step 1d: If no journey matched but a workflow did, trigger it now
     if (patternResult.matched && (patternResult as { workflow?: string }).workflow) {
+      await step.run("fire-workflow", async () => {
+        const admin = createAdminClient();
+        const pr = patternResult as { tag?: string; workflow?: string };
+        const { data: ticket } = await admin.from("tickets").select("channel").eq("id", ticket_id).single();
+        const { data: wsDelays } = await admin.from("workspaces").select("response_delays").eq("id", workspace_id).single();
+        const delays = (wsDelays?.response_delays || {}) as Record<string, number>;
+        const channel = ticket?.channel || "email";
+        const delaySec = delays[channel] || delays.email || 60;
+        await admin.from("tickets").update({
+          auto_reply_at: new Date(Date.now() + delaySec * 1000).toISOString(),
+          handled_by: `Workflow: ${pr.workflow}`,
+          ai_turn_count: 0,
+        }).eq("id", ticket_id);
+        await inngest.send({
+          name: "workflow/execute",
+          data: { workspace_id, ticket_id, trigger_tag: pr.tag, channel },
+        });
+      });
       return { action: "workflow_triggered", tag: (patternResult as { tag?: string }).tag, workflow: (patternResult as { workflow?: string }).workflow };
     }
 
