@@ -769,13 +769,8 @@ function InlineJourneyForm({
     const updated = { ...responses, [step.key]: { value, label } };
     setResponses(updated);
 
-    // "No" on consent — re-nudge once, then close
+    // "No" on consent — end journey, server handles re-nudge via email
     if (step.key === "consent" && value === "No") {
-      if (!updated._nudged) {
-        updated._nudged = { value: "true", label: "nudged" };
-        setResponses(updated);
-        return; // Stay on consent, UI shows nudge variant
-      }
       setSubmitting(true);
       await fetch(`/api/journey/${token}/complete`, {
         method: "POST",
@@ -808,11 +803,8 @@ function InlineJourneyForm({
   if (done) return null;
   if (!step) return null;
 
-  const isNudge = step.key === "consent" && !!responses._nudged;
-  const displayQuestion = isNudge ? "Want to try again?" : step.question;
-  const displaySubtitle = isNudge
-    ? "We can't send you a coupon unless you sign up for our email list. We only send coupons, sales, and latest product drops — never spam."
-    : step.subtitle;
+  const displayQuestion = step.question;
+  const displaySubtitle = step.subtitle;
 
   return (
     <div className="mt-2">
@@ -831,7 +823,7 @@ function InlineJourneyForm({
         <div className="flex gap-2">
           <button onClick={() => handleStepSubmit("Yes", "Yes, please!")} disabled={submitting}
             className="flex-1 rounded-lg py-2 text-xs font-medium text-white disabled:opacity-60" style={{ backgroundColor: primaryColor }}>
-            {isNudge ? "Yes, get my coupon" : "Yes"}
+            Yes
           </button>
           <button onClick={() => handleStepSubmit("No", "No thanks")} disabled={submitting}
             className="flex-1 rounded-lg border border-zinc-200 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-60">No thanks</button>
