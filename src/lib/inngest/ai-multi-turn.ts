@@ -1147,6 +1147,10 @@ export const aiMultiTurn = inngest.createFunction(
         auto_reply_at: null,
         pending_auto_reply: null,
       }).eq("id", ticket_id);
+
+      // Mark first touch
+      const { markFirstTouch } = await import("@/lib/first-touch");
+      await markFirstTouch(ticket_id, "ai");
     });
 
     return {

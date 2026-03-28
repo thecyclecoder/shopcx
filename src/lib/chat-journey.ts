@@ -131,6 +131,10 @@ async function sendEmailJourneyCTA(
     await ctx.admin.from("tickets").update(updates).eq("id", ctx.ticketId);
   }
 
+  // Mark first touch
+  const { markFirstTouch } = await import("@/lib/first-touch");
+  await markFirstTouch(ctx.ticketId, "journey");
+
   return true;
 }
 
@@ -151,6 +155,10 @@ async function sendChatMessage(ctx: JourneyContext, body: string) {
     if (status === "closed") updates.resolved_at = new Date().toISOString();
     await ctx.admin.from("tickets").update(updates).eq("id", ctx.ticketId);
   }
+
+  // Mark first touch
+  const { markFirstTouch } = await import("@/lib/first-touch");
+  await markFirstTouch(ctx.ticketId, "journey");
 }
 
 // Send an internal note

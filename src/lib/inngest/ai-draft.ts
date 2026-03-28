@@ -138,6 +138,10 @@ export const aiDraftTicket = inngest.createFunction(
           })
           .eq("id", ticket_id);
 
+        // Mark first touch
+        const { markFirstTouch } = await import("@/lib/first-touch");
+        await markFirstTouch(ticket_id, "ai");
+
         // Increment macro usage + log
         if (result.source_type === "macro" && result.source_id) {
           try { await admin.rpc("increment_macro_usage", { macro_id: result.source_id }); } catch {}

@@ -161,6 +161,12 @@ export async function POST(
 
   await admin.from("tickets").update(ticketUpdates).eq("id", ticketId);
 
+  // Mark first touch for agent replies
+  if (visibility === "external") {
+    const { markFirstTouch } = await import("@/lib/first-touch");
+    await markFirstTouch(ticketId, "agent");
+  }
+
   // Evaluate rules on message sent
   const { data: updatedTicket } = await admin.from("tickets").select("*").eq("id", ticketId).single();
   const { data: custData } = ticket.customer_id
