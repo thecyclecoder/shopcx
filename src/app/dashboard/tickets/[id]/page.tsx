@@ -855,6 +855,26 @@ export default function TicketDetailPage() {
           {/* Messages tab */}
           {activeTab === "messages" && <div className="mt-4 space-y-4">
             {messages.map((m) => {
+              // Journey suggestion card
+              const journeySuggestMatch = m.body.match(/<!--JOURNEY-SUGGEST:([\s\S]*?)-->/);
+              if (journeySuggestMatch) {
+                try {
+                  const suggestion = JSON.parse(journeySuggestMatch[1]);
+                  return (
+                    <JourneySuggestionCard
+                      key={m.id}
+                      journeyId={suggestion.journeyId}
+                      journeyName={suggestion.journeyName}
+                      ticketId={id as string}
+                      onSent={async () => {
+                        const res = await fetch(`/api/tickets/${id}`);
+                        if (res.ok) { const d = await res.json(); setTicket(d.ticket); setMessages(d.messages); }
+                      }}
+                    />
+                  );
+                } catch { /* fall through to normal render */ }
+              }
+
               const isInbound = m.direction === "inbound";
               const isInternal = m.visibility === "internal";
 
@@ -2120,6 +2140,60 @@ export default function TicketDetailPage() {
         )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function JourneySuggestionCard({
+  journeyId,
+  journeyName,
+  ticketId,
+  onSent,
+}: {
+  journeyId: string;
+  journeyName: string;
+  ticketId: string;
+  onSent: () => void;
+}) {
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+
+  const handleSend = async () => {
+    setSending(true);
+    const res = await fetch(`/api/tickets/${ticketId}/send-journey`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ journeyId }),
+    });
+    if (res.ok) {
+      setSent(true);
+      onSent();
+    }
+    setSending(false);
+  };
+
+  return (
+    <div className="mx-auto max-w-[85%] rounded-lg border border-cyan-200 bg-cyan-50/50 p-4 dark:border-cyan-800 dark:bg-cyan-950/20">
+      <div className="flex items-center gap-2 text-sm">
+        <svg className="h-4 w-4 shrink-0 text-cyan-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+        </svg>
+        <span className="font-medium text-cyan-700 dark:text-cyan-400">Journey Detected</span>
+      </div>
+      <p className="mt-1.5 text-sm text-zinc-600 dark:text-zinc-400">
+        Customer&apos;s message matches the <strong>{journeyName}</strong> journey. Send it to guide them through the flow automatically.
+      </p>
+      {sent ? (
+        <p className="mt-2 text-sm font-medium text-emerald-600">Journey sent!</p>
+      ) : (
+        <button
+          onClick={handleSend}
+          disabled={sending}
+          className="mt-3 rounded-md bg-cyan-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-cyan-500 disabled:opacity-50"
+        >
+          {sending ? "Sending..." : `Send "${journeyName}" Journey`}
+        </button>
+      )}
     </div>
   );
 }

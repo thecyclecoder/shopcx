@@ -276,6 +276,10 @@ export async function POST(request: Request) {
             message_body: cleanBody,
           },
         });
+      } else if (ticketData.assigned_to) {
+        // Agent-assigned ticket — check if a journey should be suggested
+        const { suggestJourneyForAgent } = await import("@/lib/journey-suggest");
+        await suggestJourneyForAgent(workspaceId, ticketId, cleanBody);
       }
     }
   } else {

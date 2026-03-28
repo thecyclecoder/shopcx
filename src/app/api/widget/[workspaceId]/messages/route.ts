@@ -207,6 +207,10 @@ export async function POST(
         message_id: msg?.id,
         expecting_reply: true,
       });
+    } else if (ticket?.assigned_to) {
+      // Agent-assigned — suggest journey if pattern matches
+      const { suggestJourneyForAgent } = await import("@/lib/journey-suggest");
+      await suggestJourneyForAgent(workspaceId, ticketId, message);
     }
   }
 
