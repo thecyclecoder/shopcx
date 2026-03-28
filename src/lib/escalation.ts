@@ -31,7 +31,7 @@ export async function handleEscalation(
     escalation_reason: reason,
     auto_reply_at: null,
     pending_auto_reply: null,
-    status: "pending",
+    status: "open",
     ...(isChatChannel ? { channel: "email" } : {}),
   }).eq("id", ticketId);
 
