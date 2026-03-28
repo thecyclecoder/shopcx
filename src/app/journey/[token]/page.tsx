@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
 
 interface JourneyOption {
@@ -524,7 +524,7 @@ function CodeDrivenJourney({
       {form && !submitted && (
         <div>
           {(form.prompt || (form as { question?: string }).question) && <h2 className="mb-2 text-lg font-semibold text-zinc-900">{form.prompt || (form as { question?: string }).question}</h2>}
-          {(form as { subtitle?: string }).subtitle && <p className="mb-4 text-sm text-zinc-500">{(form as { subtitle?: string }).subtitle}</p>}
+          {(form as { subtitle?: string }).subtitle && <div className="mb-4 text-sm text-zinc-500" dangerouslySetInnerHTML={{ __html: (form as { subtitle?: string }).subtitle! }} />}
 
           {form.type === "confirm" && (
             <div className="flex gap-3">
@@ -557,8 +557,7 @@ function CodeDrivenJourney({
           )}
 
           {form.type === "text_input" && (
-            <TextInputForm
-              placeholder={(form as { placeholder?: string }).placeholder || "Type here..."}
+            <MaskedPhoneInput
               primaryColor={primaryColor}
               submitting={submitting}
               onSubmit={(value) => handleSubmit(value, value)}
@@ -595,54 +594,76 @@ function phoneToE164(raw: string): string {
   return raw.startsWith("+") ? raw : `+1${digits}`;
 }
 
-function TextInputForm({
-  placeholder,
+function MaskedPhoneInput({
   primaryColor,
   submitting,
   onSubmit,
 }: {
-  placeholder: string;
   primaryColor: string;
   submitting: boolean;
   onSubmit: (value: string) => void;
 }) {
-  const [display, setDisplay] = useState("");
+  const [digits, setDigits] = useState("");
   const [error, setError] = useState("");
   const [validating, setValidating] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  const digits = display.replace(/\D/g, "");
   const isComplete = digits.length === 10;
+  const mask = "(___) ___-____";
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const raw = e.target.value.replace(/\D/g, "").slice(0, 10);
-    setDisplay(formatPhoneDisplay(raw));
-    setError("");
+  // Build display: replace underscores with typed digits
+  const displayed = (() => {
+    let d = 0;
+    return mask.split("").map(ch => {
+      if (ch === "_" && d < digits.length) return digits[d++];
+      return ch;
+    }).join("");
+  })();
+
+  // Cursor position after the last typed digit
+  const cursorPos = (() => {
+    let d = 0;
+    for (let i = 0; i < mask.length; i++) {
+      if (mask[i] === "_") {
+        if (d >= digits.length) return i;
+        d++;
+      }
+    }
+    return mask.length;
+  })();
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Backspace") {
+      e.preventDefault();
+      setDigits(prev => prev.slice(0, -1));
+      setError("");
+    } else if (e.key === "Enter" && isComplete) {
+      handleSubmit();
+    } else if (/^\d$/.test(e.key) && digits.length < 10) {
+      e.preventDefault();
+      setDigits(prev => prev + e.key);
+      setError("");
+    }
   };
+
+  // Keep cursor positioned correctly
+  useEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.setSelectionRange(cursorPos, cursorPos);
+    }
+  }, [digits, cursorPos]);
 
   const handleSubmit = async () => {
     if (!isComplete) return;
     setValidating(true);
     setError("");
-
-    // Validate via API
-    const e164 = phoneToE164(display);
+    const e164 = `+1${digits}`;
     try {
       const res = await fetch(`/api/validate-phone?phone=${encodeURIComponent(e164)}`);
       const data = await res.json();
-      if (!data.valid) {
-        setError("Not a valid number. Please enter a valid mobile number.");
-        setValidating(false);
-        return;
-      }
-      if (data.lineType === "landline") {
-        setError("Only mobile phones — no landlines. We need a mobile number for text messages.");
-        setValidating(false);
-        return;
-      }
-    } catch {
-      // If validation fails, proceed anyway
-    }
-
+      if (!data.valid) { setError("Not a valid number. Please enter a valid mobile number."); setValidating(false); return; }
+      if (data.lineType === "landline") { setError("Only mobile phones — no landlines. We need a mobile number for text messages."); setValidating(false); return; }
+    } catch {}
     setValidating(false);
     onSubmit(e164);
   };
@@ -650,13 +671,16 @@ function TextInputForm({
   return (
     <div>
       <input
+        ref={inputRef}
         type="tel"
         inputMode="numeric"
         autoComplete="tel-national"
-        value={display}
-        onChange={handleChange}
-        placeholder={placeholder}
-        className={`w-full rounded-xl border-2 bg-white px-4 py-3 text-sm text-zinc-900 outline-none transition-colors ${error ? "border-red-300 focus:border-red-400" : "border-zinc-200 focus:border-indigo-400"}`}
+        value={displayed}
+        onKeyDown={handleKeyDown}
+        onChange={() => {}} // Controlled via onKeyDown
+        onFocus={() => inputRef.current?.setSelectionRange(cursorPos, cursorPos)}
+        onClick={() => inputRef.current?.setSelectionRange(cursorPos, cursorPos)}
+        className={`w-full rounded-xl border-2 bg-white px-4 py-3 font-mono text-base tracking-wider text-zinc-900 outline-none transition-colors ${error ? "border-red-300 focus:border-red-400" : "border-zinc-200 focus:border-indigo-400"}`}
       />
       {error && <p className="mt-1.5 text-xs text-red-500">{error}</p>}
       <button

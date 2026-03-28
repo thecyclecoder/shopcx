@@ -111,13 +111,15 @@ export async function buildDiscountJourneySteps(
       ? new Date(sub.next_billing_date).toLocaleDateString("en-US", { month: "long", day: "numeric" })
       : "soon";
     const itemsList = (sub.items as { title: string }[] | null) || [];
-    const itemsText = itemsList.map(i => i.title).join(", ") || "your subscription";
+    const itemsHtml = itemsList.length > 0
+      ? `<ul style="margin:6px 0;padding-left:18px">${itemsList.map(i => `<li>${i.title}</li>`).join("")}</ul>`
+      : "";
 
     steps.push({
       key: "apply_subscription",
       type: "confirm",
       question: "Apply coupon to your subscription?",
-      subtitle: `You have ${itemsText} renewing ${nextDate}. Want me to apply ${coupon.code} to your next renewal?`,
+      subtitle: `I see you have a subscription renewing <strong>${nextDate}</strong>:${itemsHtml}Want me to apply <strong>${coupon.code}</strong> to your next renewal?`,
     });
     metadata.subContractId = sub.shopify_contract_id;
   }

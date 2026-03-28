@@ -817,7 +817,7 @@ function InlineJourneyForm({
         </div>
       )}
       <p className="mb-1.5 text-xs font-medium text-zinc-700">{displayQuestion}</p>
-      {displaySubtitle && <p className="mb-2 text-[11px] text-zinc-400">{displaySubtitle}</p>}
+      {displaySubtitle && <div className="mb-2 text-[11px] text-zinc-400" dangerouslySetInnerHTML={{ __html: displaySubtitle }} />}
 
       {step.type === "confirm" && (
         <div className="flex gap-2">
@@ -916,22 +916,41 @@ function formatPhoneDisplay(raw: string): string {
 }
 
 function PhoneInputForm({ primaryColor, onSubmit }: { primaryColor: string; onSubmit: (v: string) => void }) {
-  const [display, setDisplay] = useState("");
+  const [digits, setDigits] = useState("");
   const [error, setError] = useState("");
   const [validating, setValidating] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  const digits = display.replace(/\D/g, "");
   const isComplete = digits.length === 10;
+  const mask = "(___) ___-____";
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setDisplay(formatPhoneDisplay(e.target.value.replace(/\D/g, "").slice(0, 10)));
-    setError("");
+  const displayed = (() => {
+    let d = 0;
+    return mask.split("").map(ch => {
+      if (ch === "_" && d < digits.length) return digits[d++];
+      return ch;
+    }).join("");
+  })();
+
+  const cursorPos = (() => {
+    let d = 0;
+    for (let i = 0; i < mask.length; i++) {
+      if (mask[i] === "_") { if (d >= digits.length) return i; d++; }
+    }
+    return mask.length;
+  })();
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Backspace") { e.preventDefault(); setDigits(p => p.slice(0, -1)); setError(""); }
+    else if (e.key === "Enter" && isComplete) handleSubmit();
+    else if (/^\d$/.test(e.key) && digits.length < 10) { e.preventDefault(); setDigits(p => p + e.key); setError(""); }
   };
+
+  useEffect(() => { inputRef.current?.setSelectionRange(cursorPos, cursorPos); }, [digits, cursorPos]);
 
   const handleSubmit = async () => {
     if (!isComplete) return;
-    setValidating(true);
-    setError("");
+    setValidating(true); setError("");
     const e164 = `+1${digits}`;
     try {
       const res = await fetch(`/api/validate-phone?phone=${encodeURIComponent(e164)}`);
@@ -946,13 +965,16 @@ function PhoneInputForm({ primaryColor, onSubmit }: { primaryColor: string; onSu
   return (
     <div className="mt-2 space-y-1.5">
       <input
+        ref={inputRef}
         type="tel"
         inputMode="numeric"
         autoComplete="tel-national"
-        value={display}
-        onChange={handleChange}
-        placeholder="(555) 123-4567"
-        className={`w-full rounded-lg border bg-white px-3 py-2 text-sm text-zinc-900 outline-none ${error ? "border-red-300" : "border-zinc-300 focus:border-indigo-400"}`}
+        value={displayed}
+        onKeyDown={handleKeyDown}
+        onChange={() => {}}
+        onFocus={() => inputRef.current?.setSelectionRange(cursorPos, cursorPos)}
+        onClick={() => inputRef.current?.setSelectionRange(cursorPos, cursorPos)}
+        className={`w-full rounded-lg border bg-white px-3 py-2 font-mono text-sm tracking-wider text-zinc-900 outline-none ${error ? "border-red-300" : "border-zinc-300 focus:border-indigo-400"}`}
       />
       {error && <p className="text-[11px] text-red-500">{error}</p>}
       <button
