@@ -65,7 +65,8 @@ export async function POST(
             customer_id: id, workspace_id: wsId, group_id: groupId, is_primary: false,
           }, { onConflict: "customer_id" });
         }
-        actionLog.push(`Account linking: ${confirmedIds.length} profiles linked`);
+        const linkedEmails = unlinked.filter(m => confirmedSet.has(m.id)).map(m => m.email);
+        actionLog.push(`Account linking: linked ${linkedEmails.join(", ")}`);
 
         // Expand allCustomerIds to include newly linked
         for (const id of confirmedIds) {
@@ -74,12 +75,17 @@ export async function POST(
       }
 
       // Reject non-confirmed
+      const rejectedEmails: string[] = [];
       for (const m of unlinked) {
         if (!confirmedSet.has(m.id)) {
           await admin.from("customer_link_rejections").upsert({
             workspace_id: wsId, customer_id: linkCustId, rejected_customer_id: m.id,
           }, { onConflict: "customer_id,rejected_customer_id" });
+          rejectedEmails.push(m.email);
         }
+      }
+      if (rejectedEmails.length > 0) {
+        actionLog.push(`Account linking: rejected ${rejectedEmails.join(", ")}`);
       }
 
       await admin.from("tickets").update({ profile_link_completed: true }).eq("id", session.ticket_id);
