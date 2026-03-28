@@ -254,8 +254,8 @@ export async function POST(request: Request) {
 
     // Multi-turn AI: if ticket was AI-handled or has no assignee, let AI continue
     if (!isPositiveConfirmation && ticketData) {
-      const isAIHandled = ticketData.handled_by === "AI Agent" || ticketData.ai_handled;
-      const isWorkflowHandled = (ticketData.handled_by || "").startsWith("Workflow:");
+      const handledBy = ticketData.handled_by || "";
+      const isAutoHandled = handledBy === "AI Agent" || handledBy.startsWith("Workflow:") || handledBy.startsWith("Journey:") || ticketData.ai_handled;
       const isUnassigned = !ticketData.assigned_to;
       const channel = ticketData.channel || "email";
 
@@ -267,7 +267,7 @@ export async function POST(request: Request) {
         .eq("channel", channel)
         .single();
 
-      if (aiConfig?.enabled && (isAIHandled || isWorkflowHandled || isUnassigned)) {
+      if (aiConfig?.enabled && (isAutoHandled || isUnassigned)) {
         await inngest.send({
           name: "ai/reply-received",
           data: {

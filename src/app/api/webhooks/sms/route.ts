@@ -152,7 +152,8 @@ export async function POST(request: Request) {
 
     // Multi-turn AI: if ticket was AI-handled or unassigned, let AI continue
     if (ticketData) {
-      const isAIHandled = ticketData.handled_by === "AI Agent" || ticketData.ai_handled;
+      const handledBy = ticketData.handled_by || "";
+      const isAutoHandled = handledBy === "AI Agent" || handledBy.startsWith("Workflow:") || handledBy.startsWith("Journey:") || ticketData.ai_handled;
       const isUnassigned = !ticketData.assigned_to;
 
       const { data: aiConfig } = await admin
@@ -162,7 +163,7 @@ export async function POST(request: Request) {
         .eq("channel", "sms")
         .single();
 
-      if (aiConfig?.enabled && (isAIHandled || isUnassigned)) {
+      if (aiConfig?.enabled && (isAutoHandled || isUnassigned)) {
         await inngest.send({
           name: "ai/reply-received",
           data: {
