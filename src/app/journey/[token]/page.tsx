@@ -440,72 +440,111 @@ function CodeDrivenJourney({
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
-  const form = config.currentForm;
+  const [currentStepIdx, setCurrentStepIdx] = useState(0);
+  const [responses, setResponses] = useState<Record<string, { value: string; label: string }>>({});
+
+  const isMultiStep = !!(config as { multiStep?: boolean }).multiStep;
+  const multiSteps = ((config as { steps?: JourneyForm[] }).steps || []) as JourneyForm[];
+  const form = isMultiStep ? multiSteps[currentStepIdx] || null : config.currentForm;
+  const totalSteps = isMultiStep ? multiSteps.length : 1;
 
   const handleSubmit = async (value: string, label?: string) => {
+    if (!form) return;
     setSubmitting(true);
 
-    // Post response — value is for the executor, label is for the ticket message
-    await fetch(`/api/journey/${token}/step`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        stepKey: form?.id || "response",
-        responseValue: value,
-        responseLabel: label || value,
-        codeDriven: true,
-      }),
-    });
+    const stepResponses = { ...responses, [form.id]: { value, label: label || value } };
+    setResponses(stepResponses);
+
+    if (isMultiStep && currentStepIdx < multiSteps.length - 1) {
+      // Check if user said "No" on consent — skip to completion
+      if (form.id === "consent" && value === "No") {
+        // Submit all at once with declined consent
+        await fetch(`/api/journey/${token}/complete`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ outcome: "declined", responses: stepResponses }),
+        });
+        setSubmitted(true);
+        setSubmitting(false);
+        setTimeout(() => onComplete("No problem! You can always sign up later."), 500);
+        return;
+      }
+
+      // Advance to next step (client-side)
+      setCurrentStepIdx(i => i + 1);
+      setSubmitting(false);
+      return;
+    }
+
+    // Last step or single-step — submit everything
+    if (isMultiStep) {
+      await fetch(`/api/journey/${token}/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outcome: "completed", responses: stepResponses }),
+      });
+    } else {
+      await fetch(`/api/journey/${token}/step`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stepKey: form.id,
+          responseValue: value,
+          responseLabel: label || value,
+          codeDriven: true,
+        }),
+      });
+    }
 
     setSubmitted(true);
     setSubmitting(false);
-
-    // Show thank you after a moment
     setTimeout(() => {
-      onComplete("Thanks! We'll send you an email shortly with the next step.");
-    }, 1500);
+      onComplete(isMultiStep
+        ? "You're all set! Check your email for your coupon code."
+        : "Thanks! We'll send you an email shortly with the next step.");
+    }, 1000);
   };
 
   return (
     <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
-      {customerName && <p className="mb-2 text-sm text-zinc-500">Hi {customerName},</p>}
-      {config.message && <p className="mb-5 text-sm text-zinc-600">{config.message}</p>}
+      {customerName && currentStepIdx === 0 && <p className="mb-2 text-sm text-zinc-500">Hi {customerName},</p>}
+      {config.message && currentStepIdx === 0 && <p className="mb-5 text-sm text-zinc-600">{config.message}</p>}
+
+      {/* Progress for multi-step */}
+      {isMultiStep && !submitted && totalSteps > 1 && (
+        <>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-xs font-medium text-zinc-400">Step {currentStepIdx + 1} of {totalSteps}</span>
+          </div>
+          <div className="mb-5 h-1.5 w-full overflow-hidden rounded-full bg-zinc-200">
+            <div className="h-full rounded-full transition-all duration-300" style={{ width: `${((currentStepIdx + 1) / totalSteps) * 100}%`, backgroundColor: primaryColor }} />
+          </div>
+        </>
+      )}
 
       {form && !submitted && (
         <div>
-          {form.prompt && <h2 className="mb-4 text-lg font-semibold text-zinc-900">{form.prompt}</h2>}
+          {form.prompt && <h2 className="mb-2 text-lg font-semibold text-zinc-900">{form.prompt}</h2>}
+          {(form as { subtitle?: string }).subtitle && <p className="mb-4 text-sm text-zinc-500">{(form as { subtitle?: string }).subtitle}</p>}
 
-          {/* Confirm: Yes / No */}
           {form.type === "confirm" && (
             <div className="flex gap-3">
-              <button
-                onClick={() => handleSubmit("Yes", "Yes, please!")}
-                disabled={submitting}
-                className="flex-1 rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-60"
-                style={{ backgroundColor: primaryColor }}
-              >
+              <button onClick={() => handleSubmit("Yes", "Yes, please!")} disabled={submitting}
+                className="flex-1 rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-60" style={{ backgroundColor: primaryColor }}>
                 Yes
               </button>
-              <button
-                onClick={() => handleSubmit("No", "No thanks")}
-                disabled={submitting}
-                className="flex-1 rounded-xl border-2 border-zinc-200 px-4 py-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-60"
-              >
+              <button onClick={() => handleSubmit("No", "No thanks")} disabled={submitting}
+                className="flex-1 rounded-xl border-2 border-zinc-200 px-4 py-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-60">
                 No thanks
               </button>
             </div>
           )}
 
-          {/* Radio: pick one */}
           {form.type === "radio" && form.options && (
             <div className="space-y-3">
               {form.options.map((opt) => (
-                <button
-                  key={opt.value}
-                  onClick={() => handleSubmit(opt.value, opt.label)}
-                  disabled={submitting}
-                  className="flex w-full items-center gap-3 rounded-xl border-2 border-zinc-200 px-4 py-4 text-left text-sm font-medium text-zinc-800 transition-all hover:border-zinc-300 hover:bg-zinc-50 disabled:opacity-60"
-                >
+                <button key={opt.value} onClick={() => handleSubmit(opt.value, opt.label)} disabled={submitting}
+                  className="flex w-full items-center gap-3 rounded-xl border-2 border-zinc-200 px-4 py-4 text-left text-sm font-medium text-zinc-800 transition-all hover:border-zinc-300 hover:bg-zinc-50 disabled:opacity-60">
                   <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-zinc-300" />
                   {opt.label}
                 </button>
@@ -513,14 +552,9 @@ function CodeDrivenJourney({
             </div>
           )}
 
-          {/* Checklist */}
           {form.type === "checklist" && form.options && (
-            <ChecklistForm
-              options={form.options}
-              primaryColor={primaryColor}
-              submitting={submitting}
-              onSubmit={(value, label) => handleSubmit(value, label)}
-            />
+            <ChecklistForm options={form.options} primaryColor={primaryColor} submitting={submitting}
+              onSubmit={(value, label) => handleSubmit(value, label)} />
           )}
         </div>
       )}

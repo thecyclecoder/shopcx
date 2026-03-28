@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { executeAccountLinkingJourney, executeDiscountJourney } from "@/lib/chat-journey";
+import { buildDiscountJourneySteps } from "@/lib/discount-journey-builder";
+import { sendJourneyCTA } from "@/lib/email";
+import crypto from "crypto";
 
 // POST: Submit a step response
 export async function POST(
@@ -83,11 +86,61 @@ export async function POST(
     if (journeyDef?.trigger_intent === "account_linking") {
       const result = await executeAccountLinkingJourney(wsId, ticketId, responseValue, channel);
       if (result.completed) {
-        // Chain into discount journey
         await admin.from("tickets").update({ profile_link_completed: true, journey_step: 0, journey_data: {} }).eq("id", ticketId);
+
+        // Chain into discount journey — build multi-step mini-site for email
         const discDef = await admin.from("journey_definitions")
           .select("id").eq("workspace_id", wsId).eq("trigger_intent", "discount_signup").eq("is_active", true).maybeSingle();
-        if (discDef?.data) {
+
+        if (discDef?.data && channel !== "chat") {
+          await admin.from("tickets").update({
+            journey_id: discDef.data.id,
+            handled_by: "Journey: discount_signup",
+          }).eq("id", ticketId);
+
+          // Build multi-step discount form
+          const customerId = (await admin.from("tickets").select("customer_id").eq("id", ticketId).single()).data?.customer_id;
+          if (customerId) {
+            const { steps, metadata } = await buildDiscountJourneySteps(wsId, customerId);
+            const discToken = crypto.randomBytes(24).toString("hex");
+
+            await admin.from("journey_sessions").insert({
+              workspace_id: wsId,
+              journey_id: discDef.data.id,
+              customer_id: customerId,
+              ticket_id: ticketId,
+              token: discToken,
+              token_expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+              status: "pending",
+              config_snapshot: { codeDriven: true, multiStep: true, steps, metadata, ticketId, workspaceId: wsId },
+            });
+
+            // Get customer + workspace info for the CTA email
+            const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", customerId).single();
+            const { data: ws } = await admin.from("workspaces").select("name, help_primary_color").eq("id", wsId).single();
+            const { data: ticketForSubject } = await admin.from("tickets").select("subject, email_message_id").eq("id", ticketId).single();
+
+            if (cust?.email) {
+              await sendJourneyCTA({
+                workspaceId: wsId,
+                toEmail: cust.email,
+                customerName: cust.first_name || "",
+                journeyToken: discToken,
+                contextMessage: "Great news! I've linked your accounts. Now let's get you set up with exclusive coupons.",
+                workspaceName: ws?.name || "Support",
+                primaryColor: ws?.help_primary_color || undefined,
+                subject: `Re: ${ticketForSubject?.subject || "Your request"}`,
+                buttonLabel: "Get my coupon &rarr;",
+                inReplyTo: ticketForSubject?.email_message_id || null,
+              });
+              await admin.from("ticket_messages").insert({
+                ticket_id: ticketId, direction: "outbound", visibility: "internal",
+                author_type: "system", body: `[System] Sent discount journey CTA email to ${cust.email}`,
+              });
+            }
+          }
+        } else if (discDef?.data && channel === "chat") {
+          // Chat: use inline forms
           await admin.from("tickets").update({
             journey_id: discDef.data.id,
             handled_by: "Journey: discount_signup",
@@ -96,7 +149,10 @@ export async function POST(
         }
       }
     } else if (journeyDef?.trigger_intent === "discount_signup") {
-      await executeDiscountJourney(wsId, ticketId, responseValue, channel);
+      if (channel === "chat") {
+        await executeDiscountJourney(wsId, ticketId, responseValue, channel);
+      }
+      // Email discount responses handled by the multi-step mini-site completion endpoint
     }
 
     // Update session

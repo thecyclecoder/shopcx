@@ -365,11 +365,16 @@ export async function POST(request: Request) {
       });
 
       if (matchedJourney) {
-        // Journey matched — fire ai/reply-received which has the journey execution logic
         console.log(`Journey matched: ${matchedJourney.trigger_intent} for new ticket ${ticket.id}`);
-        await inngest.send({
-          name: "ai/reply-received",
-          data: { workspace_id: workspaceId, ticket_id: ticket.id, message_body: messageBody },
+
+        // Build combined mini-site journey (account linking + matched journey in one CTA)
+        const { buildCombinedEmailJourney } = await import("@/lib/email-journey-builder");
+        await buildCombinedEmailJourney({
+          workspaceId,
+          ticketId: ticket.id,
+          customerId: customerId || undefined,
+          matchedJourneyIntent: matchedJourney.trigger_intent,
+          matchedJourneyId: matchedJourney.id,
         });
       }
 
