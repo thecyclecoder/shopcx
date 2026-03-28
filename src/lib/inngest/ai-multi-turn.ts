@@ -44,6 +44,24 @@ export const aiMultiTurn = inngest.createFunction(
 
     // Handle close check — AI sends a brief closing message and closes the ticket
     if (decision.action === "close_check") {
+      // Respect the configured response delay
+      const closeDelay = await step.run("get-close-delay", async () => {
+        const admin = createAdminClient();
+        const { data: ticket } = await admin
+          .from("tickets")
+          .select("channel")
+          .eq("id", ticket_id)
+          .single();
+        const channel = ticket?.channel || "email";
+        const { data: ws } = await admin.from("workspaces").select("response_delays").eq("id", workspace_id).single();
+        const delays = (ws?.response_delays || {}) as Record<string, number>;
+        return delays[channel] || delays.email || 0;
+      });
+
+      if (closeDelay > 0) {
+        await step.sleep("close-delay", `${closeDelay}s`);
+      }
+
       await step.run("ai-positive-close", async () => {
         const admin = createAdminClient();
 
@@ -53,7 +71,7 @@ export const aiMultiTurn = inngest.createFunction(
           .eq("id", ticket_id)
           .single();
 
-        const isAutoHandled = ticket?.handled_by === "AI Agent" || (ticket?.handled_by || "").startsWith("Workflow:");
+        const isAutoHandled = ticket?.handled_by === "AI Agent" || (ticket?.handled_by || "").startsWith("Workflow:") || (ticket?.handled_by || "").startsWith("Journey:");
         const firstName = (ticket?.customers as unknown as { first_name: string | null })?.first_name;
 
         // Only do AI closure if this was an AI or workflow handled ticket
