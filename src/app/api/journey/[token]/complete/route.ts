@@ -172,7 +172,7 @@ export async function POST(
       });
     }
 
-    // Build human-readable summary for external message
+    // Build human-readable summary + send as email reply
     const couponSummary = metadata.couponSummary as string || "";
     if (couponCode && session.ticket_id) {
       const summaryParts: string[] = [];
@@ -180,13 +180,39 @@ export async function POST(
       if (subChoice?.value === "Yes") summaryParts.push(`applied ${couponCode} to subscription`);
       const summaryText = summaryParts.length > 0 ? `We've ${summaryParts.join(" and ")}.` : "";
 
+      const replyBody = `<p>${summaryText} Your coupon code is <strong>${couponCode}</strong> (${couponSummary}). Use it at checkout anytime!</p>`;
+
       await admin.from("ticket_messages").insert({
         ticket_id: session.ticket_id,
         direction: "outbound",
         visibility: "external",
         author_type: "system",
-        body: `${summaryText} Your coupon code is <strong>${couponCode}</strong> (${couponSummary}). Use it at checkout anytime!`,
+        body: replyBody,
       });
+
+      // Send as actual email reply
+      const { data: ticketData } = await admin.from("tickets")
+        .select("subject, email_message_id, channel, customer_id")
+        .eq("id", session.ticket_id)
+        .single();
+
+      if (ticketData?.channel === "email" && ticketData.customer_id) {
+        const { data: cust } = await admin.from("customers").select("email").eq("id", ticketData.customer_id).single();
+        const { data: ws } = await admin.from("workspaces").select("name").eq("id", wsId).single();
+
+        if (cust?.email) {
+          const { sendTicketReply } = await import("@/lib/email");
+          await sendTicketReply({
+            workspaceId: wsId,
+            toEmail: cust.email,
+            subject: ticketData.subject ? `Re: ${ticketData.subject}` : "Re: Your request",
+            body: replyBody,
+            inReplyTo: ticketData.email_message_id || null,
+            agentName: "Support",
+            workspaceName: ws?.name || "Support",
+          });
+        }
+      }
     }
 
     // Close the ticket
