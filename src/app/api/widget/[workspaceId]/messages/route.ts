@@ -200,6 +200,13 @@ export async function POST(
           message_body: message,
         },
       });
+
+      return NextResponse.json({
+        ticket_id: ticketId,
+        session_id: sessionId,
+        message_id: msg?.id,
+        expecting_reply: true,
+      });
     }
   }
 
@@ -207,6 +214,7 @@ export async function POST(
     ticket_id: ticketId,
     session_id: sessionId,
     message_id: msg?.id,
+    expecting_reply: false,
   });
 }
 

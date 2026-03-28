@@ -289,16 +289,19 @@ export default function ChatWidgetPage() {
           )
         );
       }
+
+      setSending(false);
+
+      // Only show typing indicator if the system is actually going to respond
+      if (data.expecting_reply) {
+        const timer = setTimeout(() => setWaitingForReply(true), 5000);
+        (window as unknown as Record<string, unknown>).__shopcxTypingTimer = timer;
+      }
     } catch {
       // Remove optimistic message on failure
       setMessages((prev) => prev.filter((m) => m.id !== tempMsg.id));
       setInput(msg);
-    } finally {
       setSending(false);
-      // Delay typing indicator by 5s — feels like someone is reading the message first
-      const timer = setTimeout(() => setWaitingForReply(true), 5000);
-      // Store timer so we can cancel if reply arrives before 5s
-      (window as unknown as Record<string, unknown>).__shopcxTypingTimer = timer;
     }
   };
 
