@@ -222,10 +222,10 @@ export default function ChatWidgetPage() {
   }, [ticketId]);
 
 
-  // Auto-scroll on new messages
+  // Auto-scroll on new messages or typing indicator
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, waitingForReply]);
 
   const handleStart = (e: React.FormEvent) => {
     e.preventDefault();
