@@ -221,11 +221,25 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - `fraud_cases` — Fraud detection cases with severity
 - `fraud_rules` — Configurable fraud detection rules
 
+## Ticket Tags (auto-applied for analytics)
+When adding new journeys or workflows, always add the corresponding tag:
+- `touched` — first outbound message sent (via `markFirstTouch()`)
+- `ft:ai` / `ft:workflow` / `ft:journey` / `ft:agent` — who made first contact
+- `j:{intent}` — journey applied (e.g., `j:discount_signup`, `j:cancel`, `j:return_request`)
+- `jr:{intent}` — journey re-nudge sent (e.g., `jr:discount`)
+- `w:{type}` — workflow applied (e.g., `w:tracking`, `w:cancel`, `w:subscription`)
+- `ai:t{N}` — AI turn count, replaces on each turn (e.g., `ai:t1`, `ai:t2`)
+- `agent` — a real human agent sent an external message
+Use `addTicketTag()` from `src/lib/ticket-tags.ts` (idempotent). Use `markFirstTouch()` from `src/lib/first-touch.ts` for ft:* tags.
+
 ## Conventions
+- Always run `npx tsc --noEmit` before committing to catch type errors
 - Migrations: `supabase/migrations/YYYYMMDDNNNNNN_description.sql`
 - API routes: `/api/resource/route.ts` or `/api/resource/[id]/route.ts`
 - All API writes use admin client, auth verified via `createClient().auth.getUser()`
 - Workspace scoped: always filter by workspace_id from cookie
 - AI responses: plain text, max 2 sentences/paragraph, mirror customer language, no markdown
+- User-facing names: always use `display_name` from workspace_members, never full name
+- Journey mini-site and live chat must produce identical human-readable ticket messages
 - Don't push during active Inngest syncs (deployment kills running functions)
 - Use git worktrees for parallel feature development
