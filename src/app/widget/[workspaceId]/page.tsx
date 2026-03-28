@@ -555,7 +555,22 @@ export default function ChatWidgetPage() {
                     style={isCustomer ? { backgroundColor: primaryColor } : undefined}
                   >
                     {bodyWithoutForm && (
-                      <div className="prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:text-inherit [&_a]:underline" dangerouslySetInnerHTML={{ __html: bodyWithoutForm }} />
+                      <div
+                        className="prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:text-inherit [&_a]:underline"
+                        dangerouslySetInnerHTML={{ __html: bodyWithoutForm }}
+                        onClick={(e) => {
+                          const el = (e.target as HTMLElement).closest("[data-coupon]");
+                          if (el) {
+                            const code = el.getAttribute("data-coupon");
+                            if (code) {
+                              navigator.clipboard.writeText(code);
+                              const orig = el.textContent;
+                              el.textContent = "Copied!";
+                              setTimeout(() => { el.textContent = orig; }, 1500);
+                            }
+                          }
+                        }}
+                      />
                     )}
 
                     {/* Interactive form */}
@@ -598,8 +613,8 @@ export default function ChatWidgetPage() {
             })}
           </>
         )}
-        {/* Typing indicator */}
-        {waitingForReply && !chatEnded && (
+        {/* Typing indicator — only after customer messages, never after our own */}
+        {waitingForReply && !chatEnded && messages.length > 0 && messages[messages.length - 1].direction === "inbound" && (
           <div className="mb-2 flex gap-2">
             <div className="rounded-2xl rounded-tl-sm bg-zinc-100 px-4 py-3">
               <div className="flex items-center gap-1">
