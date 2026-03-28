@@ -452,7 +452,8 @@ function CodeDrivenJourney({
     if (!form) return;
     setSubmitting(true);
 
-    const stepResponses = { ...responses, [form.id]: { value, label: label || value } };
+    const stepKey = form.id || (form as { key?: string }).key || "unknown";
+    const stepResponses = { ...responses, [stepKey]: { value, label: label || value } };
     setResponses(stepResponses);
 
     if (isMultiStep && currentStepIdx < multiSteps.length - 1) {

@@ -162,15 +162,29 @@ export async function POST(
       }
     }
 
-    // Log actions to ticket
-    if (session.ticket_id && actionLog.length > 0) {
-      await admin.from("ticket_messages").insert({
-        ticket_id: session.ticket_id,
-        direction: "outbound",
-        visibility: "internal",
-        author_type: "system",
-        body: `[System] Discount journey completed:\n${actionLog.map(a => `• ${a}`).join("\n")}`,
-      });
+    // Log all actions to ticket as internal note
+    if (session.ticket_id) {
+      const allActions = [...actionLog];
+      if (consent?.value === "Yes") allActions.unshift("Customer accepted marketing signup");
+      if (consent?.value === "No" || !consent) allActions.unshift("Customer did not sign up for marketing");
+      const phoneInput = responses.phone_input;
+      if (phoneInput?.value) allActions.push(`Phone number added: ${phoneInput.value}`);
+      const subChoice = responses.apply_subscription;
+      if (subChoice?.value === "Yes" && metadata.subContractId) {
+        allActions.push(`Coupon ${couponCode} applied to subscription #${metadata.subContractId}`);
+      } else if (subChoice?.value === "No" && metadata.subContractId) {
+        allActions.push("Customer declined coupon on subscription");
+      }
+
+      if (allActions.length > 0) {
+        await admin.from("ticket_messages").insert({
+          ticket_id: session.ticket_id,
+          direction: "outbound",
+          visibility: "internal",
+          author_type: "system",
+          body: `[System] Discount journey completed:\n${allActions.map(a => `• ${a}`).join("\n")}`,
+        });
+      }
     }
 
     // Build human-readable summary + send as email reply
