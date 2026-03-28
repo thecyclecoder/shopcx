@@ -81,13 +81,6 @@ export default function JourneyPage() {
       setStatus("active");
     }
     load();
-
-    // Abandon on page close
-    const handleBeforeUnload = () => {
-      navigator.sendBeacon(`/api/journey/${token}/abandon`, "{}");
-    };
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [token]);
 
   const currentStep = useCallback((): JourneyStep | null => {
@@ -473,7 +466,7 @@ function CodeDrivenJourney({
 
     // Show thank you after a moment
     setTimeout(() => {
-      onComplete("Thanks! We'll follow up shortly with the next step.");
+      onComplete("Thanks! We'll send you an email shortly with the next step.");
     }, 1500);
   };
 
@@ -606,7 +599,7 @@ function JourneyShell({ children, logoUrl, workspaceName }: { children: React.Re
   return (
     <>
       <meta name="robots" content="noindex" />
-      <div className="flex min-h-screen items-center justify-center bg-zinc-50 p-4">
+      <div className="flex min-h-screen items-center justify-center bg-zinc-50 px-5 py-4 sm:px-6">
         <div className="w-full max-w-[480px]">
           {/* Branding header */}
           {(logoUrl || workspaceName) && (

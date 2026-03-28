@@ -239,10 +239,17 @@ export async function executeAccountLinkingJourney(
     if (unlinked.length === 0) return { completed: true, linkedIds: alreadyLinkedIds };
 
     // For non-inline channels, send CTA email instead
+    const linkForm = {
+      type: "checklist",
+      id: `link-${ticketId}`,
+      prompt: "Select all emails that belong to you",
+      options: unlinked.map(m => ({ value: m.id, label: m.email })),
+    };
     const sentCTA = await sendEmailJourneyCTA(
       ctx,
       "account_linking",
       "We noticed you might have multiple profiles. Click below to confirm which emails belong to you.",
+      linkForm,
     );
     if (sentCTA) {
       await updateJourneyStep(ctx, 1, { unlinkedMatches: unlinked, existingGroupId: groupId });
