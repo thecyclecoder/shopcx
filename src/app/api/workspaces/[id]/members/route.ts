@@ -31,7 +31,7 @@ export async function GET(
   // Get members
   const { data: members, error } = await admin
     .from("workspace_members")
-    .select("id, workspace_id, user_id, role, created_at")
+    .select("id, workspace_id, user_id, role, display_name, created_at")
     .eq("workspace_id", workspaceId)
     .order("created_at");
 
@@ -48,10 +48,47 @@ export async function GET(
   const enriched = members?.map((m) => ({
     ...m,
     email: usersMap.get(m.user_id)?.email,
-    display_name: usersMap.get(m.user_id)?.display_name,
+    display_name: m.display_name || usersMap.get(m.user_id)?.display_name || null,
   }));
 
   return NextResponse.json(enriched);
+}
+
+export async function PATCH(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: workspaceId } = await params;
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const admin = createAdminClient();
+  const body = await request.json();
+  const { user_id, display_name } = body;
+
+  const targetUserId = user_id || user.id;
+
+  // Users can edit their own display_name, or admins/owners can edit anyone's
+  if (targetUserId !== user.id) {
+    const { data: caller } = await admin
+      .from("workspace_members")
+      .select("role")
+      .eq("workspace_id", workspaceId)
+      .eq("user_id", user.id)
+      .single();
+    if (!caller || !["owner", "admin"].includes(caller.role)) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+  }
+
+  await admin
+    .from("workspace_members")
+    .update({ display_name: display_name || null })
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", targetUserId);
+
+  return NextResponse.json({ ok: true });
 }
 
 export async function DELETE(

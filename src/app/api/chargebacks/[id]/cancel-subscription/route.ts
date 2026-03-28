@@ -28,7 +28,7 @@ export async function POST(
   // Verify role
   const { data: member } = await admin
     .from("workspace_members")
-    .select("role")
+    .select("role, display_name")
     .eq("workspace_id", workspaceId)
     .eq("user_id", user.id)
     .single();
@@ -36,6 +36,8 @@ export async function POST(
   if (!member || !["owner", "admin"].includes(member.role)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  const displayName = member.display_name || user.user_metadata?.full_name || user.user_metadata?.name || null;
 
   // Verify chargeback belongs to workspace
   const { data: cb } = await admin
@@ -64,7 +66,7 @@ export async function POST(
   }
 
   // Cancel via Appstle
-  const result = await appstleSubscriptionAction(workspaceId, sub.shopify_contract_id, "cancel", "chargeback");
+  const result = await appstleSubscriptionAction(workspaceId, sub.shopify_contract_id, "cancel", "chargeback", displayName);
 
   if (result.success) {
     // Log the action

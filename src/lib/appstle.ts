@@ -24,6 +24,7 @@ export async function appstleSubscriptionAction(
   contractId: string,
   action: "pause" | "cancel" | "resume",
   cancelReason?: string,
+  cancelledBy?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
@@ -35,7 +36,8 @@ export async function appstleSubscriptionAction(
       // Use DELETE endpoint with cancellationFeedback for proper reason tracking
       const params = new URLSearchParams();
       if (cancelReason) params.set("cancellationFeedback", cancelReason);
-      params.set("cancellationNote", `Cancelled via ShopCX platform — ${cancelReason || "manual"}`);
+      const byLine = cancelledBy ? `by ${cancelledBy} on ShopCX.ai` : "via ShopCX.ai";
+      params.set("cancellationNote", `Cancelled ${byLine} — ${cancelReason || "manual"}`);
       const endpoint = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/${contractId}?${params}`;
       res = await fetch(endpoint, {
         method: "DELETE",

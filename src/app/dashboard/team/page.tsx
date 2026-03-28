@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 import type { WorkspaceMember, WorkspaceRole } from "@/lib/types/workspace";
 
@@ -110,41 +110,114 @@ export default function TeamPage() {
         ) : (
           <div className="mt-3 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
             {members.map((member) => (
-              <div key={member.id} className="flex items-center justify-between px-4 py-3">
-                <div>
-                  <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                    {member.display_name || member.email}
-                  </p>
-                  {member.display_name && (
-                    <p className="text-sm text-zinc-400">{member.email}</p>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-sm font-medium capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-                    {member.role.replace("_", " ")}
-                  </span>
-                  {canManage && member.role !== "owner" && (
-                    <button
-                      onClick={async () => {
-                        if (!confirm(`Remove ${member.display_name || member.email} from this workspace?`)) return;
-                        const res = await fetch(`/api/workspaces/${workspace.id}/members`, {
-                          method: "DELETE",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ user_id: member.user_id }),
-                        });
-                        if (res.ok) {
-                          setMembers(prev => prev.filter(m => m.user_id !== member.user_id));
-                        }
-                      }}
-                      className="text-sm text-red-500 hover:underline"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-              </div>
+              <MemberRow
+                key={member.id}
+                member={member}
+                workspaceId={workspace.id}
+                canManage={canManage}
+                onRemove={() => setMembers(prev => prev.filter(m => m.user_id !== member.user_id))}
+                onUpdate={(updated) => setMembers(prev => prev.map(m => m.id === updated.id ? updated : m))}
+              />
             ))}
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MemberRow({
+  member,
+  workspaceId,
+  canManage,
+  onRemove,
+  onUpdate,
+}: {
+  member: WorkspaceMember;
+  workspaceId: string;
+  canManage: boolean;
+  onRemove: () => void;
+  onUpdate: (m: WorkspaceMember) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [nameValue, setNameValue] = useState(member.display_name || "");
+  const [saving, setSaving] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing) inputRef.current?.focus();
+  }, [editing]);
+
+  const saveName = async () => {
+    setSaving(true);
+    await fetch(`/api/workspaces/${workspaceId}/members`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: member.user_id, display_name: nameValue.trim() }),
+    });
+    onUpdate({ ...member, display_name: nameValue.trim() || undefined });
+    setEditing(false);
+    setSaving(false);
+  };
+
+  return (
+    <div className="flex items-center justify-between gap-3 px-4 py-3">
+      <div className="min-w-0 flex-1">
+        {editing ? (
+          <div className="flex items-center gap-2">
+            <input
+              ref={inputRef}
+              value={nameValue}
+              onChange={(e) => setNameValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") saveName(); if (e.key === "Escape") setEditing(false); }}
+              placeholder="Display name"
+              className="w-48 rounded border border-indigo-300 bg-white px-2 py-1 text-sm text-zinc-900 outline-none dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
+            />
+            <button onClick={saveName} disabled={saving} className="text-xs font-medium text-indigo-600 hover:underline">
+              {saving ? "..." : "Save"}
+            </button>
+            <button onClick={() => setEditing(false)} className="text-xs text-zinc-400 hover:text-zinc-600">Cancel</button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              {member.display_name || member.email}
+            </p>
+            <button
+              onClick={() => { setNameValue(member.display_name || ""); setEditing(true); }}
+              className="text-[10px] text-zinc-400 hover:text-indigo-500"
+              title="Edit display name"
+            >
+              edit
+            </button>
+          </div>
+        )}
+        {!editing && member.display_name && (
+          <p className="text-xs text-zinc-400">{member.email}</p>
+        )}
+        {!editing && !member.display_name && (
+          <p className="text-[11px] text-zinc-300 dark:text-zinc-600">No display name set</p>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs font-medium capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+          {member.role.replace("_", " ")}
+        </span>
+        {canManage && member.role !== "owner" && (
+          <button
+            onClick={async () => {
+              if (!confirm(`Remove ${member.display_name || member.email} from this workspace?`)) return;
+              const res = await fetch(`/api/workspaces/${workspaceId}/members`, {
+                method: "DELETE",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ user_id: member.user_id }),
+              });
+              if (res.ok) onRemove();
+            }}
+            className="text-xs text-red-500 hover:underline"
+          >
+            Remove
+          </button>
         )}
       </div>
     </div>
