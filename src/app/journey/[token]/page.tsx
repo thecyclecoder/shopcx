@@ -582,6 +582,20 @@ function CodeDrivenJourney({
   );
 }
 
+function formatPhoneDisplay(raw: string): string {
+  const digits = raw.replace(/\D/g, "").slice(0, 10); // Max 10 digits (US)
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 6) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+}
+
+function phoneToE164(raw: string): string {
+  const digits = raw.replace(/\D/g, "");
+  if (digits.startsWith("1") && digits.length === 11) return `+${digits}`;
+  if (digits.length === 10) return `+1${digits}`;
+  return raw.startsWith("+") ? raw : `+1${digits}`;
+}
+
 function TextInputForm({
   placeholder,
   primaryColor,
@@ -593,23 +607,66 @@ function TextInputForm({
   submitting: boolean;
   onSubmit: (value: string) => void;
 }) {
-  const [value, setValue] = useState("");
+  const [display, setDisplay] = useState("");
+  const [error, setError] = useState("");
+  const [validating, setValidating] = useState(false);
+
+  const digits = display.replace(/\D/g, "");
+  const isComplete = digits.length === 10;
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.value.replace(/\D/g, "").slice(0, 10);
+    setDisplay(formatPhoneDisplay(raw));
+    setError("");
+  };
+
+  const handleSubmit = async () => {
+    if (!isComplete) return;
+    setValidating(true);
+    setError("");
+
+    // Validate via API
+    const e164 = phoneToE164(display);
+    try {
+      const res = await fetch(`/api/validate-phone?phone=${encodeURIComponent(e164)}`);
+      const data = await res.json();
+      if (!data.valid) {
+        setError("Not a valid number. Please enter a valid mobile number.");
+        setValidating(false);
+        return;
+      }
+      if (data.lineType === "landline") {
+        setError("Only mobile phones — no landlines. We need a mobile number for text messages.");
+        setValidating(false);
+        return;
+      }
+    } catch {
+      // If validation fails, proceed anyway
+    }
+
+    setValidating(false);
+    onSubmit(e164);
+  };
+
   return (
     <div>
       <input
         type="tel"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
+        inputMode="numeric"
+        autoComplete="tel-national"
+        value={display}
+        onChange={handleChange}
         placeholder={placeholder}
-        className="w-full rounded-xl border-2 border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-900 outline-none transition-colors focus:border-indigo-400"
+        className={`w-full rounded-xl border-2 bg-white px-4 py-3 text-sm text-zinc-900 outline-none transition-colors ${error ? "border-red-300 focus:border-red-400" : "border-zinc-200 focus:border-indigo-400"}`}
       />
+      {error && <p className="mt-1.5 text-xs text-red-500">{error}</p>}
       <button
-        onClick={() => { if (value.trim()) onSubmit(value.trim()); }}
-        disabled={!value.trim() || submitting}
+        onClick={handleSubmit}
+        disabled={!isComplete || submitting || validating}
         className="mt-3 w-full rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-40"
         style={{ backgroundColor: primaryColor }}
       >
-        {submitting ? "Submitting..." : "Continue"}
+        {validating ? "Checking..." : submitting ? "Submitting..." : "Continue"}
       </button>
     </div>
   );

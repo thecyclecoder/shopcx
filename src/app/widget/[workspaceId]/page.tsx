@@ -700,6 +700,65 @@ export default function ChatWidgetPage() {
 }
 
 // Interactive form component for checklist, radio, confirm, text input
+function formatPhoneDisplay(raw: string): string {
+  const digits = raw.replace(/\D/g, "").slice(0, 10);
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 6) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+}
+
+function PhoneInputForm({ primaryColor, onSubmit }: { primaryColor: string; onSubmit: (v: string) => void }) {
+  const [display, setDisplay] = useState("");
+  const [error, setError] = useState("");
+  const [validating, setValidating] = useState(false);
+
+  const digits = display.replace(/\D/g, "");
+  const isComplete = digits.length === 10;
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setDisplay(formatPhoneDisplay(e.target.value.replace(/\D/g, "").slice(0, 10)));
+    setError("");
+  };
+
+  const handleSubmit = async () => {
+    if (!isComplete) return;
+    setValidating(true);
+    setError("");
+    const e164 = `+1${digits}`;
+    try {
+      const res = await fetch(`/api/validate-phone?phone=${encodeURIComponent(e164)}`);
+      const data = await res.json();
+      if (!data.valid) { setError("Not a valid number. Please enter a valid mobile number."); setValidating(false); return; }
+      if (data.lineType === "landline") { setError("Only mobile phones — no landlines. We need a mobile number for text messages."); setValidating(false); return; }
+    } catch {}
+    setValidating(false);
+    onSubmit(e164);
+  };
+
+  return (
+    <div className="mt-2 space-y-1.5">
+      <input
+        type="tel"
+        inputMode="numeric"
+        autoComplete="tel-national"
+        value={display}
+        onChange={handleChange}
+        placeholder="(555) 123-4567"
+        className={`w-full rounded-lg border bg-white px-3 py-2 text-sm text-zinc-900 outline-none ${error ? "border-red-300" : "border-zinc-300 focus:border-indigo-400"}`}
+      />
+      {error && <p className="text-[11px] text-red-500">{error}</p>}
+      <button
+        onClick={handleSubmit}
+        disabled={!isComplete || validating}
+        className="w-full rounded-lg py-2 text-xs font-medium text-white disabled:opacity-40"
+        style={{ backgroundColor: primaryColor }}
+      >
+        {validating ? "Checking..." : "Submit"}
+      </button>
+    </div>
+  );
+}
+
 function InteractiveForm({ form, primaryColor, onSubmit }: {
   form: { type: string; prompt?: string; options?: { value: string; label: string }[]; id: string };
   primaryColor: string;
@@ -826,7 +885,12 @@ function InteractiveForm({ form, primaryColor, onSubmit }: {
     );
   }
 
-  // Text input
+  // Phone input (detected by id prefix)
+  if (form.id.startsWith("phone-input")) {
+    return <PhoneInputForm primaryColor={primaryColor} onSubmit={onSubmit} />;
+  }
+
+  // Generic text input
   return (
     <div className="mt-2 space-y-2">
       <input
