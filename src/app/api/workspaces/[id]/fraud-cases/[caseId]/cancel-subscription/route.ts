@@ -1,14 +1,13 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { cookies } from "next/headers";
 import { appstleSubscriptionAction } from "@/lib/appstle";
 
 export async function POST(
   request: Request,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string; caseId: string }> }
 ) {
-  const { id: chargebackEventId } = await params;
+  const { id: workspaceId, caseId } = await params;
   const { subscriptionId } = await request.json();
 
   if (!subscriptionId) {
@@ -19,13 +18,8 @@ export async function POST(
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const cookieStore = await cookies();
-  const workspaceId = cookieStore.get("workspace_id")?.value;
-  if (!workspaceId) return NextResponse.json({ error: "No workspace" }, { status: 400 });
-
   const admin = createAdminClient();
 
-  // Verify role
   const { data: member } = await admin
     .from("workspace_members")
     .select("role")
@@ -37,15 +31,15 @@ export async function POST(
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  // Verify chargeback belongs to workspace
-  const { data: cb } = await admin
-    .from("chargeback_events")
-    .select("id, customer_id")
-    .eq("id", chargebackEventId)
+  // Verify fraud case
+  const { data: fraudCase } = await admin
+    .from("fraud_cases")
+    .select("id")
+    .eq("id", caseId)
     .eq("workspace_id", workspaceId)
     .single();
 
-  if (!cb) return NextResponse.json({ error: "Chargeback not found" }, { status: 404 });
+  if (!fraudCase) return NextResponse.json({ error: "Case not found" }, { status: 404 });
 
   // Get subscription
   const { data: sub } = await admin
@@ -55,35 +49,25 @@ export async function POST(
     .eq("workspace_id", workspaceId)
     .single();
 
-  if (!sub || !sub.shopify_contract_id) {
+  if (!sub?.shopify_contract_id) {
     return NextResponse.json({ error: "Subscription not found" }, { status: 404 });
   }
-
   if (sub.status === "cancelled") {
     return NextResponse.json({ error: "Already cancelled" }, { status: 400 });
   }
 
-  // Cancel via Appstle
-  const result = await appstleSubscriptionAction(workspaceId, sub.shopify_contract_id, "cancel", "chargeback");
+  const result = await appstleSubscriptionAction(workspaceId, sub.shopify_contract_id, "cancel", "fraud");
 
   if (result.success) {
-    // Log the action
-    await admin.from("chargeback_subscription_actions").insert({
-      chargeback_event_id: chargebackEventId,
-      subscription_id: sub.id,
-      customer_id: sub.customer_id,
+    // Add history entry
+    await admin.from("fraud_case_history").insert({
+      case_id: caseId,
       workspace_id: workspaceId,
-      action: "cancelled",
-      cancellation_reason: "chargeback_manual",
-      executed_by: user.id,
+      user_id: user.id,
+      action: "subscription_cancelled",
+      new_value: sub.shopify_contract_id,
+      notes: `Subscription ${sub.shopify_contract_id} cancelled for fraud`,
     });
-
-    // Update chargeback auto_action_taken if not already set
-    await admin
-      .from("chargeback_events")
-      .update({ auto_action_taken: "subscriptions_cancelled", auto_action_at: new Date().toISOString() })
-      .eq("id", chargebackEventId)
-      .is("auto_action_taken", null);
   }
 
   return NextResponse.json({ success: result.success, error: result.error });

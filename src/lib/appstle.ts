@@ -23,24 +23,34 @@ export async function appstleSubscriptionAction(
   workspaceId: string,
   contractId: string,
   action: "pause" | "cancel" | "resume",
+  cancelReason?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
-  // Appstle v2 API: PUT with query params
-  const statusMap: Record<string, string> = { pause: "PAUSED", cancel: "CANCELLED", resume: "ACTIVE" };
-  const appstleStatus = statusMap[action];
-  const endpoint = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-status?contractId=${contractId}&status=${appstleStatus}`;
-
   try {
-    const res = await fetch(endpoint, {
-      method: "PUT",
-      headers: {
-        "X-API-Key": creds.apiKey,
-      },
-    });
+    let res: Response;
 
-    // 204 = success (no content body)
+    if (action === "cancel") {
+      // Use DELETE endpoint with cancellationFeedback for proper reason tracking
+      const params = new URLSearchParams();
+      if (cancelReason) params.set("cancellationFeedback", cancelReason);
+      params.set("cancellationNote", `Cancelled via ShopCX platform — ${cancelReason || "manual"}`);
+      const endpoint = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/${contractId}?${params}`;
+      res = await fetch(endpoint, {
+        method: "DELETE",
+        headers: { "X-API-Key": creds.apiKey },
+      });
+    } else {
+      // Pause / Resume use the update-status PUT endpoint
+      const statusMap: Record<string, string> = { pause: "PAUSED", resume: "ACTIVE" };
+      const endpoint = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-status?contractId=${contractId}&status=${statusMap[action]}`;
+      res = await fetch(endpoint, {
+        method: "PUT",
+        headers: { "X-API-Key": creds.apiKey },
+      });
+    }
+
     if (!res.ok && res.status !== 204) {
       const text = await res.text();
       console.error(`Appstle ${action} error for contract ${contractId}:`, text);

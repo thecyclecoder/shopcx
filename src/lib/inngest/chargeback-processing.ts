@@ -153,7 +153,8 @@ export const chargebackReceived = inngest.createFunction(
           const result = await appstleSubscriptionAction(
             workspaceId,
             sub.shopify_contract_id,
-            "cancel"
+            "cancel",
+            "chargeback"
           );
 
           if (result.success) {
