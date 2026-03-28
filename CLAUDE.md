@@ -150,15 +150,40 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - Article feedback widget (thumbs up/down) with API
 
 ### Phase 4d: Fraud Detection ✅
-- Fraud rules engine with configurable thresholds and severity levels
-- Fraud case management dashboard
-- Inngest-powered nightly scans + per-order/customer checks
-- Chargeback processing pipeline (received → won/lost)
+- Fraud rules engine: shared_address + high_velocity with configurable thresholds
+- Fraud case detail: investigation panel with rule triggering, customer accounts, orders, subscriptions, chargebacks, account linking
+- Subscription cancel from fraud detail with reason "fraud" via Appstle DELETE endpoint
+- Inngest-powered nightly scans + per-order/customer checks + Shopify dispute polling
+- Chargeback processing pipeline (received → classify → auto-cancel or review → won/lost)
+- Chargeback list: active subscription count column (sortable), account linking in slideout
+- Auto-unsubscribe from marketing on chargebacks + fraud detection
+- Chargebacks no longer create fraud cases — fraud cases only from actual rules
+- Delete fraud cases (admin/owner only)
+
+### Phase 4e: Journeys ✅
+- See `JOURNEYS.md` for full journey system documentation
+- Combined account linking + discount signup journey
+- Multi-step mini-site (branded, mobile-friendly, progress bar)
+- Inline multi-step forms in live chat (same logic as mini-site)
+- Journey suggestions for agent-assigned tickets
+- Re-nudge system for declined signups (server-side via email)
+- Per-journey ticket status setting (open/pending/closed on each step)
 
 ### Dashboard & Settings ✅
 - Dashboard overview: real-time stats (open/pending tickets, customers, avg retention, AI resolution rate, tickets today, KB articles, active macros)
-- Settings cards: Rules, AI Agent, Macros, Workflows, Smart Patterns, Fraud Detection, Ticket Views, Tags, Team, Import, Integrations, Knowledge Base
+- Settings cards: Rules, AI Agent, Macros, Workflows, Smart Patterns, Fraud Detection, Ticket Views, Tags, Team, Import, Integrations, Knowledge Base, Journeys, Chargebacks, Coupons
+- Team page: editable display names per member
+- Journey settings: detail view with flow visualization, editable steps, channels, match patterns, priority, step ticket status
 - Branding: ShopCX.ai (lowercase .ai), notification bell, collapsible tickets menu
+
+## Priority Order (inbound message handling)
+1. **Close/Escalate** — positive closure detection, escalation keywords
+2. **Journey** — match patterns checked first, takes priority over workflows
+3. **Workflow** — smart pattern → workflow (only fires if no journey matched)
+4. **AI Agent** — generates response if nothing else handled it
+
+For new tickets (email webhook): journey check → pattern match → workflow → AI draft
+For replies (ai/reply-received): route → patterns (deferred) → journey → workflow → AI
 
 ## Key Files
 - `src/lib/supabase/admin.ts` — Service role client for all DB writes
@@ -183,9 +208,22 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - `src/lib/pattern-matcher.ts` — 3-layer classifier: keywords → embeddings → Claude Haiku
 - `src/lib/rules-engine.ts` — Synchronous rule evaluation with compound conditions
 - `src/lib/embeddings.ts` — Multi-provider embedding generation (OpenAI, Voyage, HuggingFace)
-- `src/lib/appstle.ts` — Appstle API helper (pause/cancel/resume + discount apply/remove)
-- `src/lib/email.ts` — Resend client, send ticket reply, send CSAT, send invite
+- `src/lib/appstle.ts` — Appstle API helper (pause/cancel/resume via DELETE with cancellationFeedback + discount apply/remove)
+- `src/lib/email.ts` — Resend client, send ticket reply, send CSAT, send invite, send journey CTA
+- `src/lib/journey-launcher.ts` — Unified journey launcher (chat inline + email CTA)
+- `src/lib/email-journey-builder.ts` — Combined multi-step journey builder for email channel
+- `src/lib/discount-journey-builder.ts` — Builds discount journey steps from customer data
+- `src/lib/chat-journey.ts` — Code-driven journey executors (account linking, discount signup for chat)
+- `src/lib/journey-suggest.ts` — Journey suggestion detection for agent-assigned tickets
+- `src/lib/first-touch.ts` — First outbound touch tagging (touched + ft:source)
+- `src/lib/ticket-tags.ts` — Idempotent ticket tag helper
+- `src/lib/shopify-marketing.ts` — Subscribe + unsubscribe email/SMS marketing via Shopify GraphQL
+- `src/lib/fraud-detector.ts` — Fraud rules engine (shared_address, high_velocity)
 - `src/components/notification-bell.tsx` — Dashboard notification bell with dropdown
+- `src/app/journey/[token]/page.tsx` — Journey mini-site (multi-step forms, branded)
+- `src/app/api/journey/[token]/step/route.ts` — Journey step submission (code-driven executor)
+- `src/app/api/journey/[token]/complete/route.ts` — Journey completion (processes all responses, re-nudge)
+- `src/app/api/validate-phone/route.ts` — Phone validation via Twilio Lookup v2
 
 ## Environment Variables (Vercel Production)
 - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` — Supabase
@@ -196,6 +234,7 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - `ANTHROPIC_API_KEY` — Claude API for AI agent + pattern suggestions
 - `OPENAI_API_KEY` — Embeddings via text-embedding-3-small
 - `VERCEL_API_TOKEN`, `VERCEL_PROJECT_ID`, `VERCEL_TEAM_ID` — Domain management
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` — Twilio (SMS + phone validation via Lookup v2)
 
 ## Database Schema (Supabase)
 - `workspaces` — Multi-tenant root. Credentials (encrypted), sandbox_mode, response_delays, help_slug, help_custom_domain
@@ -204,7 +243,7 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - `orders` — Synced from Shopify. Line items, fulfillments JSONB, source_name
 - `subscriptions` — From Appstle. Items JSONB, billing interval, next billing date
 - `products` — Synced from Shopify Online Store channel
-- `tickets` — Status, tags, channel, handled_by, ai_turn_count, ai_turn_limit, escalation_reason, agent_intervened
+- `tickets` — Status, tags, channel, handled_by, ai_turn_count, ai_turn_limit, escalation_reason, agent_intervened, journey_id, journey_step, journey_data, journey_nudge_count, profile_link_completed
 - `ticket_messages` — Direction, visibility, author_type (customer/agent/ai/system), macro_id
 - `ticket_views` — Saved filter combos with parent_id for nesting
 - `knowledge_base` — Articles with slug, published, content_html, view_count, helpful_yes/no, product mapping
@@ -220,6 +259,14 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - `dashboard_notifications` — Generic notifications (macro_suggestion, pattern_review, knowledge_gap, system, fraud_alert)
 - `fraud_cases` — Fraud detection cases with severity
 - `fraud_rules` — Configurable fraud detection rules
+- `journey_definitions` — Journey configs with channels, match_patterns, trigger_intent, step_ticket_status, priority
+- `journey_sessions` — Per-customer journey invocations with token, config_snapshot, responses, status
+- `journey_step_events` — Append-only audit log of journey responses
+- `chargeback_events` — Shopify disputes with reason/status mapping, auto_action_taken
+- `chargeback_subscription_actions` — Log of subscription cancellations/reinstatements from chargebacks
+- `customer_links` — Customer profile linking (group_id based)
+- `customer_link_rejections` — Rejected link suggestions (never re-offer)
+- `coupon_mappings` — Shopify coupon → AI coupon mapping with VIP tiers
 
 ## Ticket Tags (auto-applied for analytics)
 When adding new journeys or workflows, always add the corresponding tag:
