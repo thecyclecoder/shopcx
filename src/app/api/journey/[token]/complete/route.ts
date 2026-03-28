@@ -89,6 +89,17 @@ export async function POST(
       }
 
       await admin.from("tickets").update({ profile_link_completed: true }).eq("id", session.ticket_id);
+
+      // Log linking actions immediately (before consent might decline and skip the main action log)
+      if (actionLog.length > 0 && session.ticket_id) {
+        await admin.from("ticket_messages").insert({
+          ticket_id: session.ticket_id,
+          direction: "outbound",
+          visibility: "internal",
+          author_type: "system",
+          body: `[System] Account linking:\n${actionLog.filter(a => a.startsWith("Account linking")).map(a => `• ${a}`).join("\n")}`,
+        });
+      }
     }
 
     // Get the main customer profile for marketing subscription
