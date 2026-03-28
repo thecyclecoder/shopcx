@@ -556,6 +556,15 @@ function CodeDrivenJourney({
             <ChecklistForm options={form.options} primaryColor={primaryColor} submitting={submitting}
               onSubmit={(value, label) => handleSubmit(value, label)} />
           )}
+
+          {form.type === "text_input" && (
+            <TextInputForm
+              placeholder={(form as { placeholder?: string }).placeholder || "Type here..."}
+              primaryColor={primaryColor}
+              submitting={submitting}
+              onSubmit={(value) => handleSubmit(value, value)}
+            />
+          )}
         </div>
       )}
 
@@ -570,6 +579,39 @@ function CodeDrivenJourney({
         <p className="text-sm text-zinc-500">Your request is being processed. Check your email for updates.</p>
       )}
     </JourneyShell>
+  );
+}
+
+function TextInputForm({
+  placeholder,
+  primaryColor,
+  submitting,
+  onSubmit,
+}: {
+  placeholder: string;
+  primaryColor: string;
+  submitting: boolean;
+  onSubmit: (value: string) => void;
+}) {
+  const [value, setValue] = useState("");
+  return (
+    <div>
+      <input
+        type="tel"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded-xl border-2 border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-900 outline-none transition-colors focus:border-indigo-400"
+      />
+      <button
+        onClick={() => { if (value.trim()) onSubmit(value.trim()); }}
+        disabled={!value.trim() || submitting}
+        className="mt-3 w-full rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-40"
+        style={{ backgroundColor: primaryColor }}
+      >
+        {submitting ? "Submitting..." : "Continue"}
+      </button>
+    </div>
   );
 }
 

@@ -1,18 +1,17 @@
 /**
- * Build a multi-step mini-site config for the discount journey.
- * Inspects customer profiles to determine which steps are needed.
+ * Build multi-step mini-site config for the discount journey.
+ * Simple logic: main account only, no linked account considerations.
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
 
 interface DiscountStep {
   key: string;
-  type: "confirm" | "radio" | "info";
+  type: "confirm" | "radio" | "text_input" | "info";
   question: string;
   subtitle?: string;
+  placeholder?: string;
   options?: { value: string; label: string }[];
-  // For info steps (coupon display, completion)
-  html?: string;
 }
 
 export async function buildDiscountJourneySteps(
@@ -21,40 +20,19 @@ export async function buildDiscountJourneySteps(
 ): Promise<{ steps: DiscountStep[]; metadata: Record<string, unknown> }> {
   const admin = createAdminClient();
 
-  // Get all linked customer IDs
-  const { data: links } = await admin
-    .from("customer_links")
-    .select("group_id")
-    .eq("customer_id", customerId);
-  let allCustomerIds = [customerId];
-  if (links?.[0]?.group_id) {
-    const { data: groupMembers } = await admin
-      .from("customer_links")
-      .select("customer_id")
-      .eq("group_id", links[0].group_id);
-    allCustomerIds = (groupMembers || []).map(m => m.customer_id);
-  }
-
-  // Get all profiles
-  const { data: allProfiles } = await admin
+  // Only look at the main customer — no linked accounts
+  const { data: customer } = await admin
     .from("customers")
     .select("id, email, phone, email_marketing_status, sms_marketing_status, shopify_customer_id, retention_score")
-    .in("id", allCustomerIds);
+    .eq("id", customerId)
+    .single();
 
-  const profiles = allProfiles || [];
-
-  // Check if the primary customer (not linked accounts) is already subscribed
-  const primaryProfile = profiles.find(p => p.id === customerId) || profiles[0];
-  const primaryEmailSubscribed = primaryProfile?.email_marketing_status === "subscribed";
-  const primarySmsSubscribed = primaryProfile?.sms_marketing_status === "subscribed";
-  const emails = [...new Set(profiles.map(p => p.email).filter(Boolean))];
-  const phones = [...new Set(profiles.map(p => p.phone).filter(Boolean))];
+  if (!customer) return { steps: [], metadata: {} };
 
   // Get coupon info
   const { data: ws } = await admin.from("workspaces").select("vip_retention_threshold").eq("id", workspaceId).single();
   const vipThreshold = ws?.vip_retention_threshold || 85;
-  const maxRetention = Math.max(...profiles.map(p => p.retention_score || 0));
-  const isVip = maxRetention >= vipThreshold;
+  const isVip = (customer.retention_score || 0) >= vipThreshold;
 
   const { data: coupons } = await admin
     .from("coupon_mappings")
@@ -68,6 +46,14 @@ export async function buildDiscountJourneySteps(
     (c.customer_tier === "non_vip" && !isVip)
   );
   const coupon = eligible[0];
+
+  // Get all linked IDs for subscription lookup
+  let allCustomerIds = [customerId];
+  const { data: links } = await admin.from("customer_links").select("group_id").eq("customer_id", customerId);
+  if (links?.[0]?.group_id) {
+    const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", links[0].group_id);
+    allCustomerIds = (grp || []).map(m => m.customer_id);
+  }
 
   // Get active subscription with nearest renewal
   const { data: activeSubs } = await admin
@@ -84,14 +70,19 @@ export async function buildDiscountJourneySteps(
   // Build steps
   const steps: DiscountStep[] = [];
   const metadata: Record<string, unknown> = {
-    allCustomerIds,
+    customerId,
+    shopifyCustomerId: customer.shopify_customer_id,
+    customerEmail: customer.email,
     couponCode: coupon?.code || null,
     couponSummary: coupon?.summary || null,
     isVip,
   };
 
-  // Step 1: Consent (only skip if primary customer is subscribed to BOTH email AND sms)
-  if (!primaryEmailSubscribed || !primarySmsSubscribed) {
+  // Step 1: Consent (skip if already subscribed to both)
+  const emailSubscribed = customer.email_marketing_status === "subscribed";
+  const smsSubscribed = customer.sms_marketing_status === "subscribed";
+
+  if (!emailSubscribed || !smsSubscribed) {
     steps.push({
       key: "consent",
       type: "confirm",
@@ -100,33 +91,21 @@ export async function buildDiscountJourneySteps(
     });
   }
 
-  // Step 2: Which email? (only if primary not subscribed + multiple emails across accounts)
-  if (!primaryEmailSubscribed && emails.length > 1) {
+  // Step 2: Phone number (only if not on file and not already SMS subscribed)
+  if (!smsSubscribed && !customer.phone) {
     steps.push({
-      key: "email_choice",
-      type: "radio",
-      question: "Which email do you want to receive the coupon?",
-      options: emails.map(e => ({ value: e, label: e })),
+      key: "phone_input",
+      type: "text_input",
+      question: "What's your phone number?",
+      subtitle: "We'll send you coupon alerts via text.",
+      placeholder: "+1 (555) 123-4567",
     });
-    metadata.emails = emails;
-  } else if (!primaryEmailSubscribed && emails.length === 1) {
-    metadata.autoEmail = emails[0];
+    metadata.needsPhone = true;
+  } else if (customer.phone) {
+    metadata.customerPhone = customer.phone;
   }
 
-  // Step 3: Which phone? (only if primary not subscribed + multiple phones across accounts)
-  if (!primarySmsSubscribed && phones.length > 1) {
-    steps.push({
-      key: "phone_choice",
-      type: "radio",
-      question: "Which phone number do you want to have coupons delivered to?",
-      options: phones.map(p => ({ value: p as string, label: p as string })),
-    });
-    metadata.phones = phones;
-  } else if (!primarySmsSubscribed && phones.length === 1) {
-    metadata.autoPhone = phones[0];
-  }
-
-  // Step 4: Apply to subscription? (only if active sub exists)
+  // Step 3: Apply to subscription? (only if active sub + coupon exists)
   if (sub?.shopify_contract_id && coupon?.code) {
     const nextDate = sub.next_billing_date
       ? new Date(sub.next_billing_date).toLocaleDateString("en-US", { month: "long", day: "numeric" })
@@ -137,7 +116,7 @@ export async function buildDiscountJourneySteps(
     steps.push({
       key: "apply_subscription",
       type: "confirm",
-      question: `Apply coupon to your subscription?`,
+      question: "Apply coupon to your subscription?",
       subtitle: `You have ${itemsText} renewing ${nextDate}. Want me to apply ${coupon.code} to your next renewal?`,
     });
     metadata.subContractId = sub.shopify_contract_id;

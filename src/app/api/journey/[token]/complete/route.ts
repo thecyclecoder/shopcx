@@ -85,35 +85,32 @@ export async function POST(
       await admin.from("tickets").update({ profile_link_completed: true }).eq("id", session.ticket_id);
     }
 
-    // Get profiles for marketing subscription (after linking, so we have expanded IDs)
-    const { data: profiles } = await admin
-      .from("customers")
-      .select("id, email, phone, shopify_customer_id, email_marketing_status, sms_marketing_status")
-      .in("id", allCustomerIds.length > 0 ? allCustomerIds : ["__none__"]);
+    // Get the main customer profile for marketing subscription
+    const mainCustomerId = (metadata.customerId as string) || allCustomerIds[0];
+    const shopifyCustomerId = metadata.shopifyCustomerId as string;
+    const customerEmail = metadata.customerEmail as string;
 
-    // Process consent
+    // Process consent — subscribe main customer's email + phone
     const consent = responses.consent;
-    if (consent?.value === "Yes") {
-      // Subscribe email
-      const emailChoice = responses.email_choice?.value || (metadata.autoEmail as string);
-      if (emailChoice) {
-        const profile = (profiles || []).find(p => p.email === emailChoice && p.shopify_customer_id);
-        if (profile?.shopify_customer_id && profile.email_marketing_status !== "subscribed") {
-          await subscribeToEmailMarketing(wsId, profile.shopify_customer_id);
-          await admin.from("customers").update({ email_marketing_status: "subscribed" }).eq("id", profile.id);
-          actionLog.push(`Email marketing: subscribed ${emailChoice}`);
-        }
-      }
+    if (consent?.value === "Yes" && shopifyCustomerId) {
+      // Subscribe email (always the main customer's email)
+      await subscribeToEmailMarketing(wsId, shopifyCustomerId);
+      await admin.from("customers").update({ email_marketing_status: "subscribed" }).eq("id", mainCustomerId);
+      actionLog.push(`Email marketing: subscribed ${customerEmail}`);
 
-      // Subscribe SMS
-      const phoneChoice = responses.phone_choice?.value || (metadata.autoPhone as string);
-      if (phoneChoice) {
-        const profile = (profiles || []).find(p => p.phone === phoneChoice && p.shopify_customer_id);
-        if (profile?.shopify_customer_id && profile.sms_marketing_status !== "subscribed") {
-          await subscribeToSmsMarketing(wsId, profile.shopify_customer_id, phoneChoice);
-          await admin.from("customers").update({ sms_marketing_status: "subscribed" }).eq("id", profile.id);
-          actionLog.push(`SMS marketing: subscribed ${phoneChoice}`);
+      // Subscribe SMS — use phone from input or existing phone on file
+      const phoneInput = responses.phone_input?.value?.trim();
+      const existingPhone = metadata.customerPhone as string | undefined;
+      const phone = phoneInput || existingPhone;
+
+      if (phone) {
+        // If phone was entered, save it to the customer record first
+        if (phoneInput && !existingPhone) {
+          await admin.from("customers").update({ phone: phoneInput }).eq("id", mainCustomerId);
         }
+        await subscribeToSmsMarketing(wsId, shopifyCustomerId, phone);
+        await admin.from("customers").update({ sms_marketing_status: "subscribed" }).eq("id", mainCustomerId);
+        actionLog.push(`SMS marketing: subscribed ${phone}`);
       }
     }
 

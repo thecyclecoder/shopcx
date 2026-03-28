@@ -421,38 +421,19 @@ export async function executeDiscountJourney(
 
   const step = ticket.journey_step || 0;
 
-  // Get all linked customer IDs
-  const { data: links } = await admin
-    .from("customer_links")
-    .select("group_id")
-    .eq("customer_id", ctx.customerId);
-  let allCustomerIds = [ctx.customerId];
-  if (links?.[0]?.group_id) {
-    const { data: groupMembers } = await admin
-      .from("customer_links")
-      .select("customer_id")
-      .eq("group_id", links[0].group_id);
-    allCustomerIds = (groupMembers || []).map(m => m.customer_id);
-  }
-
-  // Get all profiles
-  const { data: allProfiles } = await admin
+  // Main customer only — no linked account considerations for marketing
+  const { data: customer } = await admin
     .from("customers")
     .select("id, email, phone, email_marketing_status, sms_marketing_status, shopify_customer_id, retention_score")
-    .in("id", allCustomerIds);
+    .eq("id", ctx.customerId)
+    .single();
 
-  const profiles = allProfiles || [];
-  const primaryProfile = profiles.find(p => p.id === ctx.customerId) || profiles[0];
-  if (!primaryProfile) return { completed: true, waitingForForm: false };
+  if (!customer) return { completed: true, waitingForForm: false };
 
-  // Step 0: Ask consent to sign up for coupons
+  // Step 0: Ask consent (skip if already subscribed to both)
   if (step === 0) {
-    const anyEmailSubscribed = profiles.some(p => p.email_marketing_status === "subscribed");
-    const anySmsSubscribed = profiles.some(p => p.sms_marketing_status === "subscribed");
-
-    if (anyEmailSubscribed && anySmsSubscribed) {
-      // Already subscribed to both — skip to coupon
-      await updateJourneyStep(ctx, 10, { emailDone: true, smsDone: true });
+    if (customer.email_marketing_status === "subscribed" && customer.sms_marketing_status === "subscribed") {
+      await updateJourneyStep(ctx, 10);
       return executeDiscountJourney(workspaceId, ticketId, customerMessage);
     }
 
@@ -466,117 +447,62 @@ export async function executeDiscountJourney(
   if (step === 1) {
     const msgLower = customerMessage.toLowerCase().trim();
     if (msgLower === "no" || msgLower.includes("no thanks")) {
-      await updateJourneyStep(ctx, 10, { emailDone: true, smsDone: true });
+      await updateJourneyStep(ctx, 10);
       return executeDiscountJourney(workspaceId, ticketId, customerMessage);
     }
 
-    // Said yes — check email
-    const anyEmailSubscribed = profiles.some(p => p.email_marketing_status === "subscribed");
-    if (anyEmailSubscribed) {
-      await updateJourneyStep(ctx, 5, { emailDone: true });
-      return executeDiscountJourney(workspaceId, ticketId, customerMessage);
+    // Subscribe email (main customer's email, always)
+    if (customer.shopify_customer_id && customer.email_marketing_status !== "subscribed") {
+      await subscribeToEmailMarketing(workspaceId, customer.shopify_customer_id);
+      await admin.from("customers").update({ email_marketing_status: "subscribed" }).eq("id", customer.id);
+      await sendInternalNote(ctx, `[System] Email marketing: subscribed ${customer.email}`);
     }
 
-    const emails = [...new Set(profiles.map(p => p.email).filter(Boolean))];
-    if (emails.length <= 1) {
-      const profile = profiles.find(p => p.email === emails[0] && p.shopify_customer_id);
-      if (profile?.shopify_customer_id) {
-        await subscribeToEmailMarketing(workspaceId, profile.shopify_customer_id);
-        await sendInternalNote(ctx, `[System] Email marketing: subscribed ${emails[0]}`);
+    // Check if phone is on file
+    if (customer.sms_marketing_status !== "subscribed") {
+      if (customer.phone) {
+        // Has phone — subscribe directly
+        if (customer.shopify_customer_id) {
+          await subscribeToSmsMarketing(workspaceId, customer.shopify_customer_id, customer.phone);
+          await admin.from("customers").update({ sms_marketing_status: "subscribed" }).eq("id", customer.id);
+          await sendInternalNote(ctx, `[System] SMS marketing: subscribed ${customer.phone}`);
+        }
+      } else {
+        // No phone — ask for it
+        const formPayload = JSON.stringify({ type: "text_input", id: `phone-input-${ticketId}`, prompt: "What's your phone number?", placeholder: "+1 (555) 123-4567" });
+        await sendChatMessage(ctx, `Great, you're signed up for email coupons! What's your phone number so we can text you deals too?<!--FORM:${formPayload}-->`);
+        await updateJourneyStep(ctx, 2);
+        return { completed: false, waitingForForm: true };
       }
-      await updateJourneyStep(ctx, 5, { emailDone: true, selectedEmail: emails[0] });
-      return executeDiscountJourney(workspaceId, ticketId, customerMessage);
     }
 
-    // Multiple emails — ask
-    const emailForm = { type: "radio", id: `email-${ctx.ticketId}`, prompt: "Which email for coupons?", options: emails.map(e => ({ value: e, label: e })) };
-    const sentCTA = await sendEmailJourneyCTA(ctx, "discount_signup",
-      "Great! Which email would you like to receive coupons at?", emailForm);
-    if (sentCTA) {
-      await updateJourneyStep(ctx, 2);
-      return { completed: false, waitingForForm: true };
-    }
-    const options = emails.map(e => ({ value: e, label: e }));
-    const formPayload = JSON.stringify({ type: "radio", id: `email-${ticketId}`, prompt: "Which email for coupons?", options });
-    await sendChatMessage(ctx, `Great! Which email would you like to receive coupons at?<!--FORM:${formPayload}-->`);
-    await updateJourneyStep(ctx, 2);
-    return { completed: false, waitingForForm: true };
-  }
-
-  // Step 2: Process email selection
-  if (step === 2) {
-    const selectedEmail = customerMessage.trim();
-    const profile = profiles.find(p => p.email === selectedEmail && p.shopify_customer_id);
-    if (profile?.shopify_customer_id) {
-      await subscribeToEmailMarketing(workspaceId, profile.shopify_customer_id);
-      await sendInternalNote(ctx, `[System] Email marketing: subscribed ${selectedEmail}`);
-    }
-    await updateJourneyStep(ctx, 5, { emailDone: true, selectedEmail });
+    // All done with marketing — go to coupon
+    await updateJourneyStep(ctx, 10);
     return executeDiscountJourney(workspaceId, ticketId, customerMessage);
   }
 
-  // Step 5: Check SMS
-  if (step === 5) {
-    const anySmsSubscribed = profiles.some(p => p.sms_marketing_status === "subscribed");
-    if (anySmsSubscribed) {
-      await updateJourneyStep(ctx, 10, { smsDone: true });
-      return executeDiscountJourney(workspaceId, ticketId, customerMessage);
+  // Step 2: Process phone input
+  if (step === 2) {
+    const phone = customerMessage.trim();
+    if (phone && customer.shopify_customer_id) {
+      await admin.from("customers").update({ phone }).eq("id", customer.id);
+      await subscribeToSmsMarketing(workspaceId, customer.shopify_customer_id, phone);
+      await admin.from("customers").update({ sms_marketing_status: "subscribed" }).eq("id", customer.id);
+      await sendInternalNote(ctx, `[System] SMS marketing: subscribed ${phone}`);
     }
-
-    const phones = [...new Set(profiles.map(p => p.phone).filter(Boolean))];
-    if (phones.length === 0) {
-      await updateJourneyStep(ctx, 10, { smsDone: true });
-      return executeDiscountJourney(workspaceId, ticketId, customerMessage);
-    }
-    if (phones.length === 1) {
-      const profile = profiles.find(p => p.phone === phones[0] && p.shopify_customer_id);
-      if (profile?.shopify_customer_id) {
-        await subscribeToSmsMarketing(workspaceId, profile.shopify_customer_id, phones[0]);
-        await sendInternalNote(ctx, `[System] SMS marketing: subscribed ${phones[0]}`);
-      }
-      await updateJourneyStep(ctx, 10, { smsDone: true, selectedPhone: phones[0] });
-      return executeDiscountJourney(workspaceId, ticketId, customerMessage);
-    }
-
-    // Multiple phones — ask
-    const phoneForm = { type: "radio", id: `sms-${ctx.ticketId}`, prompt: "Which phone for coupons?", options: phones.map(p => ({ value: p as string, label: p as string })) };
-    const sentSMSCTA = await sendEmailJourneyCTA(ctx, "discount_signup",
-      "Which phone number would you like to receive coupon notifications on?", phoneForm);
-    if (sentSMSCTA) {
-      await updateJourneyStep(ctx, 6);
-      return { completed: false, waitingForForm: true };
-    }
-    const options = phones.map(p => ({ value: p as string, label: p as string }));
-    const formPayload = JSON.stringify({ type: "radio", id: `sms-${ticketId}`, prompt: "Which phone for coupons?", options });
-    await sendChatMessage(ctx, `Which phone number would you like to receive coupon notifications on?<!--FORM:${formPayload}-->`);
-    await updateJourneyStep(ctx, 6);
-    return { completed: false, waitingForForm: true };
-  }
-
-  // Step 6: Process SMS selection
-  if (step === 6) {
-    const selectedPhone = customerMessage.trim();
-    const profile = profiles.find(p => p.phone === selectedPhone && p.shopify_customer_id);
-    if (profile?.shopify_customer_id) {
-      await subscribeToSmsMarketing(workspaceId, profile.shopify_customer_id, selectedPhone);
-      await sendInternalNote(ctx, `[System] SMS marketing: subscribed ${selectedPhone}`);
-    }
-    await updateJourneyStep(ctx, 10, { smsDone: true, selectedPhone });
+    await updateJourneyStep(ctx, 10);
     return executeDiscountJourney(workspaceId, ticketId, customerMessage);
   }
 
   // Step 10: Give coupon code + check subscription
   if (step === 10) {
-    // Get VIP threshold
     const { data: ws } = await admin.from("workspaces").select("vip_retention_threshold").eq("id", workspaceId).single();
     const vipThreshold = ws?.vip_retention_threshold || 85;
-    const maxRetention = Math.max(...profiles.map(p => p.retention_score || 0));
-    const isVip = maxRetention >= vipThreshold;
+    const isVip = (customer.retention_score || 0) >= vipThreshold;
 
-    // Get mapped coupon
     const { data: coupons } = await admin
       .from("coupon_mappings")
-      .select("code, summary, customer_tier, value_type, value")
+      .select("code, summary, customer_tier")
       .eq("workspace_id", workspaceId)
       .eq("ai_enabled", true);
 
@@ -586,7 +512,6 @@ export async function executeDiscountJourney(
       (c.customer_tier === "non_vip" && !isVip)
     );
 
-    // Prefer discount_request use case
     const coupon = eligible[0];
     const couponCode = coupon?.code || null;
     const couponSummary = coupon?.summary || "";
@@ -597,12 +522,18 @@ export async function executeDiscountJourney(
       return { completed: true, waitingForForm: false };
     }
 
-    await updateJourneyStep(ctx, 11, { couponCode, isVip, couponSummary });
+    await updateJourneyStep(ctx, 11, { couponCode, couponSummary });
 
-    // Styled coupon code block with copy button
     const codeBlock = `<div style="background:#f4f4f5;border:1px dashed #a1a1aa;border-radius:8px;padding:12px 16px;margin:8px 0;text-align:center"><span style="font-size:18px;font-weight:700;letter-spacing:2px;font-family:monospace;cursor:pointer" data-coupon="${couponCode}">${couponCode}</span><br><span style="font-size:12px;color:#71717a">${couponSummary}</span></div>`;
 
-    // Check for active subscription with nearest renewal
+    // Check for active subscription (use linked IDs for sub lookup)
+    let allCustomerIds = [ctx.customerId];
+    const { data: links } = await admin.from("customer_links").select("group_id").eq("customer_id", ctx.customerId);
+    if (links?.[0]?.group_id) {
+      const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", links[0].group_id);
+      allCustomerIds = (grp || []).map(m => m.customer_id);
+    }
+
     const { data: activeSubs } = await admin
       .from("subscriptions")
       .select("id, shopify_contract_id, next_billing_date, items")
@@ -621,21 +552,11 @@ export async function executeDiscountJourney(
         : "";
 
       const formPayload = JSON.stringify({ type: "confirm", id: `coupon-apply-${ticketId}`, prompt: "Apply coupon to subscription?" });
-
-      const subForm = { type: "confirm", id: `coupon-apply-${ctx.ticketId}`, prompt: "Apply coupon to subscription?" };
-      const sentSubCTA = await sendEmailJourneyCTA(ctx, "discount_signup",
-        `Here's your coupon: ${couponCode} (${couponSummary}). You have an active subscription renewing ${nextDate} — would you like to apply it?`, subForm);
-      if (sentSubCTA) {
-        await updateJourneyStep(ctx, 12, { subContractId: sub.shopify_contract_id });
-        return { completed: false, waitingForForm: true };
-      }
-
       await sendChatMessage(ctx, `Here's your coupon code!\n\n${codeBlock}\n\nI also found an active subscription renewing <strong>${nextDate}</strong>:${itemsHtml}\nWould you like me to apply this coupon to your subscription?<!--FORM:${formPayload}-->`);
       await updateJourneyStep(ctx, 12, { subContractId: sub.shopify_contract_id });
       return { completed: false, waitingForForm: true };
     }
 
-    // No subscription — just give the code
     await sendChatMessage(ctx, `Here's your coupon code!\n\n${codeBlock}\n\nUse it at checkout whenever you're ready.`);
     await updateJourneyStep(ctx, 99);
     return { completed: true, waitingForForm: false };
