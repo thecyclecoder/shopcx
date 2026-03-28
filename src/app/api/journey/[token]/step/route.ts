@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
+import { executeAccountLinkingJourney, executeDiscountJourney } from "@/lib/chat-journey";
 
 // POST: Submit a step response
 export async function POST(
@@ -46,37 +47,64 @@ export async function POST(
     response_label: responseLabel || responseValue,
   });
 
-  // Code-driven journey: post response as a ticket message to trigger the journey executor
+  // Code-driven journey: execute the journey directly (not via ai/reply-received)
   if (config.codeDriven && session.ticket_id) {
-    // Create inbound message on the ticket
+    const ticketId = session.ticket_id;
+    const wsId = session.workspace_id;
+
+    // Create inbound message on the ticket (for audit trail)
     await admin.from("ticket_messages").insert({
-      ticket_id: session.ticket_id,
+      ticket_id: ticketId,
       direction: "inbound",
       visibility: "external",
       author_type: "customer",
-      body: responseValue,
+      body: responseLabel || responseValue,
     });
 
-    // Reopen ticket if closed + reset nudge count (customer completed the step)
+    // Reopen ticket + reset nudge count + advance journey step
+    const { data: currentTicket } = await admin.from("tickets")
+      .select("journey_step, journey_id, channel")
+      .eq("id", ticketId)
+      .single();
+
+    const nextStep = (currentTicket?.journey_step || 0) + 1;
     await admin.from("tickets")
-      .update({ status: "open", resolved_at: null, journey_nudge_count: 0 })
-      .eq("id", session.ticket_id);
+      .update({ status: "open", resolved_at: null, journey_nudge_count: 0, journey_step: nextStep })
+      .eq("id", ticketId);
 
-    // Fire event to trigger the journey executor
-    await inngest.send({
-      name: "ai/reply-received",
-      data: {
-        workspace_id: session.workspace_id,
-        ticket_id: session.ticket_id,
-        message_body: responseValue,
-      },
-    });
+    // Determine which journey to execute and run it directly
+    const { data: journeyDef } = await admin.from("journey_definitions")
+      .select("trigger_intent")
+      .eq("id", currentTicket?.journey_id || session.journey_id)
+      .single();
+
+    const channel = currentTicket?.channel || "email";
+
+    if (journeyDef?.trigger_intent === "account_linking") {
+      const result = await executeAccountLinkingJourney(wsId, ticketId, responseValue, channel);
+      if (result.completed) {
+        // Chain into discount journey
+        await admin.from("tickets").update({ profile_link_completed: true, journey_step: 0, journey_data: {} }).eq("id", ticketId);
+        const discDef = await admin.from("journey_definitions")
+          .select("id").eq("workspace_id", wsId).eq("trigger_intent", "discount_signup").eq("is_active", true).maybeSingle();
+        if (discDef?.data) {
+          await admin.from("tickets").update({
+            journey_id: discDef.data.id,
+            handled_by: "Journey: discount_signup",
+          }).eq("id", ticketId);
+          await executeDiscountJourney(wsId, ticketId, "", channel);
+        }
+      }
+    } else if (journeyDef?.trigger_intent === "discount_signup") {
+      await executeDiscountJourney(wsId, ticketId, responseValue, channel);
+    }
 
     // Update session
     await admin.from("journey_sessions")
       .update({
         responses: { ...(session.responses as Record<string, unknown>), [stepKey]: { value: responseValue, label: responseLabel || responseValue } },
         current_step: session.current_step + 1,
+        status: "completed",
       })
       .eq("id", session.id);
 

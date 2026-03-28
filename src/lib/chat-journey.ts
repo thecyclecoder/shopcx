@@ -304,7 +304,7 @@ export async function executeAccountLinkingJourney(
     const confirmed: string[] = [];
     const rejected: string[] = [];
 
-    if (msgLower.includes("none of these")) {
+    if (msgLower.includes("none of these") || msgLower === "no") {
       // All rejected
       for (const m of unlinked) rejected.push(m.id);
     } else if (msgLower.includes("these are mine") || msgLower.includes("yes")) {
@@ -317,6 +317,16 @@ export async function executeAccountLinkingJourney(
       // Skip = don't link, don't reject
       await updateJourneyStep(ctx, 99);
       return { completed: true, linkedIds: [] };
+    } else {
+      // Mini-site sends customer IDs (UUIDs) or comma-separated values
+      // Match by ID or email in the response
+      for (const m of unlinked) {
+        if (customerMessage.includes(m.id) || customerMessage.includes(m.email)) {
+          confirmed.push(m.id);
+        } else {
+          rejected.push(m.id);
+        }
+      }
     }
 
     // Link confirmed
