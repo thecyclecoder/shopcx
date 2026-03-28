@@ -169,18 +169,28 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - Re-nudge system for declined signups (server-side via email)
 - Per-journey ticket status setting (open/pending/closed on each step)
 - **Cancel Journey**: AI-powered subscription retention flow
-  - Subscription selection (collapsible cards, shipping protection badge)
-  - 8 cancel reasons (4 business-critical)
-  - AI remedy selection: Claude Haiku picks top 3 from `remedies` table + success rates
+  - Subscription selection (collapsible cards, shipping protection as green badge not line item)
+  - 8 cancel reasons (4 business-critical: too expensive, too much product, not seeing results, reached goals)
+  - AI remedy selection: Claude Haiku picks top 3 from `remedies` table + historical success rates per reason
   - Open-ended AI chat: Claude Sonnet for "just need a break" / "something else" / "reached goals" (max 3 turns)
-  - Social proof: Klaviyo product reviews, AI-summarized, with full review expand
+  - Social proof: Klaviyo product reviews below remedies, AI-summarized (max 15 words), "Read full review" expand
   - Remedy outcome tracking: every offer logged to `remedy_outcomes` for system learning
-  - Appstle API: cancel, pause, skip, frequency change, coupon apply
+  - Appstle API actions: cancel (DELETE), pause (PUT status), skip next order, frequency change, coupon apply/remove
+  - "Are you sure?" confirmation before final cancel (not guilt-trippy)
   - 17px minimum text, max 25 words per remedy pitch
+  - **First-renewal detection**: `subscription_age_days < billing_interval_days` = never renewed yet
+    - Aggressive save offers (25-40% discounts, "extend your trial" framing)
+    - Subscription cards show "Your first shipment" instead of renewal date (avoids payment anxiety)
+    - `first_renewal` boolean tracked in `remedy_outcomes` for separate save rate metrics
+    - AI prompt includes first-renewal context for Haiku remedy selection
+  - Default remedies seeded via `DEFAULT_REMEDIES` in `journey-seed.ts` (9 types: coupon, pause 30/60d, skip, monthly, bimonthly, AI conversation, social proof, specialist)
+  - Coupon remedies reference `coupon_mappings` table (AI picks by VIP tier), not hardcoded
 - **Klaviyo Integration**: Product reviews for cancel journey social proof
-  - API key per workspace (encrypted), nightly + on-demand sync
+  - Settings → Integrations → Klaviyo card (API key encrypted, public key, sync button, review count, last sync)
+  - API key per workspace (encrypted via AES-256-GCM), nightly cron + on-demand sync via Inngest
   - AI review summaries (Haiku, max 15 words) stored in `product_reviews.summary`
-  - Featured reviews prioritized, then highest-rated
+  - Featured reviews (`smart_featured` from Klaviyo) prioritized, then highest-rated
+  - Reviews matched to customer's subscription products for relevant social proof
 
 ### Dashboard & Settings ✅
 - Dashboard overview: real-time stats (open/pending tickets, customers, avg retention, AI resolution rate, tickets today, KB articles, active macros)
@@ -239,7 +249,10 @@ For replies (ai/reply-received): route → patterns (deferred) → journey → w
 - `src/components/notification-bell.tsx` — Dashboard notification bell with dropdown
 - `src/app/journey/[token]/page.tsx` — Journey mini-site (multi-step forms, branded)
 - `src/app/api/journey/[token]/step/route.ts` — Journey step submission (code-driven executor)
-- `src/app/api/journey/[token]/complete/route.ts` — Journey completion (processes all responses, re-nudge)
+- `src/app/api/journey/[token]/complete/route.ts` — Journey completion (processes all responses, re-nudge, cancel actions)
+- `src/app/api/journey/[token]/remedies/route.ts` — AI remedy selection for cancel journey (Haiku)
+- `src/app/api/journey/[token]/chat/route.ts` — Open-ended AI conversation for cancel journey (Sonnet)
+- `src/app/api/workspaces/[id]/sync-reviews/route.ts` — Trigger Klaviyo review sync
 - `src/app/api/validate-phone/route.ts` — Phone validation via Twilio Lookup v2
 
 ## Environment Variables (Vercel Production)

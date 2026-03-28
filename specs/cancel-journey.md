@@ -6,6 +6,13 @@ AI-powered subscription cancellation retention flow. Instead of hardcoded rebutt
 
 **This is Phase 1**: Single subscription cancel + save. No multi-sub management — that becomes a standalone "Manage Subscription" journey later, chained onto cancel like account linking chains onto discount.
 
+### Implementation Status: COMPLETE ✅
+All items in this spec are implemented. Additional features beyond spec:
+- **First-renewal detection** (see section below): aggressive save offers for pre-first-renewal customers
+- **Default remedies seed data** in `journey-seed.ts` (`DEFAULT_REMEDIES` array, 9 types)
+- **Anthropic API via raw fetch** (not SDK) — matches existing codebase pattern
+- **Widget inline support**: `single_choice` and `subscription_select` step types in chat widget
+
 ---
 
 ## Top 4 Cancel Reasons (business critical)
@@ -340,12 +347,45 @@ Seed default remedies for new workspaces:
 
 ---
 
+## First-Renewal Cancellers (Critical Business Logic)
+
+50% of subscription churn happens before the first renewal (month 0 to month 1). After surviving the first renewal, retention improves dramatically. These customers have NEVER renewed — they signed up, received their first order, and are about to bail.
+
+### Detection
+- `subscription_age_days < billing_interval_days` (e.g., < 30 for monthly, < 60 for bi-monthly)
+- Implemented in `cancel-journey-builder.ts`, passed as `isFirstRenewal` + `subscriptionAgeDays` through metadata
+
+### Psychology for first-renewal saves
+1. **Loss aversion**: They haven't experienced the full benefit yet. "Most customers don't see results until their 2nd or 3rd month."
+2. **Sunk cost**: "You've already started — giving up now means that first order was just a one-time purchase."
+3. **Social proof**: Reviews from people who almost quit but didn't. "Sarah almost cancelled after her first month too."
+4. **Risk reversal**: "What if we extend your next order by 30 days? No charge, no risk."
+5. **Deeper discounts**: A new customer costs $30-80 to acquire. Giving 30-40% off next 2 orders is cheaper than replacement.
+
+### Implementation
+- AI remedy prompt (Haiku) includes aggressive first-renewal context when `first_renewal: true`
+- Deeper discounts prioritized (25-40%, not 10-15%)
+- Pauses framed as "extend your trial" not "take a break"
+- Skips framed as "push your next order out so you can finish what you have"
+- Subscription cards show "Your first shipment" instead of "Renews [date]" — avoids payment anxiety
+- `first_renewal` boolean stored in `remedy_outcomes` for separate metrics tracking
+
+### Review selection for first-renewal
+AI should look for reviews containing: "almost cancelled", "glad I stayed", "took time", "after a few months", "didn't notice at first", "stick with it"
+
+### Key metric
+First-renewal save rate tracked separately in `remedy_outcomes` (filter `first_renewal = true`). Goal: move from ~50% churn to <30% on first renewal.
+
+---
+
 ## Success Metrics
 
 Track via remedy_outcomes:
+- **First-renewal save rate** (THE metric — `remedy_outcomes WHERE first_renewal = true`)
 - Save rate per cancel reason
 - Save rate per remedy type
 - Which coupons save most effectively
 - AI conversation save rate vs structured remedies
 - Review influence on save rate (when shown vs not)
 - Average LTV of saved vs lost customers
+- First-renewal vs established subscriber save rates compared
