@@ -16,6 +16,7 @@ interface JourneyContext {
   customerId: string;
   journeyData: Record<string, unknown>;
   channel?: string;
+  stepTicketStatus?: string; // 'open' | 'pending' | 'closed'
 }
 
 /**
@@ -85,10 +86,20 @@ async function sendEmailJourneyCTA(
   });
 
   await sendInternalNote(ctx, `[System] Sent journey CTA email to ${customer.email} for ${journeyType}`);
+
+  // Apply step ticket status
+  const status = ctx.stepTicketStatus;
+  if (status && status !== "open") {
+    const updates: Record<string, unknown> = { status };
+    if (status === "closed") updates.resolved_at = new Date().toISOString();
+    await ctx.admin.from("tickets").update(updates).eq("id", ctx.ticketId);
+  }
+
   return true;
 }
 
 // Send a message in the chat (external, visible in widget)
+// Also sets ticket status per the journey's step_ticket_status setting
 async function sendChatMessage(ctx: JourneyContext, body: string) {
   await ctx.admin.from("ticket_messages").insert({
     ticket_id: ctx.ticketId,
@@ -97,6 +108,13 @@ async function sendChatMessage(ctx: JourneyContext, body: string) {
     author_type: "system",
     body,
   });
+
+  const status = ctx.stepTicketStatus;
+  if (status && status !== "open") {
+    const updates: Record<string, unknown> = { status };
+    if (status === "closed") updates.resolved_at = new Date().toISOString();
+    await ctx.admin.from("tickets").update(updates).eq("id", ctx.ticketId);
+  }
 }
 
 // Send an internal note
@@ -118,6 +136,18 @@ async function updateJourneyStep(ctx: JourneyContext, step: number, data?: Recor
   if (data) Object.assign(ctx.journeyData, data);
 }
 
+// Load step_ticket_status for a journey by trigger_intent
+async function getStepTicketStatus(admin: Admin, workspaceId: string, triggerIntent: string): Promise<string> {
+  const { data } = await admin
+    .from("journey_definitions")
+    .select("step_ticket_status")
+    .eq("workspace_id", workspaceId)
+    .eq("trigger_intent", triggerIntent)
+    .limit(1)
+    .single();
+  return (data?.step_ticket_status as string) || "open";
+}
+
 // ============================================================
 // JOURNEY: Account Linking
 // ============================================================
@@ -137,11 +167,13 @@ export async function executeAccountLinkingJourney(
 
   if (!ticket?.customer_id) return { completed: true, linkedIds: [] };
 
+  const stepTicketStatus = await getStepTicketStatus(admin, workspaceId, "account_linking");
   const ctx: JourneyContext = {
     admin, workspaceId, ticketId,
     customerId: ticket.customer_id,
     journeyData: (ticket.journey_data as Record<string, unknown>) || {},
     channel: channel || ticket.channel,
+    stepTicketStatus,
   };
 
   const step = ticket.journey_step || 0;
@@ -313,11 +345,13 @@ export async function executeDiscountJourney(
 
   if (!ticket?.customer_id) return { completed: true, waitingForForm: false };
 
+  const stepTicketStatus = await getStepTicketStatus(admin, workspaceId, "discount_signup");
   const ctx: JourneyContext = {
     admin, workspaceId, ticketId,
     customerId: ticket.customer_id,
     journeyData: (ticket.journey_data as Record<string, unknown>) || {},
     channel: channel || ticket.channel,
+    stepTicketStatus,
   };
 
   const step = ticket.journey_step || 0;

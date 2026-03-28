@@ -46,6 +46,7 @@ interface JourneyDef {
   trigger_intent: string | null;
   description: string | null;
   priority: number;
+  step_ticket_status: string;
   config: JourneyConfig;
   stats: { sent: number; completed: number; saved: number; cancelled: number };
   created_at: string;
@@ -258,6 +259,7 @@ function JourneyDetail({
   const [channels, setChannels] = useState<string[]>(j.channels || []);
   const [matchPatterns, setMatchPatterns] = useState((j.match_patterns || []).join(", "));
   const [priority, setPriority] = useState(j.priority);
+  const [stepTicketStatus, setStepTicketStatus] = useState(j.step_ticket_status || "open");
 
   // Step editing
   const [editingStep, setEditingStep] = useState<string | null>(null);
@@ -274,7 +276,7 @@ function JourneyDetail({
   async function save() {
     setSaving(true);
     const patterns = matchPatterns.split(",").map((s) => s.trim()).filter(Boolean);
-    const body: Record<string, unknown> = { name, description, channels, match_patterns: patterns, priority, config: j.config };
+    const body: Record<string, unknown> = { name, description, channels, match_patterns: patterns, priority, step_ticket_status: stepTicketStatus, config: j.config };
 
     const res = await fetch(`/api/workspaces/${workspaceId}/journeys/${j.id}`, {
       method: "PATCH",
@@ -514,6 +516,21 @@ function JourneyDetail({
               onChange={(e) => { setPriority(Number(e.target.value)); markDirty(); }}
               className="mt-2 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-indigo-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
             />
+          </div>
+
+          {/* Step Ticket Status */}
+          <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Ticket Status on Step</h4>
+            <p className="mt-1 text-[11px] text-zinc-400">Status to set when the journey sends a step to the customer</p>
+            <select
+              value={stepTicketStatus}
+              onChange={(e) => { setStepTicketStatus(e.target.value); markDirty(); }}
+              className="mt-2 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-indigo-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+            >
+              <option value="open">Open</option>
+              <option value="pending">Pending</option>
+              <option value="closed">Closed</option>
+            </select>
           </div>
 
           {/* Metadata */}
