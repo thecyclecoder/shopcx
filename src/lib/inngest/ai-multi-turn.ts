@@ -358,14 +358,22 @@ export const aiMultiTurn = inngest.createFunction(
         return j.match_patterns.some((p: string) => bodyLower.includes(p.toLowerCase()));
       });
 
-      if (matchedJourney && matchedJourney.trigger_intent === "discount_signup" && ticket.customer_id) {
+      if (matchedJourney && ticket.customer_id) {
         console.log(`[Journey] Matched ${matchedJourney.trigger_intent} for ticket ${ticket_id}`);
         try {
-          const { launchDiscountJourney } = await import("@/lib/journey-launcher");
-          const result = await launchDiscountJourney(
-            workspace_id, ticket_id, ticket.customer_id, ticket.channel, matchedJourney.id,
-          );
-          if (result.launched) return { handled: true };
+          if (matchedJourney.trigger_intent === "discount_signup") {
+            const { launchDiscountJourney } = await import("@/lib/journey-launcher");
+            const result = await launchDiscountJourney(
+              workspace_id, ticket_id, ticket.customer_id, ticket.channel, matchedJourney.id,
+            );
+            if (result.launched) return { handled: true };
+          } else if (matchedJourney.trigger_intent === "cancel") {
+            const { launchCancelJourney } = await import("@/lib/journey-launcher");
+            const result = await launchCancelJourney(
+              workspace_id, ticket_id, ticket.customer_id, ticket.channel, matchedJourney.id,
+            );
+            if (result.launched) return { handled: true };
+          }
         } catch (err) {
           console.error(`[Journey] Error launching ${matchedJourney.trigger_intent}:`, err);
         }

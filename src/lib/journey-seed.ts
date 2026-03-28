@@ -4,7 +4,7 @@ export const DEFAULT_REMEDIES = [
   { name: "Coupon Discount", type: "coupon", config: {}, description: "Apply a coupon to their subscription", priority: 1 },
   { name: "Pause 30 Days", type: "pause", config: { days: [30] }, description: "Pause subscription for 30 days", priority: 2 },
   { name: "Pause 60 Days", type: "pause", config: { days: [60] }, description: "Pause subscription for 60 days", priority: 3 },
-  { name: "Skip Next Order", type: "skip", config: {}, description: "Skip the next scheduled order", priority: 4 },
+  { name: "Skip Next Order", type: "skip", config: {}, description: "Skip the next scheduled order (manual — Appstle skip disabled)", priority: 4 },
   { name: "Monthly Frequency", type: "frequency_change", config: { options: ["MONTH/1"] }, description: "Switch to monthly deliveries", priority: 5 },
   { name: "Every Other Month", type: "frequency_change", config: { options: ["MONTH/2"] }, description: "Switch to every-other-month deliveries", priority: 6 },
   { name: "AI Conversation", type: "ai_conversation", config: { max_turns: 3 }, description: "Empathetic AI conversation for open-ended reasons", priority: 7 },
