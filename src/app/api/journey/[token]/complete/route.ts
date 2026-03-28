@@ -174,7 +174,7 @@ export async function POST(
           customer_id: session.customer_id,
           cancel_reason: cancelReason,
           remedy_id: remedyId || null,
-          remedy_type: remedyAction?.value || outcome,
+          remedy_type: responses?.remedy_action?.value || outcome,
           offered_text: responses?.remedy_selection?.label || null,
           accepted: true,
           first_renewal: isFirstRenewal,

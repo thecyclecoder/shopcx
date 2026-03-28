@@ -24,7 +24,6 @@ export async function POST(
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  // Check if Klaviyo is configured
   const { data: ws } = await admin
     .from("workspaces")
     .select("klaviyo_api_key_encrypted")
@@ -35,13 +34,12 @@ export async function POST(
     return NextResponse.json({ error: "Klaviyo not configured" }, { status: 400 });
   }
 
-  // Fire Inngest event for async sync
+  // Manual sync = full sync (all reviews, not just last 30 days)
   await inngest.send({
     name: "klaviyo/sync-reviews",
-    data: { workspace_id: workspaceId },
+    data: { workspace_id: workspaceId, full_sync: true },
   });
 
-  // Also do a quick count for immediate UI feedback
   const { count } = await admin
     .from("product_reviews")
     .select("id", { count: "exact", head: true })
@@ -51,6 +49,6 @@ export async function POST(
     synced: 0,
     errors: 0,
     total_reviews: count || 0,
-    message: "Review sync started in background",
+    message: "Full review sync started in background",
   });
 }

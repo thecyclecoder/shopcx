@@ -1,6 +1,6 @@
 /**
  * Inngest function: Sync product reviews from Klaviyo.
- * Runs nightly or on-demand from settings.
+ * Nightly cron pulls last 30 days (lightweight). On-demand pulls everything.
  */
 
 import { inngest } from "./client";
@@ -17,18 +17,19 @@ export const syncKlaviyoReviews = inngest.createFunction(
     ],
   },
   async ({ event, step }) => {
-    // If triggered by event, sync specific workspace
-    // If cron, sync all workspaces with Klaviyo configured
-    const workspaceId = (event?.data as { workspace_id?: string })?.workspace_id;
+    const eventData = event?.data as { workspace_id?: string; full_sync?: boolean } | undefined;
+    const workspaceId = eventData?.workspace_id;
+    const fullSync = eventData?.full_sync ?? false;
 
     if (workspaceId) {
+      // Triggered for a specific workspace (manual or event)
       const result = await step.run("sync-workspace", async () => {
-        return syncReviewsForWorkspace(workspaceId);
+        return syncReviewsForWorkspace(workspaceId, { fullSync });
       });
       return { workspace_id: workspaceId, ...result };
     }
 
-    // Cron: sync all workspaces with Klaviyo configured
+    // Cron: sync all workspaces with Klaviyo configured (30-day window)
     const workspaces = await step.run("fetch-workspaces", async () => {
       const admin = createAdminClient();
       const { data } = await admin
@@ -42,7 +43,7 @@ export const syncKlaviyoReviews = inngest.createFunction(
 
     for (const ws of workspaces) {
       const result = await step.run(`sync-${ws.id}`, async () => {
-        return syncReviewsForWorkspace(ws.id);
+        return syncReviewsForWorkspace(ws.id, { fullSync: false });
       });
       results.push({ workspace_id: ws.id, ...result });
     }

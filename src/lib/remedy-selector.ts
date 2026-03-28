@@ -229,8 +229,7 @@ export async function generateOpenEndedResponse(
     .join("\n");
 
   // Fetch reviews for the customer's subscription products
-  const productIds = context.products || [];
-  const reviews = await getReviewsForProducts(workspaceId, productIds);
+  const reviews = await getReviewsForProducts(workspaceId, products);
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return "I'm sorry, I'm having trouble right now. Let me connect you with a team member who can help.";
