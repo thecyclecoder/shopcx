@@ -1127,6 +1127,13 @@ export const aiMultiTurn = inngest.createFunction(
       // Mark first touch
       const { markFirstTouch } = await import("@/lib/first-touch");
       await markFirstTouch(ticket_id, "ai");
+
+      // Replace ai:t* tag with current turn count
+      const newTurn = finalContext.turnCount + 1;
+      const { data: tagData } = await admin.from("tickets").select("tags").eq("id", ticket_id).single();
+      const currentTags = ((tagData?.tags as string[]) || []).filter(t => !t.startsWith("ai:t"));
+      currentTags.push(`ai:t${newTurn}`);
+      await admin.from("tickets").update({ tags: currentTags }).eq("id", ticket_id);
     });
 
     return {
