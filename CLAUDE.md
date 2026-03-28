@@ -277,6 +277,7 @@ When adding new journeys or workflows, always add the corresponding tag:
 - `w:{type}` — workflow applied (e.g., `w:tracking`, `w:cancel`, `w:subscription`)
 - `ai:t{N}` — AI turn count, replaces on each turn (e.g., `ai:t1`, `ai:t2`)
 - `agent` — a real human agent sent an external message
+- `jo:positive` / `jo:negative` / `jo:neutral` — journey outcome (always ask the user what constitutes positive/negative/neutral for each new journey)
 Use `addTicketTag()` from `src/lib/ticket-tags.ts` (idempotent). Use `markFirstTouch()` from `src/lib/first-touch.ts` for ft:* tags.
 
 ## Conventions

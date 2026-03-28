@@ -216,13 +216,16 @@ export async function POST(
       }
     }
 
-    // Close the ticket
+    // Close the ticket + tag positive outcome
     if (session.ticket_id) {
       await admin.from("tickets").update({
         status: "closed",
         resolved_at: new Date().toISOString(),
         journey_step: 99,
       }).eq("id", session.ticket_id);
+
+      const { addTicketTag } = await import("@/lib/ticket-tags");
+      await addTicketTag(session.ticket_id, "jo:positive");
     }
   }
 
@@ -327,6 +330,9 @@ export async function POST(
         author_type: "system",
         body: "[System] Customer declined marketing signup twice. Journey ended. AI will handle next reply.",
       });
+
+      const { addTicketTag } = await import("@/lib/ticket-tags");
+      await addTicketTag(session.ticket_id, "jo:negative");
     }
   }
 

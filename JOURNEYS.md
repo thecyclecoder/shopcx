@@ -58,12 +58,26 @@ Customer message → Pattern match → Journey launcher
 - **On consent "Yes"**: Auto-subscribes main customer email + phone (if on file) to Shopify marketing
 - **On consent "No"**: Journey ends → server sends re-nudge CTA email → second "No" closes ticket
 - **Coupon**: Styled code block with click-to-copy, VIP tier matching
+- **Outcome**: Positive = completed signup + coupon delivered. Negative = declined twice.
 
 ### Cancellation Flow (step-based, for future use)
 - **Trigger**: Not currently auto-triggered (empty match patterns)
 - **Steps**: Seeded config with 7 steps, reason selection, rebuttals, discount/pause/skip offers
 - **Outcomes**: 10 paths (cancelled, saved_discount, saved_pause, saved_skip, etc.)
 - **Execution**: Fully rendered by the mini-site's step-based navigation (not code-driven)
+
+## Journey Outcomes
+
+Every journey must define positive, negative, and optionally neutral outcomes. These are tagged on the ticket as `jo:positive`, `jo:negative`, or `jo:neutral` for analytics.
+
+**When building a new journey, always ask the user**: "What counts as a positive outcome? What's negative? Is there a neutral case?"
+
+| Journey | Positive | Negative | Neutral |
+|---------|----------|----------|---------|
+| Discount Signup | Completed signup + coupon delivered | Declined twice | — |
+| Cancel (future) | Customer saved (accepted retention offer) | Customer cancelled | — |
+
+The outcome tag is applied in `/api/journey/[token]/complete/route.ts` based on the `outcome` field.
 
 ## Adding a New Journey
 
@@ -72,7 +86,8 @@ Customer message → Pattern match → Journey launcher
 3. Wire it into `journey-launcher.ts` for chat and `email-journey-builder.ts` for email
 4. Add response processing to `/api/journey/[token]/complete/route.ts`
 5. Add ticket tag: `j:{intent}` via `addTicketTag()`
-6. Update CLAUDE.md tag conventions
+6. Add `jo:positive` / `jo:negative` / `jo:neutral` tags based on outcome — **ask the user what these are**
+7. Update CLAUDE.md tag conventions
 
 ## Files
 
