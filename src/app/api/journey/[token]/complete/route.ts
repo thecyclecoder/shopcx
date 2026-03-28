@@ -68,6 +68,9 @@ export async function POST(
         const linkedEmails = unlinked.filter(m => confirmedSet.has(m.id)).map(m => m.email);
         actionLog.push(`Account linking: linked ${linkedEmails.join(", ")}`);
 
+        const { addTicketTag } = await import("@/lib/ticket-tags");
+        await addTicketTag(session.ticket_id!, "link");
+
         // Expand allCustomerIds to include newly linked
         for (const id of confirmedIds) {
           if (!allCustomerIds.includes(id)) allCustomerIds.push(id);
