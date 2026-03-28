@@ -22,10 +22,23 @@ interface JourneyStep {
   isTerminal?: boolean;
 }
 
+interface JourneyForm {
+  type: string;
+  id: string;
+  prompt: string;
+  options?: { value: string; label: string }[];
+}
+
 interface JourneyConfig {
-  steps: JourneyStep[];
+  steps?: JourneyStep[];
   branding?: { primaryColor?: string; accentColor?: string; logoUrl?: string };
   messages?: { intro?: string; completedSave?: string; completedCancel?: string; completedDefault?: string };
+  // Code-driven journey fields
+  codeDriven?: boolean;
+  ticketId?: string;
+  workspaceId?: string;
+  message?: string;
+  currentForm?: JourneyForm | null;
 }
 
 export default function JourneyPage() {
@@ -79,7 +92,7 @@ export default function JourneyPage() {
 
   const currentStep = useCallback((): JourneyStep | null => {
     if (!config) return null;
-    const steps = config.steps;
+    const steps = config.steps || [];
 
     if (Object.keys(responses).length === 0) return steps[0] || null;
 
@@ -242,8 +255,23 @@ export default function JourneyPage() {
     );
   }
 
+  // ── Code-driven journey ──
+  if (config.codeDriven) {
+    return (
+      <CodeDrivenJourney
+        config={config}
+        token={token}
+        customerName={customerName}
+        primaryColor={primaryColor}
+        logoUrl={logoUrl}
+        workspaceName={workspaceName}
+        onComplete={(msg) => { setCompletedMessage(msg); setStatus("completed"); }}
+      />
+    );
+  }
+
   // ── Active Step ──
-  const nonTerminalSteps = config.steps.filter((s) => !s.isTerminal);
+  const nonTerminalSteps = (config.steps || []).filter((s) => !s.isTerminal);
   const totalSteps = nonTerminalSteps.length;
   const progressSteps = Object.keys(responses).length;
   const stepNumber = progressSteps + 1;
@@ -401,6 +429,176 @@ export default function JourneyPage() {
         )}
       </div>
     </JourneyShell>
+  );
+}
+
+function CodeDrivenJourney({
+  config,
+  token,
+  customerName,
+  primaryColor,
+  logoUrl,
+  workspaceName,
+  onComplete,
+}: {
+  config: JourneyConfig;
+  token: string;
+  customerName: string;
+  primaryColor: string;
+  logoUrl?: string;
+  workspaceName: string;
+  onComplete: (msg: string) => void;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const form = config.currentForm;
+
+  const handleSubmit = async (value: string) => {
+    setSubmitting(true);
+
+    // Post response to the journey step API which will create a ticket message
+    await fetch(`/api/journey/${token}/step`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        stepKey: form?.id || "response",
+        responseValue: value,
+        responseLabel: value,
+        codeDriven: true,
+      }),
+    });
+
+    setSubmitted(true);
+    setSubmitting(false);
+
+    // Show thank you after a moment
+    setTimeout(() => {
+      onComplete("Thanks! We'll follow up shortly with the next step.");
+    }, 1500);
+  };
+
+  return (
+    <JourneyShell logoUrl={logoUrl} workspaceName={workspaceName}>
+      {customerName && <p className="mb-2 text-sm text-zinc-500">Hi {customerName},</p>}
+      {config.message && <p className="mb-5 text-sm text-zinc-600">{config.message}</p>}
+
+      {form && !submitted && (
+        <div>
+          {form.prompt && <h2 className="mb-4 text-lg font-semibold text-zinc-900">{form.prompt}</h2>}
+
+          {/* Confirm: Yes / No */}
+          {form.type === "confirm" && (
+            <div className="flex gap-3">
+              <button
+                onClick={() => handleSubmit("Yes")}
+                disabled={submitting}
+                className="flex-1 rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-60"
+                style={{ backgroundColor: primaryColor }}
+              >
+                Yes
+              </button>
+              <button
+                onClick={() => handleSubmit("No")}
+                disabled={submitting}
+                className="flex-1 rounded-xl border-2 border-zinc-200 px-4 py-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-60"
+              >
+                No thanks
+              </button>
+            </div>
+          )}
+
+          {/* Radio: pick one */}
+          {form.type === "radio" && form.options && (
+            <div className="space-y-3">
+              {form.options.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => handleSubmit(opt.value)}
+                  disabled={submitting}
+                  className="flex w-full items-center gap-3 rounded-xl border-2 border-zinc-200 px-4 py-4 text-left text-sm font-medium text-zinc-800 transition-all hover:border-zinc-300 hover:bg-zinc-50 disabled:opacity-60"
+                >
+                  <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-zinc-300" />
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Checklist */}
+          {form.type === "checklist" && form.options && (
+            <ChecklistForm
+              options={form.options}
+              primaryColor={primaryColor}
+              submitting={submitting}
+              onSubmit={(vals) => handleSubmit(vals.join(", "))}
+            />
+          )}
+        </div>
+      )}
+
+      {submitted && (
+        <div className="flex items-center justify-center py-8">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
+          <span className="ml-3 text-sm text-zinc-500">Processing...</span>
+        </div>
+      )}
+
+      {!form && !submitted && (
+        <p className="text-sm text-zinc-500">Your request is being processed. Check your email for updates.</p>
+      )}
+    </JourneyShell>
+  );
+}
+
+function ChecklistForm({
+  options,
+  primaryColor,
+  submitting,
+  onSubmit,
+}: {
+  options: { value: string; label: string }[];
+  primaryColor: string;
+  submitting: boolean;
+  onSubmit: (values: string[]) => void;
+}) {
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+
+  return (
+    <div className="space-y-3">
+      {options.map((opt) => {
+        const isChecked = checked.has(opt.value);
+        return (
+          <button
+            key={opt.value}
+            onClick={() => setChecked((prev) => { const next = new Set(prev); if (next.has(opt.value)) next.delete(opt.value); else next.add(opt.value); return next; })}
+            disabled={submitting}
+            className={`flex w-full items-center gap-3 rounded-xl border-2 px-4 py-4 text-left transition-all ${
+              isChecked ? "border-transparent text-white shadow-md" : "border-zinc-200 text-zinc-800 hover:border-zinc-300 hover:bg-zinc-50"
+            } disabled:opacity-60`}
+            style={isChecked ? { backgroundColor: primaryColor } : undefined}
+          >
+            <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border-2 ${
+              isChecked ? "border-white/40 bg-white/20" : "border-zinc-300"
+            }`}>
+              {isChecked && (
+                <svg className="h-3 w-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+            </span>
+            <span className="text-sm font-medium">{opt.label}</span>
+          </button>
+        );
+      })}
+      <button
+        onClick={() => onSubmit(Array.from(checked))}
+        disabled={checked.size === 0 || submitting}
+        className="mt-2 w-full rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-40"
+        style={{ backgroundColor: primaryColor }}
+      >
+        Continue
+      </button>
+    </div>
   );
 }
 

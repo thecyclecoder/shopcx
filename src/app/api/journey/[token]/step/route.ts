@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { inngest } from "@/lib/inngest/client";
 
 // POST: Submit a step response
 export async function POST(
@@ -11,7 +12,7 @@ export async function POST(
 
   const { data: session } = await admin
     .from("journey_sessions")
-    .select("id, workspace_id, current_step, responses, status, token_expires_at, config_snapshot")
+    .select("id, workspace_id, ticket_id, current_step, responses, status, token_expires_at, config_snapshot")
     .eq("token", token)
     .single();
 
@@ -33,14 +34,7 @@ export async function POST(
     return NextResponse.json({ error: "stepKey and responseValue required" }, { status: 400 });
   }
 
-  // Validate step matches expected
-  const config = session.config_snapshot as { steps?: { key: string; isTerminal?: boolean }[] } || {};
-  const steps = config.steps || [];
-  const expectedStep = steps[session.current_step];
-
-  if (expectedStep && expectedStep.key !== stepKey) {
-    return NextResponse.json({ error: "unexpected_step", expected: expectedStep.key }, { status: 400 });
-  }
+  const config = session.config_snapshot as { steps?: { key: string; isTerminal?: boolean }[]; codeDriven?: boolean; ticketId?: string; workspaceId?: string } || {};
 
   // Insert step event (append-only)
   await admin.from("journey_step_events").insert({
@@ -52,7 +46,52 @@ export async function POST(
     response_label: responseLabel || responseValue,
   });
 
-  // Update session responses + increment step
+  // Code-driven journey: post response as a ticket message to trigger the journey executor
+  if (config.codeDriven && session.ticket_id) {
+    // Create inbound message on the ticket
+    await admin.from("ticket_messages").insert({
+      ticket_id: session.ticket_id,
+      direction: "inbound",
+      visibility: "external",
+      author_type: "customer",
+      body: responseValue,
+    });
+
+    // Reopen ticket if closed
+    await admin.from("tickets")
+      .update({ status: "open", resolved_at: null })
+      .eq("id", session.ticket_id)
+      .in("status", ["closed"]);
+
+    // Fire event to trigger the journey executor
+    await inngest.send({
+      name: "ai/reply-received",
+      data: {
+        workspace_id: session.workspace_id,
+        ticket_id: session.ticket_id,
+        message_body: responseValue,
+      },
+    });
+
+    // Update session
+    await admin.from("journey_sessions")
+      .update({
+        responses: { ...(session.responses as Record<string, unknown>), [stepKey]: { value: responseValue, label: responseLabel || responseValue } },
+        current_step: session.current_step + 1,
+      })
+      .eq("id", session.id);
+
+    return NextResponse.json({ nextStep: session.current_step + 1, isComplete: false, codeDriven: true });
+  }
+
+  // Step-based journey: validate and advance
+  const steps = config.steps || [];
+  const expectedStep = steps[session.current_step];
+
+  if (expectedStep && expectedStep.key !== stepKey) {
+    return NextResponse.json({ error: "unexpected_step", expected: expectedStep.key }, { status: 400 });
+  }
+
   const updatedResponses = {
     ...(session.responses as Record<string, unknown>),
     [stepKey]: { value: responseValue, label: responseLabel || responseValue },

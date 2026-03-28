@@ -27,6 +27,7 @@ async function sendEmailJourneyCTA(
   ctx: JourneyContext,
   journeyType: string,
   contextMessage?: string,
+  currentForm?: { type: string; id: string; prompt: string; options?: { value: string; label: string }[] },
 ): Promise<boolean> {
   // CTA mini-site for channels that don't support inline forms
   // Only chat gets inline forms; all others get CTA → mini-site
@@ -40,7 +41,7 @@ async function sendEmailJourneyCTA(
     .single();
   if (!customer?.email) return false;
 
-  // Find or create journey definition for this type
+  // Find journey definition
   const { data: journeyDef } = await ctx.admin
     .from("journey_definitions")
     .select("id, config")
@@ -51,6 +52,17 @@ async function sendEmailJourneyCTA(
     .single();
 
   if (!journeyDef) return false;
+
+  // For code-driven journeys, embed the current form in the config
+  const configForSession = (journeyDef.config as { steps?: unknown[] })?.steps?.length
+    ? journeyDef.config
+    : {
+        codeDriven: true,
+        ticketId: ctx.ticketId,
+        workspaceId: ctx.workspaceId,
+        message: contextMessage || "",
+        currentForm: currentForm || null,
+      };
 
   // Create session token
   const token = crypto.randomBytes(24).toString("hex");
@@ -64,7 +76,7 @@ async function sendEmailJourneyCTA(
     token,
     token_expires_at: expiresAt,
     status: "pending",
-    config_snapshot: journeyDef.config,
+    config_snapshot: configForSession,
   });
 
   // Get workspace branding
@@ -424,8 +436,9 @@ export async function executeDiscountJourney(
     }
 
     // Multiple emails — ask
+    const emailForm = { type: "radio", id: `email-${ctx.ticketId}`, prompt: "Which email for coupons?", options: emails.map(e => ({ value: e, label: e })) };
     const sentCTA = await sendEmailJourneyCTA(ctx, "discount_signup",
-      "Great! Which email would you like to receive coupons at?");
+      "Great! Which email would you like to receive coupons at?", emailForm);
     if (sentCTA) {
       await updateJourneyStep(ctx, 2);
       return { completed: false, waitingForForm: true };
@@ -473,8 +486,9 @@ export async function executeDiscountJourney(
     }
 
     // Multiple phones — ask
+    const phoneForm = { type: "radio", id: `sms-${ctx.ticketId}`, prompt: "Which phone for coupons?", options: phones.map(p => ({ value: p as string, label: p as string })) };
     const sentSMSCTA = await sendEmailJourneyCTA(ctx, "discount_signup",
-      "Which phone number would you like to receive coupon notifications on?");
+      "Which phone number would you like to receive coupon notifications on?", phoneForm);
     if (sentSMSCTA) {
       await updateJourneyStep(ctx, 6);
       return { completed: false, waitingForForm: true };
@@ -555,8 +569,9 @@ export async function executeDiscountJourney(
 
       const formPayload = JSON.stringify({ type: "confirm", id: `coupon-apply-${ticketId}`, prompt: "Apply coupon to subscription?" });
 
+      const subForm = { type: "confirm", id: `coupon-apply-${ctx.ticketId}`, prompt: "Apply coupon to subscription?" };
       const sentSubCTA = await sendEmailJourneyCTA(ctx, "discount_signup",
-        `Here's your coupon: ${couponCode} (${couponSummary}). You have an active subscription renewing ${nextDate} — click below to apply the coupon to it.`);
+        `Here's your coupon: ${couponCode} (${couponSummary}). You have an active subscription renewing ${nextDate} — would you like to apply it?`, subForm);
       if (sentSubCTA) {
         await updateJourneyStep(ctx, 12, { subContractId: sub.shopify_contract_id });
         return { completed: false, waitingForForm: true };
