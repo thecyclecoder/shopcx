@@ -193,12 +193,11 @@ export default function JourneyPage() {
   }, [step, pendingOutcome]);
 
   const primaryColor = config?.branding?.primaryColor || "#4f46e5";
-  const logoUrl = config?.branding?.logoUrl;
 
   // ── Expired ──
   if (status === "expired") {
     return (
-      <JourneyShell logoUrl={logoUrl} workspaceName={workspaceName}>
+      <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
         <div className="text-center">
           <p className="text-5xl">&#x23F0;</p>
           <h2 className="mt-4 text-xl font-semibold text-zinc-900">This link has expired</h2>
@@ -211,7 +210,7 @@ export default function JourneyPage() {
   // ── Error ──
   if (status === "error") {
     return (
-      <JourneyShell logoUrl={logoUrl} workspaceName={workspaceName}>
+      <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
         <div className="text-center">
           <h2 className="text-xl font-semibold text-zinc-900">Something went wrong</h2>
           <p className="mt-2 text-sm text-zinc-500">Please try again or contact support.</p>
@@ -223,7 +222,7 @@ export default function JourneyPage() {
   // ── Completed ──
   if (status === "completed") {
     return (
-      <JourneyShell logoUrl={logoUrl} workspaceName={workspaceName}>
+      <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
         <div className="text-center">
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full" style={{ backgroundColor: `${primaryColor}15` }}>
             <svg className="h-7 w-7" style={{ color: primaryColor }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -240,7 +239,7 @@ export default function JourneyPage() {
   // ── Loading ──
   if (status === "loading" || !step || !config) {
     return (
-      <JourneyShell logoUrl={logoUrl} workspaceName={workspaceName}>
+      <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
         <div className="flex items-center justify-center py-12">
           <div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
         </div>
@@ -270,7 +269,7 @@ export default function JourneyPage() {
   const stepNumber = progressSteps + 1;
 
   return (
-    <JourneyShell logoUrl={logoUrl} workspaceName={workspaceName}>
+    <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
       {/* Progress indicator */}
       <div className="mb-1 flex items-center justify-between">
         <span className="text-xs font-medium text-zinc-400">Step {stepNumber} of {totalSteps}</span>
@@ -471,7 +470,7 @@ function CodeDrivenJourney({
   };
 
   return (
-    <JourneyShell logoUrl={logoUrl} workspaceName={workspaceName}>
+    <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
       {customerName && <p className="mb-2 text-sm text-zinc-500">Hi {customerName},</p>}
       {config.message && <p className="mb-5 text-sm text-zinc-600">{config.message}</p>}
 
@@ -595,28 +594,21 @@ function ChecklistForm({
   );
 }
 
-function JourneyShell({ children, logoUrl, workspaceName }: { children: React.ReactNode; logoUrl?: string; workspaceName?: string }) {
+function JourneyShell({ children, workspaceName, primaryColor }: { children: React.ReactNode; workspaceName?: string; primaryColor?: string }) {
+  const bgColor = primaryColor || "#4f46e5";
   return (
     <>
       <meta name="robots" content="noindex" />
-      <div className="flex min-h-screen items-center justify-center bg-zinc-50 px-5 py-4 sm:px-6">
+      <div className="flex min-h-screen items-center justify-center px-5 py-8 sm:px-6" style={{ backgroundColor: bgColor }}>
         <div className="w-full max-w-[480px]">
-          {/* Branding header */}
-          {(logoUrl || workspaceName) && (
-            <div className="mb-4 flex items-center justify-center gap-2">
-              {logoUrl && (
-                <img src={logoUrl} alt="" className="h-8 w-auto" />
-              )}
-              {workspaceName && !logoUrl && (
-                <span className="text-sm font-medium text-zinc-400">{workspaceName}</span>
-              )}
-            </div>
+          {workspaceName && (
+            <p className="mb-4 text-center text-sm font-semibold tracking-wide text-white/90">{workspaceName}</p>
           )}
-          <div className="rounded-2xl bg-white p-6 shadow-lg sm:p-8">
+          <div className="rounded-2xl bg-white p-6 shadow-xl sm:p-8">
             {children}
           </div>
-          <p className="mt-3 text-center text-[11px] text-zinc-400">
-            Powered by <a href="https://shopcx.ai" className="underline hover:text-zinc-500" target="_blank" rel="noopener noreferrer">ShopCX.ai</a>
+          <p className="mt-3 text-center text-[11px] text-white/50">
+            Powered by <a href="https://shopcx.ai" className="underline hover:text-white/70" target="_blank" rel="noopener noreferrer">ShopCX.ai</a>
           </p>
         </div>
       </div>
