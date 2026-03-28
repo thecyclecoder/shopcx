@@ -152,11 +152,11 @@ export async function buildCombinedEmailJourney({
       toEmail: cust.email,
       customerName: cust.first_name || "",
       journeyToken: token,
-      contextMessage: "I got your message and I'm going to help you. Click below to get started!",
+      contextMessage: "We currently do have coupons and discounts available. I've set one up for you. Click the button below to claim your coupon!",
       workspaceName: ws?.name || "Support",
       primaryColor: ws?.help_primary_color || undefined,
       subject: `Re: ${ticket?.subject || "Your request"}`,
-      buttonLabel: needsLinking ? "Get started &rarr;" : "Get my coupon &rarr;",
+      buttonLabel: "Claim my coupon &rarr;",
       inReplyTo: ticket?.email_message_id || null,
     });
 
