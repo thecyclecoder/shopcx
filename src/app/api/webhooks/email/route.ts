@@ -348,8 +348,33 @@ export async function POST(request: Request) {
         properties: { ticket_id: ticket.id, subject, from: normalizedEmail },
       });
 
+      // Check if a journey should handle this (priority: Journey > Workflow > AI)
+      const { data: journeyDefs } = await admin
+        .from("journey_definitions")
+        .select("id, trigger_intent, match_patterns, channels")
+        .eq("workspace_id", workspaceId)
+        .eq("is_active", true)
+        .not("trigger_intent", "is", null)
+        .order("priority", { ascending: false });
+
+      const msgLower = messageBody.toLowerCase();
+      const matchedJourney = (journeyDefs || []).find(j => {
+        if (!j.match_patterns?.length) return false;
+        if (j.channels?.length && !j.channels.includes("email")) return false;
+        return j.match_patterns.some((p: string) => msgLower.includes(p.toLowerCase()));
+      });
+
+      if (matchedJourney) {
+        // Journey matched — fire ai/reply-received which has the journey execution logic
+        console.log(`Journey matched: ${matchedJourney.trigger_intent} for new ticket ${ticket.id}`);
+        await inngest.send({
+          name: "ai/reply-received",
+          data: { workspace_id: workspaceId, ticket_id: ticket.id, message_body: messageBody },
+        });
+      }
+
       // Smart pattern matching — 3-layer: keywords → embeddings → AI
-      const matched = await matchPatterns(workspaceId, subject, messageBody);
+      const matched = !matchedJourney ? await matchPatterns(workspaceId, subject, messageBody) : null;
       if (matched?.autoTag) {
         const { data: t } = await admin.from("tickets").select("tags").eq("id", ticket.id).single();
         const tags = [...((t?.tags as string[]) || []), matched.autoTag];
@@ -413,8 +438,8 @@ export async function POST(request: Request) {
         });
       }
 
-      // AI auto-draft: only if no smart tag workflow was triggered
-      if (!matched?.autoTag) {
+      // AI auto-draft: only if no journey or workflow was triggered
+      if (!matchedJourney && !matched?.autoTag) {
         // Check if AI is enabled for email channel
         const { data: aiConfig } = await admin
           .from("ai_channel_config")

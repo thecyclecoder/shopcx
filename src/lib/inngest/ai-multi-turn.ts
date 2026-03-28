@@ -359,41 +359,45 @@ export const aiMultiTurn = inngest.createFunction(
       });
 
       if (matchedJourney) {
-        // A journey pattern matched — always try account linking first (if not completed)
-        if (!ticket.profile_link_completed && ticket.customer_id) {
-          // Find the account_linking journey definition to set journey_id
-          const linkingDef = (journeyDefs || []).find(j => j.trigger_intent === "account_linking");
-          if (linkingDef) {
-            await admin.from("tickets").update({ journey_id: linkingDef.id }).eq("id", ticket_id);
+        console.log(`[Journey] Matched ${matchedJourney.trigger_intent} for ticket ${ticket_id}`);
+        try {
+          // A journey pattern matched — always try account linking first (if not completed)
+          if (!ticket.profile_link_completed && ticket.customer_id) {
+            const linkingDef = (journeyDefs || []).find(j => j.trigger_intent === "account_linking");
+            if (linkingDef) {
+              await admin.from("tickets").update({ journey_id: linkingDef.id }).eq("id", ticket_id);
+            }
+            const linkResult = await executeAccountLinkingJourney(workspace_id, ticket_id, message_body, ticket.channel);
+            if (!linkResult.completed) {
+              await admin.from("tickets").update({
+                handled_by: `Journey: ${matchedJourney.trigger_intent}`,
+                ai_turn_count: 0,
+              }).eq("id", ticket_id);
+              return { handled: true };
+            }
+            await admin.from("tickets").update({ profile_link_completed: true, journey_id: null }).eq("id", ticket_id);
           }
-          const linkResult = await executeAccountLinkingJourney(workspace_id, ticket_id, message_body, ticket.channel);
-          if (!linkResult.completed) {
-            // Linking in progress — set handled_by so we know which journey to chain into after
-            await admin.from("tickets").update({
-              handled_by: `Journey: ${matchedJourney.trigger_intent}`,
-              ai_turn_count: 0,
-            }).eq("id", ticket_id);
-            return { handled: true };
+
+          // Account linking done or not needed — start the matched journey
+          await admin.from("tickets").update({
+            journey_step: 0,
+            journey_data: {},
+            journey_id: matchedJourney.id,
+            handled_by: `Journey: ${matchedJourney.trigger_intent}`,
+            ai_turn_count: 0,
+          }).eq("id", ticket_id);
+
+          if (matchedJourney.trigger_intent === "discount_signup") {
+            const discResult = await executeDiscountJourney(workspace_id, ticket_id, message_body, ticket.channel);
+            return { handled: !discResult.completed };
           }
-          // Linking done — mark completed and clear journey_id for next journey
-          await admin.from("tickets").update({ profile_link_completed: true, journey_id: null }).eq("id", ticket_id);
+
+          return { handled: false };
+        } catch (err) {
+          console.error(`[Journey] Error executing ${matchedJourney.trigger_intent}:`, err);
+          // Fall through to AI if journey fails
+          return { handled: false };
         }
-
-        // Account linking done or not needed — start the matched journey
-        await admin.from("tickets").update({
-          journey_step: 0,
-          journey_data: {},
-          journey_id: matchedJourney.id,
-          handled_by: `Journey: ${matchedJourney.trigger_intent}`,
-          ai_turn_count: 0,
-        }).eq("id", ticket_id);
-
-        if (matchedJourney.trigger_intent === "discount_signup") {
-          const discResult = await executeDiscountJourney(workspace_id, ticket_id, message_body, ticket.channel);
-          return { handled: !discResult.completed };
-        }
-
-        return { handled: false };
       }
 
       return { handled: false };
