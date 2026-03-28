@@ -58,6 +58,6 @@ export async function GET(
   return NextResponse.json({
     cases: cases || [],
     total: count || 0,
-    stats: stats?.[0] || { open: 0, confirmed_30d: 0, dismissed_30d: 0, value_at_risk_cents: 0 },
+    stats: stats?.[0] || { open_count: 0, confirmed_30d: 0, dismissed_30d: 0, value_at_risk_cents: 0 },
   });
 }

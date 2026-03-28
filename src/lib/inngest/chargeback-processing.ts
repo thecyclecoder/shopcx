@@ -1,6 +1,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { appstleSubscriptionAction } from "@/lib/appstle";
+import { unsubscribeFromAllMarketing } from "@/lib/shopify-marketing";
 
 // ── chargeback/received — main processing pipeline ──
 
@@ -112,6 +113,11 @@ export const chargebackReceived = inngest.createFunction(
       }
 
       return "review" as const;
+    });
+
+    // Step 3b: Unsubscribe from all marketing — don't market to chargeback filers
+    await step.run("unsubscribe-marketing", async () => {
+      await unsubscribeFromAllMarketing(workspaceId, customerId);
     });
 
     // Step 4: Execute action

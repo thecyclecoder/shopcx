@@ -2,6 +2,7 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { runAllFraudRules, checkOrderForFraud, checkCustomerForFraud } from "@/lib/fraud-detector";
 import { decrypt } from "@/lib/crypto";
+import { unsubscribeFromAllMarketing } from "@/lib/shopify-marketing";
 
 // ── Nightly full scan ──
 
@@ -133,7 +134,7 @@ export const fraudGenerateSummary = inngest.createFunction(
     const fraudCase = await step.run("load-case", async () => {
       const { data } = await admin
         .from("fraud_cases")
-        .select("id, evidence, rule_type, severity, title")
+        .select("id, evidence, rule_type, severity, title, customer_ids")
         .eq("id", caseId)
         .single();
       return data;
@@ -202,6 +203,14 @@ export const fraudGenerateSummary = inngest.createFunction(
           link: `/dashboard/fraud?case=${caseId}`,
           metadata: { entity_id: caseId, entity_type: "fraud_case", severity: fraudCase.severity },
         });
+      }
+    });
+
+    // Unsubscribe all flagged customers from email + SMS marketing
+    await step.run("unsubscribe-flagged-customers", async () => {
+      const customerIds = (fraudCase.customer_ids as string[]) || [];
+      for (const custId of customerIds) {
+        await unsubscribeFromAllMarketing(workspaceId, custId);
       }
     });
   }
