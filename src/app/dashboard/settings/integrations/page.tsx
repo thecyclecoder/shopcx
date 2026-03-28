@@ -63,6 +63,15 @@ export default function IntegrationsPage() {
   const [testSmsNumber, setTestSmsNumber] = useState("");
   const [testSmsStatus, setTestSmsStatus] = useState("");
 
+  // Klaviyo
+  const [klaviyoApiKey, setKlaviyoApiKey] = useState("");
+  const [klaviyoPublicKey, setKlaviyoPublicKey] = useState("");
+  const [klaviyoConnected, setKlaviyoConnected] = useState(false);
+  const [klaviyoApiKeyHint, setKlaviyoApiKeyHint] = useState<string | null>(null);
+  const [klaviyoLastSync, setKlaviyoLastSync] = useState<string | null>(null);
+  const [klaviyoReviewCount, setKlaviyoReviewCount] = useState<number | null>(null);
+  const [klaviyoSyncing, setKlaviyoSyncing] = useState(false);
+
   // Sandbox
   const [sandboxMode, setSandboxMode] = useState(true);
 
@@ -105,6 +114,11 @@ export default function IntegrationsPage() {
         setMetaPageId(data.meta_page_id);
         setMetaInstagramId(data.meta_instagram_id);
         setMetaWebhookToken(data.meta_webhook_verify_token);
+        setKlaviyoConnected(data.klaviyo_connected);
+        setKlaviyoApiKeyHint(data.klaviyo_api_key_hint);
+        setKlaviyoPublicKey(data.klaviyo_public_key || "");
+        setKlaviyoLastSync(data.klaviyo_last_sync_at);
+        setKlaviyoReviewCount(data.klaviyo_review_count);
         setLoading(false);
       });
   }, [workspace.id]);
@@ -237,6 +251,50 @@ export default function IntegrationsPage() {
       setShopifyDomain("");
       setMessage("Shopify disconnected");
     }
+  };
+
+  // Klaviyo handlers
+  const handleSaveKlaviyo = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const body: Record<string, string> = {};
+    if (klaviyoApiKey) body.klaviyo_api_key = klaviyoApiKey;
+    if (klaviyoPublicKey) body.klaviyo_public_key = klaviyoPublicKey;
+    if (await patchIntegrations(body)) {
+      setMessage("Klaviyo configuration saved");
+      setKlaviyoConnected(true);
+      setKlaviyoApiKeyHint(klaviyoApiKey ? `pk_...${klaviyoApiKey.slice(-4)}` : klaviyoApiKeyHint);
+      setKlaviyoApiKey("");
+    }
+  };
+
+  const handleDisconnectKlaviyo = async () => {
+    if (await patchIntegrations({ klaviyo_api_key: null, klaviyo_public_key: null })) {
+      setKlaviyoConnected(false);
+      setKlaviyoApiKeyHint(null);
+      setKlaviyoPublicKey("");
+      setKlaviyoLastSync(null);
+      setKlaviyoReviewCount(null);
+      setMessage("Klaviyo disconnected");
+    }
+  };
+
+  const handleSyncReviews = async () => {
+    setKlaviyoSyncing(true);
+    setMessage("");
+    try {
+      const res = await fetch(`/api/workspaces/${workspace.id}/sync-reviews`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setMessage(`Synced ${data.synced} reviews${data.errors ? ` (${data.errors} errors)` : ""}`);
+        setKlaviyoLastSync(new Date().toISOString());
+        setKlaviyoReviewCount(data.total_reviews ?? klaviyoReviewCount);
+      } else {
+        setMessage("Review sync failed");
+      }
+    } catch {
+      setMessage("Review sync failed");
+    }
+    setKlaviyoSyncing(false);
   };
 
   // Meta handlers
@@ -980,6 +1038,120 @@ export default function IntegrationsPage() {
               >
                 {saving ? "Connecting..." : "Connect Facebook Page"}
               </button>
+            </div>
+          )}
+        </div>
+        {/* ── Klaviyo ── */}
+        <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#112d42]/10">
+                <svg className="h-5 w-5 text-[#112d42] dark:text-[#7ac6ed]" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Klaviyo</h2>
+                <p className="text-sm text-zinc-500">Product reviews for cancel journey social proof</p>
+              </div>
+            </div>
+            {klaviyoConnected && (
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                Connected
+              </span>
+            )}
+          </div>
+
+          {canEdit && !klaviyoConnected && (
+            <form onSubmit={handleSaveKlaviyo} className="mt-5 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">Private API Key</label>
+                <input
+                  type="password"
+                  value={klaviyoApiKey}
+                  onChange={(e) => setKlaviyoApiKey(e.target.value)}
+                  placeholder="pk_..."
+                  required
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">Public Key / Site ID</label>
+                <input
+                  type="text"
+                  value={klaviyoPublicKey}
+                  onChange={(e) => setKlaviyoPublicKey(e.target.value)}
+                  placeholder="Optional"
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={saving || !klaviyoApiKey}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {saving ? "Saving..." : "Save & Connect"}
+              </button>
+            </form>
+          )}
+
+          {canEdit && klaviyoConnected && (
+            <div className="mt-5 space-y-3">
+              <div className="rounded-md bg-zinc-50 p-3 dark:bg-zinc-800">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-zinc-500">API Key</span>
+                    <span className="font-mono text-sm text-zinc-400">{klaviyoApiKeyHint}</span>
+                  </div>
+                  {klaviyoLastSync && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-zinc-500">Last sync</span>
+                      <span className="text-sm text-zinc-400">{new Date(klaviyoLastSync).toLocaleString()}</span>
+                    </div>
+                  )}
+                  {klaviyoReviewCount !== null && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-zinc-500">Reviews</span>
+                      <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{klaviyoReviewCount}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleSyncReviews}
+                  disabled={klaviyoSyncing}
+                  className="rounded-md border border-indigo-300 px-4 py-2 text-sm font-medium text-indigo-600 transition-colors hover:bg-indigo-50 disabled:opacity-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
+                >
+                  {klaviyoSyncing ? "Syncing..." : "Sync Reviews Now"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDisconnectKlaviyo}
+                  disabled={saving}
+                  className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                >
+                  Disconnect
+                </button>
+              </div>
+              {/* Update API key */}
+              <form onSubmit={handleSaveKlaviyo} className="flex gap-2">
+                <input
+                  type="password"
+                  value={klaviyoApiKey}
+                  onChange={(e) => setKlaviyoApiKey(e.target.value)}
+                  placeholder="New API key (leave blank to keep current)"
+                  className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+                <button
+                  type="submit"
+                  disabled={saving || !klaviyoApiKey}
+                  className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  Update
+                </button>
+              </form>
             </div>
           )}
         </div>

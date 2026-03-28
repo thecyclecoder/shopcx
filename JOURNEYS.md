@@ -60,8 +60,26 @@ Customer message → Pattern match → Journey launcher
 - **Coupon**: Styled code block with click-to-copy, VIP tier matching
 - **Outcome**: Positive = completed signup + coupon delivered. Negative = declined twice.
 
-### Cancellation Flow (step-based, for future use)
-- **Trigger**: Not currently auto-triggered (empty match patterns)
+### Cancel Journey (AI-powered retention)
+- **Trigger**: Match patterns: cancel, cancellation, unsubscribe, stop subscription, end subscription
+- **Channel**: All except social_comments
+- **Architecture**: Code-driven with AI remedy selection (not hardcoded rebuttals)
+- **Steps**:
+  1. Select subscription (skip if only one active sub)
+  2. Why are you cancelling? (8 reasons, 4 business-critical)
+  3. AI Remedy Selection or AI Chat:
+     - **Concrete reasons** (too expensive, too much product, etc.): Claude Haiku picks top 3 remedies from `remedies` table based on customer context + historical success rates. Shows social proof review below.
+     - **Open-ended reasons** (just need a break, something else, reached goals): Claude Sonnet empathetic conversation, max 3 turns
+  4. Resolution: execute remedy via Appstle API or confirm cancellation
+- **Subscription cards**: Collapsible detail with product list, frequency, next billing date, price. Shipping protection shown as green badge, not line item.
+- **Remedy tracking**: Every remedy offered/accepted/declined logged to `remedy_outcomes` for system learning
+- **Social proof**: Product reviews from Klaviyo, AI-summarized (max 15 words), with "Read full review" expand
+- **UI**: 17px minimum text, max 25 words per remedy pitch, max 2 sentences per step
+- **Outcome**: Positive = customer saved (accepted retention offer). Negative = customer cancelled.
+- **Tags**: `j:cancel`, `jo:positive` (saved), `jo:negative` (cancelled)
+
+### Cancellation Flow (legacy step-based, for fallback)
+- **Trigger**: Not auto-triggered (empty match patterns)
 - **Steps**: Seeded config with 7 steps, reason selection, rebuttals, discount/pause/skip offers
 - **Outcomes**: 10 paths (cancelled, saved_discount, saved_pause, saved_skip, etc.)
 - **Execution**: Fully rendered by the mini-site's step-based navigation (not code-driven)
@@ -75,7 +93,7 @@ Every journey must define positive, negative, and optionally neutral outcomes. T
 | Journey | Positive | Negative | Neutral |
 |---------|----------|----------|---------|
 | Discount Signup | Completed signup + coupon delivered | Declined twice | — |
-| Cancel (future) | Customer saved (accepted retention offer) | Customer cancelled | — |
+| Cancel | Customer saved (accepted retention offer) | Customer cancelled | — |
 
 The outcome tag is applied in `/api/journey/[token]/complete/route.ts` based on the `outcome` field.
 
@@ -98,7 +116,14 @@ The outcome tag is applied in `/api/journey/[token]/complete/route.ts` based on 
 | `src/lib/discount-journey-builder.ts` | Builds discount journey steps from customer data |
 | `src/lib/chat-journey.ts` | Code-driven executors (account linking inline forms, discount for chat fallback) |
 | `src/lib/journey-suggest.ts` | Detects journey patterns on agent-assigned tickets, creates suggestion card |
-| `src/lib/journey-seed.ts` | Default cancellation flow config |
+| `src/lib/journey-seed.ts` | Default cancellation flow config + default remedies |
+| `src/lib/cancel-journey-builder.ts` | Builds cancel journey steps from customer subs |
+| `src/lib/remedy-selector.ts` | AI remedy selection (Haiku) + open-ended conversation (Sonnet) |
+| `src/lib/klaviyo.ts` | Klaviyo API client (reviews sync + retrieval) |
+| `src/lib/inngest/sync-reviews.ts` | Nightly + on-demand Klaviyo review sync |
+| `src/app/api/journey/[token]/remedies/route.ts` | POST: AI remedy selection for cancel journey |
+| `src/app/api/journey/[token]/chat/route.ts` | POST: open-ended AI conversation for cancel journey |
+| `src/app/api/workspaces/[id]/sync-reviews/route.ts` | POST: trigger Klaviyo review sync |
 | `src/app/journey/[token]/page.tsx` | Mini-site: multi-step forms, branded background, code-driven + step-based |
 | `src/app/api/journey/[token]/route.ts` | GET: load journey session config |
 | `src/app/api/journey/[token]/step/route.ts` | POST: submit step (code-driven executor for single-form, mini-site step advance) |

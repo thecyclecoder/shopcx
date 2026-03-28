@@ -31,6 +31,7 @@ import {
   chargebackEvidenceReminder,
 } from "@/lib/inngest/chargeback-processing";
 import { ticketUnsnooze } from "@/lib/inngest/ticket-snooze";
+import { syncKlaviyoReviews } from "@/lib/inngest/sync-reviews";
 
 export const maxDuration = 300;
 
@@ -66,5 +67,6 @@ export const { GET, POST, PUT } = serve({
     chargebackLost,
     chargebackEvidenceReminder,
     ticketUnsnooze,
+    syncKlaviyoReviews,
   ],
 });

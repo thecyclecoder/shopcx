@@ -236,6 +236,20 @@ export default function JourneyPage() {
     );
   }
 
+  // ── Cancel Journey ──
+  if (status !== "loading" && config?.codeDriven && (config as { cancelJourney?: boolean }).cancelJourney) {
+    return (
+      <CancelJourney
+        config={config}
+        token={token}
+        customerName={customerName}
+        primaryColor={primaryColor}
+        workspaceName={workspaceName}
+        onComplete={(msg) => { setCompletedMessage(msg); setStatus("completed"); }}
+      />
+    );
+  }
+
   // ── Code-driven journey (must check before loading since step is always null) ──
   if (status !== "loading" && config?.codeDriven) {
     return (
@@ -420,6 +434,493 @@ export default function JourneyPage() {
         )}
       </div>
     </JourneyShell>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────
+// Cancel Journey Component
+// ──────────────────────────────────────────────────────────────
+
+interface CancelSubscription {
+  id: string;
+  contractId: string;
+  items: { title: string; variant_title?: string; quantity: number }[];
+  nextBillingDate: string | null;
+  totalPrice: string | null;
+  frequency: string | null;
+  paymentLast4: string | null;
+  hasShippingProtection: boolean;
+  isFirstRenewal: boolean;
+  subscriptionAgeDays: number;
+}
+
+interface RemedyOption {
+  remedy_id: string;
+  pitch: string;
+  coupon_code?: string;
+  confidence: number;
+}
+
+interface ReviewData {
+  summary: string;
+  rating: number;
+  body: string;
+  reviewer_name: string;
+}
+
+function CancelJourney({
+  config,
+  token,
+  customerName,
+  primaryColor,
+  workspaceName,
+  onComplete,
+}: {
+  config: JourneyConfig;
+  token: string;
+  customerName: string;
+  primaryColor: string;
+  workspaceName: string;
+  onComplete: (msg: string) => void;
+}) {
+  const [phase, setPhase] = useState<"subscription" | "reason" | "remedies" | "ai_chat" | "confirm_cancel" | "submitting">("subscription");
+  const [selectedSubId, setSelectedSubId] = useState<string | null>(null);
+  const [expandedSubId, setExpandedSubId] = useState<string | null>(null);
+  const [cancelReason, setCancelReason] = useState<string | null>(null);
+  const [remedies, setRemedies] = useState<RemedyOption[]>([]);
+  const [review, setReview] = useState<ReviewData | null>(null);
+  const [reviewExpanded, setReviewExpanded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [chatHistory, setChatHistory] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatSending, setChatSending] = useState(false);
+  const [selectedRemedyAction, setSelectedRemedyAction] = useState<string | null>(null);
+  const [responses, setResponses] = useState<Record<string, { value: string; label: string }>>({});
+
+  const cancelConfig = config as { cancelJourney?: boolean; metadata?: { subscriptions?: CancelSubscription[]; selectedSubscriptionId?: string } };
+  const metadata = cancelConfig.metadata || {};
+  const subscriptions = metadata.subscriptions || [];
+  const steps = ((config as { steps?: { key: string; type: string; question: string; options?: { value: string; label: string; emoji?: string }[] }[] }).steps || []);
+  const reasonStep = steps.find(s => s.key === "cancel_reason");
+
+  // Auto-select if single subscription
+  useEffect(() => {
+    if (subscriptions.length === 1) {
+      setSelectedSubId(subscriptions[0].id);
+      setPhase("reason");
+    } else if (subscriptions.length === 0) {
+      setPhase("reason");
+    }
+  }, [subscriptions.length]);
+
+  const submitStep = async (stepKey: string, value: string, label: string) => {
+    setResponses(prev => ({ ...prev, [stepKey]: { value, label } }));
+    await fetch(`/api/journey/${token}/step`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stepKey, responseValue: value, responseLabel: label }),
+    });
+  };
+
+  const handleSelectSubscription = async (subId: string) => {
+    setSelectedSubId(subId);
+    const sub = subscriptions.find(s => s.id === subId);
+    const label = sub?.items.map(i => i.title).join(", ") || subId;
+    await submitStep("select_subscription", subId, label);
+    setPhase("reason");
+  };
+
+  const handleSelectReason = async (value: string, label: string) => {
+    setCancelReason(value);
+    await submitStep("cancel_reason", value, label);
+    setLoading(true);
+
+    // Fetch AI remedies or start chat
+    const res = await fetch(`/api/journey/${token}/remedies`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cancel_reason: value, subscription_id: selectedSubId }),
+    });
+    const data = await res.json();
+    setLoading(false);
+
+    if (data.type === "remedies") {
+      setRemedies(data.remedies || []);
+      setReview(data.review || null);
+      setPhase("remedies");
+    } else {
+      setPhase("ai_chat");
+    }
+  };
+
+  const handleSelectRemedy = async (remedy: RemedyOption) => {
+    setSelectedRemedyAction(remedy.remedy_id);
+    await submitStep("remedy_selection", remedy.remedy_id, remedy.pitch);
+    if (remedy.coupon_code) {
+      await submitStep("remedy_coupon", remedy.coupon_code, remedy.coupon_code);
+    }
+
+    // Determine action type from remedy
+    const actionType = remedy.coupon_code ? "coupon" : "save";
+    await submitStep("remedy_action", actionType, actionType);
+
+    // Complete with saved outcome
+    setPhase("submitting");
+    const res = await fetch(`/api/journey/${token}/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        outcome: "saved_remedy",
+        responses: {
+          ...responses,
+          remedy_selection: { value: remedy.remedy_id, label: remedy.pitch },
+          remedy_action: { value: actionType, label: actionType },
+          ...(remedy.coupon_code ? { remedy_coupon: { value: remedy.coupon_code, label: remedy.coupon_code } } : {}),
+        },
+      }),
+    });
+    const result = await res.json();
+    onComplete(result.message || "We've updated your subscription. Thank you for staying with us!");
+  };
+
+  const handleStillWantToCancel = () => {
+    setPhase("confirm_cancel");
+  };
+
+  const handleConfirmCancel = async () => {
+    setPhase("submitting");
+    const res = await fetch(`/api/journey/${token}/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        outcome: "cancelled",
+        responses: {
+          ...responses,
+          confirm_cancel: { value: "confirmed", label: "Yes, cancel my subscription" },
+        },
+      }),
+    });
+    const result = await res.json();
+    onComplete(result.message || "Your subscription has been cancelled.");
+  };
+
+  const handleKeepSubscription = async () => {
+    setPhase("submitting");
+    const res = await fetch(`/api/journey/${token}/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        outcome: "saved_changed_mind",
+        responses: {
+          ...responses,
+          confirm_cancel: { value: "keep", label: "Keep my subscription" },
+        },
+      }),
+    });
+    const result = await res.json();
+    onComplete(result.message || "Great! Your subscription stays active.");
+  };
+
+  const handleChatSend = async () => {
+    if (!chatInput.trim() || chatSending) return;
+    const msg = chatInput.trim();
+    setChatInput("");
+    setChatSending(true);
+
+    const newHistory = [...chatHistory, { role: "user" as const, content: msg }];
+    setChatHistory(newHistory);
+
+    const res = await fetch(`/api/journey/${token}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: msg, history: chatHistory }),
+    });
+    const data = await res.json();
+
+    setChatHistory(prev => [...prev, { role: "assistant", content: data.response }]);
+    setChatSending(false);
+
+    if (data.ai_accepted_cancel) {
+      // AI accepted — show cancel confirmation
+      setTimeout(() => setPhase("confirm_cancel"), 2000);
+    }
+  };
+
+  const totalSteps = (subscriptions.length > 1 ? 1 : 0) + 3; // sub select + reason + remedy/chat + result
+  const currentStep = phase === "subscription" ? 1 : phase === "reason" ? (subscriptions.length > 1 ? 2 : 1) : phase === "remedies" || phase === "ai_chat" ? (subscriptions.length > 1 ? 3 : 2) : totalSteps;
+
+  return (
+    <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
+      {/* Progress */}
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-xs font-medium text-zinc-400">Step {currentStep} of {totalSteps}</span>
+      </div>
+      <div className="mb-6 h-1.5 w-full overflow-hidden rounded-full bg-zinc-200">
+        <div className="h-full rounded-full transition-all duration-300" style={{ width: `${(currentStep / totalSteps) * 100}%`, backgroundColor: primaryColor }} />
+      </div>
+
+      {customerName && phase === "subscription" && <p className="mb-2" style={{ fontSize: "17px", color: "#71717a" }}>Hi {customerName},</p>}
+
+      {/* Phase: Select Subscription */}
+      {phase === "subscription" && subscriptions.length > 1 && (
+        <div>
+          <h2 style={{ fontSize: "17px" }} className="font-semibold text-zinc-900">Which subscription would you like to cancel?</h2>
+          <div className="mt-4 space-y-3">
+            {subscriptions.map(sub => (
+              <SubscriptionCard
+                key={sub.id}
+                sub={sub}
+                expanded={expandedSubId === sub.id}
+                onToggle={() => setExpandedSubId(expandedSubId === sub.id ? null : sub.id)}
+                onSelect={() => handleSelectSubscription(sub.id)}
+                primaryColor={primaryColor}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Phase: Cancel Reason */}
+      {phase === "reason" && reasonStep && (
+        <div>
+          <h2 style={{ fontSize: "17px" }} className="font-semibold text-zinc-900">{reasonStep.question}</h2>
+          <div className="mt-4 space-y-3">
+            {(reasonStep.options || []).map(opt => (
+              <button
+                key={opt.value}
+                onClick={() => handleSelectReason(opt.value, opt.label)}
+                disabled={loading}
+                className="flex w-full items-center gap-3 rounded-xl border-2 border-zinc-200 px-4 py-4 text-left transition-all hover:border-zinc-300 hover:bg-zinc-50 disabled:opacity-60"
+              >
+                {opt.emoji && <span className="text-xl">{opt.emoji}</span>}
+                <span style={{ fontSize: "17px" }} className="font-medium text-zinc-800">{opt.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Loading AI */}
+      {loading && (
+        <div className="flex items-center justify-center py-8">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
+          <span className="ml-3 text-sm text-zinc-500">Finding the best options for you...</span>
+        </div>
+      )}
+
+      {/* Phase: Remedies */}
+      {phase === "remedies" && (
+        <div>
+          <h2 style={{ fontSize: "17px" }} className="font-semibold text-zinc-900">Before you go — would any of these help?</h2>
+          <div className="mt-4 space-y-3">
+            {remedies.map((remedy, idx) => (
+              <button
+                key={idx}
+                onClick={() => handleSelectRemedy(remedy)}
+                disabled={!!selectedRemedyAction}
+                className={`w-full rounded-xl border-2 px-4 py-4 text-left transition-all ${
+                  selectedRemedyAction === remedy.remedy_id
+                    ? "border-transparent text-white shadow-md"
+                    : "border-zinc-200 text-zinc-800 hover:border-zinc-300 hover:bg-zinc-50"
+                } disabled:opacity-60`}
+                style={selectedRemedyAction === remedy.remedy_id ? { backgroundColor: primaryColor } : undefined}
+              >
+                <span style={{ fontSize: "17px" }} className="font-medium">{remedy.pitch}</span>
+              </button>
+            ))}
+
+            <button
+              onClick={handleStillWantToCancel}
+              disabled={!!selectedRemedyAction}
+              className="w-full rounded-xl border-2 border-zinc-200 px-4 py-4 text-left text-zinc-500 transition-all hover:border-zinc-300 hover:bg-zinc-50 disabled:opacity-60"
+            >
+              <span style={{ fontSize: "17px" }}>I still want to cancel</span>
+            </button>
+          </div>
+
+          {/* Social proof review */}
+          {review && (
+            <div className="mt-5 rounded-xl border border-zinc-100 bg-zinc-50 p-4">
+              <div className="flex items-center gap-1">
+                {Array.from({ length: review.rating }).map((_, i) => (
+                  <svg key={i} className="h-4 w-4 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                  </svg>
+                ))}
+              </div>
+              <p className="mt-2 text-sm font-medium text-zinc-700">{review.summary}</p>
+              <button
+                onClick={() => setReviewExpanded(!reviewExpanded)}
+                className="mt-1 text-xs font-medium text-indigo-600 hover:text-indigo-700"
+              >
+                {reviewExpanded ? "Hide full review" : "Read full review"}
+              </button>
+              {reviewExpanded && (
+                <p className="mt-2 text-sm text-zinc-500">{review.body}</p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Phase: AI Chat */}
+      {phase === "ai_chat" && (
+        <div>
+          <h2 style={{ fontSize: "17px" }} className="mb-4 font-semibold text-zinc-900">Tell us more</h2>
+          <div className="space-y-3">
+            {chatHistory.map((msg, idx) => (
+              <div key={idx} className={`rounded-xl px-4 py-3 ${msg.role === "user" ? "ml-8 bg-zinc-100 text-zinc-800" : "mr-8 bg-indigo-50 text-zinc-700"}`}>
+                <p style={{ fontSize: "17px" }}>{msg.content}</p>
+              </div>
+            ))}
+            {chatSending && (
+              <div className="mr-8 rounded-xl bg-indigo-50 px-4 py-3">
+                <div className="flex gap-1">
+                  <span className="h-2 w-2 animate-bounce rounded-full bg-indigo-300" style={{ animationDelay: "0ms" }} />
+                  <span className="h-2 w-2 animate-bounce rounded-full bg-indigo-300" style={{ animationDelay: "150ms" }} />
+                  <span className="h-2 w-2 animate-bounce rounded-full bg-indigo-300" style={{ animationDelay: "300ms" }} />
+                </div>
+              </div>
+            )}
+          </div>
+          <form onSubmit={(e) => { e.preventDefault(); handleChatSend(); }} className="mt-4 flex gap-2">
+            <input
+              type="text"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              placeholder="Type your message..."
+              className="flex-1 rounded-xl border-2 border-zinc-200 bg-white px-4 py-3 text-zinc-900 outline-none focus:border-indigo-400"
+              style={{ fontSize: "17px" }}
+              disabled={chatSending}
+            />
+            <button
+              type="submit"
+              disabled={!chatInput.trim() || chatSending}
+              className="rounded-xl px-5 py-3 text-sm font-semibold text-white disabled:opacity-40"
+              style={{ backgroundColor: primaryColor }}
+            >
+              Send
+            </button>
+          </form>
+          <button
+            onClick={handleStillWantToCancel}
+            className="mt-3 w-full text-center text-sm text-zinc-400 hover:text-zinc-600"
+          >
+            I still want to cancel
+          </button>
+        </div>
+      )}
+
+      {/* Phase: Confirm Cancel */}
+      {phase === "confirm_cancel" && (
+        <div className="text-center">
+          <h2 style={{ fontSize: "17px" }} className="font-semibold text-zinc-900">Are you sure?</h2>
+          <p className="mt-2 text-sm text-zinc-500">This will cancel your subscription at the end of your current billing period. You won&apos;t be charged again.</p>
+          <div className="mt-6 flex gap-3">
+            <button
+              onClick={handleKeepSubscription}
+              className="flex-1 rounded-xl px-4 py-3 font-semibold text-white"
+              style={{ backgroundColor: primaryColor, fontSize: "17px" }}
+            >
+              Keep my subscription
+            </button>
+            <button
+              onClick={handleConfirmCancel}
+              className="flex-1 rounded-xl border-2 border-red-200 px-4 py-3 font-semibold text-red-600 hover:bg-red-50"
+              style={{ fontSize: "17px" }}
+            >
+              Yes, cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Phase: Submitting */}
+      {phase === "submitting" && (
+        <div className="flex items-center justify-center py-8">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
+          <span className="ml-3 text-sm text-zinc-500">Processing...</span>
+        </div>
+      )}
+    </JourneyShell>
+  );
+}
+
+function SubscriptionCard({
+  sub,
+  expanded,
+  onToggle,
+  onSelect,
+  primaryColor,
+}: {
+  sub: CancelSubscription;
+  expanded: boolean;
+  onToggle: () => void;
+  onSelect: () => void;
+  primaryColor: string;
+}) {
+  const nextDate = sub.nextBillingDate
+    ? new Date(sub.nextBillingDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+    : null;
+
+  return (
+    <div className="overflow-hidden rounded-xl border-2 border-zinc-200 transition-all hover:border-zinc-300">
+      {/* Collapsed view — for first-renewal customers, emphasize what they have rather than upcoming charges */}
+      <button onClick={onToggle} className="flex w-full items-center justify-between px-4 py-4 text-left">
+        <div className="min-w-0 flex-1">
+          <p style={{ fontSize: "17px" }} className="font-medium text-zinc-900 truncate">
+            {sub.items.map(i => i.title).join(", ")}
+          </p>
+          <div className="mt-1 flex items-center gap-3 text-sm text-zinc-500">
+            {sub.isFirstRenewal
+              ? <span>Your first shipment</span>
+              : nextDate && <span>Renews {nextDate}</span>
+            }
+            {!sub.isFirstRenewal && sub.totalPrice && <span>{sub.totalPrice}</span>}
+          </div>
+        </div>
+        <svg className={`ml-2 h-5 w-5 shrink-0 text-zinc-400 transition-transform ${expanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {/* Expanded detail */}
+      {expanded && (
+        <div className="border-t border-zinc-100 bg-zinc-50 px-4 py-3">
+          <div className="space-y-2">
+            {sub.items.map((item, idx) => (
+              <div key={idx} className="flex justify-between text-sm">
+                <span className="text-zinc-700">
+                  {item.title}{item.variant_title ? ` — ${item.variant_title}` : ""}
+                </span>
+                <span className="text-zinc-500">x{item.quantity}</span>
+              </div>
+            ))}
+          </div>
+          {sub.frequency && (
+            <p className="mt-2 text-sm text-zinc-500">{sub.frequency}</p>
+          )}
+          {sub.paymentLast4 && (
+            <p className="mt-1 text-sm text-zinc-500">Card ending in {sub.paymentLast4}</p>
+          )}
+          {sub.hasShippingProtection && (
+            <div className="mt-2 flex items-center gap-1.5 rounded-md bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-700">
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+              </svg>
+              Shipping Protection activated — free replacements for items lost, damaged, or stolen during delivery
+            </div>
+          )}
+          <button
+            onClick={onSelect}
+            className="mt-3 w-full rounded-lg px-4 py-2.5 text-sm font-semibold text-white"
+            style={{ backgroundColor: primaryColor }}
+          >
+            Cancel this subscription
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 

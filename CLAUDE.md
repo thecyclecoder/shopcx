@@ -18,7 +18,7 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - **Background Jobs**: Inngest (durable steps, retries, concurrency control)
 - **Email**: Resend (sending + inbound via webhook)
 - **AI**: Claude Haiku 4.5 (fast turns) + Claude Sonnet 4 (complex turns) + OpenAI embeddings
-- **Integrations**: Shopify (GraphQL + REST + Bulk Operations + webhooks), Appstle (subscriptions API)
+- **Integrations**: Shopify (GraphQL + REST + Bulk Operations + webhooks), Appstle (subscriptions API), Klaviyo (product reviews)
 - **Encryption**: AES-256-GCM for all stored API keys/tokens
 
 ## Architecture Decisions
@@ -168,6 +168,19 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - Journey suggestions for agent-assigned tickets
 - Re-nudge system for declined signups (server-side via email)
 - Per-journey ticket status setting (open/pending/closed on each step)
+- **Cancel Journey**: AI-powered subscription retention flow
+  - Subscription selection (collapsible cards, shipping protection badge)
+  - 8 cancel reasons (4 business-critical)
+  - AI remedy selection: Claude Haiku picks top 3 from `remedies` table + success rates
+  - Open-ended AI chat: Claude Sonnet for "just need a break" / "something else" / "reached goals" (max 3 turns)
+  - Social proof: Klaviyo product reviews, AI-summarized, with full review expand
+  - Remedy outcome tracking: every offer logged to `remedy_outcomes` for system learning
+  - Appstle API: cancel, pause, skip, frequency change, coupon apply
+  - 17px minimum text, max 25 words per remedy pitch
+- **Klaviyo Integration**: Product reviews for cancel journey social proof
+  - API key per workspace (encrypted), nightly + on-demand sync
+  - AI review summaries (Haiku, max 15 words) stored in `product_reviews.summary`
+  - Featured reviews prioritized, then highest-rated
 
 ### Dashboard & Settings ✅
 - Dashboard overview: real-time stats (open/pending tickets, customers, avg retention, AI resolution rate, tickets today, KB articles, active macros)
@@ -215,6 +228,10 @@ For replies (ai/reply-received): route → patterns (deferred) → journey → w
 - `src/lib/discount-journey-builder.ts` — Builds discount journey steps from customer data
 - `src/lib/chat-journey.ts` — Code-driven journey executors (account linking, discount signup for chat)
 - `src/lib/journey-suggest.ts` — Journey suggestion detection for agent-assigned tickets
+- `src/lib/cancel-journey-builder.ts` — Builds cancel journey steps from customer subs + remedies
+- `src/lib/remedy-selector.ts` — AI remedy selection (Haiku) + open-ended conversation (Sonnet)
+- `src/lib/klaviyo.ts` — Klaviyo API client (reviews sync, retrieval, AI summaries)
+- `src/lib/inngest/sync-reviews.ts` — Nightly + on-demand Klaviyo review sync
 - `src/lib/first-touch.ts` — First outbound touch tagging (touched + ft:source)
 - `src/lib/ticket-tags.ts` — Idempotent ticket tag helper
 - `src/lib/shopify-marketing.ts` — Subscribe + unsubscribe email/SMS marketing via Shopify GraphQL
@@ -267,6 +284,9 @@ For replies (ai/reply-received): route → patterns (deferred) → journey → w
 - `customer_links` — Customer profile linking (group_id based)
 - `customer_link_rejections` — Rejected link suggestions (never re-offer)
 - `coupon_mappings` — Shopify coupon → AI coupon mapping with VIP tiers
+- `remedies` — Retention remedies per workspace (coupon, pause, skip, frequency_change, etc.)
+- `remedy_outcomes` — Tracks every remedy offered/accepted/declined per cancel reason for learning
+- `product_reviews` — Klaviyo-synced reviews with AI summaries for cancel journey social proof
 
 ## Ticket Tags (auto-applied for analytics)
 When adding new journeys or workflows, always add the corresponding tag:

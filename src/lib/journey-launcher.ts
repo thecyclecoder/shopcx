@@ -6,6 +6,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildDiscountJourneySteps } from "@/lib/discount-journey-builder";
 import { buildCombinedEmailJourney } from "@/lib/email-journey-builder";
+import { buildCancelJourneySteps } from "@/lib/cancel-journey-builder";
 import { markFirstTouch } from "@/lib/first-touch";
 import crypto from "crypto";
 
@@ -151,6 +152,85 @@ export async function launchDiscountJourney(
 
   const { addTicketTag } = await import("@/lib/ticket-tags");
   await addTicketTag(ticketId, "j:discount");
+
+  return { launched: true };
+}
+
+export async function launchCancelJourney(
+  workspaceId: string,
+  ticketId: string,
+  customerId: string,
+  channel: string,
+  journeyId: string,
+): Promise<{ launched: boolean }> {
+  if (channel !== "chat") {
+    // Email/other channels use the email journey builder
+    await buildCombinedEmailJourney({
+      workspaceId,
+      ticketId,
+      customerId,
+      matchedJourneyIntent: "cancel",
+      matchedJourneyId: journeyId,
+    });
+    return { launched: true };
+  }
+
+  // Chat: build cancel steps + embed inline
+  const admin = createAdminClient();
+
+  const { steps, metadata } = await buildCancelJourneySteps(workspaceId, customerId, ticketId);
+  if (steps.length === 0) return { launched: false };
+
+  const token = crypto.randomBytes(24).toString("hex");
+  await admin.from("journey_sessions").insert({
+    workspace_id: workspaceId,
+    journey_id: journeyId,
+    customer_id: customerId,
+    ticket_id: ticketId,
+    token,
+    token_expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    status: "in_progress",
+    started_at: new Date().toISOString(),
+    config_snapshot: {
+      codeDriven: true,
+      cancelJourney: true,
+      steps,
+      metadata,
+    },
+  });
+
+  await admin.from("tickets").update({
+    journey_id: journeyId,
+    journey_step: 0,
+    journey_data: {},
+    handled_by: "Journey: cancel",
+    ai_turn_count: 0,
+  }).eq("id", ticketId);
+
+  const journeyPayload = JSON.stringify({ token, steps });
+  await admin.from("ticket_messages").insert({
+    ticket_id: ticketId,
+    direction: "outbound",
+    visibility: "external",
+    author_type: "system",
+    body: `I understand you'd like to cancel. Let me help you with that.<!--JOURNEY:${journeyPayload}-->`,
+  });
+
+  const { data: journeyDef } = await admin.from("journey_definitions")
+    .select("step_ticket_status")
+    .eq("id", journeyId)
+    .single();
+  const stepStatus = journeyDef?.step_ticket_status || "open";
+  if (stepStatus !== "open") {
+    const updates: Record<string, unknown> = { status: stepStatus };
+    if (stepStatus === "closed") updates.resolved_at = new Date().toISOString();
+    await admin.from("tickets").update(updates).eq("id", ticketId);
+  }
+
+  await markFirstTouch(ticketId, "journey");
+
+  const { addTicketTag } = await import("@/lib/ticket-tags");
+  await addTicketTag(ticketId, "j:cancel");
 
   return { launched: true };
 }

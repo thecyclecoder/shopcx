@@ -830,11 +830,12 @@ function InlineJourneyForm({
         </div>
       )}
 
-      {step.type === "radio" && step.options && (
+      {(step.type === "radio" || step.type === "single_choice" || step.type === "subscription_select") && step.options && (
         <div className="space-y-1.5">
           {step.options.map(opt => (
             <button key={opt.value} onClick={() => handleStepSubmit(opt.value, opt.label)} disabled={submitting}
               className="flex w-full items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-left text-xs text-zinc-700 hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-60">
+              {(opt as { emoji?: string }).emoji && <span className="text-sm">{(opt as { emoji?: string }).emoji}</span>}
               <span className="flex h-3.5 w-3.5 shrink-0 rounded-full border border-zinc-300" />
               {opt.label}
             </button>

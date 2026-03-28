@@ -32,6 +32,219 @@ export async function POST(
 
   const config = session.config_snapshot as Record<string, unknown> || {};
 
+  // Process cancel journey completion
+  if (config.cancelJourney) {
+    const metadata = (config.metadata || {}) as Record<string, unknown>;
+    const wsId = session.workspace_id;
+    const actionLog: string[] = [];
+
+    const cancelReason = responses?.cancel_reason?.value || "unknown";
+    const cancelReasonLabel = responses?.cancel_reason?.label || cancelReason;
+
+    // Determine which subscription to act on
+    const subscriptions = (metadata.subscriptions as { id: string; contractId: string; items: { title: string }[]; isFirstRenewal?: boolean }[]) || [];
+    const selectedSubId = responses?.select_subscription?.value || (metadata.selectedSubscriptionId as string);
+    const selectedSub = subscriptions.find(s => s.id === selectedSubId) || subscriptions[0];
+    const isFirstRenewal = selectedSub?.isFirstRenewal || false;
+
+    if (outcome === "cancelled" && selectedSub) {
+      // Cancel via Appstle API
+      const { appstleSubscriptionAction } = await import("@/lib/appstle");
+      const result = await appstleSubscriptionAction(
+        wsId,
+        selectedSub.contractId,
+        "cancel",
+        `customer_request: ${cancelReasonLabel}`,
+        "Customer via cancel journey",
+      );
+
+      if (result.success) {
+        actionLog.push(`Cancelled subscription ${selectedSub.contractId} (${selectedSub.items.map(i => i.title).join(", ")})`);
+      } else {
+        actionLog.push(`Failed to cancel subscription: ${result.error}`);
+      }
+
+      // Record remedy outcome (cancelled = no remedy accepted)
+      if (session.customer_id) {
+        await admin.from("remedy_outcomes").insert({
+          workspace_id: wsId,
+          customer_id: session.customer_id,
+          cancel_reason: cancelReason,
+          remedy_type: "none",
+          accepted: false,
+          outcome: "cancelled",
+          first_renewal: isFirstRenewal,
+        });
+      }
+
+      // Tag ticket
+      if (session.ticket_id) {
+        const { addTicketTag } = await import("@/lib/ticket-tags");
+        await addTicketTag(session.ticket_id, "jo:negative");
+
+        await admin.from("tickets").update({
+          status: "closed",
+          resolved_at: new Date().toISOString(),
+          journey_step: 99,
+        }).eq("id", session.ticket_id);
+      }
+    } else if (outcome?.startsWith("saved_")) {
+      // Customer accepted a remedy
+      const remedyId = responses?.remedy_selection?.value;
+      const remedyAction = responses?.remedy_action;
+
+      if (selectedSub && remedyAction) {
+        const actionType = remedyAction.value;
+        const { appstleSubscriptionAction, appstleSkipNextOrder, appstleUpdateBillingInterval } = await import("@/lib/appstle");
+
+        if (actionType === "pause") {
+          const result = await appstleSubscriptionAction(wsId, selectedSub.contractId, "pause");
+          actionLog.push(result.success ? `Paused subscription ${selectedSub.contractId}` : `Failed to pause: ${result.error}`);
+        } else if (actionType === "skip") {
+          const result = await appstleSkipNextOrder(wsId, selectedSub.contractId);
+          actionLog.push(result.success ? `Skipped next order for ${selectedSub.contractId}` : `Failed to skip: ${result.error}`);
+        } else if (actionType === "frequency_change") {
+          const result = await appstleUpdateBillingInterval(wsId, selectedSub.contractId, "MONTH", 2);
+          actionLog.push(result.success ? `Changed frequency to every 2 months for ${selectedSub.contractId}` : `Failed to change frequency: ${result.error}`);
+        } else if (actionType === "coupon") {
+          // Apply coupon via Appstle
+          const couponCode = responses?.remedy_coupon?.value;
+          if (couponCode) {
+            try {
+              const { data: wsData } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", wsId).single();
+              if (wsData?.appstle_api_key_encrypted) {
+                const { decrypt } = await import("@/lib/crypto");
+                const apiKey = decrypt(wsData.appstle_api_key_encrypted);
+
+                // Remove existing discounts first
+                const rawRes = await fetch(
+                  `https://subscription-admin.appstle.com/api/external/v2/contract-raw-response?contractId=${selectedSub.contractId}&api_key=${apiKey}`,
+                  { headers: { "X-API-Key": apiKey } },
+                );
+                if (rawRes.ok) {
+                  const rawText = await rawRes.text();
+                  const nodesMatch = rawText.match(/"discounts"[\s\S]*?"nodes"\s*:\s*\[([\s\S]*?)\]/);
+                  if (nodesMatch && nodesMatch[1].trim()) {
+                    try {
+                      const nodes = JSON.parse(`[${nodesMatch[1]}]`);
+                      for (const node of nodes) {
+                        if (node.id) {
+                          await fetch(
+                            `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${selectedSub.contractId}&discountId=${encodeURIComponent(node.id)}&api_key=${apiKey}`,
+                            { method: "PUT", headers: { "X-API-Key": apiKey } },
+                          );
+                        }
+                      }
+                    } catch {}
+                  }
+                }
+
+                // Apply new coupon
+                await fetch(
+                  `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-apply-discount?contractId=${selectedSub.contractId}&discountCode=${couponCode}&api_key=${apiKey}`,
+                  { method: "PUT", headers: { "X-API-Key": apiKey } },
+                );
+                actionLog.push(`Applied coupon ${couponCode} to subscription ${selectedSub.contractId}`);
+              }
+            } catch (err) {
+              actionLog.push(`Failed to apply coupon: ${err}`);
+            }
+          }
+        }
+      }
+
+      // Record remedy outcome
+      if (session.customer_id) {
+        await admin.from("remedy_outcomes").insert({
+          workspace_id: wsId,
+          customer_id: session.customer_id,
+          cancel_reason: cancelReason,
+          remedy_id: remedyId || null,
+          remedy_type: remedyAction?.value || outcome,
+          offered_text: responses?.remedy_selection?.label || null,
+          accepted: true,
+          first_renewal: isFirstRenewal,
+          outcome: "saved",
+        });
+      }
+
+      // Tag ticket positive
+      if (session.ticket_id) {
+        const { addTicketTag } = await import("@/lib/ticket-tags");
+        await addTicketTag(session.ticket_id, "jo:positive");
+
+        await admin.from("tickets").update({
+          status: "closed",
+          resolved_at: new Date().toISOString(),
+          journey_step: 99,
+        }).eq("id", session.ticket_id);
+      }
+    }
+
+    // Log actions as internal note
+    if (session.ticket_id) {
+      const allActions = [`Cancel reason: ${cancelReasonLabel}`, `Outcome: ${outcome}`, ...actionLog];
+      await admin.from("ticket_messages").insert({
+        ticket_id: session.ticket_id,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: `[System] Cancel journey completed:\n${allActions.map(a => `• ${a}`).join("\n")}`,
+      });
+
+      // Send customer-facing confirmation
+      const confirmMsg = outcome === "cancelled"
+        ? "<p>Your subscription has been cancelled. You won't be charged again. You're always welcome back.</p>"
+        : "<p>We've updated your subscription. Thank you for staying with us!</p>";
+
+      await admin.from("ticket_messages").insert({
+        ticket_id: session.ticket_id,
+        direction: "outbound",
+        visibility: "external",
+        author_type: "system",
+        body: confirmMsg,
+      });
+
+      // Send email reply for email channel tickets
+      const { data: ticketData } = await admin.from("tickets")
+        .select("subject, email_message_id, channel, customer_id")
+        .eq("id", session.ticket_id)
+        .single();
+
+      if (ticketData?.channel === "email" && ticketData.customer_id) {
+        const { data: cust } = await admin.from("customers").select("email").eq("id", ticketData.customer_id).single();
+        const { data: wsInfo } = await admin.from("workspaces").select("name").eq("id", wsId).single();
+
+        if (cust?.email) {
+          const { sendTicketReply } = await import("@/lib/email");
+          await sendTicketReply({
+            workspaceId: wsId,
+            toEmail: cust.email,
+            subject: ticketData.subject ? `Re: ${ticketData.subject}` : "Re: Your request",
+            body: confirmMsg,
+            inReplyTo: ticketData.email_message_id || null,
+            agentName: "Support",
+            workspaceName: wsInfo?.name || "Support",
+          });
+        }
+      }
+    }
+
+    // Mark session completed
+    await admin.from("journey_sessions").update({
+      status: "completed",
+      outcome,
+      responses: responses || {},
+      completed_at: new Date().toISOString(),
+    }).eq("id", session.id);
+
+    const message = outcome === "cancelled"
+      ? "Your subscription has been cancelled. You won't be charged again. You're always welcome back."
+      : "We've updated your subscription. Thank you for staying with us!";
+
+    return NextResponse.json({ success: true, message });
+  }
+
   // Process multi-step discount journey responses
   if (config.multiStep && responses && outcome !== "declined") {
     const metadata = (config.metadata || {}) as Record<string, unknown>;

@@ -7,6 +7,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendJourneyCTA } from "@/lib/email";
 import { buildDiscountJourneySteps } from "@/lib/discount-journey-builder";
+import { buildCancelJourneySteps } from "@/lib/cancel-journey-builder";
 import { markFirstTouch } from "@/lib/first-touch";
 import crypto from "crypto";
 
@@ -102,6 +103,80 @@ export async function buildCombinedEmailJourney({
     const { steps: discountSteps, metadata: discountMeta } = await buildDiscountJourneySteps(workspaceId, customerId);
     steps.push(...discountSteps as JourneyStep[]);
     metadata = { ...metadata, ...discountMeta };
+  } else if (matchedJourneyIntent === "cancel") {
+    // Cancel journey — uses its own code-driven flow
+    const { steps: cancelSteps, metadata: cancelMeta } = await buildCancelJourneySteps(workspaceId, customerId, ticketId);
+    if (cancelSteps.length > 0) {
+      // Cancel journey creates its own session with cancelJourney flag
+      const cancelToken = crypto.randomBytes(24).toString("hex");
+      await admin.from("journey_sessions").insert({
+        workspace_id: workspaceId,
+        journey_id: matchedJourneyId,
+        customer_id: customerId,
+        ticket_id: ticketId,
+        token: cancelToken,
+        token_expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        status: "pending",
+        config_snapshot: {
+          codeDriven: true,
+          cancelJourney: true,
+          steps: cancelSteps,
+          metadata: cancelMeta,
+        },
+      });
+
+      await admin.from("tickets").update({
+        journey_id: matchedJourneyId,
+        journey_step: 0,
+        journey_data: {},
+        handled_by: "Journey: cancel",
+        ai_turn_count: 0,
+      }).eq("id", ticketId);
+
+      const { data: custData } = await admin.from("customers").select("email, first_name").eq("id", customerId).single();
+      const { data: wsData } = await admin.from("workspaces").select("name, help_primary_color").eq("id", workspaceId).single();
+
+      if (custData?.email) {
+        await sendJourneyCTA({
+          workspaceId,
+          toEmail: custData.email,
+          customerName: custData.first_name || "",
+          journeyToken: cancelToken,
+          contextMessage: "We received your cancellation request. Before we process it, we want to make sure we explore all options for you.",
+          workspaceName: wsData?.name || "Support",
+          primaryColor: wsData?.help_primary_color || undefined,
+          subject: `Re: ${ticket?.subject || "Your request"}`,
+          buttonLabel: "Manage my subscription &rarr;",
+          inReplyTo: ticket?.email_message_id || null,
+        });
+
+        await admin.from("ticket_messages").insert({
+          ticket_id: ticketId,
+          direction: "outbound",
+          visibility: "internal",
+          author_type: "system",
+          body: `[System] Sent cancel journey CTA email to ${custData.email}`,
+        });
+
+        await markFirstTouch(ticketId, "journey");
+      }
+
+      const { addTicketTag } = await import("@/lib/ticket-tags");
+      await addTicketTag(ticketId, "j:cancel");
+
+      const { data: journeyDef } = await admin.from("journey_definitions")
+        .select("step_ticket_status")
+        .eq("id", matchedJourneyId)
+        .single();
+      const stepStatus = journeyDef?.step_ticket_status || "open";
+      if (stepStatus !== "open") {
+        const updates: Record<string, unknown> = { status: stepStatus };
+        if (stepStatus === "closed") updates.resolved_at = new Date().toISOString();
+        await admin.from("tickets").update(updates).eq("id", ticketId);
+      }
+
+      return; // Cancel journey handles its own session creation
+    }
   }
 
   if (steps.length === 0) {

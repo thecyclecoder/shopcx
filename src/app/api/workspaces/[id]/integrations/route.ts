@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at"
     )
     .eq("id", workspaceId)
     .single();
@@ -81,6 +81,15 @@ export async function GET(
     meta_page_name: workspace.meta_page_name,
     meta_instagram_id: workspace.meta_instagram_id,
     meta_webhook_verify_token: workspace.meta_webhook_verify_token,
+
+    // Klaviyo
+    klaviyo_connected: !!workspace.klaviyo_api_key_encrypted,
+    klaviyo_api_key_hint: workspace.klaviyo_api_key_encrypted
+      ? `pk_...${decrypt(workspace.klaviyo_api_key_encrypted).slice(-4)}`
+      : null,
+    klaviyo_public_key: workspace.klaviyo_public_key,
+    klaviyo_last_sync_at: workspace.klaviyo_last_sync_at,
+    klaviyo_review_count: null, // Populated by caller if needed
   });
 }
 
@@ -206,6 +215,19 @@ export async function PATCH(
       updates.meta_webhook_verify_token = null;
       updates.meta_page_name = null;
       updates.meta_oauth_state = null;
+    }
+
+    // Klaviyo
+    if ("klaviyo_api_key" in body) {
+      if (body.klaviyo_api_key) {
+        updates.klaviyo_api_key_encrypted = encrypt(body.klaviyo_api_key);
+      } else {
+        updates.klaviyo_api_key_encrypted = null;
+      }
+    }
+
+    if ("klaviyo_public_key" in body) {
+      updates.klaviyo_public_key = body.klaviyo_public_key || null;
     }
 
     // VIP threshold

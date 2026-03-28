@@ -57,12 +57,29 @@ export const journeySessionCompleted = inngest.createFunction(
 
       // Execute action based on outcome type
       if (outcome === "cancelled") {
-        // Cancel subscription
+        // Cancel subscription via Appstle API
         if (session.subscription_id) {
-          await admin
+          const { data: subData } = await admin
             .from("subscriptions")
-            .update({ status: "cancelled" })
-            .eq("id", session.subscription_id);
+            .select("shopify_contract_id")
+            .eq("id", session.subscription_id)
+            .single();
+
+          if (subData?.shopify_contract_id) {
+            const { appstleSubscriptionAction } = await import("@/lib/appstle");
+            await appstleSubscriptionAction(
+              workspace_id,
+              subData.shopify_contract_id,
+              "cancel",
+              `customer_request: ${reason}`,
+              "Customer via cancel journey",
+            );
+          } else {
+            await admin
+              .from("subscriptions")
+              .update({ status: "cancelled" })
+              .eq("id", session.subscription_id);
+          }
         }
         // Close ticket
         if (ticketId) {
@@ -87,13 +104,21 @@ export const journeySessionCompleted = inngest.createFunction(
             .eq("id", ticketId);
         }
       } else if (outcome.startsWith("saved_pause")) {
-        // Pause subscription
+        // Pause subscription via Appstle API
         const weeks = outcomeConfig?.action?.params?.weeks || 8;
         if (session.subscription_id) {
-          await admin
+          const { data: subData } = await admin
             .from("subscriptions")
-            .update({ status: "paused" })
-            .eq("id", session.subscription_id);
+            .select("shopify_contract_id")
+            .eq("id", session.subscription_id)
+            .single();
+
+          if (subData?.shopify_contract_id) {
+            const { appstleSubscriptionAction } = await import("@/lib/appstle");
+            await appstleSubscriptionAction(workspace_id, subData.shopify_contract_id, "pause");
+          } else {
+            await admin.from("subscriptions").update({ status: "paused" }).eq("id", session.subscription_id);
+          }
         }
         if (ticketId) {
           await admin.from("ticket_messages").insert({
@@ -124,6 +149,19 @@ export const journeySessionCompleted = inngest.createFunction(
             .eq("id", ticketId);
         }
       } else if (outcome === "saved_skip") {
+        // Skip next order via Appstle API
+        if (session.subscription_id) {
+          const { data: subData } = await admin
+            .from("subscriptions")
+            .select("shopify_contract_id")
+            .eq("id", session.subscription_id)
+            .single();
+
+          if (subData?.shopify_contract_id) {
+            const { appstleSkipNextOrder } = await import("@/lib/appstle");
+            await appstleSkipNextOrder(workspace_id, subData.shopify_contract_id);
+          }
+        }
         if (ticketId) {
           await admin.from("ticket_messages").insert({
             ticket_id: ticketId,
@@ -154,7 +192,18 @@ export const journeySessionCompleted = inngest.createFunction(
       }
     });
 
-    // Step 3: Mark action taken (idempotency)
+    // Step 3: Apply outcome tags
+    await step.run("apply-tags", async () => {
+      if (!session.ticket_id) return;
+      const { addTicketTag } = await import("@/lib/ticket-tags");
+      if (outcome === "cancelled") {
+        await addTicketTag(session.ticket_id, "jo:negative");
+      } else if (outcome.startsWith("saved_")) {
+        await addTicketTag(session.ticket_id, "jo:positive");
+      }
+    });
+
+    // Step 4: Mark action taken (idempotency)
     await step.run("mark-action-taken", async () => {
       const admin = createAdminClient();
       await admin
@@ -163,7 +212,7 @@ export const journeySessionCompleted = inngest.createFunction(
         .eq("id", session_id);
     });
 
-    // Step 4: Update retention score
+    // Step 5: Update retention score
     await step.run("update-retention", async () => {
       if (!session.customer_id) return;
       const admin = createAdminClient();
