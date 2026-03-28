@@ -347,13 +347,65 @@ function DetailPanel({
   const [subsLoading, setSubsLoading] = useState(true);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
 
+  // Account linking state
+  const [linkedProfiles, setLinkedProfiles] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; retention_score: number | null }[]>([]);
+  const [suggestions, setSuggestions] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; phone: string | null; match_reason: string }[]>([]);
+  const [linksLoading, setLinksLoading] = useState(true);
+  const [linkingId, setLinkingId] = useState<string | null>(null);
+
   useEffect(() => {
+    setSubsLoading(true);
+    setLinksLoading(true);
+    fetch(`/api/chargebacks/${cb.id}/subscriptions`)
+      .then((r) => r.json())
+      .then((d) => setSubs(d.subscriptions || []))
+      .finally(() => setSubsLoading(false));
+
+    // Load linked profiles + suggestions
+    if (cb.customer_id) {
+      Promise.all([
+        fetch(`/api/customers/${cb.customer_id}/links`).then((r) => r.json()),
+        fetch(`/api/customers/${cb.customer_id}/suggestions`).then((r) => r.json()),
+      ]).then(([linksData, suggestionsData]) => {
+        setLinkedProfiles(linksData.linked || []);
+        setSuggestions(suggestionsData.suggestions || []);
+      }).finally(() => setLinksLoading(false));
+    } else {
+      setLinksLoading(false);
+    }
+  }, [cb.id, cb.customer_id]);
+
+  const refreshSubs = () => {
     setSubsLoading(true);
     fetch(`/api/chargebacks/${cb.id}/subscriptions`)
       .then((r) => r.json())
       .then((d) => setSubs(d.subscriptions || []))
       .finally(() => setSubsLoading(false));
-  }, [cb.id]);
+  };
+
+  const handleLink = async (targetId: string) => {
+    if (!cb.customer_id) return;
+    setLinkingId(targetId);
+    try {
+      const res = await fetch(`/api/customers/${cb.customer_id}/links`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ link_to: targetId }),
+      });
+      if (res.ok) {
+        // Move from suggestions to linked
+        const linked = suggestions.find((s) => s.id === targetId);
+        if (linked) {
+          setLinkedProfiles((prev) => [...prev, { id: linked.id, email: linked.email, first_name: linked.first_name, last_name: linked.last_name, retention_score: null }]);
+          setSuggestions((prev) => prev.filter((s) => s.id !== targetId));
+        }
+        // Refresh subscriptions — newly linked accounts may have active subs
+        refreshSubs();
+      }
+    } finally {
+      setLinkingId(null);
+    }
+  };
 
   const handleCancelSub = async (subId: string) => {
     if (!confirm("Cancel this subscription? This will stop all future billing via Appstle.")) return;
@@ -485,6 +537,72 @@ function DetailPanel({
             </div>
           )}
         </div>
+
+        {/* Account Linking */}
+        {cb.customer_id && (
+          <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+            <p className="text-xs font-medium text-zinc-500">Linked Accounts</p>
+            {linksLoading ? (
+              <div className="mt-2 flex items-center gap-2">
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600" />
+                <span className="text-xs text-zinc-400">Loading...</span>
+              </div>
+            ) : (
+              <div className="mt-2 space-y-2">
+                {/* Already linked */}
+                {linkedProfiles.map((lp) => (
+                  <div key={lp.id} className="flex items-center gap-2 rounded-md border border-emerald-100 bg-emerald-50/50 px-3 py-2 dark:border-emerald-900/30 dark:bg-emerald-900/10">
+                    <svg className="h-4 w-4 shrink-0 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" />
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" />
+                    </svg>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm text-zinc-900 dark:text-zinc-100">
+                        {`${lp.first_name || ""} ${lp.last_name || ""}`.trim() || lp.email}
+                      </p>
+                      <p className="truncate text-xs text-zinc-500">{lp.email}</p>
+                    </div>
+                    <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400">
+                      linked
+                    </span>
+                  </div>
+                ))}
+
+                {/* Suggestions */}
+                {suggestions.length > 0 && (
+                  <>
+                    {linkedProfiles.length > 0 && <div className="border-t border-zinc-100 dark:border-zinc-800" />}
+                    <p className="text-[11px] font-medium text-zinc-400">Suggested matches</p>
+                    {suggestions.map((s) => (
+                      <div key={s.id} className="flex items-center gap-2 rounded-md border border-zinc-100 bg-zinc-50 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-800/50">
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm text-zinc-900 dark:text-zinc-100">
+                            {`${s.first_name || ""} ${s.last_name || ""}`.trim() || s.email}
+                          </p>
+                          <p className="truncate text-xs text-zinc-500">{s.email}</p>
+                          <span className="rounded bg-amber-100 px-1 py-0.5 text-[10px] text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
+                            {s.match_reason}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => handleLink(s.id)}
+                          disabled={linkingId === s.id}
+                          className="shrink-0 rounded-md border border-indigo-200 bg-white px-2.5 py-1 text-xs font-medium text-indigo-600 hover:bg-indigo-50 disabled:opacity-50 dark:border-indigo-900 dark:bg-zinc-900 dark:text-indigo-400 dark:hover:bg-indigo-900/20"
+                        >
+                          {linkingId === s.id ? "Linking..." : "Link"}
+                        </button>
+                      </div>
+                    ))}
+                  </>
+                )}
+
+                {linkedProfiles.length === 0 && suggestions.length === 0 && (
+                  <p className="text-sm text-zinc-400">No linked accounts or suggestions found</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Auto action */}
         {action && (
