@@ -228,8 +228,9 @@ export async function generateOpenEndedResponse(
     .map(r => `- ${r.name}: ${r.description || r.type}`)
     .join("\n");
 
-  // Fetch reviews
-  const reviews = await getReviewsForProducts(workspaceId, []);
+  // Fetch reviews for the customer's subscription products
+  const productIds = context.products || [];
+  const reviews = await getReviewsForProducts(workspaceId, productIds);
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return "I'm sorry, I'm having trouble right now. Let me connect you with a team member who can help.";

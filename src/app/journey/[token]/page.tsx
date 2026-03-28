@@ -640,8 +640,8 @@ function CancelJourney({
     setChatHistory(prev => [...prev, { role: "assistant", content: data.response }]);
     setChatSending(false);
 
-    if (data.ai_accepted_cancel) {
-      // AI accepted — show cancel confirmation
+    if (data.ai_accepted_cancel || data.turn_count >= data.max_turns) {
+      // AI accepted or max turns reached — show cancel confirmation
       setTimeout(() => setPhase("confirm_cancel"), 2000);
     }
   };

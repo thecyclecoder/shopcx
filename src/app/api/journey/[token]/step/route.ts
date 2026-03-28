@@ -155,12 +155,11 @@ export async function POST(
       // Email discount responses handled by the multi-step mini-site completion endpoint
     }
 
-    // Update session
+    // Update session (keep in_progress, not completed — completion happens via /complete endpoint)
     await admin.from("journey_sessions")
       .update({
         responses: { ...(session.responses as Record<string, unknown>), [stepKey]: { value: responseValue, label: responseLabel || responseValue } },
         current_step: session.current_step + 1,
-        status: "completed",
       })
       .eq("id", session.id);
 

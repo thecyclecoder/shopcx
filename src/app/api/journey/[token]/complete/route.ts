@@ -66,13 +66,22 @@ export async function POST(
 
       // Record remedy outcome (cancelled = no remedy accepted)
       if (session.customer_id) {
+        // Get LTV + sub age for analytics
+        const { data: custOrders } = await admin.from("orders").select("total_price_cents").eq("customer_id", session.customer_id);
+        const customerLtv = custOrders?.reduce((s, o) => s + (o.total_price_cents || 0), 0) || 0;
+        const { data: subData } = selectedSub ? await admin.from("subscriptions").select("id, created_at").eq("shopify_contract_id", selectedSub.contractId).eq("workspace_id", wsId).maybeSingle() : { data: null };
+        const subAgeDays = subData?.created_at ? Math.floor((Date.now() - new Date(subData.created_at).getTime()) / 86400000) : 0;
+
         await admin.from("remedy_outcomes").insert({
           workspace_id: wsId,
           customer_id: session.customer_id,
+          subscription_id: subData?.id || null,
           cancel_reason: cancelReason,
           remedy_type: "none",
           accepted: false,
           outcome: "cancelled",
+          customer_ltv_cents: customerLtv,
+          subscription_age_days: subAgeDays,
           first_renewal: isFirstRenewal,
         });
       }
@@ -89,12 +98,17 @@ export async function POST(
         }).eq("id", session.ticket_id);
       }
     } else if (outcome?.startsWith("saved_")) {
-      // Customer accepted a remedy
+      // Customer accepted a remedy — look up type from DB
       const remedyId = responses?.remedy_selection?.value;
-      const remedyAction = responses?.remedy_action;
 
-      if (selectedSub && remedyAction) {
-        const actionType = remedyAction.value;
+      // Get the actual remedy type from the remedies table
+      let actionType = responses?.remedy_action?.value || "unknown";
+      if (remedyId) {
+        const { data: remedyRow } = await admin.from("remedies").select("type").eq("id", remedyId).maybeSingle();
+        if (remedyRow?.type) actionType = remedyRow.type;
+      }
+
+      if (selectedSub && actionType !== "unknown") {
         const { appstleSubscriptionAction, appstleSkipNextOrder, appstleUpdateBillingInterval } = await import("@/lib/appstle");
 
         if (actionType === "pause") {
