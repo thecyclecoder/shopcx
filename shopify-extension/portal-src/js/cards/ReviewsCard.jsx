@@ -87,10 +87,10 @@ export default function ReviewsCard({ productIds }) {
       </div>
       <div class={'sp-reviews__inner ' + fade}>
         <div class="sp-reviews__stars" aria-label="5 out of 5 stars">
-          {'\u2605 \u2605 \u2605 \u2605 \u2605'}
+          {'\u2605\u2605\u2605\u2605\u2605'}
         </div>
         <div class="sp-reviews__title">
-          <span class="sp-reviews__quoteiconwrap" aria-hidden="true">{'\u201C\u201C'}</span>
+          <span class="sp-reviews__quoteiconwrap" aria-hidden="true">{'\u201C'}</span>
           <span class="sp-reviews__titletext">{headline}</span>
         </div>
         {showBody && bodyText && (

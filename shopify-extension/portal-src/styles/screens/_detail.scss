@@ -722,8 +722,11 @@
 .sp-reviews__stars {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 1px;
   margin-bottom: 10px;
+  color: #f59e0b;
+  font-size: 18px;
+  letter-spacing: 2px;
 }
 
 .sp-reviews__star {
@@ -746,13 +749,16 @@
 
 .sp-reviews__quoteiconwrap {
   flex: 0 0 auto;
-  margin-top: 2px;
+  font-size: 24px;
+  line-height: 1;
+  color: #d1d5db;
+  font-weight: 700;
 }
 
 .sp-reviews__quoteicon {
   width: 22px;
   height: 22px;
-  fill: #e7e7e7; /* subtle */
+  fill: #e7e7e7;
 }
 
 .sp-reviews__titletext {
