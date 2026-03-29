@@ -213,6 +213,18 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - **Tags**: `dunning:active`, `dunning:recovered`, `dunning:skipped`, `dunning:paused`
 - **Requires**: Appstle built-in retries and skip-after-X-failures turned OFF
 
+### Phase 6: Subscriptions Page ✅
+- **List view** (`/dashboard/subscriptions`): Sortable table with status/recovery/payment filters, search, pagination (25/page)
+- **Detail view** (`/dashboard/subscriptions/[id]`): Full subscription info, items, recovery timeline, order history, activity log
+- **Actions card**: Pause, resume, cancel (with reason), skip next order, bill now, change frequency, change next date
+- **Item management**: Add/remove/replace/quantity via Shopify subscription draft workflow (subscriptionContractUpdate → draftLineAdd/Remove/Update → draftCommit)
+- **Coupon management**: Apply/remove coupons via Appstle API
+- **Recovery integration**: Amber "In Recovery" / Red "Payment Failed" / Green "Recovered" badges on list + detail + customer sidebar
+- **Customer sidebar**: Subscription cards clickable → navigate to detail page, recovery badges on failed payment subscriptions
+- **Sidebar nav**: "Subscriptions" between Tickets and Customers with refresh icon
+- **API endpoints**: List, detail+actions, items CRUD, coupon, bill-now, payment-update
+- **Action labels consistent**: Pause subscription, Resume subscription, Cancel subscription, Skip next order, Change delivery frequency, Change next order date, Apply coupon, Process payment now
+
 ### Dashboard & Settings ✅
 - Dashboard overview: real-time stats (open/pending tickets, customers, avg retention, AI resolution rate, tickets today, KB articles, active macros)
 - Settings cards: Rules, AI Agent, Macros, Workflows, Smart Patterns, Fraud Detection, Dunning, Ticket Views, Tags, Team, Import, Integrations, Knowledge Base, Journeys, Chargebacks, Coupons
@@ -270,6 +282,9 @@ For replies (ai/reply-received): route → patterns (deferred) → journey → w
 - `src/lib/first-touch.ts` — First outbound touch tagging (touched + ft:source)
 - `src/lib/ticket-tags.ts` — Idempotent ticket tag helper
 - `src/lib/shopify-marketing.ts` — Subscribe + unsubscribe email/SMS marketing via Shopify GraphQL
+- `src/lib/shopify-subscriptions.ts` — Shopify subscription draft workflow: add/remove/update line items, change next billing date
+- `src/app/dashboard/subscriptions/page.tsx` — Subscription list view with filters, pagination, recovery badges
+- `src/app/dashboard/subscriptions/[id]/page.tsx` — Subscription detail with actions, items, recovery, orders, activity
 - `src/lib/fraud-detector.ts` — Fraud rules engine (shared_address, high_velocity, address_distance, name_mismatch)
 - `src/lib/shopify-order-tags.ts` — Shopify GraphQL tagsAdd/tagsRemove for order hold
 - `src/lib/geo-distance.ts` — Haversine distance + US zip code lookup via zipcodes package

@@ -646,9 +646,13 @@ export default function CustomerDetailPage() {
           </h2>
           <div className="mt-3 space-y-2">
             {subscriptions.map((sub) => (
-              <div key={sub.id} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+              <div key={sub.id}
+                onClick={() => router.push(`/dashboard/subscriptions/${sub.id}`)}
+                className={`cursor-pointer rounded-lg border p-3 transition-colors hover:border-zinc-300 dark:hover:border-zinc-700 ${
+                  sub.last_payment_status === "failed" ? "border-amber-200 bg-amber-50/30 dark:border-amber-800/50 dark:bg-amber-950/20" : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+                }`}>
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${
                       sub.status === "active" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
                       : sub.status === "paused" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
@@ -660,6 +664,9 @@ export default function CustomerDetailPage() {
                       <span className="text-sm text-zinc-500">
                         Every {sub.billing_interval_count} {sub.billing_interval}{sub.billing_interval_count > 1 ? "s" : ""}
                       </span>
+                    )}
+                    {sub.last_payment_status === "failed" && (
+                      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">In Recovery</span>
                     )}
                   </div>
                   {sub.last_payment_status && (
