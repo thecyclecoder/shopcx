@@ -1,4 +1,6 @@
 // cards/ReviewsCard.jsx — Rotating review carousel, round-robin across products
+// Priority: featured reviews first per product, then 5-star fallback
+// Tracks shown reviews so repeats show different ones on loop
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { requestJson } from '../core/api.js';
 import { shortId } from '../core/utils.js';
@@ -15,31 +17,43 @@ function truncate(str, max) {
 }
 
 /**
- * Build a round-robin sequence: product A review 1, product B review 1,
- * product C review 1, product A review 2, product B review 2, etc.
+ * Build round-robin sequence across products.
+ * For each product: featured reviews first, then 5-star, then rest.
+ * Sequence: product A featured → product B featured → product C featured →
+ *           product A 5-star → product B 5-star → etc.
  */
-function buildRoundRobin(byProductId) {
-  const productIds = Object.keys(byProductId).filter(pid => {
+function buildSequence(byProductId, requestedIds) {
+  // Use requested order so sequence follows subscription item order
+  const productIds = requestedIds.filter(pid => {
     const entry = byProductId[pid];
     return entry?.ok && Array.isArray(entry.reviews) && entry.reviews.length > 0;
   });
   if (!productIds.length) return [];
 
-  const sequence = [];
-  const maxPerProduct = Math.max(...productIds.map(pid => byProductId[pid].reviews.length));
+  // Sort each product's reviews: featured first, then by rating desc
+  const sorted = {};
+  for (const pid of productIds) {
+    const reviews = [...byProductId[pid].reviews].filter(r => r.summary || r.title || r.body);
+    reviews.sort((a, b) => {
+      if (a.featured && !b.featured) return -1;
+      if (!a.featured && b.featured) return 1;
+      return (b.rating || 0) - (a.rating || 0);
+    });
+    sorted[pid] = reviews;
+  }
 
-  for (let round = 0; round < maxPerProduct; round++) {
+  // Round-robin: for each round, pick the next review from each product
+  const sequence = [];
+  const maxRounds = Math.max(...productIds.map(pid => sorted[pid].length));
+
+  for (let round = 0; round < maxRounds; round++) {
     for (const pid of productIds) {
-      const reviews = byProductId[pid].reviews;
-      if (round < reviews.length) {
-        const r = reviews[round];
-        // Only include reviews with actual content
-        if (r.summary || r.title || r.body) {
-          sequence.push(r);
-        }
+      if (round < sorted[pid].length) {
+        sequence.push(sorted[pid][round]);
       }
     }
   }
+
   return sequence;
 }
 
@@ -57,7 +71,7 @@ export default function ReviewsCard({ productIds }) {
     requestJson('reviews', { productIds: ids.join(',') })
       .then(resp => {
         if (!resp?.ok) return;
-        const sequence = buildRoundRobin(resp.by_product_id || {});
+        const sequence = buildSequence(resp.by_product_id || {}, ids);
         setReviews(sequence);
       })
       .catch(() => {});
@@ -89,15 +103,10 @@ export default function ReviewsCard({ productIds }) {
   if (!reviews.length) return null;
 
   const r = reviews[idx % reviews.length] || {};
-
-  // Headline: AI summary (always generated) → smart_quote → title → first sentence of body
   const headline = r.summary || r.title || (r.body ? r.body.split(/[.!?]/)[0] + '.' : 'Loved it');
-
-  // Body: full review text truncated. Only show if different from headline.
   const bodyRaw = r.body || '';
   const showBody = bodyRaw && bodyRaw !== headline;
   const { text: bodyText, cut } = showBody ? truncate(bodyRaw, TRUNCATE) : { text: '', cut: false };
-
   const author = r.author || 'Verified Customer';
 
   return (
