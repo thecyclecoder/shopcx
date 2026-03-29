@@ -3,7 +3,7 @@
  *
  * Klaviyo Reviews API fields (from actual API docs):
  * - review_type: "review" | "question" | "rating" | "store"
- * - status.value: "published" | "pending" | "featured" | "rejected"
+ * - status.value: "published" | "unpublished" | "pending" | "featured" | "rejected"
  * - product.external_id: Shopify product ID
  * - smart_quote: AI-extracted excerpt
  * - email: reviewer email (server API only)

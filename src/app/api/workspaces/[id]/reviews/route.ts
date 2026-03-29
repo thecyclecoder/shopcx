@@ -53,12 +53,14 @@ export async function GET(
   const [
     { count: totalCount },
     { count: publishedCount },
+    { count: unpublishedCount },
     { count: pendingCount },
     { count: featuredCount },
     { count: rejectedCount },
   ] = await Promise.all([
     admin.from("product_reviews").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId),
     admin.from("product_reviews").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "published"),
+    admin.from("product_reviews").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "unpublished"),
     admin.from("product_reviews").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "pending"),
     admin.from("product_reviews").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "featured"),
     admin.from("product_reviews").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "rejected"),
@@ -70,6 +72,7 @@ export async function GET(
     stats: {
       total: totalCount || 0,
       published: publishedCount || 0,
+      unpublished: unpublishedCount || 0,
       pending: pendingCount || 0,
       featured: featuredCount || 0,
       rejected: rejectedCount || 0,

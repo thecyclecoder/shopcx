@@ -29,6 +29,7 @@ interface Review {
 interface Stats {
   total: number;
   published: number;
+  unpublished: number;
   pending: number;
   featured: number;
   rejected: number;
@@ -41,6 +42,7 @@ interface Product {
 
 const STATUS_BADGES: Record<string, { label: string; color: string }> = {
   published: { label: "Published", color: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" },
+  unpublished: { label: "Unpublished", color: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400" },
   pending: { label: "Pending", color: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400" },
   featured: { label: "Featured", color: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400" },
   rejected: { label: "Rejected", color: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" },
@@ -71,7 +73,7 @@ export default function ReviewsPage() {
   const canEdit = ["owner", "admin"].includes(workspace.role);
 
   const [reviews, setReviews] = useState<Review[]>([]);
-  const [stats, setStats] = useState<Stats>({ total: 0, published: 0, pending: 0, featured: 0, rejected: 0 });
+  const [stats, setStats] = useState<Stats>({ total: 0, published: 0, unpublished: 0, pending: 0, featured: 0, rejected: 0 });
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -179,10 +181,11 @@ export default function ReviewsPage() {
       )}
 
       {/* Stats */}
-      <div className="mb-6 grid grid-cols-5 gap-3">
+      <div className="mb-6 grid grid-cols-3 gap-3 sm:grid-cols-6">
         {[
           { label: "Total", value: stats.total, color: "text-zinc-900 dark:text-zinc-100" },
           { label: "Published", value: stats.published, color: "text-green-600" },
+          { label: "Unpublished", value: stats.unpublished, color: "text-zinc-500" },
           { label: "Pending", value: stats.pending, color: "text-yellow-600" },
           { label: "Featured", value: stats.featured, color: "text-indigo-600" },
           { label: "Rejected", value: stats.rejected, color: "text-red-600" },

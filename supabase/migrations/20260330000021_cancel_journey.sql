@@ -35,37 +35,49 @@ CREATE TABLE public.remedy_outcomes (
   outcome TEXT NOT NULL CHECK (outcome IN ('saved', 'cancelled', 'escalated')),
   customer_ltv_cents INTEGER,
   subscription_age_days INTEGER,
+  first_renewal BOOLEAN DEFAULT false,
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE INDEX idx_remedy_outcomes_reason ON public.remedy_outcomes(workspace_id, cancel_reason, remedy_type);
--- Track first-renewal cancellers separately for metrics
-ALTER TABLE public.remedy_outcomes ADD COLUMN IF NOT EXISTS first_renewal BOOLEAN DEFAULT false;
 
 ALTER TABLE public.remedy_outcomes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Users can view remedy outcomes in workspace" ON public.remedy_outcomes FOR SELECT TO authenticated
   USING (workspace_id IN (SELECT workspace_id FROM public.workspace_members WHERE user_id = auth.uid()));
 CREATE POLICY "Service role full access on remedy_outcomes" ON public.remedy_outcomes FOR ALL TO service_role USING (true) WITH CHECK (true);
 
--- Product reviews table
+-- Product reviews table (Klaviyo-synced)
+-- status values match Klaviyo exactly: published, unpublished, pending, featured, rejected
+-- review_type values match Klaviyo exactly: review, question, rating, store
 CREATE TABLE public.product_reviews (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID NOT NULL REFERENCES public.workspaces(id) ON DELETE CASCADE,
   shopify_product_id TEXT NOT NULL,
+  product_name TEXT,
   reviewer_name TEXT,
+  email TEXT,
   rating INTEGER CHECK (rating BETWEEN 1 AND 5),
   title TEXT,
   body TEXT,
   summary TEXT,
+  smart_quote TEXT,
+  review_type TEXT NOT NULL DEFAULT 'review' CHECK (review_type IN ('review', 'question', 'rating', 'store')),
+  status TEXT NOT NULL DEFAULT 'published' CHECK (status IN ('published', 'unpublished', 'pending', 'featured', 'rejected')),
   verified_purchase BOOLEAN DEFAULT false,
   featured BOOLEAN DEFAULT false,
+  images TEXT[] DEFAULT '{}',
+  customer_id UUID REFERENCES public.customers(id),
   klaviyo_review_id TEXT,
   published_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT now(),
   UNIQUE(workspace_id, klaviyo_review_id)
 );
 
 CREATE INDEX idx_reviews_product ON public.product_reviews(workspace_id, shopify_product_id, featured, rating DESC);
+CREATE INDEX idx_reviews_status ON public.product_reviews(workspace_id, status);
+CREATE INDEX idx_reviews_customer ON public.product_reviews(workspace_id, customer_id);
+CREATE INDEX idx_reviews_email ON public.product_reviews(workspace_id, email);
 
 ALTER TABLE public.product_reviews ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Users can view reviews in workspace" ON public.product_reviews FOR SELECT TO authenticated
