@@ -63,7 +63,7 @@ function ResumeCard({ contract, onUpdate, showToast }) {
   );
 }
 
-function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove }) {
+function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing }) {
   const [open, setOpen] = useState(false);
   return (
     <div class="sp-line-group">
@@ -96,8 +96,9 @@ function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove }) {
             <div class="sp-disclosure__action-sub sp-muted">Update how many you receive.</div>
           </button>
           {canRemove && (
-            <button class="sp-disclosure__action sp-disclosure__action--danger" onClick={onRemove}>
-              <div class="sp-disclosure__action-title">Remove</div>
+            <button class="sp-disclosure__action sp-disclosure__action--danger" disabled={removing}
+              onClick={onRemove}>
+              <div class="sp-disclosure__action-title">{removing ? 'Removing\u2026' : 'Remove'}</div>
               <div class="sp-disclosure__action-sub sp-muted">Remove this item.</div>
             </button>
           )}
@@ -109,6 +110,7 @@ function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove }) {
 
 function ItemsCard({ contract, lines, shipLine, onUpdate, showToast, config }) {
   const [modal, setModal] = useState(null);
+  const [removingLine, setRemovingLine] = useState(null); // sku of line being removed
 
   const total = lines.reduce((sum, ln) => {
     const p = getLinePrice(ln);
@@ -117,6 +119,23 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, showToast, config }) {
 
   const totalRealQty = lines.reduce((sum, ln) => sum + (ln.quantity || 1), 0);
   const canRemove = lines.length > 1;
+
+  async function doRemove(ln) {
+    setRemovingLine(ln.sku || ln.variantId);
+    try {
+      await postJson('replaceVariants', {
+        contractId: contract.id,
+        oldVariants: [{ variantId: ln.variantId }],
+        allowRemoveWithoutAdd: true,
+      });
+      showToast('Item removed.', 'success');
+      clearCaches();
+      onUpdate();
+    } catch (e) {
+      showToast(e?.message || 'Could not remove item.', 'error');
+    }
+    setRemovingLine(null);
+  }
 
   return (
     <div class="sp-card sp-detail__card">
@@ -127,9 +146,10 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, showToast, config }) {
       <div class="sp-detail__lines">
         {lines.map((ln, i) => (
           <LineItemDisclosure key={i} ln={ln} canRemove={canRemove}
+            removing={removingLine === (ln.sku || ln.variantId)}
             onSwap={() => setModal({ type: 'addSwap', line: ln, mode: 'swap' })}
             onQty={() => setModal({ type: 'quantity', line: ln })}
-            onRemove={() => setModal({ type: 'remove', line: ln })}
+            onRemove={() => doRemove(ln)}
           />
         ))}
       </div>
@@ -149,11 +169,6 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, showToast, config }) {
         <AddSwapModal mode={modal.mode} contract={contract} line={modal.line}
           catalog={config.catalog} totalRealQty={totalRealQty}
           onClose={() => setModal(null)} onDone={onUpdate} />
-      )}
-      {modal?.type === 'remove' && (
-        <RemoveModal contract={contract} line={modal.line}
-          onClose={() => setModal(null)} onDone={onUpdate}
-          onSwapInstead={() => setModal({ type: 'addSwap', line: modal.line, mode: 'swap' })} />
       )}
       {modal?.type === 'quantity' && (
         <QuantityModal contract={contract} line={modal.line}

@@ -97,6 +97,24 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     ? `https://${ws.shopify_myshopify_domain}/account`
     : null;
 
+  // Add customer's default address as the delivery address
+  const defaultAddr = (customer as Record<string, unknown>)?.default_address as Record<string, unknown> | null;
+  if (defaultAddr && !contract.deliveryMethod) {
+    contract.deliveryMethod = {
+      address: {
+        firstName: defaultAddr.firstName || defaultAddr.first_name || "",
+        lastName: defaultAddr.lastName || defaultAddr.last_name || "",
+        address1: defaultAddr.address1 || "",
+        address2: defaultAddr.address2 || "",
+        city: defaultAddr.city || "",
+        province: defaultAddr.province || "",
+        provinceCode: defaultAddr.provinceCode || "",
+        zip: defaultAddr.zip || "",
+        country: defaultAddr.country || "",
+      },
+    };
+  }
+
   return jsonOk({
     ok: true,
     shop: auth.shop,

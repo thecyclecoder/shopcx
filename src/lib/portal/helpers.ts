@@ -34,7 +34,7 @@ export async function findCustomer(workspaceId: string, shopifyCustomerId: strin
   if (!workspaceId || !shopifyCustomerId) return null;
   const admin = createAdminClient();
   const { data } = await admin.from("customers")
-    .select("id, email, first_name, last_name, shopify_customer_id")
+    .select("id, email, first_name, last_name, shopify_customer_id, default_address")
     .eq("workspace_id", workspaceId)
     .eq("shopify_customer_id", shopifyCustomerId)
     .single();

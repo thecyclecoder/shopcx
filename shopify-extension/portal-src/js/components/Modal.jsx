@@ -1,4 +1,5 @@
 // components/Modal.jsx — Reusable modal overlay
+// Uses existing .sp-modal CSS class names from _modal.scss
 import { useEffect, useCallback } from 'preact/hooks';
 
 export default function Modal({ title, onClose, children, footer }) {
@@ -8,24 +9,25 @@ export default function Modal({ title, onClose, children, footer }) {
 
   useEffect(() => {
     document.addEventListener('keydown', onKeyDown);
-    document.body.style.overflow = 'hidden';
+    document.body.classList.add('sp-modal-open');
     return () => {
       document.removeEventListener('keydown', onKeyDown);
-      document.body.style.overflow = '';
+      document.body.classList.remove('sp-modal-open');
     };
   }, [onKeyDown]);
 
   return (
-    <div class="sp-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose?.(); }}>
-      <div class="sp-modal-card" role="dialog" aria-modal="true">
+    <div class="sp-modal" role="dialog" aria-modal="true"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose?.(); }}>
+      <div class="sp-modal__card">
         {title && (
-          <div class="sp-modal-title">
+          <div class="sp-modal__title">
             <span>{title}</span>
-            <button type="button" class="sp-modal-close" onClick={onClose} aria-label="Close">{'\u2715'}</button>
+            <button type="button" class="sp-modal__close" onClick={onClose} aria-label="Close">{'\u2715'}</button>
           </div>
         )}
-        <div class="sp-modal-body">{children}</div>
-        {footer && <div class="sp-modal-footer">{footer}</div>}
+        <div class="sp-modal__body">{children}</div>
+        {footer && <div class="sp-modal__footer">{footer}</div>}
       </div>
     </div>
   );
