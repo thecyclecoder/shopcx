@@ -1,4 +1,4 @@
-// cards/ReviewsCard.jsx — Rotating review carousel for detail page
+// cards/ReviewsCard.jsx — Rotating review carousel, round-robin across products
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { requestJson } from '../core/api.js';
 import { shortId } from '../core/utils.js';
@@ -12,6 +12,35 @@ function truncate(str, max) {
   const sp = cut.lastIndexOf(' ');
   if (sp > max * 0.6) cut = cut.slice(0, sp);
   return { text: cut.replace(/\s+$/, '') + '\u2026', cut: true };
+}
+
+/**
+ * Build a round-robin sequence: product A review 1, product B review 1,
+ * product C review 1, product A review 2, product B review 2, etc.
+ */
+function buildRoundRobin(byProductId) {
+  const productIds = Object.keys(byProductId).filter(pid => {
+    const entry = byProductId[pid];
+    return entry?.ok && Array.isArray(entry.reviews) && entry.reviews.length > 0;
+  });
+  if (!productIds.length) return [];
+
+  const sequence = [];
+  const maxPerProduct = Math.max(...productIds.map(pid => byProductId[pid].reviews.length));
+
+  for (let round = 0; round < maxPerProduct; round++) {
+    for (const pid of productIds) {
+      const reviews = byProductId[pid].reviews;
+      if (round < reviews.length) {
+        const r = reviews[round];
+        // Only include reviews with actual content
+        if (r.summary || r.title || r.body) {
+          sequence.push(r);
+        }
+      }
+    }
+  }
+  return sequence;
 }
 
 export default function ReviewsCard({ productIds }) {
@@ -28,16 +57,8 @@ export default function ReviewsCard({ productIds }) {
     requestJson('reviews', { productIds: ids.join(',') })
       .then(resp => {
         if (!resp?.ok) return;
-        const map = resp.by_product_id || {};
-        const all = [];
-        for (const pid of Object.keys(map)) {
-          const entry = map[pid];
-          if (entry?.ok && Array.isArray(entry.reviews)) {
-            // Only include reviews that have actual content
-            all.push(...entry.reviews.filter(r => r.title || r.summary || r.body));
-          }
-        }
-        setReviews(all);
+        const sequence = buildRoundRobin(resp.by_product_id || {});
+        setReviews(sequence);
       })
       .catch(() => {});
   }, [productIds?.join(',')]);
@@ -69,10 +90,10 @@ export default function ReviewsCard({ productIds }) {
 
   const r = reviews[idx % reviews.length] || {};
 
-  // Headline: smart_quote (AI excerpt) → title → first sentence of body
+  // Headline: AI summary (always generated) → smart_quote → title → first sentence of body
   const headline = r.summary || r.title || (r.body ? r.body.split(/[.!?]/)[0] + '.' : 'Loved it');
 
-  // Body: full review text, truncated. Only show if different from headline.
+  // Body: full review text truncated. Only show if different from headline.
   const bodyRaw = r.body || '';
   const showBody = bodyRaw && bodyRaw !== headline;
   const { text: bodyText, cut } = showBody ? truncate(bodyRaw, TRUNCATE) : { text: '', cut: false };

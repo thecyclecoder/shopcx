@@ -200,7 +200,8 @@ export async function syncReviewPage(
         smart_quote: attrs.smart_quote || null,
         images: attrs.images || [],
         product_name: attrs.product?.name || null,
-        ...(attrs.smart_quote ? { summary: attrs.smart_quote } : {}),
+        // Don't pre-fill summary from smart_quote — let AI generate all summaries
+        // smart_quote is preserved in its own column for reference
       };
 
       if (attrs.email) {
@@ -387,9 +388,10 @@ export async function generateMissingSummaries(workspaceId: string) {
     .select("id, body, reviewer_name, rating, title")
     .eq("workspace_id", workspaceId)
     .is("summary", null)
-    .gt("rating", 3)
+    .gte("rating", 4)
     .in("review_type", ["review", "store"])
-    .limit(50);
+    .not("body", "is", null)
+    .limit(100);
 
   if (!reviews?.length) return;
 
