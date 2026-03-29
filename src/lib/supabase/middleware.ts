@@ -1,7 +1,7 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula", "/coming-soon", "/api/shopify/callback", "/api/webhooks", "/api/inngest", "/csat", "/api/csat", "/help", "/api/help", "/api/portal"];
+const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula", "/coming-soon", "/api/shopify/callback", "/api/webhooks", "/api/inngest", "/csat", "/api/csat", "/help", "/api/help", "/api/portal", "/portal"];
 const WORKSPACE_SETUP_ROUTES = ["/workspace/new", "/workspace/select"];
 const ADMIN_EMAIL = "dylan@superfoodscompany.com";
 const PRIMARY_DOMAINS = ["shopcx.ai", "www.shopcx.ai", "localhost"];

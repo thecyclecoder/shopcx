@@ -1,7 +1,15 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  async rewrites() {
+    return [
+      // Shopify App Proxy target — must NOT be under /api/ to avoid 308 redirects
+      {
+        source: "/portal",
+        destination: "/api/portal",
+      },
+    ];
+  },
 };
 
 export default nextConfig;
