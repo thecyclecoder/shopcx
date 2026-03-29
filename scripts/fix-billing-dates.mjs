@@ -13,11 +13,7 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
-
-// ── Config ──
-const SUPABASE_URL = "https://urjbhjbygyxffrfkarqn.supabase.co";
-const SUPABASE_SERVICE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVyamJoamJ5Z3l4ZmZyZmthcnFuIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NDI2OTQzNSwiZXhwIjoyMDg5ODQ1NDM1fQ.38eTZ9YRfd8EDMksQs2-z6f6pEnkVQvP5KTFYge0CyE";
-const ENCRYPTION_KEY = "0c4a5b02efc1ccdce4b2cbeb941fef8931e7b9721dc256aa9954ffb10c9efda6";
+import { SUPABASE_URL, SUPABASE_SERVICE_KEY, ENCRYPTION_KEY } from "./env.mjs";
 
 const DRY_RUN = !process.argv.includes("--execute");
 
