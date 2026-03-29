@@ -174,11 +174,21 @@ export async function GET(
     }
   }
 
+  // Fetch reviews for this customer
+  const { data: reviews } = await admin
+    .from("product_reviews")
+    .select("id, rating, title, body, review_type, status, featured, product_name, published_at")
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", customerId)
+    .order("published_at", { ascending: false })
+    .limit(20);
+
   return NextResponse.json({
     customer,
     orders: orders || [],
     subscriptions: subscriptions || [],
     tickets: tickets || [],
+    reviews: reviews || [],
     linked_identities: linkedIdentities,
     group_id: link?.group_id || null,
     is_primary: isPrimary,

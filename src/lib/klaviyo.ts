@@ -266,6 +266,50 @@ export async function updateReviewStatus(
   }
 }
 
+// ── Management: change review type via Klaviyo API ──
+
+export async function updateReviewType(
+  workspaceId: string,
+  klaviyoReviewId: string,
+  reviewType: "review" | "store",
+): Promise<{ success: boolean; error?: string }> {
+  const creds = await getKlaviyoCredentials(workspaceId);
+  if (!creds) return { success: false, error: "Klaviyo not configured" };
+
+  const admin = createAdminClient();
+
+  try {
+    const res = await fetch(`${KLAVIYO_BASE}/reviews/${klaviyoReviewId}/`, {
+      method: "PATCH",
+      headers: klaviyoHeaders(creds.apiKey),
+      body: JSON.stringify({
+        data: {
+          type: "review",
+          id: klaviyoReviewId,
+          attributes: { review_type: reviewType },
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`Klaviyo review type update failed: ${res.status}`, text);
+      return { success: false, error: `Klaviyo API error: ${res.status}` };
+    }
+
+    await admin
+      .from("product_reviews")
+      .update({ review_type: reviewType })
+      .eq("workspace_id", workspaceId)
+      .eq("klaviyo_review_id", klaviyoReviewId);
+
+    return { success: true };
+  } catch (err) {
+    console.error("Klaviyo review type update error:", err);
+    return { success: false, error: String(err) };
+  }
+}
+
 // ── AI summary generation for reviews without smart_quote ──
 
 async function generateMissingSummaries(workspaceId: string) {

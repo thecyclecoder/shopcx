@@ -66,6 +66,18 @@ interface LinkedIdentity {
   is_primary: boolean;
 }
 
+interface CustomerReview {
+  id: string;
+  rating: number | null;
+  title: string | null;
+  body: string | null;
+  review_type: string;
+  status: string;
+  featured: boolean;
+  product_name: string | null;
+  published_at: string | null;
+}
+
 interface CustomerDetail {
   id: string;
   email: string;
@@ -79,6 +91,7 @@ interface CustomerDetail {
   recent_orders: RecentOrder[];
   subscriptions: CustomerSubscription[];
   linked_identities: LinkedIdentity[];
+  reviews?: CustomerReview[];
 }
 
 interface TicketDetail extends Ticket {
@@ -185,7 +198,7 @@ export default function TicketDetailPage() {
   const [sending, setSending] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"messages" | "history">("messages");
-  const [mobileSection, setMobileSection] = useState<"conversation" | "details" | "customer" | "actions">("conversation");
+  const [mobileSection, setMobileSection] = useState<"conversation" | "details" | "customer" | "reviews" | "actions">("conversation");
   const [customerEvents, setCustomerEvents] = useState<{ id: string; event_type: string; source: string; summary: string; created_at: string }[]>([]);
   const [closeWithReply, setCloseWithReply] = useState(true);
   const [editorFocused, setEditorFocused] = useState(false);
@@ -275,6 +288,16 @@ export default function TicketDetailPage() {
             if (enriched.enriched && enriched.customer) {
               setCustomer((prev) => prev ? { ...prev, ...enriched.customer } : prev);
             }
+          })
+          .catch(() => {});
+      }
+
+      // Load reviews for customer
+      if (data.customer) {
+        fetch(`/api/workspaces/${workspace.id}/reviews?customer_id=${data.customer.id}&limit=10`)
+          .then((r) => r.json())
+          .then((d) => {
+            if (d.reviews) setCustomer((prev) => prev ? { ...prev, reviews: d.reviews } : prev);
           })
           .catch(() => {});
       }
@@ -587,6 +610,7 @@ export default function TicketDetailPage() {
           <option value="conversation">Conversation</option>
           <option value="details">Ticket Details</option>
           <option value="customer">Customer</option>
+          <option value="reviews">Reviews</option>
           <option value="actions">Actions</option>
         </select>
       </div>
@@ -1744,8 +1768,8 @@ export default function TicketDetailPage() {
 
         </div>
 
-        {/* Customer card */}
-        <div className={`${mobileSection !== "customer" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
+        {/* Customer card (also visible on mobile "reviews" section since reviews are inside) */}
+        <div className={`${mobileSection !== "customer" && mobileSection !== "reviews" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
         {customer && (
           <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
             <h3 className="text-sm font-medium uppercase tracking-wider text-zinc-500">Customer</h3>
@@ -1884,6 +1908,43 @@ export default function TicketDetailPage() {
                         )}
                         {sub.next_billing_date && (
                           <p className="mt-1 text-sm text-zinc-400">Next: {formatDate(sub.next_billing_date)}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Reviews & Ratings */}
+              {customer.reviews && customer.reviews.length > 0 && (
+                <div className="pt-2">
+                  <p className="text-sm font-medium text-zinc-500">Reviews &amp; Ratings</p>
+                  <div className="mt-1 space-y-1">
+                    {customer.reviews.map((rv) => (
+                      <div key={rv.id} className="rounded bg-zinc-50 px-2 py-1.5 dark:bg-zinc-800">
+                        <div className="flex items-center gap-1.5">
+                          <div className="flex gap-0.5">
+                            {Array.from({ length: 5 }).map((_, i) => (
+                              <svg key={i} className={`h-3 w-3 ${i < (rv.rating || 0) ? "text-yellow-400" : "text-zinc-200 dark:text-zinc-700"}`} fill="currentColor" viewBox="0 0 20 20">
+                                <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                              </svg>
+                            ))}
+                          </div>
+                          {rv.featured && (
+                            <span className="rounded bg-indigo-100 px-1 py-0.5 text-[10px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">Featured</span>
+                          )}
+                          <span className="rounded bg-zinc-100 px-1 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">
+                            {rv.review_type === "store" ? "Site" : rv.review_type === "rating" ? "Rating" : "Product"}
+                          </span>
+                        </div>
+                        {rv.product_name && (
+                          <p className="mt-0.5 text-xs text-zinc-400 truncate">{rv.product_name}</p>
+                        )}
+                        {rv.title && (
+                          <p className="mt-0.5 text-sm font-medium text-zinc-700 dark:text-zinc-300 truncate">{rv.title}</p>
+                        )}
+                        {rv.body && (
+                          <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400 line-clamp-2">{rv.body}</p>
                         )}
                       </div>
                     ))}

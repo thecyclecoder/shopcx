@@ -27,6 +27,7 @@ export async function GET(
   const productId = url.searchParams.get("product_id");
   const customerId = url.searchParams.get("customer_id");
   const search = url.searchParams.get("search");
+  const featured = url.searchParams.get("featured");
   const limit = Math.min(parseInt(url.searchParams.get("limit") || "50"), 100);
   const offset = parseInt(url.searchParams.get("offset") || "0");
 
@@ -42,6 +43,7 @@ export async function GET(
   if (productId) query = query.eq("shopify_product_id", productId);
   if (customerId) query = query.eq("customer_id", customerId);
   if (search) query = query.or(`title.ilike.%${search}%,body.ilike.%${search}%,reviewer_name.ilike.%${search}%`);
+  if (featured === "true") query = query.eq("featured", true);
 
   const { data: reviews, count, error } = await query;
 

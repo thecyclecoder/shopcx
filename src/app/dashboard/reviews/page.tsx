@@ -82,6 +82,7 @@ export default function ReviewsPage() {
   const [typeFilter, setTypeFilter] = useState<string>("");
   const [productFilter, setProductFilter] = useState<string>("");
   const [search, setSearch] = useState("");
+  const [featuredOnly, setFeaturedOnly] = useState(false);
 
   // Expanded review
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -96,6 +97,7 @@ export default function ReviewsPage() {
     if (typeFilter) params.set("review_type", typeFilter);
     if (productFilter) params.set("product_id", productFilter);
     if (search) params.set("search", search);
+    if (featuredOnly) params.set("featured", "true");
 
     const res = await fetch(`/api/workspaces/${workspace.id}/reviews?${params}`);
     if (res.ok) {
@@ -104,7 +106,7 @@ export default function ReviewsPage() {
       setStats(data.stats);
     }
     setLoading(false);
-  }, [workspace.id, statusFilter, typeFilter, productFilter, search]);
+  }, [workspace.id, statusFilter, typeFilter, productFilter, search, featuredOnly]);
 
   useEffect(() => {
     fetchReviews();
@@ -136,12 +138,12 @@ export default function ReviewsPage() {
     setSyncing(false);
   };
 
-  const handleAction = async (reviewId: string, action: "publish" | "reject" | "feature" | "unfeature") => {
+  const handleAction = async (reviewId: string, action: "publish" | "reject" | "feature" | "unfeature", extraBody?: Record<string, unknown>) => {
     setActionLoading(reviewId);
     const res = await fetch(`/api/workspaces/${workspace.id}/reviews/${reviewId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, ...extraBody }),
     });
     if (res.ok) {
       await fetchReviews();
@@ -224,6 +226,16 @@ export default function ReviewsPage() {
             <option key={p.shopify_product_id} value={p.shopify_product_id}>{p.title}</option>
           ))}
         </select>
+
+        <label className="flex items-center gap-2 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+          <input
+            type="checkbox"
+            checked={featuredOnly}
+            onChange={(e) => setFeaturedOnly(e.target.checked)}
+            className="rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
+          />
+          Featured only
+        </label>
 
         <input
           type="text"
@@ -361,6 +373,28 @@ export default function ReviewsPage() {
                           >
                             Unfeature
                           </button>
+                        )}
+                        {/* Type toggle: site ↔ product review */}
+                        {(review.review_type === "store" || review.review_type === "review") && (
+                          <>
+                            <span className="mx-0.5 text-zinc-300 dark:text-zinc-600">|</span>
+                            <button
+                              onClick={async () => {
+                                setActionLoading(review.id);
+                                await fetch(`/api/workspaces/${workspace.id}/reviews/${review.id}`, {
+                                  method: "PATCH",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ review_type: review.review_type === "store" ? "review" : "store" }),
+                                });
+                                await fetchReviews();
+                                setActionLoading(null);
+                              }}
+                              disabled={actionLoading === review.id}
+                              className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-400"
+                            >
+                              {review.review_type === "store" ? "→ Product Review" : "→ Site Review"}
+                            </button>
+                          </>
                         )}
                       </div>
                     )}
