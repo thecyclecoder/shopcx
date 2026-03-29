@@ -12,33 +12,52 @@ interface DbItem {
   variant_title?: string;
 }
 
-interface ProductImageMap {
-  [productId: string]: {
-    productImage: string;
-    variantImages: Record<string, string>; // variant_title → image_url
-  };
+interface VariantInfo {
+  id: string;
+  image_url?: string;
+}
+
+interface ProductInfo {
+  productImage: string;
+  // variant_title → { id, image_url }
+  variantsByTitle: Record<string, VariantInfo>;
+  // sku → { id, image_url }
+  variantsBySku: Record<string, VariantInfo>;
+}
+
+interface ProductMap {
+  [productId: string]: ProductInfo;
 }
 
 export function transformSubscription(
   sub: Record<string, unknown>,
-  productImages: ProductImageMap = {}
+  productMap: ProductMap = {}
 ) {
   const items = Array.isArray(sub.items) ? (sub.items as DbItem[]) : [];
 
-  // Transform items → lines (the shape the frontend card expects)
   const lines = items.map(item => {
     const pid = item.product_id || "";
-    const productEntry = productImages[pid];
+    const product = productMap[pid];
 
-    // Prefer variant image, fall back to product image
-    const variantImage = productEntry?.variantImages?.[item.variant_title || ""] || "";
-    const imageUrl = variantImage || productEntry?.productImage || "";
+    // Resolve variant ID: try direct → by SKU → by variant title
+    let resolvedVariantId = item.variant_id || "";
+    if (!resolvedVariantId && item.sku && product?.variantsBySku?.[item.sku]) {
+      resolvedVariantId = product.variantsBySku[item.sku].id;
+    }
+    if (!resolvedVariantId && item.variant_title && product?.variantsByTitle?.[item.variant_title]) {
+      resolvedVariantId = product.variantsByTitle[item.variant_title].id;
+    }
+
+    // Resolve variant image: by title → by SKU → product image
+    const variantByTitle = product?.variantsByTitle?.[item.variant_title || ""];
+    const variantBySku = product?.variantsBySku?.[item.sku || ""];
+    const imageUrl = variantByTitle?.image_url || variantBySku?.image_url || product?.productImage || "";
 
     return {
       title: item.title || "Item",
       variantTitle: item.variant_title || "",
       quantity: item.quantity || 1,
-      variantId: item.variant_id || "",
+      variantId: resolvedVariantId,
       productId: pid,
       sku: item.sku || "",
       currentPrice: {
@@ -52,32 +71,19 @@ export function transformSubscription(
   });
 
   return {
-    // Identity
     id: sub.shopify_contract_id || sub.id,
     shopify_contract_id: sub.shopify_contract_id,
-
-    // Status
     status: String(sub.status || "active").toUpperCase(),
     lastPaymentStatus: String(sub.last_payment_status || "SUCCEEDED").toUpperCase(),
-
-    // Billing
     billingPolicy: {
       interval: String(sub.billing_interval || "WEEK").toUpperCase(),
       intervalCount: Number(sub.billing_interval_count) || 4,
     },
     nextBillingDate: sub.next_billing_date || null,
-
-    // Pause
     pause_resume_at: sub.pause_resume_at || null,
-
-    // Lines (transformed from items)
     lines,
-
-    // Timestamps
     createdAt: sub.created_at,
     updatedAt: sub.updated_at,
-
-    // Delivery (stub for address card)
     deliveryMethod: sub.delivery_method || null,
   };
 }
@@ -85,14 +91,15 @@ export function transformSubscription(
 interface DbVariant {
   id?: string;
   title?: string;
+  sku?: string;
   image_url?: string;
 }
 
-export async function getProductImageMap(
+export async function getProductMap(
   admin: ReturnType<typeof import("@/lib/supabase/admin").createAdminClient>,
   workspaceId: string,
   productIds: string[]
-): Promise<ProductImageMap> {
+): Promise<ProductMap> {
   if (!productIds.length) return {};
 
   const { data: products } = await admin
@@ -101,18 +108,22 @@ export async function getProductImageMap(
     .eq("workspace_id", workspaceId)
     .in("shopify_product_id", productIds);
 
-  const map: ProductImageMap = {};
+  const map: ProductMap = {};
   for (const p of products || []) {
-    const variantImages: Record<string, string> = {};
+    const variantsByTitle: Record<string, VariantInfo> = {};
+    const variantsBySku: Record<string, VariantInfo> = {};
     const variants = Array.isArray(p.variants) ? (p.variants as DbVariant[]) : [];
+
     for (const v of variants) {
-      if (v.title && v.image_url) {
-        variantImages[v.title] = v.image_url;
-      }
+      const info: VariantInfo = { id: v.id || "", image_url: v.image_url };
+      if (v.title) variantsByTitle[v.title] = info;
+      if (v.sku) variantsBySku[v.sku] = info;
     }
+
     map[p.shopify_product_id] = {
       productImage: p.image_url || "",
-      variantImages,
+      variantsByTitle,
+      variantsBySku,
     };
   }
   return map;

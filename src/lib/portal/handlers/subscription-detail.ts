@@ -1,7 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { transformSubscription, getProductImageMap } from "@/lib/portal/helpers/transform-subscription";
+import { transformSubscription, getProductMap } from "@/lib/portal/helpers/transform-subscription";
 
 export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -32,17 +32,24 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
   const generalConfig = (portalConfig.general || {}) as Record<string, unknown>;
   const lockDays = Number(generalConfig.lock_days) || 7;
 
-  const created = sub.created_at ? new Date(sub.created_at).getTime() : 0;
-  const isLocked = created > 0 && Date.now() - created < lockDays * 86400000;
+  // Lock only truly new subs that haven't been billed yet
+  let isLocked = false;
+  if (sub.last_payment_status !== "succeeded") {
+    const created = sub.created_at ? new Date(sub.created_at).getTime() : 0;
+    const nextBilling = sub.next_billing_date ? new Date(sub.next_billing_date).getTime() : 0;
+    if (created > 0 && nextBilling > Date.now() && Date.now() - created < lockDays * 86400000) {
+      isLocked = true;
+    }
+  }
 
   // Get product images for items
   const productIds = (Array.isArray(sub.items) ? sub.items : [])
     .map((item: { product_id?: string }) => item?.product_id)
     .filter(Boolean) as string[];
-  const productImages = await getProductImageMap(admin, auth.workspaceId, [...new Set(productIds)]);
+  const productMap = await getProductMap(admin, auth.workspaceId, [...new Set(productIds)]);
 
   // Transform to frontend shape
-  const contract = transformSubscription(sub, productImages);
+  const contract = transformSubscription(sub, productMap);
 
   // Dunning cycles
   const { data: dunningCycles } = await admin.from("dunning_cycles")

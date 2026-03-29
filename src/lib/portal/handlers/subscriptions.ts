@@ -3,14 +3,24 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { transformSubscription, getProductImageMap } from "@/lib/portal/helpers/transform-subscription";
+import { transformSubscription, getProductMap } from "@/lib/portal/helpers/transform-subscription";
 
 function isSubscriptionLocked(sub: Record<string, unknown>, lockDays: number): boolean {
-  // Lock if subscription was created less than lockDays ago
-  // Use our DB created_at as a reasonable proxy — it's set when we first sync/see the subscription
+  // Lock only truly new subscriptions that haven't been billed yet.
+  // If they've had a successful payment, they're not new.
+  if (sub.last_payment_status === "succeeded") return false;
+
+  // For subs that haven't billed yet, check if they're younger than lockDays.
+  // Use next_billing_date as a proxy: if the first billing hasn't happened yet
+  // and the sub was created recently, lock it.
+  const nextBilling = sub.next_billing_date ? new Date(sub.next_billing_date as string).getTime() : 0;
   const created = sub.created_at ? new Date(sub.created_at as string).getTime() : 0;
   if (!created) return false;
-  return Date.now() - created < lockDays * 86400000;
+
+  // If next billing is in the future and sub is younger than lockDays, lock it
+  if (nextBilling > Date.now() && Date.now() - created < lockDays * 86400000) return true;
+
+  return false;
 }
 
 type Bucket = "active" | "paused" | "cancelled" | "other";
@@ -84,7 +94,7 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
       if (item?.product_id) allProductIds.add(item.product_id);
     }
   }
-  const productImages = await getProductImageMap(admin, auth.workspaceId, Array.from(allProductIds));
+  const productMap = await getProductMap(admin, auth.workspaceId, Array.from(allProductIds));
 
   // Load dunning status for all contracts
   const contractIds = allSubs.map(s => s.shopify_contract_id).filter(Boolean);
@@ -126,7 +136,7 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
     if (needsAttention) needsAttentionCount++;
 
     // Transform DB shape → frontend contract shape
-    const contract = transformSubscription(sub, productImages);
+    const contract = transformSubscription(sub, productMap);
 
     const enriched = {
       ...contract,
