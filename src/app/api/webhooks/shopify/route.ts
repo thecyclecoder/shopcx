@@ -6,6 +6,7 @@ import {
   handleOrderEvent,
   handleDisputeEvent,
 } from "@/lib/shopify-webhooks";
+import { handlePaymentMethodEvent } from "@/lib/dunning-webhook";
 
 export async function POST(request: Request) {
   const body = await request.text();
@@ -55,6 +56,11 @@ export async function POST(request: Request) {
       case "disputes/create":
       case "disputes/update":
         await handleDisputeEvent(workspace.id, payload, topic);
+        break;
+
+      case "customer_payment_methods/create":
+      case "customer_payment_methods/update":
+        await handlePaymentMethodEvent(workspace.id, payload);
         break;
 
       default:

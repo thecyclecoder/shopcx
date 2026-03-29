@@ -5,6 +5,7 @@ import { Webhook } from "svix";
 import { calculateRetentionScore } from "@/lib/retention-score";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
+import { inngest } from "@/lib/inngest/client";
 
 function mapStatus(status: string): "active" | "paused" | "cancelled" | "expired" | "failed" {
   switch (status?.toUpperCase()) {
@@ -300,5 +301,48 @@ async function handleBillingEvent(
       subscription: subCtx || undefined,
       customer: custCtx || undefined,
     });
+  }
+
+  // ── Dunning triggers ──
+  if (eventType === "subscription.billing-failure") {
+    // Parse error from billing attempt response
+    let errorCode: string | null = null;
+    let errorMsg: string | null = null;
+    if (data.billingAttemptResponseMessage) {
+      try {
+        const parsed = JSON.parse(data.billingAttemptResponseMessage as string);
+        errorCode = parsed?.error_code || null;
+        errorMsg = parsed?.error_message || null;
+      } catch { /* ignore parse errors */ }
+    }
+
+    // Fetch shopify_customer_id for card rotation lookup
+    const { data: subForDunning } = await admin.from("subscriptions").select("shopify_customer_id")
+      .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).single();
+
+    inngest.send({
+      name: "dunning/payment-failed",
+      data: {
+        workspace_id: workspaceId,
+        shopify_contract_id: contractId,
+        subscription_id: sub.id,
+        customer_id: sub.customer_id,
+        shopify_customer_id: subForDunning?.shopify_customer_id || null,
+        billing_attempt_id: data.billingAttemptId ? String(data.billingAttemptId) : null,
+        error_code: errorCode,
+        error_message: errorMsg,
+      },
+    }).catch(() => {}); // fire and forget
+  }
+
+  if (eventType === "subscription.billing-success") {
+    inngest.send({
+      name: "dunning/billing-success",
+      data: {
+        workspace_id: workspaceId,
+        shopify_contract_id: contractId,
+        customer_id: sub.customer_id,
+      },
+    }).catch(() => {}); // fire and forget
   }
 }

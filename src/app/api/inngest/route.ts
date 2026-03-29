@@ -32,6 +32,11 @@ import {
 } from "@/lib/inngest/chargeback-processing";
 import { ticketUnsnooze } from "@/lib/inngest/ticket-snooze";
 import { syncKlaviyoReviews } from "@/lib/inngest/sync-reviews";
+import {
+  dunningPaymentFailed,
+  dunningNewCardRecovery,
+  dunningBillingSuccess,
+} from "@/lib/inngest/dunning";
 
 export const maxDuration = 300;
 
@@ -68,5 +73,8 @@ export const { GET, POST, PUT } = serve({
     chargebackEvidenceReminder,
     ticketUnsnooze,
     syncKlaviyoReviews,
+    dunningPaymentFailed,
+    dunningNewCardRecovery,
+    dunningBillingSuccess,
   ],
 });

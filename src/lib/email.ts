@@ -218,3 +218,130 @@ export async function sendJourneyCTA({
   if (error) return { error: error.message };
   return {};
 }
+
+// ── Dunning Emails ──
+
+export async function sendDunningPaymentUpdateEmail({
+  workspaceId,
+  toEmail,
+  customerName,
+  workspaceName,
+  updateUrl,
+}: {
+  workspaceId: string;
+  toEmail: string;
+  customerName: string | null;
+  workspaceName: string;
+  updateUrl: string;
+}): Promise<{ error?: string }> {
+  const client = await getResendClient(workspaceId);
+  if (!client) return { error: "Resend not configured" };
+
+  const greeting = customerName ? `Hi ${customerName},` : "Hi there,";
+
+  const { error } = await client.resend.emails.send({
+    from: `${workspaceName} <support@${client.domain}>`,
+    to: toEmail,
+    subject: `Action needed: Update your payment method — ${workspaceName}`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+        <h2 style="color: #18181b; font-size: 20px; margin-bottom: 8px;">${greeting}</h2>
+        <p style="color: #71717a; font-size: 14px; line-height: 1.6;">
+          Your recent payment didn't go through. To keep your subscription active and avoid missing your next order, please update your payment method.
+        </p>
+        <div style="text-align: center; margin-top: 32px;">
+          <a href="${updateUrl}" style="display: inline-block; padding: 14px 32px; background: #6366f1; color: white; text-decoration: none; border-radius: 10px; font-size: 15px; font-weight: 600;">
+            Update Payment Method
+          </a>
+        </div>
+        <p style="color: #a1a1aa; font-size: 12px; margin-top: 32px; text-align: center;">
+          If you've already updated your card, you can ignore this email. Your next payment will be retried automatically.
+        </p>
+      </div>
+    `,
+  });
+
+  if (error) return { error: error.message };
+  return {};
+}
+
+export async function sendDunningRecoveryEmail({
+  workspaceId,
+  toEmail,
+  customerName,
+  workspaceName,
+}: {
+  workspaceId: string;
+  toEmail: string;
+  customerName: string | null;
+  workspaceName: string;
+}): Promise<{ error?: string }> {
+  const client = await getResendClient(workspaceId);
+  if (!client) return { error: "Resend not configured" };
+
+  const greeting = customerName ? `Hi ${customerName},` : "Hi there,";
+
+  const { error } = await client.resend.emails.send({
+    from: `${workspaceName} <support@${client.domain}>`,
+    to: toEmail,
+    subject: `Payment confirmed — ${workspaceName}`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+        <h2 style="color: #18181b; font-size: 20px; margin-bottom: 8px;">${greeting}</h2>
+        <p style="color: #71717a; font-size: 14px; line-height: 1.6;">
+          Great news — your payment went through! Your subscription is back on track and your next order is on its way.
+        </p>
+        <p style="color: #a1a1aa; font-size: 12px; margin-top: 32px;">
+          No action needed. Thanks for being a subscriber!
+        </p>
+      </div>
+    `,
+  });
+
+  if (error) return { error: error.message };
+  return {};
+}
+
+export async function sendDunningPausedEmail({
+  workspaceId,
+  toEmail,
+  customerName,
+  workspaceName,
+  updateUrl,
+}: {
+  workspaceId: string;
+  toEmail: string;
+  customerName: string | null;
+  workspaceName: string;
+  updateUrl: string;
+}): Promise<{ error?: string }> {
+  const client = await getResendClient(workspaceId);
+  if (!client) return { error: "Resend not configured" };
+
+  const greeting = customerName ? `Hi ${customerName},` : "Hi there,";
+
+  const { error } = await client.resend.emails.send({
+    from: `${workspaceName} <support@${client.domain}>`,
+    to: toEmail,
+    subject: `Your subscription has been paused — ${workspaceName}`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+        <h2 style="color: #18181b; font-size: 20px; margin-bottom: 8px;">${greeting}</h2>
+        <p style="color: #71717a; font-size: 14px; line-height: 1.6;">
+          We weren't able to process your payment after multiple attempts, so your subscription has been paused. Update your payment method below to resume your subscription — we'll get your next order on its way right away.
+        </p>
+        <div style="text-align: center; margin-top: 32px;">
+          <a href="${updateUrl}" style="display: inline-block; padding: 14px 32px; background: #6366f1; color: white; text-decoration: none; border-radius: 10px; font-size: 15px; font-weight: 600;">
+            Update Payment Method
+          </a>
+        </div>
+        <p style="color: #a1a1aa; font-size: 12px; margin-top: 32px; text-align: center;">
+          If you have questions, just reply to this email and we'll help you out.
+        </p>
+      </div>
+    `,
+  });
+
+  if (error) return { error: error.message };
+  return {};
+}

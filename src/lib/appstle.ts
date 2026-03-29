@@ -141,6 +141,170 @@ export async function appstleUpdateBillingInterval(
   }
 }
 
+// ── Dunning endpoints ──
+
+export async function appstleGetUpcomingOrders(
+  workspaceId: string,
+  contractId: string,
+): Promise<{ success: boolean; orders?: { id: string; billingDate: string; status: string }[]; error?: string }> {
+  const creds = await getAppstleCredentials(workspaceId);
+  if (!creds) return { success: false, error: "Appstle not configured" };
+
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/top-orders?contractId=${contractId}`,
+      { method: "GET", headers: { "X-API-Key": creds.apiKey } }
+    );
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`Appstle get upcoming orders error for contract ${contractId}:`, text);
+      return { success: false, error: `Appstle API error: ${res.status}` };
+    }
+
+    const data = await res.json();
+    return { success: true, orders: Array.isArray(data) ? data : [] };
+  } catch (err) {
+    console.error("Appstle get upcoming orders failed:", err);
+    return { success: false, error: String(err) };
+  }
+}
+
+export async function appstleAttemptBilling(
+  workspaceId: string,
+  billingAttemptId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const creds = await getAppstleCredentials(workspaceId);
+  if (!creds) return { success: false, error: "Appstle not configured" };
+
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/attempt-billing/${billingAttemptId}`,
+      { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
+    );
+
+    if (!res.ok && res.status !== 204) {
+      const text = await res.text();
+      console.error(`Appstle attempt billing error for ${billingAttemptId}:`, text);
+      return { success: false, error: `Appstle API error: ${res.status}` };
+    }
+
+    return { success: true };
+  } catch (err) {
+    console.error("Appstle attempt billing failed:", err);
+    return { success: false, error: String(err) };
+  }
+}
+
+export async function appstleSkipUpcomingOrder(
+  workspaceId: string,
+  contractId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const creds = await getAppstleCredentials(workspaceId);
+  if (!creds) return { success: false, error: "Appstle not configured" };
+
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/skip-upcoming-order?contractId=${contractId}`,
+      { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
+    );
+
+    if (!res.ok && res.status !== 204) {
+      const text = await res.text();
+      console.error(`Appstle skip upcoming order error for contract ${contractId}:`, text);
+      return { success: false, error: `Appstle API error: ${res.status}` };
+    }
+
+    return { success: true };
+  } catch (err) {
+    console.error("Appstle skip upcoming order failed:", err);
+    return { success: false, error: String(err) };
+  }
+}
+
+export async function appstleUnskipOrder(
+  workspaceId: string,
+  billingAttemptId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const creds = await getAppstleCredentials(workspaceId);
+  if (!creds) return { success: false, error: "Appstle not configured" };
+
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/unskip-order/${billingAttemptId}`,
+      { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
+    );
+
+    if (!res.ok && res.status !== 204) {
+      const text = await res.text();
+      console.error(`Appstle unskip order error for ${billingAttemptId}:`, text);
+      return { success: false, error: `Appstle API error: ${res.status}` };
+    }
+
+    return { success: true };
+  } catch (err) {
+    console.error("Appstle unskip order failed:", err);
+    return { success: false, error: String(err) };
+  }
+}
+
+export async function appstleSwitchPaymentMethod(
+  workspaceId: string,
+  contractId: string,
+  paymentMethodId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const creds = await getAppstleCredentials(workspaceId);
+  if (!creds) return { success: false, error: "Appstle not configured" };
+
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-existing-payment-method?contractId=${contractId}`,
+      {
+        method: "PUT",
+        headers: { "X-API-Key": creds.apiKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ paymentMethodId }),
+      }
+    );
+
+    if (!res.ok && res.status !== 204) {
+      const text = await res.text();
+      console.error(`Appstle switch payment method error for contract ${contractId}:`, text);
+      return { success: false, error: `Appstle API error: ${res.status}` };
+    }
+
+    return { success: true };
+  } catch (err) {
+    console.error("Appstle switch payment method failed:", err);
+    return { success: false, error: String(err) };
+  }
+}
+
+export async function appstleSendPaymentUpdateEmail(
+  workspaceId: string,
+  contractId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const creds = await getAppstleCredentials(workspaceId);
+  if (!creds) return { success: false, error: "Appstle not configured" };
+
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-payment-method?contractId=${contractId}`,
+      { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
+    );
+
+    if (!res.ok && res.status !== 204) {
+      const text = await res.text();
+      console.error(`Appstle send payment update email error for contract ${contractId}:`, text);
+      return { success: false, error: `Appstle API error: ${res.status}` };
+    }
+
+    return { success: true };
+  } catch (err) {
+    console.error("Appstle send payment update email failed:", err);
+    return { success: false, error: String(err) };
+  }
+}
+
 export async function appstleSwapProduct(
   workspaceId: string,
   contractId: string,

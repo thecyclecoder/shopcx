@@ -144,6 +144,19 @@ export default function SettingsPage() {
         </Link>
 
         <Link
+          href="/dashboard/settings/dunning"
+          className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 p-5 transition-colors hover:border-amber-300 dark:border-amber-800 dark:bg-amber-950 dark:hover:border-amber-700"
+        >
+          <div>
+            <h2 className="text-sm font-medium text-amber-900 dark:text-amber-100">Dunning</h2>
+            <p className="mt-1 text-sm text-amber-600 dark:text-amber-400">Payment failure recovery: card rotation, payday retries, automatic unskip</p>
+          </div>
+          <svg className="h-5 w-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+
+        <Link
           href="/dashboard/settings/chat-widget"
           className="flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 p-5 transition-colors hover:border-emerald-300 dark:border-emerald-800 dark:bg-emerald-950 dark:hover:border-emerald-700"
         >

@@ -192,9 +192,23 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
   - Featured reviews (`smart_featured` from Klaviyo) prioritized, then highest-rated
   - Reviews matched to customer's subscription products for relevant social proof
 
+### Phase 5: Dunning System ✅
+- **Card rotation**: On payment failure, tries all stored payment methods (deduplicated by last4+expiry) with 2h delays
+- **Payday-aware retries**: After cards exhausted, retries on 1st, 15th, Fridays, last biz day at 7 AM Central
+- **Cycle 1 action**: Skip order (default) — customer gets payment update email
+- **Cycle 2 action**: Pause subscription (default) — creates ticket + dashboard notification
+- **New card recovery**: Shopify `customer_payment_methods/create|update` webhook → unskip + switch card + bill immediately
+- **Appstle endpoints**: attemptBilling, skipUpcomingOrder, unskipOrder, switchPaymentMethod, sendPaymentUpdateEmail
+- **Shopify GraphQL**: Customer payment methods query with deduplication
+- **Inngest orchestration**: `dunning/payment-failed`, `dunning/new-card-recovery`, `dunning/billing-success`
+- **Customer communication**: Silent card rotation → payment update email → recovery confirmation → paused email
+- **Settings UI**: Enable/disable, max card rotations, payday retries toggle, cycle 1/2 actions
+- **Tags**: `dunning:active`, `dunning:recovered`, `dunning:skipped`, `dunning:paused`
+- **Requires**: Appstle built-in retries and skip-after-X-failures turned OFF
+
 ### Dashboard & Settings ✅
 - Dashboard overview: real-time stats (open/pending tickets, customers, avg retention, AI resolution rate, tickets today, KB articles, active macros)
-- Settings cards: Rules, AI Agent, Macros, Workflows, Smart Patterns, Fraud Detection, Ticket Views, Tags, Team, Import, Integrations, Knowledge Base, Journeys, Chargebacks, Coupons
+- Settings cards: Rules, AI Agent, Macros, Workflows, Smart Patterns, Fraud Detection, Dunning, Ticket Views, Tags, Team, Import, Integrations, Knowledge Base, Journeys, Chargebacks, Coupons
 - Team page: editable display names per member
 - Journey settings: detail view with flow visualization, editable steps, channels, match patterns, priority, step ticket status
 - Branding: ShopCX.ai (lowercase .ai), notification bell, collapsible tickets menu
@@ -242,6 +256,10 @@ For replies (ai/reply-received): route → patterns (deferred) → journey → w
 - `src/lib/remedy-selector.ts` — AI remedy selection (Haiku) + open-ended conversation (Sonnet)
 - `src/lib/klaviyo.ts` — Klaviyo API client (reviews sync, retrieval, AI summaries)
 - `src/lib/inngest/sync-reviews.ts` — Nightly + on-demand Klaviyo review sync
+- `src/lib/dunning.ts` — Core dunning logic: card rotation, payment method dedup, payday scheduling, Shopify payment methods query
+- `src/lib/dunning-webhook.ts` — Shopify payment method webhook handler → triggers dunning recovery
+- `src/lib/inngest/dunning.ts` — Inngest dunning orchestration: payment-failed, new-card-recovery, billing-success
+- `src/app/dashboard/settings/dunning/page.tsx` — Dunning settings UI
 - `src/lib/first-touch.ts` — First outbound touch tagging (touched + ft:source)
 - `src/lib/ticket-tags.ts` — Idempotent ticket tag helper
 - `src/lib/shopify-marketing.ts` — Subscribe + unsubscribe email/SMS marketing via Shopify GraphQL
@@ -300,6 +318,8 @@ For replies (ai/reply-received): route → patterns (deferred) → journey → w
 - `remedies` — Retention remedies per workspace (coupon, pause, skip, frequency_change, etc.)
 - `remedy_outcomes` — Tracks every remedy offered/accepted/declined per cancel reason for learning
 - `product_reviews` — Klaviyo-synced reviews with AI summaries for cancel journey social proof
+- `payment_failures` — Per-attempt log: card tried, result, attempt type (initial/card_rotation/payday_retry/new_card_retry)
+- `dunning_cycles` — Per-subscription per-billing-cycle dunning state (active/skipped/paused/recovered/exhausted)
 
 ## Ticket Tags (auto-applied for analytics)
 When adding new journeys or workflows, always add the corresponding tag:
@@ -312,6 +332,10 @@ When adding new journeys or workflows, always add the corresponding tag:
 - `agent` — a real human agent sent an external message
 - `jo:positive` / `jo:negative` / `jo:neutral` — journey outcome (always ask the user what constitutes positive/negative/neutral for each new journey)
 - `link` — customer linked accounts during a journey
+- `dunning:active` — active dunning cycle on this ticket's customer
+- `dunning:recovered` — payment recovered through dunning
+- `dunning:skipped` — order was skipped due to payment failure
+- `dunning:paused` — subscription paused due to repeated payment failure
 Use `addTicketTag()` from `src/lib/ticket-tags.ts` (idempotent). Use `markFirstTouch()` from `src/lib/first-touch.ts` for ft:* tags.
 
 ## Conventions
