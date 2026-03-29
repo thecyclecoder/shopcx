@@ -73,8 +73,8 @@ export default function ReviewsCard({ productIds }) {
   if (!reviews.length) return null;
 
   const r = reviews[idx % reviews.length] || {};
-  const title = r.smartQuote || r.title || 'Loved it';
-  const body = r.body || r.content || '';
+  const title = r.summary || r.title || 'Loved it';
+  const body = r.body || '';
   const { text: bodyText, cut } = truncate(body, TRUNCATE);
   const author = r.author || 'Verified Customer';
 

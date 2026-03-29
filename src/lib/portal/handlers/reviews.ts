@@ -31,7 +31,8 @@ export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
     byProductId[pid] = { ok: true, reviews: [] };
   }
 
-  // Fetch reviews from our synced product_reviews table
+  // Fetch featured reviews first, then 5-star as fallback
+  // Priority: smart_featured=true → 5-star → 4-star
   const { data: reviews } = await admin.from("product_reviews")
     .select("shopify_product_id, author, rating, title, body, summary, smart_featured, created_at")
     .eq("workspace_id", auth.workspaceId)
@@ -40,22 +41,44 @@ export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
     .order("smart_featured", { ascending: false })
     .order("rating", { ascending: false })
     .order("created_at", { ascending: false })
-    .limit(productIds.length * 5);
+    .limit(productIds.length * 10);
 
-  // Group by product
+  // Group by product: featured first, then 5-star, cap at 5 per product
   for (const r of reviews || []) {
     const pid = r.shopify_product_id;
-    if (pid && byProductId[pid] && byProductId[pid].reviews.length < 5) {
-      byProductId[pid].reviews.push({
-        rating: r.rating,
-        title: r.title,
-        body: r.body,
-        author: r.author,
-        summary: r.summary,
-        featured: r.smart_featured,
-        createdAt: r.created_at,
-      });
-    }
+    if (!pid || !byProductId[pid]) continue;
+    if (byProductId[pid].reviews.length >= 5) continue;
+
+    // Only include featured or 5-star reviews
+    if (!r.smart_featured && r.rating < 5) continue;
+
+    byProductId[pid].reviews.push({
+      rating: r.rating,
+      title: r.title,
+      body: r.body,
+      author: r.author,
+      summary: r.summary,
+      featured: r.smart_featured,
+      createdAt: r.created_at,
+    });
+  }
+
+  // If any product has zero reviews after filtering, backfill with 4-star
+  for (const r of reviews || []) {
+    const pid = r.shopify_product_id;
+    if (!pid || !byProductId[pid]) continue;
+    if (byProductId[pid].reviews.length >= 3) continue;
+    // Already added above if featured or 5-star; only add 4-star as last resort
+    if (r.smart_featured || r.rating >= 5) continue;
+    byProductId[pid].reviews.push({
+      rating: r.rating,
+      title: r.title,
+      body: r.body,
+      author: r.author,
+      summary: r.summary,
+      featured: r.smart_featured,
+      createdAt: r.created_at,
+    });
   }
 
   return jsonOk({
