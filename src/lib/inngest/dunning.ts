@@ -135,7 +135,7 @@ export const dunningPaymentFailed = inngest.createFunction(
     let recovered = false;
     const maxRotations = Math.min(settings.dunning_max_card_rotations, paymentMethods.length);
     let attemptNumber = 2; // #1 was the initial failure
-    let cardsTried: string[] = [];
+    const cardsTried: string[] = [];
 
     for (let i = 0; i < maxRotations && !recovered; i++) {
       const untried = getUntriedCards(paymentMethods, cardsTried);
@@ -324,7 +324,6 @@ export const dunningNewCardRecovery = inngest.createFunction(
     const {
       workspace_id,
       customer_id,
-      shopify_customer_id,
       payment_method_id,
     } = event.data as {
       workspace_id: string;
