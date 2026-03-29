@@ -15,9 +15,8 @@ async function boot() {
   // e.g. /pages/portal-test → base is /pages/portal-test
   const portalPage = window.location.pathname.replace(/\/(subscriptions|subscription)$/, '').replace(/\/+$/, '') || '/pages/portal';
 
-  // Endpoint: read from bootstrap config, default to /apps/portal
-  // Will be overridden by workspace config if set
-  let endpoint = '/apps/portal';
+  // Injected at build time from shopify.app.toml [app_proxy] prefix + subpath
+  const endpoint = typeof __PORTAL_ENDPOINT__ !== 'undefined' ? __PORTAL_ENDPOINT__ : '/apps/portal';
 
   configure({ endpoint });
 

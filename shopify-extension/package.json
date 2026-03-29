@@ -10,8 +10,8 @@
     "generate": "shopify app generate",
     "deploy": "shopify app deploy",
 
-    "portal:build": "esbuild portal-src/js/portal-entry.jsx --bundle --format=iife --platform=browser --target=es2018 --jsx=automatic --jsx-import-source=preact --outfile=extensions/subscriptions-portal-theme/assets/subscription-portal.js --minify",
-    "portal:watch": "esbuild portal-src/js/portal-entry.jsx --bundle --format=iife --platform=browser --target=es2018 --jsx=automatic --jsx-import-source=preact --outfile=extensions/subscriptions-portal-theme/assets/subscription-portal.js --sourcemap --watch",
+    "portal:build": "node build-portal.js",
+    "portal:watch": "node build-portal.js --watch",
 
     "build:css": "sass portal-src/styles/portal.scss extensions/subscriptions-portal-theme/assets/portal.min.css --style=compressed --no-source-map",
     "watch:css": "sass portal-src/styles/portal.scss extensions/subscriptions-portal-theme/assets/portal.min.css --style=expanded --source-map --watch",
