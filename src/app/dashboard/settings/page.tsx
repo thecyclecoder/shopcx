@@ -148,7 +148,7 @@ export default function SettingsPage() {
           className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 p-5 transition-colors hover:border-amber-300 dark:border-amber-800 dark:bg-amber-950 dark:hover:border-amber-700"
         >
           <div>
-            <h2 className="text-sm font-medium text-amber-900 dark:text-amber-100">Dunning</h2>
+            <h2 className="text-sm font-medium text-amber-900 dark:text-amber-100">Recovery</h2>
             <p className="mt-1 text-sm text-amber-600 dark:text-amber-400">Payment failure recovery: card rotation, payday retries, automatic unskip</p>
           </div>
           <svg className="h-5 w-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
