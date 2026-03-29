@@ -7,52 +7,80 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: workspaceId } = await params;
-  void request;
 
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const admin = createAdminClient();
+  const url = new URL(request.url);
 
-  // Run all queries in parallel
-  const [customers, retention, ticketsToday, kbArticles, macros, aiHandled, totalClosed] = await Promise.all([
-    // Total customers
+  // Time range — defaults to "today"
+  const range = url.searchParams.get("range") || "today";
+  const tzOffset = -6; // US Central
+  const now = new Date();
+  const localNow = new Date(now.getTime() + tzOffset * 60 * 60 * 1000);
+  const todayMidnight = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate()) - tzOffset * 60 * 60 * 1000);
+
+  let rangeStart: string;
+  let prevStart: string;
+  let rangeEnd: string | null = null;
+  if (range === "yesterday") {
+    rangeStart = new Date(todayMidnight.getTime() - 86400000).toISOString();
+    rangeEnd = todayMidnight.toISOString();
+    prevStart = new Date(todayMidnight.getTime() - 2 * 86400000).toISOString();
+  } else if (range === "7d") {
+    rangeStart = new Date(todayMidnight.getTime() - 7 * 86400000).toISOString();
+    prevStart = new Date(todayMidnight.getTime() - 14 * 86400000).toISOString();
+  } else if (range === "30d") {
+    rangeStart = new Date(todayMidnight.getTime() - 30 * 86400000).toISOString();
+    prevStart = new Date(todayMidnight.getTime() - 60 * 86400000).toISOString();
+  } else {
+    rangeStart = todayMidnight.toISOString();
+    prevStart = new Date(todayMidnight.getTime() - 86400000).toISOString();
+  }
+
+  // Build range-bounded event queries
+  let ticketsRangeQ = admin.from("tickets").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).gte("created_at", rangeStart);
+  let ticketsPrevQ = admin.from("tickets").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).gte("created_at", prevStart).lt("created_at", rangeStart);
+  let cancelsRangeQ = admin.from("customer_events").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("event_type", "subscription.cancelled").gte("created_at", rangeStart);
+  let cancelsPrevQ = admin.from("customer_events").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("event_type", "subscription.cancelled").gte("created_at", prevStart).lt("created_at", rangeStart);
+  let failuresRangeQ = admin.from("customer_events").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("event_type", "subscription.billing-failure").gte("created_at", rangeStart);
+  let failuresPrevQ = admin.from("customer_events").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("event_type", "subscription.billing-failure").gte("created_at", prevStart).lt("created_at", rangeStart);
+
+  if (rangeEnd) {
+    ticketsRangeQ = ticketsRangeQ.lt("created_at", rangeEnd);
+    cancelsRangeQ = cancelsRangeQ.lt("created_at", rangeEnd);
+    failuresRangeQ = failuresRangeQ.lt("created_at", rangeEnd);
+  }
+
+  const [
+    customers, ticketsRange, ticketsPrev, kbArticles, macros,
+    aiHandled, totalClosed,
+    cancelsRange, cancelsPrev, failuresRange, failuresPrev,
+    dunningRecovered, dunningActiveFailures, dunningInProgress,
+    activeSubs,
+  ] = await Promise.all([
     admin.from("customers").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId),
-
-    // Average retention score (placeholder — computed below)
-    Promise.resolve({ data: null }),
-
-    // Tickets created today
-    admin.from("tickets").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId)
-      .gte("created_at", new Date(new Date().setHours(0, 0, 0, 0)).toISOString()),
-
-    // Published KB articles
-    admin.from("knowledge_base").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId)
-      .eq("published", true),
-
-    // Active macros
-    admin.from("macros").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId)
-      .eq("active", true),
-
-    // AI handled tickets (for resolution rate)
-    admin.from("tickets").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId)
-      .eq("ai_handled", true),
-
-    // Total closed tickets
-    admin.from("tickets").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId)
-      .eq("status", "closed"),
+    ticketsRangeQ,
+    ticketsPrevQ,
+    admin.from("knowledge_base").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("published", true),
+    admin.from("macros").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("active", true),
+    admin.from("tickets").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("ai_handled", true),
+    admin.from("tickets").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "closed"),
+    cancelsRangeQ,
+    cancelsPrevQ,
+    failuresRangeQ,
+    failuresPrevQ,
+    admin.from("dunning_cycles").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "recovered"),
+    admin.from("subscriptions").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("last_payment_status", "failed").eq("status", "active"),
+    admin.from("dunning_cycles").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).in("status", ["active", "skipped", "paused"]),
+    admin.from("subscriptions").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "active"),
   ]);
 
-  // Compute avg retention — exclude secondary linked profiles to avoid double-counting
-  let avgRetention = (retention as { data: number | null }).data;
-  if (avgRetention == null) {
-    // Get secondary profile IDs to exclude
+  // Compute avg retention — exclude secondary linked profiles
+  let avgRetention: number | null = null;
+  {
     const { data: secondaryLinks } = await admin
       .from("customer_links")
       .select("customer_id")
@@ -73,54 +101,23 @@ export async function GET(
     }
   }
 
-  const aiCount = (aiHandled as { count: number | null }).count || 0;
-  const closedCount = (totalClosed as { count: number | null }).count || 0;
-  const aiResolutionRate = closedCount > 0 ? aiCount / closedCount : null;
-
-  // Cancels + payment failures (today vs yesterday) — use US Central time (UTC-6)
-  const tzOffset = -6; // US Central — TODO: make this a workspace setting
-  const now = new Date();
-  const localNow = new Date(now.getTime() + tzOffset * 60 * 60 * 1000);
-  const todayStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate()) - tzOffset * 60 * 60 * 1000).toISOString();
-  const yesterdayStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate() - 1) - tzOffset * 60 * 60 * 1000).toISOString();
-
-  // Use customer_events for accurate cancel + failure counts (webhooks log events)
-  const [cancelsToday, cancelsYesterday, failuresToday, failuresYesterday, dunningRecovered, dunningRevenue] = await Promise.all([
-    admin.from("customer_events").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId).eq("event_type", "subscription.cancelled").gte("created_at", todayStart),
-    admin.from("customer_events").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId).eq("event_type", "subscription.cancelled").gte("created_at", yesterdayStart).lt("created_at", todayStart),
-    admin.from("customer_events").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId).eq("event_type", "subscription.billing-failure").gte("created_at", todayStart),
-    admin.from("customer_events").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId).eq("event_type", "subscription.billing-failure").gte("created_at", yesterdayStart).lt("created_at", todayStart),
-    // Dunning saves (all time)
-    admin.from("dunning_cycles").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId).eq("status", "recovered"),
-    // Total failed subscriptions needing dunning
-    admin.from("subscriptions").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId).eq("last_payment_status", "failed").eq("status", "active"),
-  ]);
-
-  const cancTodayCount = (cancelsToday as { count: number | null }).count || 0;
-  const cancYestCount = (cancelsYesterday as { count: number | null }).count || 0;
-  const failTodayCount = (failuresToday as { count: number | null }).count || 0;
-  const failYestCount = (failuresYesterday as { count: number | null }).count || 0;
-  const dunningRecoveredCount = (dunningRecovered as { count: number | null }).count || 0;
-  const activeFailures = (dunningRevenue as { count: number | null }).count || 0;
+  const cnt = (r: unknown) => ((r as { count: number | null }).count || 0);
 
   return NextResponse.json({
-    customers: (customers as { count: number | null }).count || 0,
+    customers: cnt(customers),
+    active_subs: cnt(activeSubs),
     avg_retention: avgRetention,
-    ai_resolution_rate: aiResolutionRate,
-    tickets_today: (ticketsToday as { count: number | null }).count || 0,
-    kb_articles: (kbArticles as { count: number | null }).count || 0,
-    macros: (macros as { count: number | null }).count || 0,
-    cancels_today: cancTodayCount,
-    cancels_yesterday: cancYestCount,
-    failures_today: failTodayCount,
-    failures_yesterday: failYestCount,
-    dunning_recovered: dunningRecoveredCount,
-    dunning_active_failures: activeFailures,
+    ai_resolution_rate: cnt(totalClosed) > 0 ? cnt(aiHandled) / cnt(totalClosed) : null,
+    tickets_range: cnt(ticketsRange),
+    tickets_prev: cnt(ticketsPrev),
+    kb_articles: cnt(kbArticles),
+    macros: cnt(macros),
+    cancels_range: cnt(cancelsRange),
+    cancels_prev: cnt(cancelsPrev),
+    failures_range: cnt(failuresRange),
+    failures_prev: cnt(failuresPrev),
+    dunning_recovered: cnt(dunningRecovered),
+    dunning_active_failures: cnt(dunningActiveFailures),
+    dunning_in_progress: cnt(dunningInProgress),
   });
 }
