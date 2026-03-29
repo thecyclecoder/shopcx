@@ -20,6 +20,7 @@ export async function GET(
   const recovery = url.searchParams.get("recovery"); // in_recovery, recovered, failed
   const payment = url.searchParams.get("payment"); // succeeded, failed, skipped
   const search = url.searchParams.get("search");
+  const productIds = url.searchParams.get("products"); // comma-separated shopify_product_ids
   const sort = url.searchParams.get("sort") || "next_billing_date";
   const order = url.searchParams.get("order") || "asc";
   const limit = parseInt(url.searchParams.get("limit") || "25");
@@ -46,11 +47,38 @@ export async function GET(
     query = query.eq("last_payment_status", payment);
   }
 
-  // Search
+  // Product filter — find subscriptions containing any of the selected products
+  if (productIds) {
+    const ids = productIds.split(",").filter(Boolean);
+    if (ids.length > 0) {
+      const { data: allSubs } = await admin
+        .from("subscriptions")
+        .select("id, items")
+        .eq("workspace_id", workspaceId);
+      const subIds = (allSubs || [])
+        .filter(s => {
+          const items = (s.items as { product_id?: string }[] | null) || [];
+          return items.some(i => ids.includes(i.product_id || ""));
+        })
+        .map(s => s.id);
+      if (subIds.length === 0) return NextResponse.json({ subscriptions: [], total: 0 });
+      query = query.in("id", subIds);
+    }
+  }
+
+  // Search — filter on foreign table by finding matching customer IDs first
   if (search) {
-    query = query.or(
-      `customers.email.ilike.%${search}%,customers.first_name.ilike.%${search}%,customers.last_name.ilike.%${search}%`
-    );
+    const { data: matchingCustomers } = await admin
+      .from("customers")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .or(`email.ilike.%${search}%,first_name.ilike.%${search}%,last_name.ilike.%${search}%`);
+
+    const customerIds = (matchingCustomers || []).map(c => c.id);
+    if (customerIds.length === 0) {
+      return NextResponse.json({ subscriptions: [], total: 0 });
+    }
+    query = query.in("customer_id", customerIds);
   }
 
   // Sorting

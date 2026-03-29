@@ -23,10 +23,15 @@ export async function GET(
 
   const admin = createAdminClient();
 
-  // Load subscription
+  // Load subscription with full customer data
   const { data: sub, error } = await admin
     .from("subscriptions")
-    .select("*, customers(id, email, first_name, last_name, shopify_customer_id, retention_score, subscription_status)")
+    .select(`*, customers(
+      id, email, first_name, last_name, phone, shopify_customer_id,
+      retention_score, subscription_status, ltv_cents, total_orders,
+      email_marketing_status, sms_marketing_status,
+      default_address, tags, first_order_at, shopify_created_at, created_at
+    )`)
     .eq("id", subId)
     .eq("workspace_id", workspaceId)
     .single();
@@ -55,11 +60,11 @@ export async function GET(
   // Recent orders from this subscription
   const { data: orders } = await admin
     .from("orders")
-    .select("id, shopify_order_id, order_number, total_cents, line_items, fulfillments, created_at")
+    .select("id, shopify_order_id, order_number, total_cents, currency, financial_status, fulfillment_status, source_name, order_type, tags, line_items, fulfillments, created_at")
     .eq("workspace_id", workspaceId)
     .eq("subscription_id", subId)
     .order("created_at", { ascending: false })
-    .limit(10);
+    .limit(20);
 
   // Customer events for this subscription
   const { data: events } = await admin
