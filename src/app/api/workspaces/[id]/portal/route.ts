@@ -5,7 +5,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 export interface PortalConfig {
   general: {
     lock_days: number;
-    shipping_protection_variant_ids: string[];
+    shipping_protection_product_ids: string[];
     products_available_to_add: string[]; // product IDs from our products table
     rewards_url: string;
   };
@@ -26,7 +26,7 @@ export interface PortalConfig {
 const DEFAULT_CONFIG: PortalConfig = {
   general: {
     lock_days: 7,
-    shipping_protection_variant_ids: [],
+    shipping_protection_product_ids: [],
     products_available_to_add: [],
     rewards_url: "",
   },

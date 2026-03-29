@@ -8,7 +8,7 @@ export default function ShippingProtectionCard({ contract, shipLine, onUpdate })
   const { config, showToast } = useContext(PortalContext);
   const [busy, setBusy] = useState(false);
   const hasShipProt = !!shipLine;
-  const variantIds = config.shippingProtectionVariantIds || [];
+  const variantIds = config.shippingProtectionProductIds || [];
   const isConfigured = variantIds.length > 0;
 
   if (!isConfigured) return null;

@@ -26,7 +26,7 @@ async function boot() {
     portalPage,
     firstName: '',
     lockDays: 7,
-    shippingProtectionVariantIds: [],
+    shippingProtectionProductIds: [],
     catalog: [],
     rewardsUrl: '',
   };
@@ -43,7 +43,7 @@ async function boot() {
       if (bootstrap.config) {
         const c = bootstrap.config;
         config.lockDays = c.lockDays ?? 7;
-        config.shippingProtectionVariantIds = c.shippingProtectionVariantIds ?? [];
+        config.shippingProtectionProductIds = c.shippingProtectionProductIds ?? [];
         config.catalog = c.catalog ?? [];
         config.rewardsUrl = c.rewardsUrl ?? '';
       }

@@ -105,9 +105,9 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
     },
     config: {
       lockDays: Number(general.lock_days) || 7,
-      shippingProtectionVariantIds:
-        Array.isArray(general.shipping_protection_variant_ids)
-          ? general.shipping_protection_variant_ids
+      shippingProtectionProductIds:
+        Array.isArray(general.shipping_protection_product_ids)
+          ? general.shipping_protection_product_ids
           : [],
       catalog,
       rewardsUrl: String(general.rewards_url || ""),

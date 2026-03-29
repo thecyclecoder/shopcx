@@ -6,7 +6,7 @@ import { useWorkspace } from "@/lib/workspace-context";
 interface PortalConfig {
   general: {
     lock_days: number;
-    shipping_protection_variant_ids: string[];
+    shipping_protection_product_ids: string[];
     products_available_to_add: string[];
     rewards_url: string;
   };
@@ -29,7 +29,6 @@ interface ShopifyProduct {
   shopify_product_id: string;
   title: string;
   image_url: string | null;
-  variants: { id: string; title: string }[];
 }
 
 // ---- Primitives ----
@@ -88,56 +87,22 @@ function ProductMultiSelect({ label, description, products, selected, onChange }
 
   return (
     <div>
-      <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">{label}</label>
+      <div className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">{label}</div>
       {description && <p className="mt-0.5 text-xs text-zinc-400">{description}</p>}
       <div className="mt-2 max-h-64 overflow-y-auto rounded-md border border-zinc-200 dark:border-zinc-700">
         {!products.length && <p className="p-3 text-xs text-zinc-400">No products synced yet. Run a Shopify sync first.</p>}
         {products.map((p) => (
-          <label key={p.shopify_product_id}
+          <div key={p.shopify_product_id}
+            onClick={() => toggle(p.shopify_product_id)}
             className={`flex cursor-pointer items-center gap-3 border-b border-zinc-100 px-3 py-2 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/50 ${
               selected.includes(p.shopify_product_id) ? "bg-violet-50 dark:bg-violet-950/30" : ""
             }`}
           >
-            <input type="checkbox" checked={selected.includes(p.shopify_product_id)} onChange={() => toggle(p.shopify_product_id)}
-              className="h-4 w-4 rounded border-zinc-300 text-violet-600 focus:ring-violet-500" />
+            <input type="checkbox" readOnly checked={selected.includes(p.shopify_product_id)}
+              className="pointer-events-none h-4 w-4 rounded border-zinc-300 text-violet-600 focus:ring-violet-500" />
             {p.image_url && <img src={p.image_url} alt={p.title} className="h-8 w-8 rounded object-cover" />}
             <span className="text-sm text-zinc-700 dark:text-zinc-300">{p.title}</span>
-          </label>
-        ))}
-      </div>
-      <p className="mt-1 text-xs text-zinc-400">{selected.length} selected</p>
-    </div>
-  );
-}
-
-function VariantMultiSelect({ label, description, products, selected, onChange }: {
-  label: string; description?: string; products: ShopifyProduct[];
-  selected: string[]; onChange: (ids: string[]) => void;
-}) {
-  const allVariants = products.flatMap((p) =>
-    (p.variants || []).map((v) => ({ ...v, productTitle: p.title, productImage: p.image_url }))
-  );
-
-  const toggle = (id: string) => {
-    onChange(selected.includes(id) ? selected.filter((s) => s !== id) : [...selected, id]);
-  };
-
-  return (
-    <div>
-      <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">{label}</label>
-      {description && <p className="mt-0.5 text-xs text-zinc-400">{description}</p>}
-      <div className="mt-2 max-h-48 overflow-y-auto rounded-md border border-zinc-200 dark:border-zinc-700">
-        {!allVariants.length && <p className="p-3 text-xs text-zinc-400">No variants available.</p>}
-        {allVariants.map((v) => (
-          <label key={v.id}
-            className={`flex cursor-pointer items-center gap-3 border-b border-zinc-100 px-3 py-2 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/50 ${
-              selected.includes(String(v.id)) ? "bg-violet-50 dark:bg-violet-950/30" : ""
-            }`}
-          >
-            <input type="checkbox" checked={selected.includes(String(v.id))} onChange={() => toggle(String(v.id))}
-              className="h-4 w-4 rounded border-zinc-300 text-violet-600 focus:ring-violet-500" />
-            <span className="text-sm text-zinc-700 dark:text-zinc-300">{v.productTitle} — {v.title}</span>
-          </label>
+          </div>
         ))}
       </div>
       <p className="mt-1 text-xs text-zinc-400">{selected.length} selected</p>
@@ -195,11 +160,6 @@ export default function PortalSettingsPage() {
     setConfig({ ...config, general: { ...config.general, [key]: value } });
   };
 
-  const updateShopify = (key: string, value: unknown) => {
-    if (!config) return;
-    setConfig({ ...config, shopify: { ...config.shopify, [key]: value } });
-  };
-
   const updateMinisite = (key: string, value: unknown) => {
     if (!config) return;
     setConfig({ ...config, minisite: { ...config.minisite, [key]: value } });
@@ -212,6 +172,12 @@ export default function PortalSettingsPage() {
       </div>
     );
   }
+
+  // Filter shipping protection products by title
+  const shippingProtectionProducts = products.filter((p) => {
+    const t = p.title.toLowerCase();
+    return t.includes('ship') || t.includes('protection');
+  });
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
@@ -249,25 +215,21 @@ export default function PortalSettingsPage() {
             selected={config.general.products_available_to_add}
             onChange={(ids) => updateGeneral("products_available_to_add", ids)}
           />
-          <VariantMultiSelect
-            label="Shipping protection variants"
-            description="Variant(s) used for the shipping protection toggle."
-            products={products}
-            selected={config.general.shipping_protection_variant_ids}
-            onChange={(ids) => updateGeneral("shipping_protection_variant_ids", ids)}
+          <ProductMultiSelect
+            label="Shipping protection product"
+            description="Auto-filtered to products with &quot;ship&quot; or &quot;protection&quot; in the title."
+            products={shippingProtectionProducts}
+            selected={config.general.shipping_protection_product_ids || []}
+            onChange={(ids) => updateGeneral("shipping_protection_product_ids", ids)}
           />
         </Card>
 
         {/* Shopify Extension */}
-        <Card title="Shopify Extension" description="Settings for the Shopify theme extension deployment.">
+        <Card title="Shopify Extension" description="Deploy the portal as a Shopify theme block.">
           <Toggle checked={config.shopify.enabled}
-            onChange={(v) => updateShopify("enabled", v)}
+            onChange={(v) => setConfig({ ...config, shopify: { ...config.shopify, enabled: v } })}
             label="Enable Shopify extension"
             description="Allow the portal to run as a Shopify theme block via app proxy." />
-          <Field label="App proxy path" value={config.shopify.proxy_path}
-            onChange={(v) => updateShopify("proxy_path", v)}
-            placeholder="/apps/portal"
-            description="The storefront proxy path configured in Shopify Partners." />
           <div className="rounded-md border border-violet-200 bg-violet-50 p-4 dark:border-violet-800 dark:bg-violet-950/30">
             <p className="text-sm font-medium text-violet-900 dark:text-violet-100">Setup instructions</p>
             <ol className="mt-2 space-y-1 text-xs text-violet-700 dark:text-violet-300 list-decimal list-inside">
@@ -276,7 +238,7 @@ export default function PortalSettingsPage() {
               <li>Save and publish</li>
             </ol>
             <div className="mt-3">
-              <label className="block text-xs font-medium text-violet-800 dark:text-violet-200 mb-1">Workspace ID</label>
+              <div className="block text-xs font-medium text-violet-800 dark:text-violet-200 mb-1">Workspace ID</div>
               <div className="flex items-center gap-2">
                 <code className="flex-1 min-w-0 break-all rounded-md bg-white px-3 py-2 text-xs font-mono text-zinc-800 border border-violet-200 dark:bg-zinc-900 dark:text-zinc-200 dark:border-violet-700">
                   {workspace.id}
@@ -309,7 +271,7 @@ export default function PortalSettingsPage() {
                 placeholder="portal.yourdomain.com"
                 description="Point a CNAME to cname.vercel-dns.com, then enter it here." />
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Authentication method</label>
+                <div className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Authentication method</div>
                 <p className="mt-0.5 text-xs text-zinc-400">How customers log in to the mini-site.</p>
                 <select value={config.minisite.auth_method}
                   onChange={(e) => updateMinisite("auth_method", e.target.value)}
