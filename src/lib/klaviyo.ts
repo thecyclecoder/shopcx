@@ -4,7 +4,8 @@
  * Klaviyo Reviews API fields (from actual API docs):
  * - review_type: "review" | "question" | "rating" | "store"
  * - status.value: "published" | "unpublished" | "pending" | "featured" | "rejected"
- * - product.external_id: Shopify product ID
+ * - product.external_id: Shopify product ID (often null)
+ * - relationships.item.data.id: "$shopify:::$default:::{product_id}" (reliable source)
  * - smart_quote: AI-extracted excerpt
  * - email: reviewer email (server API only)
  * - images: array of image URLs
@@ -12,6 +13,25 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+
+/**
+ * Extract Shopify product ID from Klaviyo review relationships.
+ * Klaviyo stores it as: relationships.item.data.id = "$shopify:::$default:::7467749965997"
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractShopifyProductId(review: any): string | null {
+  try {
+    const catalogId = review?.relationships?.item?.data?.id;
+    if (typeof catalogId !== "string") return null;
+    // Format: $shopify:::$default:::PRODUCT_ID
+    const parts = catalogId.split(":::");
+    const lastPart = parts[parts.length - 1];
+    if (lastPart && /^\d+$/.test(lastPart)) return lastPart;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 const KLAVIYO_BASE = "https://a.klaviyo.com/api";
 const KLAVIYO_REVISION = "2025-01-15";
@@ -165,7 +185,7 @@ export async function syncReviewPage(
       const row: Record<string, unknown> = {
         workspace_id: workspaceId,
         klaviyo_review_id: review.id,
-        shopify_product_id: attrs.product?.external_id || "unknown",
+        shopify_product_id: extractShopifyProductId(review) || attrs.product?.external_id || "unknown",
         reviewer_name: attrs.author || null,
         rating: attrs.rating,
         title: attrs.title || null,
