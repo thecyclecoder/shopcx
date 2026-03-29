@@ -13,7 +13,10 @@ interface DbItem {
 }
 
 interface ProductImageMap {
-  [productId: string]: string; // product_id → image_url
+  [productId: string]: {
+    productImage: string;
+    variantImages: Record<string, string>; // variant_title → image_url
+  };
 }
 
 export function transformSubscription(
@@ -23,21 +26,30 @@ export function transformSubscription(
   const items = Array.isArray(sub.items) ? (sub.items as DbItem[]) : [];
 
   // Transform items → lines (the shape the frontend card expects)
-  const lines = items.map(item => ({
-    title: item.title || "Item",
-    variantTitle: item.variant_title || "",
-    quantity: item.quantity || 1,
-    variantId: item.variant_id || "",
-    productId: item.product_id || "",
-    sku: item.sku || "",
-    currentPrice: {
-      amount: String(((item.price_cents || 0) / 100).toFixed(2)),
-      currencyCode: "USD",
-    },
-    variantImage: {
-      transformedSrc: productImages[item.product_id || ""] || "",
-    },
-  }));
+  const lines = items.map(item => {
+    const pid = item.product_id || "";
+    const productEntry = productImages[pid];
+
+    // Prefer variant image, fall back to product image
+    const variantImage = productEntry?.variantImages?.[item.variant_title || ""] || "";
+    const imageUrl = variantImage || productEntry?.productImage || "";
+
+    return {
+      title: item.title || "Item",
+      variantTitle: item.variant_title || "",
+      quantity: item.quantity || 1,
+      variantId: item.variant_id || "",
+      productId: pid,
+      sku: item.sku || "",
+      currentPrice: {
+        amount: String(((item.price_cents || 0) / 100).toFixed(2)),
+        currencyCode: "USD",
+      },
+      variantImage: {
+        transformedSrc: imageUrl,
+      },
+    };
+  });
 
   return {
     // Identity
@@ -70,6 +82,12 @@ export function transformSubscription(
   };
 }
 
+interface DbVariant {
+  id?: string;
+  title?: string;
+  image_url?: string;
+}
+
 export async function getProductImageMap(
   admin: ReturnType<typeof import("@/lib/supabase/admin").createAdminClient>,
   workspaceId: string,
@@ -79,13 +97,23 @@ export async function getProductImageMap(
 
   const { data: products } = await admin
     .from("products")
-    .select("shopify_product_id, image_url")
+    .select("shopify_product_id, image_url, variants")
     .eq("workspace_id", workspaceId)
     .in("shopify_product_id", productIds);
 
   const map: ProductImageMap = {};
   for (const p of products || []) {
-    if (p.image_url) map[p.shopify_product_id] = p.image_url;
+    const variantImages: Record<string, string> = {};
+    const variants = Array.isArray(p.variants) ? (p.variants as DbVariant[]) : [];
+    for (const v of variants) {
+      if (v.title && v.image_url) {
+        variantImages[v.title] = v.image_url;
+      }
+    }
+    map[p.shopify_product_id] = {
+      productImage: p.image_url || "",
+      variantImages,
+    };
   }
   return map;
 }

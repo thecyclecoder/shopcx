@@ -55,7 +55,7 @@ export async function POST(
               id title handle productType vendor status tags
               images(first: 1) { edges { node { url } } }
               variants(first: 20) {
-                edges { node { id title sku price } }
+                edges { node { id title sku price image { url } } }
               }
             }
           }
@@ -81,11 +81,12 @@ export async function POST(
       if (seen.has(shopifyId)) continue;
       seen.add(shopifyId);
 
-      const variants = (p.variants?.edges || []).map((v: { node: { id: string; title: string; sku: string; price: string } }) => ({
+      const variants = (p.variants?.edges || []).map((v: { node: { id: string; title: string; sku: string; price: string; image?: { url?: string } } }) => ({
         id: v.node.id.split("/").pop(),
         title: v.node.title,
         sku: v.node.sku,
         price_cents: Math.round(parseFloat(v.node.price || "0") * 100),
+        image_url: v.node.image?.url || null,
       }));
 
       const imageUrl = p.images?.edges?.[0]?.node?.url || null;
