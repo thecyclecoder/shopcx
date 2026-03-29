@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { removeOrderTags } from "@/lib/shopify-order-tags";
 
 // GET: Single fraud case with matches and history
 export async function GET(
@@ -184,6 +185,28 @@ export async function PATCH(
         ...h,
       }))
     );
+  }
+
+  // If dismissed → remove "suspicious" tag from held orders to release them
+  if (status === "dismissed") {
+    const { data: dismissedCase } = await admin
+      .from("fraud_cases")
+      .select("order_ids, orders_held")
+      .eq("id", caseId)
+      .single();
+
+    if (dismissedCase?.orders_held && dismissedCase.order_ids?.length) {
+      for (const orderId of dismissedCase.order_ids as string[]) {
+        if (orderId) {
+          removeOrderTags(workspaceId, orderId, ["suspicious"]).catch((err) => {
+            console.error(`Failed to remove suspicious tag from order ${orderId}:`, err);
+          });
+        }
+      }
+
+      // Mark orders as no longer held
+      await admin.from("fraud_cases").update({ orders_held: false }).eq("id", caseId);
+    }
   }
 
   // If dismissed as false positive family/household, suppress the address

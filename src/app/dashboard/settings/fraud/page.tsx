@@ -165,6 +165,20 @@ export default function FraudSettingsPage() {
                 </div>
               )}
 
+              {/* Address Distance config */}
+              {rule.rule_type === "address_distance" && (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <ConfigNumber label="Distance threshold (miles)" value={rule.config.distance_threshold_miles as number} onChange={(v) => updateConfig(rule, "distance_threshold_miles", v)} />
+                </div>
+              )}
+
+              {/* Name Mismatch config */}
+              {rule.rule_type === "name_mismatch" && (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <ConfigToggle label="Ignore if last names match (spouse/family)" value={rule.config.ignore_last_name_match as boolean} onChange={(v) => updateConfig(rule, "ignore_last_name_match", v)} />
+                </div>
+              )}
+
               {/* Save button */}
               <div className="flex items-center gap-3 pt-2">
                 <button

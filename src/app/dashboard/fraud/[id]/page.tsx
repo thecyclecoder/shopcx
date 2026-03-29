@@ -15,6 +15,7 @@ interface FraudCaseDetail {
   evidence: Record<string, unknown>;
   customer_ids: string[];
   order_ids: string[];
+  orders_held: boolean;
   assigned_to: string | null;
   reviewed_by: string | null;
   reviewed_at: string | null;
@@ -197,6 +198,38 @@ export default function FraudCaseDetailPage() {
           )}
           {fraudCase.rule_type === "chargeback" && (
             <ChargebackEvidence evidence={evidence} />
+          )}
+          {fraudCase.rule_type === "address_distance" && (
+            <AddressDistanceEvidence evidence={evidence} />
+          )}
+          {fraudCase.rule_type === "name_mismatch" && (
+            <NameMismatchEvidence evidence={evidence} />
+          )}
+
+          {/* Orders Held */}
+          {fraudCase.orders_held && fraudCase.order_ids?.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-5 dark:border-amber-800 dark:bg-amber-950/30">
+              <div className="mb-3 flex items-center gap-2">
+                <svg className="h-5 w-5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                </svg>
+                <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-100">Orders Held ({fraudCase.order_ids.length})</h3>
+                <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-900/50 dark:text-amber-300">
+                  Held for Review
+                </span>
+              </div>
+              <p className="mb-3 text-xs text-amber-700 dark:text-amber-400">
+                These orders are tagged &quot;suspicious&quot; in Shopify and won&apos;t be fulfilled until this case is reviewed. Dismissing the case will remove the tag and release the orders.
+              </p>
+              <div className="space-y-1.5">
+                {fraudCase.order_ids.map((oid) => (
+                  <div key={oid} className="flex items-center gap-2 rounded-md border border-amber-200 bg-white px-3 py-2 dark:border-amber-800 dark:bg-amber-950/50">
+                    <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Order #{oid}</span>
+                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">suspicious</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
 
           {/* Investigation Panel */}
@@ -510,6 +543,52 @@ function HighVelocityEvidence({ evidence }: { evidence: Record<string, unknown> 
             </div>
           ))}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function AddressDistanceEvidence({ evidence }: { evidence: Record<string, unknown> }) {
+  const e = evidence as {
+    billing_zip: string;
+    shipping_zip: string;
+    billing_address: string;
+    shipping_address: string;
+    distance_miles: number;
+    threshold_miles: number;
+    order_id: string;
+  };
+
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Address Distance Mismatch</h3>
+      <div className="space-y-2 text-sm">
+        <DetailRow label="Billing" value={`${e.billing_address} (${e.billing_zip})`} />
+        <DetailRow label="Shipping" value={`${e.shipping_address} (${e.shipping_zip})`} />
+        <DetailRow label="Distance" value={`${e.distance_miles} miles`} />
+        <DetailRow label="Threshold" value={`${e.threshold_miles} miles`} />
+        <DetailRow label="Order" value={`#${e.order_id}`} />
+      </div>
+    </div>
+  );
+}
+
+function NameMismatchEvidence({ evidence }: { evidence: Record<string, unknown> }) {
+  const e = evidence as {
+    billing_name: string;
+    customer_name: string;
+    last_names_match: boolean;
+    order_id: string;
+  };
+
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Name Mismatch</h3>
+      <div className="space-y-2 text-sm">
+        <DetailRow label="Billing Name" value={e.billing_name} />
+        <DetailRow label="Customer Name" value={e.customer_name} />
+        <DetailRow label="Last Names Match" value={e.last_names_match ? "Yes" : "No"} />
+        <DetailRow label="Order" value={`#${e.order_id}`} />
       </div>
     </div>
   );

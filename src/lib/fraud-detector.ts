@@ -1,5 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
+import { addOrderTags } from "@/lib/shopify-order-tags";
+import { zipDistance, extractZip } from "@/lib/geo-distance";
 
 // ── Types ──
 
@@ -33,6 +35,14 @@ interface HighVelocityConfig {
   min_qualifying_orders: number;
   window_days: number;
   lookback_days: number;
+}
+
+interface AddressDistanceConfig {
+  distance_threshold_miles: number;
+}
+
+interface NameMismatchConfig {
+  ignore_last_name_match: boolean;
 }
 
 // ── Coordinator ──
@@ -71,6 +81,10 @@ export async function runAllFraudRules(workspaceId: string): Promise<FraudDetect
         case "high_velocity":
           result = await detectHighVelocity(rule, workspaceId);
           break;
+        case "address_distance":
+        case "name_mismatch":
+          // These are real-time only (triggered per-order), not batch
+          continue;
         default:
           continue;
       }
@@ -229,11 +243,17 @@ async function detectSharedAddress(
           evidence,
           customer_ids: customerIds,
           order_ids: orderIds,
+          orders_held: true,
           first_detected_at: new Date().toISOString(),
           last_seen_at: new Date().toISOString(),
         })
         .select("id")
         .single();
+
+      // Tag all orders as suspicious
+      for (const oid of orderIds) {
+        if (oid) addOrderTags(workspaceId, oid, ["suspicious"]).catch(() => {});
+      }
 
       if (newCase) {
         // Insert match rows
@@ -398,11 +418,17 @@ async function detectHighVelocity(
           evidence,
           customer_ids: [customerId],
           order_ids: orders.map((o) => o.shopify_order_id),
+          orders_held: true,
           first_detected_at: new Date().toISOString(),
           last_seen_at: new Date().toISOString(),
         })
         .select("id")
         .single();
+
+      // Tag all orders as suspicious
+      for (const o of orders) {
+        if (o.shopify_order_id) addOrderTags(workspaceId, o.shopify_order_id, ["suspicious"]).catch(() => {});
+      }
 
       if (newCase) {
         const matchRows = orders.map((o) => ({
@@ -455,26 +481,50 @@ export async function checkOrderForFraud(
     .single();
   const suppressedAddresses = new Set<string>((workspace?.fraud_suppressed_addresses || []) as string[]);
 
-  // Load the order
+  // Load the order with address details
   const { data: order } = await admin
     .from("orders")
-    .select("id, normalized_shipping_address, customer_id, subscription_id")
+    .select("id, shopify_order_id, normalized_shipping_address, customer_id, subscription_id, billing_address, shipping_address")
     .eq("id", orderId)
     .single();
 
   if (!order) return;
+
+  // Load customer for name comparison
+  const effectiveCustomerId = order.customer_id || customerId;
+  let customer: { id: string; first_name: string | null; last_name: string | null } | null = null;
+  if (effectiveCustomerId) {
+    const { data: c } = await admin.from("customers").select("id, first_name, last_name")
+      .eq("id", effectiveCustomerId).single();
+    customer = c;
+  }
+
+  let flagged = false;
 
   for (const rule of rules) {
     try {
       if (rule.rule_type === "shared_address" && order.normalized_shipping_address) {
         await checkAddressForOrder(rule, workspaceId, order.normalized_shipping_address, suppressedAddresses);
       }
-      if (rule.rule_type === "high_velocity" && (order.customer_id || customerId)) {
-        await checkVelocityForCustomer(rule, workspaceId, order.customer_id || customerId!);
+      if (rule.rule_type === "high_velocity" && effectiveCustomerId) {
+        await checkVelocityForCustomer(rule, workspaceId, effectiveCustomerId);
+      }
+      if (rule.rule_type === "address_distance") {
+        const result = await checkAddressDistance(rule, workspaceId, order, effectiveCustomerId);
+        if (result) flagged = true;
+      }
+      if (rule.rule_type === "name_mismatch" && customer) {
+        const result = await checkNameMismatch(rule, workspaceId, order, customer);
+        if (result) flagged = true;
       }
     } catch (err) {
       console.error(`Real-time fraud check error for rule ${rule.id}:`, err);
     }
+  }
+
+  // Tag the Shopify order as "suspicious" if any rule flagged it
+  if (flagged && order.shopify_order_id) {
+    await addOrderTags(workspaceId, order.shopify_order_id, ["suspicious"]);
   }
 }
 
@@ -579,4 +629,170 @@ export async function checkCustomerForFraud(
   for (const rule of rules) {
     await checkAddressForOrder(rule, workspaceId, orders[0].normalized_shipping_address!, suppressedAddresses);
   }
+}
+
+// ── Address Distance Detector (real-time only) ──
+
+async function checkAddressDistance(
+  rule: FraudRule,
+  workspaceId: string,
+  order: { id: string; shopify_order_id: string; billing_address: unknown; shipping_address: unknown; customer_id: string | null },
+  customerId: string | null,
+): Promise<boolean> {
+  const config = rule.config as unknown as AddressDistanceConfig;
+  const threshold = config.distance_threshold_miles || 100;
+
+  const billing = order.billing_address as { zip?: string; first_name?: string; last_name?: string; city?: string; province?: string } | null;
+  const shipping = order.shipping_address as { zip?: string; first_name?: string; last_name?: string; city?: string; province?: string } | null;
+
+  const billingZip = extractZip(billing);
+  const shippingZip = extractZip(shipping);
+
+  if (!billingZip || !shippingZip) return false;
+  if (billingZip === shippingZip) return false;
+
+  const distance = zipDistance(billingZip, shippingZip);
+  if (distance === null || distance < threshold) return false;
+
+  // Distance exceeds threshold — create fraud case
+  const admin = createAdminClient();
+
+  const evidence = {
+    billing_zip: billingZip,
+    shipping_zip: shippingZip,
+    billing_address: billing ? `${billing.city || ""}, ${billing.province || ""}`.trim() : billingZip,
+    shipping_address: shipping ? `${shipping.city || ""}, ${shipping.province || ""}`.trim() : shippingZip,
+    distance_miles: Math.round(distance),
+    threshold_miles: threshold,
+    order_id: order.shopify_order_id,
+  };
+
+  const title = `Billing/shipping ${Math.round(distance)} miles apart on order #${order.shopify_order_id}`;
+
+  // Check for existing case for this order
+  const { data: existing } = await admin
+    .from("fraud_cases")
+    .select("id")
+    .eq("rule_id", rule.id)
+    .eq("workspace_id", workspaceId)
+    .not("status", "in", '("confirmed_fraud","dismissed")')
+    .filter("evidence->>order_id", "eq", order.shopify_order_id)
+    .limit(1)
+    .maybeSingle();
+
+  if (existing) return true; // Already flagged
+
+  const { data: newCase } = await admin
+    .from("fraud_cases")
+    .insert({
+      workspace_id: workspaceId,
+      rule_id: rule.id,
+      rule_type: rule.rule_type,
+      status: "open",
+      severity: rule.severity,
+      title,
+      evidence,
+      customer_ids: customerId ? [customerId] : [],
+      order_ids: [order.shopify_order_id],
+      orders_held: true,
+      first_detected_at: new Date().toISOString(),
+      last_seen_at: new Date().toISOString(),
+    })
+    .select("id")
+    .single();
+
+  if (newCase) {
+    await inngest.send({
+      name: "fraud/case.created",
+      data: { caseId: newCase.id, workspaceId },
+    });
+  }
+
+  return true;
+}
+
+// ── Name Mismatch Detector (real-time only) ──
+
+async function checkNameMismatch(
+  rule: FraudRule,
+  workspaceId: string,
+  order: { id: string; shopify_order_id: string; billing_address: unknown; customer_id: string | null },
+  customer: { id: string; first_name: string | null; last_name: string | null },
+): Promise<boolean> {
+  const config = rule.config as unknown as NameMismatchConfig;
+
+  const billing = order.billing_address as { first_name?: string; last_name?: string } | null;
+  if (!billing?.first_name && !billing?.last_name) return false;
+  if (!customer.first_name && !customer.last_name) return false;
+
+  const billingFirst = (billing?.first_name || "").toLowerCase().trim();
+  const billingLast = (billing?.last_name || "").toLowerCase().trim();
+  const customerFirst = (customer.first_name || "").toLowerCase().trim();
+  const customerLast = (customer.last_name || "").toLowerCase().trim();
+
+  // If names match, no flag
+  if (billingFirst === customerFirst && billingLast === customerLast) return false;
+
+  // If last names match and config says to ignore, no flag (could be spouse/family)
+  if (config.ignore_last_name_match && billingLast === customerLast && billingLast.length > 0) return false;
+
+  // Names don't match — create fraud case
+  const admin = createAdminClient();
+
+  const billingName = `${billing?.first_name || ""} ${billing?.last_name || ""}`.trim();
+  const customerName = `${customer.first_name || ""} ${customer.last_name || ""}`.trim();
+
+  const evidence = {
+    billing_name: billingName,
+    customer_name: customerName,
+    billing_first: billing?.first_name || "",
+    billing_last: billing?.last_name || "",
+    customer_first: customer.first_name || "",
+    customer_last: customer.last_name || "",
+    last_names_match: billingLast === customerLast,
+    order_id: order.shopify_order_id,
+  };
+
+  const title = `Billing name "${billingName}" ≠ customer "${customerName}" on order #${order.shopify_order_id}`;
+
+  // Check for existing case for this order
+  const { data: existing } = await admin
+    .from("fraud_cases")
+    .select("id")
+    .eq("rule_id", rule.id)
+    .eq("workspace_id", workspaceId)
+    .not("status", "in", '("confirmed_fraud","dismissed")')
+    .filter("evidence->>order_id", "eq", order.shopify_order_id)
+    .limit(1)
+    .maybeSingle();
+
+  if (existing) return true;
+
+  const { data: newCase } = await admin
+    .from("fraud_cases")
+    .insert({
+      workspace_id: workspaceId,
+      rule_id: rule.id,
+      rule_type: rule.rule_type,
+      status: "open",
+      severity: rule.severity,
+      title,
+      evidence,
+      customer_ids: [customer.id],
+      order_ids: [order.shopify_order_id],
+      orders_held: true,
+      first_detected_at: new Date().toISOString(),
+      last_seen_at: new Date().toISOString(),
+    })
+    .select("id")
+    .single();
+
+  if (newCase) {
+    await inngest.send({
+      name: "fraud/case.created",
+      data: { caseId: newCase.id, workspaceId },
+    });
+  }
+
+  return true;
 }

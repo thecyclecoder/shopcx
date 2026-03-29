@@ -150,7 +150,14 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - Article feedback widget (thumbs up/down) with API
 
 ### Phase 4d: Fraud Detection ✅
-- Fraud rules engine: shared_address + high_velocity with configurable thresholds
+- Fraud rules engine: shared_address + high_velocity + address_distance + name_mismatch with configurable thresholds
+- **Order hold**: Real-time fraud detection tags Shopify orders "suspicious" via `tagsAdd` GraphQL mutation
+  - Fulfillment center holds tagged orders automatically
+  - Dismiss case → `tagsRemove` releases orders to fulfillment
+  - Confirm fraud → orders stay tagged for manual handling
+  - "Orders Held" section on fraud detail page with amber badge
+- **Address distance rule**: Billing/shipping zip > threshold miles apart (Haversine + `zipcodes` npm package for US zip centroids)
+- **Name mismatch rule**: Billing name ≠ customer name (case-insensitive, ignore if last names match option)
 - Fraud case detail: investigation panel with rule triggering, customer accounts, orders, subscriptions, chargebacks, account linking
 - Subscription cancel from fraud detail with reason "fraud" via Appstle DELETE endpoint
 - Inngest-powered nightly scans + per-order/customer checks + Shopify dispute polling
@@ -263,7 +270,9 @@ For replies (ai/reply-received): route → patterns (deferred) → journey → w
 - `src/lib/first-touch.ts` — First outbound touch tagging (touched + ft:source)
 - `src/lib/ticket-tags.ts` — Idempotent ticket tag helper
 - `src/lib/shopify-marketing.ts` — Subscribe + unsubscribe email/SMS marketing via Shopify GraphQL
-- `src/lib/fraud-detector.ts` — Fraud rules engine (shared_address, high_velocity)
+- `src/lib/fraud-detector.ts` — Fraud rules engine (shared_address, high_velocity, address_distance, name_mismatch)
+- `src/lib/shopify-order-tags.ts` — Shopify GraphQL tagsAdd/tagsRemove for order hold
+- `src/lib/geo-distance.ts` — Haversine distance + US zip code lookup via zipcodes package
 - `src/components/notification-bell.tsx` — Dashboard notification bell with dropdown
 - `src/app/journey/[token]/page.tsx` — Journey mini-site (multi-step forms, branded)
 - `src/app/api/journey/[token]/step/route.ts` — Journey step submission (code-driven executor)
