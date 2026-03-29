@@ -16,6 +16,8 @@ interface DashboardStats {
   cancels_yesterday: number;
   failures_today: number;
   failures_yesterday: number;
+  dunning_recovered: number;
+  dunning_active_failures: number;
 }
 
 export default function DashboardPage() {
@@ -41,6 +43,8 @@ export default function DashboardPage() {
         cancels_yesterday: extra.cancels_yesterday || 0,
         failures_today: extra.failures_today || 0,
         failures_yesterday: extra.failures_yesterday || 0,
+        dunning_recovered: extra.dunning_recovered || 0,
+        dunning_active_failures: extra.dunning_active_failures || 0,
       });
     });
   }, [workspace.id]);
@@ -69,6 +73,8 @@ export default function DashboardPage() {
     { label: "Tickets Today", value: stats.tickets_today.toLocaleString(), color: "", change: null },
     { label: "Cancels Today", value: stats.cancels_today.toLocaleString(), color: stats.cancels_today > 0 ? "text-red-600" : "", change: cancChange },
     { label: "Payment Failures Today", value: stats.failures_today.toLocaleString(), color: stats.failures_today > 0 ? "text-red-600" : "", change: failChange },
+    { label: "At-Risk Subs", value: stats.dunning_active_failures.toLocaleString(), color: stats.dunning_active_failures > 0 ? "text-amber-600" : "", change: null },
+    { label: "Dunning Saves", value: stats.dunning_recovered.toLocaleString(), color: stats.dunning_recovered > 0 ? "text-emerald-600" : "", change: null },
   ] : null;
 
   return (
@@ -90,6 +96,8 @@ export default function DashboardPage() {
           { label: "Tickets Today", value: "\u2014", color: "", change: null },
           { label: "Cancels Today", value: "\u2014", color: "", change: null },
           { label: "Payment Failures Today", value: "\u2014", color: "", change: null },
+          { label: "At-Risk Subs", value: "\u2014", color: "", change: null },
+          { label: "Dunning Saves", value: "\u2014", color: "", change: null },
         ]).map((stat) => (
           <div
             key={stat.label}

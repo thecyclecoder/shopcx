@@ -77,25 +77,35 @@ export async function GET(
   const closedCount = (totalClosed as { count: number | null }).count || 0;
   const aiResolutionRate = closedCount > 0 ? aiCount / closedCount : null;
 
-  // Cancels + payment failures (today vs yesterday)
-  const todayStart = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
-  const yesterdayStart = new Date(new Date().setHours(-24, 0, 0, 0)).toISOString();
+  // Cancels + payment failures (today vs yesterday) — use UTC dates
+  const now = new Date();
+  const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+  const yesterdayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1)).toISOString();
 
-  const [cancelsToday, cancelsYesterday, failuresToday, failuresYesterday] = await Promise.all([
+  // Use customer_events for accurate cancel + failure counts (webhooks log events)
+  const [cancelsToday, cancelsYesterday, failuresToday, failuresYesterday, dunningRecovered, dunningRevenue] = await Promise.all([
+    admin.from("customer_events").select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId).eq("event_type", "subscription.cancelled").gte("created_at", todayStart),
+    admin.from("customer_events").select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId).eq("event_type", "subscription.cancelled").gte("created_at", yesterdayStart).lt("created_at", todayStart),
+    admin.from("customer_events").select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId).eq("event_type", "subscription.billing-failure").gte("created_at", todayStart),
+    admin.from("customer_events").select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId).eq("event_type", "subscription.billing-failure").gte("created_at", yesterdayStart).lt("created_at", todayStart),
+    // Dunning saves (all time)
+    admin.from("dunning_cycles").select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId).eq("status", "recovered"),
+    // Total failed subscriptions needing dunning
     admin.from("subscriptions").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId).eq("status", "cancelled").gte("updated_at", todayStart),
-    admin.from("subscriptions").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId).eq("status", "cancelled").gte("updated_at", yesterdayStart).lt("updated_at", todayStart),
-    admin.from("subscriptions").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId).eq("last_payment_status", "failed").gte("updated_at", todayStart),
-    admin.from("subscriptions").select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId).eq("last_payment_status", "failed").gte("updated_at", yesterdayStart).lt("updated_at", todayStart),
+      .eq("workspace_id", workspaceId).eq("last_payment_status", "failed").eq("status", "active"),
   ]);
 
   const cancTodayCount = (cancelsToday as { count: number | null }).count || 0;
   const cancYestCount = (cancelsYesterday as { count: number | null }).count || 0;
   const failTodayCount = (failuresToday as { count: number | null }).count || 0;
   const failYestCount = (failuresYesterday as { count: number | null }).count || 0;
+  const dunningRecoveredCount = (dunningRecovered as { count: number | null }).count || 0;
+  const activeFailures = (dunningRevenue as { count: number | null }).count || 0;
 
   return NextResponse.json({
     customers: (customers as { count: number | null }).count || 0,
@@ -108,5 +118,7 @@ export async function GET(
     cancels_yesterday: cancYestCount,
     failures_today: failTodayCount,
     failures_yesterday: failYestCount,
+    dunning_recovered: dunningRecoveredCount,
+    dunning_active_failures: activeFailures,
   });
 }
