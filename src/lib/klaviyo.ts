@@ -253,24 +253,25 @@ export async function updateReviewStatus(
   const admin = createAdminClient();
 
   // Build PATCH body based on action
+  // Klaviyo status is an object: { value: "published" }, not a plain string
   const attributes: Record<string, unknown> = {};
   let localStatus: string;
 
   switch (action) {
     case "publish":
-      attributes.status = "published";
+      attributes.status = { value: "published" };
       localStatus = "published";
       break;
     case "reject":
-      attributes.status = "rejected";
+      attributes.status = { value: "rejected" };
       localStatus = "rejected";
       break;
     case "feature":
-      attributes.featured = true;
+      attributes.status = { value: "featured" };
       localStatus = "featured";
       break;
     case "unfeature":
-      attributes.featured = false;
+      attributes.status = { value: "published" };
       localStatus = "published";
       break;
   }
@@ -291,7 +292,7 @@ export async function updateReviewStatus(
     if (!res.ok) {
       const text = await res.text();
       console.error(`Klaviyo review update failed: ${res.status}`, text);
-      return { success: false, error: `Klaviyo API error: ${res.status}` };
+      return { success: false, error: `Klaviyo API error: ${res.status} — ${text.slice(0, 200)}` };
     }
 
     // Update local DB
