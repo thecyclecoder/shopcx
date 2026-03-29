@@ -42,6 +42,7 @@ export default function Sidebar({
   const [ticketsExpanded, setTicketsExpanded] = useState(false);
   const [escalationCounts, setEscalationCounts] = useState<{ open: number; pending: number; closed: number }>({ open: 0, pending: 0, closed: 0 });
   const [fraudCount, setFraudCount] = useState<{ count: number; maxSeverity: string }>({ count: 0, maxSeverity: "low" });
+  const [pendingReviewCount, setPendingReviewCount] = useState(0);
 
   // Close sidebar on route change (mobile), auto-expand tickets when on tickets page
   useEffect(() => {
@@ -74,6 +75,11 @@ export default function Sidebar({
             : cases.some((c: { severity: string }) => c.severity === "medium") ? "medium" : "low";
           setFraudCount({ count, maxSeverity });
         })
+        .catch(() => {});
+
+      fetch(`/api/workspaces/${workspace.id}/reviews?status=pending&limit=1`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d?.stats?.pending != null) setPendingReviewCount(d.stats.pending); })
         .catch(() => {});
     };
     fetchCounts();
@@ -169,6 +175,11 @@ export default function Sidebar({
                     <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
                   </svg>
                   <span className="flex-1">{item.label}</span>
+                  {item.href === "/dashboard/reviews" && pendingReviewCount > 0 && (
+                    <span className="rounded-full bg-yellow-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400">
+                      {pendingReviewCount > 99 ? "99+" : pendingReviewCount}
+                    </span>
+                  )}
                   {item.href === "/dashboard/fraud" && fraudCount.count > 0 && (
                     <span className={`rounded-full px-1.5 py-0.5 text-xs font-medium tabular-nums ${
                       fraudCount.maxSeverity === "high"
