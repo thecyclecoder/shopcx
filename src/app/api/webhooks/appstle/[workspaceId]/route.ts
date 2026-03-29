@@ -147,12 +147,30 @@ async function handleSubscriptionEvent(
     quantity: line.quantity,
     price_cents: dollarsToCents((line.currentPrice as { amount?: string })?.amount),
     product_id: line.productId ? extractId(line.productId as string) : null,
+    variant_id: line.variantId ? extractId(line.variantId as string) : null,
     variant_title: line.variantTitle || null,
     selling_plan: line.sellingPlanName || null,
   }));
 
   const billingPolicy = data.billingPolicy as { interval?: string; intervalCount?: number } | undefined;
   const deliveryPrice = data.deliveryPrice as { amount?: string } | undefined;
+
+  // Extract shipping address from deliveryMethod.address
+  const deliveryMethod = data.deliveryMethod as { address?: Record<string, unknown> } | undefined;
+  const rawAddr = deliveryMethod?.address;
+  const shippingAddress = rawAddr ? {
+    firstName: rawAddr.firstName || "",
+    lastName: rawAddr.lastName || "",
+    address1: rawAddr.address1 || "",
+    address2: rawAddr.address2 || "",
+    city: rawAddr.city || "",
+    province: rawAddr.province || "",
+    provinceCode: rawAddr.provinceCode || "",
+    zip: rawAddr.zip || "",
+    country: rawAddr.country || "",
+    countryCode: rawAddr.countryCode || rawAddr.countryCodeV2 || "",
+    phone: rawAddr.phone || "",
+  } : null;
 
   // Upsert subscription
   if (contractId) {
@@ -168,6 +186,8 @@ async function handleSubscriptionEvent(
       last_payment_status: (data.lastPaymentStatus as string)?.toLowerCase() || null,
       items,
       delivery_price_cents: dollarsToCents(deliveryPrice?.amount),
+      shipping_address: shippingAddress,
+      subscription_created_at: (data.createdAt as string) || null,
       updated_at: new Date().toISOString(),
     }, { onConflict: "workspace_id,shopify_contract_id" });
   }

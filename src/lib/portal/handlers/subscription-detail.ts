@@ -35,9 +35,10 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
   // Lock only truly new subs that haven't been billed yet
   let isLocked = false;
   if (sub.last_payment_status !== "succeeded") {
-    const created = sub.created_at ? new Date(sub.created_at).getTime() : 0;
-    const nextBilling = sub.next_billing_date ? new Date(sub.next_billing_date).getTime() : 0;
-    if (created > 0 && nextBilling > Date.now() && Date.now() - created < lockDays * 86400000) {
+    const created = sub.subscription_created_at
+      ? new Date(sub.subscription_created_at).getTime()
+      : sub.created_at ? new Date(sub.created_at).getTime() : 0;
+    if (created > 0 && Date.now() - created < lockDays * 86400000) {
       isLocked = true;
     }
   }
@@ -97,20 +98,22 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     ? `https://${ws.shopify_myshopify_domain}/account`
     : null;
 
-  // Add customer's default address as the delivery address
+  // Add delivery address: prefer subscription's shipping_address, fall back to customer default
+  const subAddr = sub.shipping_address as Record<string, unknown> | null;
   const defaultAddr = (customer as Record<string, unknown>)?.default_address as Record<string, unknown> | null;
-  if (defaultAddr && !contract.deliveryMethod) {
+  const addr = subAddr || defaultAddr;
+  if (addr && !contract.deliveryMethod) {
     contract.deliveryMethod = {
       address: {
-        firstName: defaultAddr.firstName || defaultAddr.first_name || "",
-        lastName: defaultAddr.lastName || defaultAddr.last_name || "",
-        address1: defaultAddr.address1 || "",
-        address2: defaultAddr.address2 || "",
-        city: defaultAddr.city || "",
-        province: defaultAddr.province || "",
-        provinceCode: defaultAddr.provinceCode || "",
-        zip: defaultAddr.zip || "",
-        country: defaultAddr.country || "",
+        firstName: addr.firstName || addr.first_name || "",
+        lastName: addr.lastName || addr.last_name || "",
+        address1: addr.address1 || "",
+        address2: addr.address2 || "",
+        city: addr.city || "",
+        province: addr.province || "",
+        provinceCode: addr.provinceCode || "",
+        zip: addr.zip || "",
+        country: addr.country || "",
       },
     };
   }
