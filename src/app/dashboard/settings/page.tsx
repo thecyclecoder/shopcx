@@ -144,6 +144,19 @@ export default function SettingsPage() {
         </Link>
 
         <Link
+          href="/dashboard/settings/portal"
+          className="flex items-center justify-between rounded-lg border border-violet-200 bg-violet-50 p-5 transition-colors hover:border-violet-300 dark:border-violet-800 dark:bg-violet-950 dark:hover:border-violet-700"
+        >
+          <div>
+            <h2 className="text-sm font-medium text-violet-900 dark:text-violet-100">Customer Portal</h2>
+            <p className="mt-1 text-sm text-violet-600 dark:text-violet-400">Subscription portal: Shopify extension, mini-site, products, selling plans</p>
+          </div>
+          <svg className="h-5 w-5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+
+        <Link
           href="/dashboard/settings/dunning"
           className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 p-5 transition-colors hover:border-amber-300 dark:border-amber-800 dark:bg-amber-950 dark:hover:border-amber-700"
         >

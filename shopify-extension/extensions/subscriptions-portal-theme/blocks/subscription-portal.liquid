@@ -1,138 +1,9 @@
 <div
   class="subscriptions-portal"
   data-app="subscriptions-portal"
-  data-endpoint="{{ block.settings.endpoint }}"
-  data-debug="{{ block.settings.debug }}"
-  data-portal-page="{{ block.settings.portal_page_path }}"
-  data-lock-window-days="{{ block.settings.lock_window_days }}"
-  data-selling-plan-week-4="{{ block.settings.selling_plan_week_4 }}"
-  data-selling-plan-week-8="{{ block.settings.selling_plan_week_8 }}"
-  data-selling-plan-week-2="{{ block.settings.selling_plan_week_2 }}"
-  data-shipping-protection-variant-ids='[
-    {%- if block.settings.shipping_protection_product -%}
-      {%- for v in block.settings.shipping_protection_product.variants -%}
-        {%- if v.available -%}
-          {{- v.id | json -}}{% unless forloop.last %},{% endunless %}
-        {%- endif -%}
-      {%- endfor -%}
-    {%- endif -%}
-  ]'
-
-  data-products-available-to-add='[
-    {%- for p in block.settings.products_available_to_add -%}
-      {
-        "productId": {{ p.id | json }},
-        "handle": {{ p.handle | json }},
-        "title": {{ p.title | json }},
-
-        "currencyCode": {{ shop.currency | json }},
-
-        "price_min": {{ p.price_min | money_without_currency | json }},
-        "price_max": {{ p.price_max | money_without_currency | json }},
-        "compare_at_price_min": {{ p.compare_at_price_min | money_without_currency | json }},
-        "compare_at_price_max": {{ p.compare_at_price_max | money_without_currency | json }},
-
-        "image": {
-          {%- if p.featured_image -%}
-            "src": {{ p.featured_image | image_url: width: 320 | json }},
-            "alt": {{ p.featured_image.alt | default: p.title | json }}
-          {%- else -%}
-            "src": "",
-            "alt": {{ p.title | json }}
-          {%- endif -%}
-        },
-
-        "metafields": {
-          "direct_response_headline": {{ p.metafields.custom.direct_response_headline.value | default: "" | json }},
-          "direct_response_subhead":  {{ p.metafields.custom.direct_response_subhead.value  | default: "" | json }}
-        },
-
-        "rating": {
-          "value": {{ p.metafields.reviews.rating.value.rating | default: 0 | json }},
-          "scale_max": {{ p.metafields.reviews.rating.value.scale_max | default: 5 | json }},
-          "count": {{ p.metafields.reviews.rating_count | default: 0 | plus: 10107 | times: 100.0  | money_without_currency | remove: ".00" | json }}
-        },
-
-        "variants": [
-          {%- assign has_variants = false -%}
-          {%- for v in p.variants -%}
-            {%- if v.available -%}
-              {%- if has_variants %},{% endif -%}
-              {
-                "id": {{ v.id | json }},
-                "title": {{ v.title | json }},
-
-                "currencyCode": {{ shop.currency | json }},
-
-                "price": {{ v.price | money_without_currency | json }},
-                "compare_at_price": {{ v.compare_at_price | money_without_currency | json }},
-
-                "price_cents": {{ v.price | json }},
-                "compare_at_price_cents": {{ v.compare_at_price | json }},
-
-                "image": {
-                  {%- if v.image -%}
-                    "src": {{ v.image | image_url: width: 240 | json }},
-                    "alt": {{ v.image.alt | default: p.title | json }}
-                  {%- elsif p.featured_image -%}
-                    "src": {{ p.featured_image | image_url: width: 240 | json }},
-                    "alt": {{ p.featured_image.alt | default: p.title | json }}
-                  {%- else -%}
-                    "src": "",
-                    "alt": {{ p.title | json }}
-                  {%- endif -%}
-                }
-              }
-              {%- assign has_variants = true -%}
-            {%- endif -%}
-          {%- endfor -%}
-        ]
-      }{% unless forloop.last %},{% endunless %}
-    {%- endfor -%}
-  ]'
-
-  data-addons='[
-    {%- for p in block.settings.addons -%}
-      {
-        "productId": {{ p.id | json }},
-        "title": {{ p.title | json }},
-        "variants": [
-          {%- assign has_variants = false -%}
-          {%- for v in p.variants -%}
-            {%- if v.available -%}
-              {%- if has_variants %},{% endif -%}
-              {
-                "id": {{ v.id | json }},
-                "title": {{ v.title | json }}
-              }
-              {%- assign has_variants = true -%}
-            {%- endif -%}
-          {%- endfor -%}
-        ]
-      }{% unless forloop.last %},{% endunless %}
-    {%- endfor -%}
-  ]'
-  {% if customer %}
-    data-first-name="{{ customer.first_name | escape }}"
-    data-last-name="{{ customer.last_name | escape }}"
-    data-email="{{ customer.email | escape }}"
-  {% endif %}
-    data-cancel-images-json='{
-    "too_much_product": {{ block.settings.cancel_img_too_much_product | image_url: width: 800 | default: "" | json }},
-    "too_expensive": {{ block.settings.cancel_img_too_expensive | image_url: width: 800 | default: "" | json }},
-    "not_getting_results": {{ block.settings.cancel_img_not_getting_results | image_url: width: 800 | default: "" | json }},
-    "tired_of_flavor": {{ block.settings.cancel_img_tired_of_flavor | image_url: width: 800 | default: "" | json }},
-    "reached_goals": {{ block.settings.cancel_img_reached_goals | image_url: width: 800 | default: "" | json }},
-    "shipping_issues": {{ block.settings.cancel_img_shipping_issues | image_url: width: 800 | default: "" | json }}
-  }'
-  data-cancel-coupons-json='{
-  "pct10": {{ block.settings.cancel_coupon_pct10 | default: "" | json }},
-  "pct15": {{ block.settings.cancel_coupon_pct15 | default: "" | json }},
-  "pct20": {{ block.settings.cancel_coupon_pct20 | default: "" | json }},
-  "pct25": {{ block.settings.cancel_coupon_pct25 | default: "" | json }}
-}'
+  data-workspace="{{ block.settings.workspace_id }}"
 >
-  
+
   {{ 'portal.min.css'
   | asset_url
   | stylesheet_tag
@@ -237,161 +108,24 @@
   "name": "Subscriptions Portal",
   "target": "section",
   "settings": [
-    { 
-      "type": "text", 
-      "id": "heading", 
-      "label": "Heading", 
-      "default": "Manage your subscriptions" 
+    {
+      "type": "text",
+      "id": "heading",
+      "label": "Heading",
+      "default": "Manage your subscriptions"
     },
     {
       "type": "text",
-      "id": "portal_page_path",
-      "label": "Portal page path",
-      "default": "/pages/portal",
-      "info": "Where this portal lives (example: /pages/portal). Used to map /pages/portal/* -> /apps/portal/*."
+      "id": "workspace_id",
+      "label": "ShopCX Workspace ID",
+      "info": "Your ShopCX workspace ID. The backend validates this against the connected Shopify store."
     },
     {
-      "type": "text",
-      "id": "endpoint",
-      "label": "App Proxy base endpoint",
-      "default": "/apps/portal",
-      "info": "Base path for the portal routes (example: /apps/portal)."
-    },
-    { 
-      "type": "checkbox", 
-      "id": "redirect_to_login", 
-      "label": "Auto-redirect to login when logged out", 
-      "default": true 
-    },
-    { 
-      "type": "checkbox", 
-      "id": "debug", 
-      "label": "Debug mode", 
-      "default": false 
-    },
-
-    {
-      "type": "header",
-      "content": "Portal Rules"
-    },
-    {
-      "type": "number",
-      "id": "lock_window_days",
-      "label": "Read-only window (days)",
-      "default": 7,
-      "info": "If a subscription is younger than this many days, it is read-only and shows the setup notice."
-    },
-
-    {
-      "type": "header",
-      "content": "Selling plan IDs (frequency)"
-    },
-    {
-      "type": "text",
-      "id": "selling_plan_week_4",
-      "label": "Selling Plan ID – 4 weeks (Monthly)",
-      "default": "REQUIRED",
-      "info": "Appstle selling plan ID for monthly subscriptions"
-    },
-    {
-      "type": "text",
-      "id": "selling_plan_week_8",
-      "label": "Selling Plan ID – 8 weeks (Every 2 months)",
-      "default": "REQUIRED",
-      "info": "Appstle selling plan ID for every-2-month subscriptions"
-    },
-    {
-      "type": "text",
-      "id": "selling_plan_week_2",
-      "label": "Selling Plan ID – 2 weeks (Twice a month)",
-      "default": "REQUIRED",
-      "info": "Appstle selling plan ID for twice-a-month subscriptions"
-    },
-
-    {
-      "type": "header",
-      "content": "Products"
-    },
-    {
-      "type": "product",
-      "id": "shipping_protection_product",
-      "label": "Shipping Protection product",
-      "info": "Used for the Shipping Protection toggle."
-    },
-    {
-      "type": "product_list",
-      "id": "products_available_to_add",
-      "label": "Products Available to Add",
-      "limit": 50
-    },
-    {
-      "type": "product_list",
-      "id": "addons",
-      "label": "One-time Add-ons (Mug, Mixer, Tumbler, etc.)",
-      "limit": 50
-    },
-    {
-  "type": "header",
-  "content": "Cancel flow images"
-},
-{
-  "type": "image_picker",
-  "id": "cancel_img_too_much_product",
-  "label": "Cancel reason image – Too much product"
-},
-{
-  "type": "image_picker",
-  "id": "cancel_img_too_expensive",
-  "label": "Cancel reason image – Too expensive"
-},
-{
-  "type": "image_picker",
-  "id": "cancel_img_not_getting_results",
-  "label": "Cancel reason image – Not getting results"
-},
-{
-  "type": "image_picker",
-  "id": "cancel_img_tired_of_flavor",
-  "label": "Cancel reason image – Tired of the flavors"
-},
-{
-  "type": "image_picker",
-  "id": "cancel_img_reached_goals",
-  "label": "Cancel reason image – Reached my goals"
-},
-{
-  "type": "image_picker",
-  "id": "cancel_img_shipping_issues",
-  "label": "Cancel reason image – Shipping or delivery issues"
-},
-{
-  "type": "header",
-  "content": "Cancel Flow – Coupons"
-},
-{
-  "type": "text",
-  "id": "cancel_coupon_pct10",
-  "label": "Coupon code – 10% off next order",
-  "default": "L10-CF"
-},
-{
-  "type": "text",
-  "id": "cancel_coupon_pct15",
-  "label": "Coupon code – 15% off next order",
-  "default": "L15-CF"
-},
-{
-  "type": "text",
-  "id": "cancel_coupon_pct20",
-  "label": "Coupon code – 20% off next order",
-  "default": "L20-CF"
-},
-{
-  "type": "text",
-  "id": "cancel_coupon_pct25",
-  "label": "Coupon code – 25% off next order",
-  "default": "L25-CF"
-}
+      "type": "checkbox",
+      "id": "redirect_to_login",
+      "label": "Auto-redirect to login when logged out",
+      "default": true
+    }
   ]
 }
 {% endschema %}

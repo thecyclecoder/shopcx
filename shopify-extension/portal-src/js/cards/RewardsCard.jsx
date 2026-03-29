@@ -1,11 +1,16 @@
 // cards/RewardsCard.jsx — Smile.io rewards integration
+import { useContext } from 'preact/hooks';
+import { PortalContext } from '../App.jsx';
 
 export default function RewardsCard() {
+  const { config } = useContext(PortalContext);
+
   function openRewards() {
     try {
       if (window.SmileUI?.openPanel) { window.SmileUI.openPanel(); return; }
     } catch {}
-    window.location.href = 'https://superfoodscompany.com/pages/rewards';
+    const url = config.rewardsUrl || '/pages/rewards';
+    window.location.href = url;
   }
 
   return (

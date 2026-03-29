@@ -200,17 +200,17 @@ function CouponCard({ contract, showToast, onUpdate }) {
   );
 }
 
-function FrequencyCard({ contract, config, showToast, onUpdate }) {
+function FrequencyCard({ contract, showToast, onUpdate }) {
   const label = billingLabel(contract?.billingPolicy) || 'Not set';
   const [modal, setModal] = useState(false);
   const [selected, setSelected] = useState('');
   const [busy, setBusy] = useState(false);
 
   const options = [
-    { label: 'Twice a Month', interval: 'WEEK', count: 2, plan: config.sellingPlans?.week2 },
-    { label: 'Monthly', interval: 'WEEK', count: 4, plan: config.sellingPlans?.week4 },
-    { label: 'Every 2 Months', interval: 'WEEK', count: 8, plan: config.sellingPlans?.week8 },
-  ].filter(o => o.plan && o.plan !== 'REQUIRED');
+    { label: 'Twice a Month', interval: 'WEEK', count: 2 },
+    { label: 'Monthly', interval: 'WEEK', count: 4 },
+    { label: 'Every 2 Months', interval: 'WEEK', count: 8 },
+  ];
 
   async function save() {
     const opt = options.find(o => o.label === selected);
@@ -362,7 +362,7 @@ export default function SubscriptionDetail() {
           {b === 'paused' && !isReadOnly && <ResumeCard contract={contract} onUpdate={fetchContract} showToast={showToast} />}
           {b === 'active' && !isReadOnly && <PauseCard contract={contract} onUpdate={fetchContract} showToast={showToast} />}
           <ItemsCard contract={contract} lines={lines} shipLine={shipLine} onUpdate={fetchContract} showToast={showToast} config={config} />
-          {!isCancelled && <FrequencyCard contract={contract} config={config} showToast={showToast} onUpdate={fetchContract} />}
+          {!isCancelled && <FrequencyCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
         </div>
         <div class="sp-detail__col">
           {!isCancelled && <RewardsCard />}

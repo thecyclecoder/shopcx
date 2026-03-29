@@ -1,38 +1,57 @@
 // portal-entry.jsx — Preact mount point
+// Only reads data-workspace from Liquid. Everything else comes from the bootstrap API.
 import { render } from 'preact';
 import App from './App.jsx';
-import { configure } from './core/api.js';
+import { configure, requestJson } from './core/api.js';
 
-function parseJsonAttr(el, attr) {
-  try {
-    const raw = el?.getAttribute(attr) || '';
-    if (!raw) return null;
-    return JSON.parse(raw.replace(/&quot;/g, '"').replace(/&#34;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&'));
-  } catch { return null; }
-}
-
-function boot() {
+async function boot() {
   const root = document.getElementById('subscriptions-portal-root');
   if (!root) return;
 
   const appEl = document.querySelector('[data-app="subscriptions-portal"]');
+  const workspaceId = appEl?.getAttribute('data-workspace') || '';
+
+  // Auto-detect portal page path from current URL
+  // e.g. /pages/portal-test → base is /pages/portal-test
+  const portalPage = window.location.pathname.replace(/\/(subscriptions|subscription)$/, '').replace(/\/+$/, '') || '/pages/portal';
+
+  // Endpoint: read from bootstrap config, default to /apps/portal
+  // Will be overridden by workspace config if set
+  let endpoint = '/apps/portal';
+
+  configure({ endpoint });
 
   const config = {
-    endpoint: appEl?.getAttribute('data-endpoint') || '/apps/portal',
-    debug: appEl?.getAttribute('data-debug') === 'true',
-    portalPage: appEl?.getAttribute('data-portal-page') || '/pages/portal',
-    lockDays: parseInt(appEl?.getAttribute('data-lock-window-days') || '7', 10),
-    sellingPlans: {
-      week4: appEl?.getAttribute('data-selling-plan-week-4') || '',
-      week8: appEl?.getAttribute('data-selling-plan-week-8') || '',
-      week2: appEl?.getAttribute('data-selling-plan-week-2') || '',
-    },
-    shippingProtectionVariantIds: parseJsonAttr(appEl, 'data-shipping-protection-variant-ids') || [],
-    catalog: parseJsonAttr(appEl, 'data-products-available-to-add') || [],
-    firstName: appEl?.getAttribute('data-first-name') || '',
+    workspaceId,
+    endpoint,
+    portalPage,
+    firstName: '',
+    lockDays: 7,
+    shippingProtectionVariantIds: [],
+    catalog: [],
+    rewardsUrl: '',
   };
 
-  configure({ endpoint: config.endpoint, debug: config.debug });
+  // Fetch everything from the bootstrap API
+  try {
+    const bootstrap = await requestJson('bootstrap', {}, { force: true });
+    if (bootstrap?.ok) {
+      // Customer identity
+      if (bootstrap.customer) {
+        config.firstName = bootstrap.customer.firstName || '';
+      }
+      // Workspace portal config
+      if (bootstrap.config) {
+        const c = bootstrap.config;
+        config.lockDays = c.lockDays ?? 7;
+        config.shippingProtectionVariantIds = c.shippingProtectionVariantIds ?? [];
+        config.catalog = c.catalog ?? [];
+        config.rewardsUrl = c.rewardsUrl ?? '';
+      }
+    }
+  } catch (e) {
+    console.warn('[Portal] Bootstrap failed:', e);
+  }
 
   root.innerHTML = '';
   render(<App config={config} />, root);
