@@ -132,49 +132,43 @@ export const dunningPaymentFailed = inngest.createFunction(
     });
 
     // Step 5: Card rotation — try each untried card with 2h delays
-    let recovered = false;
+    // Note: billingAttempt success only means the API accepted the request,
+    // NOT that the payment succeeded. Real success comes via billing-success webhook.
+    // We rotate cards and wait — if a billing-success webhook fires, dunningBillingSuccess
+    // will mark the cycle as recovered.
     const maxRotations = Math.min(settings.dunning_max_card_rotations, paymentMethods.length);
     let attemptNumber = 2; // #1 was the initial failure
-    const cardsTried: string[] = [];
 
-    for (let i = 0; i < maxRotations && !recovered; i++) {
-      const untried = getUntriedCards(paymentMethods, cardsTried);
-      if (untried.length === 0) break;
-
-      const card = untried[0];
-
+    for (let i = 0; i < maxRotations; i++) {
       // Wait 2 hours between rotation attempts (except first)
       if (i > 0) {
         await step.sleep(`card-rotation-wait-${i}`, "2h");
       }
 
-      // Check if cycle was recovered externally (e.g., customer added new card)
+      // Reload cycle from DB (gets current cards_tried, handles function restarts)
       const cycleCheck = await step.run(`check-cycle-${i}`, async () => {
         return getActiveDunningCycle(workspace_id, shopify_contract_id);
       });
-      if (!cycleCheck || cycleCheck.status === "recovered") {
-        recovered = true;
-        break;
-      }
+      if (!cycleCheck || cycleCheck.status === "recovered") break;
 
-      const rotationResult = await step.run(`rotate-card-${i}`, async () => {
-        // Switch to this card
+      // Get untried cards from DB state (not in-memory)
+      const dbCardsTried = (cycleCheck.cards_tried as string[]) || [];
+      const untried = getUntriedCards(paymentMethods, dbCardsTried);
+      if (untried.length === 0) break;
+
+      const card = untried[0];
+
+      await step.run(`rotate-card-${i}`, async () => {
         const switchRes = await appstleSwitchPaymentMethod(workspace_id, shopify_contract_id, card.id);
-        if (!switchRes.success) {
-          return { success: false, error: switchRes.error };
-        }
+        if (!switchRes.success) return;
 
-        // Get upcoming order to get billing attempt ID
         const ordersRes = await appstleGetUpcomingOrders(workspace_id, shopify_contract_id);
-        if (!ordersRes.success || !ordersRes.orders?.length) {
-          return { success: false, error: "No upcoming orders found" };
-        }
+        if (!ordersRes.success || !ordersRes.orders?.length) return;
 
         const attemptId = ordersRes.orders[0].id;
+        await appstleAttemptBilling(workspace_id, attemptId);
 
-        // Trigger billing retry
-        const billingRes = await appstleAttemptBilling(workspace_id, attemptId);
-
+        // Log the attempt (not yet known if it succeeded — webhook will tell us)
         await logPaymentFailure({
           workspaceId: workspace_id,
           customerId: customer_id,
@@ -185,31 +179,28 @@ export const dunningPaymentFailed = inngest.createFunction(
           paymentMethodId: card.id,
           attemptNumber,
           attemptType: "card_rotation",
-          succeeded: billingRes.success,
+          succeeded: false, // Will be updated by billing-success webhook
         });
 
-        // Track tried card
-        cardsTried.push(card.dedupeKey);
-        await updateDunningCycle(cycle.id, { cards_tried: cardsTried });
-
-        return billingRes;
+        // Track tried card in DB (survives function restarts)
+        const updatedTried = [...dbCardsTried, card.dedupeKey];
+        await updateDunningCycle(cycleCheck.id, {
+          cards_tried: updatedTried,
+          billing_attempt_id: attemptId,
+        });
       });
-
-      if (rotationResult.success) {
-        recovered = true;
-        await step.run("card-rotation-recovered", async () => {
-          await updateDunningCycle(cycle.id, { status: "recovered", recovered_at: new Date().toISOString() });
-          await postDunningNote(workspace_id, customer_id, dunningInternalNote(
-            `Payment recovered using card ending ${card.last4}`
-          ));
-          await tagCustomerTickets(workspace_id, customer_id, "dunning:recovered");
-        });
-      }
 
       attemptNumber++;
     }
 
-    if (recovered) {
+    // Wait briefly for any billing-success webhook to fire from last rotation
+    await step.sleep("post-rotation-wait", "30m");
+
+    // Check if any card rotation succeeded (billing-success webhook would have updated the cycle)
+    const postRotationCheck = await step.run("post-rotation-check", async () => {
+      return getActiveDunningCycle(workspace_id, shopify_contract_id);
+    });
+    if (!postRotationCheck || postRotationCheck.status === "recovered") {
       return { status: "recovered", method: "card_rotation", cycle_id: cycle.id };
     }
 
@@ -222,36 +213,28 @@ export const dunningPaymentFailed = inngest.createFunction(
     if (settings.dunning_payday_retry_enabled) {
       const paydayDates = getNextPaydayDates(new Date(), 3);
 
-      for (let i = 0; i < paydayDates.length && !recovered; i++) {
+      for (let i = 0; i < paydayDates.length; i++) {
         const retryTime = getRetryTime(paydayDates[i]);
         await step.sleepUntil(`payday-retry-wait-${i}`, retryTime);
 
-        // Check if cycle was recovered externally
+        // Check if cycle was recovered externally (billing-success webhook or new card)
         const cycleCheck = await step.run(`check-cycle-payday-${i}`, async () => {
           return getActiveDunningCycle(workspace_id, shopify_contract_id);
         });
-        if (!cycleCheck || cycleCheck.status === "recovered") {
-          recovered = true;
-          break;
-        }
+        if (!cycleCheck || cycleCheck.status === "recovered") break;
 
-        const paydayResult = await step.run(`payday-retry-${i}`, async () => {
-          // Use last successful card or first available
+        await step.run(`payday-retry-${i}`, async () => {
           const lastCard = customer_id ? await getLastSuccessfulCard(workspace_id, customer_id) : null;
           const targetMethod = lastCard?.payment_method_id || paymentMethods[0]?.id;
-          if (!targetMethod) return { success: false, error: "No payment method available" };
+          if (!targetMethod) return;
 
-          // Switch to preferred card
           await appstleSwitchPaymentMethod(workspace_id, shopify_contract_id, targetMethod);
 
-          // Get upcoming order
           const ordersRes = await appstleGetUpcomingOrders(workspace_id, shopify_contract_id);
-          if (!ordersRes.success || !ordersRes.orders?.length) {
-            return { success: false, error: "No upcoming orders" };
-          }
+          if (!ordersRes.success || !ordersRes.orders?.length) return;
 
           const attemptId = ordersRes.orders[0].id;
-          const billingRes = await appstleAttemptBilling(workspace_id, attemptId);
+          await appstleAttemptBilling(workspace_id, attemptId);
 
           await logPaymentFailure({
             workspaceId: workspace_id,
@@ -263,41 +246,27 @@ export const dunningPaymentFailed = inngest.createFunction(
             paymentMethodId: targetMethod,
             attemptNumber: attemptNumber + i,
             attemptType: "payday_retry",
-            succeeded: billingRes.success,
+            succeeded: false, // Will be updated by billing-success webhook
           });
 
-          return billingRes;
+          await updateDunningCycle(cycleCheck.id, { billing_attempt_id: attemptId });
         });
 
-        if (paydayResult.success) {
-          recovered = true;
-          await step.run("payday-recovered", async () => {
-            await updateDunningCycle(cycle.id, { status: "recovered", recovered_at: new Date().toISOString() });
-            await postDunningNote(workspace_id, customer_id, dunningInternalNote(
-              `Payment recovered on payday retry`
-            ));
-            await tagCustomerTickets(workspace_id, customer_id, "dunning:recovered");
+        // Wait for billing result
+        await step.sleep(`payday-result-wait-${i}`, "30m");
 
-            // Send recovery email
-            if (customer_id) {
-              const admin = createAdminClient();
-              const { data: customer } = await admin.from("customers").select("email, first_name").eq("id", customer_id).single();
-              const { data: ws } = await admin.from("workspaces").select("name").eq("id", workspace_id).single();
-              if (customer?.email && ws?.name) {
-                await sendDunningRecoveryEmail({
-                  workspaceId: workspace_id,
-                  toEmail: customer.email,
-                  customerName: customer.first_name,
-                  workspaceName: ws.name,
-                });
-              }
-            }
-          });
-        }
+        const postPaydayCheck = await step.run(`post-payday-check-${i}`, async () => {
+          return getActiveDunningCycle(workspace_id, shopify_contract_id);
+        });
+        if (!postPaydayCheck || postPaydayCheck.status === "recovered") break;
       }
     }
 
-    if (recovered) {
+    // Final check — was the cycle recovered during payday retries?
+    const finalCheck = await step.run("final-check", async () => {
+      return getActiveDunningCycle(workspace_id, shopify_contract_id);
+    });
+    if (!finalCheck || finalCheck.status === "recovered") {
       return { status: "recovered", method: "payday_retry", cycle_id: cycle.id };
     }
 

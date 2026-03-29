@@ -170,8 +170,9 @@ function isPayday(date: Date): boolean {
 
 export function getRetryTime(paydayDate: Date, timezoneOffset: number = -6): Date {
   // Retry at 7 AM in the target timezone (default US Central = UTC-6)
+  // 7 AM Central = 7 - (-6) = 13 UTC
   const retry = new Date(paydayDate);
-  retry.setUTCHours(7 + timezoneOffset, 0, 0, 0);
+  retry.setUTCHours(7 - timezoneOffset, 0, 0, 0);
   return retry;
 }
 
@@ -201,10 +202,10 @@ export async function getActiveDunningCycle(
     .select("id, cycle_number, status, cards_tried, billing_attempt_id")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", shopifyContractId)
-    .in("status", ["active", "skipped"])
+    .in("status", ["active", "skipped", "paused"])
     .order("cycle_number", { ascending: false })
     .limit(1)
-    .single();
+    .maybeSingle();
 
   return data;
 }
@@ -219,7 +220,7 @@ export async function getActiveDunningCyclesForCustomer(
     .select("id, shopify_contract_id, subscription_id, cycle_number, status, billing_attempt_id")
     .eq("workspace_id", workspaceId)
     .eq("customer_id", customerId)
-    .in("status", ["active", "skipped"]);
+    .in("status", ["active", "skipped", "paused"]);
 
   return data || [];
 }

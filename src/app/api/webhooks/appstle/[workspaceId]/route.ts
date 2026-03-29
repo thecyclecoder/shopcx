@@ -320,29 +320,45 @@ async function handleBillingEvent(
     const { data: subForDunning } = await admin.from("subscriptions").select("shopify_customer_id")
       .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).single();
 
-    inngest.send({
-      name: "dunning/payment-failed",
-      data: {
-        workspace_id: workspaceId,
-        shopify_contract_id: contractId,
-        subscription_id: sub.id,
-        customer_id: sub.customer_id,
-        shopify_customer_id: subForDunning?.shopify_customer_id || null,
-        billing_attempt_id: data.billingAttemptId ? String(data.billingAttemptId) : null,
-        error_code: errorCode,
-        error_message: errorMsg,
-      },
-    }).catch(() => {}); // fire and forget
+    // Check if dunning is enabled + no active cycle already exists (idempotency)
+    const { data: wsSettings } = await admin.from("workspaces").select("dunning_enabled").eq("id", workspaceId).single();
+    if (wsSettings?.dunning_enabled) {
+      const { getActiveDunningCycle } = await import("@/lib/dunning");
+      const existingCycle = await getActiveDunningCycle(workspaceId, contractId);
+      if (!existingCycle) {
+        try {
+          await inngest.send({
+            name: "dunning/payment-failed",
+            data: {
+              workspace_id: workspaceId,
+              shopify_contract_id: contractId,
+              subscription_id: sub.id,
+              customer_id: sub.customer_id,
+              shopify_customer_id: subForDunning?.shopify_customer_id || null,
+              billing_attempt_id: data.billingAttemptId ? String(data.billingAttemptId) : null,
+              error_code: errorCode,
+              error_message: errorMsg,
+            },
+          });
+        } catch (err) {
+          console.error("Failed to send dunning event:", err);
+        }
+      }
+    }
   }
 
   if (eventType === "subscription.billing-success") {
-    inngest.send({
-      name: "dunning/billing-success",
-      data: {
-        workspace_id: workspaceId,
-        shopify_contract_id: contractId,
-        customer_id: sub.customer_id,
-      },
-    }).catch(() => {}); // fire and forget
+    try {
+      await inngest.send({
+        name: "dunning/billing-success",
+        data: {
+          workspace_id: workspaceId,
+          shopify_contract_id: contractId,
+          customer_id: sub.customer_id,
+        },
+      });
+    } catch (err) {
+      console.error("Failed to send billing-success event:", err);
+    }
   }
 }
