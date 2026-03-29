@@ -391,3 +391,4 @@ Use `addTicketTag()` from `src/lib/ticket-tags.ts` (idempotent). Use `markFirstT
 - Journey mini-site and live chat must produce identical human-readable ticket messages
 - Don't push during active Inngest syncs (deployment kills running functions)
 - Use git worktrees for parallel feature development
+- **Shopify extension**: Always run a full build before committing: `cd shopify-extension && node build-portal.js && npx sass portal-src/styles/portal.scss extensions/subscriptions-portal-theme/assets/portal.min.css --style=compressed --no-source-map`

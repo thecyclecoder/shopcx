@@ -3,6 +3,7 @@ import { useState, useEffect, useContext } from 'preact/hooks';
 import { PortalContext } from '../App.jsx';
 import { requestJson } from '../core/api.js';
 import { SkeletonCard } from '../components/Skeleton.jsx';
+import RewardsCard from '../cards/RewardsCard.jsx';
 
 export default function Home() {
   const { config, router } = useContext(PortalContext);
@@ -27,7 +28,12 @@ export default function Home() {
   }
 
   if (!data) {
-    return <div class="sp-wrap sp-grid"><SkeletonCard /></div>;
+    return (
+      <div class="sp-wrap sp-grid sp-home">
+        <SkeletonCard />
+        <SkeletonCard />
+      </div>
+    );
   }
 
   const greeting = config.firstName
@@ -53,6 +59,7 @@ export default function Home() {
           </a>
         </div>
       </div>
+      <RewardsCard />
     </div>
   );
 }
