@@ -417,7 +417,7 @@ export async function generateMissingSummaries(workspaceId: string) {
           messages: [
             {
               role: "user",
-              content: `Summarize this product review in max 15 words. Start with "${nameDisplay}". Focus on the most compelling result or benefit.\n\nTitle: ${review.title || ""}\nReview: ${review.body || ""}`,
+              content: `Summarize this product review in max 15 words as if the reviewer wrote it themselves (first person). Focus on the most compelling result or benefit. No reviewer name.\n\nTitle: ${review.title || ""}\nReview: ${review.body || ""}`,
             },
           ],
         }),
