@@ -391,6 +391,8 @@ export async function generateMissingSummaries(workspaceId: string) {
     .gte("rating", 4)
     .in("review_type", ["review", "store"])
     .not("body", "is", null)
+    .order("featured", { ascending: false })
+    .order("rating", { ascending: false })
     .limit(100);
 
   if (!reviews?.length) return;
