@@ -31,52 +31,77 @@ export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
     byProductId[pid] = { ok: true, reviews: [] };
   }
 
-  // Fetch featured reviews first, then 5-star as fallback
-  // Priority: smart_featured=true → 5-star → 4-star
-  const { data: reviews } = await admin.from("product_reviews")
-    .select("shopify_product_id, author, rating, title, body, summary, smart_featured, created_at")
+  // Map product IDs to product names (for matching reviews with unknown product IDs)
+  const { data: products } = await admin.from("products")
+    .select("shopify_product_id, title")
     .eq("workspace_id", auth.workspaceId)
-    .in("shopify_product_id", productIds)
+    .in("shopify_product_id", productIds);
+
+  const productNameToId: Record<string, string> = {};
+  for (const p of products || []) {
+    if (p.title) productNameToId[p.title.toLowerCase()] = p.shopify_product_id;
+  }
+
+  // Fetch reviews: try by shopify_product_id first, then by product_name match
+  // Columns: featured (not smart_featured), reviewer_name (not author), smart_quote
+  const { data: reviews } = await admin.from("product_reviews")
+    .select("shopify_product_id, product_name, reviewer_name, rating, title, body, summary, smart_quote, featured, created_at")
+    .eq("workspace_id", auth.workspaceId)
     .gte("rating", 4)
-    .order("smart_featured", { ascending: false })
+    .eq("status", "published")
+    .order("featured", { ascending: false })
     .order("rating", { ascending: false })
     .order("created_at", { ascending: false })
-    .limit(productIds.length * 10);
+    .limit(200);
 
-  // Group by product: featured first, then 5-star, cap at 5 per product
+  // Match reviews to requested product IDs
   for (const r of reviews || []) {
-    const pid = r.shopify_product_id;
+    // Try direct product ID match
+    let pid = r.shopify_product_id && r.shopify_product_id !== "unknown"
+      ? r.shopify_product_id
+      : null;
+
+    // Fall back to product_name → product ID mapping
+    if (!pid && r.product_name) {
+      pid = productNameToId[r.product_name.toLowerCase()] || null;
+    }
+
     if (!pid || !byProductId[pid]) continue;
     if (byProductId[pid].reviews.length >= 5) continue;
 
-    // Only include featured or 5-star reviews
-    if (!r.smart_featured && r.rating < 5) continue;
+    // Featured first, then 5-star only
+    if (!r.featured && r.rating < 5) continue;
 
     byProductId[pid].reviews.push({
       rating: r.rating,
-      title: r.title,
-      body: r.body,
-      author: r.author,
-      summary: r.summary,
-      featured: r.smart_featured,
+      title: r.title || r.smart_quote || "",
+      body: r.body || "",
+      author: r.reviewer_name || "Verified Customer",
+      summary: r.summary || r.smart_quote || r.title || "",
+      featured: !!r.featured,
       createdAt: r.created_at,
     });
   }
 
-  // If any product has zero reviews after filtering, backfill with 4-star
+  // Backfill with 4-star if any product has zero reviews
   for (const r of reviews || []) {
-    const pid = r.shopify_product_id;
+    let pid = r.shopify_product_id && r.shopify_product_id !== "unknown"
+      ? r.shopify_product_id
+      : null;
+    if (!pid && r.product_name) {
+      pid = productNameToId[r.product_name.toLowerCase()] || null;
+    }
     if (!pid || !byProductId[pid]) continue;
     if (byProductId[pid].reviews.length >= 3) continue;
-    // Already added above if featured or 5-star; only add 4-star as last resort
-    if (r.smart_featured || r.rating >= 5) continue;
+    if (r.featured || r.rating >= 5) continue; // already added above
+
     byProductId[pid].reviews.push({
       rating: r.rating,
-      title: r.title,
-      body: r.body,
-      author: r.author,
-      summary: r.summary,
-      featured: r.smart_featured,
+      title: r.title || r.smart_quote || "",
+      body: r.body || "",
+      author: r.reviewer_name || "Verified Customer",
+      summary: r.summary || r.smart_quote || r.title || "",
+      featured: !!r.featured,
       createdAt: r.created_at,
     });
   }
