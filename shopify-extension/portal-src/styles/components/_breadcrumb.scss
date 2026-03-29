@@ -1,0 +1,87 @@
+/* ==========================================================================
+   Breadcrumb
+   ========================================================================== */
+
+.sp-bc__wrap {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 0 14px;
+}
+
+.sp-bc {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-gap-10);
+  flex-wrap: wrap;
+}
+
+/* Links */
+.sp-bc__a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+
+  color: var(--sp-text);
+  text-decoration: none;
+
+  font-weight: 600;
+  font-size: 14px;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+/* Disabled / current crumb */
+.sp-bc__disabled,
+.sp-bc__cur {
+  color: var(--sp-muted);
+  font-weight: 700;
+  font-size: 14px;
+  cursor: default;
+}
+
+/* Separators */
+.sp-bc__sep {
+  color: #9ca3af; /* gray-400 */
+  font-weight: 700;
+  user-select: none;
+}
+
+/* Profile icon wrapper */
+.sp-bc__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+
+  background: var(--sp-surface-soft);
+  color: var(--sp-text);
+}
+
+/* Ensure breadcrumb svg actually paints (some themes set svg/path fill:none globally) */
+.sp-bc__icon-svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+
+  path {
+    fill: var(--sp-text) !important;
+  }
+}
+
+/* Optional: tighten spacing on mobile */
+@media (max-width: 640px) {
+  .sp-bc {
+    gap: 6px;
+  }
+
+  .sp-bc__a,
+  .sp-bc__disabled,
+  .sp-bc__cur {
+    font-size: 13px;
+  }
+}

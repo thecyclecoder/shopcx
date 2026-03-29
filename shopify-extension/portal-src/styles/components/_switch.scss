@@ -1,0 +1,83 @@
+/* ==========================================================================
+   Toggle Switch
+   ========================================================================== */
+
+.sp-switchwrap {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+/* Hide native checkbox */
+.sp-switch {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Clickable label wrapper */
+.sp-switchlabel {
+  display: inline-flex;
+  cursor: pointer;
+}
+
+/* Track */
+.sp-switchtrack {
+  position: relative;
+
+  width: 54px;
+  height: 32px;
+  border-radius: 999px;
+
+  border: 1px solid var(--sp-border);
+  background: var(--sp-surface-soft, #f3f4f6);
+
+  transition: background 0.15s ease;
+}
+
+/* Thumb */
+.sp-switchthumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+
+  background: #ffffff;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  box-shadow: 0 6px 14px rgba(17, 24, 39, 0.12);
+
+  transition: transform 0.15s ease;
+}
+
+/* ------------------------------------------------------------------
+   Checked state
+------------------------------------------------------------------- */
+
+.sp-switch:checked + .sp-switchlabel .sp-switchtrack {
+  background: rgba(22, 163, 74, 0.88);
+}
+
+.sp-switch:checked + .sp-switchlabel .sp-switchthumb {
+  transform: translateX(22px);
+}
+
+/* ------------------------------------------------------------------
+   Disabled state
+------------------------------------------------------------------- */
+
+.sp-switch:disabled + .sp-switchlabel {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ------------------------------------------------------------------
+   Focus styles (keyboard accessibility)
+------------------------------------------------------------------- */
+
+.sp-switch:focus-visible + .sp-switchlabel .sp-switchtrack {
+  outline: 3px solid var(--sp-focus-strong, rgba(17, 24, 39, 0.25));
+  outline-offset: 2px;
+}

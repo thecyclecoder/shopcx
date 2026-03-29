@@ -1,0 +1,147 @@
+/* portal-src/styles/components/_cards.scss
+   ------------------------------------------------------------
+   Card primitives + shared “row” components used across screens.
+   Keep screen-specific layout in screens/*
+   ------------------------------------------------------------ */
+
+/* Base card */
+.sp-card {
+  border: 1px solid var(--sp-border);
+  border-radius: var(--sp-card-radius);
+  padding: var(--sp-pad);
+  background: var(--sp-bg);
+  box-shadow: var(--sp-shadow);
+}
+
+/* “Hero-ish” cards (homepage + headers) */
+.sp-card--heroish {
+  box-shadow: var(--sp-shadow2);
+}
+
+/* Nested cards should not stack shadows */
+.sp-card .sp-card {
+  box-shadow: none;
+}
+
+/* Common stacks */
+.sp-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-gap-16);
+}
+
+.sp-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-gap-12);
+  flex-wrap: wrap;
+}
+
+.sp-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-gap-12);
+}
+
+/* Basic headings used inside cards */
+.sp-title {
+  font-size: 28px;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  margin: 0 0 6px;
+}
+
+.sp-title2 {
+  font-size: 20px;
+  font-weight: 900;
+  margin: 0 0 4px;
+}
+
+/* Thumbnail helper (used by JS) */
+.sp-thumb {
+  width: 54px;
+  height: 54px;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 1px solid var(--sp-border);
+}
+
+/* ------------------------------------------------------------
+   Line rows (used in subscription list + detail)
+   (Some sub-variants are refined in screens/_detail.scss)
+   ------------------------------------------------------------ */
+
+.sp-line {
+  display: flex;
+  gap: var(--sp-gap-12);
+  align-items: center;
+
+  border: 1px solid var(--sp-border);
+  border-radius: 12px;
+  padding: 10px;
+
+  background: #fff;
+}
+
+.sp-line__img {
+  width: 54px;
+  height: 54px;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 1px solid var(--sp-border);
+  flex: 0 0 auto;
+}
+
+.sp-line__img--placeholder {
+  background: #f3f4f6;
+}
+
+.sp-line__meta {
+  flex: 1;
+  min-width: 160px;
+}
+
+.sp-line__title {
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.sp-line__subwrap {
+  font-size: 14px;
+  margin-top: 2px;
+}
+
+.sp-line__sub {
+  margin-top: 2px;
+  font-weight: 400;
+  font-size: 14px;
+}
+
+.sp-line__price {
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+
+
+
+
+/* ------------------------------------------------------------
+   Small responsive tweaks for line rows
+   ------------------------------------------------------------ */
+
+@media (max-width: 480px) {
+  .sp-line {
+    padding: 10px;
+  }
+
+  .sp-line__img {
+    width: 52px;
+    height: 52px;
+    border-radius: 12px;
+  }
+
+  .sp-line__price {
+    font-size: 15px;
+  }
+}

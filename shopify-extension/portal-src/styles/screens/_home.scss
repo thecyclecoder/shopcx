@@ -1,0 +1,205 @@
+/* ==========================================================================
+   Home screen
+   ========================================================================== */
+
+.sp-home-shell {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+/* Header */
+.sp-home-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sp-home-header-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+/* Title + subtitle */
+.sp-home-title {
+  font-size: 34px;
+  line-height: 1.12;
+  font-weight: 950;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.sp-home-subtitle {
+  font-size: 19px;
+  color: var(--sp-muted);
+  font-weight: 650;
+  margin-top: 6px;
+}
+
+/* Meta text (email, helper copy) */
+.sp-home-email {
+  margin-top: 10px;
+  font-size: 15px;
+  color: #9ca3af;
+  font-weight: 650;
+}
+
+.sp-home-body {
+  margin-top: 14px;
+  font-size: 17px;
+  color: #374151;
+  font-weight: 650;
+}
+
+/* CTA buttons */
+.sp-home-actions {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Desktop: buttons side-by-side, constrained width */
+@media (min-width: 900px) {
+  .sp-home-actions {
+    flex-direction: row;
+    justify-content: flex-start;
+    align-items: stretch;
+  }
+
+  .sp-home-actions .sp-btn {
+    flex: 0 1 320px;
+    width: 320px;
+  }
+}
+
+/* Desktop: slightly tighter buttons */
+@media (min-width: 900px) {
+  .sp-home-actions .sp-btn {
+    font-size: 16px;
+    padding: 12px 14px;
+    border-radius: 14px;
+  }
+}
+
+/* Mobile tightening */
+@media (max-width: 520px) {
+  .sp-home-title {
+    font-size: 30px;
+  }
+
+  .sp-home-subtitle {
+    font-size: 17px;
+  }
+}
+
+.sp-loggedout {
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  padding: 22px;
+  background: #ffffff;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
+}
+
+.sp-loggedout__inner {
+  max-width: 760px;
+}
+
+.sp-loggedout__kicker {
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 8px;
+}
+
+.sp-loggedout__title {
+  font-size: 34px;
+  line-height: 1.12;
+  font-weight: 900;
+  margin: 0 0 10px 0;
+  color: #0f172a;
+}
+
+.sp-loggedout__sub {
+  font-size: 16px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.sp-loggedout__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.sp-loggedout__chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 12px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 999px;
+  font-size: 13px;
+  color: #0f172a;
+  background: rgba(15, 23, 42, 0.02);
+}
+
+.sp-loggedout__bullets {
+  margin-top: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.sp-loggedout__bullet {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 15px;
+  color: #0f172a;
+}
+
+.sp-loggedout__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  margin-top: 6px;
+  background: #2563eb;
+  flex: 0 0 auto;
+}
+
+.sp-loggedout__actions {
+  margin-top: 18px;
+}
+
+.sp-loggedout__btn {
+  display: inline-flex;
+  justify-content: center;
+  width: 100%;
+  text-decoration: none;
+}
+
+.sp-loggedout__help {
+  margin-top: 10px;
+  font-size: 14px;
+}
+
+.sp-loggedout__link {
+  color: #2563eb;
+  text-decoration: underline;
+}
+
+@media (max-width: 700px) {
+  .sp-loggedout {
+    padding: 18px;
+    border-radius: 14px;
+  }
+  .sp-loggedout__title {
+    font-size: 28px;
+  }
+}

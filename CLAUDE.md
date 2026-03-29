@@ -213,6 +213,7 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - **Tags**: `dunning:active`, `dunning:recovered`, `dunning:skipped`, `dunning:paused`
 - **Requires**: Appstle built-in retries and skip-after-X-failures turned OFF
 
+<<<<<<< HEAD
 ### Phase 6: Subscriptions Page ✅
 - **List view** (`/dashboard/subscriptions`): Sortable table with status/recovery/payment filters, search, pagination (25/page)
 - **Detail view** (`/dashboard/subscriptions/[id]`): Full subscription info, items, recovery timeline, order history, activity log
@@ -224,6 +225,21 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - **Sidebar nav**: "Subscriptions" between Tickets and Customers with refresh icon
 - **API endpoints**: List, detail+actions, items CRUD, coupon, bill-now, payment-update
 - **Action labels consistent**: Pause subscription, Resume subscription, Cancel subscription, Skip next order, Change delivery frequency, Change next order date, Apply coupon, Process payment now
+=======
+### Phase 7: Customer Portal Consolidation ✅
+- **Backend migration**: All 13 portal route handlers ported to `/api/portal?route={name}` with Shopify App Proxy HMAC auth
+- **DB-first lookups**: Subscriptions list/detail read from Supabase, Appstle for mutations only
+- **Cancel → Journey**: Portal cancel triggers cancel journey (AI remedies, reviews, save offers) instead of hard cancel
+- **Event logging**: Every portal action logged to `customer_events` (portal.subscription.paused, portal.items.swapped, etc.)
+- **Internal notes**: Mutation actions create internal ticket notes for agent visibility
+- **Reviews**: Uses `product_reviews` table instead of direct Klaviyo API calls
+- **Dunning awareness**: Subscription responses include recovery status + payment update URL
+- **Linked accounts**: Subscription list includes linked customer profiles
+- **Shopify extension**: `shopify-extension/` subfolder, `app_proxy.url` → `shopcx.ai/api/portal`
+- **Auth**: `src/lib/portal/auth.ts` — Shopify HMAC-SHA256 verification, resolves workspace from shop domain
+- **Route handlers**: bootstrap, home, subscriptions, subscriptionDetail, pause, resume, cancel, reactivate, address, replaceVariants, coupon, frequency, reviews, cancelJourney, dunningStatus
+- **Env var**: `SHOPIFY_APP_PROXY_SECRET` for HMAC verification
+>>>>>>> 692b2d1 (Customer portal consolidation: backend + Shopify extension in ShopCX)
 
 ### Dashboard & Settings ✅
 - Dashboard overview: real-time stats (open/pending tickets, customers, avg retention, AI resolution rate, tickets today, KB articles, active macros)
@@ -253,6 +269,10 @@ For replies (ai/reply-received): route → patterns (deferred) → journey → w
 - `src/lib/rag.ts` — RAG retrieval (KB chunks + macros via pgvector)
 - `src/lib/shopify-sync.ts` — Bulk ops, paginated sync, rate limit guard
 - `src/lib/shopify-marketing.ts` — Shopify email/SMS marketing consent mutations
+- `src/app/api/portal/route.ts` — Main portal route handler (HMAC auth + route dispatch)
+- `src/lib/portal/auth.ts` — Shopify App Proxy HMAC-SHA256 verification + workspace resolution
+- `src/lib/portal/handlers/` — Portal route handlers (bootstrap, subscriptions, cancel, etc.)
+- `src/lib/portal/helpers.ts` — Portal response helpers, event logging, Appstle error handling
 - `src/lib/shopify-webhooks.ts` — Customer/order webhook handlers
 - `src/lib/inngest/ai-multi-turn.ts` — Multi-turn AI conversation handler (route → context → generate → actions → send)
 - `src/lib/inngest/ai-draft.ts` — AI draft + auto-send Inngest function

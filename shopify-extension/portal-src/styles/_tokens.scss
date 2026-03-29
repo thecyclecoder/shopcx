@@ -1,0 +1,85 @@
+/* portal-src/styles/_tokens.scss
+   ------------------------------------------------------------------
+   Design tokens + CSS variables used across the portal.
+   Keep these stable and descriptive. Prefer using variables elsewhere.
+------------------------------------------------------------------- */
+
+:root {
+  /* Core palette */
+  --sp-border: #e5e7eb;
+  --sp-bg: #ffffff;
+  --sp-text: #111827;
+  --sp-muted: #6b7280;
+
+  /* Radii */
+  --sp-card-radius: 18px;
+  --sp-btn-radius: 14px;
+
+  /* Shadows */
+  --sp-shadow: 0 1px 0 rgba(0, 0, 0, 0.02);
+  --sp-shadow2: 0 12px 30px rgba(17, 24, 39, 0.06);
+
+  /* Spacing */
+  --sp-pad: 18px;
+
+  /* Gaps (layout rhythm) */
+  --sp-gap-4: 4px;
+  --sp-gap-6: 6px;
+  --sp-gap-8: 8px;
+  --sp-gap-10: 10px;
+  --sp-gap-12: 12px;
+  --sp-gap-16: 16px;
+  --sp-gap-18: 18px;
+  --sp-gap-24: 24px;
+
+  /* Common surfaces */
+  --sp-surface: #ffffff;
+  --sp-surface-muted: #f9fafb;
+  --sp-surface-soft: #f3f4f6;
+
+  /* Overlay */
+  --sp-overlay: rgba(0, 0, 0, 0.45);
+  --sp-overlay-strong: rgba(17, 24, 39, 0.55);
+
+  /* Accents (status / pills) */
+  --sp-success-bg: #dcfce7;
+  --sp-success-text: #166534;
+
+  --sp-danger-bg: #fee2e2;
+  --sp-danger-text: #991b1b;
+
+  --sp-neutral-bg: #f3f4f6;
+  --sp-neutral-text: #374151;
+
+  --sp-warn-bg: #fef3c7;
+  --sp-warn-text: #92400e;
+
+  /* Notes */
+  --sp-note-border: #d1fae5;
+  --sp-note-bg: #ecfdf5;
+
+  /* Focus */
+  --sp-focus: rgba(17, 24, 39, 0.18);
+  --sp-focus-strong: rgba(17, 24, 39, 0.25);
+
+  /* Motion */
+  --sp-ease: ease;
+  --sp-dur-fast: 0.08s;
+  --sp-dur: 0.12s;
+
+  /* -------------------------------------------------
+     Button tokens (referenced throughout components)
+  -------------------------------------------------- */
+  --sp-btn-font-size: 18px;
+  --sp-btn-pad-y: 14px;
+  --sp-btn-pad-x: 14px;
+
+  --sp-btn-font-size-ghost: 16px;
+  --sp-ghost-bg: #f9fafb;
+
+  /* Mobile button tokens */
+  --sp-btn-font-size-mobile: 17px;
+  --sp-btn-pad-y-mobile: 13px;
+  --sp-btn-pad-x-mobile: 14px;
+  --sp-btn-radius-mobile: 16px;
+}

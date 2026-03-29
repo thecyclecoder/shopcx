@@ -1,0 +1,82 @@
+/* ==========================================================================
+   Topbar
+   ========================================================================== */
+
+.sp-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-gap-12);
+
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 12px 16px;
+}
+
+/* Title */
+.sp-topbar__title {
+  flex: 1;
+  text-align: center;
+
+  font-size: 22px;
+  font-weight: 900;
+  color: var(--sp-text);
+  margin: 0;
+}
+
+/* Back / Support buttons */
+.sp-topbar__back,
+.sp-topbar__support {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+
+  padding: 8px 30px;
+  border-radius: 999px;
+  border: 1px solid var(--sp-border);
+
+  background: #fff;
+  color: var(--sp-text);
+  text-decoration: none;
+  font-weight: 800;
+  white-space: nowrap;
+
+  transition: opacity var(--sp-dur) var(--sp-ease);
+
+  &:hover {
+    opacity: 0.96;
+  }
+}
+
+.sp-topbar__support-icon,
+.sp-topbar__back-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* Tablet / small desktop */
+@media (max-width: 768px) {
+  .sp-topbar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .sp-topbar__back,
+  .sp-topbar__support {
+    padding: 8px 10px;
+    justify-content: center;
+  }
+
+  .sp-topbar__title {
+    grid-column: 1 / -1;
+    font-size: 18px;
+  }
+}
+
+/* Mobile tightening */
+@media (max-width: 640px) {
+  .sp-topbar__title {
+    font-size: 18px;
+  }
+}

@@ -1,0 +1,337 @@
+/* portal-src/styles/screens/_subs.scss
+   ------------------------------------------------------------
+   Subscriptions list screen (portal-subscriptions.js)
+   Includes: header, tabs, list spacing, subscription card polish,
+   line rows (list context), actions row + shipping protection
+   ------------------------------------------------------------ */
+
+.sp-subs-page {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.sp-subs-header {
+  box-shadow: var(--sp-shadow2);
+}
+
+.sp-subs-status {
+  margin-top: 6px;
+}
+
+.sp-subs-tabs {
+  margin-top: 12px;
+}
+
+.sp-subs-header__tabs {
+  margin-top: 5px;
+}
+
+/* List wrapper spacing */
+.sp-subs-list {
+  margin-top: 14px;
+}
+
+/* ------------------------------------------------------------
+   Tabs (shared)
+   ------------------------------------------------------------ */
+
+.sp-tabs {
+  display: flex;
+  gap: var(--sp-gap-10);
+  flex-wrap: wrap;
+}
+
+.sp-tab {
+  padding: 10px 12px;
+  font-size: 15px;
+  font-weight: 900;
+  border-radius: 999px;
+  border: 1px solid #ccc;
+  color: #555;
+  text-decoration: none;
+  background: #fafafa;
+  text-align: center;
+}
+
+.sp-tab.is-active {
+  border-color: var(--sp-text) !important;
+  background: #ffffff !important;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
+  color: #000;
+}
+
+@media (max-width: 520px) {
+  .sp-tabs {
+    gap: 8px;
+  }
+
+  .sp-tab {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 10px;
+    font-size: 14px;
+  }
+}
+
+/* ------------------------------------------------------------
+   Subscription card polish
+   ------------------------------------------------------------ */
+
+.sp-subcard {
+  transition: transform 0.08s ease, box-shadow 0.12s ease;
+}
+
+.sp-subcard:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px rgba(17, 24, 39, 0.08);
+}
+
+.sp-subcard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--sp-gap-12);
+}
+
+.sp-subcard-titlewrap {
+  min-width: 0;
+}
+
+.sp-subcard-title {
+  font-weight: 950;
+  font-size: 18px;
+  line-height: 1.15;
+}
+
+.sp-subcard-meta {
+  margin-top: 6px;
+  font-weight: 400;
+  font-size: 14px;
+}
+
+/* Alt naming (some templates use __title/__meta) */
+.sp-subcard__title {
+  font-weight: 900;
+  font-size: 20px;
+  line-height: 1.1;
+}
+
+.sp-subcard__meta {
+  margin-top: 6px;
+  font-weight: 650;
+  font-size: 16px;
+}
+
+/* ------------------------------------------------------------
+   Lines list (inside subscription list cards)
+   ------------------------------------------------------------ */
+
+.sp-subcard-lines,
+.sp-subcard__lines {
+  margin-top: 12px;
+  display: grid;
+  gap: var(--sp-gap-10);
+}
+
+.sp-subcard-emptyline,
+.sp-subcard__empty {
+  margin: 0;
+  font-weight: 650;
+}
+
+.sp-subcard__more {
+  font-size: 13px;
+  font-weight: 650;
+  margin-top: 2px;
+}
+
+/* List-style line row */
+.sp-line {
+  display: flex;
+  gap: var(--sp-gap-12);
+  align-items: center;
+  border: 1px solid var(--sp-border);
+  border-radius: 14px;
+  padding: 10px;
+  background: #fff;
+}
+
+.sp-line-img,
+.sp-line__img {
+  width: 54px;
+  height: 54px;
+  border-radius: 12px;
+  object-fit: cover;
+  border: 1px solid var(--sp-border);
+  flex: 0 0 auto;
+}
+
+.sp-line-img--placeholder,
+.sp-line__img--placeholder {
+  background: #f3f4f6;
+}
+
+.sp-line-meta,
+.sp-line__meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.sp-line-title,
+.sp-line__title {
+  font-weight: 950;
+  line-height: 1.15;
+}
+
+.sp-line-sub,
+.sp-line__sub {
+  margin-top: 2px;
+  font-weight: 400;
+  font-size: 14px;
+}
+
+.sp-line__subwrap {
+  font-size: 14px;
+  margin-top: 2px;
+}
+
+.sp-line-price,
+.sp-line__price {
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------
+   Actions row (button + shipping protection) on subscription cards
+   ------------------------------------------------------------ */
+
+.sp-subcard-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: var(--sp-gap-10);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.sp-subcard-origin {
+  font-weight: 650;
+}
+
+/* Newer class naming */
+.sp-subcard__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: nowrap;
+  margin-top: 20px;
+}
+
+.sp-subcard__actions .sp-btn {
+  flex: 0 0 auto;
+}
+
+/* Shipping Protection inline block */
+.sp-shipprot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-gap-10);
+  flex: 1 1 auto;
+}
+
+.sp-shipprot__img {
+  width: 40px;
+  height: auto;
+  object-fit: cover;
+  border: 0;
+}
+
+.sp-shipprot__text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.1;
+}
+
+.sp-shipprot__title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.sp-shipprot__sub {
+  font-size: 13px;
+  font-weight: 400;
+  margin-top: 3px;
+  color: var(--sp-muted);
+  line-height: 1.2;
+}
+
+/* Shipping protection price display */
+.sp-shipprot__price {
+  margin-top: 8px;
+}
+
+.sp-shipprot__price-stack {
+  display: flex;
+  gap: var(--sp-gap-10);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.sp-shipprot__price-was {
+  text-decoration: line-through;
+  opacity: 0.7;
+  font-weight: 700;
+}
+
+.sp-shipprot__price-now {
+  font-weight: 900;
+}
+
+.sp-shipprot__priceRow {
+  margin-top: 6px;
+}
+
+.sp-shipprot__strike {
+  text-decoration: line-through;
+  margin-right: 8px;
+}
+
+/* Mobile: stack actions row */
+@media (max-width: 520px) {
+  .sp-subcard__actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .sp-shipprot {
+    justify-content: flex-start;
+    min-width: 0;
+  }
+}
+
+/* ------------------------------------------------------------
+   Mobile tightening
+   ------------------------------------------------------------ */
+
+@media (max-width: 480px) {
+  .sp-subcard-title {
+    font-size: 17px;
+  }
+
+  .sp-line {
+    padding: 10px;
+  }
+
+  .sp-line-img,
+  .sp-line__img {
+    width: 52px;
+    height: 52px;
+    border-radius: 12px;
+  }
+
+  .sp-line-price,
+  .sp-line__price {
+    font-size: 15px;
+  }
+}

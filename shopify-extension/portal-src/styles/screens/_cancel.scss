@@ -1,0 +1,299 @@
+/* ===========================================
+   Cancel flow (reason + offer + confirm)
+   Drop-in replacement for _cancel.scss
+   =========================================== */
+
+/* ---------- Header ---------- */
+
+.sp-cancel__header {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.sp-cancel__back {
+  align-self: flex-start;
+}
+
+.sp-cancel__title {
+  margin: 0;
+}
+.sp-cancel-offer__copy .sp-note__title {
+  font-size: 24px;
+  margin-bottom: 10px;
+}
+/* Desktop: back + title on one row */
+@media (min-width: 900px) {
+  .sp-cancel__header {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .sp-cancel__title {
+    text-align: right;
+  }
+}
+
+/* ---------- Intro blocks ---------- */
+
+.sp-cancel__intro {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.sp-cancel__required-title {
+  font-weight: 800;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.sp-cancel__required-sub {
+  margin-top: 6px;
+  margin-bottom: 15px;
+  font-size: 17px;
+}
+
+/* Softer, less dominant alert */
+.sp-cancel__alert {
+  border-radius: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(220, 38, 38, 0.16);
+  background: rgba(220, 38, 38, 0.035);
+}
+
+.sp-cancel__alert-title {
+  font-weight: 800;
+  font-size: 14px;
+  line-height: 1.2;
+  color: #b91c1c;
+}
+
+.sp-cancel__alert-sub {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.35;
+  color: rgba(127, 29, 29, 0.9);
+}
+
+/* ---------- Reasons panel + tiles ---------- */
+
+.sp-cancel__reasons-panel {
+  margin-top: 16px;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.sp-cancel__reasons {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+}
+
+/* 2 columns on desktop */
+@media (min-width: 900px) {
+  .sp-cancel__reasons {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.sp-cancel__reasons .sp-itemopt {
+  width: 100%;
+  height: 100%;
+}
+
+/* Footer link */
+.sp-cancel__footer {
+  margin-top: 14px;
+}
+
+.sp-cancel__exit {
+  display: inline-block;
+}
+
+/* ===========================================
+   Offer step
+   - Desktop: 2 columns (copy left, image right)
+   - Mobile: stacked (image first)
+   =========================================== */
+
+.sp-cancel__alert--offer {
+  margin-top: 6px;
+  margin-bottom: 14px;
+}
+
+/* The offerCard() returns:
+   <div class="sp-cancel-offer__grid sp-wrap">
+     <img class="sp-cancel-offer__img" ... />
+     <div class="sp-cancel-offer__copy">
+       <div class="sp-note sp-cancel-offer__note">...</div>
+     </div>
+   </div>
+*/
+
+.sp-note.sp-cancel-offer__note {
+  background: none;
+  border: none;
+}
+.sp-cancel-offer__grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  grid-template-areas:
+    'img'
+    'copy';
+}
+
+/* Desktop: copy left, image right */
+@media (min-width: 900px) {
+  .sp-cancel-offer__grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+    align-items: center;
+    grid-template-areas: 'copy img';
+  }
+}
+
+.sp-cancel-offer__img {
+  grid-area: img;
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 16px;
+}
+
+.sp-cancel-offer__copy {
+  grid-area: copy;
+}
+
+/* Replace the default “note” look with light grey */
+.sp-cancel-offer__note {
+  border-radius: 16px;
+  padding: 16px 18px;
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+/* ===========================================
+   Offer actions hierarchy
+   - Light grey panel behind buttons
+   - 2 options side-by-side on desktop
+   - Continue to cancel is muted/boring on its own row
+   =========================================== */
+
+.sp-cancel-offer__actions-panel {
+  margin-top: 16px;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.sp-cancel-offer__actions-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+@media (min-width: 900px) {
+  .sp-cancel-offer__actions-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.sp-cancel-offer__action .sp-btn {
+  width: 100%;
+}
+
+.sp-cancel-offer__hint {
+  margin-top: 8px;
+  font-size: 14px;
+  line-height: 1.25;
+  text-align: center;
+}
+
+/* Keep "Continue to cancel" visually boring */
+.sp-cancel-offer__cancelbtn {
+  margin-top: 12px;
+  width: 100%;
+  opacity: 0.75;
+}
+
+.sp-cancel-offer__cancelbtn:hover {
+  opacity: 0.9;
+}
+
+.sp-btn.sp-cancel-offer__cancelbtn {
+  width: 100%;
+  border: 0;
+  background: none;
+  font-size: 14px;
+  color: #333;
+}
+
+@media (max-width: 480px) {
+  .sp-btn.sp-cancel__back {
+    width: 100%;
+  }
+  .sp-cancel__title {
+    text-align: center;
+  }
+  .sp-note.sp-cancel-offer__note {
+    background: none;
+    border: none;
+    margin: 0;
+  }
+}
+/* Cancel reason step layout */
+.sp-cancel__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 420px);
+  gap: 18px;
+  align-items: start;
+}
+
+.sp-cancel__left {
+  min-width: 0;
+}
+
+.sp-cancel__right {
+  min-width: 0;
+}
+
+/* Reasons: 2-col when no reviews, 1-col when reviews panel is present */
+.sp-cancel__reasons--twocol {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.sp-cancel__reasons--onecol {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+/* Remove inline style replacement */
+.sp-itemopt--left {
+  text-align: left;
+}
+
+/* Mobile: stack */
+@media (max-width: 860px) {
+  .sp-cancel__layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sp-cancel-confirm__copy {
+  margin-top: 10px;
+}
+
+.sp-cancel-confirm__actions {
+  margin-top: 14px;
+}

@@ -1,0 +1,76 @@
+/* ==========================================================================
+   Pills
+   ========================================================================== */
+
+.sp-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+
+  padding: 6px 10px;
+  border-radius: 999px;
+
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 900;
+  white-space: nowrap;
+
+  border: 1px solid var(--sp-border);
+}
+
+/* ------------------------------------------------------------------
+   Status variants
+------------------------------------------------------------------- */
+
+.sp-pill--active {
+  background: var(--sp-success-bg, #dcfce7);
+  color: var(--sp-success-text, #166534);
+}
+
+.sp-pill--cancelled {
+  background: var(--sp-danger-bg, #fee2e2);
+  color: var(--sp-danger-text, #991b1b);
+}
+
+.sp-pill--neutral {
+  background: var(--sp-neutral-bg, #f3f4f6);
+  color: var(--sp-neutral-text, #374151);
+}
+
+.sp-pill--paused {
+  background: var(--sp-warn-bg, #fef3c7);
+  color: var(--sp-warn-text, #92400e);
+}
+
+/* ------------------------------------------------------------------
+   Secure pill (top header)
+------------------------------------------------------------------- */
+
+.sp-pill--secure {
+  background: var(--sp-neutral-bg, #f3f4f6);
+  color: var(--sp-neutral-text, #374151);
+
+  font-size: 12px;
+  padding: 6px 10px;
+  font-weight: 900;
+
+  border: 1px solid var(--sp-border);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02);
+}
+
+/* ------------------------------------------------------------------
+   Mobile tightening
+------------------------------------------------------------------- */
+
+@media (max-width: 480px) {
+  .sp-pill {
+    font-size: 12px;
+    padding: 5px 9px;
+  }
+
+  .sp-pill--secure {
+    font-size: 11.5px;
+    padding: 5px 8px;
+  }
+}

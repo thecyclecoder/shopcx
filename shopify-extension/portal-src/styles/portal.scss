@@ -1,0 +1,32 @@
+/* portal-src/styles/portal.scss
+   ------------------------------------------------------------------
+   Portal stylesheet entrypoint (compiled to portal.min.css)
+   Keep this file tiny: only imports + any build-level notes.
+------------------------------------------------------------------- */
+
+/* 1) Design tokens + CSS variables */
+@use "tokens";
+
+/* 2) Base / resets / typography / globals */
+@use "base";
+
+/* 3) Layout primitives (wrappers, grids, spacing helpers, etc.) */
+@use "layout";
+
+/* 4) Components */
+@use "components/breadcrumb";
+@use "components/buttons";
+@use "components/cards";
+@use "components/forms";
+@use "components/modal";
+@use "components/pills";
+@use "components/switch";
+@use "components/toast";
+@use "components/topbar";
+
+
+/* 5) Screens (page-level rules) */
+@use "screens/home";
+@use "screens/subs";
+@use "screens/detail";
+@use "screens/cancel";

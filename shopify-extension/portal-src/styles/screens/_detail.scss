@@ -1,0 +1,935 @@
+/* portal-src/styles/screens/_detail.scss
+   ------------------------------------------------------------
+   Subscription Detail screen (portal-subscription-detail.js)
+   Includes: header + grid + section helpers + items/totals + ship prot + alerts
+   ------------------------------------------------------------ */
+
+.sp-detail {
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.sp-detail__header {
+  box-shadow: var(--sp-shadow2);
+}
+
+.sp-detail__header-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-gap-12);
+}
+
+.sp-detail__titlewrap {
+  min-width: 0;
+}
+
+.sp-detail__title {
+  margin: 0;
+}
+
+.sp-detail__subtitle {
+  margin-top: 6px;
+  font-weight: 650;
+  font-size: 15px;
+}
+
+/* Grid */
+.sp-detail__grid {
+  margin-top: 16px;
+}
+
+.sp-detail__col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-gap-16);
+}
+
+/* Section heads inside cards */
+.sp-detail__sectionhead {
+  margin-bottom: 10px;
+}
+
+.sp-detail__section-sub {
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+/* Alerts / notices */
+.sp-alert {
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+  border-radius: 16px;
+  padding: 14px 16px;
+  margin: 14px 0;
+}
+
+.sp-alert__title {
+  font-weight: 950;
+  color: var(--sp-text);
+  margin-bottom: 4px;
+}
+
+.sp-alert__body {
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+/* ------------------------------------------------------------
+   Detail actions layout
+   ------------------------------------------------------------ */
+
+.sp-detail__actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--sp-gap-12);
+}
+
+.sp-detail__actions .sp-btn,
+.sp-detail__actions a.sp-btn {
+  width: 100%;
+}
+
+@media (min-width: 768px) {
+  .sp-detail__actions {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Full-width stacked buttons for some cards (e.g. shipping section) */
+.sp-detail__actions--stack {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--sp-gap-12);
+}
+
+.sp-detail__actions--stack .sp-btn {
+  width: 100%;
+  display: block;
+}
+
+.sp-btn--full {
+  width: 100%;
+  display: block;
+}
+
+/* Mobile: stack actions as flex (legacy behavior kept) */
+@media (max-width: 768px) {
+  .sp-detail__actions {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-gap-12);
+  }
+
+  .sp-detail__actions .sp-btn,
+  .sp-detail__actions a.sp-btn {
+    width: 100%;
+    justify-content: center;
+    text-align: center;
+  }
+}
+
+/* ------------------------------------------------------------
+   Lines list on detail page
+   ------------------------------------------------------------ */
+
+.sp-detail__lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-gap-10);
+}
+
+.sp-line--detail {
+  border-radius: 16px;
+}
+
+/* Fix mobile horizontal scroll on detail item rows */
+.sp-detail__lines .sp-line--detail .sp-line__meta {
+  min-width: 0 !important;
+}
+
+.sp-detail__lines .sp-line--detail .sp-line__title,
+.sp-detail__lines .sp-line--detail .sp-line__sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Right-aligned price block inside detail line rows */
+.sp-line--detail .sp-line__priceblock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+  min-width: 70px;
+  flex: 0 0 auto;
+}
+
+.sp-line--detail .sp-line__msrp {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--sp-muted);
+  text-decoration: line-through;
+  line-height: 1.1;
+}
+
+.sp-line--detail .sp-line__price {
+  font-size: 16px;
+  font-weight: 900;
+  color: var(--sp-text);
+  line-height: 1.1;
+}
+
+/* ------------------------------------------------------------
+   Totals block under items list
+   ------------------------------------------------------------ */
+
+.sp-items-total {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--sp-border);
+
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-gap-10);
+}
+
+.sp-items-total__row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-gap-12);
+}
+
+.sp-items-total__label {
+  font-size: 14px;
+  font-weight: 700;
+  color: #374151;
+}
+
+.sp-items-total__vals {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-gap-10);
+  white-space: nowrap;
+}
+
+.sp-items-total__msrp {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--sp-muted);
+  text-decoration: line-through;
+}
+
+.sp-items-total__now {
+  font-size: 15px;
+  font-weight: 900;
+  color: var(--sp-text);
+}
+
+.sp-items-total__row--total .sp-items-total__label {
+  font-weight: 900;
+  color: var(--sp-text);
+}
+
+.sp-items-total__row--total .sp-items-total__now {
+  font-size: 16px;
+}
+
+/* ------------------------------------------------------------
+   Items actions + hint (Add product row)
+   ------------------------------------------------------------ */
+
+.sp-detail__items-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--sp-gap-12);
+  margin-top: 12px;
+}
+
+.sp-detail__items-actions .sp-btn {
+  width: 100%;
+}
+
+@media (min-width: 768px) {
+  .sp-detail__items-actions {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.sp-detail__hint {
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.sp-detail__card .sp-detail__hint {
+  margin-bottom: 10px;
+}
+
+/* ------------------------------------------------------------
+   Coupon area (if present)
+   ------------------------------------------------------------ */
+
+.sp-detail__coupon {
+  display: flex;
+  gap: var(--sp-gap-10);
+  align-items: center;
+  margin-top: 10px;
+}
+
+.sp-detail__coupon .sp-btn {
+  flex: 0 0 auto;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+@media (max-width: 720px) {
+  .sp-detail__coupon {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* ------------------------------------------------------------
+   Shipping protection row (detail page)
+   ------------------------------------------------------------ */
+
+.sp-detail__shiprow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-gap-12);
+  margin-top: 10px;
+}
+
+.sp-detail__shipmeta {
+  min-width: 0;
+}
+
+.sp-detail__shipstate {
+  font-weight: 950;
+  font-size: 16px;
+}
+
+.sp-detail__shipsub {
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+@media (max-width: 720px) {
+  .sp-detail__shiprow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* Frequency text (small helper) */
+.sp-detail__freq-value {
+  margin-bottom: 10px;
+  font-size: 16px;
+}
+
+/* ------------------------------------------------------------
+   Add-ons + rewards/reviews placeholders
+   ------------------------------------------------------------ */
+
+.sp-detail__addons {
+  margin-top: 10px;
+}
+
+.sp-addon {
+  border: 1px dashed rgba(17, 24, 39, 0.18);
+  background: rgba(17, 24, 39, 0.02);
+  border-radius: 16px;
+  padding: 14px 16px;
+}
+
+.sp-addon__title {
+  font-weight: 950;
+}
+
+.sp-addon__sub {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.sp-detail__rewards,
+.sp-detail__reviews {
+  margin-top: 10px;
+  font-size: 14px;
+  font-weight: 650;
+}
+/* You Save Row */
+.sp-items-total__row--save {
+  background: #f4f7f6; /* very light grey-green tint */
+  border: 1px solid #e3ebe8;
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin-top: 12px;
+}
+
+.sp-items-total__row--save .sp-items-total__label {
+  font-weight: 600;
+  color: #2f3a37;
+}
+
+.sp-items-total__row--save .sp-items-total__now {
+  font-weight: 700;
+  color: #1f2d2a;
+  letter-spacing: 0.2px;
+}
+.sp-items-total__label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 170px; // adjust as needed
+}
+/* FREE Shipping */
+.sp-items-total__free {
+  font-weight: 600;
+  color: #1a9271;
+  letter-spacing: 0.3px;
+}
+/* ------------------------------------------------------------
+   Cancel card
+   ------------------------------------------------------------ */
+
+.sp-detail__cancel {
+  border: 1px solid rgba(239, 68, 68, 0.22);
+}
+
+.sp-detail__cancel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-gap-12);
+}
+
+.sp-detail__cancel-title {
+  font-weight: 950;
+}
+
+.sp-detail__cancel-sub {
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+@media (max-width: 720px) {
+  .sp-detail__header-top {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .sp-detail__cancel-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* -------------------------------------------------
+   Items group (detail page)
+-------------------------------------------------- */
+
+.sp-itemgroup {
+  border: 1px solid var(--sp-border);
+  border-radius: 18px;
+  background: var(--sp-bg);
+  padding: 14px;
+}
+
+.sp-itemgroup__head {
+  margin-bottom: 10px;
+}
+
+.sp-itemgroup__title {
+  font-size: 24px;
+  font-weight: 950;
+  margin: 0;
+  line-height: 1.1;
+}
+
+.sp-itemgroup__sub {
+  margin: 6px 0 0;
+  color: var(--sp-muted);
+  font-weight: 650;
+}
+
+.sp-itemgroup__body {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-gap-12);
+}
+
+/* inner “line” card inside the group */
+.sp-itemgroup .sp-line,
+.sp-itemgroup .sp-line--detail {
+  // border-radius: 18px;
+  // padding: 14px;
+  // border-color: rgba(229, 231, 235, 0.9);
+  // box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02);
+  border: none;
+  border-radius: 0px;
+  padding: 0;
+}
+
+/* action button under the line (Make changes…) */
+.sp-itemgroup__actions {
+  margin-top: 12px;
+}
+
+.sp-itemgroup__actions .sp-btn {
+  width: 100%;
+  justify-content: space-between;
+  padding-left: 18px;
+  padding-right: 18px;
+}
+
+/* caret alignment (if your markup uses an icon span) */
+.sp-itemgroup__caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 10px;
+}
+
+/* mobile tighten */
+@media (max-width: 480px) {
+  .sp-itemgroup {
+    padding: 12px;
+  }
+  .sp-itemgroup__title {
+    font-size: 22px;
+  }
+  .sp-itemgroup .sp-line,
+  .sp-itemgroup .sp-line--detail {
+    padding: 0px;
+  }
+}
+
+.sp-btn.sp-disclosurebtn {
+  width: 100%;
+  margin-top: 10px;
+  background: #fafafa;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.sp-itemopt__desc {
+  font-weight: 400;
+  font-size: 15px;
+  margin-top: 5px;
+}
+
+.sp-line__panel {
+  margin-top: 5px;
+}
+/* =========================================================
+   Reviews Card
+========================================================= */
+
+.sp-reviews {
+  position: relative;
+}
+
+.sp-reviews--hidden {
+  display: none;
+}
+
+.sp-reviews__inner {
+  margin-top: 6px;
+  transition: opacity 180ms ease-in-out;
+}
+
+.sp-reviews__fade--out {
+  opacity: 0;
+}
+
+.sp-reviews__fade--in {
+  opacity: 1;
+}
+
+/* =========================================================
+   Title (smart_quote)
+========================================================= */
+
+.sp-reviews__title {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.35;
+  margin-bottom: 8px;
+  color: #111;
+}
+
+/* =========================================================
+   Body (content)
+========================================================= */
+
+.sp-reviews__body {
+  font-size: 14px;
+  line-height: 1.6;
+  margin-bottom: 10px;
+  color: #555;
+}
+
+/* =========================================================
+   Read full review link
+========================================================= */
+
+.sp-reviews__actions {
+  margin-bottom: 12px;
+}
+
+.sp-reviews__link {
+  font-size: 13px;
+  font-weight: 500;
+  color: #2d6cdf;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.sp-reviews__link:hover {
+  text-decoration: underline;
+}
+
+.sp-reviews__link--hidden {
+  display: none;
+}
+
+/* =========================================================
+   Footer Meta (author + verified)
+========================================================= */
+
+.sp-reviews__meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.sp-reviews__author {
+  font-weight: 500;
+  color: #222;
+}
+
+/* Verified badge */
+
+.sp-reviews__verified {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #2d6cdf;
+  font-weight: 500;
+}
+
+.sp-reviews__verifiedicon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 50%;
+  background: #2d6cdf;
+  color: #fff;
+  line-height: 1;
+}
+
+.sp-reviews__verifiedtext {
+  font-size: 12px;
+}
+
+/* =========================================================
+   Optional polish (subtle card enhancement)
+========================================================= */
+
+.sp-card.sp-reviews {
+  overflow: hidden;
+}
+
+/* Smooth fade on initial appearance */
+.sp-reviews:not(.sp-reviews--hidden) {
+  animation: spReviewsFadeIn 220ms ease-out;
+}
+
+@keyframes spReviewsFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Reviews nav */
+.sp-reviews__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sp-reviews__meta-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sp-reviews__nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sp-reviews__nav--hidden {
+  display: none;
+}
+
+.sp-reviews__navbtn {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: 1px solid #e6e6e6;
+  background: #fff;
+  color: #222;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sp-reviews__navbtn:hover {
+  border-color: #d9d9d9;
+}
+
+.sp-reviews__navbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Stars */
+.sp-reviews__stars {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.sp-reviews__star {
+  width: 16px;
+  height: 16px;
+  fill: #f5b301; /* gold */
+}
+
+/* Title with quote icon */
+.sp-reviews__title {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: #111;
+  font-weight: 650;
+  line-height: 1.25;
+  font-size: 18px;
+}
+
+.sp-reviews__quoteiconwrap {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.sp-reviews__quoteicon {
+  width: 22px;
+  height: 22px;
+  fill: #e7e7e7; /* subtle */
+}
+
+.sp-reviews__titletext {
+  display: inline;
+}
+
+/* Body quoted */
+.sp-reviews__body {
+  font-size: 14px;
+  line-height: 1.6;
+  margin-bottom: 10px;
+  color: #555;
+}
+
+/* Nav chevrons */
+.sp-reviews__navbtn {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: 1px solid #e6e6e6;
+  background: #fff;
+  color: #222;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sp-reviews__navbtn:hover {
+  border-color: #d9d9d9;
+}
+
+.sp-reviews__navbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.sp-reviews__chev {
+  width: 18px;
+  height: 18px;
+}
+
+/* Keep the footer layout */
+.sp-reviews__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sp-reviews__meta-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sp-reviews__nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sp-reviews__nav--hidden {
+  display: none;
+}
+
+.add-product-row {
+  margin-top: 15px;
+}
+
+.sp-rewards__helper {
+  margin-top: 10px;
+  font-size: 16px;
+}
+
+/* =========================================
+   Rewards Card – Premium / Retention Focus
+========================================= */
+
+.sp-rewards {
+  position: relative;
+  overflow: hidden;
+}
+
+/* Subtle colorful gradient glow background */
+.sp-rewards::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(255, 165, 0, 0.12), transparent 40%),
+    radial-gradient(circle at 100% 100%, rgba(255, 99, 71, 0.12), transparent 40%);
+  pointer-events: none;
+}
+
+/* Banner row */
+.sp-rewards__banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(255, 174, 66, 0.08), rgba(255, 99, 71, 0.08));
+  border: 1px solid rgba(255, 165, 0, 0.15);
+  margin-top: 12px;
+  margin-bottom: 18px;
+  position: relative;
+  z-index: 1;
+}
+
+/* Emoji icon */
+.sp-rewards__banner-icon {
+  font-size: 22px;
+  line-height: 1;
+}
+
+/* Text block */
+.sp-rewards__banner-title {
+  font-weight: 600;
+  font-size: 16px;
+  margin-bottom: 2px;
+}
+
+.sp-rewards__banner-sub {
+  font-size: 14px;
+}
+
+/* Right-side pill */
+.sp-rewards__pill {
+  margin-left: auto;
+  background: linear-gradient(135deg, #ffb347, #ff7043);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* CTA styling */
+.sp-rewards__cta {
+  width: 100%;
+  font-weight: 600;
+  font-size: 16px;
+  padding: 14px 18px;
+  border-radius: 14px;
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.sp-rewards__cta:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+}
+
+/* Helper text */
+.sp-rewards__helper {
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+/* Stack actions nicely */
+.sp-rewards__actions {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Mobile refinement */
+@media (max-width: 640px) {
+  .sp-rewards__banner {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .sp-rewards__pill {
+    margin-left: 0;
+    margin-top: 6px;
+  }
+}

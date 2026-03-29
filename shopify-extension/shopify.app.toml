@@ -1,0 +1,26 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "7ce85f1d1e501b5c51b0fb6fb7f810c2"
+name = "Subscriptions Portal" # optional, but recommended to match
+application_url = "https://shopcx.ai/admin/"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = false
+
+[webhooks]
+api_version = "2026-01"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_channels,read_customers,read_orders"
+optional_scopes = [ ]
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = [ ]
+
+[app_proxy]
+url = "https://shopcx.ai/api/portal"
+subpath = "portal"
+prefix = "apps"

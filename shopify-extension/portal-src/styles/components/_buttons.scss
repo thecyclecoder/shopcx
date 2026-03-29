@@ -1,0 +1,120 @@
+/* portal-src/styles/components/_buttons.scss
+   ------------------------------------------------------------
+   Buttons + button-like controls
+   (Keep screen-specific button layout in screens/*)
+   ------------------------------------------------------------ */
+
+.sp-btn,
+button.sp-btn,
+a.sp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  width: auto;
+  text-align: center;
+
+  padding: var(--sp-btn-pad-y) var(--sp-btn-pad-x);
+  border-radius: var(--sp-btn-radius);
+
+  border: 1px solid var(--sp-border);
+  background: #fff;
+  color: var(--sp-text);
+
+  font-size: var(--sp-btn-font-size);
+  font-weight: 900;
+  text-decoration: none;
+
+  touch-action: manipulation;
+  cursor: pointer;
+
+  transition:
+    transform .08s ease,
+    box-shadow .12s ease,
+    background .12s ease,
+    border-color .12s ease,
+    opacity .12s ease;
+}
+
+.sp-btn:hover {
+  box-shadow: 0 8px 18px rgba(17, 24, 39, 0.06);
+  transform: translateY(-1px);
+}
+
+.sp-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 10px rgba(17, 24, 39, 0.06);
+}
+
+.sp-btn:focus {
+  outline: none;
+}
+
+.sp-btn:focus-visible {
+  outline: 3px solid rgba(17, 24, 39, 0.18);
+  outline-offset: 2px;
+}
+
+/* Variants */
+
+.sp-btn--ghost {
+  background: var(--sp-ghost-bg, #f9fafb);
+  border-color: var(--sp-border);
+  color: var(--sp-text);
+  font-size: var(--sp-btn-font-size-ghost, 16px);
+  font-weight: 900;
+}
+
+.sp-btn-primary {
+  border-color: var(--sp-text);
+  background: #fff;
+  color: var(--sp-text);
+}
+
+.sp-btn--danger {
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #991b1b;
+  background: #fff;
+}
+
+/* Disabled state: prefer disabled attribute; class is a fallback */
+.sp-btn:disabled,
+button.sp-btn:disabled,
+a.sp-btn[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+  box-shadow: none;
+  pointer-events: none;
+}
+
+.sp-btn--disabled {
+  opacity: 0.55;
+  pointer-events: none;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.sp-btn--disabled:hover,
+.sp-btn--disabled:active {
+  transform: none;
+  box-shadow: none;
+}
+
+/* Size helpers */
+
+.sp-btn--full {
+  width: 100%;
+}
+
+/* Mobile tightening */
+@media (max-width: 480px) {
+  .sp-btn,
+  button.sp-btn,
+  a.sp-btn {
+    font-size: var(--sp-btn-font-size-mobile, 17px);
+    padding: var(--sp-btn-pad-y-mobile, 13px) var(--sp-btn-pad-x-mobile, 14px);
+    border-radius: var(--sp-btn-radius-mobile, 16px);
+  }
+}

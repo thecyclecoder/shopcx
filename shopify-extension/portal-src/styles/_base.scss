@@ -1,0 +1,244 @@
+/* portal-src/styles/_base.scss
+   ------------------------------------------------------------------
+   Base styles, typography, layout primitives, and utilities
+------------------------------------------------------------------- */
+
+/* -------------------------------------------------
+   Global wrapper
+-------------------------------------------------- */
+
+.sp-wrap {
+  font-size: 17px;
+  line-height: 1.45;
+  color: var(--sp-text);
+}
+
+.subscriptions-portal {
+  min-height: 500px;
+  margin-bottom: 56px;
+}
+
+@media (max-width: 768px) {
+  .subscriptions-portal {
+    margin-bottom: 30px;
+  }
+}
+
+/* -------------------------------------------------
+   Page containers
+-------------------------------------------------- */
+
+.sp-page,
+.sp-home-shell,
+.sp-subs-page,
+.sp-detail {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+/* Wider contexts */
+.sp-bc__wrap,
+.sp-topbar {
+  max-width: 1100px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* -------------------------------------------------
+   Typography helpers
+-------------------------------------------------- */
+
+.sp-title {
+  font-size: 28px;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  margin: 0 0 6px;
+}
+
+.sp-title2 {
+  font-size: 20px;
+  font-weight: 900;
+  margin: 0 0 4px;
+}
+
+.sp-muted {
+  color: var(--sp-muted);
+  margin: 0;
+}
+
+/* -------------------------------------------------
+   Layout utilities
+-------------------------------------------------- */
+
+.sp-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sp-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sp-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+@media (min-width: 900px) {
+  .sp-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* -------------------------------------------------
+   Card primitive
+-------------------------------------------------- */
+
+.sp-card {
+  background: var(--sp-bg);
+  border: 1px solid var(--sp-border);
+  border-radius: var(--sp-card-radius);
+  padding: var(--sp-pad);
+  box-shadow: var(--sp-shadow);
+}
+
+/* Cards inside cards should feel flat */
+.sp-card .sp-card {
+  box-shadow: none;
+}
+
+/* Elevated variant */
+.sp-card--heroish {
+  box-shadow: var(--sp-shadow2);
+}
+
+/* -------------------------------------------------
+   Buttons (base only – variants live in components)
+-------------------------------------------------- */
+
+.sp-btn {
+  display: block;
+  width: 100%;
+  padding: 14px;
+  border-radius: var(--sp-btn-radius);
+  border: 1px solid var(--sp-border);
+  background: var(--sp-bg);
+  color: var(--sp-text);
+  font-size: 18px;
+  font-weight: 900;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition:
+    transform var(--sp-dur-fast) var(--sp-ease),
+    box-shadow var(--sp-dur) var(--sp-ease),
+    background var(--sp-dur) var(--sp-ease),
+    border-color var(--sp-dur) var(--sp-ease);
+}
+
+.sp-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(17, 24, 39, 0.06);
+}
+
+.sp-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 10px rgba(17, 24, 39, 0.06);
+}
+
+.sp-btn:focus-visible {
+  outline: 3px solid var(--sp-focus);
+  outline-offset: 2px;
+}
+
+.sp-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+
+/* -------------------------------------------------
+   Inputs
+-------------------------------------------------- */
+
+.sp-input,
+.sp-select {
+  width: 100%;
+  border: 1px solid var(--sp-border);
+  background: var(--sp-bg);
+  border-radius: 14px;
+  padding: 12px 16px;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--sp-text);
+}
+
+.sp-input::placeholder {
+  color: #9ca3af;
+  font-weight: 650;
+}
+
+/* -------------------------------------------------
+   Pills (base)
+-------------------------------------------------- */
+
+.sp-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--sp-border);
+  font-size: 13px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+/* -------------------------------------------------
+   Notes / alerts (base)
+-------------------------------------------------- */
+
+.sp-note {
+  border: 1px solid var(--sp-note-border);
+  background: var(--sp-note-bg);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 10px 0 14px;
+}
+
+.sp-note__title {
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.sp-note__body {
+  line-height: 1.35;
+}
+
+/* -------------------------------------------------
+   Utility helpers
+-------------------------------------------------- */
+
+.sp-pre {
+  white-space: pre-wrap;
+  background: #0b1020;
+  color: #e5e7eb;
+  padding: 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  overflow: auto;
+  margin-top: 12px;
+}
+
+.sp-loading {
+  font-size: 18px;
+  font-weight: 900;
+}

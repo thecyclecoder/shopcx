@@ -1,0 +1,312 @@
+/* portal-src/styles/_layout.scss
+   ------------------------------------------------------------------
+   Global layout & structural sections (no component-specific styling)
+------------------------------------------------------------------- */
+
+/* -------------------------------------------------
+   Portal mount + global wrapper
+-------------------------------------------------- */
+
+.subscriptions-portal {
+  margin-bottom: 56px;
+  min-height: 500px;
+}
+
+@media (max-width: 768px) {
+  .subscriptions-portal {
+    margin-bottom: 30px;
+  }
+}
+
+/* Portal-wide typography context wrapper */
+.sp-wrap {
+  font-size: 17px;
+  line-height: 1.45;
+  color: var(--sp-text);
+}
+
+/* -------------------------------------------------
+   Page wrappers / max-width containers
+-------------------------------------------------- */
+
+.sp-page,
+.sp-home-shell,
+.sp-subs-page,
+.sp-detail {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.sp-bc__wrap,
+.sp-topbar {
+  max-width: 1100px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* -------------------------------------------------
+   Portal page heading row
+-------------------------------------------------- */
+
+.app-title-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-gap-10);
+  padding: 20px 0;
+}
+
+.sp-page-title {
+  margin: 0;
+  line-height: 1;
+  text-align: center;
+}
+
+.sp-page-subhead {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 0;
+}
+
+/* -------------------------------------------------
+   Breadcrumb layout
+-------------------------------------------------- */
+
+.sp-bc__wrap {
+  padding: 0 0 14px;
+}
+
+.sp-bc {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-gap-10);
+  flex-wrap: wrap;
+}
+
+@media (max-width: 640px) {
+  .sp-bc {
+    gap: var(--sp-gap-6, 6px);
+  }
+}
+
+/* -------------------------------------------------
+   Top bar layout
+-------------------------------------------------- */
+
+.sp-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-gap-12);
+  padding: 12px 16px;
+}
+
+@media (max-width: 768px) {
+  .sp-topbar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .sp-topbar__title {
+    font-size: 18px;
+  }
+}
+
+/* -------------------------------------------------
+   Subscription detail page layout
+-------------------------------------------------- */
+
+.sp-detail__grid {
+  margin-top: 16px;
+}
+
+.sp-detail__col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-gap-16);
+}
+
+.sp-detail__header-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-gap-12);
+}
+
+@media (max-width: 720px) {
+  .sp-detail__header-top {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+/* -------------------------------------------------
+   Common section headers inside cards
+-------------------------------------------------- */
+
+.sp-detail__sectionhead {
+  margin-bottom: 10px;
+}
+
+.sp-detail__section-sub {
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+/* -------------------------------------------------
+   Detail “lines” list layout
+-------------------------------------------------- */
+
+.sp-detail__lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-gap-10);
+}
+
+/* -------------------------------------------------
+   Detail action areas (layout only)
+-------------------------------------------------- */
+
+.sp-detail__actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--sp-gap-12);
+}
+
+@media (min-width: 768px) {
+  .sp-detail__actions {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.sp-detail__actions--stack {
+  grid-template-columns: 1fr;
+}
+
+@media (max-width: 768px) {
+  .sp-detail__actions {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-gap-12);
+  }
+
+  .sp-detail__actions .sp-btn,
+  .sp-detail__actions a.sp-btn {
+    width: 100%;
+    justify-content: center;
+    text-align: center;
+  }
+}
+
+/* -------------------------------------------------
+   Detail items actions row
+-------------------------------------------------- */
+
+.sp-detail__items-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--sp-gap-12);
+  margin-top: 12px;
+}
+
+@media (min-width: 768px) {
+  .sp-detail__items-actions {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Hint spacing under actions */
+.sp-detail__hint {
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+/* -------------------------------------------------
+   Detail coupon row (layout only)
+-------------------------------------------------- */
+
+.sp-detail__coupon {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-gap-10);
+  margin-top: 10px;
+}
+
+@media (max-width: 720px) {
+  .sp-detail__coupon {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* -------------------------------------------------
+   Detail shipping row (layout only)
+-------------------------------------------------- */
+
+.sp-detail__shiprow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-gap-12);
+  margin-top: 10px;
+}
+
+@media (max-width: 720px) {
+  .sp-detail__shiprow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* -------------------------------------------------
+   Detail cancel row (layout only)
+-------------------------------------------------- */
+
+.sp-detail__cancel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-gap-12);
+}
+
+@media (max-width: 720px) {
+  .sp-detail__cancel-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* -------------------------------------------------
+   Tabs layout
+-------------------------------------------------- */
+
+.sp-tabs {
+  display: flex;
+  gap: var(--sp-gap-10);
+  flex-wrap: wrap;
+}
+
+/* -------------------------------------------------
+   Home actions layout (structure only)
+-------------------------------------------------- */
+
+.sp-home-actions {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-gap-12);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+@media (min-width: 900px) {
+  .sp-home-actions {
+    flex-direction: row;
+    justify-content: flex-start;
+    align-items: stretch;
+  }
+}
