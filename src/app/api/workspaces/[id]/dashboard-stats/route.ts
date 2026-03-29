@@ -77,10 +77,12 @@ export async function GET(
   const closedCount = (totalClosed as { count: number | null }).count || 0;
   const aiResolutionRate = closedCount > 0 ? aiCount / closedCount : null;
 
-  // Cancels + payment failures (today vs yesterday) — use UTC dates
+  // Cancels + payment failures (today vs yesterday) — use US Central time (UTC-6)
+  const tzOffset = -6; // US Central — TODO: make this a workspace setting
   const now = new Date();
-  const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
-  const yesterdayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1)).toISOString();
+  const localNow = new Date(now.getTime() + tzOffset * 60 * 60 * 1000);
+  const todayStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate()) - tzOffset * 60 * 60 * 1000).toISOString();
+  const yesterdayStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate() - 1) - tzOffset * 60 * 60 * 1000).toISOString();
 
   // Use customer_events for accurate cancel + failure counts (webhooks log events)
   const [cancelsToday, cancelsYesterday, failuresToday, failuresYesterday, dunningRecovered, dunningRevenue] = await Promise.all([
