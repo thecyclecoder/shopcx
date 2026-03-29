@@ -63,8 +63,52 @@ function ResumeCard({ contract, onUpdate, showToast }) {
   );
 }
 
+function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div class="sp-line-group">
+      <div class="sp-line">
+        {getLineImage(ln)
+          ? <img class="sp-line__img" src={getLineImage(ln)} alt={safeStr(ln.title)} />
+          : <div class="sp-line__img sp-line__img--placeholder" />}
+        <div class="sp-line__meta">
+          <div class="sp-line__title">{safeStr(ln.title) || 'Item'}</div>
+          <div class="sp-line__subwrap sp-muted">
+            {ln.variantTitle && <div class="sp-line__variant">{safeStr(ln.variantTitle)}</div>}
+            <div class="sp-line__qty">Qty {ln.quantity || 1}</div>
+          </div>
+        </div>
+        <div class="sp-line__price">{ln.currentPrice ? money(ln.currentPrice) : ''}</div>
+      </div>
+      <button type="button" class={'sp-disclosure' + (open ? ' is-open' : '')}
+        onClick={() => setOpen(!open)}>
+        <span class="sp-disclosure__label">Make changes to this item</span>
+        <span class="sp-disclosure__arrow">{open ? '\u25B2' : '\u25BC'}</span>
+      </button>
+      {open && (
+        <div class="sp-disclosure__panel">
+          <button class="sp-disclosure__action" onClick={onSwap}>
+            <div class="sp-disclosure__action-title">Swap</div>
+            <div class="sp-disclosure__action-sub sp-muted">Choose different flavor or product.</div>
+          </button>
+          <button class="sp-disclosure__action" onClick={onQty}>
+            <div class="sp-disclosure__action-title">Change quantity</div>
+            <div class="sp-disclosure__action-sub sp-muted">Update how many you receive.</div>
+          </button>
+          {canRemove && (
+            <button class="sp-disclosure__action sp-disclosure__action--danger" onClick={onRemove}>
+              <div class="sp-disclosure__action-title">Remove</div>
+              <div class="sp-disclosure__action-sub sp-muted">Remove this item.</div>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ItemsCard({ contract, lines, shipLine, onUpdate, showToast, config }) {
-  const [modal, setModal] = useState(null); // { type: 'addSwap'|'remove'|'quantity', line?, mode? }
+  const [modal, setModal] = useState(null);
 
   const total = lines.reduce((sum, ln) => {
     const p = getLinePrice(ln);
@@ -78,27 +122,15 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, showToast, config }) {
     <div class="sp-card sp-detail__card">
       <div class="sp-detail__sectionhead">
         <div class="sp-title2">Items</div>
+        <p class="sp-muted sp-detail__section-sub">What's included in your subscription.</p>
       </div>
       <div class="sp-detail__lines">
         {lines.map((ln, i) => (
-          <div key={i} class="sp-line">
-            {getLineImage(ln)
-              ? <img class="sp-line__img" src={getLineImage(ln)} alt={safeStr(ln.title)} />
-              : <div class="sp-line__img sp-line__img--placeholder" />}
-            <div class="sp-line__meta">
-              <div class="sp-line__title">{safeStr(ln.title) || 'Item'}</div>
-              <div class="sp-line__subwrap sp-muted">
-                {ln.variantTitle && <div class="sp-line__variant">{safeStr(ln.variantTitle)}</div>}
-                <div class="sp-line__qty">Qty {ln.quantity || 1}</div>
-              </div>
-            </div>
-            <div class="sp-line__price">{ln.currentPrice ? money(ln.currentPrice) : ''}</div>
-            <div class="sp-line__actions">
-              <button class="sp-btn sp-btn--ghost sp-btn--sm" onClick={() => setModal({ type: 'addSwap', line: ln, mode: 'swap' })}>Swap</button>
-              <button class="sp-btn sp-btn--ghost sp-btn--sm" onClick={() => setModal({ type: 'quantity', line: ln })}>Qty</button>
-              {canRemove && <button class="sp-btn sp-btn--ghost sp-btn--sm sp-btn--danger" onClick={() => setModal({ type: 'remove', line: ln })}>Remove</button>}
-            </div>
-          </div>
+          <LineItemDisclosure key={i} ln={ln} canRemove={canRemove}
+            onSwap={() => setModal({ type: 'addSwap', line: ln, mode: 'swap' })}
+            onQty={() => setModal({ type: 'quantity', line: ln })}
+            onRemove={() => setModal({ type: 'remove', line: ln })}
+          />
         ))}
       </div>
       {isFinite(total) && total > 0 && (
