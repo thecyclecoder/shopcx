@@ -1,6 +1,6 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "7ce85f1d1e501b5c51b0fb6fb7f810c2"
+client_id = "9c9266451d617c1bd641ad17af3c9e28"
 name = "Subscriptions Portal" # optional, but recommended to match
 application_url = "https://shopcx.ai/admin/"
 embedded = true

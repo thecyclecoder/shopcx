@@ -1,0 +1,102 @@
+/* ===========================================
+   Dunning banner + badge
+   Payment recovery awareness in portal
+   =========================================== */
+
+/* Amber dunning pill badge (subscription list) */
+.sp-pill--dunning {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+  font-weight: 600;
+}
+
+/* Dunning banner (subscription detail) */
+.sp-dunning-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  border: 1px solid #fcd34d;
+  background: #fffbeb;
+  margin-bottom: 12px;
+}
+
+.sp-dunning-banner--recovered {
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.sp-dunning-banner__icon {
+  font-size: 22px;
+  flex-shrink: 0;
+  line-height: 1;
+  margin-top: 2px;
+}
+
+.sp-dunning-banner__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.sp-dunning-banner__title {
+  font-weight: 700;
+  font-size: 17px;
+  color: #92400e;
+  line-height: 1.3;
+}
+
+.sp-dunning-banner--recovered .sp-dunning-banner__title {
+  color: #166534;
+}
+
+.sp-dunning-banner__sub {
+  margin-top: 4px;
+  font-size: 15px;
+  line-height: 1.4;
+  color: #78350f;
+}
+
+.sp-dunning-banner--recovered .sp-dunning-banner__sub {
+  color: #14532d;
+}
+
+.sp-dunning-banner__btn {
+  flex-shrink: 0;
+  align-self: center;
+  white-space: nowrap;
+}
+
+/* Linked account label (subscription list) */
+.sp-subcard__linked-label {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 500;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  vertical-align: middle;
+}
+
+/* Pills row in subscription card */
+.sp-subcard__pills {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 480px) {
+  .sp-dunning-banner {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .sp-dunning-banner__btn {
+    width: 100%;
+    text-align: center;
+  }
+}

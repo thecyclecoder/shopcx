@@ -1,0 +1,88 @@
+/* ===========================================
+   Skeleton loaders
+   Shimmer animation for loading states
+   =========================================== */
+
+@keyframes sp-skeleton-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.sp-skeleton-line {
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    rgba(0, 0, 0, 0.06) 25%,
+    rgba(0, 0, 0, 0.1) 50%,
+    rgba(0, 0, 0, 0.06) 75%
+  );
+  background-size: 200% 100%;
+  animation: sp-skeleton-shimmer 1.5s ease-in-out infinite;
+  width: 100%;
+}
+
+.sp-skeleton-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sp-skeleton-spacer {
+  height: 16px;
+}
+
+.sp-skeleton-card {
+  padding: 20px;
+}
+
+.sp-skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sp-skeleton-thumb {
+  width: 56px;
+  height: 56px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(0, 0, 0, 0.06) 25%,
+    rgba(0, 0, 0, 0.1) 50%,
+    rgba(0, 0, 0, 0.06) 75%
+  );
+  background-size: 200% 100%;
+  animation: sp-skeleton-shimmer 1.5s ease-in-out infinite;
+}
+
+.sp-skeleton-line-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.sp-skeleton-tile {
+  padding: 16px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.sp-skeleton-reason-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+@media (max-width: 600px) {
+  .sp-skeleton-reason-grid {
+    grid-template-columns: 1fr;
+  }
+}

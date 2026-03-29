@@ -1,6 +1,6 @@
 /* ===========================================
-   Cancel flow (reason + offer + confirm)
-   Drop-in replacement for _cancel.scss
+   Cancel flow — AI-powered retention
+   Phases: reason → remedies/chat → confirm
    =========================================== */
 
 /* ---------- Header ---------- */
@@ -19,11 +19,7 @@
 .sp-cancel__title {
   margin: 0;
 }
-.sp-cancel-offer__copy .sp-note__title {
-  font-size: 24px;
-  margin-bottom: 10px;
-}
-/* Desktop: back + title on one row */
+
 @media (min-width: 900px) {
   .sp-cancel__header {
     flex-direction: row;
@@ -39,12 +35,6 @@
 
 /* ---------- Intro blocks ---------- */
 
-.sp-cancel__intro {
-  margin-top: 10px;
-  display: grid;
-  gap: 10px;
-}
-
 .sp-cancel__required-title {
   font-weight: 800;
   font-size: 18px;
@@ -57,7 +47,7 @@
   font-size: 17px;
 }
 
-/* Softer, less dominant alert */
+/* Not cancelled yet alert */
 .sp-cancel__alert {
   border-radius: 12px;
   padding: 10px 12px;
@@ -79,221 +69,387 @@
   color: rgba(127, 29, 29, 0.9);
 }
 
-/* ---------- Reasons panel + tiles ---------- */
+/* ---------- Layout (2-col with reviews) ---------- */
 
-.sp-cancel__reasons-panel {
-  margin-top: 16px;
-  padding: 14px;
-  border-radius: 16px;
-  background: rgba(0, 0, 0, 0.03);
-  border: 1px solid rgba(0, 0, 0, 0.06);
-}
-
-.sp-cancel__reasons {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 14px;
-}
-
-/* 2 columns on desktop */
-@media (min-width: 900px) {
-  .sp-cancel__reasons {
-    grid-template-columns: 1fr 1fr;
-  }
-}
-
-.sp-cancel__reasons .sp-itemopt {
-  width: 100%;
-  height: 100%;
-}
-
-/* Footer link */
-.sp-cancel__footer {
-  margin-top: 14px;
-}
-
-.sp-cancel__exit {
-  display: inline-block;
-}
-
-/* ===========================================
-   Offer step
-   - Desktop: 2 columns (copy left, image right)
-   - Mobile: stacked (image first)
-   =========================================== */
-
-.sp-cancel__alert--offer {
-  margin-top: 6px;
-  margin-bottom: 14px;
-}
-
-/* The offerCard() returns:
-   <div class="sp-cancel-offer__grid sp-wrap">
-     <img class="sp-cancel-offer__img" ... />
-     <div class="sp-cancel-offer__copy">
-       <div class="sp-note sp-cancel-offer__note">...</div>
-     </div>
-   </div>
-*/
-
-.sp-note.sp-cancel-offer__note {
-  background: none;
-  border: none;
-}
-.sp-cancel-offer__grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 14px;
-  grid-template-areas:
-    'img'
-    'copy';
-}
-
-/* Desktop: copy left, image right */
-@media (min-width: 900px) {
-  .sp-cancel-offer__grid {
-    grid-template-columns: 1fr 1fr;
-    gap: 18px;
-    align-items: center;
-    grid-template-areas: 'copy img';
-  }
-}
-
-.sp-cancel-offer__img {
-  grid-area: img;
-  width: 100%;
-  height: auto;
-  display: block;
-  border-radius: 16px;
-}
-
-.sp-cancel-offer__copy {
-  grid-area: copy;
-}
-
-/* Replace the default “note” look with light grey */
-.sp-cancel-offer__note {
-  border-radius: 16px;
-  padding: 16px 18px;
-  background: rgba(0, 0, 0, 0.03);
-  border: 1px solid rgba(0, 0, 0, 0.06);
-}
-
-/* ===========================================
-   Offer actions hierarchy
-   - Light grey panel behind buttons
-   - 2 options side-by-side on desktop
-   - Continue to cancel is muted/boring on its own row
-   =========================================== */
-
-.sp-cancel-offer__actions-panel {
-  margin-top: 16px;
-  padding: 14px;
-  border-radius: 16px;
-  background: rgba(0, 0, 0, 0.03);
-  border: 1px solid rgba(0, 0, 0, 0.06);
-}
-
-.sp-cancel-offer__actions-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 12px;
-}
-
-@media (min-width: 900px) {
-  .sp-cancel-offer__actions-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-}
-
-.sp-cancel-offer__action .sp-btn {
-  width: 100%;
-}
-
-.sp-cancel-offer__hint {
-  margin-top: 8px;
-  font-size: 14px;
-  line-height: 1.25;
-  text-align: center;
-}
-
-/* Keep "Continue to cancel" visually boring */
-.sp-cancel-offer__cancelbtn {
-  margin-top: 12px;
-  width: 100%;
-  opacity: 0.75;
-}
-
-.sp-cancel-offer__cancelbtn:hover {
-  opacity: 0.9;
-}
-
-.sp-btn.sp-cancel-offer__cancelbtn {
-  width: 100%;
-  border: 0;
-  background: none;
-  font-size: 14px;
-  color: #333;
-}
-
-@media (max-width: 480px) {
-  .sp-btn.sp-cancel__back {
-    width: 100%;
-  }
-  .sp-cancel__title {
-    text-align: center;
-  }
-  .sp-note.sp-cancel-offer__note {
-    background: none;
-    border: none;
-    margin: 0;
-  }
-}
-/* Cancel reason step layout */
 .sp-cancel__layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 420px);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 380px);
   gap: 18px;
   align-items: start;
+  margin-top: 16px;
 }
 
-.sp-cancel__left {
-  min-width: 0;
-}
-
+.sp-cancel__left,
 .sp-cancel__right {
   min-width: 0;
 }
 
-/* Reasons: 2-col when no reviews, 1-col when reviews panel is present */
-.sp-cancel__reasons--twocol {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.sp-cancel__reasons--onecol {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 12px;
-}
-
-/* Remove inline style replacement */
-.sp-itemopt--left {
-  text-align: left;
-}
-
-/* Mobile: stack */
 @media (max-width: 860px) {
   .sp-cancel__layout {
     grid-template-columns: 1fr;
   }
 }
 
+/* ---------- Reason tiles ---------- */
+
+.sp-cancel-reasons {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+@media (min-width: 600px) {
+  .sp-cancel-reasons:not(.sp-cancel-reasons--with-reviews) {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.sp-cancel-reason {
+  width: 100%;
+  text-align: left;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--sp-border, rgba(0, 0, 0, 0.08));
+  background: var(--sp-surface, #fff);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  font-size: 17px;
+  min-height: 48px;
+}
+
+.sp-cancel-reason:hover {
+  border-color: var(--sp-accent, #111);
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.sp-cancel-reason__label {
+  font-weight: 600;
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+/* ---------- Footer ---------- */
+
+.sp-cancel__footer {
+  margin-top: 18px;
+  text-align: center;
+}
+
+.sp-cancel__exit {
+  display: inline-block;
+  font-size: 15px;
+}
+
+.sp-cancel__still-cancel {
+  opacity: 0.7;
+  font-size: 15px;
+}
+
+.sp-cancel__still-cancel:hover {
+  opacity: 1;
+}
+
+/* ---------- Remedies section ---------- */
+
+.sp-cancel__remedies-section {
+  margin-top: 16px;
+}
+
+.sp-cancel__remedies-title {
+  font-weight: 700;
+  font-size: 18px;
+  margin-bottom: 12px;
+}
+
+/* Remedy card list */
+.sp-remedy-list {
+  display: grid;
+  gap: 12px;
+}
+
+.sp-remedy-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  border: 1px solid var(--sp-border, rgba(0, 0, 0, 0.08));
+  background: var(--sp-surface, #fff);
+  transition: border-color 0.15s;
+}
+
+.sp-remedy-card:hover {
+  border-color: var(--sp-accent, #111);
+}
+
+.sp-remedy-card__icon {
+  font-size: 24px;
+  flex-shrink: 0;
+  width: 40px;
+  text-align: center;
+}
+
+.sp-remedy-card__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.sp-remedy-card__label {
+  font-weight: 700;
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+.sp-remedy-card__desc {
+  margin-top: 4px;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.sp-remedy-card__btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  .sp-remedy-card {
+    flex-direction: column;
+    align-items: stretch;
+    text-align: center;
+    gap: 10px;
+  }
+
+  .sp-remedy-card__btn {
+    width: 100%;
+  }
+}
+
+/* ---------- Review social proof ---------- */
+
+.sp-review-social-list {
+  margin-top: 20px;
+  padding: 16px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.sp-review-social-list__title {
+  font-weight: 700;
+  font-size: 16px;
+  margin-bottom: 12px;
+}
+
+.sp-review-social {
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.sp-review-social:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.sp-review-social__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.sp-review-stars {
+  color: #f59e0b;
+  font-size: 16px;
+  letter-spacing: 1px;
+}
+
+.sp-review-social__author {
+  font-size: 14px;
+}
+
+.sp-review-social__summary {
+  font-size: 17px;
+  font-style: italic;
+  font-weight: 500;
+  line-height: 1.4;
+  color: #333;
+}
+
+.sp-review-social__body {
+  margin-top: 8px;
+  font-size: 15px;
+  line-height: 1.5;
+  color: #555;
+}
+
+.sp-review-social__toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  margin-top: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* ---------- Chat widget ---------- */
+
+.sp-chat {
+  margin-top: 16px;
+}
+
+.sp-chat__messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 12px 0;
+}
+
+.sp-chat__bubble {
+  max-width: 85%;
+  padding: 12px 16px;
+  border-radius: 16px;
+  font-size: 17px;
+  line-height: 1.45;
+}
+
+.sp-chat__bubble--ai {
+  align-self: flex-start;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-bottom-left-radius: 4px;
+}
+
+.sp-chat__bubble--customer {
+  align-self: flex-end;
+  background: var(--sp-accent, #111);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+
+.sp-chat__bubble--typing {
+  padding: 16px 20px;
+}
+
+.sp-chat__typing {
+  display: flex;
+  gap: 5px;
+}
+
+.sp-chat__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.3);
+  animation: sp-chat-dot-pulse 1.4s ease-in-out infinite;
+}
+
+.sp-chat__dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.sp-chat__dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes sp-chat-dot-pulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.sp-chat__input-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.sp-chat__input {
+  flex: 1;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--sp-border, rgba(0, 0, 0, 0.12));
+  font-size: 17px;
+  outline: none;
+  min-height: 44px;
+}
+
+.sp-chat__input:focus {
+  border-color: var(--sp-accent, #111);
+}
+
+.sp-chat__send {
+  flex-shrink: 0;
+}
+
+.sp-chat__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+  align-items: center;
+}
+
+.sp-chat__cancel-link {
+  opacity: 0.7;
+  font-size: 15px;
+}
+
+.sp-chat__cancel-link:hover {
+  opacity: 1;
+}
+
+/* ---------- Confirm step ---------- */
+
+.sp-cancel-confirm__inner {
+  padding: 16px 0;
+}
+
 .sp-cancel-confirm__copy {
+  font-size: 17px;
   margin-top: 10px;
+  line-height: 1.45;
 }
 
 .sp-cancel-confirm__actions {
-  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.sp-cancel-confirm__actions .sp-btn {
+  width: 100%;
+}
+
+@media (min-width: 600px) {
+  .sp-cancel-confirm__actions {
+    flex-direction: row;
+  }
+
+  .sp-cancel-confirm__actions .sp-btn {
+    width: auto;
+  }
+}
+
+/* ---------- Mobile tweaks ---------- */
+
+@media (max-width: 480px) {
+  .sp-btn.sp-cancel__back {
+    width: 100%;
+  }
+
+  .sp-cancel__title {
+    text-align: center;
+  }
 }
