@@ -24,6 +24,8 @@ function statusFromContract(contract) {
 function billingMeta(contract) {
   const b = getBucket(contract);
   if (b === 'paused') {
+    const resumeAt = contract?.pause_resume_at ? fmtDate(contract.pause_resume_at) : '';
+    if (resumeAt) return 'Paused until ' + resumeAt;
     const until = contract?.nextBillingDate ? fmtDate(contract.nextBillingDate) : '';
     return until ? 'Paused until ' + until : 'Paused';
   }

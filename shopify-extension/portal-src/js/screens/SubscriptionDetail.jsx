@@ -320,7 +320,8 @@ export default function SubscriptionDetail() {
 
   let subtitle = '';
   if (b === 'paused') {
-    const until = contract.nextBillingDate ? fmtDate(contract.nextBillingDate) : '';
+    const resumeAt = contract.pause_resume_at ? fmtDate(contract.pause_resume_at) : '';
+    const until = resumeAt || (contract.nextBillingDate ? fmtDate(contract.nextBillingDate) : '');
     subtitle = until ? 'Paused until ' + until : 'This subscription is paused.';
   } else if (!isCancelled && contract.nextBillingDate) {
     subtitle = 'Your next order is on ' + fmtDate(contract.nextBillingDate);

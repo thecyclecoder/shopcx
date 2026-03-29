@@ -1,9 +1,10 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, addDaysFromNow, findCustomer, logPortalAction, handleAppstleError } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { inngest } from "@/lib/inngest/client";
 
-async function appstlePut(workspaceId: string, path: string, body?: unknown) {
+async function appstlePut(workspaceId: string, path: string) {
   const admin = createAdminClient();
   const { data: ws } = await admin.from("workspaces")
     .select("appstle_api_key_encrypted")
@@ -13,8 +14,7 @@ async function appstlePut(workspaceId: string, path: string, body?: unknown) {
 
   const res = await fetch(`https://subscription-admin.appstle.com${path}`, {
     method: "PUT",
-    headers: { "X-API-Key": apiKey, ...(body ? { "Content-Type": "application/json" } : {}) },
-    ...(body ? { body: JSON.stringify(body) } : {}),
+    headers: { "X-API-Key": apiKey },
     cache: "no-store",
   });
   if (!res.ok) {
@@ -24,25 +24,20 @@ async function appstlePut(workspaceId: string, path: string, body?: unknown) {
   return res.status === 204 ? null : res.json().catch(() => null);
 }
 
-async function appstlePost(workspaceId: string, path: string, body: unknown) {
-  const admin = createAdminClient();
-  const { data: ws } = await admin.from("workspaces")
-    .select("appstle_api_key_encrypted")
-    .eq("id", workspaceId).single();
-  if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
-  const apiKey = decrypt(ws.appstle_api_key_encrypted);
+function addDays(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return d.toISOString();
+}
 
-  const res = await fetch(`https://subscription-admin.appstle.com${path}`, {
-    method: "POST",
-    headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Appstle API error: ${res.status} ${text}`);
+function formatDateShort(iso: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      month: "short", day: "numeric", year: "numeric", timeZone: "UTC",
+    }).format(new Date(iso));
+  } catch {
+    return iso.split("T")[0];
   }
-  return res.status === 204 ? null : res.json().catch(() => null);
 }
 
 export const pause: RouteHandler = async ({ auth, route, req }) => {
@@ -56,47 +51,56 @@ export const pause: RouteHandler = async ({ auth, route, req }) => {
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
   if (![30, 60].includes(pauseDays)) return jsonErr({ error: "invalid_pauseDays" }, 400);
 
-  const nextBillingDate = addDaysFromNow(pauseDays);
+  // Resume date is X days from TODAY, not from next billing date
+  const resumeAt = addDays(pauseDays);
+  const resumeLabel = formatDateShort(resumeAt);
 
   try {
+    // Real pause in Appstle
     await appstlePut(auth.workspaceId,
-      `/api/external/v2/subscription-contracts-update-billing-date?contractId=${contractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(nextBillingDate)}`
+      `/api/external/v2/subscription-contracts-update-status?contractId=${contractId}&status=PAUSED`
     );
-
-    // Set portal custom attributes
-    const attrs = [
-      { key: "portal_last_action", value: `pause_${pauseDays}` },
-      { key: "portal_last_action_at", value: new Date().toISOString() },
-      { key: "portal_pause_days", value: String(pauseDays) },
-      { key: "portal_paused_until", value: "" },
-    ];
-    await appstlePost(auth.workspaceId,
-      `/api/external/v2/update-custom-note-attributes?overwriteExistingAttributes=true`,
-      { subscriptionContractId: contractId, customAttributesList: attrs }
-    ).catch(() => {});
   } catch (e) {
     return handleAppstleError(e);
   }
 
-  // Log event + internal note
+  // Update our DB: status + pause_resume_at
+  const admin = createAdminClient();
+  await admin.from("subscriptions")
+    .update({
+      status: "paused",
+      pause_resume_at: resumeAt,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("workspace_id", auth.workspaceId)
+    .eq("shopify_contract_id", String(contractId));
+
+  // Fire Inngest event for scheduled auto-resume
+  await inngest.send({
+    name: "portal/subscription-paused",
+    data: {
+      workspaceId: auth.workspaceId,
+      contractId: String(contractId),
+      pauseDays,
+      resumeAt,
+    },
+  });
+
+  // Log customer event
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
   if (customer) {
     await logPortalAction({
       workspaceId: auth.workspaceId,
       customerId: customer.id,
       eventType: "portal.subscription.paused",
-      summary: `Customer paused subscription for ${pauseDays} days via portal`,
-      properties: { shopify_contract_id: String(contractId), pauseDays },
-      createNote: true,
+      summary: `Subscription #${contractId} paused until ${resumeLabel}`,
+      properties: { shopify_contract_id: String(contractId), pauseDays, resumeAt },
+      createNote: false,
     });
   }
 
   return jsonOk({
-    ok: true, route, contractId, pauseDays,
-    patch: { nextBillingDate, customAttributes: [
-      { key: "portal_last_action", value: `pause_${pauseDays}` },
-      { key: "portal_last_action_at", value: new Date().toISOString() },
-      { key: "portal_pause_days", value: String(pauseDays) },
-    ] },
+    ok: true, route, contractId, pauseDays, resumeAt,
+    patch: { status: "PAUSED", pauseResumeAt: resumeAt },
   });
 };
