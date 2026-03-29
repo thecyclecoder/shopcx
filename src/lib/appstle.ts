@@ -258,11 +258,10 @@ export async function appstleSwitchPaymentMethod(
 
   try {
     const res = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-existing-payment-method?contractId=${contractId}`,
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-existing-payment-method?contractId=${contractId}&paymentMethodId=${encodeURIComponent(paymentMethodId)}`,
       {
         method: "PUT",
-        headers: { "X-API-Key": creds.apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify({ paymentMethodId }),
+        headers: { "X-API-Key": creds.apiKey },
       }
     );
 
