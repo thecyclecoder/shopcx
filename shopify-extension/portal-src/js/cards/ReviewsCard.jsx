@@ -1,7 +1,7 @@
 // cards/ReviewsCard.jsx — Rotating review carousel for detail page
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { requestJson } from '../core/api.js';
-import { shortId, safeStr } from '../core/utils.js';
+import { shortId } from '../core/utils.js';
 
 const ROTATE_MS = 15000;
 const TRUNCATE = 260;
@@ -14,17 +14,12 @@ function truncate(str, max) {
   return { text: cut.replace(/\s+$/, '') + '\u2026', cut: true };
 }
 
-function Stars() {
-  return <div class="sp-reviews__stars" aria-label="5 out of 5 stars">{'\u2605\u2605\u2605\u2605\u2605'}</div>;
-}
-
 export default function ReviewsCard({ productIds }) {
   const [reviews, setReviews] = useState([]);
   const [idx, setIdx] = useState(0);
   const [fade, setFade] = useState('');
   const timerRef = useRef(null);
 
-  // Fetch reviews
   useEffect(() => {
     if (!productIds?.length) return;
     const ids = productIds.map(id => shortId(id)).filter(Boolean);
@@ -38,7 +33,8 @@ export default function ReviewsCard({ productIds }) {
         for (const pid of Object.keys(map)) {
           const entry = map[pid];
           if (entry?.ok && Array.isArray(entry.reviews)) {
-            all.push(...entry.reviews);
+            // Only include reviews that have actual content
+            all.push(...entry.reviews.filter(r => r.title || r.summary || r.body));
           }
         }
         setReviews(all);
@@ -58,7 +54,6 @@ export default function ReviewsCard({ productIds }) {
     }, 180);
   }, [reviews.length]);
 
-  // Auto-rotate
   useEffect(() => {
     if (reviews.length <= 1) return;
     timerRef.current = setInterval(() => advance('next'), ROTATE_MS);
@@ -73,9 +68,15 @@ export default function ReviewsCard({ productIds }) {
   if (!reviews.length) return null;
 
   const r = reviews[idx % reviews.length] || {};
-  const title = r.summary || r.title || 'Loved it';
-  const body = r.body || '';
-  const { text: bodyText, cut } = truncate(body, TRUNCATE);
+
+  // Headline: smart_quote (AI excerpt) → title → first sentence of body
+  const headline = r.summary || r.title || (r.body ? r.body.split(/[.!?]/)[0] + '.' : 'Loved it');
+
+  // Body: full review text, truncated. Only show if different from headline.
+  const bodyRaw = r.body || '';
+  const showBody = bodyRaw && bodyRaw !== headline;
+  const { text: bodyText, cut } = showBody ? truncate(bodyRaw, TRUNCATE) : { text: '', cut: false };
+
   const author = r.author || 'Verified Customer';
 
   return (
@@ -85,13 +86,19 @@ export default function ReviewsCard({ productIds }) {
         <p class="sp-muted sp-detail__section-sub">What customers are saying.</p>
       </div>
       <div class={'sp-reviews__inner ' + fade}>
-        <Stars />
-        <div class="sp-reviews__title">
-          <span class="sp-reviews__quoteiconwrap" aria-hidden="true">{'\u201C'}</span>
-          <span class="sp-reviews__titletext">{title}</span>
+        <div class="sp-reviews__stars" aria-label="5 out of 5 stars">
+          {'\u2605 \u2605 \u2605 \u2605 \u2605'}
         </div>
-        {bodyText && <div class="sp-reviews__body sp-muted">{'\u201C'}{bodyText}{'\u201D'}</div>}
-        {cut && <a href="#" class="sp-reviews__link" onClick={(e) => e.preventDefault()}>Read full review</a>}
+        <div class="sp-reviews__title">
+          <span class="sp-reviews__quoteiconwrap" aria-hidden="true">{'\u201C\u201C'}</span>
+          <span class="sp-reviews__titletext">{headline}</span>
+        </div>
+        {showBody && bodyText && (
+          <div class="sp-reviews__body sp-muted">{'\u201C'}{bodyText}{'\u201D'}</div>
+        )}
+        {cut && (
+          <a href="#" class="sp-reviews__link" onClick={(e) => e.preventDefault()}>Read full review</a>
+        )}
         <div class="sp-reviews__meta">
           <div class="sp-reviews__meta-left">
             <span class="sp-reviews__author">{author}</span>
