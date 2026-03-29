@@ -1,10 +1,11 @@
 /**
  * Inngest function: Sync product reviews from Klaviyo.
- * Nightly cron pulls last 30 days (lightweight). On-demand pulls everything.
+ * Each page of 100 reviews runs as its own durable step (safe under 300s timeout).
+ * Nightly cron pulls last 30 days. On-demand pulls everything.
  */
 
 import { inngest } from "./client";
-import { syncReviewsForWorkspace } from "@/lib/klaviyo";
+import { buildSyncUrl, syncReviewPage, generateMissingSummaries } from "@/lib/klaviyo";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const syncKlaviyoReviews = inngest.createFunction(
@@ -22,14 +23,10 @@ export const syncKlaviyoReviews = inngest.createFunction(
     const fullSync = eventData?.full_sync ?? false;
 
     if (workspaceId) {
-      // Triggered for a specific workspace (manual or event)
-      const result = await step.run("sync-workspace", async () => {
-        return syncReviewsForWorkspace(workspaceId, { fullSync });
-      });
-      return { workspace_id: workspaceId, ...result };
+      return await syncWorkspace(workspaceId, fullSync, step);
     }
 
-    // Cron: sync all workspaces with Klaviyo configured (30-day window)
+    // Cron: sync all workspaces with Klaviyo configured
     const workspaces = await step.run("fetch-workspaces", async () => {
       const admin = createAdminClient();
       const { data } = await admin
@@ -42,12 +39,51 @@ export const syncKlaviyoReviews = inngest.createFunction(
     const results: { workspace_id: string; synced: number; errors: number }[] = [];
 
     for (const ws of workspaces) {
-      const result = await step.run(`sync-${ws.id}`, async () => {
-        return syncReviewsForWorkspace(ws.id, { fullSync: false });
-      });
+      const result = await syncWorkspace(ws.id, false, step);
       results.push({ workspace_id: ws.id, ...result });
     }
 
     return { workspaces_synced: results.length, results };
   },
 );
+
+async function syncWorkspace(
+  workspaceId: string,
+  fullSync: boolean,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  step: any,
+): Promise<{ synced: number; errors: number }> {
+  let url: string | null = buildSyncUrl({ fullSync });
+  let totalSynced = 0;
+  let totalErrors = 0;
+  let page = 0;
+
+  while (url) {
+    const pageUrl: string = url;
+    const result: { synced: number; errors: number; nextUrl: string | null } = await step.run(
+      `sync-${workspaceId}-page-${page}`,
+      async () => syncReviewPage(workspaceId, pageUrl),
+    );
+
+    totalSynced += result.synced;
+    totalErrors += result.errors;
+    url = result.nextUrl;
+    page++;
+  }
+
+  // Generate AI summaries as a separate step
+  await step.run(`summaries-${workspaceId}`, async () => {
+    await generateMissingSummaries(workspaceId);
+  });
+
+  // Update last sync timestamp
+  await step.run(`timestamp-${workspaceId}`, async () => {
+    const admin = createAdminClient();
+    await admin
+      .from("workspaces")
+      .update({ klaviyo_last_sync_at: new Date().toISOString() })
+      .eq("id", workspaceId);
+  });
+
+  return { synced: totalSynced, errors: totalErrors };
+}

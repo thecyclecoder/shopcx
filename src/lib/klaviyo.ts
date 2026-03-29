@@ -104,38 +104,68 @@ export async function fetchKlaviyoReviews(
   return allReviews;
 }
 
-// ── Sync reviews to our DB ──
+// ── Sync one page of reviews (batch of 100: fetch → match customers → upsert) ──
 
-export async function syncReviewsForWorkspace(
-  workspaceId: string,
-  options?: { fullSync?: boolean },
-): Promise<{ synced: number; errors: number }> {
-  const creds = await getKlaviyoCredentials(workspaceId);
-  if (!creds) return { synced: 0, errors: 0 };
-
-  const admin = createAdminClient();
-
-  // Nightly cron: last 30 days. Manual/first sync: everything.
+export function buildSyncUrl(options?: { fullSync?: boolean }): string {
   const sinceDate = options?.fullSync
     ? undefined
     : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  let filter = "";
+  if (sinceDate) {
+    filter = `&filter=greater-or-equal(created,${sinceDate})`;
+  }
+  return `${KLAVIYO_BASE}/reviews/?page[size]=100&sort=-created${filter}`;
+}
 
-  const reviews = await fetchKlaviyoReviews(workspaceId, { sinceDate });
+export async function syncReviewPage(
+  workspaceId: string,
+  pageUrl: string,
+): Promise<{ synced: number; errors: number; nextUrl: string | null }> {
+  const creds = await getKlaviyoCredentials(workspaceId);
+  if (!creds) return { synced: 0, errors: 0, nextUrl: null };
 
-  let synced = 0;
+  const admin = createAdminClient();
+
+  const res: Response = await fetch(pageUrl, { headers: klaviyoHeaders(creds.apiKey) });
+  if (!res.ok) {
+    console.error(`Klaviyo reviews fetch failed: ${res.status}`);
+    return { synced: 0, errors: 0, nextUrl: null };
+  }
+
+  const data: KlaviyoListResponse = await res.json();
+  const batch = data.data || [];
+  if (batch.length === 0) return { synced: 0, errors: 0, nextUrl: null };
+
+  // Step 1: Collect unique emails for batch customer lookup
+  const emails = [...new Set(batch.map(r => r.attributes.email).filter(Boolean))] as string[];
+
+  // Step 2: Batch lookup customers by email
+  const customerMap = new Map<string, string>();
+  if (emails.length > 0) {
+    const { data: customers } = await admin
+      .from("customers")
+      .select("id, email")
+      .eq("workspace_id", workspaceId)
+      .in("email", emails);
+
+    for (const c of customers || []) {
+      if (c.email) customerMap.set(c.email.toLowerCase(), c.id);
+    }
+  }
+
+  // Step 3: Build rows for batch upsert
   let errors = 0;
-
-  for (const review of reviews) {
+  const rows: Record<string, unknown>[] = [];
+  for (const review of batch) {
     try {
       const attrs = review.attributes;
       const statusValue = attrs.status?.value || "published";
       const isFeatured = statusValue === "featured";
-      const shopifyProductId = attrs.product?.external_id || null;
 
       const row: Record<string, unknown> = {
         workspace_id: workspaceId,
         klaviyo_review_id: review.id,
-        shopify_product_id: shopifyProductId || "unknown",
+        shopify_product_id: attrs.product?.external_id || "unknown",
         reviewer_name: attrs.author || null,
         rating: attrs.rating,
         title: attrs.title || null,
@@ -150,48 +180,64 @@ export async function syncReviewsForWorkspace(
         smart_quote: attrs.smart_quote || null,
         images: attrs.images || [],
         product_name: attrs.product?.name || null,
-        // summary: use smart_quote from Klaviyo if available, otherwise keep existing
         ...(attrs.smart_quote ? { summary: attrs.smart_quote } : {}),
       };
 
-      // Resolve customer_id from email
       if (attrs.email) {
-        const { data: cust } = await admin
-          .from("customers")
-          .select("id")
-          .eq("workspace_id", workspaceId)
-          .eq("email", attrs.email)
-          .limit(1)
-          .single();
-        if (cust) row.customer_id = cust.id;
+        const custId = customerMap.get(attrs.email.toLowerCase());
+        if (custId) row.customer_id = custId;
       }
 
-      const { error } = await admin
-        .from("product_reviews")
-        .upsert(row, { onConflict: "workspace_id,klaviyo_review_id" });
-
-      if (error) {
-        console.error(`Review upsert error for ${review.id}:`, error.message);
-        errors++;
-      } else {
-        synced++;
-      }
+      rows.push(row);
     } catch (err) {
-      console.error(`Error processing review ${review.id}:`, err);
+      console.error(`Error building row for review ${review.id}:`, err);
       errors++;
     }
   }
 
-  // Generate AI summaries for reviews without smart_quote or summary
+  // Step 4: Batch upsert
+  let synced = 0;
+  if (rows.length > 0) {
+    const { error, count } = await admin
+      .from("product_reviews")
+      .upsert(rows, { onConflict: "workspace_id,klaviyo_review_id", count: "exact" });
+
+    if (error) {
+      console.error(`Batch upsert error:`, error.message);
+      errors += rows.length;
+    } else {
+      synced = count || rows.length;
+    }
+  }
+
+  return { synced, errors, nextUrl: data.links?.next || null };
+}
+
+/** Convenience wrapper: syncs all pages in one call (for non-Inngest contexts) */
+export async function syncReviewsForWorkspace(
+  workspaceId: string,
+  options?: { fullSync?: boolean },
+): Promise<{ synced: number; errors: number }> {
+  let url: string | null = buildSyncUrl(options);
+  let totalSynced = 0;
+  let totalErrors = 0;
+
+  while (url) {
+    const result = await syncReviewPage(workspaceId, url);
+    totalSynced += result.synced;
+    totalErrors += result.errors;
+    url = result.nextUrl;
+  }
+
   await generateMissingSummaries(workspaceId);
 
-  // Update last sync timestamp
+  const admin = createAdminClient();
   await admin
     .from("workspaces")
     .update({ klaviyo_last_sync_at: new Date().toISOString() })
     .eq("id", workspaceId);
 
-  return { synced, errors };
+  return { synced: totalSynced, errors: totalErrors };
 }
 
 // ── Management: approve/reject/feature via Klaviyo API ──
@@ -312,7 +358,7 @@ export async function updateReviewType(
 
 // ── AI summary generation for reviews without smart_quote ──
 
-async function generateMissingSummaries(workspaceId: string) {
+export async function generateMissingSummaries(workspaceId: string) {
   const admin = createAdminClient();
 
   const { data: reviews } = await admin
