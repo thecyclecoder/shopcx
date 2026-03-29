@@ -213,7 +213,6 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - **Tags**: `dunning:active`, `dunning:recovered`, `dunning:skipped`, `dunning:paused`
 - **Requires**: Appstle built-in retries and skip-after-X-failures turned OFF
 
-<<<<<<< HEAD
 ### Phase 6: Subscriptions Page ✅
 - **List view** (`/dashboard/subscriptions`): Sortable table with status/recovery/payment filters, search, pagination (25/page)
 - **Detail view** (`/dashboard/subscriptions/[id]`): Full subscription info, items, recovery timeline, order history, activity log
@@ -225,7 +224,7 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - **Sidebar nav**: "Subscriptions" between Tickets and Customers with refresh icon
 - **API endpoints**: List, detail+actions, items CRUD, coupon, bill-now, payment-update
 - **Action labels consistent**: Pause subscription, Resume subscription, Cancel subscription, Skip next order, Change delivery frequency, Change next order date, Apply coupon, Process payment now
-=======
+
 ### Phase 7: Customer Portal Consolidation ✅
 - **Backend migration**: All 13 portal route handlers ported to `/api/portal?route={name}` with Shopify App Proxy HMAC auth
 - **DB-first lookups**: Subscriptions list/detail read from Supabase, Appstle for mutations only
@@ -239,7 +238,6 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - **Auth**: `src/lib/portal/auth.ts` — Shopify HMAC-SHA256 verification, resolves workspace from shop domain
 - **Route handlers**: bootstrap, home, subscriptions, subscriptionDetail, pause, resume, cancel, reactivate, address, replaceVariants, coupon, frequency, reviews, cancelJourney, dunningStatus
 - **Env var**: `SHOPIFY_APP_PROXY_SECRET` for HMAC verification
->>>>>>> 692b2d1 (Customer portal consolidation: backend + Shopify extension in ShopCX)
 
 ### Dashboard & Settings ✅
 - Dashboard overview: real-time stats (open/pending tickets, customers, avg retention, AI resolution rate, tickets today, KB articles, active macros)
