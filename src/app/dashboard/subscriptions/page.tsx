@@ -1,8 +1,14 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
+
+interface Product {
+  id: string;
+  shopify_product_id: string;
+  title: string;
+}
 
 interface Subscription {
   id: string;
@@ -57,8 +63,14 @@ export default function SubscriptionsPage() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
 
+  // Products for filter
+  const [products, setProducts] = useState<Product[]>([]);
+  const [selectedProducts, setSelectedProducts] = useState<string[]>([]);
+  const [productDropdownOpen, setProductDropdownOpen] = useState(false);
+  const productDropdownRef = useRef<HTMLDivElement>(null);
+
   // Filters
-  const [status, setStatus] = useState("all");
+  const [status, setStatus] = useState("active");
   const [recovery, setRecovery] = useState("all");
   const [payment, setPayment] = useState("all");
   const [search, setSearch] = useState("");
@@ -67,6 +79,33 @@ export default function SubscriptionsPage() {
   const [order, setOrder] = useState<"asc" | "desc">("asc");
   const [offset, setOffset] = useState(0);
 
+  // Load products list once
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspace.id}/products`)
+      .then(r => r.ok ? r.json() : [])
+      .then(setProducts);
+  }, [workspace.id]);
+
+  // Close product dropdown on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (productDropdownRef.current && !productDropdownRef.current.contains(e.target as Node)) {
+        setProductDropdownOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
+
+  const toggleProduct = (shopifyProductId: string) => {
+    setSelectedProducts(prev =>
+      prev.includes(shopifyProductId)
+        ? prev.filter(id => id !== shopifyProductId)
+        : [...prev, shopifyProductId]
+    );
+    setOffset(0);
+  };
+
   const fetchSubs = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams({ sort, order, limit: String(PAGE_SIZE), offset: String(offset) });
@@ -74,6 +113,7 @@ export default function SubscriptionsPage() {
     if (recovery !== "all") params.set("recovery", recovery);
     if (payment !== "all") params.set("payment", payment);
     if (appliedSearch) params.set("search", appliedSearch);
+    if (selectedProducts.length > 0) params.set("products", selectedProducts.join(","));
 
     const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions?${params}`);
     if (res.ok) {
@@ -82,7 +122,7 @@ export default function SubscriptionsPage() {
       setTotal(data.total || 0);
     }
     setLoading(false);
-  }, [workspace.id, status, recovery, payment, appliedSearch, sort, order, offset]);
+  }, [workspace.id, status, recovery, payment, appliedSearch, selectedProducts, sort, order, offset]);
 
   useEffect(() => { fetchSubs(); }, [fetchSubs]);
 
@@ -131,6 +171,51 @@ export default function SubscriptionsPage() {
           <option value="failed">Failed</option>
           <option value="skipped">Skipped</option>
         </select>
+
+        <div ref={productDropdownRef} className="relative">
+          <button
+            type="button"
+            onClick={() => setProductDropdownOpen(o => !o)}
+            className={`rounded-md border px-3 py-1.5 text-sm ${
+              selectedProducts.length > 0
+                ? "border-blue-400 bg-blue-50 text-blue-700 dark:border-blue-600 dark:bg-blue-900/30 dark:text-blue-400"
+                : "border-zinc-300 bg-white text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+            }`}
+          >
+            Products{selectedProducts.length > 0 ? ` (${selectedProducts.length})` : ""}
+            <span className="ml-1 text-[10px]">{productDropdownOpen ? "\u25B2" : "\u25BC"}</span>
+          </button>
+          {productDropdownOpen && (
+            <div className="absolute left-0 top-full z-50 mt-1 max-h-64 w-64 overflow-y-auto rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+              {selectedProducts.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => { setSelectedProducts([]); setOffset(0); }}
+                  className="w-full border-b border-zinc-100 px-3 py-1.5 text-left text-xs text-red-500 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-700/50"
+                >
+                  Clear all
+                </button>
+              )}
+              {products.map(p => (
+                <label
+                  key={p.shopify_product_id}
+                  className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedProducts.includes(p.shopify_product_id)}
+                    onChange={() => toggleProduct(p.shopify_product_id)}
+                    className="rounded border-zinc-300 text-blue-600"
+                  />
+                  <span className="truncate text-zinc-700 dark:text-zinc-300">{p.title}</span>
+                </label>
+              ))}
+              {products.length === 0 && (
+                <p className="px-3 py-2 text-xs text-zinc-400">No products found</p>
+              )}
+            </div>
+          )}
+        </div>
 
         <form onSubmit={e => { e.preventDefault(); setAppliedSearch(search); setOffset(0); }} className="flex gap-1">
           <input type="text" value={search} onChange={e => setSearch(e.target.value)}

@@ -1,15 +1,47 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 import Link from "next/link";
+
+interface CustomerData {
+  id: string;
+  email: string;
+  first_name: string | null;
+  last_name: string | null;
+  phone: string | null;
+  shopify_customer_id: string | null;
+  retention_score: number | null;
+  subscription_status: string | null;
+  ltv_cents: number | null;
+  total_orders: number | null;
+  email_marketing_status: string | null;
+  sms_marketing_status: string | null;
+  default_address: { address1?: string; city?: string; province?: string; countryCodeV2?: string; zip?: string } | null;
+  tags: string[] | null;
+  first_order_at: string | null;
+  shopify_created_at: string | null;
+  created_at: string;
+}
+
+interface SubItem {
+  title?: string;
+  sku?: string;
+  quantity?: number;
+  price_cents?: number;
+  variant_title?: string;
+  product_id?: string;
+  variant_id?: string;
+  selling_plan?: string;
+  line_id?: string;
+}
 
 interface SubDetail {
   id: string;
   shopify_contract_id: string;
   status: string;
-  items: { title?: string; sku?: string; quantity?: number; price_cents?: number; variant_title?: string; product_id?: string; selling_plan?: string; line_id?: string }[] | null;
+  items: SubItem[] | null;
   billing_interval: string | null;
   billing_interval_count: number | null;
   next_billing_date: string | null;
@@ -18,7 +50,7 @@ interface SubDetail {
   created_at: string;
   recovery_status: string | null;
   customer_id: string;
-  customers: { id: string; email: string; first_name: string | null; last_name: string | null; shopify_customer_id: string | null; retention_score: number | null };
+  customers: CustomerData;
 }
 
 interface DunningCycle {
@@ -42,13 +74,32 @@ interface PaymentFailure {
   created_at: string;
 }
 
+interface OrderLineItem {
+  title: string;
+  quantity: number;
+  price_cents: number;
+  sku: string | null;
+}
+
+interface Fulfillment {
+  trackingInfo: { number: string; url: string | null; company: string | null }[];
+  status: string | null;
+  createdAt: string | null;
+}
+
 interface Order {
   id: string;
   shopify_order_id: string;
   order_number: string | null;
   total_cents: number | null;
-  line_items: { title?: string; quantity?: number }[] | null;
-  fulfillments: { status?: string }[] | null;
+  currency: string;
+  financial_status: string | null;
+  fulfillment_status: string | null;
+  source_name: string | null;
+  order_type: string | null;
+  tags: string | null;
+  line_items: OrderLineItem[] | null;
+  fulfillments: Fulfillment[] | null;
   created_at: string;
 }
 
@@ -56,7 +107,15 @@ interface CustomerEvent {
   id: string;
   event_type: string;
   summary: string;
+  source: string;
   created_at: string;
+}
+
+interface Product {
+  id: string;
+  shopify_product_id: string;
+  title: string;
+  variants: { id: string; shopify_variant_id: string; title: string }[] | null;
 }
 
 const STATUS_BADGE: Record<string, string> = {
@@ -72,8 +131,18 @@ const RECOVERY_BADGE: Record<string, { label: string; classes: string }> = {
   recovered: { label: "Recovered", classes: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400" },
 };
 
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const EVENT_ICONS: Record<string, { icon: string; color: string }> = {
+  "subscription.created": { icon: "M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 00-3.7-3.7 48.678 48.678 0 00-7.324 0 4.006 4.006 0 00-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3l-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 003.7 3.7 48.656 48.656 0 007.324 0 4.006 4.006 0 003.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3l-3 3", color: "text-violet-500" },
+  "subscription.cancelled": { icon: "M6 18L18 6M6 6l12 12", color: "text-red-500" },
+  "subscription.paused": { icon: "M15.75 5.25v13.5m-7.5-13.5v13.5", color: "text-amber-500" },
+  "subscription.activated": { icon: "M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z", color: "text-emerald-500" },
+  "subscription.item_added": { icon: "M12 4.5v15m7.5-7.5h-15", color: "text-blue-500" },
+  "subscription.item_removed": { icon: "M19.5 12h-15", color: "text-red-500" },
+  "subscription.item_updated": { icon: "M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182", color: "text-indigo-500" },
+};
+
+function formatCents(cents: number, currency = "USD"): string {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency, minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(cents / 100);
 }
 
 function formatDate(d: string | null): string {
@@ -86,6 +155,30 @@ function formatInterval(interval: string | null, count: number | null): string {
   const c = count || 1;
   if (c === 1) return `Every ${interval}`;
   return `Every ${c} ${interval}s`;
+}
+
+function RetentionBadge({ score }: { score: number }) {
+  const classes = score > 70
+    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+    : score >= 40
+    ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+    : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400";
+  return <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${classes}`}>{score}/100</span>;
+}
+
+function StatusBadge({ status }: { status: string | null }) {
+  if (!status) return <span className="text-xs text-zinc-400">--</span>;
+  const map: Record<string, string> = {
+    paid: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+    refunded: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+    pending: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+    fulfilled: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+  };
+  return (
+    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium capitalize ${map[status] || "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"}`}>
+      {status.replace("_", " ")}
+    </span>
+  );
 }
 
 export default function SubscriptionDetailPage() {
@@ -101,6 +194,7 @@ export default function SubscriptionDetailPage() {
   const [events, setEvents] = useState<CustomerEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState<string | null>(null);
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
 
   // Action form state
   const [cancelReason, setCancelReason] = useState("");
@@ -109,7 +203,16 @@ export default function SubscriptionDetailPage() {
   const [frequencyCount, setFrequencyCount] = useState(1);
   const [nextDate, setNextDate] = useState("");
 
-  const loadSub = async () => {
+  // Item management state
+  const [products, setProducts] = useState<Product[]>([]);
+  const [showAddItem, setShowAddItem] = useState(false);
+  const [addVariantId, setAddVariantId] = useState("");
+  const [addQuantity, setAddQuantity] = useState(1);
+  const [editingItem, setEditingItem] = useState<string | null>(null);
+  const [editQuantity, setEditQuantity] = useState(1);
+  const [swapVariantId, setSwapVariantId] = useState("");
+
+  const loadSub = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}`);
     if (!res.ok) { router.push("/dashboard/subscriptions"); return; }
     const data = await res.json();
@@ -119,9 +222,16 @@ export default function SubscriptionDetailPage() {
     setOrders(data.orders || []);
     setEvents(data.events || []);
     setLoading(false);
-  };
+  }, [workspace.id, subId, router]);
 
-  useEffect(() => { loadSub(); }, [subId, workspace.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { loadSub(); }, [loadSub]);
+
+  // Load products for item management
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspace.id}/products`)
+      .then(r => r.ok ? r.json() : [])
+      .then(setProducts);
+  }, [workspace.id]);
 
   const doAction = async (action: string, body: Record<string, unknown> = {}) => {
     setActing(action);
@@ -155,6 +265,66 @@ export default function SubscriptionDetailPage() {
     setActing(null);
   };
 
+  // Item management
+  const doAddItem = async () => {
+    if (!addVariantId) return;
+    setActing("add_item");
+    const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/items`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variantId: addVariantId, quantity: addQuantity }),
+    });
+    if (res.ok) {
+      await loadSub();
+      setShowAddItem(false);
+      setAddVariantId("");
+      setAddQuantity(1);
+    } else {
+      const data = await res.json();
+      alert(data.error || "Failed to add item");
+    }
+    setActing(null);
+  };
+
+  const doRemoveItem = async (lineId: string) => {
+    if (!confirm("Remove this item from the subscription?")) return;
+    setActing("remove_item");
+    const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/items`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lineId }),
+    });
+    if (res.ok) {
+      await loadSub();
+    } else {
+      const data = await res.json();
+      alert(data.error || "Failed to remove item");
+    }
+    setActing(null);
+  };
+
+  const doUpdateItem = async (lineId: string) => {
+    setActing("update_item");
+    const body: Record<string, unknown> = { lineId };
+    if (editQuantity) body.quantity = editQuantity;
+    if (swapVariantId) body.variantId = swapVariantId;
+
+    const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/items`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      await loadSub();
+      setEditingItem(null);
+      setSwapVariantId("");
+    } else {
+      const data = await res.json();
+      alert(data.error || "Failed to update item");
+    }
+    setActing(null);
+  };
+
   if (loading || !sub) {
     return <div className="flex h-full items-center justify-center"><p className="text-sm text-zinc-400">Loading...</p></div>;
   }
@@ -163,6 +333,14 @@ export default function SubscriptionDetailPage() {
   const customerName = `${customer?.first_name || ""} ${customer?.last_name || ""}`.trim() || customer?.email;
   const items = sub.items || [];
   const activeDunning = dunningCycles.find(c => ["active", "skipped", "paused"].includes(c.status));
+
+  // Build flat variant list for add/swap selects
+  const variantOptions = products.flatMap(p =>
+    (p.variants || []).map(v => ({
+      value: v.shopify_variant_id,
+      label: v.title === "Default Title" ? p.title : `${p.title} — ${v.title}`,
+    }))
+  );
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
@@ -191,8 +369,70 @@ export default function SubscriptionDetailPage() {
       </div>
 
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Left: Info + Items + Recovery + Orders + Activity */}
+        {/* Left: Info + Customer + Items + Orders + Activity */}
         <div className="space-y-6 lg:col-span-2">
+
+          {/* Customer Card */}
+          <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Customer</h3>
+              {customer?.retention_score != null && <RetentionBadge score={customer.retention_score} />}
+            </div>
+            <div className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
+              <div>
+                <span className="text-xs text-zinc-400">LTV</span>
+                <p className="font-medium text-zinc-700 dark:text-zinc-300">{customer?.ltv_cents ? formatCents(customer.ltv_cents) : "--"}</p>
+              </div>
+              <div>
+                <span className="text-xs text-zinc-400">Total Orders</span>
+                <p className="font-medium text-zinc-700 dark:text-zinc-300">{customer?.total_orders ?? "--"}</p>
+              </div>
+              <div>
+                <span className="text-xs text-zinc-400">Subscription</span>
+                <p className="font-medium capitalize text-zinc-700 dark:text-zinc-300">{customer?.subscription_status || "--"}</p>
+              </div>
+              <div>
+                <span className="text-xs text-zinc-400">Customer Since</span>
+                <p className="font-medium text-zinc-700 dark:text-zinc-300">{formatDate(customer?.shopify_created_at || customer?.first_order_at || customer?.created_at)}</p>
+              </div>
+            </div>
+
+            {/* Contact & Marketing row */}
+            <div className="mt-4 grid grid-cols-1 gap-4 border-t border-zinc-100 pt-4 dark:border-zinc-800 sm:grid-cols-2">
+              <div className="space-y-1 text-sm">
+                <p className="text-xs font-medium uppercase text-zinc-400">Contact</p>
+                <p className="text-zinc-700 dark:text-zinc-300">{customer?.email}</p>
+                {customer?.phone && <p className="text-zinc-500">{customer.phone}</p>}
+                {customer?.default_address && (
+                  <p className="text-zinc-400">
+                    {[customer.default_address.city, customer.default_address.province, customer.default_address.countryCodeV2].filter(Boolean).join(", ")}
+                    {customer.default_address.zip && ` ${customer.default_address.zip}`}
+                  </p>
+                )}
+              </div>
+              <div className="space-y-1 text-sm">
+                <p className="text-xs font-medium uppercase text-zinc-400">Marketing</p>
+                <div className="flex items-center gap-2">
+                  <div className={`h-2 w-2 rounded-full ${customer?.email_marketing_status === "subscribed" ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-600"}`} />
+                  <span className="text-zinc-700 dark:text-zinc-300">Email: <span className="capitalize">{customer?.email_marketing_status?.replace("_", " ") || "Unknown"}</span></span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className={`h-2 w-2 rounded-full ${customer?.sms_marketing_status === "subscribed" ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-600"}`} />
+                  <span className="text-zinc-700 dark:text-zinc-300">SMS: <span className="capitalize">{customer?.sms_marketing_status?.replace("_", " ") || "Unknown"}</span></span>
+                </div>
+              </div>
+            </div>
+
+            {/* Tags */}
+            {customer?.tags && customer.tags.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-1.5 border-t border-zinc-100 pt-3 dark:border-zinc-800">
+                {customer.tags.map(tag => (
+                  <span key={tag} className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">{tag}</span>
+                ))}
+              </div>
+            )}
+          </div>
+
           {/* Subscription Info */}
           <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
             <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Subscription Info</h3>
@@ -205,32 +445,143 @@ export default function SubscriptionDetailPage() {
             </div>
           </div>
 
-          {/* Items */}
+          {/* Items with management */}
           <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-            <div className="border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
+            <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
               <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Products ({items.length})</h3>
+              {sub.status === "active" && (
+                <button
+                  onClick={() => setShowAddItem(!showAddItem)}
+                  className="rounded-md bg-indigo-500 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-600"
+                >
+                  {showAddItem ? "Cancel" : "+ Add Item"}
+                </button>
+              )}
             </div>
+
+            {/* Add item form */}
+            {showAddItem && (
+              <div className="border-b border-zinc-200 bg-zinc-50 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-800/30">
+                <div className="flex flex-wrap gap-2">
+                  <select
+                    value={addVariantId}
+                    onChange={e => setAddVariantId(e.target.value)}
+                    className="flex-1 rounded-md border border-zinc-300 px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                  >
+                    <option value="">Select product...</option>
+                    {variantOptions.map(v => (
+                      <option key={v.value} value={v.value}>{v.label}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={addQuantity}
+                    onChange={e => setAddQuantity(parseInt(e.target.value))}
+                    className="w-16 rounded-md border border-zinc-300 px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                  >
+                    {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                  <button
+                    onClick={doAddItem}
+                    disabled={!addVariantId || acting === "add_item"}
+                    className="rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+                  >
+                    {acting === "add_item" ? "Adding..." : "Add"}
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
               {items.map((item, i) => {
                 const isShippingProtection = (item.title || "").toLowerCase().includes("shipping protection");
+                const isEditing = editingItem === (item.line_id || String(i));
                 return (
-                  <div key={i} className="flex items-center justify-between px-5 py-3">
-                    <div>
-                      <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                        {item.title || "Item"}
-                        {isShippingProtection && (
-                          <span className="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Protection</span>
+                  <div key={item.line_id || i} className="px-5 py-3">
+                    <div className="flex items-center justify-between">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                          {item.title || "Item"}
+                          {isShippingProtection && (
+                            <span className="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Protection</span>
+                          )}
+                        </p>
+                        <p className="text-xs text-zinc-400">
+                          {item.variant_title && `${item.variant_title} · `}
+                          {item.sku && `SKU: ${item.sku} · `}
+                          Qty: {item.quantity || 1}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm tabular-nums text-zinc-600 dark:text-zinc-400">
+                          {item.price_cents ? formatCents(item.price_cents * (item.quantity || 1)) : "--"}
+                        </span>
+                        {sub.status === "active" && item.line_id && !isShippingProtection && (
+                          <button
+                            onClick={() => {
+                              if (isEditing) { setEditingItem(null); }
+                              else { setEditingItem(item.line_id || String(i)); setEditQuantity(item.quantity || 1); setSwapVariantId(""); }
+                            }}
+                            className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+                          >
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
+                            </svg>
+                          </button>
                         )}
-                      </p>
-                      <p className="text-xs text-zinc-400">
-                        {item.variant_title && `${item.variant_title} · `}
-                        {item.sku && `SKU: ${item.sku} · `}
-                        Qty: {item.quantity || 1}
-                      </p>
+                      </div>
                     </div>
-                    <span className="text-sm tabular-nums text-zinc-600 dark:text-zinc-400">
-                      {item.price_cents ? formatCents(item.price_cents * (item.quantity || 1)) : "--"}
-                    </span>
+
+                    {/* Edit/Swap/Remove controls */}
+                    {isEditing && item.line_id && (
+                      <div className="mt-3 space-y-2 rounded-md border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-700 dark:bg-zinc-800/30">
+                        <div className="flex items-center gap-2">
+                          <label className="text-xs text-zinc-500">Qty:</label>
+                          <select
+                            value={editQuantity}
+                            onChange={e => setEditQuantity(parseInt(e.target.value))}
+                            className="w-16 rounded-md border border-zinc-300 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                          >
+                            {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
+                          </select>
+                          <button
+                            onClick={() => doUpdateItem(item.line_id!)}
+                            disabled={editQuantity === (item.quantity || 1) || acting === "update_item"}
+                            className="rounded-md bg-indigo-500 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-50"
+                          >
+                            Update Qty
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <label className="text-xs text-zinc-500">Swap:</label>
+                          <select
+                            value={swapVariantId}
+                            onChange={e => setSwapVariantId(e.target.value)}
+                            className="flex-1 rounded-md border border-zinc-300 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                          >
+                            <option value="">Select replacement...</option>
+                            {variantOptions.map(v => (
+                              <option key={v.value} value={v.value}>{v.label}</option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={() => doUpdateItem(item.line_id!)}
+                            disabled={!swapVariantId || acting === "update_item"}
+                            className="rounded-md bg-indigo-500 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-50"
+                          >
+                            Swap
+                          </button>
+                        </div>
+                        {items.length > 1 && (
+                          <button
+                            onClick={() => doRemoveItem(item.line_id!)}
+                            disabled={acting === "remove_item"}
+                            className="rounded-md border border-red-200 px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50 dark:border-red-900 dark:text-red-400"
+                          >
+                            {acting === "remove_item" ? "Removing..." : "Remove Item"}
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -260,8 +611,6 @@ export default function SubscriptionDetailPage() {
                   </div>
                 </div>
               )}
-
-              {/* Payment attempt timeline */}
               {paymentFailures.length > 0 && (
                 <div className="space-y-1.5">
                   <p className="mb-1 text-xs font-medium text-zinc-500">Payment Attempts</p>
@@ -279,40 +628,151 @@ export default function SubscriptionDetailPage() {
             </div>
           )}
 
-          {/* Order History */}
-          {orders.length > 0 && (
-            <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-              <div className="border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
-                <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Order History ({orders.length})</h3>
-              </div>
-              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                {orders.map(o => (
-                  <div key={o.id} className="flex items-center justify-between px-5 py-3">
-                    <div>
-                      <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">#{o.order_number || o.shopify_order_id}</span>
-                      <span className="ml-2 text-xs text-zinc-400">{formatDate(o.created_at)}</span>
-                    </div>
-                    <span className="text-sm tabular-nums text-zinc-600 dark:text-zinc-400">{o.total_cents ? formatCents(o.total_cents) : "--"}</span>
-                  </div>
-                ))}
-              </div>
+          {/* Order History — full expandable table like customer detail */}
+          <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Order History ({orders.length})</h3>
             </div>
-          )}
+            {orders.length === 0 ? (
+              <p className="px-5 py-8 text-center text-sm text-zinc-400">No orders found</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
+                  <thead>
+                    <tr className="text-left text-xs font-medium uppercase text-zinc-400">
+                      <th className="px-4 py-2.5">Order</th>
+                      <th className="px-4 py-2.5">Type</th>
+                      <th className="px-4 py-2.5">Date</th>
+                      <th className="px-4 py-2.5">Total</th>
+                      <th className="px-4 py-2.5">Payment</th>
+                      <th className="px-4 py-2.5">Fulfillment</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                    {orders.map(o => (
+                      <React.Fragment key={o.id}>
+                        <tr
+                          onClick={() => setSelectedOrderId(selectedOrderId === o.id ? null : o.id)}
+                          className="cursor-pointer transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                        >
+                          <td className="whitespace-nowrap px-4 py-2.5 font-medium text-zinc-900 dark:text-zinc-100">
+                            <div className="flex items-center gap-1.5">
+                              <svg className={`h-3 w-3 text-zinc-400 transition-transform ${selectedOrderId === o.id ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                              </svg>
+                              #{o.order_number || o.shopify_order_id}
+                            </div>
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-2.5">
+                            {o.order_type === "recurring" ? (
+                              <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400">Recurring</span>
+                            ) : o.order_type === "checkout" ? (
+                              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Checkout</span>
+                            ) : o.order_type === "replacement" ? (
+                              <span className="rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">Replacement</span>
+                            ) : (
+                              <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.source_name || "--"}</span>
+                            )}
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-2.5 text-zinc-500">{formatDate(o.created_at)}</td>
+                          <td className="whitespace-nowrap px-4 py-2.5 text-zinc-700 dark:text-zinc-300">{o.total_cents ? formatCents(o.total_cents, o.currency) : "--"}</td>
+                          <td className="whitespace-nowrap px-4 py-2.5"><StatusBadge status={o.financial_status} /></td>
+                          <td className="whitespace-nowrap px-4 py-2.5"><StatusBadge status={o.fulfillment_status} /></td>
+                        </tr>
 
-          {/* Activity Log */}
+                        {/* Expanded order detail */}
+                        {selectedOrderId === o.id && (
+                          <tr>
+                            <td colSpan={6} className="bg-zinc-50 px-4 py-4 dark:bg-zinc-800/30">
+                              <div className="space-y-3">
+                                <div className="flex flex-wrap gap-4 text-xs text-zinc-500">
+                                  {o.source_name && <span>Source: <span className="font-medium text-zinc-700 dark:text-zinc-300">{o.source_name}</span></span>}
+                                  {o.tags && <span>Tags: <span className="font-medium text-zinc-700 dark:text-zinc-300">{o.tags}</span></span>}
+                                </div>
+
+                                {o.fulfillments && o.fulfillments.length > 0 && (
+                                  <div className="space-y-1.5">
+                                    {o.fulfillments.map((f, fi) => (
+                                      <div key={fi} className="flex flex-wrap items-center gap-2 text-xs">
+                                        <span className={`rounded-full px-2 py-0.5 font-medium ${
+                                          f.status === "SUCCESS" || f.status === "success"
+                                            ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                                            : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                                        }`}>{f.status || "Pending"}</span>
+                                        {f.trackingInfo?.map((t, ti) => (
+                                          <span key={ti} className="flex items-center gap-1">
+                                            {t.company && <span className="text-zinc-400">{t.company}:</span>}
+                                            {t.url ? (
+                                              <a href={t.url} target="_blank" rel="noopener noreferrer" className="font-mono text-indigo-600 hover:underline dark:text-indigo-400">{t.number}</a>
+                                            ) : (
+                                              <span className="font-mono text-zinc-600 dark:text-zinc-300">{t.number}</span>
+                                            )}
+                                          </span>
+                                        ))}
+                                        {f.createdAt && <span className="text-zinc-400">{formatDate(f.createdAt)}</span>}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {o.line_items && o.line_items.length > 0 && (
+                                  <div>
+                                    <p className="mb-2 text-xs font-medium uppercase text-zinc-500">Items</p>
+                                    <div className="divide-y divide-zinc-200 rounded border border-zinc-200 bg-white dark:divide-zinc-700 dark:border-zinc-700 dark:bg-zinc-900">
+                                      {o.line_items.map((li, idx) => (
+                                        <div key={idx} className="flex items-center justify-between px-3 py-2">
+                                          <div>
+                                            <p className="text-sm text-zinc-900 dark:text-zinc-100">{li.title}</p>
+                                            {li.sku && <p className="text-xs text-zinc-400">SKU: {li.sku}</p>}
+                                          </div>
+                                          <div className="text-right">
+                                            <p className="text-sm text-zinc-700 dark:text-zinc-300">{li.quantity} x {formatCents(li.price_cents)}</p>
+                                            <p className="text-xs text-zinc-400">{formatCents(li.quantity * li.price_cents)}</p>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Activity Timeline */}
           {events.length > 0 && (
             <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
               <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Activity</h3>
-              <div className="space-y-2">
-                {events.map(ev => (
-                  <div key={ev.id} className="flex items-start gap-2 text-sm">
-                    <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-300 dark:bg-zinc-600" />
-                    <div>
-                      <span className="text-zinc-600 dark:text-zinc-400">{ev.summary}</span>
-                      <span className="ml-2 text-xs text-zinc-300 dark:text-zinc-600">{new Date(ev.created_at).toLocaleString()}</span>
+              <div className="space-y-0">
+                {events.map((evt, idx) => {
+                  const iconInfo = EVENT_ICONS[evt.event_type] || { icon: "M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z", color: "text-zinc-400" };
+                  return (
+                    <div key={evt.id} className="flex gap-3">
+                      <div className="flex flex-col items-center">
+                        <div className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 ${iconInfo.color}`}>
+                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d={iconInfo.icon} />
+                          </svg>
+                        </div>
+                        {idx < events.length - 1 && <div className="w-px flex-1 bg-zinc-200 dark:bg-zinc-700" />}
+                      </div>
+                      <div className="pb-4">
+                        <p className="text-sm text-zinc-700 dark:text-zinc-300">{evt.summary || evt.event_type}</p>
+                        <p className="mt-0.5 text-xs text-zinc-400">
+                          {new Date(evt.created_at).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}
+                          {evt.source && <> · <span className="capitalize">{evt.source}</span></>}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -323,7 +783,6 @@ export default function SubscriptionDetailPage() {
           <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
             <h3 className="mb-4 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Actions</h3>
             <div className="space-y-2">
-              {/* Pause/Resume */}
               {sub.status === "active" && (
                 <button onClick={() => { if (confirm("Pause subscription?")) doAction("pause"); }} disabled={!!acting}
                   className="w-full rounded-md border border-amber-300 px-4 py-2 text-sm font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-50 dark:border-amber-700 dark:text-amber-400">
@@ -337,7 +796,6 @@ export default function SubscriptionDetailPage() {
                 </button>
               )}
 
-              {/* Cancel */}
               {sub.status !== "cancelled" && (
                 <>
                   {!showCancel ? (
@@ -355,16 +813,13 @@ export default function SubscriptionDetailPage() {
                           className="flex-1 rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50">
                           {acting === "cancel" ? "Cancelling..." : "Confirm Cancel"}
                         </button>
-                        <button onClick={() => setShowCancel(false)} className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm dark:border-zinc-700">
-                          Back
-                        </button>
+                        <button onClick={() => setShowCancel(false)} className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm dark:border-zinc-700">Back</button>
                       </div>
                     </div>
                   )}
                 </>
               )}
 
-              {/* Skip */}
               {sub.status === "active" && (
                 <button onClick={() => { if (confirm("Skip next order?")) doAction("skip"); }} disabled={!!acting}
                   className="w-full rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-400">
@@ -372,7 +827,6 @@ export default function SubscriptionDetailPage() {
                 </button>
               )}
 
-              {/* Bill Now */}
               {sub.status === "active" && (
                 <button onClick={doBillNow} disabled={!!acting}
                   className="w-full rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-400">
