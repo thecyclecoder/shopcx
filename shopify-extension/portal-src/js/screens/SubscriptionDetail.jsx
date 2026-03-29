@@ -310,9 +310,8 @@ export default function SubscriptionDetail() {
 
   const b = getBucket(contract);
   const isCancelled = b === 'cancelled';
-  const createdMs = Date.parse(contract.createdAt || '');
-  const isYoung = isFinite(createdMs) && (Date.now() - createdMs < config.lockDays * 86400000);
-  const isReadOnly = isCancelled || isYoung;
+  const isLocked = !!contract?.portalState?.isLocked;
+  const isReadOnly = isCancelled || isLocked;
   const { lines, shipLine } = splitLines(contract);
 
   const statusText = b === 'cancelled' ? 'Cancelled' : b === 'paused' ? 'Paused' : 'Active';
@@ -351,7 +350,7 @@ export default function SubscriptionDetail() {
 
       {dunning && <DunningBanner dunning={dunning} />}
 
-      {isYoung && (
+      {isLocked && (
         <div class="sp-alert">
           <div class="sp-alert__title">Heads up</div>
           <div class="sp-alert__body sp-muted">Your subscription is being set up. Once you receive your first order, you can make edits here.</div>
@@ -363,15 +362,15 @@ export default function SubscriptionDetail() {
           {b === 'paused' && !isReadOnly && <ResumeCard contract={contract} onUpdate={fetchContract} showToast={showToast} />}
           {b === 'active' && !isReadOnly && <PauseCard contract={contract} onUpdate={fetchContract} showToast={showToast} />}
           <ItemsCard contract={contract} lines={lines} shipLine={shipLine} onUpdate={fetchContract} showToast={showToast} config={config} />
-          {!isCancelled && <FrequencyCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
+          {!isReadOnly && <FrequencyCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
         </div>
         <div class="sp-detail__col">
           {!isCancelled && <RewardsCard />}
-          {!isCancelled && <CouponCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
-          {!isCancelled && <AddressCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
-          {!isCancelled && <ShippingProtectionCard contract={contract} shipLine={shipLine} onUpdate={fetchContract} />}
+          {!isReadOnly && <CouponCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
+          {!isReadOnly && <AddressCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
+          {!isReadOnly && <ShippingProtectionCard contract={contract} shipLine={shipLine} onUpdate={fetchContract} />}
           {!isCancelled && productIds.length > 0 && <ReviewsCard productIds={productIds} />}
-          {!isReadOnly && !isCancelled && <CancelCard router={router} contractId={shortId(contract.id)} />}
+          {!isReadOnly && <CancelCard router={router} contractId={shortId(contract.id)} />}
         </div>
       </div>
     </div>

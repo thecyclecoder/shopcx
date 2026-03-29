@@ -23,6 +23,18 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
 
   if (!sub) return jsonErr({ error: "subscription_not_found" }, 404);
 
+  // Get lock_days from portal config
+  const { data: wsConfig } = await admin.from("workspaces")
+    .select("portal_config")
+    .eq("id", auth.workspaceId)
+    .single();
+  const portalConfig = (wsConfig?.portal_config as Record<string, unknown>) || {};
+  const generalConfig = (portalConfig.general || {}) as Record<string, unknown>;
+  const lockDays = Number(generalConfig.lock_days) || 7;
+
+  const created = sub.created_at ? new Date(sub.created_at).getTime() : 0;
+  const isLocked = created > 0 && Date.now() - created < lockDays * 86400000;
+
   // Get product images for items
   const productIds = (Array.isArray(sub.items) ? sub.items : [])
     .map((item: { product_id?: string }) => item?.product_id)
@@ -90,6 +102,7 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
         needsAttention: sub.last_payment_status === "failed",
         recoveryStatus,
         paymentUpdateUrl,
+        isLocked,
       },
     },
     dunning_cycles: dunningCycles || [],

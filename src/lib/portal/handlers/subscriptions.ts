@@ -5,6 +5,14 @@ import { jsonOk, jsonErr, findCustomer } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { transformSubscription, getProductImageMap } from "@/lib/portal/helpers/transform-subscription";
 
+function isSubscriptionLocked(sub: Record<string, unknown>, lockDays: number): boolean {
+  // Lock if subscription was created less than lockDays ago
+  // Use our DB created_at as a reasonable proxy — it's set when we first sync/see the subscription
+  const created = sub.created_at ? new Date(sub.created_at as string).getTime() : 0;
+  if (!created) return false;
+  return Date.now() - created < lockDays * 86400000;
+}
+
 type Bucket = "active" | "paused" | "cancelled" | "other";
 
 function bucketStatus(status: string): Bucket {
@@ -58,6 +66,15 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
   }
 
   const allSubs = [...(subs || []), ...linkedSubs];
+
+  // Get lock_days from portal config
+  const { data: wsConfig } = await admin.from("workspaces")
+    .select("portal_config")
+    .eq("id", auth.workspaceId)
+    .single();
+  const portalConfig = (wsConfig?.portal_config as Record<string, unknown>) || {};
+  const general = (portalConfig.general || {}) as Record<string, unknown>;
+  const lockDays = Number(general.lock_days) || 7;
 
   // Get product images for all items across all subscriptions
   const allProductIds = new Set<string>();
@@ -119,6 +136,7 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
         attentionReason: needsAttention ? "payment_failed" : "",
         recoveryStatus,
         isLinkedAccount: linkedSubs?.some(l => l.id === sub.id) || false,
+        isLocked: isSubscriptionLocked(sub, lockDays),
       },
     };
 
