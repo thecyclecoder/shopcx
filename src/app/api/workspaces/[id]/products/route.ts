@@ -16,7 +16,7 @@ export async function GET(
   const admin = createAdminClient();
   const { data: products } = await admin
     .from("products")
-    .select("id, title, handle, product_type, status, image_url")
+    .select("id, shopify_product_id, title, handle, product_type, status, image_url, variants")
     .eq("workspace_id", workspaceId)
     .eq("status", "active")
     .order("title");

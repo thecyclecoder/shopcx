@@ -91,19 +91,27 @@ function ProductMultiSelect({ label, description, products, selected, onChange }
       {description && <p className="mt-0.5 text-xs text-zinc-400">{description}</p>}
       <div className="mt-2 max-h-64 overflow-y-auto rounded-md border border-zinc-200 dark:border-zinc-700">
         {!products.length && <p className="p-3 text-xs text-zinc-400">No products synced yet. Run a Shopify sync first.</p>}
-        {products.map((p) => (
-          <div key={p.shopify_product_id}
-            onClick={() => toggle(p.shopify_product_id)}
-            className={`flex cursor-pointer items-center gap-3 border-b border-zinc-100 px-3 py-2 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/50 ${
-              selected.includes(p.shopify_product_id) ? "bg-violet-50 dark:bg-violet-950/30" : ""
-            }`}
-          >
-            <input type="checkbox" readOnly checked={selected.includes(p.shopify_product_id)}
-              className="pointer-events-none h-4 w-4 rounded border-zinc-300 text-violet-600 focus:ring-violet-500" />
-            {p.image_url && <img src={p.image_url} alt={p.title} className="h-8 w-8 rounded object-cover" />}
-            <span className="text-sm text-zinc-700 dark:text-zinc-300">{p.title}</span>
-          </div>
-        ))}
+        {products.map((p) => {
+          const pid = p.shopify_product_id || p.id;
+          const isSelected = selected.includes(pid);
+          return (
+            <div key={pid}
+              onClick={() => toggle(pid)}
+              className={`flex cursor-pointer items-center gap-3 border-b border-zinc-100 px-3 py-2 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/50 ${
+                isSelected ? "bg-violet-50 dark:bg-violet-950/30" : ""
+              }`}
+            >
+              <div className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border ${
+                isSelected ? "border-violet-600 bg-violet-600 text-white" : "border-zinc-300 dark:border-zinc-600"
+              }`}>
+                {isSelected && <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>}
+              </div>
+              {p.image_url && <img src={p.image_url} alt={p.title} className="h-8 w-8 rounded object-cover" />}
+              <span className="text-sm text-zinc-700 dark:text-zinc-300">{p.title}</span>
+              {p.shopify_product_id && <span className="text-xs text-zinc-400 ml-auto">{p.shopify_product_id}</span>}
+            </div>
+          );
+        })}
       </div>
       <p className="mt-1 text-xs text-zinc-400">{selected.length} selected</p>
     </div>
