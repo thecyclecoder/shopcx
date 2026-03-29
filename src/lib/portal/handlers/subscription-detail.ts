@@ -1,6 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, findCustomer } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { transformSubscription, getProductImageMap } from "@/lib/portal/helpers/transform-subscription";
 
 export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -21,6 +22,15 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     .single();
 
   if (!sub) return jsonErr({ error: "subscription_not_found" }, 404);
+
+  // Get product images for items
+  const productIds = (Array.isArray(sub.items) ? sub.items : [])
+    .map((item: { product_id?: string }) => item?.product_id)
+    .filter(Boolean) as string[];
+  const productImages = await getProductImageMap(admin, auth.workspaceId, [...new Set(productIds)]);
+
+  // Transform to frontend shape
+  const contract = transformSubscription(sub, productImages);
 
   // Dunning cycles
   const { data: dunningCycles } = await admin.from("dunning_cycles")
@@ -74,7 +84,7 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     logged_in_customer_id: auth.loggedInCustomerId,
     route,
     contract: {
-      ...sub,
+      ...contract,
       portalState: {
         bucket: sub.status === "cancelled" ? "cancelled" : sub.status === "paused" ? "paused" : "active",
         needsAttention: sub.last_payment_status === "failed",

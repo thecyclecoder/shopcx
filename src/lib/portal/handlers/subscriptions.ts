@@ -1,8 +1,9 @@
-// DB-first subscription list — falls back to Appstle for data not yet synced
+// DB-first subscription list with contract shape transformation
 
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { transformSubscription, getProductImageMap } from "@/lib/portal/helpers/transform-subscription";
 
 type Bucket = "active" | "paused" | "cancelled" | "other";
 
@@ -12,7 +13,7 @@ function bucketStatus(status: string): Bucket {
     case "paused": return "paused";
     case "cancelled": return "cancelled";
     case "expired": return "cancelled";
-    case "failed": return "active"; // Show as active with attention flag
+    case "failed": return "active";
     default: return "other";
   }
 }
@@ -58,6 +59,16 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
 
   const allSubs = [...(subs || []), ...linkedSubs];
 
+  // Get product images for all items across all subscriptions
+  const allProductIds = new Set<string>();
+  for (const sub of allSubs) {
+    const items = Array.isArray(sub.items) ? sub.items : [];
+    for (const item of items) {
+      if (item?.product_id) allProductIds.add(item.product_id);
+    }
+  }
+  const productImages = await getProductImageMap(admin, auth.workspaceId, Array.from(allProductIds));
+
   // Load dunning status for all contracts
   const contractIds = allSubs.map(s => s.shopify_contract_id).filter(Boolean);
   const dunningMap: Record<string, { status: string; recovered_at: string | null }> = {};
@@ -76,7 +87,7 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
     }
   }
 
-  // Annotate and bucket
+  // Transform, annotate, and bucket
   const buckets: Record<Bucket, unknown[]> = { active: [], paused: [], cancelled: [], other: [] };
   let needsAttentionCount = 0;
 
@@ -97,14 +108,17 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
 
     if (needsAttention) needsAttentionCount++;
 
+    // Transform DB shape → frontend contract shape
+    const contract = transformSubscription(sub, productImages);
+
     const enriched = {
-      ...sub,
+      ...contract,
       portalState: {
         bucket,
         needsAttention: !!needsAttention,
         attentionReason: needsAttention ? "payment_failed" : "",
         recoveryStatus,
-        isLinkedAccount: linkedSubs.some(l => l.id === sub.id),
+        isLinkedAccount: linkedSubs?.some(l => l.id === sub.id) || false,
       },
     };
 
