@@ -7,17 +7,39 @@ function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
 function asIntArray(v: unknown): number[] {
   if (!Array.isArray(v)) return [];
-  return v.map(Number).filter(n => Number.isFinite(n) && n > 0).map(Math.trunc);
+  return v.map((item) => {
+    // Support both number format [123] and object format [{ variantId: "123" }]
+    if (typeof item === "object" && item !== null) {
+      const id = (item as Record<string, unknown>).variantId ?? (item as Record<string, unknown>).id;
+      return Number(id);
+    }
+    return Number(item);
+  }).filter(n => Number.isFinite(n) && n > 0).map(Math.trunc);
 }
 
 function asQtyMap(v: unknown): Record<string, number> | null {
-  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  // Support both object format { "123": 2 } and array format [{ variantId: "123", quantity: 2 }]
+  if (!v) return null;
+
   const out: Record<string, number> = {};
-  for (const k of Object.keys(v as Record<string, unknown>)) {
-    const id = clampInt(k, 0);
-    const qty = clampInt((v as Record<string, unknown>)[k], 0);
-    if (id > 0 && qty > 0) out[String(id)] = qty;
+
+  if (Array.isArray(v)) {
+    for (const item of v) {
+      if (typeof item === "object" && item !== null) {
+        const obj = item as Record<string, unknown>;
+        const id = clampInt(obj.variantId ?? obj.id, 0);
+        const qty = clampInt(obj.quantity ?? 1, 0);
+        if (id > 0 && qty > 0) out[String(id)] = qty;
+      }
+    }
+  } else if (typeof v === "object") {
+    for (const k of Object.keys(v as Record<string, unknown>)) {
+      const id = clampInt(k, 0);
+      const qty = clampInt((v as Record<string, unknown>)[k], 0);
+      if (id > 0 && qty > 0) out[String(id)] = qty;
+    }
   }
+
   return Object.keys(out).length ? out : null;
 }
 
