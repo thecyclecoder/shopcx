@@ -263,10 +263,14 @@ export async function syncReviewsForWorkspace(
 
 // ── Management: approve/reject/feature via Klaviyo API ──
 
+export type RejectionReason = "profanity_or_inappropriate" | "private_information" | "unrelated" | "false_or_misleading" | "fake" | "other";
+
 export async function updateReviewStatus(
   workspaceId: string,
   klaviyoReviewId: string,
   action: "publish" | "reject" | "feature" | "unfeature",
+  rejectionReason?: RejectionReason,
+  rejectionExplanation?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const creds = await getKlaviyoCredentials(workspaceId);
   if (!creds) return { success: false, error: "Klaviyo not configured" };
@@ -283,10 +287,15 @@ export async function updateReviewStatus(
       attributes.status = { value: "published" };
       localStatus = "published";
       break;
-    case "reject":
-      attributes.status = { value: "rejected" };
+    case "reject": {
+      const rejection_reason: Record<string, unknown> = { reason: rejectionReason || "other" };
+      if ((rejectionReason === "other" || !rejectionReason) && rejectionExplanation) {
+        rejection_reason.status_explanation = rejectionExplanation;
+      }
+      attributes.status = { value: "rejected", rejection_reason };
       localStatus = "rejected";
       break;
+    }
     case "feature":
       attributes.status = { value: "featured" };
       localStatus = "featured";

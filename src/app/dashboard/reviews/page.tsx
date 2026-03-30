@@ -93,6 +93,11 @@ export default function ReviewsPage() {
   // Action loading
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
+  // Reject modal
+  const [rejectingId, setRejectingId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState<string>("profanity_or_inappropriate");
+  const [rejectExplanation, setRejectExplanation] = useState<string>("");
+
   const fetchReviews = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams();
@@ -379,7 +384,7 @@ export default function ReviewsPage() {
                         {/* Reject: show for pending + published + featured */}
                         {(review.status === "pending" || review.status === "published" || review.status === "featured") && (
                           <button
-                            onClick={() => handleAction(review.id, "reject")}
+                            onClick={() => { setRejectingId(review.id); setRejectReason("profanity_or_inappropriate"); setRejectExplanation(""); }}
                             disabled={actionLoading === review.id}
                             className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-50"
                           >
@@ -435,6 +440,62 @@ export default function ReviewsPage() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Rejection reason modal */}
+      {rejectingId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setRejectingId(null)}>
+          <div className="mx-4 w-full max-w-md rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-900" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Reject Review</h3>
+            <p className="mt-1 text-sm text-zinc-500">Select a reason for rejecting this review.</p>
+
+            <select
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+              className="mt-4 w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+            >
+              <option value="profanity_or_inappropriate">Profanity / Inappropriate</option>
+              <option value="private_information">Contains Private Information</option>
+              <option value="unrelated">Unrelated to Product or Service</option>
+              <option value="false_or_misleading">False or Misleading</option>
+              <option value="fake">Fake</option>
+              <option value="other">Other</option>
+            </select>
+
+            {rejectReason === "other" && (
+              <textarea
+                value={rejectExplanation}
+                onChange={(e) => setRejectExplanation(e.target.value)}
+                placeholder="Explain why this review is being rejected..."
+                rows={3}
+                className="mt-3 w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+              />
+            )}
+
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                onClick={() => setRejectingId(null)}
+                className="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  const id = rejectingId;
+                  setRejectingId(null);
+                  await handleAction(id, "reject", {
+                    rejection_reason: rejectReason,
+                    ...(rejectReason === "other" && rejectExplanation ? { rejection_explanation: rejectExplanation } : {}),
+                  });
+                }}
+                disabled={actionLoading === rejectingId}
+                className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
+              >
+                Reject Review
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

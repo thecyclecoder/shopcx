@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { updateReviewStatus } from "@/lib/klaviyo";
+import { updateReviewStatus, type RejectionReason } from "@/lib/klaviyo";
 
 export async function PATCH(
   request: Request,
@@ -25,9 +25,11 @@ export async function PATCH(
   }
 
   const body = await request.json();
-  const { action, review_type } = body as {
+  const { action, review_type, rejection_reason, rejection_explanation } = body as {
     action?: "publish" | "reject" | "feature" | "unfeature";
     review_type?: "review" | "store";
+    rejection_reason?: RejectionReason;
+    rejection_explanation?: string;
   };
 
   if (!action && !review_type) {
@@ -52,8 +54,12 @@ export async function PATCH(
 
   // Handle status action
   if (action) {
+    if (action === "reject" && !rejection_reason) {
+      return NextResponse.json({ error: "A rejection reason is required" }, { status: 400 });
+    }
+
     if (review.klaviyo_review_id) {
-      const result = await updateReviewStatus(workspaceId, review.klaviyo_review_id, action);
+      const result = await updateReviewStatus(workspaceId, review.klaviyo_review_id, action, rejection_reason, rejection_explanation);
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 500 });
       }
