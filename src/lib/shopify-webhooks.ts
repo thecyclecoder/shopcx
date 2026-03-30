@@ -466,6 +466,52 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
     console.error("Order webhook upsert error:", orderError.message);
   }
 
+  // Link subscription orders to their contract
+  const sourceName = (payload.source_name as string) || "";
+  if (!orderError && shopifyCustomerId && sourceName.includes("subscription")) {
+    try {
+      const { data: subs } = await admin
+        .from("subscriptions")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_customer_id", shopifyCustomerId)
+        .in("status", ["active", "paused"]);
+
+      if (subs?.length === 1) {
+        // Single active subscription — direct link
+        await admin.from("orders")
+          .update({ subscription_id: subs[0].id })
+          .eq("workspace_id", workspaceId)
+          .eq("shopify_order_id", shopifyOrderId);
+      } else if (subs && subs.length > 1) {
+        // Multiple subscriptions — try matching by line item SKUs
+        const orderSkus = new Set(lineItems.map((li: { sku: string | null }) => li.sku).filter(Boolean));
+        if (orderSkus.size > 0) {
+          const { data: subsWithItems } = await admin
+            .from("subscriptions")
+            .select("id, items")
+            .eq("workspace_id", workspaceId)
+            .eq("shopify_customer_id", shopifyCustomerId)
+            .in("status", ["active", "paused"]);
+
+          const match = subsWithItems?.find((s) => {
+            const subSkus = (Array.isArray(s.items) ? s.items : [])
+              .map((i: { sku?: string }) => i.sku).filter(Boolean);
+            return subSkus.some((sk: string) => orderSkus.has(sk));
+          });
+          if (match) {
+            await admin.from("orders")
+              .update({ subscription_id: match.id })
+              .eq("workspace_id", workspaceId)
+              .eq("shopify_order_id", shopifyOrderId);
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Subscription linkage error:", e);
+    }
+  }
+
   // Fire fraud check for new orders only (async, non-blocking)
   if (!orderError && isNewOrder) {
     // Look up the order UUID for the fraud check
