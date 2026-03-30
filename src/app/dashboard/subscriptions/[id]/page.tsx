@@ -4,6 +4,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 import Link from "next/link";
+import StoreCreditModal from "@/components/store-credit-modal";
 
 interface CustomerData {
   id: string;
@@ -211,6 +212,8 @@ export default function SubscriptionDetailPage() {
   const [editingItem, setEditingItem] = useState<string | null>(null);
   const [editQuantity, setEditQuantity] = useState(1);
   const [swapVariantId, setSwapVariantId] = useState("");
+  const [storeCreditBalance, setStoreCreditBalance] = useState<number | null>(null);
+  const [showStoreCreditModal, setShowStoreCreditModal] = useState(false);
 
   const loadSub = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}`);
@@ -222,6 +225,13 @@ export default function SubscriptionDetailPage() {
     setOrders(data.orders || []);
     setEvents(data.events || []);
     setLoading(false);
+    // Fetch store credit balance
+    if (data.subscription?.customer_id) {
+      fetch(`/api/store-credit/balance?customerId=${data.subscription.customer_id}`)
+        .then(r => r.json())
+        .then(b => setStoreCreditBalance(b.balance ?? 0))
+        .catch(() => setStoreCreditBalance(0));
+    }
   }, [workspace.id, subId, router]);
 
   useEffect(() => { loadSub(); }, [loadSub]);
@@ -833,6 +843,24 @@ export default function SubscriptionDetailPage() {
                   {acting === "bill_now" ? "Processing..." : "Process payment now"}
                 </button>
               )}
+
+              {/* Store Credit */}
+              {["owner", "admin"].includes(workspace.role) && (
+                <div className="border-t border-zinc-100 pt-2 dark:border-zinc-800">
+                  <div className="mb-2 flex items-center justify-between text-sm">
+                    <span className="text-zinc-500">Store Credit</span>
+                    <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                      {storeCreditBalance !== null ? (storeCreditBalance > 0 ? `$${storeCreditBalance.toFixed(2)}` : "None") : "..."}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setShowStoreCreditModal(true)}
+                    className="w-full rounded-md border border-indigo-300 px-4 py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
+                  >
+                    Manage store credit
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
@@ -874,6 +902,20 @@ export default function SubscriptionDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Store Credit Modal */}
+      {showStoreCreditModal && sub && (
+        <StoreCreditModal
+          customerId={sub.customer_id}
+          currentBalance={storeCreditBalance ?? 0}
+          subscriptionId={sub.id}
+          onClose={() => setShowStoreCreditModal(false)}
+          onSuccess={(newBalance) => {
+            setStoreCreditBalance(newBalance);
+            setShowStoreCreditModal(false);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -2,6 +2,8 @@
 
 import React, { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { useWorkspace } from "@/lib/workspace-context";
+import StoreCreditModal from "@/components/store-credit-modal";
 
 interface Customer {
   id: string;
@@ -178,6 +180,7 @@ function StatusBadge({ status }: { status: string | null }) {
 export default function CustomerDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const workspace = useWorkspace();
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
@@ -194,6 +197,10 @@ export default function CustomerDetailPage() {
   const [isPrimary, setIsPrimary] = useState(true);
   const [primaryCustomer, setPrimaryCustomer] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null } | null>(null);
   const [reviews, setReviews] = useState<{ id: string; rating: number | null; title: string | null; body: string | null; review_type: string; status: string; featured: boolean; product_name: string | null; published_at: string | null }[]>([]);
+  const [storeCreditBalance, setStoreCreditBalance] = useState<number | null>(null);
+  const [showStoreCreditModal, setShowStoreCreditModal] = useState(false);
+  const [storeCreditHistory, setStoreCreditHistory] = useState<{ id: string; type: string; amount: number; reason: string | null; issued_by_name: string; balance_after: number | null; created_at: string; ticket_id: string | null }[]>([]);
+  const [showCreditHistory, setShowCreditHistory] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -236,6 +243,14 @@ export default function CustomerDetailPage() {
       fetch(`/api/customers/${id}/events`)
         .then((r) => r.json())
         .then((e) => { if (Array.isArray(e)) setEvents(e); });
+      fetch(`/api/store-credit/balance?customerId=${id}`)
+        .then(r => r.json())
+        .then(b => setStoreCreditBalance(b.balance ?? 0))
+        .catch(() => setStoreCreditBalance(0));
+      fetch(`/api/store-credit/history?customerId=${id}`)
+        .then(r => r.json())
+        .then(h => setStoreCreditHistory(h.history || []))
+        .catch(() => {});
     }
     load();
   }, [id]);
@@ -364,11 +379,21 @@ export default function CustomerDetailPage() {
             <p className="mt-0.5 text-sm text-zinc-400">{customer.phone}</p>
           )}
         </div>
-        <RetentionBadge score={customer.retention_score} />
+        <div className="flex items-center gap-2">
+          <RetentionBadge score={customer.retention_score} />
+          {["owner", "admin"].includes(workspace.role) && (
+            <button
+              onClick={() => setShowStoreCreditModal(true)}
+              className="rounded-md border border-indigo-300 px-3 py-1.5 text-sm font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
+            >
+              Manage store credit
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Stats cards */}
-      <div className="mt-8 grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <div className="mt-8 grid grid-cols-2 gap-4 sm:grid-cols-5">
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
           <p className="text-sm font-medium uppercase text-zinc-500">LTV</p>
           <p className="mt-1 text-xl font-semibold text-zinc-900 dark:text-zinc-100">
@@ -385,6 +410,12 @@ export default function CustomerDetailPage() {
           <p className="text-sm font-medium uppercase text-zinc-500">Subscription</p>
           <p className="mt-1 text-xl font-semibold capitalize text-zinc-900 dark:text-zinc-100">
             {customer.subscription_status}
+          </p>
+        </div>
+        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+          <p className="text-sm font-medium uppercase text-zinc-500">Store Credit</p>
+          <p className="mt-1 text-xl font-semibold text-zinc-900 dark:text-zinc-100">
+            {storeCreditBalance !== null ? (storeCreditBalance > 0 ? `$${storeCreditBalance.toFixed(2)}` : "$0") : "..."}
           </p>
         </div>
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
@@ -938,6 +969,82 @@ export default function CustomerDetailPage() {
             })}
           </div>
         </div>
+      )}
+
+      {/* Store Credit History */}
+      {storeCreditHistory.length > 0 && (
+        <div className="mt-6 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+          <button
+            onClick={() => setShowCreditHistory(!showCreditHistory)}
+            className="flex w-full items-center justify-between"
+          >
+            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              Store Credit History ({storeCreditHistory.length})
+            </h2>
+            <svg className={`h-4 w-4 text-zinc-400 transition-transform ${showCreditHistory ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
+          {showCreditHistory && (
+            <div className="mt-3 space-y-2">
+              {storeCreditHistory.map((entry) => (
+                <div key={entry.id} className="flex items-start justify-between rounded bg-zinc-50 px-3 py-2 dark:bg-zinc-800">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${
+                        entry.type === "credit"
+                          ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                          : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                      }`}>
+                        {entry.type === "credit" ? "+" : "-"}${entry.amount.toFixed(2)}
+                      </span>
+                      <span className="text-xs text-zinc-400">
+                        by {entry.issued_by_name}
+                      </span>
+                    </div>
+                    {entry.reason && (
+                      <p className="mt-0.5 text-xs text-zinc-500">{entry.reason}</p>
+                    )}
+                    {entry.ticket_id && (
+                      <button
+                        onClick={() => router.push(`/dashboard/tickets/${entry.ticket_id}`)}
+                        className="mt-0.5 text-xs text-indigo-600 hover:underline dark:text-indigo-400"
+                      >
+                        View ticket
+                      </button>
+                    )}
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs text-zinc-400">
+                      {new Date(entry.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                    </p>
+                    {entry.balance_after !== null && (
+                      <p className="text-xs text-zinc-500">Bal: ${entry.balance_after.toFixed(2)}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Store Credit Modal */}
+      {showStoreCreditModal && (
+        <StoreCreditModal
+          customerId={id}
+          currentBalance={storeCreditBalance ?? 0}
+          onClose={() => setShowStoreCreditModal(false)}
+          onSuccess={(newBalance) => {
+            setStoreCreditBalance(newBalance);
+            setShowStoreCreditModal(false);
+            // Refresh history
+            fetch(`/api/store-credit/history?customerId=${id}`)
+              .then(r => r.json())
+              .then(h => setStoreCreditHistory(h.history || []))
+              .catch(() => {});
+          }}
+        />
       )}
     </div>
   );

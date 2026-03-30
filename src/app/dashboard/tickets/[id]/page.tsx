@@ -7,6 +7,7 @@ import type { Ticket, TicketMessage, TicketStatus } from "@/lib/types/ticket";
 import { cleanEmailForDisplay } from "@/lib/email-utils";
 import TicketPresenceBanner, { useTicketPresence } from "@/components/ticket-presence";
 import { createClient } from "@/lib/supabase/client";
+import StoreCreditModal from "@/components/store-credit-modal";
 
 interface Member {
   user_id: string;
@@ -229,6 +230,8 @@ export default function TicketDetailPage() {
   const [applyingMacro, setApplyingMacro] = useState<string | null>(null);
   const [allMacros, setAllMacros] = useState<{ id: string; name: string; body_text: string; category: string | null; usage_count: number }[]>([]);
   const [currentUser, setCurrentUser] = useState<{ id: string; name: string } | null>(null);
+  const [storeCreditBalance, setStoreCreditBalance] = useState<number | null>(null);
+  const [showStoreCreditModal, setShowStoreCreditModal] = useState(false);
 
   // Loyalty state
   const [loyaltyMember, setLoyaltyMember] = useState<{
@@ -292,6 +295,14 @@ export default function TicketDetailPage() {
       setSandboxMode(data.sandbox_mode ?? false);
       setEmailLive(data.email_live ?? true);
       setLoading(false);
+
+      // Fetch store credit balance
+      if (data.customer?.id) {
+        fetch(`/api/store-credit/balance?customerId=${data.customer.id}`)
+          .then(r => r.json())
+          .then(b => setStoreCreditBalance(b.balance ?? 0))
+          .catch(() => setStoreCreditBalance(0));
+      }
 
       // Auto-enrich customer if missing personalization
       if (data.customer && !data.customer.first_name) {
@@ -1843,6 +1854,24 @@ export default function TicketDetailPage() {
                 <p className="text-sm text-zinc-400">Subscription</p>
                 <p className="text-sm capitalize text-zinc-700 dark:text-zinc-300">{customer.subscription_status}</p>
               </div>
+              {/* Store Credit */}
+              <div className="pt-1">
+                <p className="text-sm text-zinc-400">Store Credit</p>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                    {storeCreditBalance !== null ? (storeCreditBalance > 0 ? `$${storeCreditBalance.toFixed(2)}` : "None") : "..."}
+                  </p>
+                  {["owner", "admin"].includes(workspace.role) && (
+                    <button
+                      onClick={() => setShowStoreCreditModal(true)}
+                      className="rounded bg-indigo-50 px-1.5 py-0.5 text-xs font-medium text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-900/20 dark:text-indigo-400 dark:hover:bg-indigo-900/40"
+                    >
+                      Manage
+                    </button>
+                  )}
+                </div>
+              </div>
+
               <button
                 onClick={() => router.push(`/dashboard/customers/${customer.id}`)}
                 className="mt-1 text-sm text-indigo-600 hover:underline dark:text-indigo-400"
@@ -2310,6 +2339,24 @@ export default function TicketDetailPage() {
         )}
         </div>
       </div>
+
+      {/* Store Credit Modal */}
+      {showStoreCreditModal && customer && (
+        <StoreCreditModal
+          customerId={customer.id}
+          currentBalance={storeCreditBalance ?? 0}
+          ticketId={id}
+          onClose={() => setShowStoreCreditModal(false)}
+          onSuccess={(newBalance) => {
+            setStoreCreditBalance(newBalance);
+            setShowStoreCreditModal(false);
+            // Refresh messages to show internal note
+            fetch(`/api/tickets/${id}`).then(r => r.json()).then(data => {
+              if (data.messages) setMessages(data.messages);
+            });
+          }}
+        />
+      )}
     </div>
   );
 }

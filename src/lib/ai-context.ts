@@ -3,6 +3,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { retrieveContext, type RAGContext } from "@/lib/rag";
+import { getStoreCreditBalance } from "@/lib/store-credit";
 
 export interface ConversationMessage {
   role: "user" | "assistant";
@@ -176,6 +177,20 @@ export async function assembleTicketContext(
     const smsMktg = customer.sms_marketing_status === "subscribed";
     customerParts.push(`Email Marketing: ${emailMktg ? "subscribed" : "not subscribed"}`);
     customerParts.push(`SMS Marketing: ${smsMktg ? "subscribed" : "not subscribed"}`);
+
+    // Fetch store credit balance
+    if (customer.shopify_customer_id) {
+      try {
+        const credit = await getStoreCreditBalance(workspaceId, customer.shopify_customer_id);
+        if (credit.balance > 0) {
+          customerParts.push(`Store Credit: $${credit.balance.toFixed(2)} ${credit.currency}`);
+        } else {
+          customerParts.push(`Store Credit: None`);
+        }
+      } catch {
+        // Skip if store credit query fails
+      }
+    }
 
     // Fetch recent orders (across linked profiles)
     // allCustomerIds already defined above
