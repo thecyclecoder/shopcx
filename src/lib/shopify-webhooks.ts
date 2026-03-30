@@ -485,7 +485,7 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
           .eq("shopify_order_id", shopifyOrderId);
       } else if (subs && subs.length > 1) {
         // Multiple subscriptions — try matching by line item SKUs
-        const orderSkus = new Set(lineItems.map((li: { sku: string | null }) => li.sku).filter(Boolean));
+        const orderSkus = new Set(lineItems.map((li: { sku: unknown }) => String(li.sku || "")).filter(Boolean));
         if (orderSkus.size > 0) {
           const { data: subsWithItems } = await admin
             .from("subscriptions")
@@ -496,8 +496,8 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
 
           const match = subsWithItems?.find((s) => {
             const subSkus = (Array.isArray(s.items) ? s.items : [])
-              .map((i: { sku?: string }) => i.sku).filter(Boolean);
-            return subSkus.some((sk: string) => orderSkus.has(sk));
+              .map((i: { sku?: string }) => String(i.sku || "")).filter(Boolean);
+            return subSkus.some((sk) => orderSkus.has(sk));
           });
           if (match) {
             await admin.from("orders")
