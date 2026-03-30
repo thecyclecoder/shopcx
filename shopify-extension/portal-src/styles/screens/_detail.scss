@@ -271,27 +271,55 @@
 }
 
 /* ------------------------------------------------------------
-   Coupon area (if present)
+   Coupon area
    ------------------------------------------------------------ */
 
-.sp-detail__coupon {
+.sp-detail__coupon-row {
   display: flex;
-  gap: var(--sp-gap-10);
+  gap: var(--sp-gap-10, 10px);
   align-items: center;
-  margin-top: 10px;
 }
 
-.sp-detail__coupon .sp-btn {
+.sp-detail__coupon-row .sp-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.sp-detail__coupon-row .sp-btn {
   flex: 0 0 auto;
   padding-left: 16px;
   padding-right: 16px;
 }
 
-@media (max-width: 720px) {
-  .sp-detail__coupon {
-    flex-direction: column;
-    align-items: stretch;
-  }
+/* Applied coupon display */
+.sp-detail__coupon-applied {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-gap-10, 10px);
+}
+
+.sp-detail__coupon-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.sp-detail__coupon-code {
+  font-weight: 700;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+
+.sp-detail__coupon-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--sp-success-text, #16a34a);
+  white-space: nowrap;
 }
 
 /* ------------------------------------------------------------

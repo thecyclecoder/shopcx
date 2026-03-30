@@ -82,18 +82,51 @@
 }
 
 /* ------------------------------------------------------------------
-   Radio list + rows
+   Radio list — card-style selectable rows
 ------------------------------------------------------------------- */
 
 .sp-radio-list {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-gap-12, 12px);
-  margin-top: 15px;
-  font-size: 17px;
+  gap: var(--sp-gap-10, 10px);
+  margin-top: 12px;
 }
 
-/* Minor spacing helper used in current markup */
-label.sp-radio-row span {
-  padding-left: 6px;
+.sp-radio-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1.5px solid var(--sp-border, #e5e7eb);
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.sp-radio-row:hover {
+  border-color: #d1d5db;
+  background: #fafafa;
+}
+
+.sp-radio-row.is-selected,
+.sp-radio-row:has(input:checked) {
+  border-color: var(--sp-accent, #111);
+  background: rgba(17, 24, 39, 0.03);
+}
+
+/* Hide native radio inside card rows */
+.sp-radio-row input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.sp-radio-row span {
+  padding-left: 0;
 }

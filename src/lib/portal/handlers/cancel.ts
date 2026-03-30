@@ -2,12 +2,15 @@
 // Only falls through to hard cancel if journey is completed with cancellation outcome.
 
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 
 export const cancel: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
+
+  const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
+  if (banCheck) return banCheck;
 
   let payload: Record<string, unknown> | null = null;
   try { payload = await req.json(); } catch { payload = null; }

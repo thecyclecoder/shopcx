@@ -21,7 +21,7 @@ function PauseCard({ contract, onUpdate, showToast }) {
   async function doPause(days) {
     setBusy(true);
     try {
-      await postJson('pause', { contractId: contract.id, days });
+      await postJson('pause', { contractId: contract.id, pauseDays: days });
       showToast('Subscription paused for ' + days + ' days', 'success');
       clearCaches(); onUpdate();
     } catch { showToast('Could not pause. Please try again.', 'error'); }
@@ -63,13 +63,63 @@ function ResumeCard({ contract, onUpdate, showToast }) {
   );
 }
 
+function ReactivateCard({ contract, showToast, onUpdate }) {
+  const [modal, setModal] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [selectedDate, setSelectedDate] = useState('');
+
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const maxDate = new Date();
+  maxDate.setDate(maxDate.getDate() + 60);
+  const minStr = tomorrow.toISOString().split('T')[0];
+  const maxStr = maxDate.toISOString().split('T')[0];
+
+  async function doReactivate() {
+    if (!selectedDate || busy) return;
+    setBusy(true);
+    try {
+      await postJson('reactivate', { contractId: contract.id, nextBillingDate: selectedDate });
+      showToast('Subscription reactivated!', 'success');
+      clearCaches(); setModal(false); onUpdate();
+    } catch (e) {
+      showToast(e?.message || 'Could not reactivate. Please try again.', 'error');
+    }
+    setBusy(false);
+  }
+
+  return (
+    <div class="sp-card sp-detail__card">
+      <div class="sp-detail__sectionhead">
+        <div class="sp-title2">Reactivate subscription</div>
+        <p class="sp-muted sp-detail__section-sub">Pick up where you left off.</p>
+      </div>
+      <button class="sp-btn sp-btn-primary" onClick={() => { setSelectedDate(''); setModal(true); }}>Reactivate</button>
+      {modal && (
+        <Modal title="Reactivate subscription" onClose={() => setModal(false)} footer={
+          <><button class="sp-btn sp-btn-primary" disabled={busy || !selectedDate} onClick={doReactivate}>
+            {busy ? 'Reactivating\u2026' : 'Reactivate'}
+          </button>
+          <button class="sp-btn sp-btn--ghost" onClick={() => setModal(false)}>Cancel</button></>
+        }>
+          <div class="sp-detail__date-pick">
+            <label class="sp-muted">Choose your next order date</label>
+            <input type="date" class="sp-input" min={minStr} max={maxStr} value={selectedDate}
+              onFocus={(e) => e.target.showPicker?.()}
+              onInput={(e) => setSelectedDate(e.target.value)} />
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 function OrderActionsCard({ contract, showToast, onUpdate }) {
   const [dateModal, setDateModal] = useState(false);
   const [orderNowConfirm, setOrderNowConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [selectedDate, setSelectedDate] = useState('');
 
-  // Date bounds: tomorrow to 60 days out
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
   const maxDate = new Date();
@@ -140,7 +190,8 @@ function OrderActionsCard({ contract, showToast, onUpdate }) {
           <div class="sp-detail__date-pick">
             <label class="sp-muted">Select a new date (up to 60 days out)</label>
             <input type="date" class="sp-input" min={minStr} max={maxStr} value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)} />
+              onFocus={(e) => e.target.showPicker?.()}
+              onInput={(e) => setSelectedDate(e.target.value)} />
           </div>
         </Modal>
       )}
@@ -148,8 +199,12 @@ function OrderActionsCard({ contract, showToast, onUpdate }) {
   );
 }
 
-function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing }) {
+function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing, forceClose }) {
   const [open, setOpen] = useState(false);
+
+  // Close panel when forceClose changes (after mutations)
+  useEffect(() => { setOpen(false); }, [forceClose]);
+
   return (
     <div class="sp-line-group">
       <div class="sp-line">
@@ -193,9 +248,10 @@ function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing }
   );
 }
 
-function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToast, config }) {
+function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToast, config, isCancelled, disclosureKey }) {
   const [modal, setModal] = useState(null);
-  const [removingLine, setRemovingLine] = useState(null); // sku of line being removed
+  const [removingLine, setRemovingLine] = useState(null);
+  const [mutating, setMutating] = useState(false);
 
   const total = lines.reduce((sum, ln) => {
     const p = getLinePrice(ln);
@@ -207,6 +263,7 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
 
   async function doRemove(ln) {
     setRemovingLine(ln.sku || ln.variantId);
+    setMutating(true);
     try {
       const resp = await postJson('replaceVariants', {
         contractId: contract.id,
@@ -215,22 +272,17 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
       });
       showToast('Item removed.', 'success');
       clearCaches();
-      // Use patch lines from response if available, otherwise optimistically remove the line
       if (resp?.patch?.lines && Array.isArray(resp.patch.lines)) {
         onPatchLines(resp.patch.lines);
       } else {
-        // Appstle may be async — re-fetch would return stale data, so remove optimistically
-        const remaining = lines.filter(l => l !== ln);
-        if (remaining.length) {
-          onPatchLines(remaining);
-        } else {
-          onUpdate();
-        }
+        // Re-fetch contract to get fresh state for subsequent mutations
+        onUpdate();
       }
     } catch (e) {
       showToast(e?.message || 'Could not remove item.', 'error');
     }
     setRemovingLine(null);
+    setMutating(false);
   }
 
   return (
@@ -241,12 +293,31 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
       </div>
       <div class="sp-detail__lines">
         {lines.map((ln, i) => (
-          <LineItemDisclosure key={i} ln={ln} canRemove={canRemove}
-            removing={removingLine === (ln.sku || ln.variantId)}
-            onSwap={() => setModal({ type: 'addSwap', line: ln, mode: 'swap' })}
-            onQty={() => setModal({ type: 'quantity', line: ln })}
-            onRemove={() => doRemove(ln)}
-          />
+          isCancelled ? (
+            <div key={i} class="sp-line-group">
+              <div class="sp-line">
+                {getLineImage(ln)
+                  ? <img class="sp-line__img" src={getLineImage(ln)} alt={safeStr(ln.title)} />
+                  : <div class="sp-line__img sp-line__img--placeholder" />}
+                <div class="sp-line__meta">
+                  <div class="sp-line__title">{safeStr(ln.title) || 'Item'}</div>
+                  <div class="sp-line__subwrap sp-muted">
+                    {ln.variantTitle && <div class="sp-line__variant">{safeStr(ln.variantTitle)}</div>}
+                    <div class="sp-line__qty">Qty {ln.quantity || 1}</div>
+                  </div>
+                </div>
+                <div class="sp-line__price">{ln.currentPrice ? money(ln.currentPrice) : ''}</div>
+              </div>
+            </div>
+          ) : (
+            <LineItemDisclosure key={i} ln={ln} canRemove={canRemove}
+              removing={removingLine === (ln.sku || ln.variantId)}
+              forceClose={disclosureKey}
+              onSwap={() => setModal({ type: 'addSwap', line: ln, mode: 'swap' })}
+              onQty={() => setModal({ type: 'quantity', line: ln })}
+              onRemove={() => doRemove(ln)}
+            />
+          )
         ))}
       </div>
       {isFinite(total) && total > 0 && (
@@ -255,11 +326,13 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
           <span class="sp-detail__total-price">{toMoney(total)}</span>
         </div>
       )}
-      <div class="sp-detail__items-actions">
-        <button class="sp-btn sp-btn--ghost" onClick={() => setModal({ type: 'addSwap', mode: 'add' })}>
-          + Add item
-        </button>
-      </div>
+      {!isCancelled && (
+        <div class="sp-detail__items-actions">
+          <button class="sp-btn sp-btn--ghost" disabled={mutating} onClick={() => setModal({ type: 'addSwap', mode: 'add' })}>
+            + Add item
+          </button>
+        </div>
+      )}
 
       {modal?.type === 'addSwap' && (
         <AddSwapModal mode={modal.mode} contract={contract} line={modal.line}
@@ -321,6 +394,16 @@ function AddressCard({ contract, showToast, onUpdate }) {
 function CouponCard({ contract, showToast, onUpdate }) {
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
+
+  // Read applied coupon from contract
+  const appliedCoupon = contract?.appliedDiscount || contract?.discount || null;
+  const couponCode = appliedCoupon?.code || appliedCoupon?.title || '';
+  const couponValue = appliedCoupon?.value
+    ? (appliedCoupon.valueType === 'PERCENTAGE' || appliedCoupon.type === 'percentage'
+        ? appliedCoupon.value + '% off'
+        : '$' + Number(appliedCoupon.value).toFixed(2) + ' off')
+    : '';
+
   async function apply() {
     if (!code.trim()) return;
     setBusy(true);
@@ -331,14 +414,35 @@ function CouponCard({ contract, showToast, onUpdate }) {
     } catch { showToast('Could not apply coupon.', 'error'); }
     setBusy(false);
   }
+
+  async function remove() {
+    setBusy(true);
+    try {
+      await postJson('coupon', { contractId: contract.id, discountCode: couponCode, mode: 'remove' });
+      showToast('Coupon removed.', 'success');
+      clearCaches(); onUpdate();
+    } catch { showToast('Could not remove coupon.', 'error'); }
+    setBusy(false);
+  }
+
   return (
     <div class="sp-card sp-detail__card">
       <div class="sp-detail__sectionhead"><div class="sp-title2">Coupon</div></div>
-      <div class="sp-detail__coupon-row">
-        <input class="sp-input" placeholder="Discount code" value={code}
-          onInput={(e) => setCode(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') apply(); }} />
-        <button class="sp-btn sp-btn-primary" disabled={busy || !code.trim()} onClick={apply}>Apply</button>
-      </div>
+      {couponCode ? (
+        <div class="sp-detail__coupon-applied">
+          <div class="sp-detail__coupon-info">
+            <span class="sp-detail__coupon-code" title={couponCode}>{couponCode}</span>
+            {couponValue && <span class="sp-detail__coupon-value">{couponValue}</span>}
+          </div>
+          <button class="sp-btn sp-btn--ghost sp-btn--sm" disabled={busy} onClick={remove}>Remove</button>
+        </div>
+      ) : (
+        <div class="sp-detail__coupon-row">
+          <input class="sp-input" placeholder="Discount code" value={code}
+            onInput={(e) => setCode(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') apply(); }} />
+          <button class="sp-btn sp-btn-primary" disabled={busy || !code.trim()} onClick={apply}>Apply</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -381,7 +485,7 @@ function FrequencyCard({ contract, showToast, onUpdate }) {
         }>
           <div class="sp-radio-list">
             {options.map(o => (
-              <label key={o.label} class="sp-radio-row">
+              <label key={o.label} class={'sp-radio-row' + (selected === o.label ? ' is-selected' : '')}>
                 <input type="radio" name="freq" value={o.label} checked={selected === o.label} onChange={() => setSelected(o.label)} />
                 <span>{o.label}</span>
               </label>
@@ -420,6 +524,8 @@ export default function SubscriptionDetail() {
   const [contract, setContract] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  // Increment to force-close all disclosure panels after mutations
+  const [disclosureKey, setDisclosureKey] = useState(0);
 
   const fetchContract = useCallback(async () => {
     let c = getCachedContractById(contractId);
@@ -433,8 +539,15 @@ export default function SubscriptionDetail() {
     setLoading(false);
   }, [contractId]);
 
-  // Optimistic lines update from replaceVariants patch (avoids stale re-fetch)
+  // After any mutation: collapse disclosures + re-fetch
+  const handleUpdate = useCallback(() => {
+    setDisclosureKey(k => k + 1);
+    fetchContract();
+  }, [fetchContract]);
+
+  // Optimistic lines update from replaceVariants patch
   const patchLines = useCallback((newLines) => {
+    setDisclosureKey(k => k + 1);
     setContract(prev => prev ? normalizeContract({ ...prev, lines: newLines }) : prev);
   }, []);
 
@@ -483,7 +596,6 @@ export default function SubscriptionDetail() {
     payment_update_url: contract?.portalState?.paymentUpdateUrl || '',
   } : null;
 
-  // Product IDs for reviews
   const productIds = lines.map(ln => shortId(ln?.productId)).filter(Boolean);
 
   return (
@@ -509,17 +621,20 @@ export default function SubscriptionDetail() {
 
       <div class="sp-grid sp-detail__grid">
         <div class="sp-detail__col">
-          {b === 'paused' && !isReadOnly && <ResumeCard contract={contract} onUpdate={fetchContract} showToast={showToast} />}
-          {b === 'active' && !isReadOnly && <PauseCard contract={contract} onUpdate={fetchContract} showToast={showToast} />}
-          {b === 'active' && !isReadOnly && <OrderActionsCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
-          <ItemsCard contract={contract} lines={lines} shipLine={shipLine} onUpdate={fetchContract} onPatchLines={patchLines} showToast={showToast} config={config} />
-          {!isReadOnly && <FrequencyCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
+          {isCancelled && <ReactivateCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
+          {b === 'paused' && !isReadOnly && <ResumeCard contract={contract} onUpdate={handleUpdate} showToast={showToast} />}
+          {b === 'active' && !isReadOnly && <PauseCard contract={contract} onUpdate={handleUpdate} showToast={showToast} />}
+          {b === 'active' && !isReadOnly && <OrderActionsCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
+          <ItemsCard contract={contract} lines={lines} shipLine={shipLine}
+            onUpdate={handleUpdate} onPatchLines={patchLines} showToast={showToast}
+            config={config} isCancelled={isCancelled} disclosureKey={disclosureKey} />
+          {!isReadOnly && <FrequencyCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
         </div>
         <div class="sp-detail__col">
           {!isCancelled && <RewardsCard />}
-          {!isReadOnly && <CouponCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
-          {!isReadOnly && <AddressCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
-          {!isReadOnly && <ShippingProtectionCard contract={contract} shipLine={shipLine} onUpdate={fetchContract} />}
+          {!isReadOnly && <CouponCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
+          {!isReadOnly && <AddressCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
+          {!isReadOnly && <ShippingProtectionCard contract={contract} shipLine={shipLine} onUpdate={handleUpdate} />}
           {!isCancelled && productIds.length > 0 && <ReviewsCard productIds={productIds} />}
           {!isReadOnly && <CancelCard router={router} contractId={shortId(contract.id)} />}
         </div>

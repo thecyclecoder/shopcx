@@ -5,17 +5,17 @@ import { createAdminClient } from "@/lib/supabase/admin";
 export const bootstrap: RouteHandler = async ({ auth, route }) => {
   const admin = createAdminClient();
 
-  // Enrich with dunning + linked account info if we have a workspace
   let dunningCount = 0;
   let linkedAccountCount = 0;
   let customerFirstName = "";
   let customerLastName = "";
   let customerEmail = "";
+  let portalBanned = false;
 
   if (auth.workspaceId && auth.loggedInCustomerId) {
     const { data: customer } = await admin
       .from("customers")
-      .select("id, first_name, last_name, email")
+      .select("id, first_name, last_name, email, portal_banned")
       .eq("workspace_id", auth.workspaceId)
       .eq("shopify_customer_id", auth.loggedInCustomerId)
       .single();
@@ -24,6 +24,7 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
       customerFirstName = customer.first_name || "";
       customerLastName = customer.last_name || "";
       customerEmail = customer.email || "";
+      portalBanned = !!customer.portal_banned;
 
       // Active dunning cycles
       const { count } = await admin
@@ -91,6 +92,43 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
     }
   }
 
+  // Filter shipping protection variant IDs to only those with selling plans
+  let shippingProtectionVariantIds: string[] = [];
+  const rawSpIds = Array.isArray(general.shipping_protection_product_ids)
+    ? general.shipping_protection_product_ids
+    : [];
+
+  if (rawSpIds.length && auth.workspaceId) {
+    // Look up products that contain these variant IDs and check for selling plans
+    const { data: spProducts } = await admin
+      .from("products")
+      .select("variants")
+      .eq("workspace_id", auth.workspaceId);
+
+    if (spProducts) {
+      const rawSpIdSet = new Set(rawSpIds.map(String));
+      for (const p of spProducts) {
+        const variants = Array.isArray(p.variants) ? p.variants : [];
+        for (const v of variants as { id?: string; selling_plan_group_ids?: string[] }[]) {
+          const vid = String(v.id || "");
+          if (rawSpIdSet.has(vid)) {
+            // Only include if variant has selling plans
+            const hasSellingPlans = Array.isArray(v.selling_plan_group_ids) && v.selling_plan_group_ids.length > 0;
+            if (hasSellingPlans) {
+              shippingProtectionVariantIds.push(vid);
+            }
+          }
+        }
+      }
+    }
+
+    // If no variants with selling plans found, fall through to raw IDs
+    // (Appstle may handle subscription additions without selling plans)
+    if (!shippingProtectionVariantIds.length) {
+      shippingProtectionVariantIds = rawSpIds.map(String);
+    }
+  }
+
   return jsonOk({
     ok: true,
     shop: auth.shop,
@@ -98,6 +136,7 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
     route,
     dunning_count: dunningCount,
     linked_account_count: linkedAccountCount,
+    banned: portalBanned,
     customer: {
       firstName: customerFirstName,
       lastName: customerLastName,
@@ -105,10 +144,7 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
     },
     config: {
       lockDays: Number(general.lock_days) || 7,
-      shippingProtectionProductIds:
-        Array.isArray(general.shipping_protection_product_ids)
-          ? general.shipping_protection_product_ids
-          : [],
+      shippingProtectionProductIds: shippingProtectionVariantIds,
       catalog,
       rewardsUrl: String(general.rewards_url || ""),
     },

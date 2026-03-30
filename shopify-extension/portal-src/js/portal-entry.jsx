@@ -29,6 +29,7 @@ async function boot() {
     shippingProtectionProductIds: [],
     catalog: [],
     rewardsUrl: '',
+    banned: false,
   };
 
   // Fetch everything from the bootstrap API
@@ -40,6 +41,7 @@ async function boot() {
         config.firstName = bootstrap.customer.firstName || '';
       }
       // Workspace portal config
+      if (bootstrap.banned) config.banned = true;
       if (bootstrap.config) {
         const c = bootstrap.config;
         config.lockDays = c.lockDays ?? 7;

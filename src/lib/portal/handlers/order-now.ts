@@ -1,9 +1,12 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
 import { appstleGetUpcomingOrders, appstleAttemptBilling } from "@/lib/appstle";
 
 export const orderNow: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
+
+  const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
+  if (banCheck) return banCheck;
 
   let payload: Record<string, unknown> | null = null;
   try { payload = await req.json(); } catch { payload = null; }

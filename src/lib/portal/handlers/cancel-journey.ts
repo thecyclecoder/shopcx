@@ -1,11 +1,50 @@
 // Cancel journey endpoints for portal — returns journey steps and processes responses
 
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
+
+async function createChatTicket(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  customerId: string,
+  contractId: string,
+  reason: string,
+): Promise<string | null> {
+  const { data: ticket } = await admin.from("tickets").insert({
+    workspace_id: workspaceId,
+    customer_id: customerId,
+    subject: `Cancel chat: ${reason}`,
+    status: "open",
+    channel: "portal",
+    tags: ["cancel:ai_chat"],
+    journey_id: `cancel_chat_${contractId}`,
+  }).select("id").single();
+
+  return ticket?.id || null;
+}
+
+async function logChatMessage(
+  admin: ReturnType<typeof createAdminClient>,
+  ticketId: string,
+  direction: "in" | "out",
+  authorType: "customer" | "ai",
+  body: string,
+) {
+  await admin.from("ticket_messages").insert({
+    ticket_id: ticketId,
+    direction,
+    visibility: "external",
+    author_type: authorType,
+    body,
+  });
+}
 
 export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
+
+  const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
+  if (banCheck) return banCheck;
 
   const contractId = url.searchParams.get("contractId") || "";
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
@@ -72,8 +111,9 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
   const journeySessionId = String(payload?.journeySessionId || "");
 
   if (step === "reason") {
-    // Log the selected reason
     const reason = String(payload?.reason || "");
+    const startChat = !!payload?.startChat;
+
     if (journeySessionId) {
       await admin.from("journey_sessions")
         .update({ responses: { reason }, updated_at: new Date().toISOString() })
@@ -87,15 +127,86 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       properties: { shopify_contract_id: contractId, reason },
     });
 
+    // For open-ended reasons, create a ticket for chat logging and start AI conversation
+    if (startChat) {
+      const ticketId = await createChatTicket(admin, auth.workspaceId, customer.id, contractId, reason);
+
+      // Get initial AI response
+      try {
+        const { generateOpenEndedResponse } = await import("@/lib/remedy-selector");
+        const reply = await generateOpenEndedResponse(
+          auth.workspaceId, reason, "",
+          [], { ltv_cents: 0, retention_score: 0, subscription_age_days: 0, total_orders: 0, products: [], first_renewal: false }, [],
+        );
+
+        if (ticketId && reply) {
+          await logChatMessage(admin, ticketId, "out", "ai", reply);
+        }
+
+        return jsonOk({
+          ok: true, step: "reason", reason, type: "ai_chat",
+          reply, turn: 1, maxTurns: 3, ticketId,
+        });
+      } catch {
+        return jsonOk({
+          ok: true, step: "reason", reason, type: "ai_chat",
+          reply: null, turn: 1, maxTurns: 3, ticketId,
+        });
+      }
+    }
+
     return jsonOk({ ok: true, step: "reason", reason });
   }
 
+  if (step === "chat") {
+    const message = String(payload?.message || "");
+    const reason = String(payload?.reason || "");
+    const turn = Number(payload?.turn) || 0;
+    let ticketId = payload?.ticketId ? String(payload.ticketId) : null;
+
+    // Create ticket if we don't have one yet
+    if (!ticketId) {
+      ticketId = await createChatTicket(admin, auth.workspaceId, customer.id, contractId, reason);
+    }
+
+    // Log customer message
+    if (ticketId && message) {
+      await logChatMessage(admin, ticketId, "in", "customer", message);
+    }
+
+    // Get AI response
+    try {
+      const { generateOpenEndedResponse } = await import("@/lib/remedy-selector");
+      const reply = await generateOpenEndedResponse(
+        auth.workspaceId, reason, message,
+        [], { ltv_cents: 0, retention_score: 0, subscription_age_days: 0, total_orders: 0, products: [], first_renewal: false }, [],
+      );
+
+      // Log AI response
+      if (ticketId && reply) {
+        await logChatMessage(admin, ticketId, "out", "ai", reply);
+      }
+
+      return jsonOk({
+        ok: true, step: "chat",
+        reply: reply || "I understand. Would you like to keep your subscription?",
+        turn: turn + 1,
+        ticketId,
+      });
+    } catch {
+      return jsonOk({
+        ok: true, step: "chat",
+        reply: "I understand. Would you like to keep your subscription?",
+        turn: turn + 1,
+        ticketId,
+      });
+    }
+  }
+
   if (step === "remedy") {
-    // Customer accepted or declined a remedy
     const remedyId = String(payload?.remedyId || "");
     const accepted = !!payload?.accepted;
 
-    // Log remedy outcome
     await admin.from("remedy_outcomes").insert({
       workspace_id: auth.workspaceId,
       customer_id: customer.id,
@@ -120,8 +231,8 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
   }
 
   if (step === "confirm_cancel") {
-    // Customer confirmed final cancellation after going through journey
     const reason = String(payload?.reason || "Customer cancelled via portal");
+    const ticketId = payload?.ticketId ? String(payload.ticketId) : null;
 
     const { appstleSubscriptionAction } = await import("@/lib/appstle");
     const result = await appstleSubscriptionAction(
@@ -137,6 +248,13 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       await admin.from("journey_sessions")
         .update({ status: "completed", completed_at: new Date().toISOString() })
         .eq("id", journeySessionId);
+    }
+
+    // Close the chat ticket if one was created
+    if (ticketId) {
+      await admin.from("tickets")
+        .update({ status: "closed" })
+        .eq("id", ticketId);
     }
 
     await logPortalAction({

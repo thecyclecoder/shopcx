@@ -8,6 +8,7 @@ import { PortalContext } from '../App.jsx';
 import { requestJson, postJson, clearCaches } from '../core/api.js';
 import { shortId } from '../core/utils.js';
 import { SkeletonCancelScreen } from '../components/Skeleton.jsx';
+import ReviewsCard from '../cards/ReviewsCard.jsx';
 
 const OPEN_ENDED = ['just_need_a_break', 'something_else', 'reached_goals'];
 
@@ -184,26 +185,41 @@ export default function Cancel() {
   const [chatTurn, setChatTurn] = useState(0);
   const [chatMaxTurns, setChatMaxTurns] = useState(3);
   const [chatLoading, setChatLoading] = useState(false);
+  const [chatTicketId, setChatTicketId] = useState(null);
+
+  // Product IDs for ReviewsCard on reason step
+  const productIds = journey?.subscription?.items
+    ? (journey.subscription.items || []).map(i => shortId(i.product_id)).filter(Boolean)
+    : [];
+
+  // Scroll to top helper
+  function scrollTop() { window.scrollTo(0, 0); }
+
+  // Phase change wrapper: always scroll to top
+  function goToPhase(p) {
+    setPhase(p);
+    scrollTop();
+  }
 
   // Fetch journey data on mount
   useEffect(() => {
     if (!contractId) return;
+    scrollTop();
     requestJson('cancelJourney', { contractId }, { force: true })
       .then(resp => {
         if (resp?.ok) {
           setJourney(resp);
           if (resp.reviews) setReviews(resp.reviews);
-          setPhase('reason');
+          goToPhase('reason');
         } else {
           setJourney({ cancel_reasons: [], reviews: [] });
-          setPhase('reason');
+          goToPhase('reason');
         }
       })
       .catch(() => {
         setJourney({ cancel_reasons: [], reviews: [] });
-        setPhase('reason');
+        goToPhase('reason');
       });
-    // Events tracked server-side via customer_events
   }, [contractId]);
 
   const goBack = useCallback(() => router.navigate(detailUrl), [router, detailUrl]);
@@ -213,13 +229,13 @@ export default function Cancel() {
     setReason(reasonId);
 
     if (OPEN_ENDED.includes(reasonId)) {
-      setPhase('chat');
+      goToPhase('chat');
       setChatMessages([]);
       setChatTurn(0);
       setChatLoading(true);
 
       try {
-        const resp = await postJson('cancelJourney', { step: 'reason', reason: reasonId }, { contractId });
+        const resp = await postJson('cancelJourney', { step: 'reason', reason: reasonId, startChat: true }, { contractId });
         if (resp?.reply) {
           setChatMessages([{ role: 'ai', text: resp.reply }]);
           setChatTurn(resp.turn || 1);
@@ -228,13 +244,14 @@ export default function Cancel() {
           setChatMessages([{ role: 'ai', text: "I understand. Can you tell me more about what\u2019s going on?" }]);
           setChatTurn(1);
         }
+        if (resp?.ticketId) setChatTicketId(resp.ticketId);
       } catch {
         setChatMessages([{ role: 'ai', text: "I\u2019d love to help. Can you tell me more?" }]);
         setChatTurn(1);
       }
       setChatLoading(false);
     } else {
-      setPhase('remedies');
+      goToPhase('remedies');
       setBusy(true);
       try {
         const resp = await postJson('cancelJourney', { step: 'reason', reason: reasonId }, { contractId });
@@ -252,14 +269,17 @@ export default function Cancel() {
     setChatMessages(prev => [...prev, { role: 'customer', text }]);
     setChatLoading(true);
     try {
-      const resp = await postJson('cancelJourney', { step: 'chat', message: text, reason, turn: chatTurn }, { contractId });
+      const resp = await postJson('cancelJourney', {
+        step: 'chat', message: text, reason, turn: chatTurn, ticketId: chatTicketId,
+      }, { contractId });
       if (resp?.reply) {
         setChatMessages(prev => [...prev, { role: 'ai', text: resp.reply }]);
         setChatTurn(resp.turn || chatTurn + 1);
       }
+      if (resp?.ticketId) setChatTicketId(resp.ticketId);
     } catch {
       setChatMessages(prev => [...prev, { role: 'ai', text: 'I understand. Would you like to keep your subscription?' }]);
-      setChatTurn(chatMaxTurns); // end chat
+      setChatTurn(chatMaxTurns);
     }
     setChatLoading(false);
   }
@@ -282,7 +302,7 @@ export default function Cancel() {
   async function confirmCancel() {
     setBusy(true);
     try {
-      await postJson('cancelJourney', { step: 'confirm_cancel', reason }, { contractId });
+      await postJson('cancelJourney', { step: 'confirm_cancel', reason, ticketId: chatTicketId }, { contractId });
       showToast('Your subscription has been cancelled.', 'success');
       clearCaches();
       router.navigate(detailUrl);
@@ -315,12 +335,13 @@ export default function Cancel() {
 
   // ---- REASON STEP ----
   if (phase === 'reason') {
-    const hasReviews = reviews.length > 0;
     const reasonTiles = reasons.map(r => (
       <button key={r.id} type="button" class="sp-btn sp-btn--ghost sp-cancel-reason" onClick={() => selectReason(r.id)}>
         <div class="sp-cancel-reason__label">{r.label}</div>
       </button>
     ));
+
+    const hasProductReviews = productIds.length > 0;
 
     const content = (
       <>
@@ -328,7 +349,7 @@ export default function Cancel() {
           <div class="sp-cancel__required-title">To complete your cancellation</div>
           <div class="sp-cancel__required-sub sp-muted">Select the option that best describes your reason.</div>
         </div>
-        <div class={'sp-cancel-reasons' + (hasReviews ? ' sp-cancel-reasons--with-reviews' : '')}>
+        <div class={'sp-cancel-reasons' + (hasProductReviews ? ' sp-cancel-reasons--with-reviews' : '')}>
           {reasonTiles}
         </div>
         <div class="sp-cancel__footer">
@@ -343,10 +364,10 @@ export default function Cancel() {
       <div class="sp-card sp-cancel">
         <CancelHeader onBack={goBack} title="Cancel subscription" />
         <AlertBar />
-        {hasReviews ? (
+        {hasProductReviews ? (
           <div class="sp-cancel__layout">
             <div class="sp-cancel__left">{content}</div>
-            <div class="sp-cancel__right"><ReviewsList reviews={reviews} /></div>
+            <div class="sp-cancel__right"><ReviewsCard productIds={productIds} /></div>
           </div>
         ) : content}
       </div>
@@ -380,7 +401,7 @@ export default function Cancel() {
         <ReviewsList reviews={reviews} />
         <div class="sp-cancel__footer">
           <button type="button" class="sp-btn sp-btn--ghost sp-cancel__still-cancel"
-            onClick={() => setPhase('confirm')}>
+            onClick={() => goToPhase('confirm')}>
             I still want to cancel
           </button>
         </div>
@@ -397,7 +418,7 @@ export default function Cancel() {
         <ChatInterface
           messages={chatMessages} turn={chatTurn} maxTurns={chatMaxTurns}
           loading={chatLoading} onSend={sendChat}
-          onCancel={() => setPhase('confirm')}
+          onCancel={() => goToPhase('confirm')}
           onKeep={() => { clearCaches(); router.navigate(detailUrl); }}
         />
       </div>

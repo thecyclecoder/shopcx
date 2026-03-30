@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, addDaysFromNow, findCustomer, logPortalAction, handleAppstleError } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, addDaysFromNow, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
 import { appstleSubscriptionAction } from "@/lib/appstle";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -7,16 +7,22 @@ import { createAdminClient } from "@/lib/supabase/admin";
 export const reactivate: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
 
+  const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
+  if (banCheck) return banCheck;
+
   let payload: Record<string, unknown> | null = null;
   try { payload = await req.json(); } catch { payload = null; }
 
   const contractId = clampInt(payload?.contractId, 0);
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
 
-  const nextBillingDate = addDaysFromNow(1);
+  // Accept custom date from frontend, default to tomorrow
+  let nextBillingDate = typeof payload?.nextBillingDate === "string" && payload.nextBillingDate
+    ? new Date(payload.nextBillingDate as string).toISOString()
+    : addDaysFromNow(1);
 
   try {
-    // 1) Set next billing date to tomorrow
+    // 1) Set next billing date
     const admin = createAdminClient();
     const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
     if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
@@ -40,7 +46,7 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
       workspaceId: auth.workspaceId, customerId: customer.id,
       eventType: "portal.subscription.reactivated",
       summary: "Customer reactivated subscription via portal",
-      properties: { shopify_contract_id: String(contractId) },
+      properties: { shopify_contract_id: String(contractId), nextBillingDate },
       createNote: true,
     });
   }

@@ -88,6 +88,24 @@ export async function logPortalAction(params: {
 }
 
 /**
+ * Check if a customer is banned from portal self-serve.
+ * Returns a 403 response if banned, null otherwise.
+ */
+export async function checkPortalBan(workspaceId: string, shopifyCustomerId: string) {
+  if (!workspaceId || !shopifyCustomerId) return null;
+  const admin = createAdminClient();
+  const { data } = await admin.from("customers")
+    .select("portal_banned")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_customer_id", shopifyCustomerId)
+    .single();
+  if (data?.portal_banned) {
+    return jsonErr({ error: "account_restricted" }, 403);
+  }
+  return null;
+}
+
+/**
  * Wrap Appstle errors into portal-friendly responses.
  */
 export function handleAppstleError(e: unknown): NextResponse {

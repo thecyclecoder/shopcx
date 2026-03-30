@@ -24,13 +24,20 @@ export default function ShippingProtectionCard({ contract, shipLine, onUpdate })
     setBusy(true);
     const nextOn = !hasShipProt;
     try {
-      await postJson('replaceVariants', {
-        contractId: contract.id,
-        ...(nextOn
-          ? { newVariants: [{ variantId: String(variantIds[0]), quantity: 1 }] }
-          : { oldVariants: [{ variantId: safeStr(shipLine?.variantId) }], allowRemoveWithoutAdd: true }
-        ),
-      });
+      if (nextOn) {
+        // Adding shipping protection — pure add (no old variant to replace)
+        await postJson('replaceVariants', {
+          contractId: contract.id,
+          newVariants: [{ variantId: String(variantIds[0]), quantity: 1 }],
+        });
+      } else {
+        // Removing shipping protection
+        await postJson('replaceVariants', {
+          contractId: contract.id,
+          oldVariants: [{ variantId: safeStr(shipLine?.variantId) }],
+          allowRemoveWithoutAdd: true,
+        });
+      }
       showToast(nextOn ? 'Shipping protection added!' : 'Shipping protection removed.', 'success');
       clearCaches();
       onUpdate();

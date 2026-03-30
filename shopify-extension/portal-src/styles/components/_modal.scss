@@ -9,18 +9,18 @@ body.sp-modal-open {
   overflow: hidden;
 }
 
-/* Overlay */
+/* Overlay — portaled to document.body, max z-index to escape host stacking */
 .sp-modal {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: 2147483647;
 
   display: flex;
   align-items: center;
   justify-content: center;
 
   padding: 18px;
-  background: var(--sp-overlay, rgba(0, 0, 0, 0.45));
+  background: rgba(0, 0, 0, 0.5);
 }
 
 /* Blocking modal variant (Processing changes…) */
@@ -51,15 +51,44 @@ body.sp-modal-open {
 
 /* Title (header area) */
 .sp-modal__title {
-  padding: 20px 20px 12px;
+  padding: 22px 24px 14px;
   font-size: 20px;
   font-weight: 950;
   color: var(--sp-text);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* Styled close button */
+.sp-modal__close {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 1px solid var(--sp-border, #e5e7eb);
+  background: #fff;
+  color: var(--sp-text, #111);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.sp-modal__close:hover {
+  border-color: #d1d5db;
+  background: #f9fafb;
+}
+
+.sp-modal__close svg {
+  display: block;
 }
 
 /* Body scroll container */
 .sp-modal__body {
-  padding: 0 20px 16px;
+  padding: 0 24px 20px;
   flex: 1;
 
   overflow-y: auto;
@@ -87,9 +116,10 @@ body.sp-modal-open {
 
 /* Footer pinned */
 .sp-modal__footer {
-  padding: 16px 20px 20px;
+  padding: 16px 24px 22px;
   display: flex;
   gap: var(--sp-gap-12, 12px);
+  border-top: 1px solid var(--sp-border, #e5e7eb);
 }
 
 .sp-modal__footer .sp-btn {

@@ -23,6 +23,7 @@ export { cancelJourney } from "./cancel-journey";
 export { dunningStatus } from "./dunning-status";
 export { changeDate } from "./change-date";
 export { orderNow } from "./order-now";
+export { submitBanRequest } from "./ban-request";
 
 import type { RouteHandler } from "@/lib/portal/types";
 import { bootstrap } from "./bootstrap";
@@ -42,6 +43,7 @@ import { cancelJourney } from "./cancel-journey";
 import { dunningStatus } from "./dunning-status";
 import { changeDate } from "./change-date";
 import { orderNow } from "./order-now";
+import { submitBanRequest } from "./ban-request";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -74,4 +76,7 @@ export const routeMap: Record<string, RouteHandler> = {
   ordernow: orderNow,
   orderNow,
   order_now: orderNow,
+  submitbanrequest: submitBanRequest,
+  submitBanRequest,
+  submit_ban_request: submitBanRequest,
 };
