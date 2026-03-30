@@ -130,11 +130,17 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
       });
       showToast('Item removed.', 'success');
       clearCaches();
-      // Use patch lines from response if available (Appstle may be async, so re-fetch can be stale)
+      // Use patch lines from response if available, otherwise optimistically remove the line
       if (resp?.patch?.lines && Array.isArray(resp.patch.lines)) {
         onPatchLines(resp.patch.lines);
       } else {
-        onUpdate();
+        // Appstle may be async — re-fetch would return stale data, so remove optimistically
+        const remaining = lines.filter(l => l !== ln);
+        if (remaining.length) {
+          onPatchLines(remaining);
+        } else {
+          onUpdate();
+        }
       }
     } catch (e) {
       showToast(e?.message || 'Could not remove item.', 'error');
