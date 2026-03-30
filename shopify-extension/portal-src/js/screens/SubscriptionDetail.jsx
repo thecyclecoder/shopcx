@@ -108,7 +108,7 @@ function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing }
   );
 }
 
-function ItemsCard({ contract, lines, shipLine, onUpdate, showToast, config }) {
+function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToast, config }) {
   const [modal, setModal] = useState(null);
   const [removingLine, setRemovingLine] = useState(null); // sku of line being removed
 
@@ -123,14 +123,19 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, showToast, config }) {
   async function doRemove(ln) {
     setRemovingLine(ln.sku || ln.variantId);
     try {
-      await postJson('replaceVariants', {
+      const resp = await postJson('replaceVariants', {
         contractId: contract.id,
         oldVariants: [{ variantId: ln.variantId }],
         allowRemoveWithoutAdd: true,
       });
       showToast('Item removed.', 'success');
       clearCaches();
-      onUpdate();
+      // Use patch lines from response if available (Appstle may be async, so re-fetch can be stale)
+      if (resp?.patch?.lines && Array.isArray(resp.patch.lines)) {
+        onPatchLines(resp.patch.lines);
+      } else {
+        onUpdate();
+      }
     } catch (e) {
       showToast(e?.message || 'Could not remove item.', 'error');
     }
@@ -300,15 +305,17 @@ function FrequencyCard({ contract, showToast, onUpdate }) {
 function CancelCard({ router, contractId }) {
   const cancelUrl = router.base + '/subscription?id=' + encodeURIComponent(contractId) + '&intent=cancel';
   return (
-    <div class="sp-card sp-detail__card">
-      <div class="sp-detail__sectionhead">
-        <div class="sp-title2">Cancel subscription</div>
-        <p class="sp-muted sp-detail__section-sub">We'll ask a couple quick questions first.</p>
+    <div class="sp-card sp-detail__card sp-detail__cancel">
+      <div class="sp-detail__cancel-row">
+        <div>
+          <div class="sp-detail__cancel-title">Cancel subscription</div>
+          <div class="sp-muted sp-detail__cancel-sub">We'll ask a couple quick questions first.</div>
+        </div>
+        <a class="sp-btn sp-btn--ghost sp-btn--danger sp-btn--sm" href={cancelUrl}
+          onClick={(e) => { e.preventDefault(); router.navigate(cancelUrl); }}>
+          Cancel
+        </a>
       </div>
-      <a class="sp-btn sp-btn--ghost sp-btn--danger" href={cancelUrl}
-        onClick={(e) => { e.preventDefault(); router.navigate(cancelUrl); }}>
-        Cancel subscription
-      </a>
     </div>
   );
 }
@@ -334,6 +341,11 @@ export default function SubscriptionDetail() {
     } catch { setError(true); }
     setLoading(false);
   }, [contractId]);
+
+  // Optimistic lines update from replaceVariants patch (avoids stale re-fetch)
+  const patchLines = useCallback((newLines) => {
+    setContract(prev => prev ? normalizeContract({ ...prev, lines: newLines }) : prev);
+  }, []);
 
   useEffect(() => { fetchContract(); }, [fetchContract]);
 
@@ -408,7 +420,7 @@ export default function SubscriptionDetail() {
         <div class="sp-detail__col">
           {b === 'paused' && !isReadOnly && <ResumeCard contract={contract} onUpdate={fetchContract} showToast={showToast} />}
           {b === 'active' && !isReadOnly && <PauseCard contract={contract} onUpdate={fetchContract} showToast={showToast} />}
-          <ItemsCard contract={contract} lines={lines} shipLine={shipLine} onUpdate={fetchContract} showToast={showToast} config={config} />
+          <ItemsCard contract={contract} lines={lines} shipLine={shipLine} onUpdate={fetchContract} onPatchLines={patchLines} showToast={showToast} config={config} />
           {!isReadOnly && <FrequencyCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
         </div>
         <div class="sp-detail__col">

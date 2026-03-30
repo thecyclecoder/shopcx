@@ -104,6 +104,14 @@ a.sp-btn[aria-disabled="true"] {
 
 /* Size helpers */
 
+.sp-btn--sm {
+  font-size: 14px;
+  font-weight: 700;
+  padding: 8px 16px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
 .sp-btn--full {
   width: 100%;
 }
