@@ -420,6 +420,15 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
     sku: li.sku || null,
   }));
 
+  // Check if order already exists (to distinguish create vs update)
+  const { data: existingOrder } = await admin
+    .from("orders")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_order_id", shopifyOrderId)
+    .single();
+  const isNewOrder = !existingOrder;
+
   // Upsert order
   const shippingAddr = payload.shipping_address as Record<string, unknown> | null;
   const { error: orderError } = await admin.from("orders").upsert(
@@ -457,8 +466,8 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
     console.error("Order webhook upsert error:", orderError.message);
   }
 
-  // Fire fraud check for the new order (async, non-blocking)
-  if (!orderError) {
+  // Fire fraud check for new orders only (async, non-blocking)
+  if (!orderError && isNewOrder) {
     // Look up the order UUID for the fraud check
     const { data: savedOrder } = await admin
       .from("orders")
@@ -532,38 +541,42 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
         .eq("id", customer.id);
     }
 
-    // Log event
-    await logCustomerEvent({
-      workspaceId,
-      customerId,
-      eventType: "order.created",
-      source: "shopify",
-      summary: `Order ${(payload.name as string) || shopifyOrderId} — $${((payload.total_price as string) || "0")}`,
-      properties: {
+    // Log event — only log order.created for genuinely new orders
+    if (isNewOrder) {
+      await logCustomerEvent({
+        workspaceId,
+        customerId,
+        eventType: "order.created",
+        source: "shopify",
+        summary: `Order ${(payload.name as string) || shopifyOrderId} — $${((payload.total_price as string) || "0")}`,
+        properties: {
+          shopify_order_id: shopifyOrderId,
+          order_number: payload.name,
+          total_price: payload.total_price,
+          financial_status: payload.financial_status,
+          source_name: payload.source_name,
+        },
+      });
+    }
+
+    // Evaluate rules — only on new orders
+    if (isNewOrder) {
+      const orderCtx = {
         shopify_order_id: shopifyOrderId,
         order_number: payload.name,
-        total_price: payload.total_price,
+        total_cents: Math.round(parseFloat((payload.total_price as string) || "0") * 100),
         financial_status: payload.financial_status,
+        fulfillment_status: payload.fulfillment_status,
         source_name: payload.source_name,
-      },
-    });
-
-    // Evaluate rules
-    const orderCtx = {
-      shopify_order_id: shopifyOrderId,
-      order_number: payload.name,
-      total_cents: Math.round(parseFloat((payload.total_price as string) || "0") * 100),
-      financial_status: payload.financial_status,
-      fulfillment_status: payload.fulfillment_status,
-      source_name: payload.source_name,
-      order_type: null as string | null,
-    };
-    const { data: custCtx } = customerId
-      ? await admin.from("customers").select("*").eq("id", customerId).single()
-      : { data: null };
-    await evaluateRules(workspaceId, "order.created", {
-      order: orderCtx,
-      customer: custCtx || undefined,
-    });
+        order_type: null as string | null,
+      };
+      const { data: custCtx } = customerId
+        ? await admin.from("customers").select("*").eq("id", customerId).single()
+        : { data: null };
+      await evaluateRules(workspaceId, "order.created", {
+        order: orderCtx,
+        customer: custCtx || undefined,
+      });
+    }
   }
 }
