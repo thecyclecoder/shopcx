@@ -24,6 +24,9 @@ export { dunningStatus } from "./dunning-status";
 export { changeDate } from "./change-date";
 export { orderNow } from "./order-now";
 export { submitBanRequest } from "./ban-request";
+export { loyaltyBalance } from "./loyalty-balance";
+export { loyaltyRedeem } from "./loyalty-redeem";
+export { loyaltyApplyToSubscription } from "./loyalty-apply-subscription";
 
 import type { RouteHandler } from "@/lib/portal/types";
 import { bootstrap } from "./bootstrap";
@@ -44,6 +47,9 @@ import { dunningStatus } from "./dunning-status";
 import { changeDate } from "./change-date";
 import { orderNow } from "./order-now";
 import { submitBanRequest } from "./ban-request";
+import { loyaltyBalance } from "./loyalty-balance";
+import { loyaltyRedeem } from "./loyalty-redeem";
+import { loyaltyApplyToSubscription } from "./loyalty-apply-subscription";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -79,4 +85,13 @@ export const routeMap: Record<string, RouteHandler> = {
   submitbanrequest: submitBanRequest,
   submitBanRequest,
   submit_ban_request: submitBanRequest,
+  loyaltybalance: loyaltyBalance,
+  loyaltyBalance,
+  loyalty_balance: loyaltyBalance,
+  loyaltyredeem: loyaltyRedeem,
+  loyaltyRedeem,
+  loyalty_redeem: loyaltyRedeem,
+  loyaltyapplytosubscription: loyaltyApplyToSubscription,
+  loyaltyApplyToSubscription,
+  loyalty_apply_to_subscription: loyaltyApplyToSubscription,
 };

@@ -394,6 +394,8 @@ function AddressCard({ contract, showToast, onUpdate }) {
 function CouponCard({ contract, showToast, onUpdate }) {
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
+  const [loyalty, setLoyalty] = useState(null);
+  const [loyaltyBusy, setLoyaltyBusy] = useState(null);
 
   // Read applied coupon from contract
   const appliedCoupon = contract?.appliedDiscount || contract?.discount || null;
@@ -403,6 +405,15 @@ function CouponCard({ contract, showToast, onUpdate }) {
         ? appliedCoupon.value + '% off'
         : '$' + Number(appliedCoupon.value).toFixed(2) + ' off')
     : '';
+  const isLoyaltyCoupon = couponCode.startsWith('LOYALTY-');
+
+  // Load loyalty data when no coupon is applied
+  useEffect(() => {
+    if (couponCode) return;
+    requestJson('loyaltyBalance', {}, { force: true })
+      .then(resp => { if (resp?.ok && resp?.enabled) setLoyalty(resp); })
+      .catch(() => {});
+  }, [couponCode]);
 
   async function apply() {
     if (!code.trim()) return;
@@ -420,10 +431,49 @@ function CouponCard({ contract, showToast, onUpdate }) {
     try {
       await postJson('coupon', { contractId: contract.id, discountCode: couponCode, mode: 'remove' });
       showToast('Coupon removed.', 'success');
+      // If loyalty coupon, set status back to active
+      if (isLoyaltyCoupon) {
+        // Refresh loyalty data to reflect change
+        requestJson('loyaltyBalance', {}, { force: true })
+          .then(resp => { if (resp?.ok && resp?.enabled) setLoyalty(resp); })
+          .catch(() => {});
+      }
       clearCaches(); onUpdate();
     } catch { showToast('Could not remove coupon.', 'error'); }
     setBusy(false);
   }
+
+  async function applyLoyaltyCoupon(redemptionId) {
+    setLoyaltyBusy(redemptionId);
+    try {
+      const resp = await postJson('loyaltyApplyToSubscription', { contractId: contract.id, redemptionId });
+      if (resp?.ok) {
+        showToast(`$${resp.discount_value} loyalty coupon applied!`, 'success');
+        clearCaches(); onUpdate();
+      } else {
+        showToast(resp?.error || 'Could not apply.', 'error');
+      }
+    } catch (e) { showToast(e?.message || 'Failed.', 'error'); }
+    setLoyaltyBusy(null);
+  }
+
+  async function redeemAndApply(tierIndex) {
+    setLoyaltyBusy('tier-' + tierIndex);
+    try {
+      const resp = await postJson('loyaltyApplyToSubscription', { contractId: contract.id, tierId: tierIndex });
+      if (resp?.ok) {
+        showToast(`$${resp.discount_value} loyalty coupon redeemed and applied!`, 'success');
+        clearCaches(); onUpdate();
+      } else {
+        showToast(resp?.error || 'Could not redeem.', 'error');
+      }
+    } catch (e) { showToast(e?.message || 'Failed.', 'error'); }
+    setLoyaltyBusy(null);
+  }
+
+  const activeCoupons = loyalty?.unused_coupons?.filter(c => c.status === 'active') || [];
+  const affordableTiers = loyalty?.tiers?.filter(t => t.affordable) || [];
+  const showLoyalty = !couponCode && loyalty && (activeCoupons.length > 0 || affordableTiers.length > 0);
 
   return (
     <div class="sp-card sp-detail__card">
@@ -437,11 +487,34 @@ function CouponCard({ contract, showToast, onUpdate }) {
           <button class="sp-btn sp-btn--ghost sp-btn--sm" disabled={busy} onClick={remove}>Remove</button>
         </div>
       ) : (
-        <div class="sp-detail__coupon-row">
-          <input class="sp-input" placeholder="Discount code" value={code}
-            onInput={(e) => setCode(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') apply(); }} />
-          <button class="sp-btn sp-btn-primary" disabled={busy || !code.trim()} onClick={apply}>Apply</button>
-        </div>
+        <>
+          <div class="sp-detail__coupon-row">
+            <input class="sp-input" placeholder="Discount code" value={code}
+              onInput={(e) => setCode(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') apply(); }} />
+            <button class="sp-btn sp-btn-primary" disabled={busy || !code.trim()} onClick={apply}>Apply</button>
+          </div>
+          {showLoyalty && (
+            <div class="sp-loyalty__quick">
+              <div class="sp-loyalty__quick-title sp-muted">Use reward points</div>
+              {activeCoupons.map(c => (
+                <button key={c.id} type="button" class="sp-loyalty__quick-btn"
+                  disabled={loyaltyBusy != null}
+                  onClick={() => applyLoyaltyCoupon(c.id)}>
+                  {loyaltyBusy === c.id ? 'Applying\u2026' : `Apply $${Number(c.discount_value).toFixed(0)} coupon \u2014 ${c.code}`}
+                </button>
+              ))}
+              {activeCoupons.length === 0 && affordableTiers.map(t => (
+                <button key={t.index} type="button" class="sp-loyalty__quick-btn"
+                  disabled={loyaltyBusy != null}
+                  onClick={() => redeemAndApply(t.index)}>
+                  {loyaltyBusy === 'tier-' + t.index
+                    ? 'Redeeming\u2026'
+                    : `Redeem ${t.label} & apply \u2014 ${t.points_cost.toLocaleString()} pts`}
+                </button>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -631,7 +704,7 @@ export default function SubscriptionDetail() {
           {!isReadOnly && <FrequencyCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
         </div>
         <div class="sp-detail__col">
-          {!isCancelled && <RewardsCard />}
+          {!isCancelled && <RewardsCard contractId={shortId(contract.id)} />}
           {!isReadOnly && <CouponCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
           {!isReadOnly && <AddressCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
           {!isReadOnly && <ShippingProtectionCard contract={contract} shipLine={shipLine} onUpdate={handleUpdate} />}

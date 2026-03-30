@@ -1,42 +1,124 @@
-// cards/RewardsCard.jsx — Smile.io rewards integration
-import { useContext } from 'preact/hooks';
+// cards/RewardsCard.jsx — Interactive loyalty widget
+// Shows points balance, redemption tiers, and unused loyalty coupons
+import { useState, useEffect, useContext } from 'preact/hooks';
 import { PortalContext } from '../App.jsx';
+import { requestJson, postJson, clearCaches } from '../core/api.js';
 
-export default function RewardsCard() {
-  const { config } = useContext(PortalContext);
+function fmtDate(iso) {
+  if (!iso) return '';
+  try {
+    return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(iso));
+  } catch { return ''; }
+}
 
-  function openRewards() {
+function StatusBadge({ status }) {
+  if (status === 'active') {
+    return <span class="sp-loyalty__badge sp-loyalty__badge--active">Ready to use</span>;
+  }
+  if (status === 'applied') {
+    return <span class="sp-loyalty__badge sp-loyalty__badge--applied">Applied to subscription</span>;
+  }
+  return null;
+}
+
+export default function RewardsCard({ contractId, onCouponApplied }) {
+  const { showToast } = useContext(PortalContext);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(null); // tier index or 'redeem-{id}'
+
+  useEffect(() => {
+    requestJson('loyaltyBalance', {}, { force: true })
+      .then(resp => {
+        if (resp?.ok && resp?.enabled) setData(resp);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function redeemTier(tierIndex) {
+    setBusy(tierIndex);
     try {
-      if (window.SmileUI?.openPanel) { window.SmileUI.openPanel(); return; }
-    } catch {}
-    const url = config.rewardsUrl || '/pages/rewards';
-    window.location.href = url;
+      const resp = await postJson('loyaltyRedeem', { tierId: tierIndex });
+      if (resp?.ok) {
+        showToast(`Coupon ${resp.code} created! $${resp.discount_value} off.`, 'success');
+        // Refresh balance
+        const fresh = await requestJson('loyaltyBalance', {}, { force: true });
+        if (fresh?.ok && fresh?.enabled) setData(fresh);
+      } else {
+        showToast(resp?.error || 'Could not redeem.', 'error');
+      }
+    } catch (e) {
+      showToast(e?.message || 'Redemption failed.', 'error');
+    }
+    setBusy(null);
   }
 
+  if (loading || !data) return null;
+
+  const { points_balance, dollar_value, tiers, unused_coupons } = data;
+  const hasCoupons = unused_coupons?.length > 0;
+
   return (
-    <div class="sp-card sp-detail__card sp-rewards">
+    <div class="sp-card sp-detail__card sp-loyalty">
       <div class="sp-detail__sectionhead">
         <div class="sp-title2">Rewards</div>
         <p class="sp-muted sp-detail__section-sub">Your points and perks.</p>
       </div>
-      <div class="sp-rewards__banner">
-        <div class="sp-rewards__banner-icon" aria-hidden="true">{'\u2728'}</div>
-        <div class="sp-rewards__banner-text">
-          <div class="sp-rewards__banner-title">You've got rewards waiting</div>
-          <div class="sp-rewards__banner-sub sp-muted">
-            Redeem points for coupons and apply them to your subscription.
+
+      {/* Points balance */}
+      <div class="sp-loyalty__balance">
+        <div class="sp-loyalty__points">
+          You have <strong>{points_balance.toLocaleString()}</strong> reward points
+        </div>
+        {dollar_value > 0 && (
+          <div class="sp-loyalty__value sp-muted">
+            That's worth <strong>${dollar_value.toFixed(2)}</strong> in rewards
+          </div>
+        )}
+      </div>
+
+      {/* Redemption tiers */}
+      {tiers?.length > 0 && (
+        <div class="sp-loyalty__tiers">
+          <div class="sp-loyalty__tiers-title">Redeem your points</div>
+          <div class="sp-loyalty__tier-list">
+            {tiers.map((t, i) => (
+              <button key={i} type="button"
+                class={'sp-loyalty__tier' + (t.affordable ? '' : ' sp-loyalty__tier--disabled')}
+                disabled={!t.affordable || busy != null}
+                onClick={() => redeemTier(t.index)}>
+                <div class="sp-loyalty__tier-label">{t.label}</div>
+                <div class="sp-loyalty__tier-cost">
+                  {t.affordable
+                    ? `${t.points_cost.toLocaleString()} pts`
+                    : `Need ${t.points_needed.toLocaleString()} more`}
+                </div>
+                {busy === t.index && <div class="sp-loyalty__tier-busy">Redeeming\u2026</div>}
+              </button>
+            ))}
           </div>
         </div>
-        <div class="sp-rewards__pill">Save on your next order</div>
-      </div>
-      <div class="sp-detail__actions sp-detail__actions--stack sp-rewards__actions">
-        <button type="button" class="sp-btn sp-btn--primary sp-rewards__cta" onClick={openRewards}>
-          {'\uD83C\uDF89'} View My Points
-        </button>
-        <div class="sp-rewards__helper sp-muted">
-          Tip: applying a coupon here can reduce your next subscription charge instantly.
+      )}
+
+      {/* Unused coupons */}
+      {hasCoupons && (
+        <div class="sp-loyalty__coupons">
+          <div class="sp-loyalty__coupons-title">Your coupons</div>
+          {unused_coupons.map(c => (
+            <div key={c.id} class="sp-loyalty__coupon-row">
+              <div class="sp-loyalty__coupon-info">
+                <span class="sp-loyalty__coupon-code" title={c.code}>{c.code}</span>
+                <span class="sp-loyalty__coupon-val">${Number(c.discount_value).toFixed(0)} off</span>
+              </div>
+              <div class="sp-loyalty__coupon-meta">
+                <StatusBadge status={c.status} />
+                {c.expires_at && <span class="sp-loyalty__coupon-exp sp-muted">Exp {fmtDate(c.expires_at)}</span>}
+              </div>
+            </div>
+          ))}
         </div>
-      </div>
+      )}
     </div>
   );
 }

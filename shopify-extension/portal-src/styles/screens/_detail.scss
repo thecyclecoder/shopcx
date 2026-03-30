@@ -1054,3 +1054,200 @@
   margin-top: 2px;
   font-size: 14px;
 }
+
+/* =========================================================
+   Loyalty Widget
+========================================================= */
+
+.sp-loyalty__balance {
+  margin-top: 12px;
+  margin-bottom: 16px;
+}
+
+.sp-loyalty__points {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.sp-loyalty__value {
+  font-size: 15px;
+  margin-top: 4px;
+}
+
+.sp-loyalty__tiers {
+  margin-top: 16px;
+}
+
+.sp-loyalty__tiers-title {
+  font-weight: 700;
+  font-size: 15px;
+  margin-bottom: 10px;
+}
+
+.sp-loyalty__tier-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sp-loyalty__tier {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1.5px solid var(--sp-border, #e5e7eb);
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  text-align: left;
+}
+
+.sp-loyalty__tier:hover:not(:disabled) {
+  border-color: var(--sp-accent, #111);
+  background: rgba(17, 24, 39, 0.02);
+}
+
+.sp-loyalty__tier--disabled {
+  opacity: 0.5;
+  cursor: default;
+  background: #fafafa;
+}
+
+.sp-loyalty__tier-label {
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.sp-loyalty__tier-cost {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--sp-muted, #6b7280);
+}
+
+.sp-loyalty__tier-busy {
+  font-size: 13px;
+  color: var(--sp-muted, #6b7280);
+}
+
+.sp-loyalty__coupons {
+  margin-top: 16px;
+  border-top: 1px solid var(--sp-border, #e5e7eb);
+  padding-top: 14px;
+}
+
+.sp-loyalty__coupons-title {
+  font-weight: 700;
+  font-size: 15px;
+  margin-bottom: 10px;
+}
+
+.sp-loyalty__coupon-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.sp-loyalty__coupon-row:last-child {
+  border-bottom: none;
+}
+
+.sp-loyalty__coupon-info {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sp-loyalty__coupon-code {
+  font-weight: 600;
+  font-size: 14px;
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+
+.sp-loyalty__coupon-val {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--sp-success-text, #16a34a);
+  white-space: nowrap;
+}
+
+.sp-loyalty__coupon-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.sp-loyalty__coupon-exp {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.sp-loyalty__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sp-loyalty__badge--active {
+  background: rgba(22, 163, 74, 0.1);
+  color: #16a34a;
+}
+
+.sp-loyalty__badge--applied {
+  background: rgba(245, 158, 11, 0.1);
+  color: #d97706;
+}
+
+/* Quick-apply section in coupon card */
+.sp-loyalty__quick {
+  margin-top: 14px;
+  border-top: 1px solid var(--sp-border, #e5e7eb);
+  padding-top: 12px;
+}
+
+.sp-loyalty__quick-title {
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.sp-loyalty__quick-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--sp-border, rgba(0, 0, 0, 0.08));
+  background: rgba(22, 163, 74, 0.04);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  color: #16a34a;
+  transition: background 0.15s, border-color 0.15s;
+  margin-bottom: 6px;
+}
+
+.sp-loyalty__quick-btn:hover:not(:disabled) {
+  background: rgba(22, 163, 74, 0.08);
+  border-color: rgba(22, 163, 74, 0.2);
+}
+
+.sp-loyalty__quick-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
