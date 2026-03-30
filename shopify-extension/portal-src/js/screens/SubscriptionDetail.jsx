@@ -81,7 +81,9 @@ function ReactivateCard({ contract, showToast, onUpdate }) {
     try {
       await postJson('reactivate', { contractId: contract.id, nextBillingDate: selectedDate });
       showToast('Subscription reactivated!', 'success');
-      clearCaches(); setModal(false); onUpdate();
+      clearCaches(); setModal(false);
+      // Optimistic update — Appstle may be async so re-fetch could return stale cancelled status
+      onUpdate({ status: 'ACTIVE', nextBillingDate: selectedDate });
     } catch (e) {
       showToast(e?.message || 'Could not reactivate. Please try again.', 'error');
     }
@@ -613,9 +615,15 @@ export default function SubscriptionDetail() {
   }, [contractId]);
 
   // After any mutation: collapse disclosures + re-fetch
-  const handleUpdate = useCallback(() => {
+  const handleUpdate = useCallback((optimistic) => {
     setDisclosureKey(k => k + 1);
-    fetchContract();
+    if (optimistic && typeof optimistic === 'object') {
+      // Apply optimistic state change immediately, then background re-fetch
+      setContract(prev => prev ? normalizeContract({ ...prev, ...optimistic }) : prev);
+      setTimeout(() => fetchContract(), 3000);
+    } else {
+      fetchContract();
+    }
   }, [fetchContract]);
 
   // Optimistic lines update from replaceVariants patch
