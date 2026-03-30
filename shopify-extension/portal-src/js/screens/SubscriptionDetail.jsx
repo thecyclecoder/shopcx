@@ -63,6 +63,91 @@ function ResumeCard({ contract, onUpdate, showToast }) {
   );
 }
 
+function OrderActionsCard({ contract, showToast, onUpdate }) {
+  const [dateModal, setDateModal] = useState(false);
+  const [orderNowConfirm, setOrderNowConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [selectedDate, setSelectedDate] = useState('');
+
+  // Date bounds: tomorrow to 60 days out
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const maxDate = new Date();
+  maxDate.setDate(maxDate.getDate() + 60);
+  const minStr = tomorrow.toISOString().split('T')[0];
+  const maxStr = maxDate.toISOString().split('T')[0];
+
+  async function saveDate() {
+    if (!selectedDate || busy) return;
+    setBusy(true);
+    try {
+      await postJson('changeDate', { contractId: contract.id, nextBillingDate: selectedDate });
+      showToast('Next order date updated!', 'success');
+      clearCaches(); setDateModal(false); onUpdate();
+    } catch (e) {
+      showToast(e?.message || 'Could not update date.', 'error');
+    }
+    setBusy(false);
+  }
+
+  async function doOrderNow() {
+    setBusy(true);
+    try {
+      await postJson('orderNow', { contractId: contract.id });
+      showToast('Order placed! You\'ll receive a confirmation email shortly.', 'success');
+      clearCaches(); setOrderNowConfirm(false); onUpdate();
+    } catch (e) {
+      showToast(e?.message || 'Could not place order.', 'error');
+    }
+    setBusy(false);
+  }
+
+  const nextDate = contract.nextBillingDate ? fmtDate(contract.nextBillingDate) : null;
+
+  return (
+    <div class="sp-card sp-detail__card">
+      <div class="sp-detail__sectionhead">
+        <div class="sp-title2">Order actions</div>
+        {nextDate && <p class="sp-muted sp-detail__section-sub">Next order: {nextDate}</p>}
+      </div>
+      <div class="sp-detail__actions sp-detail__actions--stack">
+        <button class="sp-btn sp-btn-primary" disabled={busy} onClick={() => setOrderNowConfirm(true)}>
+          Order now
+        </button>
+        <button class="sp-btn sp-btn--ghost" disabled={busy} onClick={() => { setSelectedDate(''); setDateModal(true); }}>
+          Change next order date
+        </button>
+      </div>
+
+      {orderNowConfirm && (
+        <Modal title="Order now" onClose={() => setOrderNowConfirm(false)} footer={
+          <><button class="sp-btn sp-btn-primary" disabled={busy} onClick={doOrderNow}>
+            {busy ? 'Placing order\u2026' : 'Confirm'}
+          </button>
+          <button class="sp-btn sp-btn--ghost" onClick={() => setOrderNowConfirm(false)}>Cancel</button></>
+        }>
+          <p>This will process your next subscription order immediately. Your card on file will be charged.</p>
+        </Modal>
+      )}
+
+      {dateModal && (
+        <Modal title="Change next order date" onClose={() => setDateModal(false)} footer={
+          <><button class="sp-btn sp-btn-primary" disabled={busy || !selectedDate} onClick={saveDate}>
+            {busy ? 'Saving\u2026' : 'Save'}
+          </button>
+          <button class="sp-btn sp-btn--ghost" onClick={() => setDateModal(false)}>Cancel</button></>
+        }>
+          <div class="sp-detail__date-pick">
+            <label class="sp-muted">Select a new date (up to 60 days out)</label>
+            <input type="date" class="sp-input" min={minStr} max={maxStr} value={selectedDate}
+              onChange={(e) => setSelectedDate(e.target.value)} />
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing }) {
   const [open, setOpen] = useState(false);
   return (
@@ -426,6 +511,7 @@ export default function SubscriptionDetail() {
         <div class="sp-detail__col">
           {b === 'paused' && !isReadOnly && <ResumeCard contract={contract} onUpdate={fetchContract} showToast={showToast} />}
           {b === 'active' && !isReadOnly && <PauseCard contract={contract} onUpdate={fetchContract} showToast={showToast} />}
+          {b === 'active' && !isReadOnly && <OrderActionsCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
           <ItemsCard contract={contract} lines={lines} shipLine={shipLine} onUpdate={fetchContract} onPatchLines={patchLines} showToast={showToast} config={config} />
           {!isReadOnly && <FrequencyCard contract={contract} showToast={showToast} onUpdate={fetchContract} />}
         </div>

@@ -38,7 +38,7 @@ PUT /api/external/v2/subscription-contracts-update-billing-interval?contractId={
 PUT /api/external/v2/subscription-contracts-update-billing-date?contractId={id}&rescheduleFutureOrder=true&nextBillingDate={ISO8601}
 ```
 - **Response**: `204 No Content` (no body)
-- **Used in**: portal reactivate handler, dunning scripts
+- **Used in**: portal reactivate handler, portal change-date handler, dunning scripts
 
 ### Update Shipping Address
 ```
@@ -171,7 +171,7 @@ GET /api/external/v2/subscription-billing-attempts/top-orders?contractId={id}
 PUT /api/external/v2/subscription-billing-attempts/attempt-billing/{billingAttemptId}
 ```
 - **Response**: `204 No Content` (no body)
-- **Used in**: `src/lib/appstle.ts` → `appstleAttemptBilling()`
+- **Used in**: `src/lib/appstle.ts` → `appstleAttemptBilling()`, portal order-now handler, dashboard bill-now
 
 ### Skip Upcoming Order
 ```

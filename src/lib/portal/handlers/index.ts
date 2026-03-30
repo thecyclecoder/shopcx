@@ -21,6 +21,8 @@ export { frequency } from "./frequency";
 export { featuredReviews } from "./reviews";
 export { cancelJourney } from "./cancel-journey";
 export { dunningStatus } from "./dunning-status";
+export { changeDate } from "./change-date";
+export { orderNow } from "./order-now";
 
 import type { RouteHandler } from "@/lib/portal/types";
 import { bootstrap } from "./bootstrap";
@@ -38,6 +40,8 @@ import { frequency } from "./frequency";
 import { featuredReviews } from "./reviews";
 import { cancelJourney } from "./cancel-journey";
 import { dunningStatus } from "./dunning-status";
+import { changeDate } from "./change-date";
+import { orderNow } from "./order-now";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -64,4 +68,10 @@ export const routeMap: Record<string, RouteHandler> = {
   dunningstatus: dunningStatus,
   dunningStatus,
   dunning_status: dunningStatus,
+  changedate: changeDate,
+  changeDate,
+  change_date: changeDate,
+  ordernow: orderNow,
+  orderNow,
+  order_now: orderNow,
 };
