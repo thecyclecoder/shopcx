@@ -1,6 +1,7 @@
-api_version = "2026-01"
+api_version = "2025-07"
 
 [[extensions]]
+uid = "e4f5d875-ab79-4edd-e667-b6f78db2ce1f82eb47dd"
 type = "ui_extension"
 name = "Loyalty Rewards"
 handle = "loyalty-checkout"

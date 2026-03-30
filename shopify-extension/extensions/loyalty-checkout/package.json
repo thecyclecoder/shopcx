@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
-    "@shopify/ui-extensions-react": "2025.1.x",
-    "@shopify/ui-extensions": "2025.1.x",
+    "@shopify/ui-extensions-react": "2025.7.x",
+    "@shopify/ui-extensions": "2025.7.x",
     "react": "^18.0.0"
   }
 }
