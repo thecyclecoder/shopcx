@@ -108,7 +108,11 @@ async function setStatus(admin: Admin, params: Record<string, unknown>, context:
   if (!ticketId || !status) return;
 
   const updates: Record<string, unknown> = { status, updated_at: new Date().toISOString() };
-  if (status === "closed") updates.resolved_at = new Date().toISOString();
+  if (status === "closed") {
+    updates.resolved_at = new Date().toISOString();
+    updates.closed_at = new Date().toISOString();
+  }
+  if (status === "open") updates.closed_at = null;
   await admin.from("tickets").update(updates).eq("id", ticketId);
   if (context.ticket) context.ticket.status = status;
 }

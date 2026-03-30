@@ -67,7 +67,7 @@ export async function GET(
     admin.from("knowledge_base").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("published", true),
     admin.from("macros").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("active", true),
     admin.from("tickets").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("ai_handled", true),
-    admin.from("tickets").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "closed"),
+    admin.from("tickets").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).in("status", ["closed", "archived"]),
     cancelsRangeQ,
     cancelsPrevQ,
     failuresRangeQ,

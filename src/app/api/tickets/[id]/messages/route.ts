@@ -39,6 +39,11 @@ export async function POST(
 
   if (!ticket) return NextResponse.json({ error: "Ticket not found" }, { status: 404 });
 
+  // Archived tickets are read-only
+  if (ticket.status === "archived") {
+    return NextResponse.json({ error: "Archived tickets are read-only" }, { status: 400 });
+  }
+
   // Create message
   const message: Record<string, unknown> = {
     ticket_id: ticketId,

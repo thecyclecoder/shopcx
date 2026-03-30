@@ -195,12 +195,22 @@ export async function PATCH(
 
   if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
+  // Archived tickets are permanently read-only
+  if (existing.status === "archived") {
+    return NextResponse.json({ error: "Archived tickets cannot be modified" }, { status: 400 });
+  }
+
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
 
   if ("status" in body) {
     updates.status = body.status;
     if (body.status === "closed" && existing.status !== "closed") {
       updates.resolved_at = new Date().toISOString();
+      updates.closed_at = new Date().toISOString();
+    }
+    // Re-opening a closed ticket resets the archive clock
+    if (body.status === "open" && existing.status === "closed") {
+      updates.closed_at = null;
     }
     // Fire CSAT event when ticket is closed
     if (body.status === "closed" && existing.status !== "closed") {

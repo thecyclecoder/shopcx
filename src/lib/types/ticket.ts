@@ -1,5 +1,5 @@
 export type TicketChannel = "email" | "chat" | "meta_dm" | "sms";
-export type TicketStatus = "open" | "pending" | "closed";
+export type TicketStatus = "open" | "pending" | "closed" | "archived";
 export type MessageDirection = "inbound" | "outbound";
 export type MessageVisibility = "external" | "internal";
 export type MessageAuthorType = "customer" | "agent" | "ai" | "system";
@@ -28,6 +28,8 @@ export interface Ticket {
   last_customer_reply_at: string | null;
   first_response_at: string | null;
   resolved_at: string | null;
+  closed_at: string | null;
+  archived_at: string | null;
   csat_score: number | null;
   snoozed_until: string | null;
   tags: string[];

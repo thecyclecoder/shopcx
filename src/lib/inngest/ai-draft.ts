@@ -165,7 +165,7 @@ export const aiDraftTicket = inngest.createFunction(
         const admin = createAdminClient();
         const { data: ticket } = await admin.from("tickets").select("status").eq("id", ticket_id).single();
         if (ticket?.status === "pending") {
-          await admin.from("tickets").update({ status: "closed", resolved_at: new Date().toISOString() }).eq("id", ticket_id);
+          await admin.from("tickets").update({ status: "closed", resolved_at: new Date().toISOString(), closed_at: new Date().toISOString() }).eq("id", ticket_id);
         }
       });
 

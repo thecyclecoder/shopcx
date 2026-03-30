@@ -346,7 +346,10 @@ async function sendReply(admin: Admin, context: WorkflowContext, templateText: s
   // Update ticket status — use the workflow's own status config per step
   const statusAfterReply = (statusOverride as string) || "closed";
   const statusUpdates: Record<string, unknown> = { status: statusAfterReply, auto_reply_at: null, pending_auto_reply: null, updated_at: new Date().toISOString() };
-  if (statusAfterReply === "closed") statusUpdates.resolved_at = new Date().toISOString();
+  if (statusAfterReply === "closed") {
+    statusUpdates.resolved_at = new Date().toISOString();
+    statusUpdates.closed_at = new Date().toISOString();
+  }
   await admin.from("tickets").update(statusUpdates).eq("id", context.ticketId);
 
   // Mark first touch

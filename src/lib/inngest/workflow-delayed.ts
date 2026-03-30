@@ -130,6 +130,7 @@ export const positiveCloseDelayed = inngest.createFunction(
         auto_reply_at: null,
         pending_auto_reply: null,
         resolved_at: new Date().toISOString(),
+        closed_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }).eq("id", ticket_id);
     });

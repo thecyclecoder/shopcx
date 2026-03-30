@@ -36,7 +36,14 @@ export async function GET(request: Request) {
     )
     .eq("workspace_id", workspaceId);
 
-  if (status && status !== "all") query = query.eq("status", status);
+  if (status === "archived") {
+    query = query.eq("status", "archived");
+  } else if (status && status !== "all") {
+    query = query.eq("status", status);
+  } else {
+    // Default: exclude archived tickets
+    query = query.neq("status", "archived");
+  }
   if (channel && channel !== "all") query = query.eq("channel", channel);
   if (assignedTo === "__ai_agent") {
     query = query.eq("handled_by", "AI Agent");

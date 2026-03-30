@@ -99,11 +99,13 @@ interface TicketDetail extends Ticket {
 }
 
 const STATUS_OPTIONS: TicketStatus[] = ["open", "pending", "closed"];
+const STATUS_OPTIONS_WITH_ARCHIVED: TicketStatus[] = ["open", "pending", "closed", "archived"];
 
 const STATUS_COLORS: Record<string, string> = {
   open: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
   pending: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   closed: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
+  archived: "bg-zinc-50 text-zinc-400 dark:bg-zinc-900 dark:text-zinc-500",
 };
 
 function StatusBadge({ status }: { status: string }) {
@@ -703,6 +705,13 @@ export default function TicketDetailPage() {
             )}
           </div>
 
+          {/* Archived banner */}
+          {ticket.status === "archived" && (
+            <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400">
+              This ticket was archived on {ticket.archived_at ? new Date(ticket.archived_at).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "unknown date"}. Archived tickets are read-only.
+            </div>
+          )}
+
           {/* Tags */}
           <div className="mt-2 flex flex-wrap items-center gap-1">
             {(ticket.tags || []).map((tag) => {
@@ -716,6 +725,7 @@ export default function TicketDetailPage() {
                 }`}>
                   {isSmart && <svg className="mr-0.5 h-2.5 w-2.5" fill="currentColor" viewBox="0 0 20 20"><path d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" /></svg>}
                   {displayTag}
+                  {ticket.status !== "archived" && (
                   <button
                     onClick={async () => {
                       if (isSmart) {
@@ -728,9 +738,11 @@ export default function TicketDetailPage() {
                     }}
                     className={`ml-0.5 ${isSmart ? "text-violet-400 hover:text-violet-600" : "text-indigo-400 hover:text-indigo-600"}`}
                   >x</button>
+                  )}
                 </span>
               );
             })}
+            {ticket.status !== "archived" && (
             <div className="relative inline-flex">
               <form onSubmit={async (e) => {
                 e.preventDefault();
@@ -796,6 +808,7 @@ export default function TicketDetailPage() {
                 );
               })()}
             </div>
+            )}
           </div>
 
           {/* Smart tag removal feedback */}
@@ -1119,7 +1132,7 @@ export default function TicketDetailPage() {
         )}
 
         {/* AI + Macro toolbar */}
-        {ticket.status !== "closed" && (
+        {ticket.status !== "closed" && ticket.status !== "archived" && (
           <div className="shrink-0 flex items-center gap-2 border-t border-zinc-100 bg-zinc-50 px-4 py-2 dark:border-zinc-800 dark:bg-zinc-900/50">
             {!aiDraft?.ai_draft && (
               <button
@@ -1218,7 +1231,9 @@ export default function TicketDetailPage() {
           </div>
         )}
 
-        {/* Reply composer — pinned to bottom */}
+        {/* Reply composer — pinned to bottom (hidden for archived tickets) */}
+        {ticket.status !== "archived" && (
+        <>
         <div className={`shrink-0 border-t border-zinc-200 bg-white pb-4 dark:border-zinc-800 dark:bg-zinc-900 ${editorFocused ? "px-3 pt-3" : "px-3 pt-2"}`}>
           <form onSubmit={handleSend}>
             {/* Mode toggle row */}
@@ -1359,13 +1374,15 @@ export default function TicketDetailPage() {
             )}
           </form>
         </div>
+        </>
+        )}
       </div>
 
       {/* Right column - details */}
       <div className={`w-full shrink-0 overflow-y-auto border-t border-zinc-200 bg-zinc-50 p-6 md:w-80 md:border-l md:border-t-0 dark:border-zinc-800 dark:bg-zinc-950 ${mobileSection === "conversation" ? "hidden md:block" : ""}`}>
-        {/* Actions card */}
+        {/* Actions card (hidden for archived) */}
         <div className={`${mobileSection !== "actions" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
-        {(availableWorkflows.length > 0 || (!(ticket.tags || []).some(t => t.startsWith("smart:")) && !patternSuggestion)) && (
+        {ticket.status !== "archived" && (availableWorkflows.length > 0 || (!(ticket.tags || []).some(t => t.startsWith("smart:")) && !patternSuggestion)) && (
           <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 p-4 dark:border-indigo-800 dark:bg-indigo-950">
             <h3 className="text-xs font-medium uppercase tracking-wider text-indigo-600 dark:text-indigo-400">Actions</h3>
             <div className="mt-3 space-y-3">
@@ -1655,6 +1672,9 @@ export default function TicketDetailPage() {
           <div className="mt-3 space-y-3">
             <div>
               <label className="block text-sm text-zinc-500">Status</label>
+              {ticket.status === "archived" ? (
+                <div className="mt-1 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-sm text-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-500">Archived</div>
+              ) : (
               <select
                 value={ticket.status}
                 onChange={(e) => handlePatch({ status: e.target.value })}
@@ -1664,6 +1684,7 @@ export default function TicketDetailPage() {
                   <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>
                 ))}
               </select>
+              )}
             </div>
             <div>
               <label className="block text-sm text-zinc-500">Assigned To</label>
@@ -1686,7 +1707,8 @@ export default function TicketDetailPage() {
               <select
                 value={ticket.assigned_to || ""}
                 onChange={(e) => handlePatch({ assigned_to: e.target.value || null, handled_by: null })}
-                className="mt-1 w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                disabled={ticket.status === "archived"}
+                className="mt-1 w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
               >
                 <option value="">Unassigned</option>
                 {members.map((m) => (

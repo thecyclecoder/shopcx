@@ -183,6 +183,19 @@ export async function POST(request: Request) {
     }
   }
 
+  // If matched ticket is archived, create a new ticket instead of threading
+  if (ticketId) {
+    const { data: matchedTicket } = await admin
+      .from("tickets")
+      .select("status")
+      .eq("id", ticketId)
+      .single();
+
+    if (matchedTicket?.status === "archived") {
+      ticketId = null;
+    }
+  }
+
   if (ticketId) {
     // Strip quoted reply content (the previous message) from the body
     const cleanBody = stripQuotedReply(messageBody) || messageBody;
@@ -211,6 +224,7 @@ export async function POST(request: Request) {
     if (ticket && (ticket.status === "pending" || ticket.status === "closed")) {
       await admin.from("tickets").update({
         status: "open",
+        closed_at: null, // Reset archive clock on reopen
         last_customer_reply_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }).eq("id", ticketId);

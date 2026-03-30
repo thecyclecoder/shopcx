@@ -136,6 +136,7 @@ export async function POST(request: Request) {
     };
     if (ticket && (ticket.status === "pending" || ticket.status === "closed")) {
       statusUpdate.status = "open";
+      statusUpdate.closed_at = null;
     }
     await admin.from("tickets").update(statusUpdate).eq("id", ticketId);
 

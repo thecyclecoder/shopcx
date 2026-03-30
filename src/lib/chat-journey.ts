@@ -131,7 +131,10 @@ async function sendEmailJourneyCTA(
   const status = ctx.stepTicketStatus;
   if (status && status !== "open") {
     const updates: Record<string, unknown> = { status };
-    if (status === "closed") updates.resolved_at = new Date().toISOString();
+    if (status === "closed") {
+      updates.resolved_at = new Date().toISOString();
+      updates.closed_at = new Date().toISOString();
+    }
     await ctx.admin.from("tickets").update(updates).eq("id", ctx.ticketId);
   }
 
@@ -156,7 +159,10 @@ async function sendChatMessage(ctx: JourneyContext, body: string) {
   const status = ctx.stepTicketStatus;
   if (status && status !== "open") {
     const updates: Record<string, unknown> = { status };
-    if (status === "closed") updates.resolved_at = new Date().toISOString();
+    if (status === "closed") {
+      updates.resolved_at = new Date().toISOString();
+      updates.closed_at = new Date().toISOString();
+    }
     await ctx.admin.from("tickets").update(updates).eq("id", ctx.ticketId);
   }
 

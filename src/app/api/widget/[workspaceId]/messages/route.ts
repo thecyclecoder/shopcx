@@ -79,12 +79,13 @@ export async function POST(
         .eq("id", session.ticket_id)
         .single();
 
-      if (ticket && ticket.channel === "chat") {
+      if (ticket && ticket.channel === "chat" && ticket.status !== "archived") {
         ticketId = ticket.id;
         // Reopen if closed (customer reply reopens the conversation)
         if (ticket.status === "closed") {
           await admin.from("tickets").update({
             status: "open",
+            closed_at: null,
             last_customer_reply_at: new Date().toISOString(),
           }).eq("id", ticket.id);
         }

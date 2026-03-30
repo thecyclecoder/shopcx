@@ -38,6 +38,7 @@ import {
   dunningBillingSuccess,
 } from "@/lib/inngest/dunning";
 import { portalAutoResume } from "@/lib/inngest/portal-auto-resume";
+import { ticketAutoArchive } from "@/lib/inngest/auto-archive";
 
 export const maxDuration = 300;
 
@@ -78,5 +79,6 @@ export const { GET, POST, PUT } = serve({
     dunningNewCardRecovery,
     dunningBillingSuccess,
     portalAutoResume,
+    ticketAutoArchive,
   ],
 });

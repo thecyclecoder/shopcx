@@ -28,13 +28,14 @@ interface Member {
   email: string | null;
 }
 
-const STATUS_OPTIONS = ["all", "open", "pending", "closed"] as const;
+const STATUS_OPTIONS = ["all", "open", "pending", "closed", "archived"] as const;
 const CHANNEL_OPTIONS = ["all", "email", "chat", "help_center", "social_comments", "meta_dm", "sms"] as const;
 
 const STATUS_COLORS: Record<string, string> = {
   open: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
   pending: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   closed: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
+  archived: "bg-zinc-50 text-zinc-400 dark:bg-zinc-900 dark:text-zinc-500",
 };
 
 function StatusBadge({ status }: { status: string }) {

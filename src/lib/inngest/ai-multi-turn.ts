@@ -130,6 +130,7 @@ export const aiMultiTurn = inngest.createFunction(
           await admin.from("tickets").update({
             status: "closed",
             resolved_at: new Date().toISOString(),
+            closed_at: new Date().toISOString(),
             auto_reply_at: null,
             pending_auto_reply: null,
           }).eq("id", ticket_id);
@@ -1125,6 +1126,7 @@ export const aiMultiTurn = inngest.createFunction(
       await admin.from("tickets").update({
         status: shouldClose ? "closed" : "open",
         resolved_at: shouldClose ? new Date().toISOString() : undefined,
+        closed_at: shouldClose ? new Date().toISOString() : null,
         ai_turn_count: finalContext.turnCount + 1,
         last_ai_turn_at: new Date().toISOString(),
         handled_by: "AI Agent",
