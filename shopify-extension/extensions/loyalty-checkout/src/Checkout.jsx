@@ -1,6 +1,6 @@
 import {
   reactExtension,
-  useAuthenticatedAccountCustomer,
+  useCustomer,
   useApplyDiscountCodeChange,
   useShop,
   useSettings,
@@ -19,7 +19,7 @@ export default reactExtension("purchase.checkout.block.render", () => (
 ));
 
 function LoyaltyRewards() {
-  const customer = useAuthenticatedAccountCustomer();
+  const customer = useCustomer();
   const applyDiscountCode = useApplyDiscountCodeChange();
   const shop = useShop();
   const settings = useSettings();
