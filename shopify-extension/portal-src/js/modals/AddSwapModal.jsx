@@ -68,7 +68,7 @@ function Stars({ value, count }) {
   );
 }
 
-export default function AddSwapModal({ mode, contract, line, catalog, onClose, onDone, totalRealQty }) {
+export default function AddSwapModal({ mode, contract, line, catalog, onClose, onDone, onPatchLines, totalRealQty }) {
   const { showToast } = useContext(PortalContext);
   const [step, setStep] = useState(1);
   const [selectedProduct, setSelectedProduct] = useState(null);
@@ -90,10 +90,14 @@ export default function AddSwapModal({ mode, contract, line, catalog, onClose, o
       if (isSwap && line) {
         payload.oldLineId = safeStr(line.id);
       }
-      await postJson('replaceVariants', payload);
+      const resp = await postJson('replaceVariants', payload);
       showToast(isSwap ? 'Item swapped!' : 'Item added!', 'success');
       clearCaches();
-      onDone?.();
+      if (resp?.patch?.lines && Array.isArray(resp.patch.lines) && onPatchLines) {
+        onPatchLines(resp.patch.lines);
+      } else {
+        onDone?.();
+      }
       onClose();
     } catch (e) {
       showToast(e?.message || 'Something went wrong.', 'error');

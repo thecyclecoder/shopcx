@@ -5,7 +5,7 @@ import { postJson, clearCaches } from '../core/api.js';
 import { safeStr } from '../core/utils.js';
 import Modal from '../components/Modal.jsx';
 
-export default function QuantityModal({ contract, line, onClose, onDone }) {
+export default function QuantityModal({ contract, line, onClose, onDone, onPatchLines }) {
   const { showToast } = useContext(PortalContext);
   const initialQty = line?.quantity || 1;
   const [qty, setQty] = useState(initialQty);
@@ -23,14 +23,18 @@ export default function QuantityModal({ contract, line, onClose, onDone }) {
     }
     setBusy(true);
     try {
-      await postJson('replaceVariants', {
+      const resp = await postJson('replaceVariants', {
         contractId: contract.id,
         oldLineId: safeStr(line?.id),
         newVariants: [{ variantId: safeStr(line?.variantId), quantity: qty }],
       });
       showToast('Quantity updated!', 'success');
       clearCaches();
-      onDone?.();
+      if (resp?.patch?.lines && Array.isArray(resp.patch.lines) && onPatchLines) {
+        onPatchLines(resp.patch.lines);
+      } else {
+        onDone?.();
+      }
       onClose();
     } catch (e) {
       showToast(e?.message || 'Could not update quantity.', 'error');

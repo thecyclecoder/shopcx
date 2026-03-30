@@ -179,11 +179,11 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
       {modal?.type === 'addSwap' && (
         <AddSwapModal mode={modal.mode} contract={contract} line={modal.line}
           catalog={config.catalog} totalRealQty={totalRealQty}
-          onClose={() => setModal(null)} onDone={onUpdate} />
+          onClose={() => setModal(null)} onDone={onUpdate} onPatchLines={onPatchLines} />
       )}
       {modal?.type === 'quantity' && (
         <QuantityModal contract={contract} line={modal.line}
-          onClose={() => setModal(null)} onDone={onUpdate} />
+          onClose={() => setModal(null)} onDone={onUpdate} onPatchLines={onPatchLines} />
       )}
     </div>
   );
