@@ -24,3 +24,16 @@ redirect_urls = [ ]
 url = "https://shopcx.ai/api/portal"
 subpath = "portal-v2"
 prefix = "apps"
+
+# Loyalty checkout UI extension
+[[extensions]]
+type = "checkout_ui_extension"
+name = "Loyalty Rewards"
+handle = "loyalty-checkout"
+
+[extensions.settings]
+[[extensions.settings.fields]]
+key = "api_endpoint"
+type = "single_line_text_field"
+name = "API Endpoint"
+description = "Base URL for loyalty API"

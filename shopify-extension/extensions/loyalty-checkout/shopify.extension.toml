@@ -1,0 +1,18 @@
+type = "ui_extension"
+name = "Loyalty Rewards"
+handle = "loyalty-checkout"
+
+[[extensions.targeting]]
+module = "./src/Checkout.jsx"
+target = "purchase.checkout.block.render"
+
+[extensions.capabilities]
+api_access = true
+network_access = true
+
+[extensions.settings]
+[[extensions.settings.fields]]
+key = "api_endpoint"
+type = "single_line_text_field"
+name = "API Endpoint"
+description = "Base URL for loyalty API (e.g., https://shopcx.ai)"

@@ -230,6 +230,17 @@ export default function TicketDetailPage() {
   const [allMacros, setAllMacros] = useState<{ id: string; name: string; body_text: string; category: string | null; usage_count: number }[]>([]);
   const [currentUser, setCurrentUser] = useState<{ id: string; name: string } | null>(null);
 
+  // Loyalty state
+  const [loyaltyMember, setLoyaltyMember] = useState<{
+    id: string; points_balance: number; points_earned: number; points_spent: number;
+  } | null>(null);
+  const [loyaltySettings, setLoyaltySettings] = useState<{
+    enabled: boolean;
+    redemption_tiers: { label: string; points_cost: number; discount_value: number }[];
+  } | null>(null);
+  const [redeeming, setRedeeming] = useState(false);
+  const [redeemResult, setRedeemResult] = useState<string | null>(null);
+
   // Fetch current user for presence
   useEffect(() => {
     const supabase = createClient();
@@ -309,6 +320,18 @@ export default function TicketDetailPage() {
         fetch(`/api/customers/${data.customer.id}/suggestions`)
           .then((r) => r.json())
           .then((s) => setLinkSuggestions(s.suggestions || []))
+          .catch(() => {});
+      }
+
+      // Load loyalty data for customer
+      if (data.customer) {
+        fetch(`/api/loyalty/members?workspace_id=${workspace.id}&customer_id=${data.customer.id}&limit=1`)
+          .then((r) => r.json())
+          .then((d) => { if (d.members?.[0]) setLoyaltyMember(d.members[0]); })
+          .catch(() => {});
+        fetch(`/api/workspaces/${workspace.id}/loyalty`)
+          .then((r) => r.json())
+          .then((d) => { if (d.enabled) setLoyaltySettings(d); })
           .catch(() => {});
       }
 
@@ -1933,6 +1956,70 @@ export default function TicketDetailPage() {
                         )}
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Loyalty */}
+              {loyaltyMember && loyaltySettings && (
+                <div className="pt-2">
+                  <p className="text-sm font-medium text-zinc-500">Loyalty</p>
+                  <div className="mt-1 rounded bg-zinc-50 px-2 py-1.5 dark:bg-zinc-800">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-zinc-500">Points</span>
+                      <span className="text-sm font-semibold text-purple-600 dark:text-purple-400">
+                        {loyaltyMember.points_balance.toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="mt-2 space-y-1">
+                      {loyaltySettings.redemption_tiers.map((tier, idx) => {
+                        const affordable = loyaltyMember.points_balance >= tier.points_cost;
+                        return (
+                          <button
+                            key={idx}
+                            disabled={!affordable || redeeming}
+                            onClick={async () => {
+                              setRedeeming(true);
+                              setRedeemResult(null);
+                              try {
+                                const res = await fetch("/api/loyalty/redeem", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({
+                                    workspace_id: workspace.id,
+                                    member_id: loyaltyMember.id,
+                                    tier_index: idx,
+                                  }),
+                                });
+                                const data = await res.json();
+                                if (res.ok) {
+                                  setRedeemResult(`Code: ${data.code}`);
+                                  setLoyaltyMember((prev) => prev ? { ...prev, points_balance: data.new_balance } : prev);
+                                } else {
+                                  setRedeemResult(data.error || "Failed");
+                                }
+                              } catch {
+                                setRedeemResult("Failed");
+                              }
+                              setRedeeming(false);
+                            }}
+                            className={`flex w-full items-center justify-between rounded px-2 py-1 text-sm transition-colors ${
+                              affordable
+                                ? "bg-purple-50 text-purple-700 hover:bg-purple-100 dark:bg-purple-900/20 dark:text-purple-400 dark:hover:bg-purple-900/30"
+                                : "bg-zinc-100 text-zinc-400 dark:bg-zinc-700 dark:text-zinc-500"
+                            }`}
+                          >
+                            <span>{tier.label}</span>
+                            <span className="text-sm">{tier.points_cost.toLocaleString()} pts</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {redeemResult && (
+                      <p className={`mt-1.5 text-sm font-medium ${redeemResult.startsWith("Code:") ? "text-emerald-600 dark:text-emerald-400" : "text-red-500"}`}>
+                        {redeemResult}
+                      </p>
+                    )}
                   </div>
                 </div>
               )}

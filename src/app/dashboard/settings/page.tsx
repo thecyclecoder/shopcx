@@ -170,6 +170,19 @@ export default function SettingsPage() {
         </Link>
 
         <Link
+          href="/dashboard/settings/loyalty"
+          className="flex items-center justify-between rounded-lg border border-purple-200 bg-purple-50 p-5 transition-colors hover:border-purple-300 dark:border-purple-800 dark:bg-purple-950 dark:hover:border-purple-700"
+        >
+          <div>
+            <h2 className="text-sm font-medium text-purple-900 dark:text-purple-100">Loyalty</h2>
+            <p className="mt-1 text-sm text-purple-600 dark:text-purple-400">Points program settings, redemption tiers, provider configuration</p>
+          </div>
+          <svg className="h-5 w-5 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+
+        <Link
           href="/dashboard/settings/chat-widget"
           className="flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 p-5 transition-colors hover:border-emerald-300 dark:border-emerald-800 dark:bg-emerald-950 dark:hover:border-emerald-700"
         >
