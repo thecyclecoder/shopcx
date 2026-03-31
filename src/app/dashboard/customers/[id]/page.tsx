@@ -201,7 +201,7 @@ export default function CustomerDetailPage() {
   const [showStoreCreditModal, setShowStoreCreditModal] = useState(false);
   const [storeCreditHistory, setStoreCreditHistory] = useState<{ id: string; type: string; amount: number; reason: string | null; issued_by_name: string; balance_after: number | null; created_at: string; ticket_id: string | null }[]>([]);
   const [showCreditHistory, setShowCreditHistory] = useState(false);
-  const [loyaltyMember, setLoyaltyMember] = useState<{ points_balance: number; points_earned: number; points_spent: number } | null>(null);
+  const [loyaltyMember, setLoyaltyMember] = useState<{ id: string; points_balance: number; points_earned: number; points_spent: number } | null>(null);
   const [loyaltyTiers, setLoyaltyTiers] = useState<{ label: string; points_cost: number; discount_value: number; affordable: boolean }[]>([]);
   const [loyaltyRedeeming, setLoyaltyRedeeming] = useState(false);
   const [loyaltyRedeemTier, setLoyaltyRedeemTier] = useState("");
@@ -266,11 +266,7 @@ export default function CustomerDetailPage() {
       fetch(`/api/workspaces/${workspace.id}/loyalty`)
         .then(r => r.json())
         .then(d => {
-          if (d.redemption_tiers) {
-            setLoyaltyTiers(d.redemption_tiers.map((t: { label: string; points_cost: number; discount_value: number }) => ({
-              ...t, affordable: (loyaltyMember?.points_balance || 0) >= t.points_cost
-            })));
-          }
+          if (d.redemption_tiers) setLoyaltyTiers(d.redemption_tiers);
         })
         .catch(() => {});
     }
@@ -1021,11 +1017,14 @@ export default function CustomerDetailPage() {
               <select value={loyaltyRedeemTier} onChange={(e) => setLoyaltyRedeemTier(e.target.value)}
                 className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
                 <option value="">Redeem points...</option>
-                {loyaltyTiers.map((t, i) => (
-                  <option key={i} value={String(i)} disabled={!t.affordable}>
-                    {t.label} — {t.points_cost.toLocaleString()} pts{!t.affordable ? " (insufficient)" : ""}
-                  </option>
-                ))}
+                {loyaltyTiers.map((t, i) => {
+                  const canAfford = (loyaltyMember?.points_balance || 0) >= t.points_cost;
+                  return (
+                    <option key={i} value={String(i)} disabled={!canAfford}>
+                      {t.label} — {t.points_cost.toLocaleString()} pts{!canAfford ? " (insufficient)" : ""}
+                    </option>
+                  );
+                })}
               </select>
               <button disabled={!loyaltyRedeemTier || loyaltyRedeeming} onClick={async () => {
                 setLoyaltyRedeeming(true);
@@ -1033,7 +1032,7 @@ export default function CustomerDetailPage() {
                 try {
                   const res = await fetch("/api/loyalty/redeem", {
                     method: "POST", headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ customer_id: id, tier_index: parseInt(loyaltyRedeemTier) }),
+                    body: JSON.stringify({ workspace_id: workspace.id, member_id: (loyaltyMember as Record<string, unknown>)?.id, tier_index: parseInt(loyaltyRedeemTier) }),
                   });
                   const data = await res.json();
                   if (data.ok) {
