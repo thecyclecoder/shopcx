@@ -267,7 +267,7 @@ export const chargebackReceived = inngest.createFunction(
 
       // Slack notification
       dispatchSlackNotification(workspaceId, "chargeback", {
-        customer: { name: customer?.first_name, email: customer?.email },
+        customer: { email: cb.email || "" },
         amount: amountStr,
         reason: cb.reason || "unknown",
         orderId: orderLabel,

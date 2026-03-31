@@ -278,7 +278,7 @@ export const dunningPaymentFailed = inngest.createFunction(
 
     // Slack notification for exhausted dunning
     dispatchSlackNotification(workspace_id, "dunning_failed", {
-      customer: { email: customer_email || "" },
+      customer: { email: "" },
       attempts: cycle.cycle_number || 0,
     }).catch(() => {});
 
