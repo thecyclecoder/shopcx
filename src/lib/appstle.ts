@@ -205,14 +205,14 @@ export async function appstleSkipUpcomingOrder(
 
   try {
     const res = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/skip-upcoming-order?contractId=${contractId}`,
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/skip-upcoming-order?contractId=${contractId}&shop=${creds.shop}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
 
     if (!res.ok && res.status !== 204) {
       const text = await res.text();
       console.error(`Appstle skip upcoming order error for contract ${contractId}:`, text);
-      return { success: false, error: `Appstle API error: ${res.status}` };
+      return { success: false, error: text || `Appstle API error: ${res.status}` };
     }
 
     return { success: true };

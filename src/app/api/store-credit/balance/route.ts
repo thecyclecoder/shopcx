@@ -29,6 +29,11 @@ export async function GET(request: Request) {
     return NextResponse.json({ balance: 0, currency: "USD" });
   }
 
-  const result = await getStoreCreditBalance(workspaceId, customer.shopify_customer_id);
-  return NextResponse.json(result);
+  try {
+    const result = await getStoreCreditBalance(workspaceId, customer.shopify_customer_id);
+    return NextResponse.json(result);
+  } catch (err) {
+    console.error("[store-credit/balance] error:", err);
+    return NextResponse.json({ balance: 0, currency: "USD" });
+  }
 }

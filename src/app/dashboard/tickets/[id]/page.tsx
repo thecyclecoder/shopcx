@@ -500,7 +500,16 @@ export default function TicketDetailPage() {
         setSubActionResult({ subId, message: res.ok ? `${action.replace(/_/g, " ")} successful` : (data.error || "Failed"), success: res.ok });
       }
       setSubActionPanel(null);
-      // Refresh customer data
+      // Post system message to conversation for successful actions
+      if (subActionResult?.success !== false) {
+        const actionLabel = action.replace(/_/g, " ");
+        await fetch(`/api/tickets/${id}/messages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ body: `${actionLabel} completed on subscription`, visibility: "internal", author_type: "system" }),
+        }).catch(() => {});
+      }
+      // Refresh customer data + messages
       const refreshRes = await fetch(`/api/tickets/${id}`);
       if (refreshRes.ok) {
         const refreshData = await refreshRes.json();
@@ -2117,21 +2126,21 @@ export default function TicketDetailPage() {
                   {(sub.status === "active" || sub.status === "paused") && (
                     <div className="mt-2 border-t border-zinc-200 pt-2 dark:border-zinc-700">
                       {subActionPanel?.subId !== sub.id ? (
-                        <div className="flex flex-wrap gap-1">
+                        <div className="flex flex-col gap-1.5">
                           {sub.status === "active" && (
                             <>
-                              <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "skip" }); }} className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Skip</button>
-                              <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "bill_now" }); }} className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Order Now</button>
-                              <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "pause_30" }); }} className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Pause 30</button>
-                              <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "pause_60" }); }} className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Pause 60</button>
+                              <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "skip" }); }} className="w-full rounded-md bg-zinc-100 px-3 py-2 text-left text-sm font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Skip Next Order</button>
+                              <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "bill_now" }); }} className="w-full rounded-md bg-zinc-100 px-3 py-2 text-left text-sm font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Order Now</button>
+                              <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "pause_30" }); }} className="w-full rounded-md bg-zinc-100 px-3 py-2 text-left text-sm font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Pause 30 Days</button>
+                              <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "pause_60" }); }} className="w-full rounded-md bg-zinc-100 px-3 py-2 text-left text-sm font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Pause 60 Days</button>
                             </>
                           )}
                           {sub.status === "paused" && (
-                            <button onClick={() => handleSubAction(sub.id, "resume")} disabled={subActionLoading} className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400">Resume</button>
+                            <button onClick={() => handleSubAction(sub.id, "resume")} disabled={subActionLoading} className="w-full rounded-md bg-emerald-100 px-3 py-2 text-left text-sm font-medium text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400">Resume Subscription</button>
                           )}
-                          <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "change_next_date" }); setSubNextDate(sub.next_billing_date?.split("T")[0] || ""); }} className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Change Date</button>
-                          <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "apply_coupon" }); setSubCouponCode(""); }} className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Coupon</button>
-                          <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "cancel" }); setSubCancelReason(""); }} className="rounded bg-red-50 px-1.5 py-0.5 text-xs text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400">Cancel</button>
+                          <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "change_next_date" }); setSubNextDate(sub.next_billing_date?.split("T")[0] || ""); }} className="w-full rounded-md bg-zinc-100 px-3 py-2 text-left text-sm font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Change Next Order Date</button>
+                          <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "apply_coupon" }); setSubCouponCode(""); }} className="w-full rounded-md bg-zinc-100 px-3 py-2 text-left text-sm font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Apply Coupon</button>
+                          <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "cancel" }); setSubCancelReason(""); }} className="w-full rounded-md bg-red-50 px-3 py-2 text-left text-sm font-medium text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400">Cancel Subscription</button>
                         </div>
                       ) : (
                         <div className="space-y-2">
