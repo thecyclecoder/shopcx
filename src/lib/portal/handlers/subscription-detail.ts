@@ -116,7 +116,8 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
   }
   const defaultAddr = (customer as Record<string, unknown>)?.default_address as Record<string, unknown> | null;
   const addr = subAddr || orderAddr || defaultAddr;
-  const hasDeliveryAddress = contract.deliveryMethod?.address?.address1;
+  const dm = contract.deliveryMethod as { address?: { address1?: string } } | null;
+  const hasDeliveryAddress = dm?.address?.address1;
   if (addr && !hasDeliveryAddress) {
     contract.deliveryMethod = {
       address: {
