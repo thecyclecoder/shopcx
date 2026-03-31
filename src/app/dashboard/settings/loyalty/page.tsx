@@ -98,16 +98,19 @@ export default function LoyaltySettingsPage() {
   };
 
   const Toggle = ({ checked, onChange, label, hint }: { checked: boolean; onChange: (v: boolean) => void; label: string; hint?: string }) => (
-    <div className="flex items-center justify-between">
-      <div>
+    <div className="flex items-center justify-between gap-4">
+      <div className="min-w-0">
         <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{label}</p>
-        {hint && <p className="text-xs text-zinc-400">{hint}</p>}
+        {hint && <p className="text-xs text-zinc-400 mt-0.5">{hint}</p>}
       </div>
       <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
         onClick={() => onChange(!checked)}
-        className={`relative h-5 w-9 rounded-full transition-colors ${checked ? "bg-indigo-600" : "bg-zinc-300 dark:bg-zinc-600"}`}
+        className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${checked ? "bg-zinc-900 dark:bg-zinc-100" : "bg-zinc-200 dark:bg-zinc-700"}`}
       >
-        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${checked ? "translate-x-4" : "translate-x-0.5"}`} />
+        <span className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out dark:bg-zinc-900 ${checked ? "translate-x-5" : "translate-x-0"} ${checked ? "dark:bg-zinc-900" : "dark:bg-zinc-400"}`} />
       </button>
     </div>
   );
