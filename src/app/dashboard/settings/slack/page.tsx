@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 
 const EVENT_TYPES = [
@@ -25,6 +25,84 @@ interface Rule {
 interface Channel {
   id: string;
   name: string;
+  is_private?: boolean;
+}
+
+function ChannelPicker({ channels, value, onChange }: {
+  channels: Channel[];
+  value: string | null;
+  onChange: (channelId: string | null, channelName: string | null) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const selected = channels.find((c) => c.id === value);
+  const filtered = channels.filter((c) =>
+    c.name.toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="w-full text-left text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+      >
+        {selected ? (
+          <span>{selected.is_private ? "🔒 " : "#"}{selected.name}</span>
+        ) : (
+          <span className="text-gray-400">Select channel...</span>
+        )}
+      </button>
+      {open && (
+        <div className="absolute z-20 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="p-2">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search channels..."
+              autoFocus
+              className="w-full rounded-md border border-gray-200 px-2.5 py-1.5 text-sm bg-white focus:border-indigo-500 focus:outline-none dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100"
+            />
+          </div>
+          <div className="max-h-48 overflow-y-auto">
+            <button
+              type="button"
+              onClick={() => { onChange(null, null); setOpen(false); setSearch(""); }}
+              className="w-full px-3 py-1.5 text-left text-sm text-gray-400 hover:bg-gray-50 dark:hover:bg-zinc-700"
+            >
+              None
+            </button>
+            {filtered.map((ch) => (
+              <button
+                key={ch.id}
+                type="button"
+                onClick={() => { onChange(ch.id, ch.name); setOpen(false); setSearch(""); }}
+                className={`w-full px-3 py-1.5 text-left text-sm hover:bg-gray-50 dark:hover:bg-zinc-700 ${
+                  ch.id === value ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400" : "text-gray-700 dark:text-zinc-300"
+                }`}
+              >
+                {ch.is_private ? "🔒 " : "#"}{ch.name}
+              </button>
+            ))}
+            {filtered.length === 0 && (
+              <p className="px-3 py-2 text-sm text-gray-400">No channels found</p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function SlackSettingsPage() {
@@ -135,22 +213,13 @@ export default function SlackSettingsPage() {
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-3 pt-3 border-t border-gray-100">
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">Channel</label>
-                    <select
-                      value={rule.channel_id || ""}
-                      onChange={(e) => {
-                        const ch = channels.find((c) => c.id === e.target.value);
-                        updateRule(et.key, {
-                          channel_id: e.target.value || null,
-                          channel_name: ch?.name || null,
-                        });
+                    <ChannelPicker
+                      channels={channels}
+                      value={rule.channel_id}
+                      onChange={(channelId, channelName) => {
+                        updateRule(et.key, { channel_id: channelId, channel_name: channelName });
                       }}
-                      className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white"
-                    >
-                      <option value="">None</option>
-                      {channels.map((ch) => (
-                        <option key={ch.id} value={ch.id}>#{ch.name}</option>
-                      ))}
-                    </select>
+                    />
                   </div>
                   <div className="flex items-center gap-2">
                     <input

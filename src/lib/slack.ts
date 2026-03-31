@@ -66,13 +66,13 @@ export async function lookupUserByEmail(token: string, email: string): Promise<s
   return (result.user as { id: string })?.id || null;
 }
 
-export async function listChannels(token: string): Promise<{ id: string; name: string }[]> {
-  const channels: { id: string; name: string }[] = [];
+export async function listChannels(token: string): Promise<{ id: string; name: string; is_private: boolean }[]> {
+  const channels: { id: string; name: string; is_private: boolean }[] = [];
   let cursor: string | undefined;
 
   do {
     const body: Record<string, unknown> = {
-      types: "public_channel",
+      types: "public_channel,private_channel",
       exclude_archived: true,
       limit: 200,
     };
@@ -81,8 +81,8 @@ export async function listChannels(token: string): Promise<{ id: string; name: s
     const result = await slackApi(token, "conversations.list", body);
     if (!result.ok) break;
 
-    const items = (result.channels as { id: string; name: string }[]) || [];
-    channels.push(...items.map((c) => ({ id: c.id, name: c.name })));
+    const items = (result.channels as { id: string; name: string; is_private: boolean }[]) || [];
+    channels.push(...items.map((c) => ({ id: c.id, name: c.name, is_private: !!c.is_private })));
 
     cursor = (result.response_metadata as { next_cursor?: string })?.next_cursor || undefined;
   } while (cursor);
