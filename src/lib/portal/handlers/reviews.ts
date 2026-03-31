@@ -48,7 +48,7 @@ export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
     .select("shopify_product_id, product_name, reviewer_name, rating, title, body, summary, smart_quote, featured, created_at")
     .eq("workspace_id", auth.workspaceId)
     .gte("rating", 4)
-    .in("status", ["published", "featured"])
+    .or("status.in.(published,featured),status.is.null")
     .order("featured", { ascending: false })
     .order("rating", { ascending: false })
     .order("created_at", { ascending: false })

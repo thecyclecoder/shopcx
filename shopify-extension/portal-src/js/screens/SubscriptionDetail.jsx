@@ -393,20 +393,23 @@ function AddressCard({ contract, showToast, onUpdate }) {
   );
 }
 
-function CouponCard({ contract, showToast, onUpdate }) {
+function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [loyalty, setLoyalty] = useState(null);
   const [loyaltyBusy, setLoyaltyBusy] = useState(null);
+  const [localApplied, setLocalApplied] = useState(null); // { code, value } for optimistic display
 
-  // Read applied coupon from contract
-  const appliedCoupon = contract?.appliedDiscount || contract?.discount || null;
-  const couponCode = appliedCoupon?.code || appliedCoupon?.title || '';
-  const couponValue = appliedCoupon?.value
-    ? (appliedCoupon.valueType === 'PERCENTAGE' || appliedCoupon.type === 'percentage'
-        ? appliedCoupon.value + '% off'
-        : '$' + Number(appliedCoupon.value).toFixed(2) + ' off')
-    : '';
+  // Read applied coupon from contract OR local optimistic state
+  const appliedCoupon = localApplied || contract?.appliedDiscount || contract?.discount || null;
+  const couponCode = localApplied ? localApplied.code : (appliedCoupon?.code || appliedCoupon?.title || '');
+  const couponValue = localApplied
+    ? '$' + Number(localApplied.value).toFixed(2) + ' off'
+    : appliedCoupon?.value
+      ? (appliedCoupon.valueType === 'PERCENTAGE' || appliedCoupon.type === 'percentage'
+          ? appliedCoupon.value + '% off'
+          : '$' + Number(appliedCoupon.value).toFixed(2) + ' off')
+      : '';
   const isLoyaltyCoupon = couponCode.startsWith('LOYALTY-');
 
   // Load loyalty data when no coupon is applied
@@ -433,13 +436,12 @@ function CouponCard({ contract, showToast, onUpdate }) {
     try {
       await postJson('coupon', { contractId: contract.id, discountCode: couponCode, mode: 'remove' });
       showToast('Coupon removed.', 'success');
-      // If loyalty coupon, set status back to active
-      if (isLoyaltyCoupon) {
-        // Refresh loyalty data to reflect change
-        requestJson('loyaltyBalance', {}, { force: true })
-          .then(resp => { if (resp?.ok && resp?.enabled) setLoyalty(resp); })
-          .catch(err => console.error('[SubscriptionDetail] loyalty refresh error:', err?.message));
-      }
+      setLocalApplied(null);
+      if (onCouponStateChange) onCouponStateChange(false);
+      // Refresh loyalty data
+      requestJson('loyaltyBalance', {}, { force: true })
+        .then(resp => { if (resp?.ok && resp?.enabled) setLoyalty(resp); })
+        .catch(err => console.error('[SubscriptionDetail] loyalty refresh error:', err?.message));
       clearCaches(); onUpdate();
     } catch { showToast('Could not remove coupon.', 'error'); }
     setBusy(false);
@@ -451,6 +453,8 @@ function CouponCard({ contract, showToast, onUpdate }) {
       const resp = await postJson('loyaltyApplyToSubscription', { contractId: contract.id, redemptionId });
       if (resp?.ok) {
         showToast(`$${resp.discount_value} loyalty coupon applied!`, 'success');
+        setLocalApplied({ code: resp.code, value: resp.discount_value, valueType: 'FIXED_AMOUNT' });
+        if (onCouponStateChange) onCouponStateChange(true);
         clearCaches(); onUpdate();
       } else {
         showToast(resp?.error || 'Could not apply.', 'error');
@@ -465,6 +469,8 @@ function CouponCard({ contract, showToast, onUpdate }) {
       const resp = await postJson('loyaltyApplyToSubscription', { contractId: contract.id, tierId: tierIndex });
       if (resp?.ok) {
         showToast(`$${resp.discount_value} loyalty coupon redeemed and applied!`, 'success');
+        setLocalApplied({ code: resp.code, value: resp.discount_value, valueType: 'FIXED_AMOUNT' });
+        if (onCouponStateChange) onCouponStateChange(true);
         clearCaches(); onUpdate();
       } else {
         showToast(resp?.error || 'Could not redeem.', 'error');
@@ -660,6 +666,8 @@ export default function SubscriptionDetail() {
   const appliedDiscount = contract?.appliedDiscount || contract?.discount || null;
   const appliedCouponCode = appliedDiscount?.code || appliedDiscount?.title || '';
   const hasLoyaltyCouponApplied = appliedCouponCode.startsWith('LOYALTY-');
+  const hasCouponApplied = !!appliedCouponCode;
+  const [couponAppliedLocal, setCouponAppliedLocal] = useState(hasCouponApplied);
 
   const statusText = b === 'cancelled' ? 'Cancelled' : b === 'paused' ? 'Paused' : 'Active';
   const statusKind = b === 'cancelled' ? 'cancelled' : b === 'paused' ? 'paused' : 'active';
@@ -715,8 +723,8 @@ export default function SubscriptionDetail() {
           {!isReadOnly && <FrequencyCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
         </div>
         <div class="sp-detail__col">
-          {!isCancelled && <RewardsCard contractId={shortId(contract.id)} hideRedeem={!hasLoyaltyCouponApplied} showRedeemOverride={!!hasLoyaltyCouponApplied} />}
-          {!isReadOnly && <CouponCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
+          {!isCancelled && <RewardsCard contractId={shortId(contract.id)} hideRedeem={!couponAppliedLocal} showRedeemOverride={couponAppliedLocal} />}
+          {!isReadOnly && <CouponCard contract={contract} showToast={showToast} onUpdate={handleUpdate} onCouponStateChange={(v) => setCouponAppliedLocal(v)} />}
           {!isReadOnly && <AddressCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
           {!isReadOnly && <ShippingProtectionCard contract={contract} shipLine={shipLine} onUpdate={handleUpdate} />}
           {!isCancelled && productIds.length > 0 && <ReviewsCard productIds={productIds} />}

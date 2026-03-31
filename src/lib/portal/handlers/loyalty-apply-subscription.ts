@@ -152,14 +152,38 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     }
   }
 
-  // Apply coupon to subscription via Appstle
+  // Release any previously applied loyalty coupons back to 'active'
+  const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
+  if (customer) {
+    const { data: member } = await admin.from("loyalty_members")
+      .select("id")
+      .eq("workspace_id", auth.workspaceId)
+      .eq("shopify_customer_id", auth.loggedInCustomerId)
+      .single();
+    if (member) {
+      await admin.from("loyalty_redemptions")
+        .update({ status: "active" })
+        .eq("workspace_id", auth.workspaceId)
+        .eq("member_id", member.id)
+        .eq("status", "applied");
+    }
+  }
+
+  // Apply coupon to subscription via Appstle (remove existing first if needed)
   try {
     const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
     if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
     const apiKey = decrypt(ws.appstle_api_key_encrypted);
 
-    const endpoint = `/api/external/v2/subscription-contracts-apply-discount?contractId=${contractId}&discountCode=${encodeURIComponent(code)}`;
-    const res = await fetch(`https://subscription-admin.appstle.com${endpoint}`, {
+    // Remove any existing discount first to avoid Appstle rejection
+    const removeEndpoint = `/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}`;
+    await fetch(`https://subscription-admin.appstle.com${removeEndpoint}`, {
+      method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store",
+    }).catch(() => {}); // ignore if no coupon was applied
+
+    // Apply the new coupon
+    const applyEndpoint = `/api/external/v2/subscription-contracts-apply-discount?contractId=${contractId}&discountCode=${encodeURIComponent(code)}`;
+    const res = await fetch(`https://subscription-admin.appstle.com${applyEndpoint}`, {
       method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store",
     });
 
@@ -177,7 +201,6 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
       .eq("id", redemptionId);
   }
 
-  const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
   if (customer) {
     await logPortalAction({
       workspaceId: auth.workspaceId, customerId: customer.id,

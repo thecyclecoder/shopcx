@@ -98,11 +98,26 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     ? `https://${ws.shopify_myshopify_domain}/account`
     : null;
 
-  // Add delivery address: prefer subscription's shipping_address, fall back to customer default
+  // Add delivery address: prefer subscription's shipping_address, fall back to last order, then customer default
   const subAddr = sub.shipping_address as Record<string, unknown> | null;
+  let orderAddr: Record<string, unknown> | null = null;
+  if (!subAddr) {
+    const { data: lastOrder } = await admin.from("orders")
+      .select("shipping_address")
+      .eq("workspace_id", auth.workspaceId)
+      .eq("subscription_id", sub.id)
+      .not("shipping_address", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (lastOrder?.shipping_address) {
+      orderAddr = lastOrder.shipping_address as Record<string, unknown>;
+    }
+  }
   const defaultAddr = (customer as Record<string, unknown>)?.default_address as Record<string, unknown> | null;
-  const addr = subAddr || defaultAddr;
-  if (addr && !contract.deliveryMethod) {
+  const addr = subAddr || orderAddr || defaultAddr;
+  const hasDeliveryAddress = contract.deliveryMethod?.address?.address1;
+  if (addr && !hasDeliveryAddress) {
     contract.deliveryMethod = {
       address: {
         firstName: addr.firstName || addr.first_name || "",
