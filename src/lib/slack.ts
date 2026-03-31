@@ -135,6 +135,7 @@ export async function exchangeCodeForToken(code: string): Promise<{
       client_id: process.env.SLACK_CLIENT_ID || "",
       client_secret: process.env.SLACK_CLIENT_SECRET || "",
       code,
+      redirect_uri: `${process.env.NEXT_PUBLIC_SITE_URL}/api/slack/callback`,
     }),
   });
   return res.json() as Promise<{
@@ -152,7 +153,7 @@ export async function saveSlackConnection(
   teamName: string,
 ): Promise<void> {
   const admin = createAdminClient();
-  await admin
+  const { error } = await admin
     .from("workspaces")
     .update({
       slack_bot_token_encrypted: encrypt(botToken),
@@ -161,6 +162,10 @@ export async function saveSlackConnection(
       slack_connected_at: new Date().toISOString(),
     })
     .eq("id", workspaceId);
+  if (error) {
+    console.error("[Slack] Failed to save connection:", error);
+    throw new Error(`Failed to save Slack connection: ${error.message}`);
+  }
 }
 
 export async function disconnectSlack(workspaceId: string): Promise<void> {

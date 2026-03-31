@@ -28,12 +28,17 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(`${process.env.NEXT_PUBLIC_SITE_URL}/dashboard/settings/integrations?slack=error&reason=${result.error || "token_exchange_failed"}`);
   }
 
-  await saveSlackConnection(
-    workspaceId,
-    result.access_token,
-    result.team?.id || "",
-    result.team?.name || "",
-  );
+  try {
+    await saveSlackConnection(
+      workspaceId,
+      result.access_token,
+      result.team?.id || "",
+      result.team?.name || "",
+    );
+  } catch (e) {
+    console.error("[Slack] save connection error:", e);
+    return NextResponse.redirect(`${process.env.NEXT_PUBLIC_SITE_URL}/dashboard/settings/integrations?slack=error&reason=save_failed`);
+  }
 
   // Auto-map team members (non-blocking)
   autoMapTeamMembers(workspaceId).catch((e) => console.error("[Slack] auto-map error:", e));

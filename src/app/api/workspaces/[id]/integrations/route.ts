@@ -95,8 +95,18 @@ export async function GET(
     slack_connected: !!workspace.slack_bot_token_encrypted,
     slack_team_name: workspace.slack_team_name,
     slack_connected_at: workspace.slack_connected_at,
-    slack_members_mapped: 0, // Will be populated below
+    slack_members_mapped: 0,
     slack_members_total: 0,
+    ...(workspace.slack_bot_token_encrypted ? await (async () => {
+      const { data: members } = await admin
+        .from("workspace_members")
+        .select("slack_user_id")
+        .eq("workspace_id", workspaceId);
+      return {
+        slack_members_mapped: members?.filter((m) => m.slack_user_id).length || 0,
+        slack_members_total: members?.length || 0,
+      };
+    })() : {}),
   });
 }
 
