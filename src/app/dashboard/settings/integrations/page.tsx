@@ -645,12 +645,12 @@ export default function IntegrationsPage() {
                   {supportEmails.length > 0 && (
                     <div className="divide-y divide-zinc-200 rounded border border-zinc-200 bg-white dark:divide-zinc-700 dark:border-zinc-700 dark:bg-zinc-900">
                       {supportEmails.map((se) => (
-                        <div key={se.id} className="flex items-center justify-between px-3 py-2">
-                          <div>
-                            <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{se.email}</span>
-                            {se.label && <span className="ml-2 text-sm text-zinc-400">({se.label})</span>}
+                        <div key={se.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-2 px-3 py-2">
+                          <div className="min-w-0 flex items-center flex-wrap gap-1">
+                            <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate max-w-[200px] sm:max-w-none">{se.email}</span>
+                            {se.label && <span className="text-sm text-zinc-400 shrink-0">({se.label})</span>}
                             {se.is_default && (
-                              <span className="ml-2 rounded bg-indigo-100 px-1.5 py-0.5 text-sm font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+                              <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-sm font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400 shrink-0">
                                 Reply-To
                               </span>
                             )}
@@ -661,7 +661,7 @@ export default function IntegrationsPage() {
                               await fetch(`/api/workspaces/${workspace.id}/support-emails?email_id=${se.id}`, { method: "DELETE" });
                               setSupportEmails((prev) => prev.filter((e) => e.id !== se.id));
                             }}
-                            className="text-sm text-zinc-400 hover:text-red-500"
+                            className="text-sm text-zinc-400 hover:text-red-500 shrink-0 self-start sm:self-center"
                           >
                             Remove
                           </button>
@@ -670,7 +670,7 @@ export default function IntegrationsPage() {
                     </div>
                   )}
 
-                  <div className="flex items-end gap-2">
+                  <div className="space-y-2 sm:space-y-0 sm:flex sm:items-end sm:gap-2">
                     <div className="flex-1">
                       <input
                         type="email"
@@ -680,42 +680,44 @@ export default function IntegrationsPage() {
                         className="block w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                       />
                     </div>
-                    <div className="w-24">
-                      <input
-                        type="text"
-                        value={newSupportLabel}
-                        onChange={(e) => setNewSupportLabel(e.target.value)}
-                        placeholder="Label"
-                        className="block w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
-                      />
+                    <div className="flex items-end gap-2">
+                      <div className="flex-1 sm:w-24 sm:flex-none">
+                        <input
+                          type="text"
+                          value={newSupportLabel}
+                          onChange={(e) => setNewSupportLabel(e.target.value)}
+                          placeholder="Label"
+                          className="block w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        disabled={!newSupportEmail}
+                        onClick={async () => {
+                          const res = await fetch(`/api/workspaces/${workspace.id}/support-emails`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              email: newSupportEmail,
+                              label: newSupportLabel || null,
+                              is_default: supportEmails.length === 0,
+                            }),
+                          });
+                          if (res.ok) {
+                            const created = await res.json();
+                            setSupportEmails((prev) => [...prev, created]);
+                            setNewSupportEmail("");
+                            setNewSupportLabel("");
+                          } else {
+                            const data = await res.json();
+                            setMessage(data.error || "Failed to add email");
+                          }
+                        }}
+                        className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50 shrink-0"
+                      >
+                        Add
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      disabled={!newSupportEmail}
-                      onClick={async () => {
-                        const res = await fetch(`/api/workspaces/${workspace.id}/support-emails`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            email: newSupportEmail,
-                            label: newSupportLabel || null,
-                            is_default: supportEmails.length === 0,
-                          }),
-                        });
-                        if (res.ok) {
-                          const created = await res.json();
-                          setSupportEmails((prev) => [...prev, created]);
-                          setNewSupportEmail("");
-                          setNewSupportLabel("");
-                        } else {
-                          const data = await res.json();
-                          setMessage(data.error || "Failed to add email");
-                        }
-                      }}
-                      className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
-                    >
-                      Add
-                    </button>
                   </div>
                 </div>
               )}
