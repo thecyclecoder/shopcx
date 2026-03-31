@@ -477,11 +477,14 @@ export default function TicketDetailPage() {
   const handleSubAction = async (subId: string, action: string, body: Record<string, unknown> = {}) => {
     setSubActionLoading(true);
     setSubActionResult(null);
+    let actionSuccess = false;
+    let actionMessage = "";
     try {
       if (action === "bill_now") {
         const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/bill-now`, { method: "POST" });
         const data = await res.json();
-        setSubActionResult({ subId, message: res.ok ? "Payment processed" : (data.error || "Failed"), success: res.ok });
+        actionSuccess = res.ok;
+        actionMessage = res.ok ? "Payment processed" : (data.error || "Failed");
       } else if (action === "apply_coupon") {
         const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/coupon`, {
           method: "POST",
@@ -489,7 +492,8 @@ export default function TicketDetailPage() {
           body: JSON.stringify({ code: body.code }),
         });
         const data = await res.json();
-        setSubActionResult({ subId, message: res.ok ? "Coupon applied" : (data.error || "Failed"), success: res.ok });
+        actionSuccess = res.ok;
+        actionMessage = res.ok ? "Coupon applied" : (data.error || "Failed");
       } else {
         const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}`, {
           method: "PATCH",
@@ -497,18 +501,22 @@ export default function TicketDetailPage() {
           body: JSON.stringify({ action, ...body }),
         });
         const data = await res.json();
-        setSubActionResult({ subId, message: res.ok ? `${action.replace(/_/g, " ")} successful` : (data.error || "Failed"), success: res.ok });
+        actionSuccess = res.ok;
+        actionMessage = res.ok ? `${action.replace(/_/g, " ")} successful` : (data.error || "Failed");
       }
+      setSubActionResult({ subId, message: actionMessage, success: actionSuccess });
       setSubActionPanel(null);
-      // Post system message to conversation for successful actions
-      if (subActionResult?.success !== false) {
-        const actionLabel = action.replace(/_/g, " ");
-        await fetch(`/api/tickets/${id}/messages`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ body: `${actionLabel} completed on subscription`, visibility: "internal", author_type: "system" }),
-        }).catch(() => {});
-      }
+
+      // Post system message to conversation
+      const actionLabel = action.replace(/_/g, " ");
+      const noteBody = actionSuccess
+        ? `${actionLabel} completed on subscription`
+        : `${actionLabel} attempted but failed: ${actionMessage}`;
+      await fetch(`/api/tickets/${id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: noteBody, visibility: "internal", author_type: "system" }),
+      }).catch(() => {});
       // Refresh customer data + messages
       const refreshRes = await fetch(`/api/tickets/${id}`);
       if (refreshRes.ok) {
