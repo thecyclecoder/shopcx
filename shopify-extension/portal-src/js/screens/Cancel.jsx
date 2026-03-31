@@ -10,7 +10,9 @@ import { shortId } from '../core/utils.js';
 import { SkeletonCancelScreen } from '../components/Skeleton.jsx';
 import ReviewsCard from '../cards/ReviewsCard.jsx';
 
-const OPEN_ENDED = ['just_need_a_break', 'something_else', 'reached_goals'];
+// Reason type is now driven by backend config (type: "remedy" | "ai_conversation")
+// Fallback for old configs that don't have types yet
+const OPEN_ENDED_FALLBACK = ['just_need_a_break', 'something_else', 'reached_goals'];
 
 const DEFAULT_REASONS = [
   { id: 'too_expensive', label: "It\u2019s too expensive" },
@@ -64,7 +66,7 @@ function ReviewsList({ reviews }) {
 const REMEDY_ICONS = {
   coupon: '\uD83C\uDFF7\uFE0F', pause: '\u23F8\uFE0F', pause_30d: '\u23F8\uFE0F', pause_60d: '\u23F8\uFE0F',
   skip: '\u23ED\uFE0F', monthly: '\uD83D\uDCC5', bimonthly: '\uD83D\uDCC5', frequency_change: '\uD83D\uDCC5',
-  specialist: '\uD83D\uDC64', social_proof: '\u2B50', ai_conversation: '\uD83D\uDCAC',
+  free_product: '\uD83C\uDF81', line_item_modifier: '\uD83D\uDD04',
 };
 
 function RemedyCard({ remedy, onAccept, busy }) {
@@ -133,7 +135,7 @@ function ChatInterface({ messages, turn, maxTurns, loading, onSend, onCancel, on
         {ended && (
           <button type="button" class="sp-btn sp-btn-primary" onClick={onKeep}>Keep my subscription</button>
         )}
-        {!loading && (
+        {!loading && turn >= 2 && (
           <button type="button" class="sp-btn sp-btn--ghost sp-chat__cancel-link" onClick={onCancel}>
             I still want to cancel
           </button>
@@ -228,14 +230,19 @@ export default function Cancel() {
   async function selectReason(reasonId) {
     setReason(reasonId);
 
-    if (OPEN_ENDED.includes(reasonId)) {
+    // Check reason type from backend config, fall back to hardcoded list
+    const reasonConfig = reasons.find(r => r.id === reasonId);
+    const reasonType = reasonConfig?.type || (OPEN_ENDED_FALLBACK.includes(reasonId) ? 'ai_conversation' : 'remedy');
+    const suggestedRemedyId = reasonConfig?.suggested_remedy_id || null;
+
+    if (reasonType === 'ai_conversation') {
       goToPhase('chat');
       setChatMessages([]);
       setChatTurn(0);
       setChatLoading(true);
 
       try {
-        const resp = await postJson('cancelJourney', { step: 'reason', reason: reasonId, startChat: true }, { contractId });
+        const resp = await postJson('cancelJourney', { step: 'reason', reason: reasonId, reasonType: 'ai_conversation' }, { contractId });
         if (resp?.reply) {
           setChatMessages([{ role: 'ai', text: resp.reply }]);
           setChatTurn(resp.turn || 1);
@@ -254,7 +261,10 @@ export default function Cancel() {
       goToPhase('remedies');
       setBusy(true);
       try {
-        const resp = await postJson('cancelJourney', { step: 'reason', reason: reasonId }, { contractId });
+        const resp = await postJson('cancelJourney', {
+          step: 'reason', reason: reasonId, reasonType: 'remedy',
+          suggested_remedy_id: suggestedRemedyId,
+        }, { contractId });
         if (resp?.remedies) setRemedies(resp.remedies);
         if (resp?.reviews) setReviews(resp.reviews);
       } catch {

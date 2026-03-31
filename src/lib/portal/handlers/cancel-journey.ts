@@ -101,14 +101,16 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       ? configuredReasons
           .filter((r: { enabled?: boolean }) => r.enabled !== false)
           .sort((a: { sort_order?: number }, b: { sort_order?: number }) => (a.sort_order ?? 99) - (b.sort_order ?? 99))
-          .map((r: { slug?: string; label?: string }) => ({ id: r.slug, label: r.label }))
+          .map((r: { slug?: string; label?: string; type?: string; suggested_remedy_id?: string }) => ({
+            id: r.slug, label: r.label, type: r.type || "remedy", suggested_remedy_id: r.suggested_remedy_id || null,
+          }))
       : [
-          { id: "too_expensive", label: "Too expensive" },
-          { id: "too_much_product", label: "I have too much product" },
-          { id: "not_seeing_results", label: "Not seeing results" },
-          { id: "reached_goals", label: "I've reached my goals" },
-          { id: "just_need_a_break", label: "Just need a break" },
-          { id: "something_else", label: "Something else" },
+          { id: "too_expensive", label: "Too expensive", type: "remedy", suggested_remedy_id: null },
+          { id: "too_much_product", label: "I have too much product", type: "remedy", suggested_remedy_id: null },
+          { id: "not_seeing_results", label: "Not seeing results", type: "remedy", suggested_remedy_id: null },
+          { id: "reached_goals", label: "I've reached my goals", type: "ai_conversation", suggested_remedy_id: null },
+          { id: "just_need_a_break", label: "Just need a break", type: "ai_conversation", suggested_remedy_id: null },
+          { id: "something_else", label: "Something else", type: "ai_conversation", suggested_remedy_id: null },
         ];
 
     return jsonOk({
@@ -129,7 +131,10 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
 
   if (step === "reason") {
     const reason = String(payload?.reason || "");
-    const startChat = !!payload?.startChat;
+    const suggestedRemedyId = payload?.suggested_remedy_id ? String(payload.suggested_remedy_id) : null;
+
+    // Determine reason type from config or payload
+    const reasonType = String(payload?.reasonType || "remedy");
 
     if (journeySessionId) {
       await admin.from("journey_sessions")
@@ -141,11 +146,11 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       workspaceId: auth.workspaceId, customerId: customer.id,
       eventType: "portal.subscription.cancel_reason",
       summary: `Cancel reason selected: ${reason}`,
-      properties: { shopify_contract_id: contractId, reason },
+      properties: { shopify_contract_id: contractId, reason, reasonType },
     });
 
-    // For open-ended reasons, create a ticket for chat logging and start AI conversation
-    if (startChat) {
+    // For ai_conversation type reasons, create a ticket and start AI chat
+    if (reasonType === "ai_conversation") {
       const ticketId = await createChatTicket(admin, auth.workspaceId, customer.id, contractId, reason);
 
       // Get initial AI response
@@ -176,32 +181,43 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
     let selectedRemedies: unknown[] = [];
     let reasonReviews: unknown[] = [];
     try {
+      const { data: custData } = await admin.from("customers")
+        .select("ltv_cents, retention_score, total_orders")
+        .eq("id", customer.id)
+        .single();
+
+      const { data: subData } = await admin.from("subscriptions")
+        .select("items, created_at, billing_interval, billing_interval_count")
+        .eq("workspace_id", auth.workspaceId)
+        .eq("shopify_contract_id", contractId)
+        .single();
+
+      const subAgeDays = subData?.created_at ? Math.floor((Date.now() - new Date(subData.created_at).getTime()) / 86400000) : 0;
+      const billingDays = (subData?.billing_interval_count || 1) * (subData?.billing_interval === "MONTH" ? 30 : subData?.billing_interval === "WEEK" ? 7 : 30);
+      const productIds = ((subData?.items as { product_id?: string }[]) || []).map(i => i.product_id).filter(Boolean) as string[];
+
+      const customerCtx = {
+        ltv_cents: custData?.ltv_cents || 0,
+        retention_score: custData?.retention_score || 0,
+        subscription_age_days: subAgeDays,
+        total_orders: custData?.total_orders || 0,
+        products: productIds,
+        first_renewal: subAgeDays < billingDays,
+      };
+
       const { selectRemedies } = await import("@/lib/remedy-selector");
-      const { data: subForRemedies } = await admin.from("subscriptions")
-        .select("items").eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", contractId).single();
-      const productIds = (Array.isArray(subForRemedies?.items) ? subForRemedies.items : [])
-        .map((i: { product_id?: string }) => i.product_id).filter(Boolean) as string[];
-      const result = await selectRemedies(
-        auth.workspaceId,
-        reason,
-        { ltv_cents: 0, retention_score: 0, subscription_age_days: 0, total_orders: 0, products: productIds, first_renewal: false },
-        productIds,
-      );
+      const result = await selectRemedies(auth.workspaceId, reason, customerCtx, productIds);
       selectedRemedies = result?.remedies || [];
       if (result?.review) reasonReviews = [result.review];
     } catch {
-      // Fall back to first 3 enabled remedies
       try {
         const { data: allRemedies } = await admin.from("remedies")
-          .select("*")
+          .select("id, type, name, description")
           .eq("workspace_id", auth.workspaceId)
           .eq("enabled", true)
           .limit(3);
         selectedRemedies = (allRemedies || []).map((r) => ({
-          id: r.id,
-          type: r.type,
-          label: r.name || r.type,
-          description: r.pitch_text || "",
+          id: r.id, type: r.type, label: r.name || r.type, description: r.description || "",
         }));
       } catch {}
     }
