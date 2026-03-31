@@ -74,20 +74,14 @@ export default function SettingsPage() {
           <SettingsCard href="/dashboard/settings/chat-widget" title="Live Chat" desc="Embeddable chat widget" />
         </SettingsSection>
 
-        <div>
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-3">Ticketing Configuration</h2>
-          <div className="space-y-3">
-            <ResponseDelayEditor workspaceId={workspace.id} />
-            <AutoCloseReplyEditor workspaceId={workspace.id} />
-          </div>
-        </div>
+        <SettingsSection title="Ticketing Configuration">
+          <SettingsCard href="/dashboard/settings/response-delay" title="Response Delay" desc="How long AI and workflows wait before replying" />
+          <SettingsCard href="/dashboard/settings/auto-close" title="Auto-Close Reply" desc="Message sent when customer confirms with thanks" />
+        </SettingsSection>
 
-        <div>
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-3">Knowledge & Content</h2>
-          <div className="space-y-3">
-            <HelpCenterEditor workspaceId={workspace.id} />
-          </div>
-        </div>
+        <SettingsSection title="Knowledge & Content">
+          <SettingsCard href="/dashboard/settings/knowledge-base" title="Knowledge Base" desc="Help center import, subdomain, branding, custom domain" />
+        </SettingsSection>
 
         <SettingsSection title="General">
           <SettingsCard href="/dashboard/settings/integrations" title="Integrations" desc="Connect Shopify, Resend, Appstle, Klaviyo, and more" />
