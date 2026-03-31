@@ -243,6 +243,21 @@ export default function TicketDetailPage() {
   } | null>(null);
   const [redeeming, setRedeeming] = useState(false);
   const [redeemResult, setRedeemResult] = useState<string | null>(null);
+  const [selectedRedeemTier, setSelectedRedeemTier] = useState<number | null>(null);
+
+  // Collapsible card states (all collapsed by default)
+  const [customerCardOpen, setCustomerCardOpen] = useState(false);
+  const [subscriptionsCardOpen, setSubscriptionsCardOpen] = useState(false);
+  const [ordersCardOpen, setOrdersCardOpen] = useState(false);
+  const [loyaltyCardOpen, setLoyaltyCardOpen] = useState(false);
+
+  // Inline subscription actions state
+  const [subActionPanel, setSubActionPanel] = useState<{ subId: string; action: string } | null>(null);
+  const [subActionLoading, setSubActionLoading] = useState(false);
+  const [subActionResult, setSubActionResult] = useState<{ subId: string; message: string; success: boolean } | null>(null);
+  const [subNextDate, setSubNextDate] = useState("");
+  const [subCancelReason, setSubCancelReason] = useState("");
+  const [subCouponCode, setSubCouponCode] = useState("");
 
   // Fetch current user for presence
   useEffect(() => {
@@ -456,6 +471,45 @@ export default function TicketDetailPage() {
       setOrderActionError("Network error");
     } finally {
       setOrderActionLoading(false);
+    }
+  };
+
+  const handleSubAction = async (subId: string, action: string, body: Record<string, unknown> = {}) => {
+    setSubActionLoading(true);
+    setSubActionResult(null);
+    try {
+      if (action === "bill_now") {
+        const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/bill-now`, { method: "POST" });
+        const data = await res.json();
+        setSubActionResult({ subId, message: res.ok ? "Payment processed" : (data.error || "Failed"), success: res.ok });
+      } else if (action === "apply_coupon") {
+        const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/coupon`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: body.code }),
+        });
+        const data = await res.json();
+        setSubActionResult({ subId, message: res.ok ? "Coupon applied" : (data.error || "Failed"), success: res.ok });
+      } else {
+        const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, ...body }),
+        });
+        const data = await res.json();
+        setSubActionResult({ subId, message: res.ok ? `${action.replace(/_/g, " ")} successful` : (data.error || "Failed"), success: res.ok });
+      }
+      setSubActionPanel(null);
+      // Refresh customer data
+      const refreshRes = await fetch(`/api/tickets/${id}`);
+      if (refreshRes.ok) {
+        const refreshData = await refreshRes.json();
+        setCustomer(refreshData.customer);
+      }
+    } catch {
+      setSubActionResult({ subId, message: "Network error", success: false });
+    } finally {
+      setSubActionLoading(false);
     }
   };
 
@@ -1694,7 +1748,7 @@ export default function TicketDetailPage() {
                 const res = await fetch(`/api/tickets/${id}`, { method: "DELETE" });
                 if (res.ok) router.push("/dashboard/tickets");
               }}
-              className="text-xs text-red-500 hover:underline"
+              className="w-full rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
             >
               Delete ticket
             </button>
@@ -1827,22 +1881,45 @@ export default function TicketDetailPage() {
 
         </div>
 
-        {/* Customer card (also visible on mobile "reviews" section since reviews are inside) */}
-        <div className={`${mobileSection !== "customer" && mobileSection !== "reviews" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
+        {/* ═══ CUSTOMER CARD ═══ */}
+        <div className={`${mobileSection !== "customer" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
         {customer && (
-          <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-            <h3 className="text-sm font-medium uppercase tracking-wider text-zinc-500">Customer</h3>
-            <div className="mt-3 space-y-2">
+          <div className="mt-4 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            <button
+              onClick={() => setCustomerCardOpen(!customerCardOpen)}
+              className="flex w-full items-center justify-between p-4"
+            >
+              <h3 className="text-sm font-medium uppercase tracking-wider text-zinc-500">Customer</h3>
+              <svg className={`h-4 w-4 text-zinc-400 transition-transform ${customerCardOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {customerCardOpen && (
+            <div className="space-y-2 border-t border-zinc-100 px-4 pb-4 pt-3 dark:border-zinc-800">
               <div>
-                <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                <button
+                  onClick={() => router.push(`/dashboard/customers/${customer.id}`)}
+                  className="truncate text-sm font-medium text-indigo-600 hover:underline dark:text-indigo-400"
+                >
                   {[customer.first_name, customer.last_name].filter(Boolean).join(" ") || customer.email}
-                </p>
+                </button>
                 <div className="mt-1">
                   <RetentionBadge score={customer.retention_score} />
                 </div>
               </div>
               <p className="text-sm text-zinc-500">{customer.email}</p>
               {customer.phone && <p className="text-sm text-zinc-500">{customer.phone}</p>}
+              {customer.subscriptions?.[0]?.id && (
+                <a
+                  href={`https://${(() => { /* resolve shop domain from workspace */ return "admin.shopify.com"; })()}/customers`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+                >
+                  <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" /></svg>
+                  View in Shopify
+                </a>
+              )}
               <div className="grid grid-cols-2 gap-2 pt-1">
                 <div>
                   <p className="text-sm text-zinc-400">LTV</p>
@@ -1875,12 +1952,17 @@ export default function TicketDetailPage() {
                 </div>
               </div>
 
-              <button
-                onClick={() => router.push(`/dashboard/customers/${customer.id}`)}
-                className="mt-1 text-sm text-indigo-600 hover:underline dark:text-indigo-400"
-              >
-                View full profile
-              </button>
+              {/* Marketing status */}
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <div>
+                  <p className="text-sm text-zinc-400">Email Marketing</p>
+                  <p className="text-sm capitalize text-zinc-700 dark:text-zinc-300">{(customer as CustomerDetail & { email_marketing_status?: string }).email_marketing_status || "unknown"}</p>
+                </div>
+                <div>
+                  <p className="text-sm text-zinc-400">SMS Marketing</p>
+                  <p className="text-sm capitalize text-zinc-700 dark:text-zinc-300">{(customer as CustomerDetail & { sms_marketing_status?: string }).sms_marketing_status || "unknown"}</p>
+                </div>
+              </div>
 
               {/* Linked Identities */}
               {(customer.linked_identities?.length > 0 || linkSuggestions.length > 0) && (
@@ -1950,393 +2032,593 @@ export default function TicketDetailPage() {
                 </div>
               )}
 
-              {/* Subscriptions */}
-              {customer.subscriptions?.length > 0 && (
-                <div className="pt-2">
-                  <p className="text-sm font-medium text-zinc-500">Subscriptions</p>
-                  <div className="mt-1 space-y-1">
-                    {customer.subscriptions.map((sub) => (
-                      <div key={sub.id} className="rounded bg-zinc-50 px-2 py-1.5 text-sm dark:bg-zinc-800">
-                        <div className="flex items-center justify-between">
-                          <span className={`rounded px-1.5 py-0.5 text-sm font-medium ${
-                            sub.status === "active" ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
-                            : sub.status === "paused" ? "bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
-                            : "bg-zinc-100 text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400"
-                          }`}>
-                            {sub.status}
-                          </span>
-                          {sub.billing_interval && (
-                            <span className="text-sm text-zinc-400">
-                              {sub.billing_interval_count}/{sub.billing_interval}
-                            </span>
-                          )}
-                        </div>
-                        {sub.items?.length > 0 && (
-                          <div className="mt-1 space-y-0.5">
-                            {sub.items.slice(0, 3).map((item, idx) => (
-                              <p key={idx} className="truncate text-sm text-zinc-500 dark:text-zinc-400">
-                                {item.quantity}x {item.title}
-                              </p>
-                            ))}
-                            {sub.items.length > 3 && (
-                              <p className="text-sm text-zinc-400">+{sub.items.length - 3} more</p>
-                            )}
-                          </div>
-                        )}
-                        {sub.next_billing_date && (
-                          <p className="mt-1 text-sm text-zinc-400">Next: {formatDate(sub.next_billing_date)}</p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
+              {/* Ban/Unban — admin only */}
+              {["owner", "admin"].includes(workspace.role) && (
+                <div className="pt-2 border-t border-zinc-100 dark:border-zinc-800">
+                  <button
+                    onClick={async () => {
+                      const isBanned = (customer as CustomerDetail & { banned?: boolean }).banned;
+                      if (!confirm(isBanned ? "Unban this customer?" : "Ban this customer? They will not receive AI responses.")) return;
+                      await fetch(`/api/customers/${customer.id}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ banned: !isBanned }),
+                      });
+                      setCustomer((prev) => prev ? { ...prev, banned: !isBanned } as CustomerDetail : prev);
+                    }}
+                    className="text-xs text-red-500 hover:underline"
+                  >
+                    {(customer as CustomerDetail & { banned?: boolean }).banned ? "Unban customer" : "Ban customer"}
+                  </button>
                 </div>
               )}
+            </div>
+            )}
+          </div>
+        )}
+        </div>
 
-              {/* Loyalty */}
-              {loyaltyMember && loyaltySettings && (
-                <div className="pt-2">
-                  <p className="text-sm font-medium text-zinc-500">Loyalty</p>
-                  <div className="mt-1 rounded bg-zinc-50 px-2 py-1.5 dark:bg-zinc-800">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm text-zinc-500">Points</span>
-                      <span className="text-sm font-semibold text-purple-600 dark:text-purple-400">
-                        {loyaltyMember.points_balance.toLocaleString()}
+        {/* ═══ SUBSCRIPTIONS CARD ═══ */}
+        <div className={`${mobileSection !== "subscriptions" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
+        {customer && customer.subscriptions?.length > 0 && (
+          <div className="mt-4 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            <button
+              onClick={() => setSubscriptionsCardOpen(!subscriptionsCardOpen)}
+              className="flex w-full items-center justify-between p-4"
+            >
+              <h3 className="text-sm font-medium uppercase tracking-wider text-zinc-500">
+                Subscriptions <span className="text-xs text-zinc-400">({customer.subscriptions.length})</span>
+              </h3>
+              <svg className={`h-4 w-4 text-zinc-400 transition-transform ${subscriptionsCardOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {subscriptionsCardOpen && (
+            <div className="space-y-2 border-t border-zinc-100 px-4 pb-4 pt-3 dark:border-zinc-800">
+              {customer.subscriptions.map((sub) => (
+                <div key={sub.id} className="rounded border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800">
+                  <div className="flex items-center justify-between">
+                    <button
+                      onClick={() => router.push(`/dashboard/subscriptions/${sub.id}`)}
+                      className="flex items-center gap-1.5"
+                    >
+                      <span className={`rounded px-1.5 py-0.5 text-sm font-medium ${
+                        sub.status === "active" ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
+                        : sub.status === "paused" ? "bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
+                        : "bg-zinc-100 text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400"
+                      }`}>
+                        {sub.status}
                       </span>
-                    </div>
-                    <div className="mt-2 space-y-1">
-                      {loyaltySettings.redemption_tiers.map((tier, idx) => {
-                        const affordable = loyaltyMember.points_balance >= tier.points_cost;
-                        return (
-                          <button
-                            key={idx}
-                            disabled={!affordable || redeeming}
-                            onClick={async () => {
-                              setRedeeming(true);
-                              setRedeemResult(null);
-                              try {
-                                const res = await fetch("/api/loyalty/redeem", {
-                                  method: "POST",
-                                  headers: { "Content-Type": "application/json" },
-                                  body: JSON.stringify({
-                                    workspace_id: workspace.id,
-                                    member_id: loyaltyMember.id,
-                                    tier_index: idx,
-                                  }),
-                                });
-                                const data = await res.json();
-                                if (res.ok) {
-                                  setRedeemResult(`Code: ${data.code}`);
-                                  setLoyaltyMember((prev) => prev ? { ...prev, points_balance: data.new_balance } : prev);
-                                } else {
-                                  setRedeemResult(data.error || "Failed");
-                                }
-                              } catch {
-                                setRedeemResult("Failed");
-                              }
-                              setRedeeming(false);
-                            }}
-                            className={`flex w-full items-center justify-between rounded px-2 py-1 text-sm transition-colors ${
-                              affordable
-                                ? "bg-purple-50 text-purple-700 hover:bg-purple-100 dark:bg-purple-900/20 dark:text-purple-400 dark:hover:bg-purple-900/30"
-                                : "bg-zinc-100 text-zinc-400 dark:bg-zinc-700 dark:text-zinc-500"
-                            }`}
-                          >
-                            <span>{tier.label}</span>
-                            <span className="text-sm">{tier.points_cost.toLocaleString()} pts</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                    {redeemResult && (
-                      <p className={`mt-1.5 text-sm font-medium ${redeemResult.startsWith("Code:") ? "text-emerald-600 dark:text-emerald-400" : "text-red-500"}`}>
-                        {redeemResult}
-                      </p>
+                      <svg className="h-3 w-3 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" /></svg>
+                    </button>
+                    {sub.billing_interval && (
+                      <span className="text-sm text-zinc-400">
+                        {sub.billing_interval_count}/{sub.billing_interval}
+                      </span>
                     )}
                   </div>
-                </div>
-              )}
+                  {sub.items?.length > 0 && (
+                    <div className="mt-1 space-y-0.5">
+                      {sub.items.slice(0, 3).map((item, idx) => (
+                        <p key={idx} className="truncate text-sm text-zinc-500 dark:text-zinc-400">
+                          {item.quantity}x {item.title}
+                        </p>
+                      ))}
+                      {sub.items.length > 3 && (
+                        <p className="text-sm text-zinc-400">+{sub.items.length - 3} more</p>
+                      )}
+                    </div>
+                  )}
+                  {sub.next_billing_date && (
+                    <p className="mt-1 text-sm text-zinc-400">Next: {formatDate(sub.next_billing_date)}</p>
+                  )}
 
-              {/* Reviews & Ratings */}
-              {customer.reviews && customer.reviews.length > 0 && (
-                <div className="pt-2">
-                  <p className="text-sm font-medium text-zinc-500">Reviews &amp; Ratings</p>
-                  <div className="mt-1 space-y-1">
-                    {customer.reviews.map((rv) => (
-                      <div key={rv.id} className="rounded bg-zinc-50 px-2 py-1.5 dark:bg-zinc-800">
-                        <div className="flex items-center gap-1.5">
-                          <div className="flex gap-0.5">
-                            {Array.from({ length: 5 }).map((_, i) => (
-                              <svg key={i} className={`h-3 w-3 ${i < (rv.rating || 0) ? "text-yellow-400" : "text-zinc-200 dark:text-zinc-700"}`} fill="currentColor" viewBox="0 0 20 20">
-                                <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-                              </svg>
-                            ))}
-                          </div>
-                          {rv.featured && (
-                            <span className="rounded bg-indigo-100 px-1 py-0.5 text-[10px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">Featured</span>
+                  {/* Inline subscription actions */}
+                  {(sub.status === "active" || sub.status === "paused") && (
+                    <div className="mt-2 border-t border-zinc-200 pt-2 dark:border-zinc-700">
+                      {subActionPanel?.subId !== sub.id ? (
+                        <div className="flex flex-wrap gap-1">
+                          {sub.status === "active" && (
+                            <>
+                              <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "skip" }); }} className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Skip</button>
+                              <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "bill_now" }); }} className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Order Now</button>
+                              <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "pause_30" }); }} className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Pause 30</button>
+                              <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "pause_60" }); }} className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Pause 60</button>
+                            </>
                           )}
-                          <span className="rounded bg-zinc-100 px-1 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">
-                            {rv.review_type === "store" ? "Site" : rv.review_type === "rating" ? "Rating" : "Product"}
-                          </span>
+                          {sub.status === "paused" && (
+                            <button onClick={() => handleSubAction(sub.id, "resume")} disabled={subActionLoading} className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400">Resume</button>
+                          )}
+                          <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "change_next_date" }); setSubNextDate(sub.next_billing_date?.split("T")[0] || ""); }} className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Change Date</button>
+                          <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "apply_coupon" }); setSubCouponCode(""); }} className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600">Coupon</button>
+                          <button onClick={() => { setSubActionPanel({ subId: sub.id, action: "cancel" }); setSubCancelReason(""); }} className="rounded bg-red-50 px-1.5 py-0.5 text-xs text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400">Cancel</button>
                         </div>
-                        {rv.product_name && (
-                          <p className="mt-0.5 text-xs text-zinc-400 truncate">{rv.product_name}</p>
-                        )}
-                        {rv.title && (
-                          <p className="mt-0.5 text-sm font-medium text-zinc-700 dark:text-zinc-300 truncate">{rv.title}</p>
-                        )}
-                        {rv.body && (
-                          <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400 line-clamp-2">{rv.body}</p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Recent orders */}
-              {customer.recent_orders.length > 0 && (
-                <div className="pt-2">
-                  <p className="text-sm font-medium text-zinc-500">Recent Orders</p>
-                  <div className="mt-1 space-y-1">
-                    {customer.recent_orders.map((o) => (
-                      <div key={o.id}>
-                        <button
-                          onClick={() => setExpandedOrderId(expandedOrderId === o.id ? null : o.id)}
-                          className="flex w-full items-center justify-between rounded bg-zinc-50 px-2 py-1.5 text-sm transition-colors hover:bg-zinc-100 dark:bg-zinc-800 dark:hover:bg-zinc-700"
-                        >
-                          <div className="flex items-center gap-1.5">
-                            <svg className={`h-3 w-3 text-zinc-400 transition-transform ${expandedOrderId === o.id ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-                            </svg>
-                            <span className="font-medium text-zinc-700 dark:text-zinc-300">#{o.order_number || "--"}</span>
-                          </div>
-                          <span className="text-zinc-500">{formatCents(o.total_cents)}</span>
-                        </button>
-                        {expandedOrderId === o.id && (
-                          <div className="mt-1 rounded border border-zinc-200 bg-white p-2 text-sm dark:border-zinc-700 dark:bg-zinc-900">
-                            <div className="flex flex-wrap gap-1">
-                              {o.order_type && (
-                                <span className={`rounded px-1.5 py-0.5 text-sm font-medium ${
-                                  o.order_type === "recurring" ? "bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
-                                  : o.order_type === "replacement" ? "bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400"
-                                  : o.order_type === "checkout" ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
-                                  : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
-                                }`}>
-                                  {o.order_type === "recurring" ? "Recurring" : o.order_type === "replacement" ? "Replacement" : o.order_type === "checkout" ? "Checkout" : o.order_type}
-                                </span>
-                              )}
-                              {o.financial_status && (
-                                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-sm font-medium capitalize text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.financial_status}</span>
-                              )}
-                              {o.fulfillment_status && (
-                                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-sm font-medium capitalize text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.fulfillment_status}</span>
-                              )}
+                      ) : (
+                        <div className="space-y-2">
+                          {/* Skip confirmation */}
+                          {subActionPanel.action === "skip" && (
+                            <div>
+                              <p className="text-xs text-zinc-500">Skip next order?</p>
+                              <div className="mt-1 flex gap-1.5">
+                                <button disabled={subActionLoading} onClick={() => handleSubAction(sub.id, "skip")} className="rounded bg-indigo-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50">{subActionLoading ? "..." : "Confirm"}</button>
+                                <button onClick={() => setSubActionPanel(null)} className="text-xs text-zinc-400 hover:text-zinc-600">Cancel</button>
+                              </div>
                             </div>
-                            <p className="mt-1 text-sm text-zinc-400">{formatDate(o.created_at)}</p>
-                            {/* Fulfillments */}
-                            {o.fulfillments?.length > 0 && (
-                              <div className="mt-1.5 space-y-1">
-                                {o.fulfillments.map((f, fi) => (
-                                  <div key={fi}>
-                                    {f.trackingInfo?.map((t, ti) => (
-                                      <div key={ti} className="flex items-center gap-1">
-                                        {t.company && <span className="text-zinc-400">{t.company}:</span>}
-                                        {t.url ? (
-                                          <a href={t.url} target="_blank" rel="noopener noreferrer" className="font-mono text-indigo-600 hover:underline dark:text-indigo-400">{t.number}</a>
-                                        ) : (
-                                          <span className="font-mono">{t.number}</span>
-                                        )}
-                                      </div>
-                                    ))}
-                                  </div>
-                                ))}
+                          )}
+                          {/* Bill now confirmation */}
+                          {subActionPanel.action === "bill_now" && (
+                            <div>
+                              <p className="text-xs text-zinc-500">Process payment now?</p>
+                              <div className="mt-1 flex gap-1.5">
+                                <button disabled={subActionLoading} onClick={() => handleSubAction(sub.id, "bill_now")} className="rounded bg-indigo-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50">{subActionLoading ? "..." : "Bill Now"}</button>
+                                <button onClick={() => setSubActionPanel(null)} className="text-xs text-zinc-400 hover:text-zinc-600">Cancel</button>
                               </div>
-                            )}
-                            {/* Line items */}
-                            {o.line_items?.length > 0 && (
-                              <div className="mt-1.5 space-y-0.5">
-                                {o.line_items.map((li, idx) => (
-                                  <div key={idx} className="flex justify-between">
-                                    <span className="text-zinc-600 dark:text-zinc-400">{li.quantity}× {li.title}</span>
-                                    <span className="text-zinc-400">{formatCents(li.price_cents * li.quantity)}</span>
-                                  </div>
-                                ))}
+                            </div>
+                          )}
+                          {/* Pause 30/60 */}
+                          {(subActionPanel.action === "pause_30" || subActionPanel.action === "pause_60") && (
+                            <div>
+                              <p className="text-xs text-zinc-500">Pause for {subActionPanel.action === "pause_30" ? "30" : "60"} days?</p>
+                              <div className="mt-1 flex gap-1.5">
+                                <button disabled={subActionLoading} onClick={() => handleSubAction(sub.id, "pause", { days: subActionPanel.action === "pause_30" ? 30 : 60 })} className="rounded bg-amber-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-amber-500 disabled:opacity-50">{subActionLoading ? "..." : "Pause"}</button>
+                                <button onClick={() => setSubActionPanel(null)} className="text-xs text-zinc-400 hover:text-zinc-600">Cancel</button>
                               </div>
-                            )}
+                            </div>
+                          )}
+                          {/* Change next date */}
+                          {subActionPanel.action === "change_next_date" && (
+                            <div>
+                              <p className="text-xs text-zinc-500">Change next order date</p>
+                              <input
+                                type="date"
+                                value={subNextDate}
+                                onChange={(e) => setSubNextDate(e.target.value)}
+                                className="mt-1 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                              />
+                              <div className="mt-1 flex gap-1.5">
+                                <button disabled={subActionLoading || !subNextDate} onClick={() => handleSubAction(sub.id, "change_next_date", { next_billing_date: subNextDate })} className="rounded bg-indigo-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50">{subActionLoading ? "..." : "Save"}</button>
+                                <button onClick={() => setSubActionPanel(null)} className="text-xs text-zinc-400 hover:text-zinc-600">Cancel</button>
+                              </div>
+                            </div>
+                          )}
+                          {/* Apply coupon */}
+                          {subActionPanel.action === "apply_coupon" && (
+                            <div>
+                              <p className="text-xs text-zinc-500">Apply coupon code</p>
+                              <input
+                                type="text"
+                                value={subCouponCode}
+                                onChange={(e) => setSubCouponCode(e.target.value)}
+                                placeholder="Coupon code"
+                                className="mt-1 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                              />
+                              <div className="mt-1 flex gap-1.5">
+                                <button disabled={subActionLoading || !subCouponCode.trim()} onClick={() => handleSubAction(sub.id, "apply_coupon", { code: subCouponCode.trim() })} className="rounded bg-indigo-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50">{subActionLoading ? "..." : "Apply"}</button>
+                                <button onClick={() => setSubActionPanel(null)} className="text-xs text-zinc-400 hover:text-zinc-600">Cancel</button>
+                              </div>
+                            </div>
+                          )}
+                          {/* Cancel subscription */}
+                          {subActionPanel.action === "cancel" && (
+                            <div>
+                              <p className="text-xs font-medium text-red-600 dark:text-red-400">Cancel subscription</p>
+                              <input
+                                type="text"
+                                value={subCancelReason}
+                                onChange={(e) => setSubCancelReason(e.target.value)}
+                                placeholder="Reason (optional)"
+                                className="mt-1 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
+                              />
+                              <div className="mt-1 flex gap-1.5">
+                                <button disabled={subActionLoading} onClick={() => { if (confirm("Cancel this subscription?")) handleSubAction(sub.id, "cancel", { reason: subCancelReason || undefined }); }} className="rounded bg-red-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50">{subActionLoading ? "..." : "Confirm Cancel"}</button>
+                                <button onClick={() => setSubActionPanel(null)} className="text-xs text-zinc-400 hover:text-zinc-600">Back</button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {/* Action result message */}
+                      {subActionResult?.subId === sub.id && (
+                        <p className={`mt-1 text-xs font-medium ${subActionResult.success ? "text-emerald-600 dark:text-emerald-400" : "text-red-500"}`}>
+                          {subActionResult.message}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            )}
+          </div>
+        )}
+        </div>
 
-                            {/* Order Action Buttons */}
-                            {o.shopify_order_id && (
-                              <div className="mt-2 flex flex-wrap gap-1.5 border-t border-zinc-200 pt-2 dark:border-zinc-700">
-                                {(o.financial_status === "paid" || o.financial_status === "partially_refunded") && (
-                                  <button
-                                    onClick={() => { setOrderActionPanel({ orderId: o.id, action: "refund" }); setRefundFull(true); setOrderActionError(null); setOrderActionSuccess(null); }}
-                                    className="rounded bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/40"
-                                  >
-                                    Refund
-                                  </button>
-                                )}
-                                {(!o.fulfillment_status || o.fulfillment_status === "unfulfilled") && (
-                                  <>
-                                    <button
-                                      onClick={() => { setOrderActionPanel({ orderId: o.id, action: "cancel" }); setCancelReason("CUSTOMER"); setCancelRefund(true); setCancelRestock(true); setOrderActionError(null); setOrderActionSuccess(null); }}
-                                      className="rounded bg-amber-50 px-2 py-1 text-xs font-medium text-amber-600 hover:bg-amber-100 dark:bg-amber-900/20 dark:text-amber-400 dark:hover:bg-amber-900/40"
-                                    >
-                                      Cancel
-                                    </button>
-                                    <button
-                                      onClick={() => { setOrderActionPanel({ orderId: o.id, action: "edit_address" }); setAddressForm({ address1: "", address2: "", city: "", province: "", zip: "", country: "US" }); setOrderActionError(null); setOrderActionSuccess(null); }}
-                                      className="rounded bg-blue-50 px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-400 dark:hover:bg-blue-900/40"
-                                    >
-                                      Edit Address
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            )}
-
-                            {/* Order Action Success */}
-                            {orderActionSuccess && orderActionPanel === null && (
-                              <p className="mt-1.5 text-xs text-emerald-600 dark:text-emerald-400">{orderActionSuccess}</p>
-                            )}
-
-                            {/* Refund Form */}
-                            {orderActionPanel?.orderId === o.id && orderActionPanel.action === "refund" && (
-                              <div className="mt-2 space-y-2 rounded border border-red-200 bg-red-50/50 p-2 dark:border-red-800 dark:bg-red-900/10">
-                                <p className="text-xs font-medium text-red-700 dark:text-red-400">Refund Order #{o.order_number}</p>
-                                <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
-                                  <input type="checkbox" checked={refundFull} onChange={(e) => setRefundFull(e.target.checked)} className="rounded" />
-                                  Full refund ({formatCents(o.total_cents)})
-                                </label>
-                                {orderActionError && <p className="text-xs text-red-600">{orderActionError}</p>}
-                                <div className="flex gap-1.5">
-                                  <button
-                                    disabled={orderActionLoading}
-                                    onClick={() => {
-                                      if (confirm(`Refund ${refundFull ? formatCents(o.total_cents) : "selected items"} to customer?`)) {
-                                        handleOrderAction(o, "refund", { full: refundFull });
-                                      }
-                                    }}
-                                    className="rounded bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
-                                  >
-                                    {orderActionLoading ? "Processing..." : "Confirm Refund"}
-                                  </button>
-                                  <button onClick={() => setOrderActionPanel(null)} className="rounded px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
-                                    Cancel
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-
-                            {/* Cancel Form */}
-                            {orderActionPanel?.orderId === o.id && orderActionPanel.action === "cancel" && (
-                              <div className="mt-2 space-y-2 rounded border border-amber-200 bg-amber-50/50 p-2 dark:border-amber-800 dark:bg-amber-900/10">
-                                <p className="text-xs font-medium text-amber-700 dark:text-amber-400">Cancel Order #{o.order_number}</p>
-                                <div>
-                                  <label className="block text-xs text-zinc-500 mb-1">Reason</label>
-                                  <select
-                                    value={cancelReason}
-                                    onChange={(e) => setCancelReason(e.target.value as "CUSTOMER" | "INVENTORY" | "OTHER")}
-                                    className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
-                                  >
-                                    <option value="CUSTOMER">Customer request</option>
-                                    <option value="INVENTORY">Out of stock</option>
-                                    <option value="OTHER">Other</option>
-                                  </select>
-                                </div>
-                                <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
-                                  <input type="checkbox" checked={cancelRefund} onChange={(e) => setCancelRefund(e.target.checked)} className="rounded" />
-                                  Refund payment
-                                </label>
-                                <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
-                                  <input type="checkbox" checked={cancelRestock} onChange={(e) => setCancelRestock(e.target.checked)} className="rounded" />
-                                  Restock items
-                                </label>
-                                {orderActionError && <p className="text-xs text-red-600">{orderActionError}</p>}
-                                <div className="flex gap-1.5">
-                                  <button
-                                    disabled={orderActionLoading}
-                                    onClick={() => {
-                                      if (confirm(`Cancel order #${o.order_number}?`)) {
-                                        handleOrderAction(o, "cancel", { reason: cancelReason, refund: cancelRefund, restock: cancelRestock });
-                                      }
-                                    }}
-                                    className="rounded bg-amber-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-50"
-                                  >
-                                    {orderActionLoading ? "Processing..." : "Confirm Cancel"}
-                                  </button>
-                                  <button onClick={() => setOrderActionPanel(null)} className="rounded px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
-                                    Back
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-
-                            {/* Edit Address Form */}
-                            {orderActionPanel?.orderId === o.id && orderActionPanel.action === "edit_address" && (
-                              <div className="mt-2 space-y-2 rounded border border-blue-200 bg-blue-50/50 p-2 dark:border-blue-800 dark:bg-blue-900/10">
-                                <p className="text-xs font-medium text-blue-700 dark:text-blue-400">Edit Shipping Address</p>
-                                <input
-                                  placeholder="Address line 1"
-                                  value={addressForm.address1}
-                                  onChange={(e) => setAddressForm((f) => ({ ...f, address1: e.target.value }))}
-                                  className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
-                                />
-                                <input
-                                  placeholder="Address line 2 (optional)"
-                                  value={addressForm.address2}
-                                  onChange={(e) => setAddressForm((f) => ({ ...f, address2: e.target.value }))}
-                                  className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
-                                />
-                                <div className="flex gap-1.5">
-                                  <input
-                                    placeholder="City"
-                                    value={addressForm.city}
-                                    onChange={(e) => setAddressForm((f) => ({ ...f, city: e.target.value }))}
-                                    className="flex-1 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
-                                  />
-                                  <input
-                                    placeholder="State"
-                                    value={addressForm.province}
-                                    onChange={(e) => setAddressForm((f) => ({ ...f, province: e.target.value }))}
-                                    className="w-16 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
-                                  />
-                                </div>
-                                <div className="flex gap-1.5">
-                                  <input
-                                    placeholder="ZIP"
-                                    value={addressForm.zip}
-                                    onChange={(e) => setAddressForm((f) => ({ ...f, zip: e.target.value }))}
-                                    className="w-24 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
-                                  />
-                                  <input
-                                    placeholder="Country (US)"
-                                    value={addressForm.country}
-                                    onChange={(e) => setAddressForm((f) => ({ ...f, country: e.target.value }))}
-                                    className="flex-1 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
-                                  />
-                                </div>
-                                {orderActionError && <p className="text-xs text-red-600">{orderActionError}</p>}
-                                <div className="flex gap-1.5">
-                                  <button
-                                    disabled={orderActionLoading || !addressForm.address1 || !addressForm.city || !addressForm.province || !addressForm.zip}
-                                    onClick={() => handleOrderAction(o, "update_address", { address: addressForm })}
-                                    className="rounded bg-blue-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                                  >
-                                    {orderActionLoading ? "Saving..." : "Save Address"}
-                                  </button>
-                                  <button onClick={() => setOrderActionPanel(null)} className="rounded px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
-                                    Cancel
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
+        {/* ═══ ORDERS CARD ═══ */}
+        <div className={`${mobileSection !== "orders" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
+        {customer && customer.recent_orders.length > 0 && (
+          <div className="mt-4 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            <button
+              onClick={() => setOrdersCardOpen(!ordersCardOpen)}
+              className="flex w-full items-center justify-between p-4"
+            >
+              <h3 className="text-sm font-medium uppercase tracking-wider text-zinc-500">
+                Orders <span className="text-xs text-zinc-400">({customer.recent_orders.length})</span>
+              </h3>
+              <svg className={`h-4 w-4 text-zinc-400 transition-transform ${ordersCardOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {ordersCardOpen && (
+            <div className="space-y-1 border-t border-zinc-100 px-4 pb-4 pt-3 dark:border-zinc-800">
+              {customer.recent_orders.map((o) => (
+                <div key={o.id}>
+                  <button
+                    onClick={() => setExpandedOrderId(expandedOrderId === o.id ? null : o.id)}
+                    className="flex w-full items-center justify-between rounded bg-zinc-50 px-2 py-1.5 text-sm transition-colors hover:bg-zinc-100 dark:bg-zinc-800 dark:hover:bg-zinc-700"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <svg className={`h-3 w-3 text-zinc-400 transition-transform ${expandedOrderId === o.id ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                      </svg>
+                      <span className="font-medium text-zinc-700 dark:text-zinc-300">#{o.order_number || "--"}</span>
+                    </div>
+                    <span className="text-zinc-500">{formatCents(o.total_cents)}</span>
+                  </button>
+                  {expandedOrderId === o.id && (
+                    <div className="mt-1 rounded border border-zinc-200 bg-white p-2 text-sm dark:border-zinc-700 dark:bg-zinc-900">
+                      <div className="flex flex-wrap gap-1">
+                        {o.order_type && (
+                          <span className={`rounded px-1.5 py-0.5 text-sm font-medium ${
+                            o.order_type === "recurring" ? "bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
+                            : o.order_type === "replacement" ? "bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400"
+                            : o.order_type === "checkout" ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
+                            : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                          }`}>
+                            {o.order_type === "recurring" ? "Recurring" : o.order_type === "replacement" ? "Replacement" : o.order_type === "checkout" ? "Checkout" : o.order_type}
+                          </span>
+                        )}
+                        {o.financial_status && (
+                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-sm font-medium capitalize text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.financial_status}</span>
+                        )}
+                        {o.fulfillment_status && (
+                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-sm font-medium capitalize text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.fulfillment_status}</span>
                         )}
                       </div>
-                    ))}
-                  </div>
+                      <p className="mt-1 text-sm text-zinc-400">{formatDate(o.created_at)}</p>
+                      {/* Fulfillments */}
+                      {o.fulfillments?.length > 0 && (
+                        <div className="mt-1.5 space-y-1">
+                          {o.fulfillments.map((f, fi) => (
+                            <div key={fi}>
+                              {f.trackingInfo?.map((t, ti) => (
+                                <div key={ti} className="flex items-center gap-1">
+                                  {t.company && <span className="text-zinc-400">{t.company}:</span>}
+                                  {t.url ? (
+                                    <a href={t.url} target="_blank" rel="noopener noreferrer" className="font-mono text-indigo-600 hover:underline dark:text-indigo-400">{t.number}</a>
+                                  ) : (
+                                    <span className="font-mono">{t.number}</span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {/* Line items */}
+                      {o.line_items?.length > 0 && (
+                        <div className="mt-1.5 space-y-0.5">
+                          {o.line_items.map((li, idx) => (
+                            <div key={idx} className="flex justify-between">
+                              <span className="text-zinc-600 dark:text-zinc-400">{li.quantity}× {li.title}</span>
+                              <span className="text-zinc-400">{formatCents(li.price_cents * li.quantity)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Order Action Buttons */}
+                      {o.shopify_order_id && (
+                        <div className="mt-2 flex flex-wrap gap-1.5 border-t border-zinc-200 pt-2 dark:border-zinc-700">
+                          {(o.financial_status === "paid" || o.financial_status === "partially_refunded") && (
+                            <button
+                              onClick={() => { setOrderActionPanel({ orderId: o.id, action: "refund" }); setRefundFull(true); setOrderActionError(null); setOrderActionSuccess(null); }}
+                              className="rounded bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/40"
+                            >
+                              Refund
+                            </button>
+                          )}
+                          {(!o.fulfillment_status || o.fulfillment_status === "unfulfilled") && (
+                            <>
+                              <button
+                                onClick={() => { setOrderActionPanel({ orderId: o.id, action: "cancel" }); setCancelReason("CUSTOMER"); setCancelRefund(true); setCancelRestock(true); setOrderActionError(null); setOrderActionSuccess(null); }}
+                                className="rounded bg-amber-50 px-2 py-1 text-xs font-medium text-amber-600 hover:bg-amber-100 dark:bg-amber-900/20 dark:text-amber-400 dark:hover:bg-amber-900/40"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={() => { setOrderActionPanel({ orderId: o.id, action: "edit_address" }); setAddressForm({ address1: "", address2: "", city: "", province: "", zip: "", country: "US" }); setOrderActionError(null); setOrderActionSuccess(null); }}
+                                className="rounded bg-blue-50 px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-400 dark:hover:bg-blue-900/40"
+                              >
+                                Edit Address
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Order Action Success */}
+                      {orderActionSuccess && orderActionPanel === null && (
+                        <p className="mt-1.5 text-xs text-emerald-600 dark:text-emerald-400">{orderActionSuccess}</p>
+                      )}
+
+                      {/* Refund Form */}
+                      {orderActionPanel?.orderId === o.id && orderActionPanel.action === "refund" && (
+                        <div className="mt-2 space-y-2 rounded border border-red-200 bg-red-50/50 p-2 dark:border-red-800 dark:bg-red-900/10">
+                          <p className="text-xs font-medium text-red-700 dark:text-red-400">Refund Order #{o.order_number}</p>
+                          <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+                            <input type="checkbox" checked={refundFull} onChange={(e) => setRefundFull(e.target.checked)} className="rounded" />
+                            Full refund ({formatCents(o.total_cents)})
+                          </label>
+                          {orderActionError && <p className="text-xs text-red-600">{orderActionError}</p>}
+                          <div className="flex gap-1.5">
+                            <button
+                              disabled={orderActionLoading}
+                              onClick={() => {
+                                if (confirm(`Refund ${refundFull ? formatCents(o.total_cents) : "selected items"} to customer?`)) {
+                                  handleOrderAction(o, "refund", { full: refundFull });
+                                }
+                              }}
+                              className="rounded bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                            >
+                              {orderActionLoading ? "Processing..." : "Confirm Refund"}
+                            </button>
+                            <button onClick={() => setOrderActionPanel(null)} className="rounded px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Cancel Form */}
+                      {orderActionPanel?.orderId === o.id && orderActionPanel.action === "cancel" && (
+                        <div className="mt-2 space-y-2 rounded border border-amber-200 bg-amber-50/50 p-2 dark:border-amber-800 dark:bg-amber-900/10">
+                          <p className="text-xs font-medium text-amber-700 dark:text-amber-400">Cancel Order #{o.order_number}</p>
+                          <div>
+                            <label className="block text-xs text-zinc-500 mb-1">Reason</label>
+                            <select
+                              value={cancelReason}
+                              onChange={(e) => setCancelReason(e.target.value as "CUSTOMER" | "INVENTORY" | "OTHER")}
+                              className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                            >
+                              <option value="CUSTOMER">Customer request</option>
+                              <option value="INVENTORY">Out of stock</option>
+                              <option value="OTHER">Other</option>
+                            </select>
+                          </div>
+                          <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+                            <input type="checkbox" checked={cancelRefund} onChange={(e) => setCancelRefund(e.target.checked)} className="rounded" />
+                            Refund payment
+                          </label>
+                          <label className="flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+                            <input type="checkbox" checked={cancelRestock} onChange={(e) => setCancelRestock(e.target.checked)} className="rounded" />
+                            Restock items
+                          </label>
+                          {orderActionError && <p className="text-xs text-red-600">{orderActionError}</p>}
+                          <div className="flex gap-1.5">
+                            <button
+                              disabled={orderActionLoading}
+                              onClick={() => {
+                                if (confirm(`Cancel order #${o.order_number}?`)) {
+                                  handleOrderAction(o, "cancel", { reason: cancelReason, refund: cancelRefund, restock: cancelRestock });
+                                }
+                              }}
+                              className="rounded bg-amber-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+                            >
+                              {orderActionLoading ? "Processing..." : "Confirm Cancel"}
+                            </button>
+                            <button onClick={() => setOrderActionPanel(null)} className="rounded px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                              Back
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Edit Address Form */}
+                      {orderActionPanel?.orderId === o.id && orderActionPanel.action === "edit_address" && (
+                        <div className="mt-2 space-y-2 rounded border border-blue-200 bg-blue-50/50 p-2 dark:border-blue-800 dark:bg-blue-900/10">
+                          <p className="text-xs font-medium text-blue-700 dark:text-blue-400">Edit Shipping Address</p>
+                          <input
+                            placeholder="Address line 1"
+                            value={addressForm.address1}
+                            onChange={(e) => setAddressForm((f) => ({ ...f, address1: e.target.value }))}
+                            className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                          />
+                          <input
+                            placeholder="Address line 2 (optional)"
+                            value={addressForm.address2}
+                            onChange={(e) => setAddressForm((f) => ({ ...f, address2: e.target.value }))}
+                            className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                          />
+                          <div className="flex gap-1.5">
+                            <input
+                              placeholder="City"
+                              value={addressForm.city}
+                              onChange={(e) => setAddressForm((f) => ({ ...f, city: e.target.value }))}
+                              className="flex-1 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                            />
+                            <input
+                              placeholder="State"
+                              value={addressForm.province}
+                              onChange={(e) => setAddressForm((f) => ({ ...f, province: e.target.value }))}
+                              className="w-16 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                            />
+                          </div>
+                          <div className="flex gap-1.5">
+                            <input
+                              placeholder="ZIP"
+                              value={addressForm.zip}
+                              onChange={(e) => setAddressForm((f) => ({ ...f, zip: e.target.value }))}
+                              className="w-24 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                            />
+                            <input
+                              placeholder="Country (US)"
+                              value={addressForm.country}
+                              onChange={(e) => setAddressForm((f) => ({ ...f, country: e.target.value }))}
+                              className="flex-1 rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                            />
+                          </div>
+                          {orderActionError && <p className="text-xs text-red-600">{orderActionError}</p>}
+                          <div className="flex gap-1.5">
+                            <button
+                              disabled={orderActionLoading || !addressForm.address1 || !addressForm.city || !addressForm.province || !addressForm.zip}
+                              onClick={() => handleOrderAction(o, "update_address", { address: addressForm })}
+                              className="rounded bg-blue-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                            >
+                              {orderActionLoading ? "Saving..." : "Save Address"}
+                            </button>
+                            <button onClick={() => setOrderActionPanel(null)} className="rounded px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-              )}
+              ))}
+            </div>
+            )}
+          </div>
+        )}
+        </div>
+
+        {/* ═══ LOYALTY CARD ═══ */}
+        <div className={`${mobileSection !== "loyalty" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
+        {loyaltyMember && loyaltySettings && (
+          <div className="mt-4 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            <button
+              onClick={() => setLoyaltyCardOpen(!loyaltyCardOpen)}
+              className="flex w-full items-center justify-between p-4"
+            >
+              <h3 className="text-sm font-medium uppercase tracking-wider text-zinc-500">
+                Loyalty <span className="text-xs font-semibold text-purple-600 dark:text-purple-400">{loyaltyMember.points_balance.toLocaleString()} pts</span>
+              </h3>
+              <svg className={`h-4 w-4 text-zinc-400 transition-transform ${loyaltyCardOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {loyaltyCardOpen && (
+            <div className="space-y-2 border-t border-zinc-100 px-4 pb-4 pt-3 dark:border-zinc-800">
+              <div className="rounded bg-zinc-50 px-2 py-1.5 dark:bg-zinc-800">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-zinc-500">Points Balance</span>
+                  <span className="text-sm font-semibold text-purple-600 dark:text-purple-400">
+                    {loyaltyMember.points_balance.toLocaleString()}
+                  </span>
+                </div>
+                <div className="mt-1 flex items-center justify-between text-xs text-zinc-400">
+                  <span>Earned: {loyaltyMember.points_earned.toLocaleString()}</span>
+                  <span>Spent: {loyaltyMember.points_spent.toLocaleString()}</span>
+                </div>
+              </div>
+
+              {/* Redemption workflow: dropdown + submit */}
+              <div className="rounded border border-purple-200 bg-purple-50/50 p-2.5 dark:border-purple-800 dark:bg-purple-900/10">
+                <p className="text-xs font-medium text-purple-700 dark:text-purple-400">Create Redemption</p>
+                <select
+                  value={selectedRedeemTier ?? ""}
+                  onChange={(e) => setSelectedRedeemTier(e.target.value ? Number(e.target.value) : null)}
+                  className="mt-1.5 w-full rounded border border-purple-300 bg-white px-2 py-1 text-xs dark:border-purple-700 dark:bg-zinc-800 dark:text-zinc-100"
+                >
+                  <option value="">Select tier...</option>
+                  {loyaltySettings.redemption_tiers.map((tier, idx) => {
+                    const affordable = loyaltyMember.points_balance >= tier.points_cost;
+                    return (
+                      <option key={idx} value={idx} disabled={!affordable}>
+                        {tier.label} — {tier.points_cost.toLocaleString()} pts{!affordable ? " (not enough)" : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+                <button
+                  disabled={selectedRedeemTier === null || redeeming}
+                  onClick={async () => {
+                    if (selectedRedeemTier === null) return;
+                    setRedeeming(true);
+                    setRedeemResult(null);
+                    try {
+                      const res = await fetch("/api/loyalty/redeem", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          workspace_id: workspace.id,
+                          member_id: loyaltyMember.id,
+                          tier_index: selectedRedeemTier,
+                        }),
+                      });
+                      const data = await res.json();
+                      if (res.ok) {
+                        setRedeemResult(`Code: ${data.code}`);
+                        setLoyaltyMember((prev) => prev ? { ...prev, points_balance: data.new_balance } : prev);
+                        setSelectedRedeemTier(null);
+                      } else {
+                        setRedeemResult(data.error || "Failed");
+                      }
+                    } catch {
+                      setRedeemResult("Failed");
+                    }
+                    setRedeeming(false);
+                  }}
+                  className="mt-2 w-full rounded bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-500 disabled:opacity-50"
+                >
+                  {redeeming ? "Redeeming..." : "Redeem"}
+                </button>
+                {redeemResult && (
+                  <p className={`mt-1.5 text-sm font-medium ${redeemResult.startsWith("Code:") ? "text-emerald-600 dark:text-emerald-400" : "text-red-500"}`}>
+                    {redeemResult}
+                  </p>
+                )}
+              </div>
+            </div>
+            )}
+          </div>
+        )}
+        </div>
+
+        {/* ═══ REVIEWS CARD ═══ */}
+        <div className={`${mobileSection !== "reviews" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
+        {customer?.reviews && customer.reviews.length > 0 && (
+          <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+            <h3 className="text-sm font-medium uppercase tracking-wider text-zinc-500">Reviews &amp; Ratings</h3>
+            <div className="mt-2 space-y-1">
+              {customer.reviews.map((rv) => (
+                <div key={rv.id} className="rounded bg-zinc-50 px-2 py-1.5 dark:bg-zinc-800">
+                  <div className="flex items-center gap-1.5">
+                    <div className="flex gap-0.5">
+                      {Array.from({ length: 5 }).map((_, i) => (
+                        <svg key={i} className={`h-3 w-3 ${i < (rv.rating || 0) ? "text-yellow-400" : "text-zinc-200 dark:text-zinc-700"}`} fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                        </svg>
+                      ))}
+                    </div>
+                    {rv.featured && (
+                      <span className="rounded bg-indigo-100 px-1 py-0.5 text-[10px] font-medium text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">Featured</span>
+                    )}
+                    <span className="rounded bg-zinc-100 px-1 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">
+                      {rv.review_type === "store" ? "Site" : rv.review_type === "rating" ? "Rating" : "Product"}
+                    </span>
+                  </div>
+                  {rv.product_name && (
+                    <p className="mt-0.5 text-xs text-zinc-400 truncate">{rv.product_name}</p>
+                  )}
+                  {rv.title && (
+                    <p className="mt-0.5 text-sm font-medium text-zinc-700 dark:text-zinc-300 truncate">{rv.title}</p>
+                  )}
+                  {rv.body && (
+                    <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400 line-clamp-2">{rv.body}</p>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
         )}
