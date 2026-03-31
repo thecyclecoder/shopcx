@@ -99,7 +99,7 @@ export default function ImportPage() {
     : 0;
 
   return (
-    <div className="p-8">
+    <div className="p-4 sm:p-8 overflow-x-hidden">
       <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Import Data</h1>
       <p className="mt-2 text-sm text-zinc-500">Upload CSV files to import data into your workspace.</p>
 

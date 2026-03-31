@@ -57,14 +57,14 @@ export default function ChatWidgetSettingsPage() {
 
   if (loading) {
     return (
-      <div className="p-8">
+      <div className="p-4 sm:p-8 overflow-x-hidden">
         <div className="h-6 w-48 animate-pulse rounded bg-zinc-200 dark:bg-zinc-700" />
       </div>
     );
   }
 
   return (
-    <div className="p-8">
+    <div className="p-4 sm:p-8 overflow-x-hidden">
       <div className="mb-6 flex items-center gap-2">
         <Link href="/dashboard/settings" className="text-sm text-zinc-400 hover:text-zinc-600">Settings</Link>
         <span className="text-zinc-300">/</span>
@@ -195,7 +195,7 @@ export default function ChatWidgetSettingsPage() {
             <label className="mb-2 block text-sm font-medium text-zinc-900 dark:text-zinc-100">Manual Embed Code</label>
             <p className="mb-2 text-sm text-zinc-500">Or manually add this script to any website, just before &lt;/body&gt;.</p>
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+              <code className="flex-1 min-w-0 break-all rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
                 {embedCode}
               </code>
               <button

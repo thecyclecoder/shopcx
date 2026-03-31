@@ -142,7 +142,7 @@ export default function JourneysSettingsPage() {
   }
 
   return (
-    <div className="p-8">
+    <div className="p-4 sm:p-8 overflow-x-hidden">
       <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Journeys</h1>
       <p className="mt-2 text-sm text-zinc-500">
         Customer-facing retention flows. Channels determine execution: live chat uses inline forms, all others send a CTA email linking to a branded mini-site.
@@ -328,7 +328,7 @@ function JourneyDetail({
   const nonTerminalSteps = steps.filter((s) => !s.isTerminal);
 
   return (
-    <div className="p-8">
+    <div className="p-4 sm:p-8 overflow-x-hidden">
       {/* Header */}
       <div className="flex items-center gap-3">
         <button onClick={onBack} className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800">

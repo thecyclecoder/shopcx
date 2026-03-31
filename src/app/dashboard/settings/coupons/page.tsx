@@ -117,7 +117,7 @@ export default function CouponsPage() {
   const unmapped = shopifyDiscounts.filter(d => !mappings.some(m => m.code === d.code));
 
   return (
-    <div className="mx-auto max-w-4xl p-8">
+    <div className="mx-auto max-w-4xl p-4 sm:p-8 overflow-x-hidden">
       <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Coupons</h1>
       <p className="mt-1 text-sm text-zinc-500">Map Shopify discount codes for AI and agent use.</p>
 

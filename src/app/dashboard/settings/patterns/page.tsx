@@ -126,7 +126,7 @@ export default function PatternsPage() {
   if (loading) return <div className="p-8 text-sm text-zinc-400">Loading...</div>;
 
   return (
-    <div className="p-8">
+    <div className="p-4 sm:p-8 overflow-x-hidden">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Smart Patterns</h1>

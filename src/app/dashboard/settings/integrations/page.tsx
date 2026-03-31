@@ -362,7 +362,7 @@ export default function IntegrationsPage() {
   }
 
   return (
-    <div className="p-8">
+    <div className="p-4 sm:p-8 overflow-x-hidden">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Integrations</h1>
         <p className="mt-2 text-sm text-zinc-500">Connect external services to your workspace.</p>
@@ -436,7 +436,7 @@ export default function IntegrationsPage() {
                 <form onSubmit={handleSaveShopifyCredentials} className="mt-5 space-y-4">
                   <p className="text-sm text-zinc-500">
                     Create a custom app in your Shopify Partners dashboard with scopes:{" "}
-                    <code className="rounded bg-zinc-100 px-1 py-0.5 text-sm dark:bg-zinc-800">
+                    <code className="rounded bg-zinc-100 px-1 py-0.5 text-sm break-all dark:bg-zinc-800">
                       read_customers, read_orders, read_products, read_inventory
                     </code>
                   </p>
@@ -500,7 +500,7 @@ export default function IntegrationsPage() {
                   </p>
                   <p className="text-sm text-zinc-400">
                     Make sure your app&apos;s redirect URL is set to:{" "}
-                    <code className="rounded bg-zinc-100 px-1 py-0.5 text-sm dark:bg-zinc-800">
+                    <code className="rounded bg-zinc-100 px-1 py-0.5 text-sm break-all dark:bg-zinc-800">
                       {typeof window !== "undefined" ? window.location.origin : "https://shopcx.ai"}/api/shopify/callback
                     </code>
                   </p>
@@ -539,7 +539,7 @@ export default function IntegrationsPage() {
                   {shopifyMyshopifyDomain && shopifyMyshopifyDomain !== `${shopifyDomain}.myshopify.com` && (
                     <div className="flex items-center justify-between">
                       <span className="text-sm text-zinc-500">Canonical domain</span>
-                      <span className="font-mono text-sm text-zinc-400">{shopifyMyshopifyDomain}</span>
+                      <span className="font-mono text-sm break-all text-zinc-400">{shopifyMyshopifyDomain}</span>
                     </div>
                   )}
                   {shopifyScopes && (
@@ -757,7 +757,7 @@ export default function IntegrationsPage() {
                       {/* Inbound address */}
                       <div>
                         <p className="text-sm font-medium uppercase tracking-wider text-zinc-500">Inbound Address</p>
-                        <p className="mt-0.5 rounded bg-white px-2 py-1 font-mono text-sm text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100">
+                        <p className="mt-0.5 rounded bg-white px-2 py-1 font-mono text-sm break-all text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100">
                           inbound@{resendDomain}
                         </p>
                         <p className="mt-1 text-sm text-zinc-400">
@@ -885,7 +885,7 @@ export default function IntegrationsPage() {
             <div className="mt-5 space-y-4">
               <p className="text-sm text-zinc-500">
                 Enter the webhook signing secret from Appstle. The webhook endpoint is:{" "}
-                <code className="rounded bg-zinc-100 px-1 py-0.5 text-sm dark:bg-zinc-800">
+                <code className="rounded bg-zinc-100 px-1 py-0.5 text-sm break-all dark:bg-zinc-800">
                   {typeof window !== "undefined" ? window.location.origin : "https://shopcx.ai"}/api/webhooks/appstle/{workspace.id}
                 </code>
               </p>
@@ -1016,10 +1016,10 @@ export default function IntegrationsPage() {
                     Configure this in your Meta App Dashboard under Webhooks:
                   </p>
                   <div className="mt-2 space-y-1">
-                    <p className="font-mono text-amber-700 dark:text-amber-400">
+                    <p className="font-mono break-all text-amber-700 dark:text-amber-400">
                       Callback URL: https://shopcx.ai/api/webhooks/meta
                     </p>
-                    <p className="font-mono text-amber-700 dark:text-amber-400">
+                    <p className="font-mono break-all text-amber-700 dark:text-amber-400">
                       Verify Token: {metaWebhookToken}
                     </p>
                   </div>

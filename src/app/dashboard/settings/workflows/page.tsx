@@ -175,7 +175,7 @@ export default function WorkflowsPage() {
   if (loading) return <div className="p-8 text-sm text-zinc-400">Loading...</div>;
 
   return (
-    <div className="p-8">
+    <div className="p-4 sm:p-8 overflow-x-hidden">
       <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Workflows</h1>
       <p className="mt-1 text-sm text-zinc-500">Automated multi-step responses triggered by smart tags.</p>
 
