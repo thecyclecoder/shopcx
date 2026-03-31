@@ -1251,3 +1251,73 @@
   opacity: 0.6;
   cursor: default;
 }
+
+/* Premium tier styling */
+.sp-loyalty__tier--premium {
+  background: linear-gradient(135deg, rgba(255, 174, 66, 0.06), rgba(255, 99, 71, 0.06));
+  border-color: rgba(255, 165, 0, 0.2);
+}
+
+.sp-loyalty__tier--premium:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(255, 174, 66, 0.12), rgba(255, 99, 71, 0.12));
+  border-color: rgba(255, 165, 0, 0.35);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(255, 165, 0, 0.12);
+}
+
+.sp-loyalty__tier--premium .sp-loyalty__tier-label {
+  color: #92400e;
+}
+
+/* Premium quick-apply buttons */
+.sp-loyalty__quick-btn--premium {
+  background: linear-gradient(135deg, rgba(255, 174, 66, 0.08), rgba(255, 99, 71, 0.08));
+  border-color: rgba(255, 165, 0, 0.2);
+  color: #92400e;
+}
+
+.sp-loyalty__quick-btn--premium:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(255, 174, 66, 0.14), rgba(255, 99, 71, 0.14));
+  border-color: rgba(255, 165, 0, 0.35);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(255, 165, 0, 0.1);
+}
+
+/* Coupon row mobile wrap fix */
+.sp-loyalty__coupon-row {
+  flex-wrap: wrap;
+}
+
+.sp-loyalty__coupon-info {
+  flex-wrap: wrap;
+}
+
+.sp-loyalty__coupon-meta {
+  flex-wrap: wrap;
+}
+
+@media (max-width: 480px) {
+  .sp-loyalty__coupon-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .sp-loyalty__coupon-code {
+    max-width: 180px;
+  }
+
+  .sp-loyalty__badge {
+    font-size: 10px;
+    padding: 2px 6px;
+  }
+}
+
+/* Mobile: full-width action buttons */
+@media (max-width: 640px) {
+  .sp-detail__card .sp-btn:not(.sp-btn--sm):not(.sp-btn--danger):not(.sp-detail__coupon-row .sp-btn):not(.sp-switchwrap .sp-btn) {
+    width: 100%;
+    display: block;
+    text-align: center;
+  }
+}

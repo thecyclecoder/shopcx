@@ -323,7 +323,7 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
         ))}
       </div>
       {isFinite(total) && total > 0 && (
-        <div class="sp-detail__totals">
+        <div class="sp-detail__totals" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span class="sp-muted">Subtotal</span>
           <span class="sp-detail__total-price">{toMoney(total)}</span>
         </div>
@@ -475,7 +475,7 @@ function CouponCard({ contract, showToast, onUpdate }) {
 
   const activeCoupons = loyalty?.unused_coupons?.filter(c => c.status === 'active') || [];
   const affordableTiers = loyalty?.tiers?.filter(t => t.affordable) || [];
-  const showLoyalty = !couponCode && loyalty && (activeCoupons.length > 0 || affordableTiers.length > 0);
+  const showLoyalty = !couponCode && !isLoyaltyCoupon && loyalty && (activeCoupons.length > 0 || affordableTiers.length > 0);
 
   return (
     <div class="sp-card sp-detail__card">
@@ -499,14 +499,14 @@ function CouponCard({ contract, showToast, onUpdate }) {
             <div class="sp-loyalty__quick">
               <div class="sp-loyalty__quick-title sp-muted">Use reward points</div>
               {activeCoupons.map(c => (
-                <button key={c.id} type="button" class="sp-loyalty__quick-btn"
+                <button key={c.id} type="button" class="sp-loyalty__quick-btn sp-loyalty__quick-btn--premium"
                   disabled={loyaltyBusy != null}
                   onClick={() => applyLoyaltyCoupon(c.id)}>
                   {loyaltyBusy === c.id ? 'Applying\u2026' : `Apply $${Number(c.discount_value).toFixed(0)} coupon \u2014 ${c.code}`}
                 </button>
               ))}
               {activeCoupons.length === 0 && affordableTiers.map(t => (
-                <button key={t.index} type="button" class="sp-loyalty__quick-btn"
+                <button key={t.index} type="button" class="sp-loyalty__quick-btn sp-loyalty__quick-btn--premium"
                   disabled={loyaltyBusy != null}
                   onClick={() => redeemAndApply(t.index)}>
                   {loyaltyBusy === 'tier-' + t.index
@@ -657,6 +657,9 @@ export default function SubscriptionDetail() {
   const isLocked = !!contract?.portalState?.isLocked;
   const isReadOnly = isCancelled || isLocked;
   const { lines, shipLine } = splitLines(contract);
+  const appliedDiscount = contract?.appliedDiscount || contract?.discount || null;
+  const appliedCouponCode = appliedDiscount?.code || appliedDiscount?.title || '';
+  const hasLoyaltyCouponApplied = appliedCouponCode.startsWith('LOYALTY-');
 
   const statusText = b === 'cancelled' ? 'Cancelled' : b === 'paused' ? 'Paused' : 'Active';
   const statusKind = b === 'cancelled' ? 'cancelled' : b === 'paused' ? 'paused' : 'active';
@@ -712,7 +715,7 @@ export default function SubscriptionDetail() {
           {!isReadOnly && <FrequencyCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
         </div>
         <div class="sp-detail__col">
-          {!isCancelled && <RewardsCard contractId={shortId(contract.id)} />}
+          {!isCancelled && <RewardsCard contractId={shortId(contract.id)} hideRedeem={!hasLoyaltyCouponApplied} showRedeemOverride={!!hasLoyaltyCouponApplied} />}
           {!isReadOnly && <CouponCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
           {!isReadOnly && <AddressCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
           {!isReadOnly && <ShippingProtectionCard contract={contract} shipLine={shipLine} onUpdate={handleUpdate} />}

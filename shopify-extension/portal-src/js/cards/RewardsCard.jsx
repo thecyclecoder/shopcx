@@ -21,7 +21,7 @@ function StatusBadge({ status }) {
   return null;
 }
 
-export default function RewardsCard({ contractId, onCouponApplied }) {
+export default function RewardsCard({ contractId, onCouponApplied, hideRedeem, showRedeemOverride }) {
   const { showToast } = useContext(PortalContext);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -60,33 +60,41 @@ export default function RewardsCard({ contractId, onCouponApplied }) {
   const { points_balance, dollar_value, tiers, unused_coupons } = data;
   const hasCoupons = unused_coupons?.length > 0;
 
+  const showRedeem = showRedeemOverride || !hideRedeem;
+
   return (
-    <div class="sp-card sp-detail__card sp-loyalty">
+    <div class="sp-card sp-detail__card sp-rewards">
       <div class="sp-detail__sectionhead">
         <div class="sp-title2">Rewards</div>
         <p class="sp-muted sp-detail__section-sub">Your points and perks.</p>
       </div>
 
-      {/* Points balance */}
-      <div class="sp-loyalty__balance">
-        <div class="sp-loyalty__points">
-          You have <strong>{points_balance.toLocaleString()}</strong> reward points
+      {/* Premium banner */}
+      <div class="sp-rewards__banner">
+        <div class="sp-rewards__banner-icon">&#127873;</div>
+        <div>
+          <div class="sp-rewards__banner-title">
+            You have <strong>{points_balance.toLocaleString()}</strong> reward points
+          </div>
+          {dollar_value > 0 && (
+            <div class="sp-rewards__banner-sub sp-muted">
+              That's worth <strong>${dollar_value.toFixed(2)}</strong> in rewards
+            </div>
+          )}
         </div>
         {dollar_value > 0 && (
-          <div class="sp-loyalty__value sp-muted">
-            That's worth <strong>${dollar_value.toFixed(2)}</strong> in rewards
-          </div>
+          <div class="sp-rewards__pill">${dollar_value.toFixed(0)} value</div>
         )}
       </div>
 
       {/* Redemption tiers */}
-      {tiers?.length > 0 && (
+      {showRedeem && tiers?.length > 0 && (
         <div class="sp-loyalty__tiers">
           <div class="sp-loyalty__tiers-title">Redeem your points</div>
           <div class="sp-loyalty__tier-list">
             {tiers.map((t, i) => (
               <button key={i} type="button"
-                class={'sp-loyalty__tier' + (t.affordable ? '' : ' sp-loyalty__tier--disabled')}
+                class={'sp-loyalty__tier' + (t.affordable ? ' sp-loyalty__tier--premium' : ' sp-loyalty__tier--disabled')}
                 disabled={!t.affordable || busy != null}
                 onClick={() => redeemTier(t.index)}>
                 <div class="sp-loyalty__tier-label">{t.label}</div>
