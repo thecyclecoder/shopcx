@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface LoyaltyMember {
@@ -18,6 +19,7 @@ const PAGE_SIZE = 25;
 
 export default function LoyaltyPage() {
   const workspace = useWorkspace();
+  const router = useRouter();
   const [members, setMembers] = useState<LoyaltyMember[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -183,7 +185,7 @@ export default function LoyaltyPage() {
               </tr>
             ) : (
               members.map((m) => (
-                <tr key={m.id} className="transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                <tr key={m.id} onClick={() => router.push(`/dashboard/loyalty/${m.id}`)} className="cursor-pointer transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
                   <td className="px-4 py-3">
                     <div>
                       <p className="font-medium text-zinc-900 dark:text-zinc-100">{memberName(m)}</p>

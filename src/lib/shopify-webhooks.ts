@@ -457,6 +457,7 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
       })),
       shipping_address: shippingAddr || null,
       normalized_shipping_address: normalizeShopifyShippingAddress(shippingAddr),
+      discount_codes: ((payload.discount_codes as { code: string; amount: string; type: string }[]) || []).map((dc) => dc.code),
       created_at: (payload.created_at as string) || new Date().toISOString(),
     },
     { onConflict: "workspace_id,shopify_order_id" }

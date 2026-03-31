@@ -687,6 +687,75 @@ export default function CustomerDetailPage() {
         </div>
       )}
 
+      {/* Loyalty */}
+      {loyaltyMember && (
+        <div className="mt-6 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+          <button
+            onClick={() => router.push(`/dashboard/loyalty/${(loyaltyMember as Record<string, unknown>).id}`)}
+            className="flex w-full items-center justify-between"
+          >
+            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Loyalty Points</h2>
+            <svg className="h-4 w-4 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
+          <div className="mt-3 grid grid-cols-3 gap-3">
+            <div>
+              <p className="text-xs text-zinc-400">Balance</p>
+              <p className="text-lg font-bold text-zinc-900 dark:text-zinc-100">{loyaltyMember.points_balance.toLocaleString()}</p>
+            </div>
+            <div>
+              <p className="text-xs text-zinc-400">Earned</p>
+              <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{loyaltyMember.points_earned.toLocaleString()}</p>
+            </div>
+            <div>
+              <p className="text-xs text-zinc-400">Spent</p>
+              <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{loyaltyMember.points_spent.toLocaleString()}</p>
+            </div>
+          </div>
+          {loyaltyResult && (
+            <div className="mt-3 rounded-md bg-emerald-50 p-3 dark:bg-emerald-900/20">
+              <p className="text-sm text-emerald-700 dark:text-emerald-400">Coupon created: <strong>{loyaltyResult.code}</strong> (${loyaltyResult.value} off)</p>
+            </div>
+          )}
+          {loyaltyTiers.length > 0 && (
+            <div className="mt-3 flex items-center gap-2">
+              <select value={loyaltyRedeemTier} onChange={(e) => setLoyaltyRedeemTier(e.target.value)}
+                className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
+                <option value="">Redeem points...</option>
+                {loyaltyTiers.map((t, i) => {
+                  const canAfford = (loyaltyMember?.points_balance || 0) >= t.points_cost;
+                  return (
+                    <option key={i} value={String(i)} disabled={!canAfford}>
+                      {t.label} — {t.points_cost.toLocaleString()} pts{!canAfford ? " (insufficient)" : ""}
+                    </option>
+                  );
+                })}
+              </select>
+              <button disabled={!loyaltyRedeemTier || loyaltyRedeeming} onClick={async () => {
+                setLoyaltyRedeeming(true);
+                setLoyaltyResult(null);
+                try {
+                  const res = await fetch("/api/loyalty/redeem", {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ workspace_id: workspace.id, member_id: (loyaltyMember as Record<string, unknown>)?.id, tier_index: parseInt(loyaltyRedeemTier) }),
+                  });
+                  const data = await res.json();
+                  if (data.ok) {
+                    setLoyaltyResult({ code: data.code, value: data.discount_value });
+                    setLoyaltyMember(prev => prev ? { ...prev, points_balance: data.new_balance, points_spent: prev.points_spent + (loyaltyTiers[parseInt(loyaltyRedeemTier)]?.points_cost || 0) } : prev);
+                    setLoyaltyRedeemTier("");
+                  }
+                } catch {}
+                setLoyaltyRedeeming(false);
+              }} className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900">
+                {loyaltyRedeeming ? "..." : "Redeem"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Subscriptions */}
       {subscriptions.length > 0 && (
         <div className="mt-8">
@@ -986,67 +1055,6 @@ export default function CustomerDetailPage() {
               );
             })}
           </div>
-        </div>
-      )}
-
-      {/* Loyalty */}
-      {loyaltyMember && (
-        <div className="mt-6 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Loyalty Points</h2>
-          <div className="mt-3 grid grid-cols-3 gap-3">
-            <div>
-              <p className="text-xs text-zinc-400">Balance</p>
-              <p className="text-lg font-bold text-zinc-900 dark:text-zinc-100">{loyaltyMember.points_balance.toLocaleString()}</p>
-            </div>
-            <div>
-              <p className="text-xs text-zinc-400">Earned</p>
-              <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{loyaltyMember.points_earned.toLocaleString()}</p>
-            </div>
-            <div>
-              <p className="text-xs text-zinc-400">Spent</p>
-              <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{loyaltyMember.points_spent.toLocaleString()}</p>
-            </div>
-          </div>
-          {loyaltyResult && (
-            <div className="mt-3 rounded-md bg-emerald-50 p-3 dark:bg-emerald-900/20">
-              <p className="text-sm text-emerald-700 dark:text-emerald-400">Coupon created: <strong>{loyaltyResult.code}</strong> (${loyaltyResult.value} off)</p>
-            </div>
-          )}
-          {loyaltyTiers.length > 0 && (
-            <div className="mt-3 flex items-center gap-2">
-              <select value={loyaltyRedeemTier} onChange={(e) => setLoyaltyRedeemTier(e.target.value)}
-                className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
-                <option value="">Redeem points...</option>
-                {loyaltyTiers.map((t, i) => {
-                  const canAfford = (loyaltyMember?.points_balance || 0) >= t.points_cost;
-                  return (
-                    <option key={i} value={String(i)} disabled={!canAfford}>
-                      {t.label} — {t.points_cost.toLocaleString()} pts{!canAfford ? " (insufficient)" : ""}
-                    </option>
-                  );
-                })}
-              </select>
-              <button disabled={!loyaltyRedeemTier || loyaltyRedeeming} onClick={async () => {
-                setLoyaltyRedeeming(true);
-                setLoyaltyResult(null);
-                try {
-                  const res = await fetch("/api/loyalty/redeem", {
-                    method: "POST", headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ workspace_id: workspace.id, member_id: (loyaltyMember as Record<string, unknown>)?.id, tier_index: parseInt(loyaltyRedeemTier) }),
-                  });
-                  const data = await res.json();
-                  if (data.ok) {
-                    setLoyaltyResult({ code: data.code, value: data.discount_value });
-                    setLoyaltyMember(prev => prev ? { ...prev, points_balance: data.new_balance, points_spent: prev.points_spent + (loyaltyTiers[parseInt(loyaltyRedeemTier)]?.points_cost || 0) } : prev);
-                    setLoyaltyRedeemTier("");
-                  }
-                } catch {}
-                setLoyaltyRedeeming(false);
-              }} className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900">
-                {loyaltyRedeeming ? "..." : "Redeem"}
-              </button>
-            </div>
-          )}
         </div>
       )}
 

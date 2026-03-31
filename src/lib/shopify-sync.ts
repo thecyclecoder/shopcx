@@ -313,6 +313,7 @@ const BULK_ORDERS_QUERY = `
               email
               tags
               sourceName
+              discountCodes
               totalPriceSet { shopMoney { amount currencyCode } }
               displayFinancialStatus
               displayFulfillmentStatus
@@ -444,6 +445,7 @@ export async function upsertOrderChunk(
       fulfillments: (o.fulfillments as unknown[]) || [],
       shipping_address: shippingAddr || null,
       normalized_shipping_address: normalizeShopifyShippingAddress(shippingAddr),
+      discount_codes: (o.discountCodes as string[]) || [],
       created_at: (o.createdAt as string) || new Date().toISOString(),
     });
   }
