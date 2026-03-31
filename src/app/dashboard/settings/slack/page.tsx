@@ -28,7 +28,8 @@ interface Channel {
 }
 
 export default function SlackSettingsPage() {
-  const { workspaceId } = useWorkspace();
+  const workspace = useWorkspace();
+  const workspaceId = workspace.id;
   const [rules, setRules] = useState<Rule[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
