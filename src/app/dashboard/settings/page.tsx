@@ -74,15 +74,26 @@ export default function SettingsPage() {
           <SettingsCard href="/dashboard/settings/chat-widget" title="Live Chat" desc="Embeddable chat widget" />
         </SettingsSection>
 
+        <div>
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-3">Ticketing Configuration</h2>
+          <div className="space-y-3">
+            <ResponseDelayEditor workspaceId={workspace.id} />
+            <AutoCloseReplyEditor workspaceId={workspace.id} />
+          </div>
+        </div>
+
+        <div>
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-3">Knowledge & Content</h2>
+          <div className="space-y-3">
+            <HelpCenterEditor workspaceId={workspace.id} />
+          </div>
+        </div>
+
         <SettingsSection title="General">
           <SettingsCard href="/dashboard/settings/integrations" title="Integrations" desc="Connect Shopify, Resend, Appstle, Klaviyo, and more" />
           <SettingsCard href="/dashboard/team" title="Team" desc="Members, roles, and invitations" />
           <SettingsCard href="/dashboard/settings/import" title="Import Data" desc="Upload CSV files for subscriptions" />
         </SettingsSection>
-
-        <HelpCenterEditor workspaceId={workspace.id} />
-        <ResponseDelayEditor workspaceId={workspace.id} />
-        <AutoCloseReplyEditor workspaceId={workspace.id} />
 
         <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
           <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Workspace</h2>
