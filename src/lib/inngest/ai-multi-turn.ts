@@ -189,11 +189,7 @@ export const aiMultiTurn = inngest.createFunction(
       try {
         const match = await matchPatterns(workspace_id, ticket.subject || "", message_body);
         if (match && match.autoTag) {
-          // Add smart tag
-          const tags = [...new Set([...(ticket.tags as string[] || []), match.autoTag])];
-          await admin.from("tickets").update({ tags }).eq("id", ticket_id);
-
-          // Check if there's a workflow for this tag
+          // Only apply smart tag if an enabled workflow exists for this tag
           const { data: workflow } = await admin
             .from("workflows")
             .select("id, name")
@@ -203,12 +199,17 @@ export const aiMultiTurn = inngest.createFunction(
             .single();
 
           if (workflow) {
+            // Add smart tag only when workflow is active
+            const tags = [...new Set([...(ticket.tags as string[] || []), match.autoTag])];
+            await admin.from("tickets").update({ tags }).eq("id", ticket_id);
+
             // Don't fire the workflow yet — let journeys check first (priority: journey > workflow)
             // Just record what matched; workflow fires later if no journey claims it
             return { matched: true, tag: match.autoTag, workflow: workflow.name, workflowId: workflow.id };
           }
 
-          return { matched: true, tag: match.autoTag, workflow: null };
+          // No enabled workflow — skip tagging, let AI handle it
+          return { matched: false };
         }
       } catch {}
 

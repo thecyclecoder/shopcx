@@ -403,7 +403,16 @@ export async function POST(request: Request) {
 
       // Smart pattern matching — 3-layer: keywords → embeddings → AI
       const matched = !matchedJourney ? await matchPatterns(workspaceId, subject, messageBody) : null;
+      let workflowFired = false;
       if (matched?.autoTag) {
+        // Only apply smart tag + fire workflow if an enabled workflow exists for this tag
+        const { data: wf } = await admin.from("workflows").select("id, config, template")
+          .eq("workspace_id", workspaceId).eq("trigger_tag", matched.autoTag).eq("enabled", true).single();
+
+        if (!wf) {
+          console.log(`Pattern matched: ${matched.category} (${matched.method}) → ${matched.autoTag} — no enabled workflow, skipping`);
+        } else {
+        workflowFired = true;
         const { data: t } = await admin.from("tickets").select("tags").eq("id", ticket.id).single();
         const tags = [...((t?.tags as string[]) || []), matched.autoTag];
         await admin.from("tickets").update({ tags: [...new Set(tags)] }).eq("id", ticket.id);
@@ -416,10 +425,6 @@ export async function POST(request: Request) {
         const delays = (wsDelay?.response_delays || { email: 60 }) as Record<string, number>;
         const delaySec = delays.email || 60;
         const autoReplyAt = new Date(Date.now() + delaySec * 1000).toISOString();
-
-        // Build full workflow context + resolve the preview with real data
-        const { data: wf } = await admin.from("workflows").select("config, template")
-          .eq("workspace_id", workspaceId).eq("trigger_tag", matched.autoTag).eq("enabled", true).single();
         let pendingPreview = "Preparing a response...";
         if (wf?.config) {
           try {
@@ -469,10 +474,11 @@ export async function POST(request: Request) {
         const { addTicketTag } = await import("@/lib/ticket-tags");
         const wfShort = matched.autoTag.replace("smart:", "").replace("order-", "").replace("-request", "").replace("-inquiry", "");
         await addTicketTag(ticket.id, `w:${wfShort}`);
+        } // end: enabled workflow exists
       }
 
       // AI auto-draft: only if no journey or workflow was triggered
-      if (!matchedJourney && !matched?.autoTag) {
+      if (!matchedJourney && !workflowFired) {
         // Check if AI is enabled for email channel
         const { data: aiConfig } = await admin
           .from("ai_channel_config")
