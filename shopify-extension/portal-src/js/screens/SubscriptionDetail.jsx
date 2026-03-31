@@ -100,7 +100,7 @@ function ReactivateCard({ contract, showToast, onUpdate }) {
       {modal && (
         <Modal title="Reactivate subscription" onClose={() => setModal(false)} footer={
           <><button class="sp-btn sp-btn-primary" disabled={busy || !selectedDate} onClick={doReactivate}>
-            {busy ? 'Reactivating\u2026' : 'Reactivate'}
+            {busy ? 'Reactivating…' : 'Reactivate'}
           </button>
           <button class="sp-btn sp-btn--ghost" onClick={() => setModal(false)}>Cancel</button></>
         }>
@@ -174,7 +174,7 @@ function OrderActionsCard({ contract, showToast, onUpdate }) {
       {orderNowConfirm && (
         <Modal title="Order now" onClose={() => setOrderNowConfirm(false)} footer={
           <><button class="sp-btn sp-btn-primary" disabled={busy} onClick={doOrderNow}>
-            {busy ? 'Placing order\u2026' : 'Confirm'}
+            {busy ? 'Placing order…' : 'Confirm'}
           </button>
           <button class="sp-btn sp-btn--ghost" onClick={() => setOrderNowConfirm(false)}>Cancel</button></>
         }>
@@ -185,7 +185,7 @@ function OrderActionsCard({ contract, showToast, onUpdate }) {
       {dateModal && (
         <Modal title="Change next order date" onClose={() => setDateModal(false)} footer={
           <><button class="sp-btn sp-btn-primary" disabled={busy || !selectedDate} onClick={saveDate}>
-            {busy ? 'Saving\u2026' : 'Save'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
           <button class="sp-btn sp-btn--ghost" onClick={() => setDateModal(false)}>Cancel</button></>
         }>
@@ -240,7 +240,7 @@ function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing, 
           {canRemove && (
             <button class="sp-disclosure__action sp-disclosure__action--danger" disabled={removing}
               onClick={onRemove}>
-              <div class="sp-disclosure__action-title">{removing ? 'Removing\u2026' : 'Remove'}</div>
+              <div class="sp-disclosure__action-title">{removing ? 'Removing…' : 'Remove'}</div>
               <div class="sp-disclosure__action-sub sp-muted">Remove this item.</div>
             </button>
           )}
@@ -374,7 +374,7 @@ function AddressCard({ contract, showToast, onUpdate }) {
   return (
     <div class="sp-card sp-detail__card">
       <div class="sp-detail__sectionhead"><div class="sp-title2">Shipping address</div></div>
-      <p class="sp-muted" style={{ whiteSpace: 'pre-line' }}>{display || 'No address on file'}</p>
+      <p class="sp-muted" style={{ whiteSpace: 'pre-line', marginBottom: '12px' }}>{display || 'No address on file'}</p>
       <button class="sp-btn sp-btn--ghost" onClick={() => setEditing(true)}>Change address</button>
       {editing && (
         <Modal title="Change shipping address" onClose={() => setEditing(false)} footer={
@@ -508,7 +508,7 @@ function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
                 <button key={c.id} type="button" class="sp-loyalty__quick-btn sp-loyalty__quick-btn--premium"
                   disabled={loyaltyBusy != null}
                   onClick={() => applyLoyaltyCoupon(c.id)}>
-                  {loyaltyBusy === c.id ? 'Applying\u2026' : `Apply $${Number(c.discount_value).toFixed(0)} coupon \u2014 ${c.code}`}
+                  {loyaltyBusy === c.id ? 'Applying…' : `Apply $${Number(c.discount_value).toFixed(0)} coupon \u2014 ${c.code}`}
                 </button>
               ))}
               {activeCoupons.length === 0 && affordableTiers.map(t => (
@@ -516,7 +516,7 @@ function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
                   disabled={loyaltyBusy != null}
                   onClick={() => redeemAndApply(t.index)}>
                   {loyaltyBusy === 'tier-' + t.index
-                    ? 'Redeeming\u2026'
+                    ? 'Redeeming…'
                     : `Redeem ${t.label} & apply \u2014 ${t.points_cost.toLocaleString()} pts`}
                 </button>
               ))}

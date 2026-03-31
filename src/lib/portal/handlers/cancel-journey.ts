@@ -172,7 +172,42 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       }
     }
 
-    return jsonOk({ ok: true, step: "reason", reason });
+    // Select top 3 remedies for this reason using AI
+    let selectedRemedies: unknown[] = [];
+    try {
+      const { data: allRemedies } = await admin.from("remedies")
+        .select("*")
+        .eq("workspace_id", auth.workspaceId)
+        .eq("enabled", true);
+
+      if (allRemedies?.length) {
+        // Try AI selection, fall back to first 3
+        try {
+          const { selectRemedies } = await import("@/lib/remedy-selector");
+          selectedRemedies = await selectRemedies(auth.workspaceId, reason, allRemedies, 3);
+        } catch {
+          selectedRemedies = allRemedies.slice(0, 3).map((r) => ({
+            id: r.id,
+            type: r.type,
+            label: r.name || r.label || r.type,
+            description: r.pitch_text || "",
+          }));
+        }
+      }
+    } catch {}
+
+    // Get relevant reviews for social proof
+    let reasonReviews: unknown[] = [];
+    try {
+      const { data: tagged } = await admin.from("product_reviews")
+        .select("title, body, smart_quote, reviewer_name, rating")
+        .eq("workspace_id", auth.workspaceId)
+        .gte("rating", 5)
+        .limit(3);
+      reasonReviews = tagged || [];
+    } catch {}
+
+    return jsonOk({ ok: true, step: "reason", reason, remedies: selectedRemedies, reviews: reasonReviews });
   }
 
   if (step === "chat") {

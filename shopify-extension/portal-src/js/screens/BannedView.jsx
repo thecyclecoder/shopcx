@@ -72,7 +72,7 @@ export default function BannedView() {
 
           <button type="submit" class="sp-btn sp-btn-primary" disabled={busy || !message.trim()}
             style={{ width: '100%', marginTop: '8px' }}>
-            {busy ? 'Submitting\u2026' : 'Submit request'}
+            {busy ? 'Submitting…' : 'Submit request'}
           </button>
         </form>
       </div>

@@ -4,6 +4,38 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 
+const chevron = (
+  <svg className="h-4 w-4 text-zinc-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+  </svg>
+);
+
+function SettingsSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-3">{title}</h2>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function SettingsCard({ href, title, desc }: { href: string; title: string; desc: string }) {
+  return (
+    <Link
+      href={href}
+      className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-4 transition-colors hover:border-zinc-300 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700 dark:hover:bg-zinc-800/50"
+    >
+      <div className="min-w-0">
+        <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{title}</h3>
+        <p className="mt-0.5 text-xs text-zinc-500 truncate">{desc}</p>
+      </div>
+      {chevron}
+    </Link>
+  );
+}
+
 export default function SettingsPage() {
   const workspace = useWorkspace();
 
@@ -12,266 +44,41 @@ export default function SettingsPage() {
       <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Settings</h1>
       <p className="mt-2 text-sm text-zinc-500">Manage your workspace configuration.</p>
 
-      <div className="mt-8 max-w-xl space-y-4">
-        <Link
-          href="/dashboard/settings/integrations"
-          className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Integrations</h2>
-            <p className="mt-1 text-sm text-zinc-500">Connect Resend, Shopify, Stripe, and more</p>
-          </div>
-          <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
+      <div className="mt-8 max-w-3xl space-y-8">
+        <SettingsSection title="Ticketing & AI">
+          <SettingsCard href="/dashboard/settings/rules" title="Rules" desc="Automate ticket tagging, assignment, and replies" />
+          <SettingsCard href="/dashboard/settings/ai" title="AI Agent" desc="Personalities, channel config, confidence thresholds" />
+          <SettingsCard href="/dashboard/settings/macros" title="Macros" desc="Saved responses for common inquiries" />
+          <SettingsCard href="/dashboard/settings/workflows" title="Workflows" desc="Automated multi-step responses" />
+          <SettingsCard href="/dashboard/settings/patterns" title="Smart Patterns" desc="Auto-tag tickets based on content" />
+          <SettingsCard href="/dashboard/settings/journeys" title="Journeys" desc="Customer-facing retention flows" />
+          <SettingsCard href="/dashboard/settings/views" title="Ticket Views" desc="Saved views and sidebar hierarchy" />
+          <SettingsCard href="/dashboard/settings/tags" title="Tags" desc="Manage ticket tags" />
+        </SettingsSection>
 
-        <Link
-          href="/dashboard/settings/rules"
-          className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Rules</h2>
-            <p className="mt-1 text-sm text-zinc-500">Automate ticket tagging, assignment, replies, and more</p>
-          </div>
-          <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
+        <SettingsSection title="Subscriptions & Retention">
+          <SettingsCard href="/dashboard/settings/cancel-flow" title="Cancel Flow" desc="Cancel reasons, remedies, and AI save offers" />
+          <SettingsCard href="/dashboard/settings/coupons" title="Coupons" desc="Map Shopify discounts for AI and agents" />
+          <SettingsCard href="/dashboard/settings/dunning" title="Recovery" desc="Card rotation, payday retries, automatic unskip" />
+          <SettingsCard href="/dashboard/settings/portal" title="Customer Portal" desc="Shopify extension, mini-site, products" />
+        </SettingsSection>
 
-        <Link
-          href="/dashboard/settings/journeys"
-          className="flex items-center justify-between rounded-lg border border-cyan-200 bg-cyan-50 p-5 transition-colors hover:border-cyan-300 dark:border-cyan-800 dark:bg-cyan-950 dark:hover:border-cyan-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-cyan-900 dark:text-cyan-100">Journeys</h2>
-            <p className="mt-1 text-sm text-cyan-600 dark:text-cyan-400">Customer-facing retention flows — cancellation, win-back, pause, and more</p>
-          </div>
-          <svg className="h-5 w-5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
+        <SettingsSection title="Revenue Protection">
+          <SettingsCard href="/dashboard/settings/fraud" title="Fraud Detection" desc="Rules, thresholds, and severity levels" />
+          <SettingsCard href="/dashboard/settings/chargebacks" title="Chargebacks" desc="Auto-cancel, evidence reminders, dispute handling" />
+        </SettingsSection>
 
-        <Link
-          href="/dashboard/settings/ai"
-          className="flex items-center justify-between rounded-lg border border-violet-200 bg-violet-50 p-5 transition-colors hover:border-violet-300 dark:border-violet-800 dark:bg-violet-950 dark:hover:border-violet-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-violet-900 dark:text-violet-100">AI Agent</h2>
-            <p className="mt-1 text-sm text-violet-600 dark:text-violet-400">Knowledge base, macros, personalities, channel config, and AI workflows</p>
-          </div>
-          <svg className="h-5 w-5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
+        <SettingsSection title="Customer Engagement">
+          <SettingsCard href="/dashboard/settings/loyalty" title="Loyalty" desc="Points program, redemption tiers" />
+          <SettingsCard href="/dashboard/settings/slack" title="Slack" desc="Notifications for escalations, chargebacks, and more" />
+          <SettingsCard href="/dashboard/settings/chat-widget" title="Live Chat" desc="Embeddable chat widget" />
+        </SettingsSection>
 
-        <Link
-          href="/dashboard/settings/macros"
-          className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Macros</h2>
-            <p className="mt-1 text-sm text-zinc-500">Saved responses for common customer inquiries</p>
-          </div>
-          <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/workflows"
-          className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Workflows</h2>
-            <p className="mt-1 text-sm text-zinc-500">Automated multi-step responses to order tracking, cancellations, and more</p>
-          </div>
-          <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/patterns"
-          className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Smart Patterns</h2>
-            <p className="mt-1 text-sm text-zinc-500">Auto-tag tickets based on message content patterns</p>
-          </div>
-          <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/coupons"
-          className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Coupons</h2>
-            <p className="mt-1 text-sm text-zinc-500">Map Shopify discounts for AI and agent use, set VIP tiers</p>
-          </div>
-          <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/cancel-flow"
-          className="flex items-center justify-between rounded-lg border border-cyan-200 bg-cyan-50 p-5 transition-colors hover:border-cyan-300 dark:border-cyan-800 dark:bg-cyan-950 dark:hover:border-cyan-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-cyan-900 dark:text-cyan-100">Cancel Flow</h2>
-            <p className="mt-1 text-sm text-cyan-600 dark:text-cyan-400">Cancel reasons, retention remedies, and AI save offers</p>
-          </div>
-          <svg className="h-5 w-5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/fraud"
-          className="flex items-center justify-between rounded-lg border border-red-200 bg-red-50 p-5 transition-colors hover:border-red-300 dark:border-red-800 dark:bg-red-950 dark:hover:border-red-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-red-900 dark:text-red-100">Fraud Detection</h2>
-            <p className="mt-1 text-sm text-red-600 dark:text-red-400">Configure fraud detection rules, thresholds, and severity levels</p>
-          </div>
-          <svg className="h-5 w-5 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/chargebacks"
-          className="flex items-center justify-between rounded-lg border border-red-200 bg-red-50 p-5 transition-colors hover:border-red-300 dark:border-red-800 dark:bg-red-950 dark:hover:border-red-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-red-900 dark:text-red-100">Chargeback Automation</h2>
-            <p className="mt-1 text-sm text-red-600 dark:text-red-400">Auto-cancel subscriptions, evidence reminders, and dispute handling</p>
-          </div>
-          <svg className="h-5 w-5 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/portal"
-          className="flex items-center justify-between rounded-lg border border-violet-200 bg-violet-50 p-5 transition-colors hover:border-violet-300 dark:border-violet-800 dark:bg-violet-950 dark:hover:border-violet-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-violet-900 dark:text-violet-100">Customer Portal</h2>
-            <p className="mt-1 text-sm text-violet-600 dark:text-violet-400">Subscription portal: Shopify extension, mini-site, products, selling plans</p>
-          </div>
-          <svg className="h-5 w-5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/dunning"
-          className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 p-5 transition-colors hover:border-amber-300 dark:border-amber-800 dark:bg-amber-950 dark:hover:border-amber-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-amber-900 dark:text-amber-100">Recovery</h2>
-            <p className="mt-1 text-sm text-amber-600 dark:text-amber-400">Payment failure recovery: card rotation, payday retries, automatic unskip</p>
-          </div>
-          <svg className="h-5 w-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/loyalty"
-          className="flex items-center justify-between rounded-lg border border-purple-200 bg-purple-50 p-5 transition-colors hover:border-purple-300 dark:border-purple-800 dark:bg-purple-950 dark:hover:border-purple-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-purple-900 dark:text-purple-100">Loyalty</h2>
-            <p className="mt-1 text-sm text-purple-600 dark:text-purple-400">Points program settings, redemption tiers, provider configuration</p>
-          </div>
-          <svg className="h-5 w-5 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/slack"
-          className="flex items-center justify-between rounded-lg border border-violet-200 bg-violet-50 p-5 transition-colors hover:border-violet-300 dark:border-violet-800 dark:bg-violet-950 dark:hover:border-violet-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-violet-900 dark:text-violet-100">Slack</h2>
-            <p className="mt-1 text-sm text-violet-600 dark:text-violet-400">Configure Slack notifications for escalations, chargebacks, and more</p>
-          </div>
-          <svg className="h-5 w-5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/chat-widget"
-          className="flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 p-5 transition-colors hover:border-emerald-300 dark:border-emerald-800 dark:bg-emerald-950 dark:hover:border-emerald-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-emerald-900 dark:text-emerald-100">Live Chat Widget</h2>
-            <p className="mt-1 text-sm text-emerald-600 dark:text-emerald-400">Embeddable chat widget for your website, real-time messaging</p>
-          </div>
-          <svg className="h-5 w-5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/views"
-          className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Ticket Views</h2>
-            <p className="mt-1 text-sm text-zinc-500">Manage saved views and sidebar hierarchy</p>
-          </div>
-          <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/tags"
-          className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Tags</h2>
-            <p className="mt-1 text-sm text-zinc-500">Manage ticket tags used across your workspace</p>
-          </div>
-          <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/team"
-          className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Team</h2>
-            <p className="mt-1 text-sm text-zinc-500">Manage members, roles, and invitations</p>
-          </div>
-          <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-
-        <Link
-          href="/dashboard/settings/import"
-          className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-5 transition-colors hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
-        >
-          <div>
-            <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Import Data</h2>
-            <p className="mt-1 text-sm text-zinc-500">Upload CSV files for subscriptions and other data</p>
-          </div>
-          <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
+        <SettingsSection title="General">
+          <SettingsCard href="/dashboard/settings/integrations" title="Integrations" desc="Connect Shopify, Resend, Appstle, Klaviyo, and more" />
+          <SettingsCard href="/dashboard/team" title="Team" desc="Members, roles, and invitations" />
+          <SettingsCard href="/dashboard/settings/import" title="Import Data" desc="Upload CSV files for subscriptions" />
+        </SettingsSection>
 
         <HelpCenterEditor workspaceId={workspace.id} />
         <ResponseDelayEditor workspaceId={workspace.id} />

@@ -13,7 +13,7 @@ function truncate(str, max) {
   let cut = str.slice(0, max);
   const sp = cut.lastIndexOf(' ');
   if (sp > max * 0.6) cut = cut.slice(0, sp);
-  return { text: cut.replace(/\s+$/, '') + '\u2026', cut: true };
+  return { text: cut.replace(/\s+$/, '') + '…', cut: true };
 }
 
 /**

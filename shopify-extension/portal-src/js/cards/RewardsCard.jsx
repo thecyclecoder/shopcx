@@ -103,7 +103,7 @@ export default function RewardsCard({ contractId, onCouponApplied, hideRedeem, s
                     ? `${t.points_cost.toLocaleString()} pts`
                     : `Need ${t.points_needed.toLocaleString()} more`}
                 </div>
-                {busy === t.index && <div class="sp-loyalty__tier-busy">Redeeming\u2026</div>}
+                {busy === t.index && <div class="sp-loyalty__tier-busy">Redeeming…</div>}
               </button>
             ))}
           </div>

@@ -123,7 +123,7 @@ function ChatInterface({ messages, turn, maxTurns, loading, onSend, onCancel, on
       </div>
       {!ended && !loading && (
         <div class="sp-chat__input-row">
-          <input ref={inputRef} type="text" class="sp-chat__input" placeholder="Type your message\u2026"
+          <input ref={inputRef} type="text" class="sp-chat__input" placeholder="Type your message…"
             value={text} onInput={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSend(); } }} />
           <button type="button" class="sp-btn sp-btn-primary sp-chat__send" onClick={handleSend}>Send</button>
@@ -379,14 +379,14 @@ export default function Cancel() {
     if (busy && !remedies.length) {
       return (
         <div class="sp-cancel">
-          <CancelHeader onBack={goBack} title="Before you go\u2026" />
+          <CancelHeader onBack={goBack} title="Before you go…" />
           <SkeletonCancelScreen />
         </div>
       );
     }
     return (
       <div class="sp-card sp-cancel">
-        <CancelHeader onBack={goBack} title="Before you go\u2026" />
+        <CancelHeader onBack={goBack} title="Before you go…" />
         <AlertBar />
         {remedies.length > 0 && (
           <div class="sp-cancel__remedies-section">

@@ -142,7 +142,7 @@ export default function AddSwapModal({ mode, contract, line, catalog, onClose, o
   return (
     <Modal title={isSwap ? 'Swap item' : 'Add item'} onClose={onClose} footer={
       <><button class="sp-btn sp-btn-primary" disabled={busy || !selectedVariant} onClick={handleSubmit}>
-        {busy ? 'Saving\u2026' : (isSwap ? 'Swap' : 'Add to subscription')}
+        {busy ? 'Saving…' : (isSwap ? 'Swap' : 'Add to subscription')}
       </button>
       <button class="sp-btn sp-btn--ghost" onClick={() => setStep(1)}>Back</button></>
     }>

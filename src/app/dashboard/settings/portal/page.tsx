@@ -271,9 +271,6 @@ export default function PortalSettingsPage() {
             description="Host the customer portal on a subdomain or custom domain." />
           {config.minisite.enabled && (
             <>
-              <Field label="Subdomain" value={config.minisite.subdomain}
-                onChange={(v) => updateMinisite("subdomain", v)}
-                placeholder="portal" description="e.g. portal.shopcx.ai" />
               <Field label="Custom domain" value={config.minisite.custom_domain}
                 onChange={(v) => updateMinisite("custom_domain", v)}
                 placeholder="portal.yourdomain.com"
