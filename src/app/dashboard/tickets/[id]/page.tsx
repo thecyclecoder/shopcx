@@ -201,7 +201,7 @@ export default function TicketDetailPage() {
   const [sending, setSending] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"messages" | "history">("messages");
-  const [mobileSection, setMobileSection] = useState<"conversation" | "details" | "customer" | "reviews" | "actions">("conversation");
+  const [mobileSection, setMobileSection] = useState<"conversation" | "details" | "customer" | "subscriptions" | "orders" | "loyalty" | "reviews" | "actions">("conversation");
   const [customerEvents, setCustomerEvents] = useState<{ id: string; event_type: string; source: string; summary: string; created_at: string }[]>([]);
   const [closeWithReply, setCloseWithReply] = useState(true);
   const [editorFocused, setEditorFocused] = useState(false);
@@ -646,6 +646,9 @@ export default function TicketDetailPage() {
           <option value="conversation">Conversation</option>
           <option value="details">Ticket Details</option>
           <option value="customer">Customer</option>
+          <option value="subscriptions">Subscriptions</option>
+          <option value="orders">Orders</option>
+          <option value="loyalty">Loyalty</option>
           <option value="reviews">Reviews</option>
           <option value="actions">Actions</option>
         </select>
