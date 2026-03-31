@@ -201,6 +201,11 @@ export default function CustomerDetailPage() {
   const [showStoreCreditModal, setShowStoreCreditModal] = useState(false);
   const [storeCreditHistory, setStoreCreditHistory] = useState<{ id: string; type: string; amount: number; reason: string | null; issued_by_name: string; balance_after: number | null; created_at: string; ticket_id: string | null }[]>([]);
   const [showCreditHistory, setShowCreditHistory] = useState(false);
+  const [loyaltyMember, setLoyaltyMember] = useState<{ points_balance: number; points_earned: number; points_spent: number } | null>(null);
+  const [loyaltyTiers, setLoyaltyTiers] = useState<{ label: string; points_cost: number; discount_value: number; affordable: boolean }[]>([]);
+  const [loyaltyRedeeming, setLoyaltyRedeeming] = useState(false);
+  const [loyaltyRedeemTier, setLoyaltyRedeemTier] = useState("");
+  const [loyaltyResult, setLoyaltyResult] = useState<{ code: string; value: number } | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -250,6 +255,23 @@ export default function CustomerDetailPage() {
       fetch(`/api/store-credit/history?customerId=${id}`)
         .then(r => r.json())
         .then(h => setStoreCreditHistory(h.history || []))
+        .catch(() => {});
+      // Loyalty
+      fetch(`/api/loyalty/members?workspace_id=${workspace.id}&customer_id=${id}`)
+        .then(r => r.json())
+        .then(d => {
+          if (d.members?.[0]) setLoyaltyMember(d.members[0]);
+        })
+        .catch(() => {});
+      fetch(`/api/workspaces/${workspace.id}/loyalty`)
+        .then(r => r.json())
+        .then(d => {
+          if (d.redemption_tiers) {
+            setLoyaltyTiers(d.redemption_tiers.map((t: { label: string; points_cost: number; discount_value: number }) => ({
+              ...t, affordable: (loyaltyMember?.points_balance || 0) >= t.points_cost
+            })));
+          }
+        })
         .catch(() => {});
     }
     load();
@@ -968,6 +990,64 @@ export default function CustomerDetailPage() {
               );
             })}
           </div>
+        </div>
+      )}
+
+      {/* Loyalty */}
+      {loyaltyMember && (
+        <div className="mt-6 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Loyalty Points</h2>
+          <div className="mt-3 grid grid-cols-3 gap-3">
+            <div>
+              <p className="text-xs text-zinc-400">Balance</p>
+              <p className="text-lg font-bold text-zinc-900 dark:text-zinc-100">{loyaltyMember.points_balance.toLocaleString()}</p>
+            </div>
+            <div>
+              <p className="text-xs text-zinc-400">Earned</p>
+              <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{loyaltyMember.points_earned.toLocaleString()}</p>
+            </div>
+            <div>
+              <p className="text-xs text-zinc-400">Spent</p>
+              <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{loyaltyMember.points_spent.toLocaleString()}</p>
+            </div>
+          </div>
+          {loyaltyResult && (
+            <div className="mt-3 rounded-md bg-emerald-50 p-3 dark:bg-emerald-900/20">
+              <p className="text-sm text-emerald-700 dark:text-emerald-400">Coupon created: <strong>{loyaltyResult.code}</strong> (${loyaltyResult.value} off)</p>
+            </div>
+          )}
+          {loyaltyTiers.length > 0 && (
+            <div className="mt-3 flex items-center gap-2">
+              <select value={loyaltyRedeemTier} onChange={(e) => setLoyaltyRedeemTier(e.target.value)}
+                className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
+                <option value="">Redeem points...</option>
+                {loyaltyTiers.map((t, i) => (
+                  <option key={i} value={String(i)} disabled={!t.affordable}>
+                    {t.label} — {t.points_cost.toLocaleString()} pts{!t.affordable ? " (insufficient)" : ""}
+                  </option>
+                ))}
+              </select>
+              <button disabled={!loyaltyRedeemTier || loyaltyRedeeming} onClick={async () => {
+                setLoyaltyRedeeming(true);
+                setLoyaltyResult(null);
+                try {
+                  const res = await fetch("/api/loyalty/redeem", {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ customer_id: id, tier_index: parseInt(loyaltyRedeemTier) }),
+                  });
+                  const data = await res.json();
+                  if (data.ok) {
+                    setLoyaltyResult({ code: data.code, value: data.discount_value });
+                    setLoyaltyMember(prev => prev ? { ...prev, points_balance: data.new_balance, points_spent: prev.points_spent + (loyaltyTiers[parseInt(loyaltyRedeemTier)]?.points_cost || 0) } : prev);
+                    setLoyaltyRedeemTier("");
+                  }
+                } catch {}
+                setLoyaltyRedeeming(false);
+              }} className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900">
+                {loyaltyRedeeming ? "..." : "Redeem"}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
