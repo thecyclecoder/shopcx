@@ -15,7 +15,7 @@ export async function GET(req: NextRequest) {
   if (!clientId) return NextResponse.json({ error: "Slack not configured" }, { status: 500 });
 
   const redirectUri = `${process.env.NEXT_PUBLIC_SITE_URL}/api/slack/callback`;
-  const scopes = "chat:write,channels:read,users:read,users:read.email";
+  const scopes = "chat:write,channels:read,groups:read,users:read,users:read.email";
   const state = Buffer.from(JSON.stringify({ workspaceId, userId: user.id })).toString("base64url");
 
   const url = `https://slack.com/oauth/v2/authorize?client_id=${clientId}&scope=${scopes}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
