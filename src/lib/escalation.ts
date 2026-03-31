@@ -53,11 +53,13 @@ export async function handleEscalation(
   }
 
   // Branch on reason
+  let assignedMemberId: string | undefined;
+
   switch (reason) {
     case "cancellation_intent": {
       await addInternalNote(admin, ticketId, `Cancellation intent detected on turn ${turnCount}. Escalated for human review.`);
       // Assign to admin/owner
-      await assignToAdmin(admin, workspaceId, ticketId);
+      assignedMemberId = await assignToAdmin(admin, workspaceId, ticketId);
       break;
     }
 
@@ -65,38 +67,38 @@ export async function handleEscalation(
     case "chargeback":
     case "fraud": {
       await addInternalNote(admin, ticketId, `Billing dispute/escalation detected on turn ${turnCount}. Reason: ${reason}. Assigned to admin for urgent review.`);
-      await assignToAdmin(admin, workspaceId, ticketId);
+      assignedMemberId = await assignToAdmin(admin, workspaceId, ticketId);
       break;
     }
 
     case "human_requested": {
       await addInternalNote(admin, ticketId, `Customer requested human on turn ${turnCount}. Assigned to agent.`);
-      await assignToAgent(admin, workspaceId, ticketId);
+      assignedMemberId = await assignToAgent(admin, workspaceId, ticketId);
       break;
     }
 
     case "turn_limit_reached": {
       await addInternalNote(admin, ticketId, `AI turn limit reached (${turnCount} turns). Full conversation history available. Assigned to agent.`);
-      await assignToAgent(admin, workspaceId, ticketId);
+      assignedMemberId = await assignToAgent(admin, workspaceId, ticketId);
       break;
     }
 
     case "negative_sentiment":
     case "negative_sentiment_detected": {
       await addInternalNote(admin, ticketId, `Negative sentiment detected on turn ${turnCount}. AI paused to prevent further friction. Assigned to agent.`);
-      await assignToAgent(admin, workspaceId, ticketId);
+      assignedMemberId = await assignToAgent(admin, workspaceId, ticketId);
       break;
     }
 
     case "low_confidence": {
       await addInternalNote(admin, ticketId, `AI response below confidence threshold on turn ${turnCount}. Draft saved for agent review.`);
-      await assignToAgent(admin, workspaceId, ticketId);
+      assignedMemberId = await assignToAgent(admin, workspaceId, ticketId);
       break;
     }
 
     default: {
       await addInternalNote(admin, ticketId, `Escalated: ${reason} (turn ${turnCount}).`);
-      await assignToAgent(admin, workspaceId, ticketId);
+      assignedMemberId = await assignToAgent(admin, workspaceId, ticketId);
     }
   }
 
@@ -116,6 +118,7 @@ export async function handleEscalation(
     ticketNumber: ticket.subject || ticketId,
     customer: { name: customer?.first_name || undefined, email: customer?.email },
     reason: reason.replace(/_/g, " "),
+    assignedMemberId,
   }).catch(() => {});
 }
 
@@ -137,16 +140,17 @@ async function assignToAdmin(
   admin: ReturnType<typeof createAdminClient>,
   workspaceId: string,
   ticketId: string,
-) {
+): Promise<string | undefined> {
   const { data: admins } = await admin
     .from("workspace_members")
-    .select("user_id")
+    .select("id, user_id")
     .eq("workspace_id", workspaceId)
     .in("role", ["owner", "admin"])
     .limit(1);
 
   if (admins?.[0]) {
     await admin.from("tickets").update({ assigned_to: admins[0].user_id }).eq("id", ticketId);
+    return admins[0].id;
   }
 }
 
@@ -154,17 +158,18 @@ async function assignToAgent(
   admin: ReturnType<typeof createAdminClient>,
   workspaceId: string,
   ticketId: string,
-) {
+): Promise<string | undefined> {
   // Round-robin: pick agent with fewest open tickets
   const { data: members } = await admin
     .from("workspace_members")
-    .select("user_id")
+    .select("id, user_id")
     .eq("workspace_id", workspaceId)
     .in("role", ["owner", "admin", "agent"]);
 
   if (!members?.length) return;
 
   // Count open tickets per member
+  let bestMemberId = members[0].id;
   let bestAgent = members[0].user_id;
   let bestCount = Infinity;
 
@@ -178,9 +183,11 @@ async function assignToAgent(
 
     if ((count || 0) < bestCount) {
       bestCount = count || 0;
+      bestMemberId = m.id;
       bestAgent = m.user_id;
     }
   }
 
   await admin.from("tickets").update({ assigned_to: bestAgent }).eq("id", ticketId);
+  return bestMemberId;
 }

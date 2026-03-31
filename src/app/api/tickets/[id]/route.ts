@@ -5,6 +5,7 @@ import { cookies } from "next/headers";
 import { inngest } from "@/lib/inngest/client";
 import { evaluateRules } from "@/lib/rules-engine";
 import { calculateRetentionScore } from "@/lib/retention-score";
+import { dispatchSlackNotification } from "@/lib/slack-notify";
 
 // GET: ticket detail with messages and customer
 export async function GET(
@@ -257,6 +258,28 @@ export async function PATCH(
       ticket: updated,
       customer: custData || undefined,
     });
+  }
+
+  // Slack notification on manual escalation
+  if ("escalated_to" in body && body.escalated_to) {
+    const { data: member } = await admin
+      .from("workspace_members")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("user_id", body.escalated_to)
+      .single();
+
+    const { data: custData } = updated.customer_id
+      ? await admin.from("customers").select("first_name, email").eq("id", updated.customer_id).single()
+      : { data: null };
+
+    dispatchSlackNotification(workspaceId, "escalation", {
+      ticketId,
+      ticketNumber: updated.subject || ticketId,
+      customer: { name: custData?.first_name || undefined, email: custData?.email },
+      reason: body.escalation_reason || "Manual escalation",
+      assignedMemberId: member?.id,
+    }).catch(() => {});
   }
 
   return NextResponse.json(updated);
