@@ -23,7 +23,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(`${process.env.NEXT_PUBLIC_SITE_URL}/dashboard/settings/integrations?slack=error&reason=invalid_state`);
   }
 
+  console.log("[Slack] callback received, exchanging code for token...");
   const result = await exchangeCodeForToken(code);
+  console.log("[Slack] token exchange result:", { ok: result.ok, error: result.error, hasToken: !!result.access_token, team: result.team });
   if (!result.ok || !result.access_token) {
     return NextResponse.redirect(`${process.env.NEXT_PUBLIC_SITE_URL}/dashboard/settings/integrations?slack=error&reason=${result.error || "token_exchange_failed"}`);
   }
