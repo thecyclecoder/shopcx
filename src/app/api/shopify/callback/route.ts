@@ -87,16 +87,17 @@ export async function GET(request: Request) {
     // Discover the real myshopify domain
     const shopDetails = await fetchShopDetails(shop, access_token);
 
-    // Store everything
-    await admin
-      .from("workspaces")
-      .update({
-        shopify_access_token_encrypted: encrypt(access_token),
-        shopify_myshopify_domain: shopDetails.myshopify_domain,
-        shopify_domain: shopDetails.domain || shopDetails.myshopify_domain,
-        shopify_scopes: scope,
-      })
-      .eq("id", workspaceId);
+    // Store everything — preserve shopify_domain if already set (user-entered subdomain)
+    const { data: existingWs } = await admin.from("workspaces").select("shopify_domain").eq("id", workspaceId).single();
+    const updateData: Record<string, unknown> = {
+      shopify_access_token_encrypted: encrypt(access_token),
+      shopify_myshopify_domain: shopDetails.myshopify_domain,
+      shopify_scopes: scope,
+    };
+    if (!existingWs?.shopify_domain) {
+      updateData.shopify_domain = shopDetails.domain || shopDetails.myshopify_domain;
+    }
+    await admin.from("workspaces").update(updateData).eq("id", workspaceId);
 
     // Register webhooks for real-time sync
     const webhookUrl = `${siteUrl}/api/webhooks/shopify`;
