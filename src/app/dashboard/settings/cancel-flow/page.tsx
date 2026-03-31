@@ -7,6 +7,8 @@ interface CancelReason {
   id: string;
   slug: string;
   label: string;
+  type: "remedy" | "ai_conversation";
+  suggested_remedy_id?: string | null;
   enabled: boolean;
   sort_order: number;
 }
@@ -35,8 +37,13 @@ const REMEDY_TYPES = [
   { value: "pause", label: "Pause subscription" },
   { value: "skip", label: "Skip next order" },
   { value: "frequency_change", label: "Change frequency" },
-  { value: "ai_conversation", label: "AI conversation" },
-  { value: "specialist", label: "Talk to specialist" },
+  { value: "free_product", label: "Free product (one-time)" },
+  { value: "line_item_modifier", label: "Line item change (swap/qty)" },
+];
+
+const REASON_TYPES = [
+  { value: "remedy", label: "Show remedies (AI picks top 3)" },
+  { value: "ai_conversation", label: "AI conversation (open-ended chat)" },
 ];
 
 // Config fields per remedy type
@@ -61,12 +68,12 @@ const TYPE_CONFIG_FIELDS: Record<string, { key: string; label: string; type: "nu
 };
 
 const DEFAULT_REASONS: Omit<CancelReason, "id">[] = [
-  { slug: "too_expensive", label: "It's too expensive", enabled: true, sort_order: 0 },
-  { slug: "too_much_product", label: "I have too much product", enabled: true, sort_order: 1 },
-  { slug: "not_seeing_results", label: "I'm not seeing results", enabled: true, sort_order: 2 },
-  { slug: "reached_goals", label: "I already reached my goals", enabled: true, sort_order: 3 },
-  { slug: "just_need_a_break", label: "I just need a break", enabled: true, sort_order: 4 },
-  { slug: "something_else", label: "Something else", enabled: true, sort_order: 5 },
+  { slug: "too_expensive", label: "It's too expensive", type: "remedy", enabled: true, sort_order: 0 },
+  { slug: "too_much_product", label: "I have too much product", type: "remedy", enabled: true, sort_order: 1 },
+  { slug: "not_seeing_results", label: "I'm not seeing results", type: "remedy", enabled: true, sort_order: 2 },
+  { slug: "reached_goals", label: "I already reached my goals", type: "ai_conversation", enabled: true, sort_order: 3 },
+  { slug: "just_need_a_break", label: "I just need a break", type: "ai_conversation", enabled: true, sort_order: 4 },
+  { slug: "something_else", label: "Something else", type: "ai_conversation", enabled: true, sort_order: 5 },
 ];
 
 function rateBadge(rate: number | null) {
@@ -163,6 +170,7 @@ export default function CancelFlowSettingsPage() {
       id: "",
       slug: "",
       label: "",
+      type: "remedy",
       enabled: true,
       sort_order: reasons.length,
     });
@@ -221,7 +229,12 @@ export default function CancelFlowSettingsPage() {
                   <button onClick={() => moveReason(i, 1)} disabled={i === reasons.length - 1} className="text-xs text-zinc-400 hover:text-zinc-600 disabled:opacity-30">&#9660;</button>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{r.label}</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{r.label}</span>
+                    <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${r.type === "ai_conversation" ? "bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-300" : "bg-cyan-100 text-cyan-700 dark:bg-cyan-900 dark:text-cyan-300"}`}>
+                      {r.type === "ai_conversation" ? "AI chat" : "Remedies"}
+                    </span>
+                  </div>
                   <div className="text-xs text-zinc-400 font-mono">{r.slug}</div>
                 </div>
                 <button
@@ -271,6 +284,31 @@ export default function CancelFlowSettingsPage() {
                   className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm font-mono dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
                 />
               </div>
+              <div>
+                <label className="block text-xs font-medium text-zinc-500 mb-1">Type</label>
+                <select
+                  value={editingReason.type || "remedy"}
+                  onChange={(e) => setEditingReason({ ...editingReason, type: e.target.value as "remedy" | "ai_conversation" })}
+                  className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                >
+                  {REASON_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                </select>
+              </div>
+              {editingReason.type === "remedy" && (
+                <div>
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">Suggested remedy (optional — AI will prioritize this)</label>
+                  <select
+                    value={editingReason.suggested_remedy_id || ""}
+                    onChange={(e) => setEditingReason({ ...editingReason, suggested_remedy_id: e.target.value || null })}
+                    className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                  >
+                    <option value="">AI decides (no suggestion)</option>
+                    {remedies.filter(r => r.is_active).map(r => (
+                      <option key={r.id} value={r.id}>{r.name} ({r.type})</option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="flex gap-2">
                 <button onClick={saveReason} disabled={!editingReason.label || !editingReason.slug}
                   className="rounded-md bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-50">
@@ -433,7 +471,7 @@ export default function CancelFlowSettingsPage() {
             </div>
             <div className="flex items-start gap-2">
               <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" />
-              <p><span className="font-medium">Open-ended reasons:</span> &quot;Just need a break&quot;, &quot;Something else&quot;, &quot;Reached goals&quot; trigger AI chat instead of remedies</p>
+              <p><span className="font-medium">Reason types:</span> &quot;Remedy&quot; reasons show AI-picked offers. &quot;AI conversation&quot; reasons open a chat. Cancel button hidden until 2 AI turns.</p>
             </div>
           </div>
         </div>

@@ -588,10 +588,68 @@ body.sp-modal-open {
   font-weight: 700;
 }
 
-.sp-addswap-price__note {
-  margin-top: 6px;
-  font-size: 12px;
-  display: none;
+/* -------------------------
+   Add/Swap redesign: constrained images, gold stars, premium CTA, discount badge
+   ------------------------- */
+
+/* Constrained product images (Step 1 + Step 2) */
+.sp-addswap__img {
+  max-width: 200px;
+  max-height: 200px;
+  border-radius: 12px;
+  object-fit: contain;
+  display: block;
+  margin: 0 auto 8px;
+  background: #fff;
+  border: 1px solid var(--sp-border);
+}
+
+.sp-addswap__img--placeholder {
+  width: 200px;
+  height: 200px;
+  background: #f3f4f6;
+}
+
+/* Gold star rating */
+.sp-addswap__stars {
+  color: #f5b301;
+  font-size: 16px;
+  letter-spacing: 1px;
+  margin: 6px 0;
+  display: inline-block;
+}
+
+/* Premium gradient "Select product" CTA */
+.sp-addswap__select-btn {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 8px 20px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #f59e0b, #ef4444);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  border: none;
+  cursor: pointer;
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.sp-addswap-product:hover .sp-addswap__select-btn {
+  opacity: 0.92;
+  transform: scale(1.02);
+}
+
+/* 25% OFF discount badge pill */
+.sp-addswap__discount-badge {
+  background: linear-gradient(135deg, #f59e0b, #f97316);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  line-height: 1.4;
 }
 
 /* Modal footer: support 3 buttons on mobile */

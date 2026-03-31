@@ -41,6 +41,7 @@ export async function selectRemedies(
   cancelReason: string,
   customer: CustomerContext,
   shopifyProductIds: string[],
+  suggestedRemedyId?: string | null,
 ): Promise<{ remedies: RemedySelection[]; review: { summary: string; rating: number; body: string; reviewer_name: string } | null }> {
   const admin = createAdminClient();
 
@@ -91,7 +92,6 @@ export async function selectRemedies(
 
   // Build AI prompt
   const remedyList = remedies
-    .filter(r => r.type !== "ai_conversation")
     .map(r => {
       const rates = successRates[r.type];
       const rate = rates && rates.offered > 0 ? Math.round((rates.saved / rates.offered) * 100) : null;
@@ -157,7 +157,7 @@ Customer: LTV $${(customer.ltv_cents / 100).toFixed(0)}, retention score ${custo
 Cancel reason: "${reasonLabels[cancelReason] || cancelReason}"
 Available remedies: ${JSON.stringify(remedyList)}
 Available coupons: ${JSON.stringify(couponList)}
-Product reviews: ${JSON.stringify(reviewList)}${firstRenewalContext}
+Product reviews: ${JSON.stringify(reviewList)}${suggestedRemedyId ? `\n\nIMPORTANT: The admin has suggested remedy ID "${suggestedRemedyId}" for this cancel reason. Prioritize including it in your top 3 picks if it's a good fit, but still choose the best overall combination.` : ""}${firstRenewalContext}
 
 IMPORTANT: Never select two remedies of the same type (e.g. don't show two coupons or two pause options). Each remedy must be a different type to give the customer distinct choices.
 
@@ -201,7 +201,6 @@ Return ONLY the JSON array, no other text.`,
     // Fallback: return first 3 remedies with generic pitches
     return {
       remedies: remedies
-        .filter(r => r.type !== "ai_conversation")
         .slice(0, 3)
         .map(r => ({
           remedy_id: r.id,
@@ -236,7 +235,6 @@ export async function generateOpenEndedResponse(
     .order("priority", { ascending: true });
 
   const remediesList = (remedies || [])
-    .filter(r => r.type !== "ai_conversation")
     .map(r => `- ${r.name}: ${r.description || r.type}`)
     .join("\n");
 

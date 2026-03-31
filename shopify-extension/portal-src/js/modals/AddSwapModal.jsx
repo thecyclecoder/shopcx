@@ -8,11 +8,16 @@ import { safeStr, shortId } from '../core/utils.js';
 import Modal from '../components/Modal.jsx';
 
 function pickImage(obj) {
-  return obj?.image?.src || obj?.featuredImage?.src || obj?.image || '';
+  const src = obj?.image?.src || obj?.featuredImage?.src || obj?.image || '';
+  if (!src) return '';
+  // Use Shopify _300x300 size transform for smaller images
+  return src.includes('?') ? src + '&width=300' : src + '?width=300';
 }
 
 function variantImage(v) {
-  return v?.image?.src || '';
+  const src = v?.image?.src || '';
+  if (!src) return '';
+  return src.includes('?') ? src + '&width=300' : src + '?width=300';
 }
 
 function cents(v) {
@@ -31,27 +36,16 @@ function fmtCents(c) {
   return sign + '$' + Math.floor(abs / 100) + '.' + String(abs % 100).padStart(2, '0');
 }
 
-// Tier pricing: 25% S&S base + tier discount based on total real items
-function computePrice(variant, qty, totalRealQty) {
+// Simple pricing: MSRP × 0.75 (25% subscribe & save discount)
+function computePrice(variant, qty) {
   const msrpCents = cents(variant?.compare_at_price_cents || variant?.compare_at_price) ||
                     cents(variant?.price_cents || variant?.price);
-  const baseCents = cents(variant?.price_cents || variant?.price);
-  if (!msrpCents) return { msrp: null, price: null, note: '' };
+  if (!msrpCents) return { msrp: null, price: null };
 
-  const ssDsc = 0.25; // 25% subscribe & save
-  let tierDsc = 0;
-  const total = (totalRealQty || 0) + qty;
-  if (total >= 4) tierDsc = 0.16;
-  else if (total >= 3) tierDsc = 0.12;
-  else if (total >= 2) tierDsc = 0.08;
-
-  const unitAfter = (baseCents || msrpCents) * (1 - ssDsc) * (1 - tierDsc);
+  const unitAfter = msrpCents * 0.75;
   return {
     msrp: msrpCents * qty,
     price: Math.round(unitAfter * qty),
-    note: tierDsc > 0
-      ? `Includes 25% S&S + ${Math.round(tierDsc * 100)}% tier discount.`
-      : 'Includes 25% subscribe & save.',
   };
 }
 
@@ -61,7 +55,7 @@ function Stars({ value, count }) {
   const stars = Array.from({ length: 5 }, (_, i) => i < full ? '\u2605' : '\u2606');
   return (
     <span class="sp-addswap-rating">
-      <span class="sp-addswap-rating__stars">{stars.join('')}</span>
+      <span class="sp-addswap__stars">{stars.join('')}</span>
       {v > 0 && <span class="sp-addswap-rating__val">{v.toFixed(1)}</span>}
       {count && <span class="sp-addswap-rating__count">({count})</span>}
     </span>
@@ -120,11 +114,12 @@ export default function AddSwapModal({ mode, contract, line, catalog, onClose, o
             return (
               <button key={p.productId || p.id} type="button" class="sp-addswap-product"
                 onClick={() => { setSelectedProduct(p); setStep(2); setSelectedVariant(p.variants?.[0] || null); }}>
-                {img ? <img class="sp-addswap-product__img" src={img} alt={p.title} /> : <div class="sp-addswap-product__img sp-addswap-product__img--placeholder" />}
+                {img ? <img class="sp-addswap__img" src={img} alt={p.title} /> : <div class="sp-addswap__img sp-addswap__img--placeholder" />}
                 <div class="sp-addswap-product__text">
                   <div class="sp-addswap-product__title">{p.title}</div>
                   {p.metafields?.direct_response_headline && <div class="sp-addswap-product__headline sp-muted">{p.metafields.direct_response_headline}</div>}
                   <Stars value={rating.value} count={rating.count} />
+                  <span class="sp-addswap__select-btn">Select product</span>
                 </div>
               </button>
             );
@@ -136,7 +131,7 @@ export default function AddSwapModal({ mode, contract, line, catalog, onClose, o
 
   // Step 2: variant + quantity
   const variants = selectedProduct?.variants || [];
-  const pricing = selectedVariant ? computePrice(selectedVariant, qty, totalRealQty || 0) : {};
+  const pricing = selectedVariant ? computePrice(selectedVariant, qty) : {};
   const varImg = variantImage(selectedVariant) || pickImage(selectedProduct);
 
   return (
@@ -152,7 +147,7 @@ export default function AddSwapModal({ mode, contract, line, catalog, onClose, o
       </div>
 
       <div class="sp-addswap-selected">
-        {varImg ? <img class="sp-addswap-selected__img" src={varImg} alt={selectedProduct?.title} /> : <div class="sp-addswap-selected__img sp-addswap-selected__img--placeholder" />}
+        {varImg ? <img class="sp-addswap__img" src={varImg} alt={selectedProduct?.title} /> : <div class="sp-addswap__img sp-addswap__img--placeholder" />}
         <div class="sp-addswap-selected__text">
           <div class="sp-addswap-selected__title">{selectedProduct?.title}</div>
           {selectedVariant?.title && <div class="sp-addswap-selected__headline sp-muted">{selectedVariant.title}</div>}
@@ -189,8 +184,8 @@ export default function AddSwapModal({ mode, contract, line, catalog, onClose, o
           <div class="sp-addswap-price__vals">
             {pricing.msrp != null && <div class="sp-addswap-price__msrp">{fmtCents(pricing.msrp)}</div>}
             {pricing.price != null && <div class="sp-addswap-price__now">{fmtCents(pricing.price)}</div>}
+            <span class="sp-addswap__discount-badge">25% OFF</span>
           </div>
-          {pricing.note && <div class="sp-addswap-price__note sp-muted">{pricing.note}</div>}
         </div>
       )}
     </Modal>
