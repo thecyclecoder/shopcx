@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { useWorkspace } from "@/lib/hooks/use-workspace";
+import { useWorkspace } from "@/lib/workspace-context";
 
 const EVENT_TYPES = [
   { key: "escalation", label: "Escalation", description: "When a ticket is escalated to a human agent" },
