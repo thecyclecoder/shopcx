@@ -57,7 +57,11 @@ export async function postMessage(
 }
 
 export async function lookupUserByEmail(token: string, email: string): Promise<string | null> {
-  const result = await slackApi(token, "users.lookupByEmail", { email });
+  // users.lookupByEmail requires GET with query param, not JSON body
+  const res = await fetch(`${SLACK_API}/users.lookupByEmail?email=${encodeURIComponent(email)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const result = await res.json() as Record<string, unknown>;
   if (!result.ok) return null;
   return (result.user as { id: string })?.id || null;
 }
