@@ -31,8 +31,9 @@ export default function RewardsCard({ contractId, onCouponApplied }) {
     requestJson('loyaltyBalance', {}, { force: true })
       .then(resp => {
         if (resp?.ok && resp?.enabled) setData(resp);
+        else if (resp && !resp.enabled) console.log('[RewardsCard] loyalty not enabled for this workspace');
       })
-      .catch(() => {})
+      .catch(err => console.error('[RewardsCard] failed to load loyalty balance:', err?.status, err?.details || err?.message))
       .finally(() => setLoading(false));
   }, []);
 

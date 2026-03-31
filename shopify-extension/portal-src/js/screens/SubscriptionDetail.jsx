@@ -414,7 +414,7 @@ function CouponCard({ contract, showToast, onUpdate }) {
     if (couponCode) return;
     requestJson('loyaltyBalance', {}, { force: true })
       .then(resp => { if (resp?.ok && resp?.enabled) setLoyalty(resp); })
-      .catch(() => {});
+      .catch(err => console.error('[SubscriptionDetail] loyalty balance error:', err?.status, err?.details || err?.message));
   }, [couponCode]);
 
   async function apply() {
@@ -438,7 +438,7 @@ function CouponCard({ contract, showToast, onUpdate }) {
         // Refresh loyalty data to reflect change
         requestJson('loyaltyBalance', {}, { force: true })
           .then(resp => { if (resp?.ok && resp?.enabled) setLoyalty(resp); })
-          .catch(() => {});
+          .catch(err => console.error('[SubscriptionDetail] loyalty refresh error:', err?.message));
       }
       clearCaches(); onUpdate();
     } catch { showToast('Could not remove coupon.', 'error'); }
