@@ -2,6 +2,7 @@
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { dispatchSlackNotification } from "@/lib/slack-notify";
 
 export const journeySessionCompleted = inngest.createFunction(
   {
@@ -202,6 +203,15 @@ export const journeySessionCompleted = inngest.createFunction(
         await addTicketTag(session.ticket_id, "jo:positive");
       }
     });
+
+    // Slack notification for cancellations
+    if (outcome === "cancelled" && session.workspace_id) {
+      dispatchSlackNotification(session.workspace_id, "cancel_completed", {
+        ticketId: session.ticket_id,
+        customer: { email: session.customer_email || "" },
+        reason: session.responses?.cancellation_reason?.label || "unknown",
+      }).catch(() => {});
+    }
 
     // Step 4: Mark action taken (idempotency)
     await step.run("mark-action-taken", async () => {

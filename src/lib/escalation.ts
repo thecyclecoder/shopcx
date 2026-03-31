@@ -3,6 +3,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendTicketReply } from "@/lib/email";
+import { dispatchSlackNotification } from "@/lib/slack-notify";
 
 export async function handleEscalation(
   workspaceId: string,
@@ -108,6 +109,14 @@ export async function handleEscalation(
     link: `/dashboard/tickets/${ticketId}`,
     metadata: { ticket_id: ticketId, reason },
   });
+
+  // Slack notification
+  dispatchSlackNotification(workspaceId, "escalation", {
+    ticketId,
+    ticketNumber: ticket.subject || ticketId,
+    customer: { name: customer?.first_name || undefined, email: customer?.email },
+    reason: reason.replace(/_/g, " "),
+  }).catch(() => {});
 }
 
 async function addInternalNote(

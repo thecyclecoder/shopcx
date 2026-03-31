@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { runAllFraudRules, checkOrderForFraud, checkCustomerForFraud } from "@/lib/fraud-detector";
 import { decrypt } from "@/lib/crypto";
 import { unsubscribeFromAllMarketing } from "@/lib/shopify-marketing";
+import { dispatchSlackNotification } from "@/lib/slack-notify";
 
 // ── Nightly full scan ──
 
@@ -205,6 +206,14 @@ export const fraudGenerateSummary = inngest.createFunction(
         });
       }
     });
+
+    // Slack notification for new fraud case
+    dispatchSlackNotification(workspaceId, "fraud_case", {
+      customer: { name: fraudCase.title, email: "" },
+      severity: fraudCase.severity,
+      rules: [],
+      caseId,
+    }).catch(() => {});
 
     // Unsubscribe all flagged customers from email + SMS marketing
     await step.run("unsubscribe-flagged-customers", async () => {

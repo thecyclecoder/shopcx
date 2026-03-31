@@ -2,6 +2,7 @@
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { dispatchSlackNotification } from "@/lib/slack-notify";
 import {
   getCustomerPaymentMethods,
   deduplicatePaymentMethods,
@@ -274,6 +275,12 @@ export const dunningPaymentFailed = inngest.createFunction(
     await step.run("mark-exhausted", async () => {
       await updateDunningCycle(cycle.id, { status: "exhausted" });
     });
+
+    // Slack notification for exhausted dunning
+    dispatchSlackNotification(workspace_id, "dunning_failed", {
+      customer: { email: customer_email || "" },
+      attempts: cycle.cycle_number || 0,
+    }).catch(() => {});
 
     return { status: "exhausted", cycle_id: cycle.id, cycle_number: cycle.cycle_number };
   }

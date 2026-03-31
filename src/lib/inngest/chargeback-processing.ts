@@ -2,6 +2,7 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { appstleSubscriptionAction } from "@/lib/appstle";
 import { unsubscribeFromAllMarketing } from "@/lib/shopify-marketing";
+import { dispatchSlackNotification } from "@/lib/slack-notify";
 
 // ── chargeback/received — main processing pipeline ──
 
@@ -263,6 +264,14 @@ export const chargebackReceived = inngest.createFunction(
           },
         });
       }
+
+      // Slack notification
+      dispatchSlackNotification(workspaceId, "chargeback", {
+        customer: { name: customer?.first_name, email: customer?.email },
+        amount: amountStr,
+        reason: cb.reason || "unknown",
+        orderId: orderLabel,
+      }).catch(() => {});
 
       // Support ticket
       if (ws.chargeback_auto_ticket) {

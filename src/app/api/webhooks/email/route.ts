@@ -8,6 +8,7 @@ import { evaluateRules } from "@/lib/rules-engine";
 import { matchPatterns } from "@/lib/pattern-matcher";
 import { inngest } from "@/lib/inngest/client";
 import { buildContext, resolveTemplate } from "@/lib/workflow-executor";
+import { dispatchSlackNotification } from "@/lib/slack-notify";
 
 // Detect short positive confirmation replies (thanks, got it, etc.)
 const POSITIVE_PHRASES = [
@@ -361,6 +362,14 @@ export async function POST(request: Request) {
         summary: `New ticket: ${subject || "(No subject)"}`,
         properties: { ticket_id: ticket.id, subject, from: normalizedEmail },
       });
+
+      // Slack notification for new ticket
+      dispatchSlackNotification(workspaceId, "new_ticket", {
+        ticketId: ticket.id,
+        customer: { email: normalizedEmail },
+        channel: "email",
+        subject: subject || "(No subject)",
+      }).catch(() => {});
 
       // Check if a journey should handle this (priority: Journey > Workflow > AI)
       const { data: journeyDefs } = await admin

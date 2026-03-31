@@ -73,6 +73,14 @@ export default function IntegrationsPage() {
   const [klaviyoSyncing, setKlaviyoSyncing] = useState(false);
 
 
+  // Slack
+  const [slackConnected, setSlackConnected] = useState(false);
+  const [slackTeamName, setSlackTeamName] = useState<string | null>(null);
+  const [slackConnectedAt, setSlackConnectedAt] = useState<string | null>(null);
+  const [slackMembersMapped, setSlackMembersMapped] = useState(0);
+  const [slackMembersTotal, setSlackMembersTotal] = useState(0);
+  const [slackSyncing, setSlackSyncing] = useState(false);
+
   // Sandbox
   const [sandboxMode, setSandboxMode] = useState(true);
 
@@ -120,6 +128,11 @@ export default function IntegrationsPage() {
         setKlaviyoPublicKey(data.klaviyo_public_key || "");
         setKlaviyoLastSync(data.klaviyo_last_sync_at);
         setKlaviyoReviewCount(data.klaviyo_review_count);
+        setSlackConnected(!!data.slack_connected);
+        setSlackTeamName(data.slack_team_name || null);
+        setSlackConnectedAt(data.slack_connected_at || null);
+        setSlackMembersMapped(data.slack_members_mapped || 0);
+        setSlackMembersTotal(data.slack_members_total || 0);
         setLoading(false);
       });
   }, [workspace.id]);
@@ -1156,6 +1169,80 @@ export default function IntegrationsPage() {
             </div>
           )}
         </div>
+      </div>
+      {/* ── Slack ── */}
+      <div className="rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Slack</h3>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+              {slackConnected
+                ? `Connected to ${slackTeamName || "Slack workspace"}`
+                : "Send notifications to Slack channels and DMs"}
+            </p>
+          </div>
+          {slackConnected && (
+            <span className="inline-flex items-center rounded-full bg-green-50 px-2.5 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">
+              Connected
+            </span>
+          )}
+        </div>
+
+        {!slackConnected ? (
+          <div className="mt-4">
+            <a
+              href="/api/slack/oauth"
+              className="inline-flex items-center rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+            >
+              Connect Slack
+            </a>
+          </div>
+        ) : (
+          <div className="mt-4 space-y-3">
+            <div className="text-sm text-zinc-600 dark:text-zinc-400">
+              <p>Team members mapped: {slackMembersMapped} of {slackMembersTotal}</p>
+              {slackConnectedAt && <p className="mt-1">Connected {new Date(slackConnectedAt).toLocaleDateString()}</p>}
+            </div>
+            <div className="flex gap-2">
+              <a
+                href="/dashboard/settings/slack"
+                className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+              >
+                Configure Notifications
+              </a>
+              <button
+                type="button"
+                onClick={async () => {
+                  setSlackSyncing(true);
+                  try {
+                    const res = await fetch("/api/slack/sync-members", { method: "POST" });
+                    const data = await res.json();
+                    if (data.ok) {
+                      setSlackMembersMapped(data.mapped);
+                      setSlackMembersTotal(data.total);
+                    }
+                  } catch {}
+                  setSlackSyncing(false);
+                }}
+                disabled={slackSyncing}
+                className="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                {slackSyncing ? "Syncing..." : "Re-sync Members"}
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  await fetch("/api/slack/disconnect", { method: "POST" });
+                  setSlackConnected(false);
+                  setSlackTeamName(null);
+                }}
+                className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+              >
+                Disconnect
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
