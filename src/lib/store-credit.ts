@@ -64,13 +64,34 @@ const DEBIT_MUTATION = `
 `;
 
 const BALANCE_QUERY = `
-  query storeCreditBalance($id: ID!) {
+  query GetCustomerStoreCredit($id: ID!) {
     customer(id: $id) {
       storeCreditAccounts(first: 5) {
-        edges {
-          node {
-            id
-            balance { amount currencyCode }
+        nodes {
+          id
+          balance { amount currencyCode }
+          transactions(first: 20) {
+            nodes {
+              ... on StoreCreditAccountCreditTransaction {
+                id
+                amount { amount currencyCode }
+                balanceAfterTransaction { amount currencyCode }
+                createdAt
+                expiresAt
+              }
+              ... on StoreCreditAccountDebitTransaction {
+                id
+                amount { amount currencyCode }
+                balanceAfterTransaction { amount currencyCode }
+                createdAt
+              }
+              ... on StoreCreditAccountExpirationTransaction {
+                id
+                amount { amount currencyCode }
+                balanceAfterTransaction { amount currencyCode }
+                createdAt
+              }
+            }
           }
         }
       }
@@ -233,19 +254,19 @@ export async function getStoreCreditBalance(
   const data = await shopifyGQL(workspaceId, BALANCE_QUERY, { id: customerGid });
 
   const customer = data.customer as {
-    storeCreditAccounts: { edges: { node: { balance: { amount: string; currencyCode: string } } }[] };
+    storeCreditAccounts: { nodes: { id: string; balance: { amount: string; currencyCode: string } }[] };
   } | null;
 
-  if (!customer?.storeCreditAccounts?.edges?.length) {
+  const nodes = customer?.storeCreditAccounts?.nodes;
+  if (!nodes?.length) {
     return { balance: 0, currency: "USD" };
   }
 
-  // Sum across all store credit accounts (usually just one)
   let total = 0;
   let currency = "USD";
-  for (const edge of customer.storeCreditAccounts.edges) {
-    total += parseFloat(edge.node.balance.amount);
-    currency = edge.node.balance.currencyCode;
+  for (const node of nodes) {
+    total += parseFloat(node.balance.amount);
+    currency = node.balance.currencyCode;
   }
 
   return { balance: total, currency };
