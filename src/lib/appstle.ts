@@ -205,7 +205,7 @@ export async function appstleSkipUpcomingOrder(
 
   try {
     const res = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/skip-upcoming-order?contractId=${contractId}&shop=${creds.shop}`,
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/skip-upcoming-order?subscriptionContractId=${contractId}&shop=${creds.shop}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
 
