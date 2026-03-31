@@ -71,14 +71,18 @@ export async function listChannels(token: string): Promise<{ id: string; name: s
   let cursor: string | undefined;
 
   do {
-    const body: Record<string, unknown> = {
+    // conversations.list requires GET with query params, not JSON body
+    const params = new URLSearchParams({
       types: "public_channel,private_channel",
-      exclude_archived: true,
-      limit: 200,
-    };
-    if (cursor) body.cursor = cursor;
+      exclude_archived: "true",
+      limit: "200",
+    });
+    if (cursor) params.set("cursor", cursor);
 
-    const result = await slackApi(token, "conversations.list", body);
+    const res = await fetch(`${SLACK_API}/conversations.list?${params}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const result = await res.json() as Record<string, unknown>;
     if (!result.ok) break;
 
     const items = (result.channels as { id: string; name: string; is_private: boolean }[]) || [];
