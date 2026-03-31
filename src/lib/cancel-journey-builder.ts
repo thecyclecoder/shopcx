@@ -32,7 +32,7 @@ export interface CancelJourneyMetadata {
   selectedSubscriptionId?: string;
 }
 
-const CANCEL_REASONS = [
+const DEFAULT_CANCEL_REASONS = [
   { value: "too_expensive", label: "Too expensive", emoji: "💸" },
   { value: "too_much_product", label: "I have too much product", emoji: "📦" },
   { value: "not_seeing_results", label: "I'm not seeing results", emoji: "😕" },
@@ -42,6 +42,25 @@ const CANCEL_REASONS = [
   { value: "just_pausing", label: "I just need a break", emoji: "⏸️" },
   { value: "something_else", label: "Something else", emoji: "💬" },
 ];
+
+async function loadCancelReasons(workspaceId: string): Promise<{ value: string; label: string; emoji?: string }[]> {
+  const admin = createAdminClient();
+  const { data: ws } = await admin.from("workspaces")
+    .select("portal_config")
+    .eq("id", workspaceId)
+    .single();
+
+  const portalConfig = (ws?.portal_config || {}) as Record<string, unknown>;
+  const cancelConfig = (portalConfig.cancel_flow || {}) as Record<string, unknown>;
+  const configuredReasons = Array.isArray(cancelConfig.reasons) ? cancelConfig.reasons : [];
+
+  if (configuredReasons.length === 0) return DEFAULT_CANCEL_REASONS;
+
+  return configuredReasons
+    .filter((r: { enabled?: boolean }) => r.enabled !== false)
+    .sort((a: { sort_order?: number }, b: { sort_order?: number }) => (a.sort_order ?? 99) - (b.sort_order ?? 99))
+    .map((r: { slug?: string; label?: string }) => ({ value: r.slug || "", label: r.label || "" }));
+}
 
 export async function buildCancelJourneySteps(
   workspaceId: string,
@@ -142,11 +161,12 @@ export async function buildCancelJourneySteps(
   }
 
   // Step 2: Why are you cancelling?
+  const cancelReasons = await loadCancelReasons(workspaceId);
   steps.push({
     key: "cancel_reason",
     type: "single_choice",
     question: "Why are you cancelling?",
-    options: CANCEL_REASONS,
+    options: cancelReasons,
   });
 
   // Step 3 is dynamic — AI remedy selection or AI chat (built at runtime on server)

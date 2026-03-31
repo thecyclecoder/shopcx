@@ -87,17 +87,34 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       reviews = revs || [];
     }
 
+    // Load cancel reasons from workspace portal_config
+    const { data: ws } = await admin.from("workspaces")
+      .select("portal_config")
+      .eq("id", auth.workspaceId)
+      .single();
+
+    const portalConfig = (ws?.portal_config || {}) as Record<string, unknown>;
+    const cancelConfig = (portalConfig.cancel_flow || {}) as Record<string, unknown>;
+    const configuredReasons = Array.isArray(cancelConfig.reasons) ? cancelConfig.reasons : [];
+
+    const cancelReasons = configuredReasons.length > 0
+      ? configuredReasons
+          .filter((r: { enabled?: boolean }) => r.enabled !== false)
+          .sort((a: { sort_order?: number }, b: { sort_order?: number }) => (a.sort_order ?? 99) - (b.sort_order ?? 99))
+          .map((r: { slug?: string; label?: string }) => ({ id: r.slug, label: r.label }))
+      : [
+          { id: "too_expensive", label: "Too expensive" },
+          { id: "too_much_product", label: "I have too much product" },
+          { id: "not_seeing_results", label: "Not seeing results" },
+          { id: "reached_goals", label: "I've reached my goals" },
+          { id: "just_need_a_break", label: "Just need a break" },
+          { id: "something_else", label: "Something else" },
+        ];
+
     return jsonOk({
       ok: true, route,
       subscription: sub,
-      cancel_reasons: [
-        { id: "too_expensive", label: "Too expensive" },
-        { id: "too_much_product", label: "I have too much product" },
-        { id: "not_seeing_results", label: "Not seeing results" },
-        { id: "reached_goals", label: "I've reached my goals" },
-        { id: "just_need_a_break", label: "Just need a break" },
-        { id: "something_else", label: "Something else" },
-      ],
+      cancel_reasons: cancelReasons,
       remedies: remedies || [],
       reviews,
     });
