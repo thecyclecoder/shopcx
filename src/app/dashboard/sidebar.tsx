@@ -141,7 +141,7 @@ export default function Sidebar({
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 py-3">
+      <nav className="flex-1 space-y-1 md:space-y-0.5 overflow-y-auto px-3 py-3">
         {NAV_ITEMS.map((item) => {
           const isActive = pathname === item.href ||
             (item.href !== "/dashboard" && pathname.startsWith(item.href));
@@ -152,13 +152,13 @@ export default function Sidebar({
                 <button
                   type="button"
                   onClick={() => setTicketsExpanded(prev => !prev)}
-                  className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${
+                  className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2.5 md:py-2 text-[15px] md:text-sm transition-colors ${
                     isActive
                       ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
                       : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
                   }`}
                 >
-                  <svg className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <svg className="h-5 w-5 md:h-4 md:w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
                   </svg>
                   <span className="flex-1 text-left">{item.label}</span>
@@ -167,13 +167,13 @@ export default function Sidebar({
               ) : (
                 <Link
                   href={item.href}
-                  className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${
+                  className={`flex items-center gap-2.5 rounded-md px-2.5 py-2.5 md:py-2 text-[15px] md:text-sm transition-colors ${
                     isActive
                       ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
                       : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
                   }`}
                 >
-                  <svg className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <svg className="h-5 w-5 md:h-4 md:w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
                   </svg>
                   <span className="flex-1">{item.label}</span>
