@@ -4,21 +4,36 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-const CANCEL_REASONS = [
+const DEFAULT_CANCEL_REASONS = [
   "too_expensive",
   "too_much_product",
   "not_seeing_results",
   "reached_goals",
   "just_need_a_break",
-  "tired_of_flavor",
-  "shipping_issues",
   "something_else",
 ];
+
+async function loadCancelReasonSlugs(workspaceId: string): Promise<string[]> {
+  const admin = createAdminClient();
+  const { data: ws } = await admin.from("workspaces")
+    .select("portal_config")
+    .eq("id", workspaceId)
+    .single();
+  const portalConfig = (ws?.portal_config || {}) as Record<string, unknown>;
+  const cancelConfig = (portalConfig.cancel_flow || {}) as Record<string, unknown>;
+  const reasons = Array.isArray(cancelConfig.reasons) ? cancelConfig.reasons : [];
+  if (reasons.length === 0) return DEFAULT_CANCEL_REASONS;
+  return reasons
+    .filter((r: { enabled?: boolean }) => r.enabled !== false)
+    .map((r: { slug?: string }) => r.slug || "")
+    .filter(Boolean);
+}
 
 const BATCH_SIZE = 20;
 
 async function tagReview(
   review: { id: string; title: string | null; body: string | null; summary: string | null; rating: number },
+  cancelReasons: string[],
 ): Promise<string[]> {
   const reviewText = [review.title, review.summary, review.body].filter(Boolean).join("\n\n");
   if (!reviewText || reviewText.length < 20) return [];
@@ -40,7 +55,7 @@ async function tagReview(
         role: "user",
         content: `You analyze product reviews for a subscription company. Given this review, determine which cancel reasons it would help counter. A customer considering cancelling for a given reason would be encouraged to stay after reading this review.
 
-Cancel reasons: ${CANCEL_REASONS.join(", ")}
+Cancel reasons: ${cancelReasons.join(", ")}
 
 Review (${review.rating}/5 stars):
 ${reviewText}
@@ -59,7 +74,7 @@ Return ONLY a JSON array of matching cancel reason slugs. Only include reasons w
     if (!match) return [];
     const parsed = JSON.parse(match[0]);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((s: unknown) => typeof s === "string" && CANCEL_REASONS.includes(s as string));
+    return parsed.filter((s: unknown) => typeof s === "string" && cancelReasons.includes(s as string));
   } catch {
     return [];
   }
@@ -74,8 +89,17 @@ export const tagCancelRelevanceBulk = inngest.createFunction(
     concurrency: { limit: 1 },
     triggers: [{ event: "reviews/tag-cancel-relevance" }],
   },
-  async ({ step }: { event: any; step: any }) => {
+  async ({ event, step }: { event: any; step: any }) => {
     const admin = createAdminClient();
+    const workspaceId = event.data?.workspaceId as string | undefined;
+
+    // Load cancel reasons from workspace settings (or use defaults)
+    const cancelReasons = await step.run("load-cancel-reasons", async () => {
+      if (workspaceId) return loadCancelReasonSlugs(workspaceId);
+      // If no workspace specified, find the first workspace with reviews
+      const { data: ws } = await admin.from("workspaces").select("id").limit(1).single();
+      return ws ? loadCancelReasonSlugs(ws.id) : DEFAULT_CANCEL_REASONS;
+    });
 
     const { count } = await step.run("count-untagged", async () => {
       const result = await admin.from("product_reviews")
@@ -103,7 +127,7 @@ export const tagCancelRelevanceBulk = inngest.createFunction(
 
         let tagged = 0;
         for (const review of reviews) {
-          const relevance = await tagReview(review);
+          const relevance = await tagReview(review, cancelReasons);
           await admin.from("product_reviews")
             .update({
               cancel_relevance: relevance.length > 0 ? relevance : [],
@@ -135,6 +159,12 @@ export const tagCancelRelevanceCron = inngest.createFunction(
   async ({ step }: { event: any; step: any }) => {
     const admin = createAdminClient();
 
+    // Load cancel reasons from first workspace
+    const cancelReasons = await step.run("load-cancel-reasons", async () => {
+      const { data: ws } = await admin.from("workspaces").select("id").limit(1).single();
+      return ws ? loadCancelReasonSlugs(ws.id) : DEFAULT_CANCEL_REASONS;
+    });
+
     const reviews = await step.run("fetch-reviews", async () => {
       const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
@@ -162,7 +192,7 @@ export const tagCancelRelevanceCron = inngest.createFunction(
       const result = await step.run(`cron-batch-${b}`, async () => {
         let tagged = 0;
         for (const review of batch) {
-          const relevance = await tagReview(review);
+          const relevance = await tagReview(review, cancelReasons);
           await admin.from("product_reviews")
             .update({
               cancel_relevance: relevance.length > 0 ? relevance : [],

@@ -22,9 +22,31 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
   // Load remedies
   const { data: remedies } = await admin.from("remedies")
-    .select("id, name, type, description, is_active, priority, config, success_rate")
+    .select("id, name, type, description, enabled, priority, config")
     .eq("workspace_id", workspaceId)
     .order("priority", { ascending: true });
+
+  // Compute success rates from remedy_outcomes
+  const { data: outcomes } = await admin.from("remedy_outcomes")
+    .select("remedy_id, outcome")
+    .eq("workspace_id", workspaceId);
+
+  const rateMap: Record<string, { offered: number; accepted: number }> = {};
+  for (const o of outcomes || []) {
+    if (!o.remedy_id) continue;
+    if (!rateMap[o.remedy_id]) rateMap[o.remedy_id] = { offered: 0, accepted: 0 };
+    rateMap[o.remedy_id].offered++;
+    if (o.outcome === "accepted") rateMap[o.remedy_id].accepted++;
+  }
+
+  const enriched = (remedies || []).map(r => ({
+    ...r,
+    is_active: r.enabled,
+    success_rate: rateMap[r.id] && rateMap[r.id].offered > 0
+      ? rateMap[r.id].accepted / rateMap[r.id].offered
+      : null,
+    coupon_mapping_id: (r.config as Record<string, unknown>)?.coupon_mapping_id || null,
+  }));
 
   // Load coupon mappings for reference
   const { data: coupons } = await admin.from("coupon_mappings")
@@ -35,7 +57,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
   return NextResponse.json({
     reasons,
-    remedies: remedies || [],
+    remedies: enriched,
     coupons: coupons || [],
   });
 }

@@ -66,10 +66,10 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
 
     // Load remedies
     const { data: remedies } = await admin.from("remedies")
-      .select("id, type, label, description, config, success_rate")
+      .select("id, type, name, description, config")
       .eq("workspace_id", auth.workspaceId)
-      .eq("is_active", true)
-      .order("success_rate", { ascending: false });
+      .eq("enabled", true)
+      .order("priority", { ascending: true });
 
     // Load reviews for subscription products
     const productIds = (sub.items as { product_id?: string }[] || [])

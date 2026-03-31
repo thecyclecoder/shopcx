@@ -36,9 +36,29 @@ const REMEDY_TYPES = [
   { value: "skip", label: "Skip next order" },
   { value: "frequency_change", label: "Change frequency" },
   { value: "ai_conversation", label: "AI conversation" },
-  { value: "social_proof", label: "Social proof" },
   { value: "specialist", label: "Talk to specialist" },
 ];
+
+// Config fields per remedy type
+const TYPE_CONFIG_FIELDS: Record<string, { key: string; label: string; type: "number" | "select"; unit?: string; options?: { value: string; label: string }[] }[]> = {
+  pause: [
+    { key: "pause_days", label: "Pause duration", type: "select", options: [
+      { value: "14", label: "14 days" }, { value: "30", label: "30 days" },
+      { value: "60", label: "60 days" }, { value: "90", label: "90 days" },
+    ]},
+  ],
+  skip: [
+    { key: "skip_count", label: "Orders to skip", type: "select", options: [
+      { value: "1", label: "1 order" }, { value: "2", label: "2 orders" }, { value: "3", label: "3 orders" },
+    ]},
+  ],
+  frequency_change: [
+    { key: "frequency_interval", label: "New frequency", type: "select", options: [
+      { value: "monthly", label: "Every month" }, { value: "bimonthly", label: "Every 2 months" },
+      { value: "quarterly", label: "Every 3 months" },
+    ]},
+  ],
+};
 
 const DEFAULT_REASONS: Omit<CancelReason, "id">[] = [
   { slug: "too_expensive", label: "It's too expensive", enabled: true, sort_order: 0 },
@@ -352,6 +372,34 @@ export default function CancelFlowSettingsPage() {
                   </select>
                 </div>
               )}
+              {TYPE_CONFIG_FIELDS[editingRemedy.type]?.map(field => (
+                <div key={field.key}>
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">{field.label}</label>
+                  {field.type === "select" && field.options ? (
+                    <select
+                      value={String((editingRemedy.config as Record<string, unknown>)?.[field.key] || "")}
+                      onChange={(e) => setEditingRemedy({
+                        ...editingRemedy,
+                        config: { ...((editingRemedy.config || {}) as Record<string, unknown>), [field.key]: e.target.value },
+                      })}
+                      className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                    >
+                      <option value="">Select...</option>
+                      {field.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      type="number"
+                      value={String((editingRemedy.config as Record<string, unknown>)?.[field.key] || "")}
+                      onChange={(e) => setEditingRemedy({
+                        ...editingRemedy,
+                        config: { ...((editingRemedy.config || {}) as Record<string, unknown>), [field.key]: e.target.value },
+                      })}
+                      className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                    />
+                  )}
+                </div>
+              ))}
               <div className="flex gap-2">
                 <button onClick={() => saveRemedy(editingRemedy)} disabled={saving || !editingRemedy.name}
                   className="rounded-md bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-50">
@@ -378,6 +426,10 @@ export default function CancelFlowSettingsPage() {
             <div className="flex items-start gap-2">
               <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" />
               <p><span className="font-medium">Learning over time:</span> Acceptance rates tracked per remedy. AI adjusts selections based on success_rate</p>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" />
+              <p><span className="font-medium">Social proof:</span> Relevant product reviews are shown alongside all remedies automatically (tagged by cancel reason)</p>
             </div>
             <div className="flex items-start gap-2">
               <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" />

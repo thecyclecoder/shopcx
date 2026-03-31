@@ -16,7 +16,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     name: body.name || "Untitled",
     type: body.type || "coupon",
     description: body.description || "",
-    is_active: body.is_active ?? true,
+    enabled: body.is_active ?? body.enabled ?? true,
     priority: body.priority ?? 0,
     config: body.coupon_mapping_id
       ? { ...((body.config || {}) as object), coupon_mapping_id: body.coupon_mapping_id }
@@ -40,7 +40,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   if (body.name !== undefined) update.name = body.name;
   if (body.type !== undefined) update.type = body.type;
   if (body.description !== undefined) update.description = body.description;
-  if (body.is_active !== undefined) update.is_active = body.is_active;
+  if (body.is_active !== undefined) update.enabled = body.is_active;
+  if (body.enabled !== undefined) update.enabled = body.enabled;
   if (body.priority !== undefined) update.priority = body.priority;
   if (body.config !== undefined) update.config = body.config;
   if (body.coupon_mapping_id !== undefined) {

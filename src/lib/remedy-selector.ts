@@ -159,6 +159,8 @@ Available remedies: ${JSON.stringify(remedyList)}
 Available coupons: ${JSON.stringify(couponList)}
 Product reviews: ${JSON.stringify(reviewList)}${firstRenewalContext}
 
+IMPORTANT: Never select two remedies of the same type (e.g. don't show two coupons or two pause options). Each remedy must be a different type to give the customer distinct choices.
+
 Return a JSON array of exactly 3 remedies with:
 - remedy_id: which remedy to offer
 - pitch: 1-2 sentence pitch (casual, empathetic, specific to their situation). Max 25 words.
@@ -176,7 +178,17 @@ Return ONLY the JSON array, no other text.`,
     const text = (aiData.content?.[0] as { type: string; text: string })?.text?.trim() || "[]";
     // Parse JSON, handling potential markdown code blocks
     const jsonStr = text.replace(/^```json?\n?/, "").replace(/\n?```$/, "");
-    const selections: RemedySelection[] = JSON.parse(jsonStr);
+    let selections: RemedySelection[] = JSON.parse(jsonStr);
+
+    // Deduplicate by remedy type — keep only the first of each type
+    const remedyTypeMap = new Map(remedies.map(r => [r.id, r.type]));
+    const seenTypes = new Set<string>();
+    selections = selections.filter(s => {
+      const rType = remedyTypeMap.get(s.remedy_id);
+      if (!rType || seenTypes.has(rType)) return false;
+      seenTypes.add(rType);
+      return true;
+    });
 
     return {
       remedies: selections.slice(0, 3),
