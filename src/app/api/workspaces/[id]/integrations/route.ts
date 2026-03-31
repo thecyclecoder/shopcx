@@ -213,11 +213,8 @@ export async function PATCH(
 
     // Shopify disconnect — clear all shopify fields
     if (body.shopify_disconnect === true) {
-      updates.shopify_client_id_encrypted = null;
-      updates.shopify_client_secret_encrypted = null;
+      // Only clear access token + OAuth state — keep client ID, secret, and domain
       updates.shopify_access_token_encrypted = null;
-      updates.shopify_domain = null;
-      updates.shopify_myshopify_domain = null;
       updates.shopify_scopes = null;
       updates.shopify_oauth_state = null;
     }
