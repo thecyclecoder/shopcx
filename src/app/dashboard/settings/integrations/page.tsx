@@ -31,6 +31,9 @@ export default function IntegrationsPage() {
   const [shopifyHasCredentials, setShopifyHasCredentials] = useState(false);
   const [shopifyMyshopifyDomain, setShopifyMyshopifyDomain] = useState<string | null>(null);
   const [shopifyScopes, setShopifyScopes] = useState<string | null>(null);
+  const [multipassSecret, setMultipassSecret] = useState("");
+  const [multipassHint, setMultipassHint] = useState<string | null>(null);
+  const [multipassSaving, setMultipassSaving] = useState(false);
 
   // Meta state
   const [metaConnected, setMetaConnected] = useState(false);
@@ -114,6 +117,7 @@ export default function IntegrationsPage() {
         setShopifyDomain(data.shopify_domain || "");
         setShopifyMyshopifyDomain(data.shopify_myshopify_domain);
         setShopifyScopes(data.shopify_scopes);
+        setMultipassHint(data.shopify_multipass_hint || null);
         setAppstleConnected(data.appstle_connected);
         setAppstleHasApiKey(data.appstle_has_api_key);
         setAppstleSecretHint(data.appstle_secret_hint);
@@ -861,6 +865,47 @@ export default function IntegrationsPage() {
             <p className="mt-4 text-sm text-zinc-400">Only owners and admins can manage integrations.</p>
           )}
         </div>
+
+        {/* ── Shopify Multipass ── */}
+        {shopifyConnected && canEdit && (
+          <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+            <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Shopify Multipass</h3>
+            <p className="mt-1 text-sm text-zinc-500">Required for customer portal authentication. Find in Shopify admin &gt; Settings &gt; Customer accounts &gt; Multipass.</p>
+            {multipassHint && (
+              <p className="mt-2 text-sm text-green-600 dark:text-green-400">Connected (secret: ...{multipassHint})</p>
+            )}
+            <form className="mt-3 flex gap-2" onSubmit={async (e) => {
+              e.preventDefault();
+              if (!multipassSecret.trim()) return;
+              setMultipassSaving(true);
+              const res = await fetch(`/api/workspaces/${workspace.id}/integrations`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ shopify_multipass_secret: multipassSecret }),
+              });
+              if (res.ok) {
+                setMultipassHint(multipassSecret.slice(-4));
+                setMultipassSecret("");
+                setMessage("Multipass secret saved!");
+              } else {
+                setMessage("Failed to save Multipass secret.");
+              }
+              setMultipassSaving(false);
+            }}>
+              <input
+                type="password"
+                value={multipassSecret}
+                onChange={(e) => setMultipassSecret(e.target.value)}
+                placeholder={multipassHint ? "New secret (leave blank to keep current)" : "Multipass secret"}
+                className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+              />
+              <button type="submit" disabled={multipassSaving || !multipassSecret.trim()}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50">
+                {multipassSaving ? "Saving..." : "Save"}
+              </button>
+            </form>
+          </div>
+        )}
 
         {/* ── Appstle (Subscriptions) ── */}
         <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">

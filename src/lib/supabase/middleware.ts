@@ -12,14 +12,17 @@ export async function updateSession(request: NextRequest) {
   const isLocalhost = hostname.includes("localhost") || hostname.includes("127.0.0.1");
 
   if (!isLocalhost) {
-    // Check if this is a help center subdomain (e.g. superfoods.shopcx.ai or help.superfoodscompany.com)
     const isPrimaryDomain = PRIMARY_DOMAINS.some(d => hostname === d || hostname.endsWith(`.${d}`));
+    const pathname = request.nextUrl.pathname;
 
-    if (!isPrimaryDomain) {
-      // Custom domain (e.g. help.superfoodscompany.com) — look up workspace by domain
-      const pathname = request.nextUrl.pathname;
-      if (!pathname.startsWith("/help/") && !pathname.startsWith("/api/help/") && !pathname.startsWith("/_next")) {
-        // Look up help_slug from custom domain via Supabase REST
+    // Skip internal paths
+    if (!pathname.startsWith("/help/") && !pathname.startsWith("/portal/") && !pathname.startsWith("/api/") && !pathname.startsWith("/_next")) {
+
+      // Resolve slug from hostname
+      let slug: string | null = null;
+
+      if (!isPrimaryDomain) {
+        // Custom domain — look up workspace by domain
         const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
         const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
         if (supabaseUrl && serviceKey) {
@@ -29,27 +32,47 @@ export async function updateSession(request: NextRequest) {
               { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
             );
             const data = await res.json();
-            if (data?.[0]?.help_slug) {
-              const url = request.nextUrl.clone();
-              url.pathname = `/help/${data[0].help_slug}${pathname === "/" ? "" : pathname}`;
-              return NextResponse.rewrite(url);
-            }
+            if (data?.[0]?.help_slug) slug = data[0].help_slug;
           } catch {}
         }
-      }
-    } else {
-      // Check for shopcx.ai subdomain (e.g. superfoods.shopcx.ai)
-      const parts = hostname.split(".");
-      if (parts.length >= 3) {
-        const subdomain = parts[0];
-        if (subdomain !== "www" && subdomain !== "app") {
-          const pathname = request.nextUrl.pathname;
-          if (!pathname.startsWith("/help/") && !pathname.startsWith("/api/") && !pathname.startsWith("/_next")) {
-            const url = request.nextUrl.clone();
-            url.pathname = `/help/${subdomain}${pathname === "/" ? "" : pathname}`;
-            return NextResponse.rewrite(url);
-          }
+      } else {
+        // shopcx.ai subdomain (e.g. superfoods.shopcx.ai)
+        const parts = hostname.split(".");
+        if (parts.length >= 3) {
+          const sub = parts[0];
+          if (sub !== "www" && sub !== "app") slug = sub;
         }
+      }
+
+      if (slug) {
+        const url = request.nextUrl.clone();
+
+        // /kb/* → help center
+        if (pathname.startsWith("/kb/")) {
+          url.pathname = `/help/${slug}${pathname.slice(3)}`;
+          return NextResponse.rewrite(url);
+        }
+        if (pathname === "/kb") {
+          url.pathname = `/help/${slug}`;
+          return NextResponse.rewrite(url);
+        }
+
+        // /portal/* → portal minisite
+        if (pathname.startsWith("/portal/") || pathname === "/portal") {
+          const portalPath = pathname === "/portal" ? "" : pathname.slice(7);
+          url.pathname = `/portal/${slug}${portalPath}`;
+          return NextResponse.rewrite(url);
+        }
+
+        // Root → redirect to /kb/
+        if (pathname === "/") {
+          url.pathname = "/kb/";
+          return NextResponse.redirect(url, 301);
+        }
+
+        // Backwards compat: old help URLs without /kb/ → 301 redirect
+        url.pathname = `/kb${pathname}`;
+        return NextResponse.redirect(url, 301);
       }
     }
   }

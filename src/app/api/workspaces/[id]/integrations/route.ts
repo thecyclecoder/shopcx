@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at"
     )
     .eq("id", workspaceId)
     .single();
@@ -90,6 +90,11 @@ export async function GET(
     klaviyo_public_key: workspace.klaviyo_public_key,
     klaviyo_last_sync_at: workspace.klaviyo_last_sync_at,
     klaviyo_review_count: null, // Populated by caller if needed
+
+    // Multipass
+    shopify_multipass_hint: workspace.shopify_multipass_secret_encrypted
+      ? decrypt(workspace.shopify_multipass_secret_encrypted).slice(-4)
+      : null,
 
     // Slack
     slack_connected: !!workspace.slack_bot_token_encrypted,
@@ -193,6 +198,12 @@ export async function PATCH(
     if ("shopify_client_secret" in body) {
       updates.shopify_client_secret_encrypted = body.shopify_client_secret
         ? encrypt(body.shopify_client_secret)
+        : null;
+    }
+
+    if ("shopify_multipass_secret" in body) {
+      updates.shopify_multipass_secret_encrypted = body.shopify_multipass_secret
+        ? encrypt(body.shopify_multipass_secret)
         : null;
     }
 

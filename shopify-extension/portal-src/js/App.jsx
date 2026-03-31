@@ -9,6 +9,7 @@ import Subscriptions from './screens/Subscriptions.jsx';
 import SubscriptionDetail from './screens/SubscriptionDetail.jsx';
 import Cancel from './screens/Cancel.jsx';
 import BannedView from './screens/BannedView.jsx';
+import Breadcrumbs from './components/Breadcrumbs.jsx';
 
 export const PortalContext = createContext(null);
 
@@ -27,16 +28,32 @@ export default function App({ config }) {
 
   const ctx = { config, router, showToast };
 
-  // Banned customers see restricted view only
+  // Breadcrumbs per screen
+  const goHome = () => router.navigate(router.base);
+  const goSubs = () => router.navigate(router.base + '/subscriptions');
+  let breadcrumbs = [];
   let screen;
+
   if (config.banned) {
+    breadcrumbs = [{ label: 'Manager' }, { label: 'Restricted' }];
     screen = <BannedView />;
   } else {
     switch (router.screen) {
-      case 'subscriptions': screen = <Subscriptions />; break;
-      case 'detail':        screen = <SubscriptionDetail />; break;
-      case 'cancel':        screen = <Cancel />; break;
-      default:              screen = <Home />;
+      case 'subscriptions':
+        breadcrumbs = [{ label: 'Manager', onClick: goHome }, { label: 'Subscriptions' }];
+        screen = <Subscriptions />;
+        break;
+      case 'detail':
+        breadcrumbs = [{ label: 'Manager', onClick: goHome }, { label: 'Subscriptions', onClick: goSubs }, { label: 'View' }];
+        screen = <SubscriptionDetail />;
+        break;
+      case 'cancel':
+        breadcrumbs = [{ label: 'Manager', onClick: goHome }, { label: 'Subscriptions', onClick: goSubs }, { label: 'Cancel' }];
+        screen = <Cancel />;
+        break;
+      default:
+        breadcrumbs = [{ label: 'Manager', onClick: goHome }, { label: 'Home' }];
+        screen = <Home />;
     }
   }
 
@@ -49,6 +66,7 @@ export default function App({ config }) {
 
   return (
     <PortalContext.Provider value={ctx}>
+      <Breadcrumbs items={breadcrumbs} />
       {screen}
       {toastEl && createPortal(toastEl, document.body)}
     </PortalContext.Provider>
