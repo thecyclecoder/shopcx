@@ -175,9 +175,26 @@ export default function DashboardPage() {
                   <p className="text-sm font-medium text-red-700 dark:text-red-400">+ {dupeAlerts.length - 5} more</p>
                 )}
               </div>
-              <a href="/dashboard/orders?filter=all" className="mt-2 inline-block text-sm font-medium text-red-800 underline hover:text-red-900 dark:text-red-300 dark:hover:text-red-200">
-                View in Orders
-              </a>
+              <div className="mt-2 flex items-center gap-3">
+                <a href="/dashboard/orders?filter=all" className="text-sm font-medium text-red-800 underline hover:text-red-900 dark:text-red-300 dark:hover:text-red-200">
+                  View in Orders
+                </a>
+                <button
+                  onClick={async () => {
+                    await Promise.all(dupeAlerts.map(a =>
+                      fetch(`/api/workspaces/${workspace.id}/notifications/${a.id}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ dismissed: true }),
+                      })
+                    ));
+                    setDupeAlerts([]);
+                  }}
+                  className="text-sm font-medium text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-200"
+                >
+                  Dismiss
+                </button>
+              </div>
             </div>
           </div>
         </div>
