@@ -2,6 +2,7 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { transformSubscription, getProductMap } from "@/lib/portal/helpers/transform-subscription";
+import { decrypt } from "@/lib/crypto";
 
 export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -134,6 +135,44 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     };
   }
 
+  // Fetch applied discount from Appstle raw contract response
+  let appliedDiscount: { code?: string; title?: string; value?: number; valueType?: string } | null = null;
+  try {
+    const { data: wsKeys } = await admin.from("workspaces")
+      .select("appstle_api_key_encrypted")
+      .eq("id", auth.workspaceId)
+      .single();
+    if (wsKeys?.appstle_api_key_encrypted) {
+      const apiKey = decrypt(wsKeys.appstle_api_key_encrypted);
+      const rawRes = await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/contract-raw-response?contractId=${contractId}&api_key=${apiKey}`,
+        { headers: { "X-API-Key": apiKey } },
+      );
+      if (rawRes.ok) {
+        const rawText = await rawRes.text();
+        const nodesMatch = rawText.match(/"discounts"[\s\S]*?"nodes"\s*:\s*\[([\s\S]*?)\]/);
+        if (nodesMatch && nodesMatch[1].trim()) {
+          try {
+            const nodes = JSON.parse(`[${nodesMatch[1]}]`);
+            const firstDiscount = nodes[0];
+            if (firstDiscount) {
+              // Extract discount title/code and value
+              const title = firstDiscount.title || "";
+              const valueNode = firstDiscount.value;
+              if (valueNode?.percentage) {
+                appliedDiscount = { code: title, title, value: valueNode.percentage, valueType: "PERCENTAGE" };
+              } else if (valueNode?.fixedAmount?.amount) {
+                appliedDiscount = { code: title, title, value: Number(valueNode.fixedAmount.amount), valueType: "FIXED_AMOUNT" };
+              } else {
+                appliedDiscount = { code: title, title };
+              }
+            }
+          } catch {}
+        }
+      }
+    }
+  } catch {}
+
   return jsonOk({
     ok: true,
     shop: auth.shop,
@@ -141,6 +180,7 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     route,
     contract: {
       ...contract,
+      appliedDiscount,
       portalState: {
         bucket: sub.status === "cancelled" ? "cancelled" : sub.status === "paused" ? "paused" : "active",
         needsAttention: sub.last_payment_status === "failed",
