@@ -106,7 +106,7 @@ export async function GET(
         } else {
           lateTracking++;
         }
-      } else if (!o.amplifier_order_id && o.created_at < sixHoursAgo) {
+      } else if (!o.amplifier_order_id && !isRefunded && o.created_at < sixHoursAgo) {
         syncErrors++;
       }
     }
@@ -136,6 +136,7 @@ export async function GET(
     query = query
       .is("amplifier_order_id", null)
       .not("fulfillment_status", "ilike", "fulfilled")
+      .not("financial_status", "in", '("refunded","partially_refunded")')
       .lt("created_at", sixHoursAgo)
       .not("tags", "ilike", "%suspicious%");
   } else if (filter === "suspicious") {
