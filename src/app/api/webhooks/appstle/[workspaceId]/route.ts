@@ -346,22 +346,60 @@ async function handleBillingEvent(
       const { getActiveDunningCycle } = await import("@/lib/dunning");
       const existingCycle = await getActiveDunningCycle(workspaceId, contractId);
       if (!existingCycle) {
-        try {
-          await inngest.send({
-            name: "dunning/payment-failed",
-            data: {
-              workspace_id: workspaceId,
-              shopify_contract_id: contractId,
-              subscription_id: sub.id,
-              customer_id: sub.customer_id,
-              shopify_customer_id: subForDunning?.shopify_customer_id || null,
-              billing_attempt_id: data.billingAttemptId ? String(data.billingAttemptId) : null,
-              error_code: errorCode,
-              error_message: errorMsg,
-            },
-          });
-        } catch (err) {
-          console.error("Failed to send dunning event:", err);
+        // Guard: if a successful order exists within the current billing cycle,
+        // this is a false billing-failure from Appstle — do NOT trigger dunning.
+        const { data: subBilling } = await admin.from("subscriptions")
+          .select("id, billing_interval, billing_interval_count")
+          .eq("workspace_id", workspaceId)
+          .eq("shopify_contract_id", contractId)
+          .single();
+
+        let skipDunning = false;
+        if (subBilling) {
+          const interval = subBilling.billing_interval || "month";
+          const count = subBilling.billing_interval_count || 1;
+          let cycleDays = 28;
+          if (interval === "week") cycleDays = 7 * count;
+          else if (interval === "month") cycleDays = 28 * count;
+          else if (interval === "year") cycleDays = 365 * count;
+          else if (interval === "day") cycleDays = count;
+
+          const cutoff = new Date(Date.now() - cycleDays * 24 * 60 * 60 * 1000).toISOString();
+
+          const { data: recentOrder } = await admin.from("orders")
+            .select("id, order_number, created_at")
+            .eq("workspace_id", workspaceId)
+            .eq("subscription_id", subBilling.id)
+            .eq("financial_status", "paid")
+            .gte("created_at", cutoff)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .single();
+
+          if (recentOrder) {
+            console.log(`Dunning guard: skipping for contract ${contractId} — paid order ${recentOrder.order_number} from ${recentOrder.created_at} (within ${cycleDays}-day cycle)`);
+            skipDunning = true;
+          }
+        }
+
+        if (!skipDunning) {
+          try {
+            await inngest.send({
+              name: "dunning/payment-failed",
+              data: {
+                workspace_id: workspaceId,
+                shopify_contract_id: contractId,
+                subscription_id: sub.id,
+                customer_id: sub.customer_id,
+                shopify_customer_id: subForDunning?.shopify_customer_id || null,
+                billing_attempt_id: data.billingAttemptId ? String(data.billingAttemptId) : null,
+                error_code: errorCode,
+                error_message: errorMsg,
+              },
+            });
+          } catch (err) {
+            console.error("Failed to send dunning event:", err);
+          }
         }
       }
     }
