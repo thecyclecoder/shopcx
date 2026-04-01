@@ -8,6 +8,9 @@ import { getReviewsForProducts } from "@/lib/klaviyo";
 
 interface RemedySelection {
   remedy_id: string;
+  name: string;
+  description: string | null;
+  type: string;
   pitch: string;
   coupon_code?: string;
   confidence: number;
@@ -190,8 +193,20 @@ Return ONLY the JSON array, no other text.`,
       return true;
     });
 
+    // Enrich selections with name/description/type from the database
+    const remedyMap = new Map(remedies.map(r => [r.id, r]));
+    const enriched = selections.slice(0, 3).map(s => {
+      const r = remedyMap.get(s.remedy_id);
+      return {
+        ...s,
+        name: r?.name || "",
+        description: r?.description || null,
+        type: r?.type || "",
+      };
+    });
+
     return {
-      remedies: selections.slice(0, 3),
+      remedies: enriched,
       review: bestReview
         ? { summary: bestReview.summary, rating: bestReview.rating, body: bestReview.body, reviewer_name: bestReview.reviewer_name }
         : null,
@@ -204,6 +219,9 @@ Return ONLY the JSON array, no other text.`,
         .slice(0, 3)
         .map(r => ({
           remedy_id: r.id,
+          name: r.name,
+          description: r.description || null,
+          type: r.type,
           pitch: r.description || r.name,
           confidence: 0.5,
         })),

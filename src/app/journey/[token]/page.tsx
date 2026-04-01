@@ -456,6 +456,9 @@ interface CancelSubscription {
 
 interface RemedyOption {
   remedy_id: string;
+  name: string;
+  description: string | null;
+  type: string;
   pitch: string;
   coupon_code?: string;
   confidence: number;
@@ -709,9 +712,19 @@ function CancelJourney({
       )}
 
       {/* Phase: Remedies */}
-      {phase === "remedies" && (
+      {phase === "remedies" && (() => {
+        const selectedSub = subscriptions.find(s => s.id === selectedSubId);
+        const ageDays = selectedSub?.subscriptionAgeDays || 0;
+        const ageMonths = Math.floor(ageDays / 28);
+        const isVip = ageMonths >= 3;
+
+        const headerText = isVip
+          ? `Hey ${customerName}, you're a VIP customer with us. Thanks for being with us for ${ageMonths} month${ageMonths !== 1 ? "s" : ""}. We've put together a special group of options for you because we'd hate to lose you!`
+          : `Hey ${customerName}, most people see the best results with at least 3 months of consistent use. Here are some options to keep you on track:`;
+
+        return (
         <div>
-          <h2 style={{ fontSize: "17px" }} className="font-semibold text-zinc-900">Before you go — would any of these help?</h2>
+          <p style={{ fontSize: "17px" }} className="text-zinc-700">{headerText}</p>
           <div className="mt-4 space-y-3">
             {remedies.map((remedy, idx) => (
               <button
@@ -725,7 +738,10 @@ function CancelJourney({
                 } disabled:opacity-60`}
                 style={selectedRemedyAction === remedy.remedy_id ? { backgroundColor: primaryColor } : undefined}
               >
-                <span style={{ fontSize: "17px" }} className="font-medium">{remedy.pitch}</span>
+                <span style={{ fontSize: "17px" }} className="font-semibold">{remedy.name}</span>
+                {remedy.description && (
+                  <span style={{ fontSize: "15px" }} className="mt-1 block text-zinc-500">{remedy.description}</span>
+                )}
               </button>
             ))}
 
@@ -761,7 +777,8 @@ function CancelJourney({
             </div>
           )}
         </div>
-      )}
+        );
+      })()}
 
       {/* Phase: AI Chat */}
       {phase === "ai_chat" && (
