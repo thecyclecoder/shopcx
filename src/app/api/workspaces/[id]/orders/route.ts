@@ -76,7 +76,7 @@ export async function GET(
   const shopifyDomain = workspace?.shopify_myshopify_domain || "";
 
   // Filters
-  const filter = url.searchParams.get("filter") || "late_tracking";
+  const filter = url.searchParams.get("filter") || "all";
   const search = url.searchParams.get("search");
   const sort = url.searchParams.get("sort") || "created_at";
   const order = url.searchParams.get("order") || "desc";
@@ -101,8 +101,8 @@ export async function GET(
     let syncErrors = 0, suspicious = 0, lateTracking = 0, awaitingTracking = 0, inTransit = 0, fulfilled = 0;
 
     for (const o of orders) {
-      const tags: string[] = o.tags || [];
-      const isSuspicious = tags.includes("suspicious");
+      const tagStr = (o.tags as string) || "";
+      const isSuspicious = tagStr.includes("suspicious");
       const isFulfilled = o.fulfillment_status === "fulfilled";
 
       if (isSuspicious) { suspicious++; continue; }
@@ -135,7 +135,7 @@ export async function GET(
       amplifier_order_id, amplifier_received_at, amplifier_shipped_at,
       amplifier_tracking_number, amplifier_carrier, amplifier_status,
       customer_id, shopify_order_id,
-      customers!inner(id, email, first_name, last_name)
+      customers(id, email, first_name, last_name)
     `, { count: "exact" })
     .eq("workspace_id", workspaceId);
 
@@ -147,9 +147,9 @@ export async function GET(
       .is("amplifier_order_id", null)
       .neq("fulfillment_status", "fulfilled")
       .lt("created_at", sixHoursAgo)
-      .not("tags", "cs", "{suspicious}");
+      .not("tags", "ilike", "%suspicious%");
   } else if (filter === "suspicious") {
-    query = query.contains("tags", ["suspicious"]);
+    query = query.ilike("tags", "%suspicious%");
   } else if (filter === "in_transit") {
     query = query
       .not("amplifier_shipped_at", "is", null)

@@ -13,7 +13,7 @@ interface Order {
   fulfillment_status: string;
   line_items: { sku?: string; title?: string; quantity?: number }[] | null;
   created_at: string;
-  tags: string[] | null;
+  tags: string | null;
   shopify_order_id: string;
   amplifier_order_id: string | null;
   amplifier_received_at: string | null;
@@ -21,7 +21,7 @@ interface Order {
   amplifier_tracking_number: string | null;
   amplifier_carrier: string | null;
   amplifier_status: string | null;
-  customers: { id: string; email: string; first_name: string | null; last_name: string | null };
+  customers: { id: string; email: string; first_name: string | null; last_name: string | null } | null;
 }
 
 interface Counts {
@@ -76,8 +76,8 @@ function formatDate(d: string | null): string {
 }
 
 function getOrderStatus(order: Order): { label: string; key: string } {
-  const tags = order.tags || [];
-  if (tags.includes("suspicious")) return { label: "Suspicious", key: "suspicious" };
+  const tagStr = (order.tags as unknown as string) || "";
+  if (tagStr.includes("suspicious")) return { label: "Suspicious", key: "suspicious" };
   if (order.fulfillment_status === "fulfilled") return { label: "Fulfilled", key: "fulfilled" };
   if (order.amplifier_shipped_at) return { label: "In Transit", key: "in_transit" };
   if (order.amplifier_order_id) {
@@ -101,7 +101,7 @@ export default function OrdersPage() {
   const [counts, setCounts] = useState<Counts>({ sync_error: 0, suspicious: 0, late_tracking: 0, awaiting_tracking: 0, in_transit: 0, fulfilled: 0 });
   const [shopifyDomain, setShopifyDomain] = useState("");
 
-  const [filter, setFilter] = useState<FilterKey>("late_tracking");
+  const [filter, setFilter] = useState<FilterKey>("all");
   const [search, setSearch] = useState("");
   const [appliedSearch, setAppliedSearch] = useState("");
   const [sort, setSort] = useState("created_at");
