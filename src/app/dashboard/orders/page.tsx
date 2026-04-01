@@ -32,11 +32,12 @@ interface Counts {
   awaiting_tracking: number;
   in_transit: number;
   fulfilled: number;
+  refunded: number;
 }
 
 const PAGE_SIZE = 25;
 
-type FilterKey = "all" | "sync_error" | "suspicious" | "late_tracking" | "awaiting_tracking" | "in_transit" | "fulfilled";
+type FilterKey = "all" | "sync_error" | "suspicious" | "late_tracking" | "awaiting_tracking" | "in_transit" | "fulfilled" | "refunded";
 
 const FILTER_CARDS: { key: FilterKey; label: string; color: string; activeColor: string; countKey?: keyof Counts }[] = [
   { key: "sync_error", label: "Sync Errors", color: "border-red-200 dark:border-red-900", activeColor: "border-red-500 bg-red-50 dark:border-red-500 dark:bg-red-950", countKey: "sync_error" },
@@ -45,6 +46,7 @@ const FILTER_CARDS: { key: FilterKey; label: string; color: string; activeColor:
   { key: "awaiting_tracking", label: "Awaiting Tracking", color: "border-zinc-200 dark:border-zinc-700", activeColor: "border-zinc-500 bg-zinc-50 dark:border-zinc-500 dark:bg-zinc-800", countKey: "awaiting_tracking" },
   { key: "in_transit", label: "In Transit", color: "border-blue-200 dark:border-blue-900", activeColor: "border-blue-500 bg-blue-50 dark:border-blue-500 dark:bg-blue-950", countKey: "in_transit" },
   { key: "fulfilled", label: "Fulfilled", color: "border-emerald-200 dark:border-emerald-900", activeColor: "border-emerald-500 bg-emerald-50 dark:border-emerald-500 dark:bg-emerald-950", countKey: "fulfilled" },
+  { key: "refunded", label: "Refunded", color: "border-orange-200 dark:border-orange-900", activeColor: "border-orange-500 bg-orange-50 dark:border-orange-500 dark:bg-orange-950", countKey: "refunded" },
 ];
 
 const COUNT_COLORS: Record<string, string> = {
@@ -54,6 +56,7 @@ const COUNT_COLORS: Record<string, string> = {
   awaiting_tracking: "text-zinc-600 dark:text-zinc-400",
   in_transit: "text-blue-600 dark:text-blue-400",
   fulfilled: "text-emerald-600 dark:text-emerald-400",
+  refunded: "text-orange-600 dark:text-orange-400",
 };
 
 const STATUS_BADGE: Record<string, string> = {
@@ -63,6 +66,7 @@ const STATUS_BADGE: Record<string, string> = {
   late_tracking: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
   in_transit: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
   fulfilled: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+  refunded: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400",
 };
 
 const EDITABLE_STATUSES = ["Awaiting Inventory", "Processing Shipment"];
@@ -78,19 +82,24 @@ function formatDate(d: string | null): string {
 
 function getOrderStatus(order: Order): { label: string; key: string } {
   const tagStr = (order.tags as unknown as string) || "";
-  if (tagStr.includes("suspicious")) return { label: "Suspicious", key: "suspicious" };
+
+  // Fulfilled orders are always "Fulfilled" — they made it through
   if (order.fulfillment_status === "fulfilled") return { label: "Fulfilled", key: "fulfilled" };
+
+  if (tagStr.includes("suspicious")) return { label: "Suspicious", key: "suspicious" };
   if (order.amplifier_shipped_at) return { label: "In Transit", key: "in_transit" };
   if (order.amplifier_order_id) {
-    // Has amplifier ID — either awaiting or late (we show amplifier_status if available)
     return { label: order.amplifier_status || "Awaiting Tracking", key: "awaiting_tracking" };
   }
-  // No amplifier ID and older than 6 hours
   const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
   if (new Date(order.created_at).getTime() < sixHoursAgo) {
     return { label: "Sync Error", key: "sync_error" };
   }
   return { label: "Pending", key: "awaiting_tracking" };
+}
+
+function isRefunded(order: Order): boolean {
+  return order.financial_status === "refunded" || order.financial_status === "partially_refunded";
 }
 
 export default function OrdersPage() {
@@ -100,7 +109,7 @@ export default function OrdersPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [counts, setCounts] = useState<Counts>({ sync_error: 0, suspicious: 0, late_tracking: 0, awaiting_tracking: 0, in_transit: 0, fulfilled: 0 });
+  const [counts, setCounts] = useState<Counts>({ sync_error: 0, suspicious: 0, late_tracking: 0, awaiting_tracking: 0, in_transit: 0, fulfilled: 0, refunded: 0 });
   const [shopifyDomain, setShopifyDomain] = useState("");
 
   const [filter, setFilter] = useState<FilterKey>("all");
@@ -170,7 +179,7 @@ export default function OrdersPage() {
       </div>
 
       {/* Summary cards */}
-      <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
         {FILTER_CARDS.map(card => {
           const count = card.countKey ? counts[card.countKey] : 0;
           const isActive = filter === card.key;
@@ -256,6 +265,11 @@ export default function OrdersPage() {
                       <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE[status.key] || STATUS_BADGE.awaiting_tracking}`}>
                         {status.label}
                       </span>
+                      {isRefunded(o) && (
+                        <span className={`ml-1 inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE.refunded}`}>
+                          {o.financial_status === "partially_refunded" ? "Partial Refund" : "Refunded"}
+                        </span>
+                      )}
                       {isEditable && (
                         <span className="ml-1 text-[10px] font-medium text-blue-500 dark:text-blue-400">Editable</span>
                       )}
