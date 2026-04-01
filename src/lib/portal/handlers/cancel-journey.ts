@@ -506,48 +506,72 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
 
   if (step === "line_item_action") {
     const action = String(payload?.action || "");
-    const lineId = String(payload?.lineId || "");
+    const variantId = String(payload?.variantId || "");
 
     if (!action) return jsonErr({ error: "missing_action" }, 400);
 
-    let result: { success: boolean; error?: string } = { success: false, error: "unknown action" };
+    // All line item mutations go through Appstle's replaceVariants endpoint
+    const { decrypt } = await import("@/lib/crypto");
+    const { data: wsKeys } = await admin.from("workspaces")
+      .select("appstle_api_key_encrypted, shopify_myshopify_domain")
+      .eq("id", auth.workspaceId).single();
+    if (!wsKeys?.appstle_api_key_encrypted) return jsonErr({ error: "appstle_not_configured" }, 500);
+    const apiKey = decrypt(wsKeys.appstle_api_key_encrypted);
+    const shop = wsKeys.shopify_myshopify_domain || "";
+
     let savedAction = "";
+    const body: Record<string, unknown> = {
+      shop, contractId: Number(contractId), eventSource: "CUSTOMER_PORTAL", stopSwapEmails: true,
+    };
 
     if (action === "swap_variant") {
       const oldVariantId = String(payload?.oldVariantId || "");
       const newVariantId = String(payload?.newVariantId || "");
       if (!oldVariantId || !newVariantId) return jsonErr({ error: "missing_variant_ids" }, 400);
-
-      const { appstleSwapProduct } = await import("@/lib/appstle");
-      result = await appstleSwapProduct(auth.workspaceId, contractId, oldVariantId, newVariantId);
+      body.oldVariants = [Number(oldVariantId)];
+      body.newVariants = { [newVariantId]: 1 };
+      body.carryForwardDiscount = "true";
       savedAction = "changed your product variant";
     } else if (action === "change_quantity") {
       const quantity = Number(payload?.quantity);
-      if (!lineId || !quantity || quantity < 1) return jsonErr({ error: "invalid_quantity" }, 400);
-
-      const { updateLineItem } = await import("@/lib/shopify-subscriptions");
-      result = await updateLineItem(auth.workspaceId, contractId, lineId, { quantity });
+      if (!variantId || !quantity || quantity < 1) return jsonErr({ error: "invalid_quantity" }, 400);
+      // Remove old, re-add with new quantity
+      body.oldVariants = [Number(variantId)];
+      body.newVariants = { [variantId]: quantity };
+      body.carryForwardDiscount = "true";
       savedAction = `updated your quantity to ${quantity}`;
     } else if (action === "remove") {
-      if (!lineId) return jsonErr({ error: "missing_lineId" }, 400);
-
-      const { removeLineItem } = await import("@/lib/shopify-subscriptions");
-      result = await removeLineItem(auth.workspaceId, contractId, lineId);
+      if (!variantId) return jsonErr({ error: "missing_variantId" }, 400);
+      body.oldVariants = [Number(variantId)];
+      body.allowRemoveWithoutAdd = true;
       savedAction = "removed an item from your subscription";
     } else if (action === "swap_product") {
       const newVariantId = String(payload?.newVariantId || "");
       const quantity = Number(payload?.quantity) || 1;
-      if (!lineId || !newVariantId) return jsonErr({ error: "missing_params" }, 400);
-
-      const { removeLineItem, addLineItem } = await import("@/lib/shopify-subscriptions");
-      const removeResult = await removeLineItem(auth.workspaceId, contractId, lineId);
-      if (!removeResult.success) {
-        return jsonErr({ error: "remove_failed", message: removeResult.error }, 500);
-      }
-      result = await addLineItem(auth.workspaceId, contractId, newVariantId, quantity);
+      if (!variantId || !newVariantId) return jsonErr({ error: "missing_params" }, 400);
+      body.oldVariants = [Number(variantId)];
+      body.newVariants = { [newVariantId]: quantity };
+      body.carryForwardDiscount = "true";
       savedAction = "swapped a product in your subscription";
     } else {
       return jsonErr({ error: "invalid_action" }, 400);
+    }
+
+    let result: { success: boolean; error?: string };
+    try {
+      const res = await fetch(
+        "https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details/replace-variants-v3",
+        { method: "POST", headers: { "X-API-Key": apiKey, "Content-Type": "application/json" }, body: JSON.stringify(body), cache: "no-store" },
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        console.error(`Appstle replaceVariants error:`, text);
+        result = { success: false, error: `Appstle API error: ${res.status}` };
+      } else {
+        result = { success: true };
+      }
+    } catch (err) {
+      result = { success: false, error: String(err) };
     }
 
     if (!result.success) {

@@ -198,16 +198,16 @@ function LineItemModifier({ subscription, contractId, onComplete, onCancel, show
     setBusy(true);
     try {
       let payload = { step: 'line_item_action', action };
-      const lineId = selectedItem?.id || selectedItem?.lineId || '';
+      const vid = shortId(selectedItem?.variantId);
 
       if (action === 'swap_variant') {
-        payload = { ...payload, oldVariantId: shortId(selectedItem.variantId), newVariantId: actionValue };
+        payload = { ...payload, oldVariantId: vid, newVariantId: actionValue, variantId: vid };
       } else if (action === 'change_quantity') {
-        payload = { ...payload, lineId: shortId(lineId), quantity: actionValue };
+        payload = { ...payload, variantId: vid, quantity: actionValue };
       } else if (action === 'remove') {
-        payload = { ...payload, lineId: shortId(lineId) };
+        payload = { ...payload, variantId: vid };
       } else if (action === 'swap_product') {
-        payload = { ...payload, lineId: shortId(lineId), newVariantId: actionValue, quantity: selectedItem?.quantity || 1 };
+        payload = { ...payload, variantId: vid, newVariantId: actionValue, quantity: selectedItem?.quantity || 1 };
       }
 
       const resp = await postJson('cancelJourney', payload, { contractId });

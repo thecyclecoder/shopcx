@@ -212,3 +212,43 @@ export async function changeNextBillingDate(
     return { success: false, error: String(err) };
   }
 }
+
+// ── Resolve variant ID to subscription line ID ──
+
+export async function getLineIdByVariant(
+  workspaceId: string,
+  contractId: string,
+  variantId: string,
+): Promise<string | null> {
+  try {
+    const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+    const gid = contractId.startsWith("gid://") ? contractId : `gid://shopify/SubscriptionContract/${contractId}`;
+    const data = await shopifyGQL(shop, accessToken, `
+      query subscriptionContractLines($id: ID!) {
+        subscriptionContract(id: $id) {
+          lines(first: 50) {
+            edges {
+              node {
+                id
+                variantId
+              }
+            }
+          }
+        }
+      }
+    `, { id: gid });
+
+    const contract = data.subscriptionContract as { lines?: { edges?: { node: { id: string; variantId: string } }[] } } | null;
+    const targetGid = variantId.startsWith("gid://") ? variantId : `gid://shopify/ProductVariant/${variantId}`;
+
+    for (const edge of contract?.lines?.edges || []) {
+      if (edge.node.variantId === targetGid) {
+        return edge.node.id;
+      }
+    }
+    return null;
+  } catch (err) {
+    console.error("Get line ID by variant failed:", err);
+    return null;
+  }
+}
