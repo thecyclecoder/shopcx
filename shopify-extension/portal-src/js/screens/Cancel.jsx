@@ -345,8 +345,8 @@ function LineItemModifier({ subscription, contractId, onComplete, onCancel, show
         <div class="sp-cancel__footer" style={{ gap: '8px', display: 'flex', flexDirection: 'column' }}>
           {action !== 'swap_product' && (
             <button type="button" class="sp-btn sp-btn-primary" disabled={!canProceed || busy}
-              onClick={() => setSubStep('confirm')}>
-              {busy ? 'Updating...' : 'Confirm change'}
+              onClick={() => action === 'remove' ? executeAction() : setSubStep('confirm')}>
+              {busy ? 'Updating...' : action === 'remove' ? 'Remove item' : 'Confirm change'}
             </button>
           )}
           <button type="button" class="sp-btn sp-btn--ghost" onClick={() => { setSubStep('choose_action'); setActionValue(null); }}>

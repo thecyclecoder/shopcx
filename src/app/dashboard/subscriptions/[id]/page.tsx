@@ -296,13 +296,13 @@ export default function SubscriptionDetailPage() {
     setActing(null);
   };
 
-  const doRemoveItem = async (lineId: string) => {
+  const doRemoveItem = async (variantId: string) => {
     if (!confirm("Remove this item from the subscription?")) return;
     setActing("remove_item");
     const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/items`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ lineId }),
+      body: JSON.stringify({ variantId }),
     });
     if (res.ok) {
       await loadSub();
@@ -313,11 +313,11 @@ export default function SubscriptionDetailPage() {
     setActing(null);
   };
 
-  const doUpdateItem = async (lineId: string) => {
+  const doUpdateItem = async (variantId: string) => {
     setActing("update_item");
-    const body: Record<string, unknown> = { lineId };
+    const body: Record<string, unknown> = { variantId };
     if (editQuantity) body.quantity = editQuantity;
-    if (swapVariantId) body.variantId = swapVariantId;
+    if (swapVariantId) body.newVariantId = swapVariantId;
 
     const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/items`, {
       method: "PATCH",
@@ -504,9 +504,10 @@ export default function SubscriptionDetailPage() {
             <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
               {items.map((item, i) => {
                 const isShippingProtection = (item.title || "").toLowerCase().includes("shipping protection");
-                const isEditing = editingItem === (item.line_id || String(i));
+                const itemKey = item.variant_id || item.line_id || String(i);
+                const isEditing = editingItem === itemKey;
                 return (
-                  <div key={item.line_id || i} className="px-5 py-3">
+                  <div key={itemKey} className="px-5 py-3">
                     <div className="flex items-center justify-between">
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
@@ -525,11 +526,11 @@ export default function SubscriptionDetailPage() {
                         <span className="text-sm tabular-nums text-zinc-600 dark:text-zinc-400">
                           {item.price_cents ? formatCents(item.price_cents * (item.quantity || 1)) : "--"}
                         </span>
-                        {sub.status === "active" && item.line_id && !isShippingProtection && (
+                        {sub.status === "active" && item.variant_id && !isShippingProtection && (
                           <button
                             onClick={() => {
                               if (isEditing) { setEditingItem(null); }
-                              else { setEditingItem(item.line_id || String(i)); setEditQuantity(item.quantity || 1); setSwapVariantId(""); }
+                              else { setEditingItem(itemKey); setEditQuantity(item.quantity || 1); setSwapVariantId(""); }
                             }}
                             className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
                           >
@@ -542,7 +543,7 @@ export default function SubscriptionDetailPage() {
                     </div>
 
                     {/* Edit/Swap/Remove controls */}
-                    {isEditing && item.line_id && (
+                    {isEditing && item.variant_id && (
                       <div className="mt-3 space-y-2 rounded-md border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-700 dark:bg-zinc-800/30">
                         <div className="flex items-center gap-2">
                           <label className="text-xs text-zinc-500">Qty:</label>
@@ -554,7 +555,7 @@ export default function SubscriptionDetailPage() {
                             {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
                           </select>
                           <button
-                            onClick={() => doUpdateItem(item.line_id!)}
+                            onClick={() => doUpdateItem(item.variant_id!)}
                             disabled={editQuantity === (item.quantity || 1) || acting === "update_item"}
                             className="rounded-md bg-indigo-500 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-50"
                           >
@@ -574,7 +575,7 @@ export default function SubscriptionDetailPage() {
                             ))}
                           </select>
                           <button
-                            onClick={() => doUpdateItem(item.line_id!)}
+                            onClick={() => doUpdateItem(item.variant_id!)}
                             disabled={!swapVariantId || acting === "update_item"}
                             className="rounded-md bg-indigo-500 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-50"
                           >
@@ -583,7 +584,7 @@ export default function SubscriptionDetailPage() {
                         </div>
                         {items.length > 1 && (
                           <button
-                            onClick={() => doRemoveItem(item.line_id!)}
+                            onClick={() => doRemoveItem(item.variant_id!)}
                             disabled={acting === "remove_item"}
                             className="rounded-md border border-red-200 px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50 dark:border-red-900 dark:text-red-400"
                           >
