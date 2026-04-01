@@ -8,7 +8,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: workspaceId } = await params;
-  void request;
+  const url = new URL(request.url);
+  const typeFilter = url.searchParams.get("type");
+  const dismissedParam = url.searchParams.get("dismissed");
 
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -16,12 +18,16 @@ export async function GET(
 
   const admin = createAdminClient();
 
-  const { data: notifications } = await admin
+  let query = admin
     .from("dashboard_notifications")
     .select("*")
     .eq("workspace_id", workspaceId)
-    .or(`user_id.is.null,user_id.eq.${user.id}`)
-    .eq("dismissed", false)
+    .or(`user_id.is.null,user_id.eq.${user.id}`);
+
+  if (typeFilter) query = query.eq("type", typeFilter);
+  query = query.eq("dismissed", dismissedParam === "true");
+
+  const { data: notifications } = await query
     .order("read", { ascending: true })
     .order("created_at", { ascending: false })
     .limit(50);

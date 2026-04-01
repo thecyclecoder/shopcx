@@ -533,6 +533,68 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
     }
   }
 
+  // Duplicate order detection: check for multiple paid orders on the same subscription within 7 days
+  if (!orderError && isNewOrder && sourceName.includes("subscription")) {
+    try {
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const orderName = (payload.name as string) || shopifyOrderId;
+
+      // Find which subscription this order belongs to
+      const { data: thisOrder } = await admin
+        .from("orders")
+        .select("subscription_id")
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_order_id", shopifyOrderId)
+        .single();
+
+      if (thisOrder?.subscription_id) {
+        const { data: recentOrders } = await admin
+          .from("orders")
+          .select("id, order_number, total_cents, created_at")
+          .eq("workspace_id", workspaceId)
+          .eq("subscription_id", thisOrder.subscription_id)
+          .eq("financial_status", "paid")
+          .gte("created_at", sevenDaysAgo)
+          .neq("shopify_order_id", shopifyOrderId)
+          .order("created_at", { ascending: false })
+          .limit(1);
+
+        if (recentOrders && recentOrders.length > 0) {
+          const prior = recentOrders[0];
+          // Don't create duplicate notifications for the same order
+          const { data: existingNotifs } = await admin
+            .from("dashboard_notifications")
+            .select("id, metadata")
+            .eq("workspace_id", workspaceId)
+            .eq("type", "duplicate_order_alert")
+            .eq("dismissed", false);
+
+          const alreadyNotified = existingNotifs?.some(
+            (n) => (n.metadata as { shopify_order_id?: string })?.shopify_order_id === shopifyOrderId
+          );
+
+          if (!alreadyNotified) {
+            await admin.from("dashboard_notifications").insert({
+              workspace_id: workspaceId,
+              type: "duplicate_order_alert",
+              title: `Duplicate order detected: ${orderName}`,
+              body: `${orderName} ($${((payload.total_price as string) || "0")}) was created on the same subscription as ${prior.order_number} ($${(prior.total_cents / 100).toFixed(2)}) from ${new Date(prior.created_at).toLocaleDateString()}. This may be a double charge.`,
+              metadata: {
+                shopify_order_id: shopifyOrderId,
+                order_number: orderName,
+                prior_order_number: prior.order_number,
+                total_price: payload.total_price,
+                customer_id: customerId,
+              },
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Duplicate order detection error:", e);
+    }
+  }
+
   // Update customer stats from DB (not payload — payload may be incomplete)
   if (customerId) {
     // Count orders and sum LTV from our DB (source of truth)

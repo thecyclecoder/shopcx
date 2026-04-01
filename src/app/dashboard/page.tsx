@@ -88,6 +88,7 @@ export default function DashboardPage() {
   const workspace = useWorkspace();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [range, setRange] = useState<Range>("today");
+  const [dupeAlerts, setDupeAlerts] = useState<{ id: string; title: string; body: string }[]>([]);
 
   const load = useCallback(async () => {
     const [open, pending, extra] = await Promise.all([
@@ -118,6 +119,14 @@ export default function DashboardPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Fetch duplicate order alerts
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspace.id}/notifications?type=duplicate_order_alert&dismissed=false`)
+      .then(r => r.ok ? r.json() : { notifications: [] })
+      .then(data => setDupeAlerts(data.notifications || []))
+      .catch(() => {});
+  }, [workspace.id]);
+
   const prev = prevLabel(range);
 
   return (
@@ -144,6 +153,35 @@ export default function DashboardPage() {
           ))}
         </div>
       </div>
+
+      {/* Duplicate order alert banner */}
+      {dupeAlerts.length > 0 && (
+        <div className="mb-6 rounded-lg border-2 border-red-500 bg-red-50 p-4 dark:bg-red-950/50">
+          <div className="flex items-start gap-3">
+            <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-red-600 text-white">
+              <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+              </svg>
+            </div>
+            <div className="flex-1">
+              <h3 className="text-sm font-bold text-red-800 dark:text-red-300">
+                {dupeAlerts.length} Duplicate Order{dupeAlerts.length > 1 ? "s" : ""} Detected
+              </h3>
+              <div className="mt-1 space-y-1">
+                {dupeAlerts.slice(0, 5).map(alert => (
+                  <p key={alert.id} className="text-sm text-red-700 dark:text-red-400">{alert.body}</p>
+                ))}
+                {dupeAlerts.length > 5 && (
+                  <p className="text-sm font-medium text-red-700 dark:text-red-400">+ {dupeAlerts.length - 5} more</p>
+                )}
+              </div>
+              <a href="/dashboard/orders?filter=all" className="mt-2 inline-block text-sm font-medium text-red-800 underline hover:text-red-900 dark:text-red-300 dark:hover:text-red-200">
+                View in Orders
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
 
       {!stats ? (
         <p className="text-sm text-zinc-400">Loading...</p>
