@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface Order {
@@ -94,6 +95,7 @@ function getOrderStatus(order: Order): { label: string; key: string } {
 
 export default function OrdersPage() {
   const workspace = useWorkspace();
+  const router = useRouter();
 
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
@@ -232,7 +234,9 @@ export default function OrdersPage() {
                 const isEditable = o.amplifier_status && EDITABLE_STATUSES.includes(o.amplifier_status);
 
                 return (
-                  <tr key={o.id} className="border-b border-zinc-50 transition-colors hover:bg-zinc-50 dark:border-zinc-800/50 dark:hover:bg-zinc-800/30">
+                  <tr key={o.id}
+                    onClick={() => router.push(`/dashboard/orders/${o.id}`)}
+                    className="cursor-pointer border-b border-zinc-50 transition-colors hover:bg-zinc-50 dark:border-zinc-800/50 dark:hover:bg-zinc-800/30">
                     <td className="whitespace-nowrap px-4 py-2.5 font-medium text-zinc-900 dark:text-zinc-100">
                       {o.order_number}
                     </td>
