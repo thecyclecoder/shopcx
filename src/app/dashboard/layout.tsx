@@ -5,6 +5,7 @@ import { WorkspaceProvider } from "@/lib/workspace-context";
 import Sidebar from "./sidebar";
 import ImportProgressBar from "@/components/import-progress-bar";
 import PatternReviewBanner from "@/components/pattern-review-banner";
+import PullToRefresh from "@/components/pull-to-refresh";
 
 export default async function DashboardLayout({
   children,
@@ -31,10 +32,12 @@ export default async function DashboardLayout({
           workspace={current}
           user={{ id: user.id, email: user.email!, name: user.user_metadata?.full_name || user.user_metadata?.name }}
         />
-        <main className="flex-1 overflow-y-auto scrollbar-hidden pt-[calc(4rem+env(safe-area-inset-top))] md:pt-0">
-          <ImportProgressBar />
-          <PatternReviewBanner />
-          {children}
+        <main className="flex-1 overflow-hidden pt-[calc(4rem+env(safe-area-inset-top))] md:pt-0">
+          <PullToRefresh>
+            <ImportProgressBar />
+            <PatternReviewBanner />
+            {children}
+          </PullToRefresh>
         </main>
       </div>
     </WorkspaceProvider>
