@@ -340,49 +340,80 @@ async function handleBillingEvent(
     const { data: subForDunning } = await admin.from("subscriptions").select("shopify_customer_id")
       .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).single();
 
-    // Check if dunning is enabled + no active cycle already exists (idempotency)
+    // Check if dunning is enabled
     const { data: wsSettings } = await admin.from("workspaces").select("dunning_enabled").eq("id", workspaceId).single();
     if (wsSettings?.dunning_enabled) {
-      const { getActiveDunningCycle } = await import("@/lib/dunning");
-      const existingCycle = await getActiveDunningCycle(workspaceId, contractId);
-      if (!existingCycle) {
-        // Guard: if a successful order exists within the current billing cycle,
-        // this is a false billing-failure from Appstle — do NOT trigger dunning.
-        const { data: subBilling } = await admin.from("subscriptions")
-          .select("id, billing_interval, billing_interval_count")
+      // Guard: if a successful order exists within the current billing cycle,
+      // this is a false billing-failure from Appstle — do NOT trigger dunning.
+      const { data: subBilling } = await admin.from("subscriptions")
+        .select("id, billing_interval, billing_interval_count")
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_contract_id", contractId)
+        .single();
+
+      let skipDunning = false;
+      if (subBilling) {
+        const interval = subBilling.billing_interval || "month";
+        const count = subBilling.billing_interval_count || 1;
+        let cycleDays = 28;
+        if (interval === "week") cycleDays = 7 * count;
+        else if (interval === "month") cycleDays = 28 * count;
+        else if (interval === "year") cycleDays = 365 * count;
+        else if (interval === "day") cycleDays = count;
+
+        const cutoff = new Date(Date.now() - cycleDays * 24 * 60 * 60 * 1000).toISOString();
+
+        const { data: recentOrder } = await admin.from("orders")
+          .select("id, order_number, created_at")
           .eq("workspace_id", workspaceId)
-          .eq("shopify_contract_id", contractId)
+          .eq("subscription_id", subBilling.id)
+          .eq("financial_status", "paid")
+          .gte("created_at", cutoff)
+          .order("created_at", { ascending: false })
+          .limit(1)
           .single();
 
-        let skipDunning = false;
-        if (subBilling) {
-          const interval = subBilling.billing_interval || "month";
-          const count = subBilling.billing_interval_count || 1;
-          let cycleDays = 28;
-          if (interval === "week") cycleDays = 7 * count;
-          else if (interval === "month") cycleDays = 28 * count;
-          else if (interval === "year") cycleDays = 365 * count;
-          else if (interval === "day") cycleDays = count;
-
-          const cutoff = new Date(Date.now() - cycleDays * 24 * 60 * 60 * 1000).toISOString();
-
-          const { data: recentOrder } = await admin.from("orders")
-            .select("id, order_number, created_at")
-            .eq("workspace_id", workspaceId)
-            .eq("subscription_id", subBilling.id)
-            .eq("financial_status", "paid")
-            .gte("created_at", cutoff)
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .single();
-
-          if (recentOrder) {
-            console.log(`Dunning guard: skipping for contract ${contractId} — paid order ${recentOrder.order_number} from ${recentOrder.created_at} (within ${cycleDays}-day cycle)`);
-            skipDunning = true;
-          }
+        if (recentOrder) {
+          console.log(`Dunning guard: skipping for contract ${contractId} — paid order ${recentOrder.order_number} from ${recentOrder.created_at} (within ${cycleDays}-day cycle)`);
+          skipDunning = true;
         }
+      }
 
-        if (!skipDunning) {
+      if (!skipDunning) {
+        // Atomically create cycle — unique index on (workspace_id, shopify_contract_id)
+        // WHERE status IN ('active','skipped','paused') prevents duplicates.
+        // If two webhooks race, only one insert succeeds; the other gets a conflict error.
+        const { data: prev } = await admin
+          .from("dunning_cycles")
+          .select("cycle_number")
+          .eq("workspace_id", workspaceId)
+          .eq("shopify_contract_id", contractId)
+          .in("status", ["recovered", "exhausted"])
+          .order("cycle_number", { ascending: false })
+          .limit(1)
+          .single();
+
+        const cycleNumber = prev ? prev.cycle_number + 1 : 1;
+        const billingAttemptId = data.billingAttemptId ? String(data.billingAttemptId) : null;
+
+        const { data: newCycle, error: cycleError } = await admin
+          .from("dunning_cycles")
+          .insert({
+            workspace_id: workspaceId,
+            shopify_contract_id: contractId,
+            subscription_id: sub.id,
+            customer_id: sub.customer_id,
+            cycle_number: cycleNumber,
+            status: "active",
+            billing_attempt_id: billingAttemptId,
+          })
+          .select("id, cycle_number")
+          .single();
+
+        if (cycleError) {
+          // Unique constraint violation = another webhook already created the cycle
+          console.log(`Dunning: cycle already exists for contract ${contractId}, skipping duplicate`);
+        } else {
           try {
             await inngest.send({
               name: "dunning/payment-failed",
@@ -392,9 +423,10 @@ async function handleBillingEvent(
                 subscription_id: sub.id,
                 customer_id: sub.customer_id,
                 shopify_customer_id: subForDunning?.shopify_customer_id || null,
-                billing_attempt_id: data.billingAttemptId ? String(data.billingAttemptId) : null,
+                billing_attempt_id: billingAttemptId,
                 error_code: errorCode,
                 error_message: errorMsg,
+                cycle_id: newCycle.id,
               },
             });
           } catch (err) {

@@ -54,6 +54,7 @@ export const dunningPaymentFailed = inngest.createFunction(
       billing_attempt_id,
       error_code,
       error_message,
+      cycle_id,
     } = event.data as {
       workspace_id: string;
       shopify_contract_id: string;
@@ -63,6 +64,7 @@ export const dunningPaymentFailed = inngest.createFunction(
       billing_attempt_id: string | null;
       error_code: string | null;
       error_message: string | null;
+      cycle_id?: string;
     };
 
     // Step 1: Check dunning settings
@@ -74,17 +76,44 @@ export const dunningPaymentFailed = inngest.createFunction(
       return { status: "skipped", reason: "dunning_disabled" };
     }
 
-    // Step 2: Check for existing active dunning cycle (avoid double-processing)
-    const existingCycle = await step.run("check-existing-cycle", async () => {
-      return getActiveDunningCycle(workspace_id, shopify_contract_id);
-    });
+    // Step 2: Load the cycle created by the webhook handler, or check for existing
+    const cycle = await step.run("load-dunning-cycle", async () => {
+      if (cycle_id) {
+        // Cycle was pre-created by the webhook handler (race-safe via unique index)
+        const admin = createAdminClient();
+        const { data } = await admin
+          .from("dunning_cycles")
+          .select("id, cycle_number")
+          .eq("id", cycle_id)
+          .single();
+        if (!data) return null;
 
-    if (existingCycle) {
-      return { status: "skipped", reason: "active_cycle_exists", cycle_id: existingCycle.id };
-    }
+        // Log initial failure
+        await logPaymentFailure({
+          workspaceId: workspace_id,
+          customerId: customer_id,
+          subscriptionId: subscription_id,
+          shopifyContractId: shopify_contract_id,
+          billingAttemptId: billing_attempt_id,
+          errorCode: error_code,
+          errorMessage: error_message,
+          attemptNumber: 1,
+          attemptType: "initial",
+          succeeded: false,
+        });
 
-    // Step 3: Log initial failure + create dunning cycle
-    const cycle = await step.run("create-dunning-cycle", async () => {
+        // Post internal note
+        await postDunningNote(workspace_id, customer_id, dunningInternalNote(
+          `Payment failed on subscription ${shopify_contract_id}. Starting dunning cycle ${data.cycle_number} — trying other payment methods.`
+        ));
+
+        return data;
+      }
+
+      // Legacy path: cycle not pre-created (backwards compat with in-flight events)
+      const existing = await getActiveDunningCycle(workspace_id, shopify_contract_id);
+      if (existing) return null; // Already exists, skip
+
       await logPaymentFailure({
         workspaceId: workspace_id,
         customerId: customer_id,
@@ -106,13 +135,16 @@ export const dunningPaymentFailed = inngest.createFunction(
         billing_attempt_id,
       );
 
-      // Post internal note on ticket if one exists for this customer
       await postDunningNote(workspace_id, customer_id, dunningInternalNote(
         `Payment failed on subscription ${shopify_contract_id}. Starting dunning cycle ${c.cycle_number} — trying other payment methods.`
       ));
 
       return c;
     });
+
+    if (!cycle) {
+      return { status: "skipped", reason: "active_cycle_exists" };
+    }
 
     // Step 4: Get customer payment methods from Shopify
     if (!shopify_customer_id) {
