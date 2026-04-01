@@ -331,7 +331,7 @@ If they're firm on cancelling after 2-3 exchanges, accept gracefully: "I complet
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-5-20250514",
+      model: "claude-sonnet-4-20250514",
       max_tokens: 200,
       system: systemPrompt,
       messages: [
