@@ -81,6 +81,7 @@ export async function GET(
     const [syncRes, suspRes, transitRes, fulfilledRes, refundedRes, awaitLateRes] = await Promise.all([
       // Sync errors
       base().is("amplifier_order_id", null)
+        .is("sync_resolved_at", null)
         .not("fulfillment_status", "ilike", "fulfilled")
         .not("financial_status", "ilike", "refunded")
         .not("financial_status", "ilike", "partially_refunded")
@@ -150,6 +151,7 @@ export async function GET(
   if (filter === "sync_error") {
     query = query
       .is("amplifier_order_id", null)
+      .is("sync_resolved_at", null)
       .not("fulfillment_status", "ilike", "fulfilled")
       .not("financial_status", "ilike", "refunded")
       .not("financial_status", "ilike", "partially_refunded")

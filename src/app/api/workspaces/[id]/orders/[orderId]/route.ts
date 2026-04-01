@@ -24,6 +24,7 @@ export async function GET(
       shipping_address, discount_codes, order_type,
       amplifier_order_id, amplifier_received_at, amplifier_shipped_at,
       amplifier_tracking_number, amplifier_carrier, amplifier_status,
+      sync_resolved_at, sync_resolved_note,
       fulfillments,
       customer_id,
       customers(id, email, first_name, last_name, phone, shopify_customer_id, retention_score, ltv_cents, total_orders)
@@ -107,4 +108,46 @@ export async function GET(
     shopify_domain: workspace?.shopify_myshopify_domain || "",
     timeline,
   });
+}
+
+export async function PATCH(
+  request: Request,
+  { params }: { params: Promise<{ id: string; orderId: string }> }
+) {
+  const { id: workspaceId, orderId } = await params;
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const admin = createAdminClient();
+
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user.id)
+    .single();
+
+  if (!member || !["owner", "admin"].includes(member.role)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const body = await request.json();
+
+  if (body.action === "resolve_sync") {
+    const { error } = await admin
+      .from("orders")
+      .update({
+        sync_resolved_at: new Date().toISOString(),
+        sync_resolved_note: body.note || null,
+      })
+      .eq("id", orderId)
+      .eq("workspace_id", workspaceId);
+
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: true });
+  }
+
+  return NextResponse.json({ error: "Unknown action" }, { status: 400 });
 }

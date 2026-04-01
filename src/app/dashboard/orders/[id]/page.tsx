@@ -26,6 +26,8 @@ interface OrderDetail {
     city?: string; province?: string; zip?: string; country?: string;
   } | null;
   discount_codes: string[] | null;
+  sync_resolved_at: string | null;
+  sync_resolved_note: string | null;
   amplifier_order_id: string | null;
   amplifier_received_at: string | null;
   amplifier_shipped_at: string | null;
@@ -86,6 +88,8 @@ export default function OrderDetailPage() {
   const [shopifyDomain, setShopifyDomain] = useState("");
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [resolveNote, setResolveNote] = useState("");
+  const [resolving, setResolving] = useState(false);
 
   useEffect(() => {
     fetch(`/api/workspaces/${workspace.id}/orders/${orderId}`)
@@ -338,6 +342,54 @@ export default function OrderDetailPage() {
               )}
             </div>
           </div>
+
+          {/* Resolve Sync Error */}
+          {!order.amplifier_order_id && !(order.fulfillment_status || "").toLowerCase().includes("fulfilled") && (
+            <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
+                <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Sync Status</h2>
+              </div>
+              <div className="px-4 py-3">
+                {order.sync_resolved_at ? (
+                  <div>
+                    <p className="text-sm text-emerald-600 dark:text-emerald-400">Resolved {formatDate(order.sync_resolved_at)}</p>
+                    {order.sync_resolved_note && (
+                      <p className="mt-1 text-xs text-zinc-500">{order.sync_resolved_note}</p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-xs text-zinc-500">This order has no Amplifier ID. Resolve to remove from sync errors.</p>
+                    <input
+                      type="text"
+                      value={resolveNote}
+                      onChange={e => setResolveNote(e.target.value)}
+                      placeholder="Note (optional)"
+                      className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                    />
+                    <button
+                      disabled={resolving}
+                      onClick={async () => {
+                        setResolving(true);
+                        const res = await fetch(`/api/workspaces/${workspace.id}/orders/${orderId}`, {
+                          method: "PATCH",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ action: "resolve_sync", note: resolveNote }),
+                        });
+                        if (res.ok) {
+                          setOrder(prev => prev ? { ...prev, sync_resolved_at: new Date().toISOString(), sync_resolved_note: resolveNote } : prev);
+                        }
+                        setResolving(false);
+                      }}
+                      className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {resolving ? "Resolving..." : "Resolve"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
