@@ -284,10 +284,18 @@ export async function generateOpenEndedResponse(
     .join("\n");
 
   // Fetch reviews for the customer's subscription products
-  const reviews = await getReviewsForProducts(workspaceId, products);
+  let reviews: { summary: string; rating: number; body: string; reviewer_name: string; shopify_product_id: string }[] = [];
+  try {
+    reviews = await getReviewsForProducts(workspaceId, products);
+  } catch (err) {
+    console.error("Failed to fetch reviews for AI chat:", err);
+  }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return "I'm sorry, I'm having trouble right now. I've escalated this to our team, and they will be in touch with you soon.";
+  if (!apiKey) {
+    console.error("ANTHROPIC_API_KEY not set — AI chat unavailable");
+    return "I'm sorry, I'm having trouble right now. I've escalated this to our team, and they will be in touch with you soon.";
+  }
 
   // Fetch product titles for context
   const { data: productRecords } = products.length
@@ -333,7 +341,11 @@ If they're firm on cancelling after 2-3 exchanges, accept gracefully: "I complet
     }),
   });
 
-  if (!aiRes.ok) return "I'm sorry, I'm having trouble right now. I've escalated this to our team, and they will be in touch with you soon.";
+  if (!aiRes.ok) {
+    const errText = await aiRes.text().catch(() => "");
+    console.error(`Anthropic API error in generateOpenEndedResponse: ${aiRes.status}`, errText);
+    return "I'm sorry, I'm having trouble right now. I've escalated this to our team, and they will be in touch with you soon.";
+  }
   const aiData = await aiRes.json();
   return (aiData.content?.[0] as { type: string; text: string })?.text?.trim() || "I understand. I've escalated this to our team, and they will be in touch with you soon.";
 }

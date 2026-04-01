@@ -309,14 +309,14 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
         first_renewal: false,
       };
 
-      // Get the human-readable reason label from config
+      // Use human-readable reason label for AI context (not the slug)
       const reasonLabel = String(payload?.reasonLabel || reason);
 
       // Get initial AI response
       try {
         const { generateOpenEndedResponse } = await import("@/lib/remedy-selector");
         const reply = await generateOpenEndedResponse(
-          auth.workspaceId, reason, reasonLabel,
+          auth.workspaceId, reasonLabel, "",
           [], customerCtx, productIds,
         );
 
