@@ -203,6 +203,10 @@ export default function Cancel() {
     scrollTop();
   }
 
+  // Customer context for personalized messaging
+  const [customerFirstName, setCustomerFirstName] = useState('');
+  const [subscriptionAgeDays, setSubscriptionAgeDays] = useState(0);
+
   // Fetch journey data on mount
   useEffect(() => {
     if (!contractId) return;
@@ -212,6 +216,8 @@ export default function Cancel() {
         if (resp?.ok) {
           setJourney(resp);
           if (resp.reviews) setReviews(resp.reviews);
+          if (resp.customerFirstName) setCustomerFirstName(resp.customerFirstName);
+          if (resp.subscriptionAgeDays) setSubscriptionAgeDays(resp.subscriptionAgeDays);
           goToPhase('reason');
         } else {
           setJourney({ cancel_reasons: [], reviews: [] });
@@ -386,21 +392,28 @@ export default function Cancel() {
 
   // ---- REMEDIES STEP ----
   if (phase === 'remedies') {
+    const ageMonths = Math.floor(subscriptionAgeDays / 28);
+    const isVip = ageMonths >= 3;
+    const name = customerFirstName || 'there';
+    const personalHeader = isVip
+      ? `Hey ${name}, you're a VIP customer with us. Thanks for being with us for ${ageMonths} month${ageMonths !== 1 ? 's' : ''}. We've put together a special group of options for you because we'd hate to lose you!`
+      : `Hey ${name}, most people see the best results with at least 3 months of consistent use. Here are some options to keep you on track:`;
+
     if (busy && !remedies.length) {
       return (
         <div class="sp-cancel">
-          <CancelHeader onBack={goBack} title="Before you go…" />
+          <CancelHeader onBack={goBack} title="We have options for you" />
           <SkeletonCancelScreen />
         </div>
       );
     }
     return (
       <div class="sp-card sp-cancel">
-        <CancelHeader onBack={goBack} title="Before you go…" />
+        <CancelHeader onBack={goBack} title="We have options for you" />
         <AlertBar />
         {remedies.length > 0 && (
           <div class="sp-cancel__remedies-section">
-            <div class="sp-cancel__remedies-title">We have a few options that might help:</div>
+            <div class="sp-cancel__remedies-title">{personalHeader}</div>
             <div class="sp-remedy-list">
               {remedies.slice(0, 3).map(r => (
                 <RemedyCard key={r.id} remedy={r} onAccept={acceptRemedy} busy={busy} />

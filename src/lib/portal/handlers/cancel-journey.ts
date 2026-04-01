@@ -113,12 +113,18 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
           { id: "something_else", label: "Something else", type: "ai_conversation", suggested_remedy_id: null },
         ];
 
+    const subAgeDays = sub.created_at
+      ? Math.floor((Date.now() - new Date(sub.created_at).getTime()) / 86400000)
+      : 0;
+
     return jsonOk({
       ok: true, route,
       subscription: sub,
       cancel_reasons: cancelReasons,
       remedies: remedies || [],
       reviews,
+      customerFirstName: customer.first_name || "",
+      subscriptionAgeDays: subAgeDays,
     });
   }
 
@@ -206,8 +212,13 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       };
 
       const { selectRemedies } = await import("@/lib/remedy-selector");
-      const result = await selectRemedies(auth.workspaceId, reason, customerCtx, productIds);
-      selectedRemedies = result?.remedies || [];
+      const result = await selectRemedies(auth.workspaceId, reason, customerCtx, productIds, suggestedRemedyId);
+      selectedRemedies = (result?.remedies || []).map((r: { remedy_id: string; name: string; type: string; pitch: string; coupon_code?: string; confidence: number }) => ({
+        id: r.remedy_id,
+        type: r.type,
+        label: r.name,
+        description: r.pitch,
+      }));
       if (result?.review) reasonReviews = [result.review];
     } catch {
       try {
