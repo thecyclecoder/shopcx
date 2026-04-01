@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { decrypt } from "@/lib/crypto";
+import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 
 export async function GET(
   request: Request,
@@ -136,11 +138,74 @@ export async function PATCH(
   const body = await request.json();
 
   if (body.action === "resolve_sync") {
+    // Get the order's Shopify ID
+    const { data: order } = await admin
+      .from("orders")
+      .select("shopify_order_id")
+      .eq("id", orderId)
+      .eq("workspace_id", workspaceId)
+      .single();
+
+    if (!order) return NextResponse.json({ error: "Order not found" }, { status: 404 });
+
+    // Mark fulfilled in Shopify (no customer notification)
+    const { data: ws } = await admin
+      .from("workspaces")
+      .select("shopify_access_token_encrypted, shopify_myshopify_domain")
+      .eq("id", workspaceId)
+      .single();
+
+    if (ws?.shopify_access_token_encrypted && ws?.shopify_myshopify_domain) {
+      const accessToken = decrypt(ws.shopify_access_token_encrypted);
+      const shopifyGid = `gid://shopify/Order/${order.shopify_order_id}`;
+
+      // Step 1: Get fulfillment orders for this order
+      const foQuery = `{ order(id: "${shopifyGid}") { fulfillmentOrders(first: 5) { edges { node { id status } } } } }`;
+      const foRes = await fetch(`https://${ws.shopify_myshopify_domain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+        method: "POST",
+        headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+        body: JSON.stringify({ query: foQuery }),
+      });
+      const foData = await foRes.json();
+      const fulfillmentOrders = foData.data?.order?.fulfillmentOrders?.edges || [];
+
+      // Step 2: Fulfill each open fulfillment order without notifying customer
+      for (const edge of fulfillmentOrders) {
+        const fo = edge.node;
+        if (fo.status === "CLOSED" || fo.status === "CANCELLED") continue;
+
+        const fulfillMutation = `
+          mutation fulfillmentCreateV2($fulfillment: FulfillmentV2Input!) {
+            fulfillmentCreateV2(fulfillment: $fulfillment) {
+              fulfillment { id }
+              userErrors { field message }
+            }
+          }
+        `;
+
+        await fetch(`https://${ws.shopify_myshopify_domain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+          method: "POST",
+          headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: fulfillMutation,
+            variables: {
+              fulfillment: {
+                lineItemsByFulfillmentOrder: [{ fulfillmentOrderId: fo.id }],
+                notifyCustomer: false,
+              },
+            },
+          }),
+        });
+      }
+    }
+
+    // Update our DB
     const { error } = await admin
       .from("orders")
       .update({
         sync_resolved_at: new Date().toISOString(),
         sync_resolved_note: body.note || null,
+        fulfillment_status: "fulfilled",
       })
       .eq("id", orderId)
       .eq("workspace_id", workspaceId);
