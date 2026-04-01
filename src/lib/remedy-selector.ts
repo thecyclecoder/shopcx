@@ -287,7 +287,7 @@ export async function generateOpenEndedResponse(
   const reviews = await getReviewsForProducts(workspaceId, products);
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return "I'm sorry, I'm having trouble right now. Let me connect you with a team member who can help.";
+  if (!apiKey) return "I'm sorry, I'm having trouble right now. I've escalated this to our team, and they will be in touch with you soon.";
 
   // Fetch product titles for context
   const { data: productRecords } = products.length
@@ -333,7 +333,7 @@ If they're firm on cancelling after 2-3 exchanges, accept gracefully: "I complet
     }),
   });
 
-  if (!aiRes.ok) return "I'm sorry, I'm having trouble right now. Let me connect you with a team member.";
+  if (!aiRes.ok) return "I'm sorry, I'm having trouble right now. I've escalated this to our team, and they will be in touch with you soon.";
   const aiData = await aiRes.json();
-  return (aiData.content?.[0] as { type: string; text: string })?.text?.trim() || "I understand. Let me connect you with someone who can help.";
+  return (aiData.content?.[0] as { type: string; text: string })?.text?.trim() || "I understand. I've escalated this to our team, and they will be in touch with you soon.";
 }
