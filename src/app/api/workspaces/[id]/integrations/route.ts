@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at"
     )
     .eq("id", workspaceId)
     .single();
@@ -90,6 +90,13 @@ export async function GET(
     klaviyo_public_key: workspace.klaviyo_public_key,
     klaviyo_last_sync_at: workspace.klaviyo_last_sync_at,
     klaviyo_review_count: null, // Populated by caller if needed
+
+    // Amplifier
+    amplifier_connected: !!workspace.amplifier_api_key_encrypted,
+    amplifier_api_key_hint: workspace.amplifier_api_key_encrypted
+      ? `...${decrypt(workspace.amplifier_api_key_encrypted).slice(-4)}`
+      : null,
+    amplifier_order_source_code: workspace.amplifier_order_source_code || null,
 
     // Multipass
     shopify_multipass_hint: workspace.shopify_multipass_secret_encrypted
@@ -253,6 +260,19 @@ export async function PATCH(
 
     if ("klaviyo_public_key" in body) {
       updates.klaviyo_public_key = body.klaviyo_public_key || null;
+    }
+
+    // Amplifier
+    if ("amplifier_api_key" in body) {
+      if (body.amplifier_api_key) {
+        updates.amplifier_api_key_encrypted = encrypt(body.amplifier_api_key);
+      } else {
+        updates.amplifier_api_key_encrypted = null;
+      }
+    }
+
+    if ("amplifier_order_source_code" in body) {
+      updates.amplifier_order_source_code = body.amplifier_order_source_code || null;
     }
 
     // VIP threshold

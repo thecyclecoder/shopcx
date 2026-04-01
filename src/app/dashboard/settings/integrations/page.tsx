@@ -75,6 +75,11 @@ export default function IntegrationsPage() {
   const [klaviyoReviewCount, setKlaviyoReviewCount] = useState<number | null>(null);
   const [klaviyoSyncing, setKlaviyoSyncing] = useState(false);
 
+  // Amplifier
+  const [amplifierApiKey, setAmplifierApiKey] = useState("");
+  const [amplifierOrderSourceCode, setAmplifierOrderSourceCode] = useState("");
+  const [amplifierConnected, setAmplifierConnected] = useState(false);
+  const [amplifierApiKeyHint, setAmplifierApiKeyHint] = useState<string | null>(null);
 
   // Slack
   const [slackConnected, setSlackConnected] = useState(false);
@@ -132,6 +137,9 @@ export default function IntegrationsPage() {
         setKlaviyoPublicKey(data.klaviyo_public_key || "");
         setKlaviyoLastSync(data.klaviyo_last_sync_at);
         setKlaviyoReviewCount(data.klaviyo_review_count);
+        setAmplifierConnected(data.amplifier_connected);
+        setAmplifierApiKeyHint(data.amplifier_api_key_hint);
+        setAmplifierOrderSourceCode(data.amplifier_order_source_code || "");
         setSlackConnected(!!data.slack_connected);
         setSlackTeamName(data.slack_team_name || null);
         setSlackConnectedAt(data.slack_connected_at || null);
@@ -313,6 +321,29 @@ export default function IntegrationsPage() {
       setMessage("Review sync failed");
     }
     setKlaviyoSyncing(false);
+  };
+
+  // Amplifier handlers
+  const handleSaveAmplifier = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const body: Record<string, string> = {};
+    if (amplifierApiKey) body.amplifier_api_key = amplifierApiKey;
+    if (amplifierOrderSourceCode) body.amplifier_order_source_code = amplifierOrderSourceCode;
+    if (await patchIntegrations(body)) {
+      setMessage("Amplifier configuration saved");
+      setAmplifierConnected(true);
+      setAmplifierApiKeyHint(amplifierApiKey ? `...${amplifierApiKey.slice(-4)}` : amplifierApiKeyHint);
+      setAmplifierApiKey("");
+    }
+  };
+
+  const handleDisconnectAmplifier = async () => {
+    if (await patchIntegrations({ amplifier_api_key: null, amplifier_order_source_code: null })) {
+      setAmplifierConnected(false);
+      setAmplifierApiKeyHint(null);
+      setAmplifierOrderSourceCode("");
+      setMessage("Amplifier disconnected");
+    }
   };
 
   // Meta handlers
@@ -1217,6 +1248,116 @@ export default function IntegrationsPage() {
           )}
         </div>
       </div>
+      {/* ── Amplifier ── */}
+        <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600/10">
+                <svg className="h-5 w-5 text-blue-600 dark:text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                  <polyline points="3.29 7 12 12 20.71 7" />
+                  <line x1="12" y1="22" x2="12" y2="12" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Amplifier</h2>
+                <p className="text-sm text-zinc-500">3PL fulfillment and order management</p>
+              </div>
+            </div>
+            {amplifierConnected && (
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                Connected
+              </span>
+            )}
+          </div>
+
+          {canEdit && !amplifierConnected && (
+            <form onSubmit={handleSaveAmplifier} className="mt-5 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">API Key</label>
+                <input
+                  type="password"
+                  value={amplifierApiKey}
+                  onChange={(e) => setAmplifierApiKey(e.target.value)}
+                  placeholder="Your Amplifier API key"
+                  required
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">Order Source Code</label>
+                <input
+                  type="text"
+                  value={amplifierOrderSourceCode}
+                  onChange={(e) => setAmplifierOrderSourceCode(e.target.value)}
+                  placeholder="e.g. SHOPCX (optional)"
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={saving || !amplifierApiKey}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {saving ? "Saving..." : "Save & Connect"}
+              </button>
+            </form>
+          )}
+
+          {canEdit && amplifierConnected && (
+            <div className="mt-5 space-y-3">
+              <div className="rounded-md bg-zinc-50 p-3 dark:bg-zinc-800">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-zinc-500">API Key</span>
+                    <span className="font-mono text-sm text-zinc-400">{amplifierApiKeyHint}</span>
+                  </div>
+                  {amplifierOrderSourceCode && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-zinc-500">Order Source Code</span>
+                      <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{amplifierOrderSourceCode}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleDisconnectAmplifier}
+                  disabled={saving}
+                  className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                >
+                  Disconnect
+                </button>
+              </div>
+              <form onSubmit={handleSaveAmplifier} className="space-y-2">
+                <input
+                  type="password"
+                  value={amplifierApiKey}
+                  onChange={(e) => setAmplifierApiKey(e.target.value)}
+                  placeholder="New API key (leave blank to keep current)"
+                  className="block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={amplifierOrderSourceCode}
+                    onChange={(e) => setAmplifierOrderSourceCode(e.target.value)}
+                    placeholder="Order Source Code"
+                    className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                  />
+                  <button
+                    type="submit"
+                    disabled={saving || (!amplifierApiKey && !amplifierOrderSourceCode)}
+                    className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                  >
+                    Update
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+        </div>
       {/* ── Slack ── */}
       <div className="rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="flex items-center justify-between">
