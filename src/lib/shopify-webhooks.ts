@@ -7,6 +7,7 @@ import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { normalizeShopifyShippingAddress } from "@/lib/address-normalize";
 import { inngest } from "@/lib/inngest/client";
+import { getMemberByCustomerId, deductPoints } from "@/lib/loyalty";
 
 // ── HMAC verification ──
 
@@ -423,11 +424,12 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
   // Check if order already exists (to distinguish create vs update)
   const { data: existingOrder } = await admin
     .from("orders")
-    .select("id")
+    .select("id, financial_status")
     .eq("workspace_id", workspaceId)
     .eq("shopify_order_id", shopifyOrderId)
     .single();
   const isNewOrder = !existingOrder;
+  const previousFinancialStatus = existingOrder?.financial_status || null;
 
   // Upsert order
   const shippingAddr = payload.shipping_address as Record<string, unknown> | null;
@@ -604,6 +606,52 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
           source_name: payload.source_name,
         },
       });
+    }
+
+    // Detect refund: financial_status changed to refunded or partially_refunded
+    const newFinancialStatus = (payload.financial_status as string) || null;
+    const isRefund = !isNewOrder
+      && (newFinancialStatus === "refunded" || newFinancialStatus === "partially_refunded")
+      && previousFinancialStatus !== newFinancialStatus;
+
+    if (isRefund) {
+      const orderName = (payload.name as string) || shopifyOrderId;
+      const totalPrice = (payload.total_price as string) || "0";
+
+      // Log customer event
+      await logCustomerEvent({
+        workspaceId,
+        customerId,
+        eventType: "order.refunded",
+        source: "shopify",
+        summary: `Order ${orderName} ${newFinancialStatus === "partially_refunded" ? "partially " : ""}refunded — $${totalPrice}`,
+        properties: {
+          shopify_order_id: shopifyOrderId,
+          order_number: payload.name,
+          total_price: totalPrice,
+          financial_status: newFinancialStatus,
+        },
+      });
+
+      // Deduct loyalty points earned from this order
+      try {
+        const member = await getMemberByCustomerId(workspaceId, customerId);
+        if (member) {
+          // Points earned = 1 point per dollar spent (matching earn rate)
+          const pointsToDeduct = Math.floor(parseFloat(totalPrice));
+          if (pointsToDeduct > 0) {
+            await deductPoints(
+              member,
+              pointsToDeduct,
+              existingOrder?.id || null,
+              "refund",
+              `Refund on order ${orderName}`,
+            );
+          }
+        }
+      } catch (e) {
+        console.error("Loyalty deduction on refund error:", e);
+      }
     }
 
     // Evaluate rules — only on new orders
