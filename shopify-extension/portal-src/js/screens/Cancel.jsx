@@ -1,6 +1,6 @@
 // screens/Cancel.jsx — AI-powered cancel retention flow
 //
-// Flow: skeleton → reason → remedies|chat → confirm → done
+// Flow: skeleton → reason → remedies|chat|line_item_modify → confirm → done
 // Backend: GET/POST /api/portal?route=cancelJourney&contractId={id}
 
 import { useState, useEffect, useContext, useRef, useCallback } from 'preact/hooks';
@@ -9,6 +9,7 @@ import { requestJson, postJson, clearCaches } from '../core/api.js';
 import { shortId } from '../core/utils.js';
 import { SkeletonCancelScreen } from '../components/Skeleton.jsx';
 import ReviewsCard from '../cards/ReviewsCard.jsx';
+import { fireConfetti } from '../core/confetti.js';
 
 // Reason type is now driven by backend config (type: "remedy" | "ai_conversation")
 // Fallback for old configs that don't have types yet
@@ -125,7 +126,7 @@ function ChatInterface({ messages, turn, maxTurns, loading, onSend, onCancel, on
       </div>
       {!ended && !loading && (
         <div class="sp-chat__input-row">
-          <input ref={inputRef} type="text" class="sp-chat__input" placeholder="Type your message…"
+          <input ref={inputRef} type="text" class="sp-chat__input" placeholder="Type your message\u2026"
             value={text} onInput={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSend(); } }} />
           <button type="button" class="sp-btn sp-btn-primary sp-chat__send" onClick={handleSend}>Send</button>
@@ -143,6 +144,243 @@ function ChatInterface({ messages, turn, maxTurns, loading, onSend, onCancel, on
       </div>
     </div>
   );
+}
+
+// ---- Line Item Modifier Components ----
+
+function LineItemCard({ item, selected, onSelect }) {
+  const img = item.image || item.variantImage;
+  return (
+    <button type="button"
+      class={'sp-remedy-card sp-remedy-card--selectable' + (selected ? ' sp-remedy-card--selected' : '')}
+      onClick={() => onSelect(item)}>
+      {img && <img src={img} alt="" class="sp-remedy-card__img" />}
+      <div class="sp-remedy-card__body">
+        <div class="sp-remedy-card__label">{item.title || item.productTitle}</div>
+        {item.variantTitle && item.variantTitle !== 'Default Title' && (
+          <div class="sp-remedy-card__desc sp-muted">{item.variantTitle}</div>
+        )}
+        <div class="sp-remedy-card__desc sp-muted">Qty: {item.quantity || 1}</div>
+      </div>
+    </button>
+  );
+}
+
+function LineItemModifier({ subscription, contractId, onComplete, onCancel, showToast }) {
+  const [subStep, setSubStep] = useState('select_item'); // select_item, choose_action, action_form, confirm
+  const [selectedItem, setSelectedItem] = useState(null);
+  const [action, setAction] = useState('');
+  const [actionValue, setActionValue] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [variants, setVariants] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [productSearch, setProductSearch] = useState('');
+
+  const items = (subscription?.items || subscription?.lines || [])
+    .filter(i => !i.isShippingProtection);
+
+  function selectItem(item) {
+    setSelectedItem(item);
+    setSubStep('choose_action');
+  }
+
+  function chooseAction(act) {
+    setAction(act);
+    if (act === 'swap_variant') {
+      // Load variants for this product from the item data
+      const v = selectedItem?.variants || [];
+      setVariants(v);
+    }
+    setSubStep('action_form');
+  }
+
+  async function executeAction() {
+    setBusy(true);
+    try {
+      let payload = { step: 'line_item_action', action };
+      const lineId = selectedItem?.id || selectedItem?.lineId || '';
+
+      if (action === 'swap_variant') {
+        payload = { ...payload, oldVariantId: shortId(selectedItem.variantId), newVariantId: actionValue };
+      } else if (action === 'change_quantity') {
+        payload = { ...payload, lineId: shortId(lineId), quantity: actionValue };
+      } else if (action === 'remove') {
+        payload = { ...payload, lineId: shortId(lineId) };
+      } else if (action === 'swap_product') {
+        payload = { ...payload, lineId: shortId(lineId), newVariantId: actionValue, quantity: selectedItem?.quantity || 1 };
+      }
+
+      const resp = await postJson('cancelJourney', payload, { contractId });
+      if (resp?.ok) {
+        onComplete(resp.savedAction || 'updated your subscription items');
+      } else {
+        showToast('Something went wrong. Please try again.', 'error');
+        setBusy(false);
+      }
+    } catch {
+      showToast('Something went wrong. Please try again.', 'error');
+      setBusy(false);
+    }
+  }
+
+  const hasMultipleVariants = selectedItem?.variants?.length > 1;
+  const actionLabel = {
+    swap_variant: 'Change flavor',
+    change_quantity: 'Change quantity',
+    swap_product: 'Swap product',
+    remove: 'Remove item',
+  };
+
+  // Step 1: Select item
+  if (subStep === 'select_item') {
+    return (
+      <div class="sp-cancel__line-items">
+        <div class="sp-cancel__remedies-title">Which item would you like to change?</div>
+        <div class="sp-remedy-list">
+          {items.map((item, i) => (
+            <LineItemCard key={i} item={item} selected={false} onSelect={selectItem} />
+          ))}
+        </div>
+        <div class="sp-cancel__footer">
+          <button type="button" class="sp-btn sp-btn--ghost" onClick={onCancel}>
+            {'\u2190'} Back to options
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Step 2: Choose action
+  if (subStep === 'choose_action') {
+    return (
+      <div class="sp-cancel__line-items">
+        <div class="sp-cancel__remedies-title">What would you like to do with {selectedItem?.title || 'this item'}?</div>
+        <div class="sp-remedy-list">
+          {hasMultipleVariants && (
+            <button type="button" class="sp-btn sp-btn--ghost sp-cancel-reason"
+              onClick={() => chooseAction('swap_variant')}>
+              <div class="sp-cancel-reason__label">{'\uD83C\uDF68'} Change flavor / variant</div>
+            </button>
+          )}
+          <button type="button" class="sp-btn sp-btn--ghost sp-cancel-reason"
+            onClick={() => chooseAction('change_quantity')}>
+            <div class="sp-cancel-reason__label">{'\uD83D\uDD22'} Change quantity</div>
+          </button>
+          <button type="button" class="sp-btn sp-btn--ghost sp-cancel-reason"
+            onClick={() => chooseAction('swap_product')}>
+            <div class="sp-cancel-reason__label">{'\uD83D\uDD00'} Swap for a different product</div>
+          </button>
+          <button type="button" class="sp-btn sp-btn--ghost sp-cancel-reason"
+            onClick={() => chooseAction('remove')}>
+            <div class="sp-cancel-reason__label">{'\u274C'} Remove this item</div>
+          </button>
+        </div>
+        <div class="sp-cancel__footer">
+          <button type="button" class="sp-btn sp-btn--ghost" onClick={() => setSubStep('select_item')}>
+            {'\u2190'} Back
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Step 3: Action form
+  if (subStep === 'action_form') {
+    let form = null;
+
+    if (action === 'swap_variant') {
+      const currentVariant = shortId(selectedItem?.variantId);
+      form = (
+        <div>
+          <div class="sp-cancel__remedies-title">Choose a new variant</div>
+          <div class="sp-remedy-list">
+            {variants.filter(v => shortId(v.id) !== currentVariant).map((v, i) => (
+              <button key={i} type="button"
+                class={'sp-btn sp-btn--ghost sp-cancel-reason' + (actionValue === shortId(v.id) ? ' sp-cancel-reason--selected' : '')}
+                onClick={() => setActionValue(shortId(v.id))}>
+                <div class="sp-cancel-reason__label">{v.title}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    } else if (action === 'change_quantity') {
+      const qty = actionValue || selectedItem?.quantity || 1;
+      form = (
+        <div>
+          <div class="sp-cancel__remedies-title">Set new quantity</div>
+          <div class="sp-cancel__qty-row">
+            <button type="button" class="sp-btn sp-btn--ghost sp-btn--sm"
+              disabled={qty <= 1} onClick={() => setActionValue(Math.max(1, qty - 1))}>-</button>
+            <span class="sp-cancel__qty-val">{qty}</span>
+            <button type="button" class="sp-btn sp-btn--ghost sp-btn--sm"
+              onClick={() => setActionValue(qty + 1)}>+</button>
+          </div>
+        </div>
+      );
+    } else if (action === 'remove') {
+      form = (
+        <div>
+          <div class="sp-cancel__remedies-title">Remove {selectedItem?.title || 'this item'}?</div>
+          <p class="sp-muted" style={{ marginBottom: '16px' }}>
+            This will remove the item from your upcoming orders.
+          </p>
+        </div>
+      );
+      if (!actionValue) setActionValue('confirmed');
+    } else if (action === 'swap_product') {
+      form = (
+        <div>
+          <div class="sp-cancel__remedies-title">This feature is coming soon</div>
+          <p class="sp-muted">Product swap will be available in a future update. For now, you can remove this item and add a new one from your subscription page.</p>
+        </div>
+      );
+    }
+
+    const canProceed = action === 'remove' || (action === 'swap_product') || !!actionValue;
+
+    return (
+      <div class="sp-cancel__line-items">
+        {form}
+        <div class="sp-cancel__footer" style={{ gap: '8px', display: 'flex', flexDirection: 'column' }}>
+          {action !== 'swap_product' && (
+            <button type="button" class="sp-btn sp-btn-primary" disabled={!canProceed || busy}
+              onClick={() => setSubStep('confirm')}>
+              {busy ? 'Updating...' : 'Confirm change'}
+            </button>
+          )}
+          <button type="button" class="sp-btn sp-btn--ghost" onClick={() => { setSubStep('choose_action'); setActionValue(null); }}>
+            {'\u2190'} Back
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Step 4: Confirm
+  if (subStep === 'confirm') {
+    return (
+      <div class="sp-cancel__line-items">
+        <div class="sp-cancel__remedies-title">Confirm your change</div>
+        <div class="sp-remedy-card">
+          <div class="sp-remedy-card__body">
+            <div class="sp-remedy-card__label">{selectedItem?.title}</div>
+            <div class="sp-remedy-card__desc sp-muted">{actionLabel[action] || action}</div>
+          </div>
+        </div>
+        <div class="sp-cancel__footer" style={{ gap: '8px', display: 'flex', flexDirection: 'column' }}>
+          <button type="button" class="sp-btn sp-btn-primary" disabled={busy} onClick={executeAction}>
+            {busy ? 'Updating...' : 'Confirm'}
+          </button>
+          <button type="button" class="sp-btn sp-btn--ghost" onClick={() => setSubStep('action_form')}>
+            {'\u2190'} Back
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 // ---- Headers ----
@@ -175,12 +413,13 @@ export default function Cancel() {
   const detailUrl = router.base + '/subscription?id=' + encodeURIComponent(contractId);
 
   // State
-  const [phase, setPhase] = useState('loading'); // loading, reason, remedies, chat, confirm
+  const [phase, setPhase] = useState('loading'); // loading, reason, remedies, chat, line_item_modify, confirm
   const [journey, setJourney] = useState(null);
   const [reason, setReason] = useState('');
   const [remedies, setRemedies] = useState([]);
   const [reviews, setReviews] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [sessionId, setSessionId] = useState(null);
 
   // Chat state
   const [chatMessages, setChatMessages] = useState([]);
@@ -206,6 +445,13 @@ export default function Cancel() {
   // Customer context for personalized messaging
   const [customerFirstName, setCustomerFirstName] = useState('');
   const [subscriptionAgeDays, setSubscriptionAgeDays] = useState(0);
+
+  // Navigate to detail with save celebration
+  function navigateWithSave(action) {
+    clearCaches();
+    const savedUrl = detailUrl + (detailUrl.includes('?') ? '&' : '?') + 'saved=1&action=' + encodeURIComponent(action);
+    router.navigate(savedUrl);
+  }
 
   // Fetch journey data on mount
   useEffect(() => {
@@ -273,6 +519,7 @@ export default function Cancel() {
         }, { contractId });
         if (resp?.remedies) setRemedies(resp.remedies);
         if (resp?.reviews) setReviews(resp.reviews);
+        if (resp?.sessionId) setSessionId(resp.sessionId);
       } catch {
         setRemedies(journey?.remedies || []);
       }
@@ -304,10 +551,19 @@ export default function Cancel() {
   async function acceptRemedy(remedy) {
     setBusy(true);
     try {
-      await postJson('cancelJourney', { step: 'remedy', remedyId: remedy.id, accepted: true, reason }, { contractId });
-      showToast('Your subscription has been updated!', 'success');
-      clearCaches();
-      router.navigate(detailUrl);
+      const resp = await postJson('cancelJourney', {
+        step: 'remedy', remedyId: remedy.id, accepted: true, reason, sessionId,
+      }, { contractId });
+
+      // Line item modifier: open multi-step flow
+      if (resp?.step === 'line_item_modify') {
+        goToPhase('line_item_modify');
+        setBusy(false);
+        return;
+      }
+
+      const action = resp?.savedAction || remedy.label || 'updated your subscription';
+      navigateWithSave(action);
     } catch {
       showToast('Something went wrong. Please try again.', 'error');
       setBusy(false);
@@ -318,7 +574,9 @@ export default function Cancel() {
   async function confirmCancel() {
     setBusy(true);
     try {
-      await postJson('cancelJourney', { step: 'confirm_cancel', reason, ticketId: chatTicketId }, { contractId });
+      await postJson('cancelJourney', {
+        step: 'confirm_cancel', reason, ticketId: chatTicketId, sessionId,
+      }, { contractId });
       showToast('Your subscription has been cancelled.', 'success');
       clearCaches();
       router.navigate(detailUrl);
@@ -428,6 +686,22 @@ export default function Cancel() {
             I still want to cancel
           </button>
         </div>
+      </div>
+    );
+  }
+
+  // ---- LINE ITEM MODIFIER STEP ----
+  if (phase === 'line_item_modify') {
+    return (
+      <div class="sp-card sp-cancel">
+        <CancelHeader onBack={() => goToPhase('remedies')} title="Customize your order" />
+        <LineItemModifier
+          subscription={journey?.subscription}
+          contractId={contractId}
+          showToast={showToast}
+          onComplete={(savedAction) => navigateWithSave(savedAction)}
+          onCancel={() => goToPhase('remedies')}
+        />
       </div>
     );
   }

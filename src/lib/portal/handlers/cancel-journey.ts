@@ -3,6 +3,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { inngest } from "@/lib/inngest/client";
 
 async function createChatTicket(
   admin: ReturnType<typeof createAdminClient>,
@@ -38,6 +39,135 @@ async function logChatMessage(
     author_type: authorType,
     body,
   });
+}
+
+// ── Remedy action execution ──
+
+type RemedyConfig = Record<string, unknown>;
+
+async function executeRemedyAction(
+  workspaceId: string,
+  contractId: string,
+  remedyType: string,
+  config: RemedyConfig,
+): Promise<{ success: boolean; error?: string; patch?: Record<string, unknown>; savedAction?: string }> {
+  const { appstleSubscriptionAction, appstleSkipNextOrder, appstleUpdateBillingInterval, appstleAddFreeProduct } =
+    await import("@/lib/appstle");
+  const admin = createAdminClient();
+
+  switch (remedyType) {
+    case "coupon": {
+      const couponMappingId = config.coupon_mapping_id as string | undefined;
+      if (!couponMappingId) return { success: false, error: "No coupon configured for this remedy" };
+
+      const { data: mapping } = await admin.from("coupon_mappings")
+        .select("code").eq("id", couponMappingId).single();
+      if (!mapping?.code) return { success: false, error: "Coupon not found" };
+
+      const { data: wsData } = await admin.from("workspaces")
+        .select("appstle_api_key_encrypted").eq("id", workspaceId).single();
+      if (!wsData?.appstle_api_key_encrypted) return { success: false, error: "Appstle not configured" };
+
+      const { decrypt } = await import("@/lib/crypto");
+      const apiKey = decrypt(wsData.appstle_api_key_encrypted);
+
+      // Remove existing discounts first
+      try {
+        const rawRes = await fetch(
+          `https://subscription-admin.appstle.com/api/external/v2/contract-raw-response?contractId=${contractId}&api_key=${apiKey}`,
+          { headers: { "X-API-Key": apiKey } },
+        );
+        if (rawRes.ok) {
+          const rawText = await rawRes.text();
+          const nodesMatch = rawText.match(/"discounts"[\s\S]*?"nodes"\s*:\s*\[([\s\S]*?)\]/);
+          if (nodesMatch && nodesMatch[1].trim()) {
+            try {
+              const nodes = JSON.parse(`[${nodesMatch[1]}]`);
+              for (const node of nodes) {
+                if (node.id) {
+                  await fetch(
+                    `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}&discountId=${encodeURIComponent(node.id)}&api_key=${apiKey}`,
+                    { method: "PUT", headers: { "X-API-Key": apiKey } },
+                  );
+                }
+              }
+            } catch {}
+          }
+        }
+      } catch {}
+
+      // Apply new coupon
+      await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-apply-discount?contractId=${contractId}&discountCode=${mapping.code}&api_key=${apiKey}`,
+        { method: "PUT", headers: { "X-API-Key": apiKey } },
+      );
+
+      return { success: true, savedAction: `saved with coupon ${mapping.code}`, patch: {} };
+    }
+
+    case "pause": {
+      const pauseDays = Number(config.pause_days) || 30;
+      const result = await appstleSubscriptionAction(workspaceId, contractId, "pause");
+      if (!result.success) return { success: false, error: result.error };
+
+      const resumeAt = new Date(Date.now() + pauseDays * 86400000).toISOString();
+
+      // Update DB with resume date
+      await admin.from("subscriptions")
+        .update({ pause_resume_at: resumeAt, updated_at: new Date().toISOString() })
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_contract_id", contractId);
+
+      // Schedule auto-resume via Inngest
+      await inngest.send({
+        name: "portal/subscription-paused",
+        data: { workspaceId, contractId, pauseDays, resumeAt },
+      });
+
+      return {
+        success: true,
+        savedAction: `paused your subscription for ${pauseDays} days`,
+        patch: { status: "PAUSED", pauseResumeAt: resumeAt },
+      };
+    }
+
+    case "skip": {
+      const result = await appstleSkipNextOrder(workspaceId, contractId);
+      if (!result.success) return { success: false, error: result.error };
+      return { success: true, savedAction: "skipped your next order", patch: {} };
+    }
+
+    case "frequency_change": {
+      const freqMap: Record<string, { interval: "MONTH"; count: number }> = {
+        monthly: { interval: "MONTH", count: 1 },
+        bimonthly: { interval: "MONTH", count: 2 },
+        quarterly: { interval: "MONTH", count: 3 },
+      };
+      const freq = freqMap[config.frequency_interval as string] || { interval: "MONTH" as const, count: 2 };
+      const result = await appstleUpdateBillingInterval(workspaceId, contractId, freq.interval, freq.count);
+      if (!result.success) return { success: false, error: result.error };
+      const label = config.frequency_interval === "monthly" ? "monthly" : config.frequency_interval === "bimonthly" ? "every 2 months" : "every 3 months";
+      return { success: true, savedAction: `changed your delivery to ${label}`, patch: {} };
+    }
+
+    case "free_product": {
+      const variantId = config.product_variant_id as string;
+      if (!variantId) return { success: false, error: "No product configured for this remedy" };
+      const result = await appstleAddFreeProduct(workspaceId, contractId, variantId, 1);
+      if (!result.success) return { success: false, error: result.error };
+      const title = (config.product_title as string) || "a free product";
+      return { success: true, savedAction: `added ${title} free to your next order`, patch: {} };
+    }
+
+    case "line_item_modifier": {
+      // Line item modifier is handled by the multi-step frontend flow
+      // This just signals the frontend to open the inline flow
+      return { success: true, savedAction: "", patch: {} };
+    }
+
+    default:
+      return { success: false, error: `Unknown remedy type: ${remedyType}` };
+  }
 }
 
 export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => {
@@ -186,6 +316,7 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
     // Select top 3 remedies for this reason using AI
     let selectedRemedies: unknown[] = [];
     let reasonReviews: unknown[] = [];
+    let sessionId: string | null = null;
     try {
       const { data: custData } = await admin.from("customers")
         .select("ltv_cents, retention_score, total_orders")
@@ -220,6 +351,23 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
         description: r.pitch,
       }));
       if (result?.review) reasonReviews = [result.review];
+
+      // Record all shown remedies with a shared session_id
+      if (selectedRemedies.length > 0) {
+        sessionId = crypto.randomUUID();
+        const shownRows = (selectedRemedies as { id: string; type: string }[]).map((r) => ({
+          workspace_id: auth.workspaceId,
+          customer_id: customer.id,
+          remedy_id: r.id,
+          remedy_type: r.type,
+          cancel_reason: reason,
+          shown: true,
+          outcome: null,
+          session_id: sessionId,
+          accepted: false,
+        }));
+        await admin.from("remedy_outcomes").insert(shownRows);
+      }
     } catch {
       try {
         const { data: allRemedies } = await admin.from("remedies")
@@ -233,7 +381,7 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       } catch {}
     }
 
-    return jsonOk({ ok: true, step: "reason", reason, remedies: selectedRemedies, reviews: reasonReviews });
+    return jsonOk({ ok: true, step: "reason", reason, remedies: selectedRemedies, reviews: reasonReviews, sessionId });
   }
 
   if (step === "chat") {
@@ -284,33 +432,143 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
   if (step === "remedy") {
     const remedyId = String(payload?.remedyId || "");
     const accepted = !!payload?.accepted;
+    const sessionId = payload?.sessionId ? String(payload.sessionId) : null;
 
-    await admin.from("remedy_outcomes").insert({
-      workspace_id: auth.workspaceId,
-      customer_id: customer.id,
-      remedy_id: remedyId || null,
-      shopify_contract_id: contractId,
-      cancel_reason: String(payload?.reason || ""),
-      outcome: accepted ? "accepted" : "declined",
-      source: "portal",
-    });
+    if (accepted && remedyId) {
+      // Fetch remedy details for action execution
+      const { data: remedy } = await admin.from("remedies")
+        .select("type, config")
+        .eq("id", remedyId)
+        .single();
 
-    if (accepted) {
+      if (!remedy) {
+        return jsonErr({ error: "remedy_not_found" }, 404);
+      }
+
+      // For line_item_modifier, signal frontend to show multi-step flow
+      if (remedy.type === "line_item_modifier") {
+        // Update outcome tracking
+        if (sessionId) {
+          await admin.from("remedy_outcomes")
+            .update({ outcome: "accepted", accepted: true })
+            .eq("session_id", sessionId)
+            .eq("remedy_id", remedyId);
+          await admin.from("remedy_outcomes")
+            .update({ outcome: "passed_over" })
+            .eq("session_id", sessionId)
+            .neq("remedy_id", remedyId)
+            .is("outcome", null);
+        }
+
+        return jsonOk({ ok: true, step: "line_item_modify", remedyId, remedyType: "line_item_modifier" });
+      }
+
+      // Execute the remedy action
+      const actionResult = await executeRemedyAction(
+        auth.workspaceId, contractId, remedy.type, remedy.config as RemedyConfig,
+      );
+
+      if (!actionResult.success) {
+        return jsonErr({ error: "remedy_action_failed", message: actionResult.error }, 500);
+      }
+
+      // Update outcome tracking: accepted for this remedy, passed_over for others
+      if (sessionId) {
+        await admin.from("remedy_outcomes")
+          .update({ outcome: "accepted", accepted: true })
+          .eq("session_id", sessionId)
+          .eq("remedy_id", remedyId);
+        await admin.from("remedy_outcomes")
+          .update({ outcome: "passed_over" })
+          .eq("session_id", sessionId)
+          .neq("remedy_id", remedyId)
+          .is("outcome", null);
+      }
+
       await logPortalAction({
         workspaceId: auth.workspaceId, customerId: customer.id,
         eventType: "portal.subscription.saved",
-        summary: `Customer saved by remedy via portal`,
-        properties: { shopify_contract_id: contractId, remedyId },
+        summary: `Customer saved by ${remedy.type} remedy via portal`,
+        properties: { shopify_contract_id: contractId, remedyId, remedyType: remedy.type, savedAction: actionResult.savedAction },
         createNote: true,
+      });
+
+      return jsonOk({
+        ok: true, step: "remedy", accepted: true, remedyId,
+        patch: actionResult.patch,
+        savedAction: actionResult.savedAction,
       });
     }
 
-    return jsonOk({ ok: true, step: "remedy", accepted, remedyId });
+    // Declined — shouldn't normally happen (customer goes to confirm_cancel instead)
+    return jsonOk({ ok: true, step: "remedy", accepted: false, remedyId });
+  }
+
+  if (step === "line_item_action") {
+    const action = String(payload?.action || "");
+    const lineId = String(payload?.lineId || "");
+
+    if (!action) return jsonErr({ error: "missing_action" }, 400);
+
+    let result: { success: boolean; error?: string } = { success: false, error: "unknown action" };
+    let savedAction = "";
+
+    if (action === "swap_variant") {
+      const oldVariantId = String(payload?.oldVariantId || "");
+      const newVariantId = String(payload?.newVariantId || "");
+      if (!oldVariantId || !newVariantId) return jsonErr({ error: "missing_variant_ids" }, 400);
+
+      const { appstleSwapProduct } = await import("@/lib/appstle");
+      result = await appstleSwapProduct(auth.workspaceId, contractId, oldVariantId, newVariantId);
+      savedAction = "changed your product variant";
+    } else if (action === "change_quantity") {
+      const quantity = Number(payload?.quantity);
+      if (!lineId || !quantity || quantity < 1) return jsonErr({ error: "invalid_quantity" }, 400);
+
+      const { updateLineItem } = await import("@/lib/shopify-subscriptions");
+      result = await updateLineItem(auth.workspaceId, contractId, lineId, { quantity });
+      savedAction = `updated your quantity to ${quantity}`;
+    } else if (action === "remove") {
+      if (!lineId) return jsonErr({ error: "missing_lineId" }, 400);
+
+      const { removeLineItem } = await import("@/lib/shopify-subscriptions");
+      result = await removeLineItem(auth.workspaceId, contractId, lineId);
+      savedAction = "removed an item from your subscription";
+    } else if (action === "swap_product") {
+      const newVariantId = String(payload?.newVariantId || "");
+      const quantity = Number(payload?.quantity) || 1;
+      if (!lineId || !newVariantId) return jsonErr({ error: "missing_params" }, 400);
+
+      const { removeLineItem, addLineItem } = await import("@/lib/shopify-subscriptions");
+      const removeResult = await removeLineItem(auth.workspaceId, contractId, lineId);
+      if (!removeResult.success) {
+        return jsonErr({ error: "remove_failed", message: removeResult.error }, 500);
+      }
+      result = await addLineItem(auth.workspaceId, contractId, newVariantId, quantity);
+      savedAction = "swapped a product in your subscription";
+    } else {
+      return jsonErr({ error: "invalid_action" }, 400);
+    }
+
+    if (!result.success) {
+      return jsonErr({ error: "action_failed", message: result.error }, 500);
+    }
+
+    await logPortalAction({
+      workspaceId: auth.workspaceId, customerId: customer.id,
+      eventType: "portal.subscription.item_modified",
+      summary: `Customer ${savedAction} via cancel flow`,
+      properties: { shopify_contract_id: contractId, action },
+      createNote: true,
+    });
+
+    return jsonOk({ ok: true, step: "line_item_action", savedAction, patch: {} });
   }
 
   if (step === "confirm_cancel") {
     const reason = String(payload?.reason || "Customer cancelled via portal");
     const ticketId = payload?.ticketId ? String(payload.ticketId) : null;
+    const sessionId = payload?.sessionId ? String(payload.sessionId) : null;
 
     const { appstleSubscriptionAction } = await import("@/lib/appstle");
     const result = await appstleSubscriptionAction(
@@ -319,6 +577,14 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
 
     if (!result.success) {
       return jsonErr({ error: "cancel_failed", message: result.error }, 500);
+    }
+
+    // Mark all shown remedies in this session as rejected (customer cancelled anyway)
+    if (sessionId) {
+      await admin.from("remedy_outcomes")
+        .update({ outcome: "rejected" })
+        .eq("session_id", sessionId)
+        .is("outcome", null);
     }
 
     // Complete journey session

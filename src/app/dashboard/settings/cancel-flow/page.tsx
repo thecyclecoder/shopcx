@@ -32,6 +32,14 @@ interface CouponMapping {
   value: number;
 }
 
+interface Product {
+  id: string;
+  shopify_product_id: string;
+  title: string;
+  image_url: string | null;
+  variants: { id: string; shopify_variant_id: string; title: string }[];
+}
+
 const REMEDY_TYPES = [
   { value: "coupon", label: "Coupon / Discount" },
   { value: "pause", label: "Pause subscription" },
@@ -93,6 +101,8 @@ export default function CancelFlowSettingsPage() {
   const [saved, setSaved] = useState(false);
   const [editingRemedy, setEditingRemedy] = useState<Remedy | null>(null);
   const [editingReason, setEditingReason] = useState<CancelReason | null>(null);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [productSearch, setProductSearch] = useState("");
 
   const fetchData = useCallback(async () => {
     try {
@@ -107,7 +117,14 @@ export default function CancelFlowSettingsPage() {
     setLoading(false);
   }, [workspace.id]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  const fetchProducts = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/workspaces/${workspace.id}/products`);
+      if (res.ok) setProducts(await res.json());
+    } catch {}
+  }, [workspace.id]);
+
+  useEffect(() => { fetchData(); fetchProducts(); }, [fetchData, fetchProducts]);
 
   const saveReasons = async (updated: CancelReason[]) => {
     setSaving(true);
@@ -408,6 +425,69 @@ export default function CancelFlowSettingsPage() {
                       </option>
                     ))}
                   </select>
+                </div>
+              )}
+              {editingRemedy.type === "free_product" && (
+                <div>
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">Free product to add</label>
+                  <input
+                    type="text"
+                    placeholder="Search products..."
+                    value={productSearch}
+                    onChange={(e) => setProductSearch(e.target.value)}
+                    className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm mb-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                  />
+                  <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800">
+                    {products
+                      .filter(p => !productSearch || p.title.toLowerCase().includes(productSearch.toLowerCase()))
+                      .slice(0, 20)
+                      .map(p => {
+                        const firstVariant = p.variants?.[0];
+                        const isSelected = (editingRemedy.config as Record<string, unknown>)?.product_variant_id === (firstVariant?.shopify_variant_id || p.shopify_product_id);
+                        return (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onClick={() => setEditingRemedy({
+                              ...editingRemedy,
+                              config: {
+                                ...((editingRemedy.config || {}) as Record<string, unknown>),
+                                product_variant_id: firstVariant?.shopify_variant_id || p.shopify_product_id,
+                                product_title: p.title,
+                                product_image_url: p.image_url,
+                              },
+                            })}
+                            className={`flex w-full items-center gap-3 px-3 py-2 text-left text-sm hover:bg-zinc-50 dark:hover:bg-zinc-700 ${isSelected ? "bg-indigo-50 dark:bg-indigo-900/30" : ""}`}
+                          >
+                            {p.image_url ? (
+                              <img src={p.image_url} alt="" className="h-8 w-8 rounded object-cover" />
+                            ) : (
+                              <div className="h-8 w-8 rounded bg-zinc-200 dark:bg-zinc-600" />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <div className="font-medium text-zinc-900 dark:text-zinc-100 truncate">{p.title}</div>
+                              {firstVariant?.title && firstVariant.title !== "Default Title" && (
+                                <div className="text-xs text-zinc-400 truncate">{firstVariant.title}</div>
+                              )}
+                            </div>
+                            {isSelected && <span className="text-indigo-500 text-xs font-medium">Selected</span>}
+                          </button>
+                        );
+                      })}
+                    {products.filter(p => !productSearch || p.title.toLowerCase().includes(productSearch.toLowerCase())).length === 0 && (
+                      <div className="px-3 py-4 text-center text-xs text-zinc-400">No products found</div>
+                    )}
+                  </div>
+                  {String((editingRemedy.config as Record<string, unknown>)?.product_title || "") && (
+                    <div className="mt-2 flex items-center gap-2 rounded-md bg-indigo-50 px-3 py-2 text-sm dark:bg-indigo-900/30">
+                      {String((editingRemedy.config as Record<string, unknown>)?.product_image_url || "") && (
+                        <img src={String((editingRemedy.config as Record<string, unknown>).product_image_url)} alt="" className="h-6 w-6 rounded object-cover" />
+                      )}
+                      <span className="text-indigo-700 dark:text-indigo-300 font-medium">
+                        {String((editingRemedy.config as Record<string, unknown>).product_title)}
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
               {TYPE_CONFIG_FIELDS[editingRemedy.type]?.map(field => (

@@ -13,6 +13,7 @@ import ReviewsCard from '../cards/ReviewsCard.jsx';
 import AddSwapModal from '../modals/AddSwapModal.jsx';
 import RemoveModal from '../modals/RemoveModal.jsx';
 import QuantityModal from '../modals/QuantityModal.jsx';
+import { fireConfetti } from '../core/confetti.js';
 
 // ---- Inline cards ----
 
@@ -608,6 +609,32 @@ export default function SubscriptionDetail() {
   // Increment to force-close all disclosure panels after mutations
   const [disclosureKey, setDisclosureKey] = useState(0);
 
+  // Success banner state (set by cancel flow remedy acceptance)
+  const [savedBanner, setSavedBanner] = useState(null);
+  const [bannerHiding, setBannerHiding] = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('saved') === '1') {
+      const action = params.get('action') || 'updated your subscription';
+      setSavedBanner(action);
+      fireConfetti();
+      // Clean URL params
+      params.delete('saved');
+      params.delete('action');
+      const cleanUrl = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+      window.history.replaceState(null, '', cleanUrl);
+      // Auto-dismiss after 8 seconds
+      const timer = setTimeout(() => dismissBanner(), 8000);
+      return () => clearTimeout(timer);
+    }
+  }, []);
+
+  function dismissBanner() {
+    setBannerHiding(true);
+    setTimeout(() => { setSavedBanner(null); setBannerHiding(false); }, 300);
+  }
+
   const fetchContract = useCallback(async () => {
     let c = getCachedContractById(contractId);
     if (c) { setContract(normalizeContract(c)); setLoading(false); return; }
@@ -701,6 +728,16 @@ export default function SubscriptionDetail() {
           <Pill kind={statusKind}>{statusText}</Pill>
         </div>
       </div>
+
+      {savedBanner && (
+        <div class={'sp-success-banner' + (bannerHiding ? ' sp-success-banner--hiding' : '')}>
+          <div class="sp-success-banner__title">Congratulations!</div>
+          <div class="sp-success-banner__text">
+            You just {savedBanner} and you're still on track with your health goals!
+          </div>
+          <button type="button" class="sp-success-banner__close" onClick={dismissBanner}>{'\u2715'}</button>
+        </div>
+      )}
 
       {dunning && <DunningBanner dunning={dunning} />}
 

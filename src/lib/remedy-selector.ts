@@ -25,18 +25,13 @@ interface CustomerContext {
   first_renewal?: boolean;
 }
 
-// Reasons that go to structured remedy selection vs open-ended AI chat
-const CONCRETE_REASONS = [
-  "too_expensive",
-  "too_much_product",
-  "not_seeing_results",
-  "reached_goals",
-  "taste_texture",
-  "health_change",
-];
+// Minimum number of "shown" events before we trust historical acceptance rates
+const STATS_THRESHOLD = 200;
 
-export function isConcreteReason(reason: string): boolean {
-  return CONCRETE_REASONS.includes(reason);
+/** @deprecated Reason type is now driven by settings config, not hardcoded lists */
+export function isConcreteReason(_reason: string): boolean {
+  // All reasons go through settings config now — this exists for backward compat with journey routes
+  return true;
 }
 
 export async function selectRemedies(
@@ -58,18 +53,50 @@ export async function selectRemedies(
 
   if (!remedies?.length) return { remedies: [], review: null };
 
-  // Fetch historical success rates for this reason
-  const { data: outcomes } = await admin
+  // Fetch historical acceptance rates using shown/outcome tracking
+  // Strategy: use per-reason+remedy stats if >= STATS_THRESHOLD, else fall back to global remedy stats
+  const { data: reasonStats } = await admin
     .from("remedy_outcomes")
-    .select("remedy_type, accepted, outcome")
+    .select("remedy_id, outcome")
     .eq("workspace_id", workspaceId)
-    .eq("cancel_reason", cancelReason);
+    .eq("cancel_reason", cancelReason)
+    .eq("shown", true);
 
+  const { data: globalStats } = await admin
+    .from("remedy_outcomes")
+    .select("remedy_id, outcome")
+    .eq("workspace_id", workspaceId)
+    .eq("shown", true);
+
+  // Build per-reason stats: { remedy_id -> { shown, accepted } }
+  const reasonRates: Record<string, { shown: number; accepted: number }> = {};
+  for (const o of reasonStats || []) {
+    if (!o.remedy_id) continue;
+    if (!reasonRates[o.remedy_id]) reasonRates[o.remedy_id] = { shown: 0, accepted: 0 };
+    reasonRates[o.remedy_id].shown++;
+    if (o.outcome === "accepted") reasonRates[o.remedy_id].accepted++;
+  }
+
+  // Build global stats: { remedy_id -> { shown, accepted } }
+  const globalRates: Record<string, { shown: number; accepted: number }> = {};
+  for (const o of globalStats || []) {
+    if (!o.remedy_id) continue;
+    if (!globalRates[o.remedy_id]) globalRates[o.remedy_id] = { shown: 0, accepted: 0 };
+    globalRates[o.remedy_id].shown++;
+    if (o.outcome === "accepted") globalRates[o.remedy_id].accepted++;
+  }
+
+  // Compute acceptance rate per remedy: prefer granular, fall back to global, then "no data"
   const successRates: Record<string, { offered: number; saved: number }> = {};
-  for (const o of outcomes || []) {
-    if (!successRates[o.remedy_type]) successRates[o.remedy_type] = { offered: 0, saved: 0 };
-    successRates[o.remedy_type].offered++;
-    if (o.accepted && o.outcome === "saved") successRates[o.remedy_type].saved++;
+  for (const r of remedies) {
+    const perReason = reasonRates[r.id];
+    const global = globalRates[r.id];
+    if (perReason && perReason.shown >= STATS_THRESHOLD) {
+      successRates[r.type] = { offered: perReason.shown, saved: perReason.accepted };
+    } else if (global && global.shown >= STATS_THRESHOLD) {
+      successRates[r.type] = { offered: global.shown, saved: global.accepted };
+    }
+    // else: no data — AI uses its own judgment
   }
 
   // Fetch available coupons

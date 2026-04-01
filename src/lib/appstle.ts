@@ -304,6 +304,41 @@ export async function appstleSendPaymentUpdateEmail(
   }
 }
 
+export async function appstleAddFreeProduct(
+  workspaceId: string,
+  contractId: string,
+  variantId: string,
+  quantity: number = 1,
+): Promise<{ success: boolean; error?: string }> {
+  const creds = await getAppstleCredentials(workspaceId);
+  if (!creds) return { success: false, error: "Appstle not configured" };
+
+  try {
+    const params = new URLSearchParams({
+      contractId,
+      variantId,
+      quantity: String(quantity),
+      price: "0",
+      isOneTimeProduct: "true",
+    });
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contract-add-line-item?${params}`,
+      { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
+    );
+
+    if (!res.ok && res.status !== 204) {
+      const text = await res.text();
+      console.error(`Appstle add free product error for contract ${contractId}:`, text);
+      return { success: false, error: `Appstle API error: ${res.status}` };
+    }
+
+    return { success: true };
+  } catch (err) {
+    console.error("Appstle add free product failed:", err);
+    return { success: false, error: String(err) };
+  }
+}
+
 export async function appstleSwapProduct(
   workspaceId: string,
   contractId: string,
