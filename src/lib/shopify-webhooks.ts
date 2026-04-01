@@ -559,9 +559,10 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
           .order("created_at", { ascending: false })
           .limit(1);
 
-        if (recentOrders && recentOrders.length > 0) {
+        const newTotalCents = Math.round(parseFloat((payload.total_price as string) || "0") * 100);
+        if (recentOrders && recentOrders.length > 0 && recentOrders[0].total_cents === newTotalCents) {
           const prior = recentOrders[0];
-          // Don't create duplicate notifications for the same order
+          // Same subscription, same amount, within 7 days — likely a double charge
           const { data: existingNotifs } = await admin
             .from("dashboard_notifications")
             .select("id, metadata")
