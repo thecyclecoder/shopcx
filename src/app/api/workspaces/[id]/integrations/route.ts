@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at"
     )
     .eq("id", workspaceId)
     .single();
@@ -97,6 +97,10 @@ export async function GET(
       ? `...${decrypt(workspace.amplifier_api_key_encrypted).slice(-4)}`
       : null,
     amplifier_order_source_code: workspace.amplifier_order_source_code || null,
+    amplifier_tracking_sla_days: workspace.amplifier_tracking_sla_days ?? 1,
+    amplifier_cutoff_hour: workspace.amplifier_cutoff_hour ?? 11,
+    amplifier_cutoff_timezone: workspace.amplifier_cutoff_timezone || "America/Chicago",
+    amplifier_shipping_days: workspace.amplifier_shipping_days || [1, 2, 3, 4, 5],
 
     // Multipass
     shopify_multipass_hint: workspace.shopify_multipass_secret_encrypted
@@ -273,6 +277,22 @@ export async function PATCH(
 
     if ("amplifier_order_source_code" in body) {
       updates.amplifier_order_source_code = body.amplifier_order_source_code || null;
+    }
+
+    if ("amplifier_tracking_sla_days" in body) {
+      updates.amplifier_tracking_sla_days = parseInt(body.amplifier_tracking_sla_days) || 1;
+    }
+
+    if ("amplifier_cutoff_hour" in body) {
+      updates.amplifier_cutoff_hour = parseInt(body.amplifier_cutoff_hour) ?? 11;
+    }
+
+    if ("amplifier_cutoff_timezone" in body) {
+      updates.amplifier_cutoff_timezone = body.amplifier_cutoff_timezone || "America/Chicago";
+    }
+
+    if ("amplifier_shipping_days" in body) {
+      updates.amplifier_shipping_days = body.amplifier_shipping_days || [1, 2, 3, 4, 5];
     }
 
     // VIP threshold

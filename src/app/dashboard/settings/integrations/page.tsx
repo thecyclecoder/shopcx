@@ -80,6 +80,12 @@ export default function IntegrationsPage() {
   const [amplifierOrderSourceCode, setAmplifierOrderSourceCode] = useState("");
   const [amplifierConnected, setAmplifierConnected] = useState(false);
   const [amplifierApiKeyHint, setAmplifierApiKeyHint] = useState<string | null>(null);
+  const [amplifierWebhooksRegistered, setAmplifierWebhooksRegistered] = useState(false);
+  const [amplifierWebhooksLoading, setAmplifierWebhooksLoading] = useState(false);
+  const [amplifierSlaDays, setAmplifierSlaDays] = useState(1);
+  const [amplifierCutoffHour, setAmplifierCutoffHour] = useState(11);
+  const [amplifierCutoffTimezone, setAmplifierCutoffTimezone] = useState("America/Chicago");
+  const [amplifierShippingDays, setAmplifierShippingDays] = useState<number[]>([1, 2, 3, 4, 5]);
 
   // Slack
   const [slackConnected, setSlackConnected] = useState(false);
@@ -140,6 +146,16 @@ export default function IntegrationsPage() {
         setAmplifierConnected(data.amplifier_connected);
         setAmplifierApiKeyHint(data.amplifier_api_key_hint);
         setAmplifierOrderSourceCode(data.amplifier_order_source_code || "");
+        setAmplifierSlaDays(data.amplifier_tracking_sla_days ?? 1);
+        setAmplifierCutoffHour(data.amplifier_cutoff_hour ?? 11);
+        setAmplifierCutoffTimezone(data.amplifier_cutoff_timezone || "America/Chicago");
+        setAmplifierShippingDays(data.amplifier_shipping_days || [1, 2, 3, 4, 5]);
+        if (data.amplifier_connected) {
+          fetch(`/api/workspaces/${workspace.id}/integrations/amplifier/webhooks`)
+            .then(r => r.json())
+            .then(wh => setAmplifierWebhooksRegistered(!!wh.registered))
+            .catch(() => {});
+        }
         setSlackConnected(!!data.slack_connected);
         setSlackTeamName(data.slack_team_name || null);
         setSlackConnectedAt(data.slack_connected_at || null);
@@ -1305,7 +1321,7 @@ export default function IntegrationsPage() {
           )}
 
           {canEdit && amplifierConnected && (
-            <div className="mt-5 space-y-3">
+            <div className="mt-5 space-y-4">
               <div className="rounded-md bg-zinc-50 p-3 dark:bg-zinc-800">
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
@@ -1320,6 +1336,145 @@ export default function IntegrationsPage() {
                   )}
                 </div>
               </div>
+
+              {/* Webhooks */}
+              <div className="rounded-md border border-zinc-200 p-3 dark:border-zinc-700">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Webhooks</h4>
+                    <p className="text-xs text-zinc-500">Receive order.received and order.shipped events</p>
+                  </div>
+                  {amplifierWebhooksRegistered ? (
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Active</span>
+                  ) : (
+                    <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">Not registered</span>
+                  )}
+                </div>
+                <div className="mt-2">
+                  {amplifierWebhooksRegistered ? (
+                    <button
+                      type="button"
+                      disabled={amplifierWebhooksLoading}
+                      onClick={async () => {
+                        setAmplifierWebhooksLoading(true);
+                        const res = await fetch(`/api/workspaces/${workspace.id}/integrations/amplifier/webhooks`, { method: "DELETE" });
+                        if (res.ok) { setAmplifierWebhooksRegistered(false); setMessage("Amplifier webhooks removed"); }
+                        else setMessage("Failed to remove webhooks");
+                        setAmplifierWebhooksLoading(false);
+                      }}
+                      className="rounded-md border border-red-300 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                    >
+                      {amplifierWebhooksLoading ? "..." : "Remove Webhooks"}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={amplifierWebhooksLoading}
+                      onClick={async () => {
+                        setAmplifierWebhooksLoading(true);
+                        const res = await fetch(`/api/workspaces/${workspace.id}/integrations/amplifier/webhooks`, { method: "POST" });
+                        const data = await res.json();
+                        if (data.registered) { setAmplifierWebhooksRegistered(true); setMessage("Amplifier webhooks registered"); }
+                        else setMessage("Failed to register webhooks: " + (data.errors?.join(", ") || "unknown error"));
+                        setAmplifierWebhooksLoading(false);
+                      }}
+                      className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {amplifierWebhooksLoading ? "Registering..." : "Register Webhooks"}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* SLA Settings */}
+              <div className="rounded-md border border-zinc-200 p-3 dark:border-zinc-700">
+                <h4 className="mb-3 text-sm font-medium text-zinc-900 dark:text-zinc-100">Tracking SLA</h4>
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <label className="w-40 text-sm text-zinc-500">Expected tracking</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="14"
+                      value={amplifierSlaDays}
+                      onChange={e => setAmplifierSlaDays(parseInt(e.target.value) || 1)}
+                      className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    />
+                    <span className="text-sm text-zinc-500">business day(s)</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <label className="w-40 text-sm text-zinc-500">Receive cutoff</label>
+                    <select
+                      value={amplifierCutoffHour}
+                      onChange={e => setAmplifierCutoffHour(parseInt(e.target.value))}
+                      className="rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    >
+                      {Array.from({ length: 24 }, (_, i) => (
+                        <option key={i} value={i}>
+                          {i === 0 ? "12:00 AM" : i < 12 ? `${i}:00 AM` : i === 12 ? "12:00 PM" : `${i - 12}:00 PM`}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={amplifierCutoffTimezone}
+                      onChange={e => setAmplifierCutoffTimezone(e.target.value)}
+                      className="rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    >
+                      <option value="America/New_York">Eastern</option>
+                      <option value="America/Chicago">Central</option>
+                      <option value="America/Denver">Mountain</option>
+                      <option value="America/Los_Angeles">Pacific</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-sm text-zinc-500">Shipping days</label>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        { day: 1, label: "Mon" },
+                        { day: 2, label: "Tue" },
+                        { day: 3, label: "Wed" },
+                        { day: 4, label: "Thu" },
+                        { day: 5, label: "Fri" },
+                        { day: 6, label: "Sat" },
+                        { day: 7, label: "Sun" },
+                      ].map(({ day, label }) => (
+                        <button
+                          key={day}
+                          type="button"
+                          onClick={() => setAmplifierShippingDays(prev =>
+                            prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day].sort()
+                          )}
+                          className={`rounded-md border px-3 py-1 text-xs font-medium transition-colors ${
+                            amplifierShippingDays.includes(day)
+                              ? "border-indigo-500 bg-indigo-50 text-indigo-700 dark:border-indigo-500 dark:bg-indigo-950 dark:text-indigo-300"
+                              : "border-zinc-300 text-zinc-500 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={async () => {
+                      if (await patchIntegrations({
+                        amplifier_tracking_sla_days: amplifierSlaDays,
+                        amplifier_cutoff_hour: amplifierCutoffHour,
+                        amplifier_cutoff_timezone: amplifierCutoffTimezone,
+                        amplifier_shipping_days: amplifierShippingDays,
+                      })) {
+                        setMessage("SLA settings saved");
+                      }
+                    }}
+                    className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                  >
+                    {saving ? "Saving..." : "Save SLA Settings"}
+                  </button>
+                </div>
+              </div>
+
               <div className="flex gap-2">
                 <button
                   type="button"
