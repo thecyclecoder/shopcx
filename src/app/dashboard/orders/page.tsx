@@ -22,6 +22,8 @@ interface Order {
   amplifier_tracking_number: string | null;
   amplifier_carrier: string | null;
   amplifier_status: string | null;
+  delivery_status: string | null;
+  delivered_at: string | null;
   customers: { id: string; email: string; first_name: string | null; last_name: string | null } | null;
 }
 
@@ -31,13 +33,13 @@ interface Counts {
   late_tracking: number;
   awaiting_tracking: number;
   in_transit: number;
-  fulfilled: number;
+  delivered: number;
   refunded: number;
 }
 
 const PAGE_SIZE = 25;
 
-type FilterKey = "all" | "sync_error" | "suspicious" | "late_tracking" | "awaiting_tracking" | "in_transit" | "fulfilled" | "refunded";
+type FilterKey = "all" | "sync_error" | "suspicious" | "late_tracking" | "awaiting_tracking" | "in_transit" | "delivered" | "refunded";
 
 const FILTER_CARDS: { key: FilterKey; label: string; color: string; activeColor: string; countKey?: keyof Counts }[] = [
   { key: "sync_error", label: "Sync Errors", color: "border-red-200 dark:border-red-900", activeColor: "border-red-500 bg-red-50 dark:border-red-500 dark:bg-red-950", countKey: "sync_error" },
@@ -45,7 +47,7 @@ const FILTER_CARDS: { key: FilterKey; label: string; color: string; activeColor:
   { key: "late_tracking", label: "Late Tracking", color: "border-red-200 dark:border-red-900", activeColor: "border-red-500 bg-red-50 dark:border-red-500 dark:bg-red-950", countKey: "late_tracking" },
   { key: "awaiting_tracking", label: "Awaiting Tracking", color: "border-zinc-200 dark:border-zinc-700", activeColor: "border-zinc-500 bg-zinc-50 dark:border-zinc-500 dark:bg-zinc-800", countKey: "awaiting_tracking" },
   { key: "in_transit", label: "In Transit", color: "border-blue-200 dark:border-blue-900", activeColor: "border-blue-500 bg-blue-50 dark:border-blue-500 dark:bg-blue-950", countKey: "in_transit" },
-  { key: "fulfilled", label: "Fulfilled", color: "border-emerald-200 dark:border-emerald-900", activeColor: "border-emerald-500 bg-emerald-50 dark:border-emerald-500 dark:bg-emerald-950", countKey: "fulfilled" },
+  { key: "delivered", label: "Delivered", color: "border-emerald-200 dark:border-emerald-900", activeColor: "border-emerald-500 bg-emerald-50 dark:border-emerald-500 dark:bg-emerald-950", countKey: "delivered" },
   { key: "refunded", label: "Refunded", color: "border-orange-200 dark:border-orange-900", activeColor: "border-orange-500 bg-orange-50 dark:border-orange-500 dark:bg-orange-950", countKey: "refunded" },
 ];
 
@@ -55,7 +57,7 @@ const COUNT_COLORS: Record<string, string> = {
   late_tracking: "text-red-600 dark:text-red-400",
   awaiting_tracking: "text-zinc-600 dark:text-zinc-400",
   in_transit: "text-blue-600 dark:text-blue-400",
-  fulfilled: "text-emerald-600 dark:text-emerald-400",
+  delivered: "text-emerald-600 dark:text-emerald-400",
   refunded: "text-orange-600 dark:text-orange-400",
 };
 
@@ -65,7 +67,7 @@ const STATUS_BADGE: Record<string, string> = {
   awaiting_tracking: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
   late_tracking: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
   in_transit: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
-  fulfilled: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+  delivered: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
   refunded: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400",
 };
 
@@ -82,12 +84,13 @@ function formatDate(d: string | null): string {
 
 function getOrderStatus(order: Order): { label: string; key: string } {
   const tagStr = (order.tags as unknown as string) || "";
+  const isFulfilled = (order.fulfillment_status || "").toLowerCase() === "fulfilled";
+  const isDelivered = (order.delivery_status || "").toLowerCase() === "delivered";
 
-  // Fulfilled orders are always "Fulfilled" — they made it through
-  if ((order.fulfillment_status || "").toLowerCase() === "fulfilled") return { label: "Fulfilled", key: "fulfilled" };
+  if (isDelivered) return { label: "Delivered", key: "delivered" };
+  if (isFulfilled) return { label: "In Transit", key: "in_transit" };
 
   if (tagStr.includes("suspicious")) return { label: "Suspicious", key: "suspicious" };
-  if (order.amplifier_shipped_at) return { label: "In Transit", key: "in_transit" };
   if (order.amplifier_order_id) {
     return { label: order.amplifier_status || "Awaiting Tracking", key: "awaiting_tracking" };
   }
@@ -109,7 +112,7 @@ export default function OrdersPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [counts, setCounts] = useState<Counts>({ sync_error: 0, suspicious: 0, late_tracking: 0, awaiting_tracking: 0, in_transit: 0, fulfilled: 0, refunded: 0 });
+  const [counts, setCounts] = useState<Counts>({ sync_error: 0, suspicious: 0, late_tracking: 0, awaiting_tracking: 0, in_transit: 0, delivered: 0, refunded: 0 });
   const [shopifyDomain, setShopifyDomain] = useState("");
 
   const [filter, setFilter] = useState<FilterKey>("all");

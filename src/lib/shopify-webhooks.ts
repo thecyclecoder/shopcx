@@ -431,6 +431,23 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
   const isNewOrder = !existingOrder;
   const previousFinancialStatus = existingOrder?.financial_status || null;
 
+  // Extract delivery status from fulfillments
+  // shipment_status values: confirmed, in_transit, out_for_delivery, delivered, failure
+  const deliveryRank: Record<string, number> = { confirmed: 1, in_transit: 2, out_for_delivery: 3, delivered: 4 };
+  const rawFulfillments = (payload.fulfillments as Record<string, unknown>[]) || [];
+  let deliveryStatus: string | null = null;
+  let deliveredAt: string | null = null;
+
+  for (const f of rawFulfillments) {
+    const ss = (f.shipment_status as string || "").toLowerCase();
+    if (ss && (deliveryRank[ss] || 0) > (deliveryRank[deliveryStatus || ""] || 0)) {
+      deliveryStatus = ss;
+    }
+    if (ss === "delivered" && f.updated_at && !deliveredAt) {
+      deliveredAt = f.updated_at as string;
+    }
+  }
+
   // Upsert order
   const shippingAddr = payload.shipping_address as Record<string, unknown> | null;
   const { error: orderError } = await admin.from("orders").upsert(
@@ -448,19 +465,22 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
       line_items: lineItems,
       source_name: (payload.source_name as string) || null,
       tags: (payload.tags as string) || null,
-      fulfillments: ((payload.fulfillments as Record<string, unknown>[]) || []).map((f) => ({
+      fulfillments: rawFulfillments.map((f) => ({
         trackingInfo: ((f.tracking_numbers as string[]) || []).map((num, i) => ({
           number: num,
           url: (f.tracking_urls as string[])?.[i] || null,
           company: (f.tracking_company as string) || null,
         })),
         status: f.status || null,
+        shipmentStatus: f.shipment_status || null,
         createdAt: f.created_at || null,
       })),
       shipping_address: shippingAddr || null,
       normalized_shipping_address: normalizeShopifyShippingAddress(shippingAddr),
       discount_codes: ((payload.discount_codes as { code: string; amount: string; type: string }[]) || []).map((dc) => dc.code),
       created_at: (payload.created_at as string) || new Date().toISOString(),
+      delivery_status: deliveryStatus,
+      ...(deliveredAt ? { delivered_at: deliveredAt } : {}),
     },
     { onConflict: "workspace_id,shopify_order_id" }
   );

@@ -78,7 +78,7 @@ export async function GET(
       .eq("workspace_id", workspaceId).not("financial_status", "ilike", "pending");
 
     // Run all count queries in parallel — each matches its filter query exactly
-    const [syncRes, suspRes, transitRes, fulfilledRes, refundedRes, awaitLateRes] = await Promise.all([
+    const [syncRes, suspRes, transitRes, deliveredRes, refundedRes, awaitLateRes] = await Promise.all([
       // Sync errors
       base().is("amplifier_order_id", null)
         .is("sync_resolved_at", null)
@@ -90,11 +90,11 @@ export async function GET(
       // Suspicious
       base().ilike("tags", "%suspicious%")
         .not("fulfillment_status", "ilike", "fulfilled"),
-      // In transit
-      base().not("amplifier_shipped_at", "is", null)
-        .not("fulfillment_status", "ilike", "fulfilled"),
-      // Fulfilled
-      base().ilike("fulfillment_status", "fulfilled"),
+      // In transit: fulfilled but not delivered
+      base().ilike("fulfillment_status", "fulfilled")
+        .not("delivery_status", "ilike", "delivered"),
+      // Delivered
+      base().ilike("delivery_status", "delivered"),
       // Refunded
       base().or("financial_status.ilike.refunded,financial_status.ilike.partially_refunded"),
       // Awaiting + late tracking candidates (split by SLA in JS)
@@ -125,7 +125,7 @@ export async function GET(
         late_tracking: lateTracking,
         awaiting_tracking: awaitingTracking,
         in_transit: transitRes.count || 0,
-        fulfilled: fulfilledRes.count || 0,
+        delivered: deliveredRes.count || 0,
         refunded: refundedRes.count || 0,
       },
     });
@@ -139,6 +139,7 @@ export async function GET(
       fulfillment_status, line_items, created_at, tags, source_name,
       amplifier_order_id, amplifier_received_at, amplifier_shipped_at,
       amplifier_tracking_number, amplifier_carrier, amplifier_status,
+      delivery_status, delivered_at,
       customer_id, shopify_order_id,
       customers(id, email, first_name, last_name)
     `, { count: "exact" })
@@ -163,10 +164,10 @@ export async function GET(
       .not("fulfillment_status", "ilike", "fulfilled");
   } else if (filter === "in_transit") {
     query = query
-      .not("amplifier_shipped_at", "is", null)
-      .not("fulfillment_status", "ilike", "fulfilled");
-  } else if (filter === "fulfilled") {
-    query = query.ilike("fulfillment_status", "fulfilled");
+      .ilike("fulfillment_status", "fulfilled")
+      .not("delivery_status", "ilike", "delivered");
+  } else if (filter === "delivered") {
+    query = query.ilike("delivery_status", "delivered");
   } else if (filter === "refunded") {
     query = query.or("financial_status.ilike.refunded,financial_status.ilike.partially_refunded");
   }
