@@ -84,7 +84,7 @@ function getOrderStatus(order: Order): { label: string; key: string } {
   const tagStr = (order.tags as unknown as string) || "";
 
   // Fulfilled orders are always "Fulfilled" — they made it through
-  if (order.fulfillment_status === "fulfilled") return { label: "Fulfilled", key: "fulfilled" };
+  if ((order.fulfillment_status || "").toLowerCase() === "fulfilled") return { label: "Fulfilled", key: "fulfilled" };
 
   if (tagStr.includes("suspicious")) return { label: "Suspicious", key: "suspicious" };
   if (order.amplifier_shipped_at) return { label: "In Transit", key: "in_transit" };
