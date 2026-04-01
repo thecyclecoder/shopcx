@@ -739,8 +739,8 @@ function CancelJourney({
                 style={selectedRemedyAction === remedy.remedy_id ? { backgroundColor: primaryColor } : undefined}
               >
                 <span style={{ fontSize: "17px" }} className="font-semibold">{remedy.name}</span>
-                {remedy.description && (
-                  <span style={{ fontSize: "15px" }} className="mt-1 block text-zinc-500">{remedy.description}</span>
+                {remedy.pitch && (
+                  <span style={{ fontSize: "15px" }} className="mt-1 block text-zinc-500">{remedy.pitch}</span>
                 )}
               </button>
             ))}
