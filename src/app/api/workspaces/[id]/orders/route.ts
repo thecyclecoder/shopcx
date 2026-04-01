@@ -79,6 +79,7 @@ export async function GET(
       .from("orders")
       .select("id, fulfillment_status, financial_status, tags, amplifier_order_id, amplifier_received_at, amplifier_shipped_at, created_at")
       .eq("workspace_id", workspaceId)
+      .not("financial_status", "ilike", "pending")
       .order("created_at", { ascending: false })
       .limit(5000);
 
@@ -128,7 +129,8 @@ export async function GET(
       customer_id, shopify_order_id,
       customers(id, email, first_name, last_name)
     `, { count: "exact" })
-    .eq("workspace_id", workspaceId);
+    .eq("workspace_id", workspaceId)
+    .not("financial_status", "ilike", "pending");
 
   const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
 
