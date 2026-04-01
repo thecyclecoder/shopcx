@@ -87,9 +87,10 @@ export async function GET(
 
     for (const o of orders) {
       const tagStr = (o.tags as string) || "";
-      const isSuspicious = tagStr.includes("suspicious");
+      const isSuspicious = tagStr.toLowerCase().includes("suspicious");
       const isFulfilled = (o.fulfillment_status || "").toLowerCase() === "fulfilled";
-      const isRefunded = o.financial_status === "refunded" || o.financial_status === "partially_refunded";
+      const fin = (o.financial_status || "").toLowerCase();
+      const isRefunded = fin === "refunded" || fin === "partially_refunded";
 
       // Refunded is its own count (can overlap with fulfilled)
       if (isRefunded) refunded++;
@@ -136,11 +137,14 @@ export async function GET(
     query = query
       .is("amplifier_order_id", null)
       .not("fulfillment_status", "ilike", "fulfilled")
-      .not("financial_status", "in", '("refunded","partially_refunded")')
+      .not("financial_status", "ilike", "refunded")
+      .not("financial_status", "ilike", "partially_refunded")
       .lt("created_at", sixHoursAgo)
       .not("tags", "ilike", "%suspicious%");
   } else if (filter === "suspicious") {
-    query = query.ilike("tags", "%suspicious%");
+    query = query
+      .ilike("tags", "%suspicious%")
+      .not("fulfillment_status", "ilike", "fulfilled");
   } else if (filter === "in_transit") {
     query = query
       .not("amplifier_shipped_at", "is", null)
@@ -148,7 +152,7 @@ export async function GET(
   } else if (filter === "fulfilled") {
     query = query.ilike("fulfillment_status", "fulfilled");
   } else if (filter === "refunded") {
-    query = query.in("financial_status", ["refunded", "partially_refunded"]);
+    query = query.or("financial_status.ilike.refunded,financial_status.ilike.partially_refunded");
   }
 
   // Search
