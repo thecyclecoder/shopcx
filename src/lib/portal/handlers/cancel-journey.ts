@@ -424,6 +424,23 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       await logChatMessage(admin, ticketId, "in", "customer", message);
     }
 
+    // Load conversation history from ticket messages
+    const conversationHistory: { role: "user" | "assistant"; content: string }[] = [];
+    if (ticketId) {
+      const { data: messages } = await admin.from("ticket_messages")
+        .select("direction, author_type, body")
+        .eq("ticket_id", ticketId)
+        .order("created_at", { ascending: true });
+
+      for (const m of messages || []) {
+        if (m.author_type === "customer") {
+          conversationHistory.push({ role: "user", content: m.body || "" });
+        } else if (m.author_type === "ai") {
+          conversationHistory.push({ role: "assistant", content: m.body || "" });
+        }
+      }
+    }
+
     // Fetch real customer context for AI
     const { data: custData } = await admin.from("customers")
       .select("ltv_cents, retention_score, total_orders")
@@ -444,12 +461,12 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       first_renewal: false,
     };
 
-    // Get AI response
+    // Get AI response with full conversation history
     try {
       const { generateOpenEndedResponse } = await import("@/lib/remedy-selector");
       const reply = await generateOpenEndedResponse(
         auth.workspaceId, reason, message,
-        [], customerCtx, productIds,
+        conversationHistory, customerCtx, productIds,
       );
 
       // Log AI response
