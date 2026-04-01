@@ -153,7 +153,7 @@ function CancelHeader({ contractId, title, onBack }) {
       <button type="button" class="sp-btn sp-btn--ghost sp-cancel__back" onClick={onBack}>
         {'\u2190'} Back to subscription
       </button>
-      <div class="sp-cancel__title sp-title2">{title || 'Cancel subscription'}</div>
+      {title && <div class="sp-cancel__title sp-title2">{title}</div>}
     </div>
   );
 }
@@ -402,14 +402,14 @@ export default function Cancel() {
     if (busy && !remedies.length) {
       return (
         <div class="sp-cancel">
-          <CancelHeader onBack={goBack} title="We have options for you" />
+          <CancelHeader onBack={goBack} />
           <SkeletonCancelScreen />
         </div>
       );
     }
     return (
       <div class="sp-card sp-cancel">
-        <CancelHeader onBack={goBack} title="We have options for you" />
+        <CancelHeader onBack={goBack} />
         <AlertBar />
         {remedies.length > 0 && (
           <div class="sp-cancel__remedies-section">

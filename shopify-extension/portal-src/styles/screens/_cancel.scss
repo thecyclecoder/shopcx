@@ -216,9 +216,13 @@
 @media (max-width: 480px) {
   .sp-remedy-card {
     flex-direction: column;
-    align-items: stretch;
+    align-items: center;
     text-align: center;
     gap: 10px;
+  }
+
+  .sp-remedy-card__icon {
+    width: auto;
   }
 
   .sp-remedy-card__btn {
