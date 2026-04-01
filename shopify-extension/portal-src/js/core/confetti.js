@@ -5,7 +5,23 @@ const COLORS = ['#22c55e', '#14b8a6', '#10b981', '#f59e0b', '#06b6d4', '#8b5cf6'
 const PARTICLE_COUNT = 60;
 const DURATION = 3000;
 
+let styleInjected = false;
+function ensureKeyframes() {
+  if (styleInjected) return;
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes sp-confetti-fall {
+      0% { transform: translateY(0) translateX(0) rotate(0deg); opacity: 1; }
+      75% { opacity: 1; }
+      100% { transform: translateY(100vh) translateX(var(--sp-drift,0px)) rotate(var(--sp-rot,360deg)); opacity: 0; }
+    }
+  `;
+  document.head.appendChild(style);
+  styleInjected = true;
+}
+
 export function fireConfetti() {
+  ensureKeyframes();
   const container = document.createElement('div');
   container.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2147483646;overflow:hidden;';
   document.body.appendChild(container);
