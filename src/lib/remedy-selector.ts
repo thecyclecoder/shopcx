@@ -289,16 +289,16 @@ export async function generateOpenEndedResponse(
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return "I'm sorry, I'm having trouble right now. Let me connect you with a team member who can help.";
 
-  const reasonLabels: Record<string, string> = {
-    just_pausing: "Just needs a break",
-    something_else: "Something else",
-    reached_goals: "Already reached goals",
-  };
+  // Fetch product titles for context
+  const { data: productRecords } = products.length
+    ? await admin.from("products").select("title").eq("workspace_id", workspaceId).in("shopify_product_id", products)
+    : { data: [] };
+  const productNames = (productRecords || []).map(p => p.title).join(", ");
 
   const systemPrompt = `You are a friendly subscription specialist for ${ws?.name || "our company"}. A customer wants to cancel their subscription.
 
-Their reason: "${reasonLabels[cancelReason] || cancelReason}"
-Their products: ${products.join(", ")}
+Their cancel reason: "${cancelReason}"
+Their products: ${productNames || "subscription products"}
 They've been subscribed for ${customer.subscription_age_days} days with ${customer.total_orders} orders totaling $${(customer.ltv_cents / 100).toFixed(0)}.
 
 Available remedies you can offer:
@@ -308,7 +308,12 @@ Relevant reviews: ${reviews.slice(0, 2).map(r => r.summary).join("; ")}
 
 Be empathetic and genuine. Don't be pushy. Understand their real concern first, then naturally suggest a remedy that fits. Keep responses under 3 sentences. Reference their specific products when relevant.
 
+If the reason is shipping-related, ask what happened with their delivery. Offer to help track or replace a package.
+
 If they're firm on cancelling after 2-3 exchanges, accept gracefully: "I completely understand. Let me go ahead and cancel that for you."`;
+
+  // On initial call (no customer message yet), use the cancel reason as the first message
+  const userMessage = customerMessage || `I want to cancel because: ${cancelReason}`;
 
   const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -323,7 +328,7 @@ If they're firm on cancelling after 2-3 exchanges, accept gracefully: "I complet
       system: systemPrompt,
       messages: [
         ...conversationHistory,
-        { role: "user", content: customerMessage },
+        { role: "user", content: userMessage },
       ],
     }),
   });

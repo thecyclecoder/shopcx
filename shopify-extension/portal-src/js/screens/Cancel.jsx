@@ -16,12 +16,12 @@ import { fireConfetti } from '../core/confetti.js';
 const OPEN_ENDED_FALLBACK = ['just_need_a_break', 'something_else', 'reached_goals'];
 
 const DEFAULT_REASONS = [
-  { id: 'too_expensive', label: "It\u2019s too expensive" },
+  { id: 'too_expensive', label: "It's too expensive" },
   { id: 'too_much_product', label: 'I have too much product' },
-  { id: 'not_seeing_results', label: "I\u2019m not seeing results" },
+  { id: 'not_seeing_results', label: "I'm not seeing results" },
   { id: 'reached_goals', label: 'I already reached my goals' },
   { id: 'just_need_a_break', label: 'I just need a break' },
-  { id: 'tired_of_flavor', label: "I\u2019m tired of the flavors" },
+  { id: 'tired_of_flavor', label: "I'm tired of the flavors" },
   { id: 'shipping_issues', label: 'Shipping or delivery issues' },
   { id: 'something_else', label: 'Something else' },
 ];
@@ -126,7 +126,7 @@ function ChatInterface({ messages, turn, maxTurns, loading, onSend, onCancel, on
       </div>
       {!ended && !loading && (
         <div class="sp-chat__input-row">
-          <input ref={inputRef} type="text" class="sp-chat__input" placeholder="Type your message\u2026"
+          <input ref={inputRef} type="text" class="sp-chat__input" placeholder="Type your message…"
             value={text} onInput={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSend(); } }} />
           <button type="button" class="sp-btn sp-btn-primary sp-chat__send" onClick={handleSend}>Send</button>
@@ -494,18 +494,19 @@ export default function Cancel() {
       setChatLoading(true);
 
       try {
-        const resp = await postJson('cancelJourney', { step: 'reason', reason: reasonId, reasonType: 'ai_conversation' }, { contractId });
+        const reasonLabel = reasonConfig?.label || reasonId;
+        const resp = await postJson('cancelJourney', { step: 'reason', reason: reasonId, reasonType: 'ai_conversation', reasonLabel }, { contractId });
         if (resp?.reply) {
           setChatMessages([{ role: 'ai', text: resp.reply }]);
           setChatTurn(resp.turn || 1);
           if (resp.maxTurns) setChatMaxTurns(resp.maxTurns);
         } else {
-          setChatMessages([{ role: 'ai', text: "I understand. Can you tell me more about what\u2019s going on?" }]);
+          setChatMessages([{ role: 'ai', text: "I understand. Can you tell me more about what's going on?" }]);
           setChatTurn(1);
         }
         if (resp?.ticketId) setChatTicketId(resp.ticketId);
       } catch {
-        setChatMessages([{ role: 'ai', text: "I\u2019d love to help. Can you tell me more?" }]);
+        setChatMessages([{ role: 'ai', text: "I'd love to help. Can you tell me more?" }]);
         setChatTurn(1);
       }
       setChatLoading(false);
@@ -581,7 +582,7 @@ export default function Cancel() {
       clearCaches();
       router.navigate(detailUrl);
     } catch {
-      showToast("Sorry \u2014 we couldn\u2019t cancel your subscription. Please try again.", 'error');
+      showToast("Sorry — we couldn't cancel your subscription. Please try again.", 'error');
       setBusy(false);
     }
   }
@@ -710,7 +711,7 @@ export default function Cancel() {
   if (phase === 'chat') {
     return (
       <div class="sp-card sp-cancel">
-        <CancelHeader onBack={goBack} title="Let\u2019s talk about it" />
+        <CancelHeader onBack={goBack} title="Let's talk about it" />
         <AlertBar />
         <ChatInterface
           messages={chatMessages} turn={chatTurn} maxTurns={chatMaxTurns}

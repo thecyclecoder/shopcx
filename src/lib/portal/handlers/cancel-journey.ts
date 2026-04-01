@@ -289,12 +289,35 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
     if (reasonType === "ai_conversation") {
       const ticketId = await createChatTicket(admin, auth.workspaceId, customer.id, contractId, reason);
 
+      // Fetch real customer context for AI
+      const { data: custData } = await admin.from("customers")
+        .select("ltv_cents, retention_score, total_orders")
+        .eq("id", customer.id).single();
+      const { data: subData } = await admin.from("subscriptions")
+        .select("items, created_at, billing_interval, billing_interval_count")
+        .eq("workspace_id", auth.workspaceId)
+        .eq("shopify_contract_id", contractId).single();
+      const subAgeDays = subData?.created_at ? Math.floor((Date.now() - new Date(subData.created_at).getTime()) / 86400000) : 0;
+      const productIds = ((subData?.items as { product_id?: string }[]) || []).map(i => i.product_id).filter(Boolean) as string[];
+
+      const customerCtx = {
+        ltv_cents: custData?.ltv_cents || 0,
+        retention_score: custData?.retention_score || 0,
+        subscription_age_days: subAgeDays,
+        total_orders: custData?.total_orders || 0,
+        products: productIds,
+        first_renewal: false,
+      };
+
+      // Get the human-readable reason label from config
+      const reasonLabel = String(payload?.reasonLabel || reason);
+
       // Get initial AI response
       try {
         const { generateOpenEndedResponse } = await import("@/lib/remedy-selector");
         const reply = await generateOpenEndedResponse(
-          auth.workspaceId, reason, "",
-          [], { ltv_cents: 0, retention_score: 0, subscription_age_days: 0, total_orders: 0, products: [], first_renewal: false }, [],
+          auth.workspaceId, reason, reasonLabel,
+          [], customerCtx, productIds,
         );
 
         if (ticketId && reply) {
@@ -305,7 +328,8 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
           ok: true, step: "reason", reason, type: "ai_chat",
           reply, turn: 1, maxTurns: 3, ticketId,
         });
-      } catch {
+      } catch (err) {
+        console.error("AI chat initial response failed:", err);
         return jsonOk({
           ok: true, step: "reason", reason, type: "ai_chat",
           reply: null, turn: 1, maxTurns: 3, ticketId,
@@ -400,12 +424,32 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       await logChatMessage(admin, ticketId, "in", "customer", message);
     }
 
+    // Fetch real customer context for AI
+    const { data: custData } = await admin.from("customers")
+      .select("ltv_cents, retention_score, total_orders")
+      .eq("id", customer.id).single();
+    const { data: subData } = await admin.from("subscriptions")
+      .select("items, created_at")
+      .eq("workspace_id", auth.workspaceId)
+      .eq("shopify_contract_id", contractId).single();
+    const subAgeDays = subData?.created_at ? Math.floor((Date.now() - new Date(subData.created_at).getTime()) / 86400000) : 0;
+    const productIds = ((subData?.items as { product_id?: string }[]) || []).map(i => i.product_id).filter(Boolean) as string[];
+
+    const customerCtx = {
+      ltv_cents: custData?.ltv_cents || 0,
+      retention_score: custData?.retention_score || 0,
+      subscription_age_days: subAgeDays,
+      total_orders: custData?.total_orders || 0,
+      products: productIds,
+      first_renewal: false,
+    };
+
     // Get AI response
     try {
       const { generateOpenEndedResponse } = await import("@/lib/remedy-selector");
       const reply = await generateOpenEndedResponse(
         auth.workspaceId, reason, message,
-        [], { ltv_cents: 0, retention_score: 0, subscription_age_days: 0, total_orders: 0, products: [], first_renewal: false }, [],
+        [], customerCtx, productIds,
       );
 
       // Log AI response
