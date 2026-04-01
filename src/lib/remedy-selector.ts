@@ -343,7 +343,30 @@ If they're firm on cancelling after 2-3 exchanges, accept gracefully: "I complet
 
   if (!aiRes.ok) {
     const errText = await aiRes.text().catch(() => "");
-    console.error(`Anthropic API error in generateOpenEndedResponse: ${aiRes.status}`, errText);
+    console.error(`Anthropic API error in generateOpenEndedResponse (Sonnet): ${aiRes.status}`, errText);
+
+    // Retry with Haiku as fallback
+    try {
+      const retryRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 200,
+          system: systemPrompt,
+          messages: [...conversationHistory, { role: "user", content: userMessage }],
+        }),
+      });
+      if (retryRes.ok) {
+        const retryData = await retryRes.json();
+        const text = (retryData.content?.[0] as { type: string; text: string })?.text?.trim();
+        if (text) return text;
+      } else {
+        const retryErr = await retryRes.text().catch(() => "");
+        console.error(`Anthropic API error in generateOpenEndedResponse (Haiku fallback): ${retryRes.status}`, retryErr);
+      }
+    } catch {}
+
     return "I'm sorry, I'm having trouble right now. I've escalated this to our team, and they will be in touch with you soon.";
   }
   const aiData = await aiRes.json();
