@@ -74,47 +74,59 @@ export async function GET(
 
   if (countsMode) {
     const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    const base = () => admin.from("orders").select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId).not("financial_status", "ilike", "pending");
 
-    const { data: allOrders } = await admin
-      .from("orders")
-      .select("id, fulfillment_status, financial_status, tags, amplifier_order_id, amplifier_received_at, amplifier_shipped_at, created_at")
-      .eq("workspace_id", workspaceId)
-      .not("financial_status", "ilike", "pending")
-      .order("created_at", { ascending: false })
-      .limit(5000);
+    // Run all count queries in parallel — each matches its filter query exactly
+    const [syncRes, suspRes, transitRes, fulfilledRes, refundedRes, awaitLateRes] = await Promise.all([
+      // Sync errors
+      base().is("amplifier_order_id", null)
+        .not("fulfillment_status", "ilike", "fulfilled")
+        .not("financial_status", "ilike", "refunded")
+        .not("financial_status", "ilike", "partially_refunded")
+        .lt("created_at", sixHoursAgo)
+        .not("tags", "ilike", "%suspicious%"),
+      // Suspicious
+      base().ilike("tags", "%suspicious%")
+        .not("fulfillment_status", "ilike", "fulfilled"),
+      // In transit
+      base().not("amplifier_shipped_at", "is", null)
+        .not("fulfillment_status", "ilike", "fulfilled"),
+      // Fulfilled
+      base().ilike("fulfillment_status", "fulfilled"),
+      // Refunded
+      base().or("financial_status.ilike.refunded,financial_status.ilike.partially_refunded"),
+      // Awaiting + late tracking candidates (split by SLA in JS)
+      admin.from("orders")
+        .select("amplifier_received_at")
+        .eq("workspace_id", workspaceId)
+        .not("financial_status", "ilike", "pending")
+        .not("amplifier_order_id", "is", null)
+        .not("amplifier_received_at", "is", null)
+        .is("amplifier_shipped_at", null)
+        .not("fulfillment_status", "ilike", "fulfilled"),
+    ]);
 
-    const orders = allOrders || [];
-    let syncErrors = 0, suspicious = 0, lateTracking = 0, awaitingTracking = 0, inTransit = 0, fulfilled = 0, refunded = 0;
-
-    for (const o of orders) {
-      const tagStr = (o.tags as string) || "";
-      const isSuspicious = tagStr.toLowerCase().includes("suspicious");
-      const isFulfilled = (o.fulfillment_status || "").toLowerCase() === "fulfilled";
-      const fin = (o.financial_status || "").toLowerCase();
-      const isRefunded = fin === "refunded" || fin === "partially_refunded";
-
-      // Refunded is its own count (can overlap with fulfilled)
-      if (isRefunded) refunded++;
-
-      // Primary category — fulfilled orders go to fulfilled, nothing else
-      if (isFulfilled) { fulfilled++; continue; }
-      if (isSuspicious) { suspicious++; continue; }
-
-      if (o.amplifier_shipped_at) {
-        inTransit++;
-      } else if (o.amplifier_order_id && o.amplifier_received_at) {
-        if (isWithinSLA(o.amplifier_received_at, slaDays, cutoffHour, cutoffTimezone, shippingDays)) {
-          awaitingTracking++;
-        } else {
-          lateTracking++;
-        }
-      } else if (!o.amplifier_order_id && !isRefunded && o.created_at < sixHoursAgo) {
-        syncErrors++;
+    // Split awaiting vs late by SLA calculation
+    let awaitingTracking = 0, lateTracking = 0;
+    for (const o of awaitLateRes.data || []) {
+      if (isWithinSLA(o.amplifier_received_at, slaDays, cutoffHour, cutoffTimezone, shippingDays)) {
+        awaitingTracking++;
+      } else {
+        lateTracking++;
       }
     }
 
     return NextResponse.json({
-      counts: { sync_error: syncErrors, suspicious, late_tracking: lateTracking, awaiting_tracking: awaitingTracking, in_transit: inTransit, fulfilled, refunded },
+      counts: {
+        sync_error: syncRes.count || 0,
+        suspicious: suspRes.count || 0,
+        late_tracking: lateTracking,
+        awaiting_tracking: awaitingTracking,
+        in_transit: transitRes.count || 0,
+        fulfilled: fulfilledRes.count || 0,
+        refunded: refundedRes.count || 0,
+      },
     });
   }
 
