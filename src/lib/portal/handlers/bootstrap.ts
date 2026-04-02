@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk } from "@/lib/portal/helpers";
+import { jsonOk, logPortalAction } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const bootstrap: RouteHandler = async ({ auth, route }) => {
@@ -25,6 +25,14 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
       customerLastName = customer.last_name || "";
       customerEmail = customer.email || "";
       portalBanned = !!customer.portal_banned;
+
+      // Log portal session
+      logPortalAction({
+        workspaceId: auth.workspaceId,
+        customerId: customer.id,
+        eventType: "portal.bootstrap",
+        summary: "Portal session started",
+      }).catch(() => {}); // fire and forget
 
       // Active dunning cycles
       const { count } = await admin
