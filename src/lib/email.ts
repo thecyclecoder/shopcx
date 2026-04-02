@@ -2,7 +2,41 @@ import { Resend } from "resend";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 
-export async function getResendClient(workspaceId: string): Promise<{ resend: Resend; domain: string; supportEmail: string | null } | null> {
+/**
+ * Sandbox gate — in sandbox mode, only allow emails to workspace members.
+ * Returns true if the email should be BLOCKED (not sent).
+ * Invite emails are always allowed (they go to new members being invited).
+ */
+async function sandboxBlock(workspaceId: string, toEmail: string, isInvite = false): Promise<boolean> {
+  if (isInvite) return false; // Invites always go through
+  const admin = createAdminClient();
+  const { data: ws } = await admin.from("workspaces").select("sandbox_mode").eq("id", workspaceId).single();
+  if (!ws?.sandbox_mode) return false; // Sandbox off — allow all
+
+  // Sandbox on — only allow emails to workspace member emails
+  const { data: members } = await admin
+    .from("workspace_members")
+    .select("users(email)")
+    .eq("workspace_id", workspaceId);
+  const memberEmails = new Set(
+    (members || []).map((m) => ((m.users as { email?: string })?.email || "").toLowerCase()).filter(Boolean)
+  );
+  const blocked = !memberEmails.has(toEmail.toLowerCase());
+  if (blocked) {
+    console.log(`[Sandbox] Blocked email to ${toEmail} — not a workspace member`);
+  }
+  return blocked;
+}
+
+export async function getResendClient(
+  workspaceId: string,
+  /** If provided, sandbox mode will block emails to non-workspace-member addresses */
+  recipientEmail?: string,
+): Promise<{ resend: Resend; domain: string; supportEmail: string | null } | null> {
+  if (recipientEmail && await sandboxBlock(workspaceId, recipientEmail)) {
+    return null; // Blocked by sandbox
+  }
+
   const admin = createAdminClient();
   const { data: workspace } = await admin
     .from("workspaces")
@@ -35,7 +69,7 @@ export async function sendInviteEmail({
   role: string;
   invitedByName: string;
 }) {
-  const client = await getResendClient(workspaceId);
+  const client = await getResendClient(workspaceId); // invites always allowed, no sandbox gate
   if (!client) return { error: "Resend not configured" };
 
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
@@ -81,7 +115,7 @@ export async function sendTicketReply({
   agentName: string;
   workspaceName: string;
 }): Promise<{ messageId?: string; error?: string }> {
-  const client = await getResendClient(workspaceId);
+  const client = await getResendClient(workspaceId, toEmail);
   if (!client) return { error: "Resend not configured" };
 
   const headers: Record<string, string> = {};
@@ -122,7 +156,7 @@ export async function sendCsatEmail({
   csatUrl: string;
   workspaceName: string;
 }): Promise<{ error?: string }> {
-  const client = await getResendClient(workspaceId);
+  const client = await getResendClient(workspaceId, toEmail);
   if (!client) return { error: "Resend not configured" };
 
   const { error } = await client.resend.emails.send({
@@ -175,7 +209,7 @@ export async function sendJourneyCTA({
   buttonLabel?: string;
   inReplyTo?: string | null;
 }): Promise<{ error?: string }> {
-  const client = await getResendClient(workspaceId);
+  const client = await getResendClient(workspaceId, toEmail);
   if (!client) return { error: "Resend not configured" };
 
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
@@ -234,7 +268,7 @@ export async function sendDunningPaymentUpdateEmail({
   workspaceName: string;
   updateUrl: string;
 }): Promise<{ error?: string }> {
-  const client = await getResendClient(workspaceId);
+  const client = await getResendClient(workspaceId, toEmail);
   if (!client) return { error: "Resend not configured" };
 
   const greeting = customerName ? `Hi ${customerName},` : "Hi there,";
@@ -276,7 +310,7 @@ export async function sendDunningRecoveryEmail({
   customerName: string | null;
   workspaceName: string;
 }): Promise<{ error?: string }> {
-  const client = await getResendClient(workspaceId);
+  const client = await getResendClient(workspaceId, toEmail);
   if (!client) return { error: "Resend not configured" };
 
   const greeting = customerName ? `Hi ${customerName},` : "Hi there,";
@@ -315,7 +349,7 @@ export async function sendDunningPausedEmail({
   workspaceName: string;
   updateUrl: string;
 }): Promise<{ error?: string }> {
-  const client = await getResendClient(workspaceId);
+  const client = await getResendClient(workspaceId, toEmail);
   if (!client) return { error: "Resend not configured" };
 
   const greeting = customerName ? `Hi ${customerName},` : "Hi there,";
