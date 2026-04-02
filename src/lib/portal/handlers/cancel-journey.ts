@@ -32,16 +32,18 @@ async function logChatMessage(
   admin: ReturnType<typeof createAdminClient>,
   ticketId: string,
   direction: "in" | "out",
-  authorType: "customer" | "ai",
+  authorType: "customer" | "ai" | "system",
   body: string,
+  visibility: "external" | "internal" = "external",
 ) {
-  await admin.from("ticket_messages").insert({
+  const { error } = await admin.from("ticket_messages").insert({
     ticket_id: ticketId,
     direction,
-    visibility: "external",
+    visibility,
     author_type: authorType,
     body,
   });
+  if (error) console.error("Failed to log chat message:", error.message, { ticketId, authorType });
 }
 
 // ── Remedy action execution ──
@@ -422,17 +424,19 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       if (ticketId) {
         // 1: System message — cancel flow started
         const customerEmail = customer.email || "";
-        await admin.from("ticket_messages").insert({
-          ticket_id: ticketId,
-          direction: "out",
-          visibility: "internal",
-          author_type: "system",
-          body: `${customerEmail} started cancel flow for contract #${contractId} with cancel reason "${reasonLabel}"`,
-        });
+        await logChatMessage(admin, ticketId, "out", "system",
+          `${customerEmail} started cancel flow for contract #${contractId} with cancel reason "${reasonLabel}"`,
+          "internal",
+        );
 
         // 2: Backfill initial AI message
         if (initialAiReply) {
           await logChatMessage(admin, ticketId, "out", "ai", initialAiReply);
+        }
+
+        // 3: Log customer message right away (before AI response)
+        if (message) {
+          await logChatMessage(admin, ticketId, "in", "customer", message);
         }
       }
     } else {
@@ -442,8 +446,8 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
         .eq("id", ticketId);
     }
 
-    // 3: Log customer message
-    if (ticketId && message) {
+    // Log customer message (only for subsequent replies — first reply is backfilled above)
+    if (ticketId && message && payload?.ticketId) {
       await logChatMessage(admin, ticketId, "in", "customer", message);
     }
 
