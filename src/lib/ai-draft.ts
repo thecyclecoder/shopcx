@@ -432,12 +432,13 @@ async function checkProactiveAccountLinking(
       inReplyTo: ticket?.email_message_id || null,
     });
 
+    // Internal note — the journey CTA email IS the customer-facing response (no separate AI message)
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId,
       direction: "outbound",
       visibility: "internal",
-      author_type: "ai",
-      body: `[AI Draft — Account Linking]\n\nI got your message and I want to help. Before I can look into this, I noticed we might have a few accounts under your name. I've sent you a quick link to confirm which emails are yours so I can see your full history.`,
+      author_type: "system",
+      body: `[System] Account linking journey CTA sent to ${customer.email}. The email includes an empathetic intro + link to confirm accounts.`,
     });
   }
 
