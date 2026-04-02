@@ -1018,7 +1018,7 @@ function CodeDrivenJourney({
     setSubmitting(false);
     setTimeout(() => {
       onComplete(isMultiStep
-        ? "You're all set! Check your email for your coupon code."
+        ? "You're all set! Check your email for next steps."
         : "Thanks! We'll send you an email shortly with the next step.");
     }, 1000);
   };
