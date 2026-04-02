@@ -2035,11 +2035,13 @@ export default function TicketDetailPage() {
                                   body: JSON.stringify({ link_to: s.id }),
                                 });
                                 if (res.ok) {
-                                  setCustomer((prev) => prev ? {
-                                    ...prev,
-                                    linked_identities: [...(prev.linked_identities || []), { id: s.id, email: s.email, first_name: s.first_name, last_name: s.last_name, is_primary: false }],
-                                  } : prev);
                                   setLinkSuggestions((prev) => prev.filter((x) => x.id !== s.id));
+                                  // Re-fetch ticket to get updated customer data with linked orders/subscriptions
+                                  const refreshRes = await fetch(`/api/tickets/${ticket.id}`);
+                                  if (refreshRes.ok) {
+                                    const refreshData = await refreshRes.json();
+                                    setCustomer(refreshData.customer);
+                                  }
                                 }
                               }}
                               className="ml-2 flex-shrink-0 rounded border border-indigo-300 px-1.5 py-0.5 text-xs font-medium text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
