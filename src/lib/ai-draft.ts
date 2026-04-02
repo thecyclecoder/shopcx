@@ -392,8 +392,21 @@ async function checkProactiveAccountLinking(
     standaloneAccountLinking: true,
   };
 
-  await admin.from("journey_sessions").insert({
+  // Look up account_linking journey definition
+  const { data: linkingDef } = await admin.from("journey_definitions")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("trigger_intent", "account_linking")
+    .single();
+
+  if (!linkingDef) {
+    console.error("No account_linking journey definition found for workspace", workspaceId);
+    return null; // Can't launch journey without a definition
+  }
+
+  const { error: sessionError } = await admin.from("journey_sessions").insert({
     workspace_id: workspaceId,
+    journey_id: linkingDef.id,
     customer_id: customer.id,
     ticket_id: ticketId,
     token,
@@ -407,6 +420,11 @@ async function checkProactiveAccountLinking(
       needsLinking: true,
     },
   });
+
+  if (sessionError) {
+    console.error("Failed to create account linking journey session:", sessionError.message);
+    return null;
+  }
 
   // Send CTA email with personalized intro
   const { data: ws } = await admin.from("workspaces")
