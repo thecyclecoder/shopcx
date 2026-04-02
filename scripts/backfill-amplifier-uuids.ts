@@ -46,10 +46,14 @@ interface AmplifierOrder {
   }[];
 }
 
-async function fetchAllAmplifierOrders(authHeader: string): Promise<AmplifierOrder[]> {
+// Max consecutive pages with zero new matches before stopping early
+const MAX_EMPTY_PAGES = 2;
+
+async function fetchRecentAmplifierOrders(authHeader: string, orderNumbers: Set<string>): Promise<AmplifierOrder[]> {
   const allOrders: AmplifierOrder[] = [];
   let page = 1;
   const perPage = 50;
+  let emptyStreak = 0;
 
   while (true) {
     const url = `https://api.amplifier.com/orders?page=${page}&per_page=${perPage}&sort_by=date&sort_direction=desc`;
@@ -63,10 +67,29 @@ async function fetchAllAmplifierOrders(authHeader: string): Promise<AmplifierOrd
     }
 
     const json = await res.json();
-    const orders = json.data || [];
-    allOrders.push(...orders);
+    const orders: AmplifierOrder[] = json.data || [];
 
-    console.log(`  Fetched page ${page}: ${orders.length} orders (total: ${allOrders.length})`);
+    // Count how many on this page match our unmatched orders
+    let matchesOnPage = 0;
+    for (const o of orders) {
+      const numericId = (o.order_id || "").replace(/^[^0-9]*/, "");
+      if (orderNumbers.has(o.order_id) || orderNumbers.has(numericId)) {
+        matchesOnPage++;
+      }
+    }
+
+    allOrders.push(...orders);
+    console.log(`  Page ${page}: ${orders.length} orders, ${matchesOnPage} matches (total fetched: ${allOrders.length})`);
+
+    if (matchesOnPage === 0) {
+      emptyStreak++;
+      if (emptyStreak >= MAX_EMPTY_PAGES) {
+        console.log(`  Stopping early — ${MAX_EMPTY_PAGES} consecutive pages with no matches`);
+        break;
+      }
+    } else {
+      emptyStreak = 0;
+    }
 
     if (orders.length < perPage || page >= (json.total_pages || 999)) break;
     page++;
@@ -96,10 +119,34 @@ async function main() {
     const apiKey = await decrypt(ws.amplifier_api_key_encrypted);
     const authHeader = "Basic " + Buffer.from(apiKey + ":").toString("base64");
 
-    // Fetch all orders from Amplifier
-    console.log("Fetching orders from Amplifier...");
-    const ampOrders = await fetchAllAmplifierOrders(authHeader);
-    console.log(`Total Amplifier orders: ${ampOrders.length}`);
+    // Fetch our orders that are missing amplifier_order_id (need this first to know when to stop)
+    const { data: dbOrders } = await admin
+      .from("orders")
+      .select("id, order_number")
+      .eq("workspace_id", ws.id)
+      .is("amplifier_order_id", null)
+      .not("financial_status", "ilike", "pending");
+
+    if (!dbOrders?.length) {
+      console.log("No orders missing Amplifier UUID.");
+      continue;
+    }
+
+    console.log(`DB orders missing Amplifier UUID: ${dbOrders.length}`);
+
+    // Build set of order numbers for fast lookup
+    const orderNumbers = new Set<string>();
+    for (const o of dbOrders) {
+      if (o.order_number) {
+        orderNumbers.add(o.order_number);
+        orderNumbers.add(o.order_number.replace(/^[^0-9]*/, ""));
+      }
+    }
+
+    // Fetch recent orders from Amplifier (stops after 2 consecutive pages with no matches)
+    console.log("Fetching recent orders from Amplifier...");
+    const ampOrders = await fetchRecentAmplifierOrders(authHeader, orderNumbers);
+    console.log(`Total Amplifier orders fetched: ${ampOrders.length}`);
 
     if (!ampOrders.length) continue;
 
@@ -108,14 +155,6 @@ async function main() {
     for (const o of ampOrders) {
       if (o.order_id) ampMap.set(o.order_id, o);
     }
-
-    // Fetch our orders that are missing amplifier_order_id
-    const { data: dbOrders } = await admin
-      .from("orders")
-      .select("id, order_number")
-      .eq("workspace_id", ws.id)
-      .is("amplifier_order_id", null)
-      .not("financial_status", "ilike", "pending");
 
     if (!dbOrders?.length) {
       console.log("No orders missing Amplifier UUID.");
