@@ -12,15 +12,18 @@ async function createChatTicket(
   contractId: string,
   reason: string,
 ): Promise<string | null> {
-  const { data: ticket } = await admin.from("tickets").insert({
+  const { data: ticket, error } = await admin.from("tickets").insert({
     workspace_id: workspaceId,
     customer_id: customerId,
     subject: `Cancel chat: ${reason}`,
     status: "open",
     channel: "portal",
     tags: ["cancel:ai_chat"],
-    journey_id: `cancel_chat_${contractId}`,
   }).select("id").single();
+
+  if (error) {
+    console.error("Failed to create cancel chat ticket:", error.message, { workspaceId, customerId, contractId });
+  }
 
   return ticket?.id || null;
 }
