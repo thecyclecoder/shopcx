@@ -173,6 +173,80 @@ export async function generateAIDraft(
     tier = "human";
   }
 
+  // 9b. Intake clarification — if confidence too low for a known customer,
+  // use clarification turns to ask for more detail instead of going silent
+  const clarificationTurns = Number(context.ticket.ai_clarification_turns) || 0;
+  const MAX_CLARIFICATION_TURNS = 2;
+
+  if (tier === "human" && context.customer?.id && clarificationTurns < MAX_CLARIFICATION_TURNS) {
+    const firstName = (context.customer.first_name as string) || "there";
+    const originalMessage = lastMessage?.body || "";
+
+    // Generate clarifying question via Claude
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    let clarifyDraft = "";
+
+    if (apiKey) {
+      try {
+        const clarifyRes = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-haiku-4-5-20251001",
+            max_tokens: 150,
+            system: `You are a friendly support agent for ${(context.ticket as Record<string, unknown>).workspace_name || "our company"}. A customer sent a message but it's not clear enough to identify their specific issue. Write a short, empathetic response asking them to describe their issue in more detail. Be warm but concise — 2-3 sentences max. Do not use markdown. Do not promise to fix anything yet. Do not say "I'm sorry to hear that" if this is clarification attempt #2 — just ask directly.${clarificationTurns === 0 ? "" : " This is a follow-up clarification request — be more direct."}`,
+            messages: [{ role: "user", content: `Customer "${firstName}" wrote: "${originalMessage.slice(0, 500)}"\n\nAsk them to clarify what specifically happened so you can help.` }],
+          }),
+        });
+        if (clarifyRes.ok) {
+          const data = await clarifyRes.json();
+          clarifyDraft = (data.content?.[0] as { text: string })?.text?.trim() || "";
+        }
+      } catch {}
+    }
+
+    if (!clarifyDraft) {
+      clarifyDraft = clarificationTurns === 0
+        ? `Hi ${firstName}, I want to help get this resolved for you. Could you describe what specifically happened so I can look into it right away?`
+        : `Hi ${firstName}, I want to make sure I understand your concern correctly. Could you give me a few more details about what went wrong?`;
+    }
+
+    // Log internal system message
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `AI unable to match customer request to a journey, workflow, or macro. Requesting clarification (attempt ${clarificationTurns + 1}/${MAX_CLARIFICATION_TURNS}).`,
+    });
+
+    // Update ticket with clarification state
+    await admin.from("tickets").update({
+      ai_draft: clarifyDraft,
+      ai_confidence: result.confidence,
+      ai_tier: "review",
+      ai_source_type: null,
+      ai_source_id: null,
+      ai_drafted_at: new Date().toISOString(),
+      ai_clarification_turns: clarificationTurns + 1,
+      needs_clarification: true,
+      status: "pending",
+      pending_auto_reply: null,
+      auto_reply_at: null,
+    }).eq("id", ticketId);
+
+    return {
+      draft: clarifyDraft,
+      confidence: result.confidence,
+      tier: "review",
+      source_type: null,
+      source_id: null,
+      ai_workflow_id: null,
+      reasoning: `Low confidence (${Math.round(result.confidence * 100)}%). Requesting clarification — attempt ${clarificationTurns + 1}/${MAX_CLARIFICATION_TURNS}.`,
+      sandbox: channelConfig.sandbox,
+    };
+  }
+
   // 10. Always suggest a macro if one was found (even for human tier)
   let suggestedMacroId: string | null = null;
   let suggestedMacroName: string | null = null;
@@ -288,6 +362,15 @@ async function checkProactiveAccountLinking(
   const emailList = matches.map(m => m.email).join(", ");
 
   const draft = `Hi ${firstName}, I'm sorry to hear you're having trouble — I want to make sure I can help you properly.\n\nI noticed we may have a few different accounts associated with your name. Could you confirm if any of these emails also belong to you?\n\n${matches.map(m => `• ${m.email}`).join("\n")}\n\nThis will help me pull up your complete order history so I can see everything and get this resolved for you.`;
+
+  // Log internal system message
+  await admin.from("ticket_messages").insert({
+    ticket_id: ticketId,
+    direction: "outbound",
+    visibility: "internal",
+    author_type: "system",
+    body: `AI detected ${matches.length} potential duplicate profile(s): ${emailList}. Account linking draft generated for agent review.`,
+  });
 
   // Tag the ticket so we know account linking was offered
   const { data: ticket } = await admin.from("tickets").select("tags").eq("id", ticketId).single();

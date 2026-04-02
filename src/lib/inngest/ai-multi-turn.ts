@@ -421,6 +421,58 @@ export const aiMultiTurn = inngest.createFunction(
       return assembleTicketContext(workspace_id, ticket_id);
     });
 
+    // Step 2a: If ticket is in clarification mode, customer just replied to our question.
+    // Re-run AI draft pipeline which will re-try RAG matching against the NEW message.
+    const needsClarification = await step.run("check-clarification-mode", async () => {
+      const admin = createAdminClient();
+      const { data: t } = await admin.from("tickets")
+        .select("needs_clarification, ai_clarification_turns")
+        .eq("id", ticket_id).single();
+      return t?.needs_clarification && (t?.ai_clarification_turns || 0) <= 2;
+    });
+
+    if (needsClarification) {
+      // Customer replied to our clarification question — re-run AI draft with fresh matching
+      await step.run("re-draft-after-clarification", async () => {
+        const admin = createAdminClient();
+        // Log system message
+        await admin.from("ticket_messages").insert({
+          ticket_id,
+          direction: "outbound",
+          visibility: "internal",
+          author_type: "system",
+          body: `Customer replied to clarification request. Re-evaluating with new message content.`,
+        });
+        // Clear needs_clarification so AI draft can proceed normally or ask again
+        await admin.from("tickets").update({ needs_clarification: false }).eq("id", ticket_id);
+      });
+
+      // Re-run AI draft pipeline (it will re-try RAG matching on the new message)
+      const { generateAIDraft } = await import("@/lib/ai-draft");
+      const draftResult = await step.run("generate-clarified-draft", async () => {
+        return generateAIDraft(workspace_id, ticket_id);
+      });
+
+      // If we got a match this time, the draft is stored on the ticket already
+      if (draftResult.tier !== "human" || draftResult.draft) {
+        await step.run("log-clarification-matched", async () => {
+          const admin = createAdminClient();
+          const matchType = draftResult.source_type || "clarification";
+          await admin.from("ticket_messages").insert({
+            ticket_id,
+            direction: "outbound",
+            visibility: "internal",
+            author_type: "system",
+            body: `Matched customer request to ${matchType}${draftResult.source_id ? ` (${draftResult.reasoning?.slice(0, 100)})` : ""}. Draft generated with ${Math.round(draftResult.confidence * 100)}% confidence.`,
+          });
+        });
+        return { action: "clarification_matched", confidence: draftResult.confidence, tier: draftResult.tier };
+      }
+
+      // Still no match — if clarification turns exhausted, leave open for agent
+      return { action: "clarification_exhausted", confidence: draftResult.confidence };
+    }
+
     // Step 2b: KB gap check — if no KB chunks or macros matched AND it's a question, don't wing it
     // Skip gap check for action confirmations (yes, sign me up, etc.)
     const isActionConfirmation = /^(yes|yeah|sure|ok|please|go ahead|sign me up|do it|absolutely)/i.test(message_body.trim());
