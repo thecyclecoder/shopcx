@@ -357,11 +357,9 @@ async function checkProactiveAccountLinking(
 
   if (matches.length === 0) return null;
 
-  // Found potential duplicates — generate an account-linking response
+  // Found potential duplicates — launch standalone account linking journey
   const firstName = customer.first_name || "there";
   const emailList = matches.map(m => m.email).join(", ");
-
-  const draft = `Hi ${firstName}, I'm sorry to hear you're having trouble — I want to make sure I can help you properly.\n\nI noticed we may have a few different accounts associated with your name. Could you confirm if any of these emails also belong to you?\n\n${matches.map(m => `• ${m.email}`).join("\n")}\n\nThis will help me pull up your complete order history so I can see everything and get this resolved for you.`;
 
   // Log internal system message
   await admin.from("ticket_messages").insert({
@@ -369,37 +367,110 @@ async function checkProactiveAccountLinking(
     direction: "outbound",
     visibility: "internal",
     author_type: "system",
-    body: `AI detected ${matches.length} potential duplicate profile(s): ${emailList}. Account linking draft generated for agent review.`,
+    body: `AI detected ${matches.length} potential duplicate profile(s): ${emailList}. Launching account linking journey.`,
   });
 
-  // Tag the ticket so we know account linking was offered
-  const { data: ticket } = await admin.from("tickets").select("tags").eq("id", ticketId).single();
-  const existingTags: string[] = ticket?.tags || [];
-  if (!existingTags.includes("ai:linking_offered")) {
-    await admin.from("tickets").update({ tags: [...existingTags, "ai:linking_offered"] }).eq("id", ticketId);
+  // Create standalone account linking journey session
+  const crypto = await import("crypto");
+  const token = crypto.randomBytes(24).toString("hex");
+
+  const steps = [{
+    key: "account_linking",
+    type: "checklist" as const,
+    question: "Do any of these emails also belong to you?",
+    subtitle: "This helps us pull up your full account details so we can resolve your issue faster.",
+    options: matches.map(m => ({ value: m.id, label: m.email })),
+  }];
+
+  const metadata = {
+    ticketId,
+    workspaceId,
+    unlinkedMatches: matches.map(m => ({ id: m.id, email: m.email })),
+    existingGroupId: existingLink?.group_id || null,
+    linkCustomerId: customer.id,
+    needsLinking: true,
+    standaloneAccountLinking: true,
+  };
+
+  await admin.from("journey_sessions").insert({
+    workspace_id: workspaceId,
+    customer_id: customer.id,
+    ticket_id: ticketId,
+    token,
+    token_expires_at: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
+    status: "pending",
+    config_snapshot: {
+      codeDriven: true,
+      multiStep: true,
+      steps,
+      metadata,
+      needsLinking: true,
+    },
+  });
+
+  // Send CTA email with personalized intro
+  const { data: ws } = await admin.from("workspaces")
+    .select("name, help_primary_color")
+    .eq("id", workspaceId).single();
+
+  const { data: ticket } = await admin.from("tickets")
+    .select("tags, subject, email_message_id")
+    .eq("id", ticketId).single();
+
+  if (customer.email) {
+    const { sendJourneyCTA } = await import("@/lib/email");
+    await sendJourneyCTA({
+      workspaceId,
+      toEmail: customer.email,
+      customerName: firstName,
+      journeyToken: token,
+      contextMessage: `I got your message and I want to help. Before I can look into this, I noticed we might have a few different accounts under your name. Could you quickly confirm which emails are yours? This way I can see your full history and get this sorted out for you.`,
+      workspaceName: ws?.name || "Support",
+      primaryColor: ws?.help_primary_color || undefined,
+      subject: `Re: ${ticket?.subject || "Your request"}`,
+      buttonLabel: "Confirm my accounts &rarr;",
+      inReplyTo: ticket?.email_message_id || null,
+    });
+
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "ai",
+      body: `[AI Draft — Account Linking]\n\nI got your message and I want to help. Before I can look into this, I noticed we might have a few accounts under your name. I've sent you a quick link to confirm which emails are yours so I can see your full history.`,
+    });
   }
 
-  // Store draft on ticket
+  // Tag and update ticket
+  const existingTags: string[] = ticket?.tags || [];
+  const { addTicketTag } = await import("@/lib/ticket-tags");
+  await addTicketTag(ticketId, "ai:linking_offered");
+  await addTicketTag(ticketId, "j:account_linking");
+
+  const { markFirstTouch } = await import("@/lib/first-touch");
+  await markFirstTouch(ticketId, "journey");
+
   await admin.from("tickets").update({
-    ai_draft: draft,
+    ai_draft: null,
     ai_confidence: 0.85,
     ai_tier: "review",
-    ai_source_type: null,
-    ai_source_id: null,
     ai_drafted_at: new Date().toISOString(),
+    needs_clarification: true,
+    status: "pending",
+    handled_by: "Journey: account_linking",
     pending_auto_reply: null,
     auto_reply_at: null,
   }).eq("id", ticketId);
 
   return {
-    draft,
+    draft: "",
     confidence: 0.85,
-    tier: "review", // Agent should review before sending (account linking is sensitive)
+    tier: "review",
     source_type: null,
     source_id: null,
     ai_workflow_id: null,
-    reasoning: `Found ${matches.length} potential duplicate profile(s): ${emailList}. Generated account linking prompt.`,
-    sandbox: true, // Always sandbox for account linking drafts
+    reasoning: `Found ${matches.length} potential duplicate profile(s): ${emailList}. Launched standalone account linking journey.`,
+    sandbox: false, // Journey CTA was sent (sandbox gate is in email.ts)
   };
 }
 
