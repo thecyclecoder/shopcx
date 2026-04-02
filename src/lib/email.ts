@@ -16,14 +16,20 @@ async function sandboxBlock(workspaceId: string, toEmail: string, isInvite = fal
   // Sandbox on — only allow emails to workspace member emails
   const { data: members } = await admin
     .from("workspace_members")
-    .select("users(email)")
+    .select("user_id")
     .eq("workspace_id", workspaceId);
-  const memberEmails = new Set(
-    (members || []).map((m) => ((m.users as { email?: string })?.email || "").toLowerCase()).filter(Boolean)
-  );
+
+  const memberEmails = new Set<string>();
+  for (const m of members || []) {
+    if (m.user_id) {
+      const { data: user } = await admin.auth.admin.getUserById(m.user_id);
+      if (user?.user?.email) memberEmails.add(user.user.email.toLowerCase());
+    }
+  }
+
   const blocked = !memberEmails.has(toEmail.toLowerCase());
   if (blocked) {
-    console.log(`[Sandbox] Blocked email to ${toEmail} — not a workspace member`);
+    console.log(`[Sandbox] Blocked email to ${toEmail} — not a workspace member. Allowed: ${[...memberEmails].join(", ")}`);
   }
   return blocked;
 }
