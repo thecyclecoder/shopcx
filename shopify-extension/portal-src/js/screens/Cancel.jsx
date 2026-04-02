@@ -149,7 +149,8 @@ function ChatInterface({ messages, turn, maxTurns, loading, onSend, onCancel, on
 // ---- Line Item Modifier Components ----
 
 function LineItemCard({ item, selected, onSelect }) {
-  const img = item.image || item.variantImage;
+  const img = item.image || item.variantImage || item.variant_image;
+  const vTitle = item.variantTitle || item.variant_title;
   return (
     <button type="button"
       class={'sp-remedy-card sp-remedy-card--selectable' + (selected ? ' sp-remedy-card--selected' : '')}
@@ -157,8 +158,8 @@ function LineItemCard({ item, selected, onSelect }) {
       {img && <img src={img} alt="" class="sp-remedy-card__img" />}
       <div class="sp-remedy-card__body">
         <div class="sp-remedy-card__label">{item.title || item.productTitle}</div>
-        {item.variantTitle && item.variantTitle !== 'Default Title' && (
-          <div class="sp-remedy-card__desc sp-muted">{item.variantTitle}</div>
+        {vTitle && vTitle !== 'Default Title' && (
+          <div class="sp-remedy-card__desc sp-muted">{vTitle}</div>
         )}
         <div class="sp-remedy-card__desc sp-muted">Qty: {item.quantity || 1}</div>
       </div>
@@ -198,7 +199,7 @@ function LineItemModifier({ subscription, contractId, onComplete, onCancel, show
     setBusy(true);
     try {
       let payload = { step: 'line_item_action', action };
-      const vid = shortId(selectedItem?.variantId);
+      const vid = shortId(selectedItem?.variantId || selectedItem?.variant_id);
 
       if (action === 'swap_variant') {
         payload = { ...payload, oldVariantId: vid, newVariantId: actionValue, variantId: vid };
