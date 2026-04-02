@@ -36,7 +36,7 @@ export const amplifierWebhookProcess = inngest.createFunction(
           .from("orders")
           .select("id, order_number")
           .eq("workspace_id", workspaceId)
-          .or(`order_number.eq.${referenceId},order_number.ilike.%${referenceId}`)
+          .eq("order_number", `SC${referenceId}`)
           .limit(1)
           .single();
         return order;
@@ -76,7 +76,7 @@ export const amplifierWebhookProcess = inngest.createFunction(
             .from("orders")
             .select("id")
             .eq("workspace_id", workspaceId)
-            .or(`order_number.eq.${referenceId},order_number.ilike.%${referenceId}`)
+            .eq("order_number", `SC${referenceId}`)
             .limit(1)
             .single();
           if (byRef) return byRef.id;
