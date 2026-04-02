@@ -31,7 +31,7 @@ async function createChatTicket(
 async function logChatMessage(
   admin: ReturnType<typeof createAdminClient>,
   ticketId: string,
-  direction: "in" | "out",
+  direction: "inbound" | "outbound",
   authorType: "customer" | "ai" | "system",
   body: string,
   visibility: "external" | "internal" = "external",
@@ -424,19 +424,19 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       if (ticketId) {
         // 1: System message — cancel flow started
         const customerEmail = customer.email || "";
-        await logChatMessage(admin, ticketId, "out", "system",
+        await logChatMessage(admin, ticketId, "outbound", "system",
           `${customerEmail} started cancel flow for contract #${contractId} with cancel reason "${reasonLabel}"`,
           "internal",
         );
 
         // 2: Backfill initial AI message
         if (initialAiReply) {
-          await logChatMessage(admin, ticketId, "out", "ai", initialAiReply);
+          await logChatMessage(admin, ticketId, "outbound", "ai", initialAiReply);
         }
 
         // 3: Log customer message right away (before AI response)
         if (message) {
-          await logChatMessage(admin, ticketId, "in", "customer", message);
+          await logChatMessage(admin, ticketId, "inbound", "customer", message);
         }
       }
     } else {
@@ -448,7 +448,7 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
 
     // Log customer message (only for subsequent replies — first reply is backfilled above)
     if (ticketId && message && payload?.ticketId) {
-      await logChatMessage(admin, ticketId, "in", "customer", message);
+      await logChatMessage(admin, ticketId, "inbound", "customer", message);
     }
 
     // Load conversation history from ticket messages for AI context
@@ -499,7 +499,7 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
 
       // Log AI response + close ticket (reopens on next customer reply)
       if (ticketId && reply) {
-        await logChatMessage(admin, ticketId, "out", "ai", reply);
+        await logChatMessage(admin, ticketId, "outbound", "ai", reply);
         await admin.from("tickets")
           .update({ status: "closed" })
           .eq("id", ticketId);
