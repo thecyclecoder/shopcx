@@ -63,6 +63,10 @@ export default function SettingsPage() {
           <SettingsCard href="/dashboard/settings/portal" title="Customer Portal" desc="Shopify extension, mini-site, products" />
         </SettingsSection>
 
+        <SettingsSection title="Orders & Fulfillment">
+          <SettingsCard href="/dashboard/settings/tracking-sla" title="Tracking SLA" desc="Expected shipping times, cutoff hours, and shipping days" />
+        </SettingsSection>
+
         <SettingsSection title="Revenue Protection">
           <SettingsCard href="/dashboard/settings/fraud" title="Fraud Detection" desc="Rules, thresholds, and severity levels" />
           <SettingsCard href="/dashboard/settings/chargebacks" title="Chargebacks" desc="Auto-cancel, evidence reminders, dispute handling" />
@@ -70,8 +74,11 @@ export default function SettingsPage() {
 
         <SettingsSection title="Customer Engagement">
           <SettingsCard href="/dashboard/settings/loyalty" title="Loyalty" desc="Points program, redemption tiers" />
-          <SettingsCard href="/dashboard/settings/slack" title="Slack" desc="Notifications for escalations, chargebacks, and more" />
           <SettingsCard href="/dashboard/settings/chat-widget" title="Live Chat" desc="Embeddable chat widget" />
+        </SettingsSection>
+
+        <SettingsSection title="Notifications">
+          <SettingsCard href="/dashboard/settings/slack" title="Slack Notifications" desc="Escalations, chargebacks, fraud alerts, and more" />
         </SettingsSection>
 
         <SettingsSection title="Ticketing Configuration">

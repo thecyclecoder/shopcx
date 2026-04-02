@@ -429,7 +429,7 @@ export default function CancelFlowSettingsPage() {
               )}
               {editingRemedy.type === "free_product" && (
                 <div>
-                  <label className="block text-xs font-medium text-zinc-500 mb-1">Free product to add</label>
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">Free product variant to add</label>
                   <input
                     type="text"
                     placeholder="Search products..."
@@ -437,38 +437,36 @@ export default function CancelFlowSettingsPage() {
                     onChange={(e) => setProductSearch(e.target.value)}
                     className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm mb-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
                   />
-                  <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800">
+                  <div className="max-h-60 overflow-y-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800">
                     {products
                       .filter(p => !productSearch || p.title.toLowerCase().includes(productSearch.toLowerCase()))
                       .slice(0, 20)
-                      .map(p => {
-                        const firstVariant = p.variants?.[0];
-                        const isSelected = (editingRemedy.config as Record<string, unknown>)?.product_variant_id === (firstVariant?.id || p.shopify_product_id);
+                      .flatMap(p => (p.variants || []).map(v => ({ product: p, variant: v })))
+                      .map(({ product: p, variant: v }) => {
+                        const isSelected = (editingRemedy.config as Record<string, unknown>)?.product_variant_id === v.id;
+                        const variantLabel = v.title && v.title !== "Default Title" ? `${p.title} — ${v.title}` : p.title;
                         return (
                           <button
-                            key={p.id}
+                            key={v.id}
                             type="button"
                             onClick={() => setEditingRemedy({
                               ...editingRemedy,
                               config: {
                                 ...((editingRemedy.config || {}) as Record<string, unknown>),
-                                product_variant_id: firstVariant?.id || p.shopify_product_id,
-                                product_title: p.title,
-                                product_image_url: p.image_url,
+                                product_variant_id: v.id,
+                                product_title: variantLabel,
+                                product_image_url: (v as Record<string, unknown>).image_url || p.image_url,
                               },
                             })}
                             className={`flex w-full items-center gap-3 px-3 py-2 text-left text-sm hover:bg-zinc-50 dark:hover:bg-zinc-700 ${isSelected ? "bg-indigo-50 dark:bg-indigo-900/30" : ""}`}
                           >
-                            {p.image_url ? (
-                              <img src={p.image_url} alt="" className="h-8 w-8 rounded object-cover" />
+                            {(v as Record<string, unknown>).image_url || p.image_url ? (
+                              <img src={String((v as Record<string, unknown>).image_url || p.image_url)} alt="" className="h-8 w-8 rounded object-cover" />
                             ) : (
                               <div className="h-8 w-8 rounded bg-zinc-200 dark:bg-zinc-600" />
                             )}
                             <div className="flex-1 min-w-0">
-                              <div className="font-medium text-zinc-900 dark:text-zinc-100 truncate">{p.title}</div>
-                              {firstVariant?.title && firstVariant.title !== "Default Title" && (
-                                <div className="text-xs text-zinc-400 truncate">{firstVariant.title}</div>
-                              )}
+                              <div className="font-medium text-zinc-900 dark:text-zinc-100 truncate">{variantLabel}</div>
                             </div>
                             {isSelected && <span className="text-indigo-500 text-xs font-medium">Selected</span>}
                           </button>
