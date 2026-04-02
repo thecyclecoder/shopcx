@@ -97,21 +97,25 @@ export async function GET(
       base().ilike("delivery_status", "delivered"),
       // Refunded
       base().or("financial_status.ilike.refunded,financial_status.ilike.partially_refunded"),
-      // Awaiting + late tracking candidates (split by SLA in JS)
+      // Awaiting + late tracking candidates: all unfulfilled orders (split by SLA in JS)
       admin.from("orders")
-        .select("amplifier_received_at")
+        .select("amplifier_received_at, amplifier_order_id, fulfillment_status")
         .eq("workspace_id", workspaceId)
         .not("financial_status", "ilike", "pending")
-        .not("amplifier_order_id", "is", null)
-        .not("amplifier_received_at", "is", null)
+        .not("financial_status", "ilike", "refunded")
+        .not("financial_status", "ilike", "partially_refunded")
         .is("amplifier_shipped_at", null)
-        .not("fulfillment_status", "ilike", "fulfilled"),
+        .not("fulfillment_status", "ilike", "fulfilled")
+        .not("tags", "ilike", "%suspicious%"),
     ]);
 
-    // Split awaiting vs late by SLA calculation
+    // Split awaiting vs late: Amplifier orders use SLA check, non-Amplifier are always "awaiting"
     let awaitingTracking = 0, lateTracking = 0;
     for (const o of awaitLateRes.data || []) {
-      if (isWithinSLA(o.amplifier_received_at, slaDays, cutoffHour, cutoffTimezone, shippingDays)) {
+      if (!o.amplifier_order_id || !o.amplifier_received_at) {
+        // No Amplifier sync — just awaiting tracking
+        awaitingTracking++;
+      } else if (isWithinSLA(o.amplifier_received_at, slaDays, cutoffHour, cutoffTimezone, shippingDays)) {
         awaitingTracking++;
       } else {
         lateTracking++;
@@ -197,13 +201,14 @@ export async function GET(
   };
   const sortCol = validSorts[sort] || "created_at";
 
-  // For awaiting/late tracking, fetch all matching and post-filter
+  // For awaiting/late tracking, fetch all unfulfilled orders and post-filter by SLA
   if (filter === "awaiting_tracking" || filter === "late_tracking") {
     query = query
-      .not("amplifier_order_id", "is", null)
-      .not("amplifier_received_at", "is", null)
       .is("amplifier_shipped_at", null)
-      .not("fulfillment_status", "ilike", "fulfilled");
+      .not("fulfillment_status", "ilike", "fulfilled")
+      .not("financial_status", "ilike", "refunded")
+      .not("financial_status", "ilike", "partially_refunded")
+      .not("tags", "ilike", "%suspicious%");
 
     query = query.order(sortCol, { ascending: order === "asc" });
 
@@ -211,6 +216,10 @@ export async function GET(
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
     const filtered = (allMatching || []).filter(o => {
+      // Non-Amplifier orders are always "awaiting tracking"
+      if (!o.amplifier_order_id || !o.amplifier_received_at) {
+        return filter === "awaiting_tracking";
+      }
       const within = isWithinSLA(o.amplifier_received_at, slaDays, cutoffHour, cutoffTimezone, shippingDays);
       return filter === "awaiting_tracking" ? within : !within;
     });
