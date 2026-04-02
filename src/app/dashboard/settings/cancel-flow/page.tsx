@@ -443,7 +443,7 @@ export default function CancelFlowSettingsPage() {
                       .slice(0, 20)
                       .map(p => {
                         const firstVariant = p.variants?.[0];
-                        const isSelected = (editingRemedy.config as Record<string, unknown>)?.product_variant_id === (firstVariant?.shopify_variant_id || p.shopify_product_id);
+                        const isSelected = (editingRemedy.config as Record<string, unknown>)?.product_variant_id === (firstVariant?.id || p.shopify_product_id);
                         return (
                           <button
                             key={p.id}
@@ -452,7 +452,7 @@ export default function CancelFlowSettingsPage() {
                               ...editingRemedy,
                               config: {
                                 ...((editingRemedy.config || {}) as Record<string, unknown>),
-                                product_variant_id: firstVariant?.shopify_variant_id || p.shopify_product_id,
+                                product_variant_id: firstVariant?.id || p.shopify_product_id,
                                 product_title: p.title,
                                 product_image_url: p.image_url,
                               },
