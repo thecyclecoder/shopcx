@@ -428,6 +428,8 @@ export default function Cancel() {
   const [chatMaxTurns, setChatMaxTurns] = useState(3);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatTicketId, setChatTicketId] = useState(null);
+  const [chatInitialAiReply, setChatInitialAiReply] = useState(null);
+  const [chatReasonLabel, setChatReasonLabel] = useState('');
 
   // Product IDs for ReviewsCard on reason step
   const productIds = journey?.subscription?.items
@@ -495,20 +497,26 @@ export default function Cancel() {
       setChatLoading(true);
 
       try {
-        const reasonLabel = reasonConfig?.label || reasonId;
-        const resp = await postJson('cancelJourney', { step: 'reason', reason: reasonId, reasonType: 'ai_conversation', reasonLabel }, { contractId });
+        const rl = reasonConfig?.label || reasonId;
+        setChatReasonLabel(rl);
+        const resp = await postJson('cancelJourney', { step: 'reason', reason: reasonId, reasonType: 'ai_conversation', reasonLabel: rl }, { contractId });
         if (resp?.reply) {
           setChatMessages([{ role: 'ai', text: resp.reply }]);
           setChatTurn(resp.turn || 1);
           if (resp.maxTurns) setChatMaxTurns(resp.maxTurns);
+          setChatInitialAiReply(resp.reply);
         } else {
-          setChatMessages([{ role: 'ai', text: "I understand. Can you tell me more about what's going on?" }]);
+          const fallback = "I understand. Can you tell me more about what's going on?";
+          setChatMessages([{ role: 'ai', text: fallback }]);
           setChatTurn(1);
+          setChatInitialAiReply(fallback);
         }
         if (resp?.ticketId) setChatTicketId(resp.ticketId);
       } catch {
-        setChatMessages([{ role: 'ai', text: "I'd love to help. Can you tell me more?" }]);
+        const fallback = "I'd love to help. Can you tell me more?";
+        setChatMessages([{ role: 'ai', text: fallback }]);
         setChatTurn(1);
+        setChatInitialAiReply(fallback);
       }
       setChatLoading(false);
     } else {
@@ -535,7 +543,9 @@ export default function Cancel() {
     setChatLoading(true);
     try {
       const resp = await postJson('cancelJourney', {
-        step: 'chat', message: text, reason, turn: chatTurn, ticketId: chatTicketId,
+        step: 'chat', message: text, reason, reasonLabel: chatReasonLabel,
+        turn: chatTurn, ticketId: chatTicketId,
+        initialAiReply: chatTicketId ? null : chatInitialAiReply,
       }, { contractId });
       if (resp?.reply) {
         setChatMessages(prev => [...prev, { role: 'ai', text: resp.reply }]);

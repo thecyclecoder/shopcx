@@ -285,10 +285,8 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       properties: { shopify_contract_id: contractId, reason, reasonType },
     });
 
-    // For ai_conversation type reasons, create a ticket and start AI chat
+    // For ai_conversation type reasons, get initial AI reply (no ticket yet — created on first customer reply)
     if (reasonType === "ai_conversation") {
-      const ticketId = await createChatTicket(admin, auth.workspaceId, customer.id, contractId, reason);
-
       // Fetch real customer context for AI
       const { data: custData } = await admin.from("customers")
         .select("ltv_cents, retention_score, total_orders")
@@ -312,7 +310,7 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       // Use human-readable reason label for AI context (not the slug)
       const reasonLabel = String(payload?.reasonLabel || reason);
 
-      // Get initial AI response
+      // Get initial AI response (no ticket created yet)
       try {
         const { generateOpenEndedResponse } = await import("@/lib/remedy-selector");
         const reply = await generateOpenEndedResponse(
@@ -320,19 +318,17 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
           [], customerCtx, productIds,
         );
 
-        if (ticketId && reply) {
-          await logChatMessage(admin, ticketId, "out", "ai", reply);
-        }
-
         return jsonOk({
           ok: true, step: "reason", reason, type: "ai_chat",
-          reply, turn: 1, maxTurns: 3, ticketId,
+          reply, turn: 1, maxTurns: 3,
+          // Pass initial AI reply back so chat step can backfill it into ticket
+          initialAiReply: reply,
         });
       } catch (err) {
         console.error("AI chat initial response failed:", err);
         return jsonOk({
           ok: true, step: "reason", reason, type: "ai_chat",
-          reply: null, turn: 1, maxTurns: 3, ticketId,
+          reply: null, turn: 1, maxTurns: 3,
         });
       }
     }
@@ -411,25 +407,50 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
   if (step === "chat") {
     const message = String(payload?.message || "");
     const reason = String(payload?.reason || "");
+    const reasonLabel = String(payload?.reasonLabel || reason);
     const turn = Number(payload?.turn) || 0;
     let ticketId = payload?.ticketId ? String(payload.ticketId) : null;
+    const initialAiReply = payload?.initialAiReply ? String(payload.initialAiReply) : null;
 
-    // Create ticket if we don't have one yet
+    // First customer reply — create ticket and backfill conversation history
     if (!ticketId) {
-      ticketId = await createChatTicket(admin, auth.workspaceId, customer.id, contractId, reason);
+      ticketId = await createChatTicket(admin, auth.workspaceId, customer.id, contractId, reasonLabel);
+
+      if (ticketId) {
+        // 1: System message — cancel flow started
+        const customerEmail = customer.email || "";
+        await admin.from("ticket_messages").insert({
+          ticket_id: ticketId,
+          direction: "out",
+          visibility: "internal",
+          author_type: "system",
+          body: `${customerEmail} started cancel flow for contract #${contractId} with cancel reason "${reasonLabel}"`,
+        });
+
+        // 2: Backfill initial AI message
+        if (initialAiReply) {
+          await logChatMessage(admin, ticketId, "out", "ai", initialAiReply);
+        }
+      }
+    } else {
+      // Subsequent replies — reopen the ticket
+      await admin.from("tickets")
+        .update({ status: "open" })
+        .eq("id", ticketId);
     }
 
-    // Log customer message
+    // 3: Log customer message
     if (ticketId && message) {
       await logChatMessage(admin, ticketId, "in", "customer", message);
     }
 
-    // Load conversation history from ticket messages
+    // Load conversation history from ticket messages for AI context
     const conversationHistory: { role: "user" | "assistant"; content: string }[] = [];
     if (ticketId) {
       const { data: messages } = await admin.from("ticket_messages")
         .select("direction, author_type, body")
         .eq("ticket_id", ticketId)
+        .neq("author_type", "system")
         .order("created_at", { ascending: true });
 
       for (const m of messages || []) {
@@ -461,22 +482,25 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       first_renewal: false,
     };
 
-    // Get AI response with full conversation history
+    // 4: Get AI response with full conversation history
     try {
       const { generateOpenEndedResponse } = await import("@/lib/remedy-selector");
       const reply = await generateOpenEndedResponse(
-        auth.workspaceId, reason, message,
+        auth.workspaceId, reasonLabel, message,
         conversationHistory, customerCtx, productIds,
       );
 
-      // Log AI response
+      // Log AI response + close ticket (reopens on next customer reply)
       if (ticketId && reply) {
         await logChatMessage(admin, ticketId, "out", "ai", reply);
+        await admin.from("tickets")
+          .update({ status: "closed" })
+          .eq("id", ticketId);
       }
 
       return jsonOk({
         ok: true, step: "chat",
-        reply: reply || "I understand. Would you like to keep your subscription?",
+        reply: reply || "I understand. You can complete your cancellation using the cancel button below.",
         turn: turn + 1,
         ticketId,
       });
