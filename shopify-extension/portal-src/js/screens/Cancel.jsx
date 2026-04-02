@@ -93,7 +93,10 @@ function ChatInterface({ messages, turn, maxTurns, loading, onSend, onCancel, on
   const ended = turn >= maxTurns;
 
   useEffect(() => {
-    messagesEnd.current?.scrollIntoView({ behavior: 'smooth' });
+    // Small delay to ensure DOM has rendered the new message
+    setTimeout(() => {
+      messagesEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }, 50);
   }, [messages.length, loading]);
 
   useEffect(() => {
