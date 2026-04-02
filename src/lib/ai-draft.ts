@@ -68,7 +68,7 @@ export async function generateAIDraft(
 
   // 1b. Proactive account linking check — before generating any draft
   if (context.customer?.id && !context.ticket.profile_link_completed) {
-    const linkResult = await checkProactiveAccountLinking(admin, workspaceId, ticketId, context.customer, lastMessage?.body || "");
+    const linkResult = await checkProactiveAccountLinking(admin, workspaceId, ticketId, context.customer as { id: string; email?: string; first_name?: string; last_name?: string }, lastMessage?.body || "");
     if (linkResult) return linkResult;
   }
 
