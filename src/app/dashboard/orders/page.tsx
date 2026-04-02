@@ -88,7 +88,7 @@ function getOrderStatus(order: Order): { label: string; key: string } {
   const isDelivered = (order.delivery_status || "").toLowerCase() === "delivered";
 
   if (isDelivered) return { label: "Delivered", key: "delivered" };
-  if (isFulfilled) return { label: "In Transit", key: "in_transit" };
+  if (isFulfilled || order.amplifier_shipped_at) return { label: "In Transit", key: "in_transit" };
 
   if (tagStr.includes("suspicious")) return { label: "Suspicious", key: "suspicious" };
   if (order.amplifier_order_id) {

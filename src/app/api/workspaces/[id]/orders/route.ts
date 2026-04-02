@@ -90,8 +90,8 @@ export async function GET(
       // Suspicious
       base().ilike("tags", "%suspicious%")
         .not("fulfillment_status", "ilike", "fulfilled"),
-      // In transit: fulfilled but not delivered
-      base().ilike("fulfillment_status", "fulfilled")
+      // In transit: fulfilled (or partial with tracking) but not delivered
+      base().or("fulfillment_status.ilike.fulfilled,amplifier_shipped_at.not.is.null")
         .not("delivery_status", "ilike", "delivered"),
       // Delivered
       base().ilike("delivery_status", "delivered"),
@@ -164,7 +164,7 @@ export async function GET(
       .not("fulfillment_status", "ilike", "fulfilled");
   } else if (filter === "in_transit") {
     query = query
-      .ilike("fulfillment_status", "fulfilled")
+      .or("fulfillment_status.ilike.fulfilled,amplifier_shipped_at.not.is.null")
       .not("delivery_status", "ilike", "delivered");
   } else if (filter === "delivered") {
     query = query.ilike("delivery_status", "delivered");
