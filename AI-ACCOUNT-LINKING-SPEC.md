@@ -98,6 +98,66 @@ AI proactively detects potential duplicate profiles before generating a draft re
 - Test ticket ID: 26596c4b-7317-4310-84a1-52786e282e44
 - Gorgias source: #263836274
 
+## Turn Architecture
+
+### Two separate turn counters
+The current single `ai_turn_count` is replaced with two distinct phases:
+
+**`ai_clarification_turns`** (Intake phase, max 2)
+- Counts AI attempts to understand what the customer needs
+- Each clarification → ticket status = "pending" (waiting for reply)
+- After each customer reply → re-run RAG/macro/journey/workflow matching
+- If confidence reached → proceed to resolution (Phase 2)
+- If 2 turns with no match → ticket stays "open" for agent intervention
+- Does NOT count against `ai_turn_count`
+
+**`ai_turn_count`** (Conversation phase, existing counter)
+- Only tracks free-form AI responses where AI is working without a matched source
+- Multi-turn AI conversation (e.g., portal cancel chat, complex back-and-forth)
+- Subject to `ai_turn_limit` (default 4) and model escalation (Haiku→Sonnet)
+
+**Resolution actions (no turn count):**
+- Journey triggered → not a turn (structured flow takes over)
+- Workflow triggered → not a turn (template-based response)
+- Macro applied → not a turn (the macro IS the resolution)
+- These are outcomes, not AI "talking"
+
+### DB changes needed
+```sql
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS ai_clarification_turns INTEGER DEFAULT 0;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS needs_clarification BOOLEAN DEFAULT false;
+```
+
+### Intake phase logic (in ai-draft.ts)
+```
+Customer message arrives → recognized customer?
+  NO → silence (unknown sender)
+  YES → check for duplicate profiles
+    [Duplicates?]
+      YES → trigger account linking journey, set pending
+    [After linking or no duplicates]
+      → run RAG/macro/journey/workflow matching
+      [Confidence >= threshold?]
+        YES → execute matched resolution (journey/workflow/macro)
+        NO → ai_clarification_turns < 2?
+          YES → generate clarifying question, set pending
+                increment ai_clarification_turns
+                set needs_clarification = true
+          NO → leave ticket open for agent (2 attempts exhausted)
+```
+
+### Status transitions during intake
+```
+Turn 0: Customer emails in
+  → AI checks account linking → pending (if journey sent)
+  → AI tries to match → no match → clarification #1 → pending
+Turn 1: Customer replies to clarification
+  → AI re-matches → no match → clarification #2 → pending  
+Turn 2: Customer replies again
+  → AI re-matches → no match → leave open (agent takes over)
+  → AI re-matches → match found → execute resolution
+```
+
 ## Flow Diagram
 ```
 Ticket arrives from recognized customer
@@ -107,20 +167,32 @@ AI checks for duplicate profiles (fuzzy name match)
 [Duplicates found?]
   YES → Trigger account linking journey
         → Post internal note
-        → Set ticket pending
+        → Set ticket pending, needs_clarification = true
         → Customer completes journey (links accounts)
-        → Re-trigger AI draft with full context
-        → AI generates response (or clarifying question if vague)
-  NO → [Message clear enough for macro/KB match?]
-        YES → Normal AI draft flow
-        NO → Generate clarifying question (don't go silent)
-
-[After account linking completes]
+        → Re-trigger AI with full context
+  NO → continue
   ↓
-[Was original message vague?]
-  YES → Send clarifying question (quote original message)
-        → Customer replies with details
-        → AI now has full context + clear issue → normal draft
-  NO → AI generates response with full combined context
+[Run RAG/macro/journey/workflow matching]
+  ↓
+[Confidence >= threshold?]
+  YES → Execute resolution (journey/workflow/macro)
+        → No turn counted
+  NO → [ai_clarification_turns < 2?]
+        YES → Send empathetic clarifying question
+              → Quote original message if vague
+              → Set ticket pending
+              → Increment ai_clarification_turns
+        NO → Leave ticket open for agent
+             → 2 clarification attempts exhausted
+
+[Customer replies to clarification]
+  ↓
+[Re-run matching against new message]
+  ↓
+[Match found?]
+  YES → Execute matched resolution
+  NO → [More clarification turns available?]
+        YES → Ask again (different angle)
+        NO → Open for agent
 ```
 ```
