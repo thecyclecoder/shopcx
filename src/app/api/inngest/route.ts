@@ -40,6 +40,7 @@ import {
 import { portalAutoResume } from "@/lib/inngest/portal-auto-resume";
 import { ticketAutoArchive } from "@/lib/inngest/auto-archive";
 import { tagCancelRelevanceBulk, tagCancelRelevanceCron } from "@/lib/inngest/review-tagging";
+import { amplifierWebhookProcess } from "@/lib/inngest/amplifier-webhooks";
 
 export const maxDuration = 300;
 
@@ -83,5 +84,6 @@ export const { GET, POST, PUT } = serve({
     ticketAutoArchive,
     tagCancelRelevanceBulk,
     tagCancelRelevanceCron,
+    amplifierWebhookProcess,
   ],
 });
