@@ -8,30 +8,47 @@
  * Requires .env.local with NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ENCRYPTION_KEY
  */
 
-import "dotenv/config";
-import { createClient } from "@supabase/supabase-js";
+import { readFileSync } from "fs";
+import { resolve } from "path";
 
-// Load encryption key for decrypting Amplifier API key
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
-if (!ENCRYPTION_KEY) throw new Error("ENCRYPTION_KEY required");
+// Load .env.local manually (no dotenv dependency)
+const envPath = resolve(process.cwd(), ".env.local");
+try {
+  const envContent = readFileSync(envPath, "utf8");
+  for (const line of envContent.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx < 0) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    let val = trimmed.slice(eqIdx + 1).trim();
+    // Strip surrounding quotes
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    if (!process.env[key]) process.env[key] = val;
+  }
+} catch {}
+import { createClient } from "@supabase/supabase-js";
+import { createDecipheriv } from "crypto";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const encryptionKey = process.env.ENCRYPTION_KEY;
 if (!supabaseUrl || !supabaseKey) throw new Error("Supabase env vars required");
+if (!encryptionKey || encryptionKey.length !== 64) throw new Error("ENCRYPTION_KEY must be a 64-char hex string");
 
 const admin = createClient(supabaseUrl, supabaseKey);
 
-// AES-256-GCM decrypt (mirrors src/lib/crypto.ts)
-async function decrypt(encrypted: string): Promise<string> {
-  const crypto = await import("crypto");
-  const buf = Buffer.from(encrypted, "base64");
-  const iv = buf.subarray(0, 12);
-  const tag = buf.subarray(buf.length - 16);
-  const ciphertext = buf.subarray(12, buf.length - 16);
-  const key = Buffer.from(ENCRYPTION_KEY!, "hex");
-  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+function decrypt(encrypted: string): string {
+  const [ivHex, tagHex, ciphertextHex] = encrypted.split(":");
+  const iv = Buffer.from(ivHex, "hex");
+  const tag = Buffer.from(tagHex, "hex");
+  const ciphertext = Buffer.from(ciphertextHex, "hex");
+  const key = Buffer.from(encryptionKey!, "hex");
+  const decipher = createDecipheriv("aes-256-gcm", key, iv);
   decipher.setAuthTag(tag);
-  return decipher.update(ciphertext, undefined, "utf8") + decipher.final("utf8");
+  return decipher.update(ciphertext).toString("utf8") + decipher.final("utf8");
 }
 
 interface AmplifierOrder {
@@ -119,15 +136,15 @@ async function main() {
     const apiKey = await decrypt(ws.amplifier_api_key_encrypted);
     const authHeader = "Basic " + Buffer.from(apiKey + ":").toString("base64");
 
-    // Fetch recent unfulfilled orders missing amplifier_order_id (last 3 days, exclude partial)
-    const threeDaysAgo = new Date(Date.now() - 3 * 86400000).toISOString();
+    // Fetch recent unfulfilled/partial orders missing amplifier_order_id (last 7 days)
+    const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString();
     const { data: dbOrders } = await admin
       .from("orders")
       .select("id, order_number")
       .eq("workspace_id", ws.id)
       .is("amplifier_order_id", null)
-      .gte("created_at", threeDaysAgo)
-      .or("fulfillment_status.is.null,fulfillment_status.eq.unfulfilled")
+      .gte("created_at", sevenDaysAgo)
+      .not("fulfillment_status", "ilike", "fulfilled")
       .not("financial_status", "ilike", "pending");
 
     if (!dbOrders?.length) {
