@@ -332,6 +332,42 @@ export async function POST(
       }
     }
 
+    // Standalone account linking — stop here and re-trigger AI for clarification
+    if (metadata.standaloneAccountLinking && session.ticket_id) {
+      await admin.from("journey_sessions").update({
+        status: "completed", completed_at: new Date().toISOString(),
+      }).eq("id", session.id);
+
+      // Re-open ticket and re-trigger AI draft with full combined context
+      await admin.from("tickets").update({
+        status: "open",
+        handled_by: null,
+        needs_clarification: true,
+      }).eq("id", session.ticket_id);
+
+      await admin.from("ticket_messages").insert({
+        ticket_id: session.ticket_id,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: "[System] Account linking completed. Re-triggering AI with combined customer context.",
+      });
+
+      // Fire AI draft to generate clarification question
+      const { inngest } = await import("@/lib/inngest/client");
+      await inngest.send({
+        name: "ai/draft-ticket",
+        data: {
+          ticket_id: session.ticket_id,
+          workspace_id: wsId,
+          channel: "email",
+          delay_seconds: 0,
+        },
+      });
+
+      return NextResponse.json({ ok: true, completed: true, action: "account_linking_complete" });
+    }
+
     // Get the main customer profile for marketing subscription
     const mainCustomerId = (metadata.customerId as string) || allCustomerIds[0];
     const shopifyCustomerId = metadata.shopifyCustomerId as string;
