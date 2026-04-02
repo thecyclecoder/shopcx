@@ -146,12 +146,6 @@ export default function PortalAnalyticsPage() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  useEffect(() => {
-    const handler = () => { fetchData(); };
-    window.addEventListener("pull-to-refresh", handler);
-    return () => window.removeEventListener("pull-to-refresh", handler);
-  }, [fetchData]);
-
   const s = data?.summary;
 
   return (

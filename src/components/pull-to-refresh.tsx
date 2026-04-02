@@ -12,6 +12,7 @@ export default function PullToRefresh({ children }: { children: ReactNode }) {
   const [pulling, setPulling] = useState(false);
   const [pullDistance, setPullDistance] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
   const startY = useRef(0);
   const isDragging = useRef(false);
 
@@ -47,8 +48,8 @@ export default function PullToRefresh({ children }: { children: ReactNode }) {
       setRefreshing(true);
       setPullDistance(THRESHOLD);
       router.refresh();
-      // Also reload client-side data by dispatching a custom event
-      window.dispatchEvent(new CustomEvent("pull-to-refresh"));
+      // Increment key to force remount all children — re-runs all useEffects/fetches
+      setRefreshKey(k => k + 1);
       setTimeout(() => {
         setRefreshing(false);
         setPulling(false);
@@ -99,8 +100,8 @@ export default function PullToRefresh({ children }: { children: ReactNode }) {
           </div>
         </div>
       )}
-      {/* Content shifted down during pull */}
-      <div style={{ transform: pulling ? `translateY(${pullDistance}px)` : "none", transition: pulling ? "none" : "transform 0.2s ease" }}>
+      {/* Content shifted down during pull — key forces full remount on refresh */}
+      <div key={refreshKey} style={{ transform: pulling ? `translateY(${pullDistance}px)` : "none", transition: pulling ? "none" : "transform 0.2s ease" }}>
         {children}
       </div>
     </div>

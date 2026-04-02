@@ -131,13 +131,6 @@ export default function OrdersPage() {
 
   useEffect(() => { fetchCounts(); }, [fetchCounts]);
 
-  // Refresh counts on pull-to-refresh
-  useEffect(() => {
-    const handler = () => { fetchCounts(); };
-    window.addEventListener("pull-to-refresh", handler);
-    return () => window.removeEventListener("pull-to-refresh", handler);
-  }, [fetchCounts]);
-
   const fetchOrders = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams({
