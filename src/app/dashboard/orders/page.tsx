@@ -123,11 +123,20 @@ export default function OrdersPage() {
   const [offset, setOffset] = useState(0);
 
   // Fetch counts
-  useEffect(() => {
+  const fetchCounts = useCallback(() => {
     fetch(`/api/workspaces/${workspace.id}/orders?counts=true`)
       .then(r => r.json())
       .then(data => { if (data.counts) setCounts(data.counts); });
   }, [workspace.id]);
+
+  useEffect(() => { fetchCounts(); }, [fetchCounts]);
+
+  // Refresh counts on pull-to-refresh
+  useEffect(() => {
+    const handler = () => { fetchCounts(); };
+    window.addEventListener("pull-to-refresh", handler);
+    return () => window.removeEventListener("pull-to-refresh", handler);
+  }, [fetchCounts]);
 
   const fetchOrders = useCallback(async () => {
     setLoading(true);
