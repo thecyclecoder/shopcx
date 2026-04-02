@@ -703,7 +703,7 @@ export default function TicketDetailPage() {
   }
 
   return (
-    <div className="flex h-full flex-1 flex-col overflow-x-hidden overflow-y-hidden md:flex-row">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
       {/* Mobile section selector */}
       <div className="flex items-center gap-2 border-b border-zinc-200 bg-white px-3 py-2 md:hidden dark:border-zinc-800 dark:bg-zinc-900">
         <button onClick={() => router.push("/dashboard/tickets")} className="text-zinc-400">
@@ -1339,7 +1339,7 @@ export default function TicketDetailPage() {
           </div>
         )}
 
-        {/* Reply composer — pinned to bottom (hidden for archived tickets) */}
+        {/* Reply composer — pinned to bottom */}
         {ticket.status !== "archived" && (
         <>
         <div className={`shrink-0 border-t border-zinc-200 bg-white pb-4 dark:border-zinc-800 dark:bg-zinc-900 ${editorFocused ? "px-3 pt-3" : "px-3 pt-2"}`}>

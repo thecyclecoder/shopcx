@@ -101,7 +101,7 @@ export default function PullToRefresh({ children }: { children: ReactNode }) {
         </div>
       )}
       {/* Content shifted down during pull — key forces full remount on refresh */}
-      <div key={refreshKey} style={{ transform: pulling ? `translateY(${pullDistance}px)` : "none", transition: pulling ? "none" : "transform 0.2s ease" }}>
+      <div key={refreshKey} className="flex h-full flex-col" style={{ transform: pulling ? `translateY(${pullDistance}px)` : "none", transition: pulling ? "none" : "transform 0.2s ease" }}>
         {children}
       </div>
     </div>
