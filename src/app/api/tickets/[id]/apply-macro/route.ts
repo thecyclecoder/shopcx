@@ -72,6 +72,15 @@ export async function POST(
 
   const parts: string[] = [];
   parts.push("Personalize this macro response for the customer. Keep the core message but adapt the tone and include relevant customer details.");
+  parts.push("\nFORMATTING RULES:");
+  parts.push("- Maximum 2-3 sentences per paragraph. Each new point or shift in direction gets its own paragraph.");
+  parts.push("- Separate paragraphs with a blank line.");
+  parts.push("- Do NOT use markdown (no **, __, bullet points, headers). Plain text only.");
+  parts.push("- Your response should NEVER be longer than the original macro. Match its length. If the macro is 3 sentences, your personalized version should be about 3 sentences.");
+  parts.push("- Do NOT add extra explanation, caveats, or filler that wasn't in the original macro.");
+  if (channel === "chat" || channel === "sms" || channel === "meta_dm") {
+    parts.push(`- CHANNEL: This is ${channel}. Keep it shorter than the macro — 1-2 sentences max. Conversational and direct.`);
+  }
   if (personality) {
     parts.push(`\nTone: ${personality.tone}`);
     if (personality.style_instructions) parts.push(`Style: ${personality.style_instructions}`);

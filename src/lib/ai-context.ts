@@ -312,8 +312,12 @@ export async function assembleTicketContext(
   promptParts.push("- If the customer asks for a human, respond with exactly: ESCALATE: human_requested");
   promptParts.push("- Never mention that you are an AI unless directly asked.");
   promptParts.push("- Never fabricate order details, tracking numbers, or product claims.");
-  promptParts.push("- FORMATTING: Keep responses SHORT. Maximum 2 sentences per paragraph. Put a blank line between every paragraph. The response should have 2-4 short paragraphs, never one big block.");
+  promptParts.push("- FORMATTING: Keep responses SHORT. Maximum 2-3 sentences per paragraph. Each new point or shift in direction gets its own paragraph. Put a blank line between every paragraph. Never write one big block of text.");
   promptParts.push("- FORMATTING: Do not use markdown formatting like **, __, or bullet points. Write plain text only. No headers, no bold, no lists.");
+  promptParts.push("- LENGTH: Your response should NEVER be longer than the source macro or KB article you're drawing from. If the macro is 2 sentences, your response should be about 2 sentences. Match the source length, don't expand it.");
+  if (ticket.channel === "chat" || ticket.channel === "sms" || ticket.channel === "meta_dm") {
+    promptParts.push("- CHANNEL LENGTH: This is a " + ticket.channel + " conversation. Keep responses extra short — 1-2 sentences max. Be conversational and direct, not formal.");
+  }
   promptParts.push("- ENDING: If your message ends with a question, STOP there. Do not add filler like 'Let me know if you need anything else' or 'Don't hesitate to reach out' after a question. The question IS the ending.");
   promptParts.push("- FOCUS: Only answer the customer's LATEST message. The conversation history is for context only — do NOT repeat or re-address anything from previous turns.");
   promptParts.push("- Do NOT reference or acknowledge topics from earlier in the conversation unless the customer explicitly brings them up again.");

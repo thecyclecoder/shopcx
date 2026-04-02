@@ -354,6 +354,16 @@ function buildSystemPrompt(
     parts.push("--- END MATCH QUALITY ---");
   }
 
+  // Formatting rules
+  parts.push("\n--- FORMATTING RULES ---");
+  parts.push("- Maximum 2-3 sentences per paragraph. Each new point gets its own paragraph. Separate paragraphs with a blank line.");
+  parts.push("- Do NOT use markdown (no **, __, bullet points, headers). Plain text only.");
+  parts.push("- Your response should NEVER be longer than the source macro or KB article. If the macro is 2 sentences, your draft should be about 2 sentences. Match the source length.");
+  if (channelConfig.channel === "chat" || channelConfig.channel === "sms" || channelConfig.channel === "meta_dm") {
+    parts.push(`- CHANNEL: This is ${channelConfig.channel}. Keep it extra short — 1-2 sentences max. Conversational and direct, not formal.`);
+  }
+  parts.push("--- END FORMATTING RULES ---");
+
   // Output format
   parts.push('\nRespond with JSON: { "draft": "your response to the customer", "confidence": 0.XX, "reasoning": "brief explanation of what you matched and why" }');
   parts.push("\nConfidence guidelines — be GENEROUS with confidence when you have good source material:");
