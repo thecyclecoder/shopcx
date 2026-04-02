@@ -79,14 +79,13 @@ export async function GET(
 
     // Run all count queries in parallel — each matches its filter query exactly
     const [syncRes, suspRes, transitRes, deliveredRes, refundedRes, awaitingTrackingRes, lateTrackingCandidates] = await Promise.all([
-      // Sync errors
-      base().is("amplifier_order_id", null)
-        .is("sync_resolved_at", null)
-        .not("fulfillment_status", "ilike", "fulfilled")
-        .not("financial_status", "ilike", "refunded")
-        .not("financial_status", "ilike", "partially_refunded")
-        .lt("created_at", sixHoursAgo)
-        .not("tags", "ilike", "%suspicious%"),
+      // Sync errors: awaiting tracking criteria + no amplifier UUID + older than 6 hours
+      base()
+        .eq("financial_status", "paid")
+        .or("fulfillment_status.is.null,fulfillment_status.neq.fulfilled")
+        .not("tags", "ilike", "%suspicious%")
+        .is("amplifier_order_id", null)
+        .lt("created_at", sixHoursAgo),
       // Suspicious
       base().ilike("tags", "%suspicious%")
         .not("fulfillment_status", "ilike", "fulfilled"),
@@ -155,13 +154,11 @@ export async function GET(
   // Apply filters
   if (filter === "sync_error") {
     query = query
+      .eq("financial_status", "paid")
+      .or("fulfillment_status.is.null,fulfillment_status.neq.fulfilled")
+      .not("tags", "ilike", "%suspicious%")
       .is("amplifier_order_id", null)
-      .is("sync_resolved_at", null)
-      .not("fulfillment_status", "ilike", "fulfilled")
-      .not("financial_status", "ilike", "refunded")
-      .not("financial_status", "ilike", "partially_refunded")
-      .lt("created_at", sixHoursAgo)
-      .not("tags", "ilike", "%suspicious%");
+      .lt("created_at", sixHoursAgo);
   } else if (filter === "suspicious") {
     query = query
       .ilike("tags", "%suspicious%")
