@@ -119,12 +119,15 @@ async function main() {
     const apiKey = await decrypt(ws.amplifier_api_key_encrypted);
     const authHeader = "Basic " + Buffer.from(apiKey + ":").toString("base64");
 
-    // Fetch our orders that are missing amplifier_order_id (need this first to know when to stop)
+    // Fetch recent unfulfilled orders missing amplifier_order_id (last 3 days, exclude partial)
+    const threeDaysAgo = new Date(Date.now() - 3 * 86400000).toISOString();
     const { data: dbOrders } = await admin
       .from("orders")
       .select("id, order_number")
       .eq("workspace_id", ws.id)
       .is("amplifier_order_id", null)
+      .gte("created_at", threeDaysAgo)
+      .or("fulfillment_status.is.null,fulfillment_status.eq.unfulfilled")
       .not("financial_status", "ilike", "pending");
 
     if (!dbOrders?.length) {
