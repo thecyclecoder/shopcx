@@ -63,6 +63,14 @@ export async function generateAIDraft(
     .order("created_at", { ascending: true });
 
   const channel = (context.ticket.channel as string) || "email";
+  const customerMessages = (messages || []).filter((m) => m.direction === "inbound");
+  const lastMessage = customerMessages[customerMessages.length - 1];
+
+  // 1b. Proactive account linking check — before generating any draft
+  if (context.customer?.id && !context.ticket.profile_link_completed) {
+    const linkResult = await checkProactiveAccountLinking(admin, workspaceId, ticketId, context.customer, lastMessage?.body || "");
+    if (linkResult) return linkResult;
+  }
 
   // 2. Get channel config + personality
   const { data: channelConfig } = await admin
@@ -95,8 +103,6 @@ export async function generateAIDraft(
     .order("priority", { ascending: false });
 
   // 4. Build query from latest customer message
-  const customerMessages = (messages || []).filter((m) => m.direction === "inbound");
-  const lastMessage = customerMessages[customerMessages.length - 1];
   const query = [context.ticket.subject, lastMessage?.body].filter(Boolean).join(" ");
 
   // 5. RAG retrieval — find matching macros and KB articles
@@ -229,6 +235,88 @@ export async function generateAIDraft(
     ai_workflow_id: workflowMatch?.id || null,
     reasoning: result.reasoning,
     sandbox: channelConfig.sandbox,
+  };
+}
+
+// ── Proactive Account Linking ──
+// Before generating a normal AI draft, check if this customer has potential
+// duplicate profiles. If so, generate an empathetic response + account linking
+// prompt instead of the normal draft flow.
+
+async function checkProactiveAccountLinking(
+  admin: ReturnType<typeof import("@/lib/supabase/admin").createAdminClient>,
+  workspaceId: string,
+  ticketId: string,
+  customer: { id: string; email?: string; first_name?: string; last_name?: string },
+  customerMessage: string,
+): Promise<AIDraftResult | null> {
+  if (!customer.last_name || customer.last_name.length < 2) return null;
+
+  // Check if already linked
+  const { data: existingLink } = await admin.from("customer_links").select("group_id").eq("customer_id", customer.id).single();
+  const excludeIds = [customer.id];
+  if (existingLink) {
+    const { data: groupMembers } = await admin.from("customer_links").select("customer_id").eq("group_id", existingLink.group_id);
+    for (const m of groupMembers || []) excludeIds.push(m.customer_id);
+  }
+
+  // Check for rejected suggestions
+  const { data: rejections } = await admin.from("customer_link_rejections").select("rejected_customer_id").eq("customer_id", customer.id);
+  const rejectedIds = (rejections || []).map(r => r.rejected_customer_id);
+
+  // Find potential duplicates — same last name + similar first name
+  const { data: candidates } = await admin.from("customers")
+    .select("id, email, first_name, last_name, ltv_cents, total_orders")
+    .eq("workspace_id", workspaceId)
+    .ilike("last_name", customer.last_name)
+    .limit(20);
+
+  const matches = (candidates || []).filter(c => {
+    if (excludeIds.includes(c.id) || rejectedIds.includes(c.id)) return false;
+    if (c.email === customer.email) return false;
+    if (!customer.first_name) return true; // Same last name, no first name to compare
+    if (!c.first_name) return false;
+    const a = customer.first_name.toLowerCase();
+    const b = c.first_name.toLowerCase();
+    return a === b || a.startsWith(b) || b.startsWith(a);
+  });
+
+  if (matches.length === 0) return null;
+
+  // Found potential duplicates — generate an account-linking response
+  const firstName = customer.first_name || "there";
+  const emailList = matches.map(m => m.email).join(", ");
+
+  const draft = `Hi ${firstName}, I'm sorry to hear you're having trouble — I want to make sure I can help you properly.\n\nI noticed we may have a few different accounts associated with your name. Could you confirm if any of these emails also belong to you?\n\n${matches.map(m => `• ${m.email}`).join("\n")}\n\nThis will help me pull up your complete order history so I can see everything and get this resolved for you.`;
+
+  // Tag the ticket so we know account linking was offered
+  const { data: ticket } = await admin.from("tickets").select("tags").eq("id", ticketId).single();
+  const existingTags: string[] = ticket?.tags || [];
+  if (!existingTags.includes("ai:linking_offered")) {
+    await admin.from("tickets").update({ tags: [...existingTags, "ai:linking_offered"] }).eq("id", ticketId);
+  }
+
+  // Store draft on ticket
+  await admin.from("tickets").update({
+    ai_draft: draft,
+    ai_confidence: 0.85,
+    ai_tier: "review",
+    ai_source_type: null,
+    ai_source_id: null,
+    ai_drafted_at: new Date().toISOString(),
+    pending_auto_reply: null,
+    auto_reply_at: null,
+  }).eq("id", ticketId);
+
+  return {
+    draft,
+    confidence: 0.85,
+    tier: "review", // Agent should review before sending (account linking is sensitive)
+    source_type: null,
+    source_id: null,
+    ai_workflow_id: null,
+    reasoning: `Found ${matches.length} potential duplicate profile(s): ${emailList}. Generated account linking prompt.`,
+    sandbox: true, // Always sandbox for account linking drafts
   };
 }
 
