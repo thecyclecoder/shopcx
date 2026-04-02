@@ -100,7 +100,7 @@ export async function GET(
       // Awaiting tracking: paid + not fulfilled (unfulfilled/partial/null) + not suspicious
       base()
         .eq("financial_status", "paid")
-        .not("fulfillment_status", "ilike", "fulfilled")
+        .or("fulfillment_status.is.null,fulfillment_status.neq.fulfilled")
         .not("tags", "ilike", "%suspicious%"),
       // Late tracking: Amplifier orders past SLA (need JS split)
       admin.from("orders")
@@ -201,11 +201,11 @@ export async function GET(
   };
   const sortCol = validSorts[sort] || "created_at";
 
-  // Awaiting tracking: paid + not fulfilled + not suspicious
+  // Awaiting tracking: paid + not fulfilled (null/partial/unfulfilled) + not suspicious
   if (filter === "awaiting_tracking") {
     query = query
       .eq("financial_status", "paid")
-      .not("fulfillment_status", "ilike", "fulfilled")
+      .or("fulfillment_status.is.null,fulfillment_status.neq.fulfilled")
       .not("tags", "ilike", "%suspicious%")
       .order(sortCol, { ascending: order === "asc" })
       .range(offset, offset + limit - 1);
