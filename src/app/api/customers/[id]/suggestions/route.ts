@@ -128,18 +128,28 @@ export async function GET(
     }
   }
 
-  // 4. Match by first name + last name (exact, case-insensitive)
-  if (customer.first_name && customer.last_name && customer.first_name.length > 1 && customer.last_name.length > 1) {
-    const { data: nameMatches } = await admin
+  // 4. Match by last name + same or similar first name
+  if (customer.last_name && customer.last_name.length > 1) {
+    const { data: lastNameMatches } = await admin
       .from("customers")
       .select("id, email, first_name, last_name, phone")
       .eq("workspace_id", workspaceId)
-      .ilike("first_name", customer.first_name)
       .ilike("last_name", customer.last_name)
-      .limit(5);
+      .limit(20);
 
-    for (const m of nameMatches || []) {
-      addSuggestion(m, "Same name");
+    for (const m of lastNameMatches || []) {
+      if (!customer.first_name || !m.first_name) {
+        addSuggestion(m, "Same last name");
+        continue;
+      }
+      const a = customer.first_name.toLowerCase();
+      const b = m.first_name.toLowerCase();
+      if (a === b) {
+        addSuggestion(m, "Same name");
+      } else if (a.startsWith(b) || b.startsWith(a)) {
+        // Fuzzy: "Elvi" matches "Elvira", "Rob" matches "Robert"
+        addSuggestion(m, "Similar name");
+      }
     }
   }
 
