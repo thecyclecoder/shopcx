@@ -25,6 +25,7 @@ import { sendTicketReply } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { markFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
+import { matchPlaybook, startPlaybook, executePlaybookStep } from "@/lib/playbook-executor";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -203,6 +204,8 @@ async function handlerNames(admin: Admin, wsId: string, hasCust: boolean, ch: st
   if (hasCust && !social) {
     const { data: j } = await admin.from("journey_definitions").select("name, trigger_intent").eq("workspace_id", wsId).eq("is_active", true);
     for (const x of j || []) parts.push(`Journey: ${x.name} (intent: ${x.trigger_intent || "n/a"})`);
+    const { data: pb } = await admin.from("playbooks").select("name, trigger_intents").eq("workspace_id", wsId).eq("is_active", true);
+    for (const x of pb || []) parts.push(`Playbook: ${x.name} (intents: ${(x.trigger_intents as string[]).join(", ") || "n/a"})`);
     const { data: w } = await admin.from("workflows").select("name, trigger_tag").eq("workspace_id", wsId).eq("enabled", true);
     for (const x of w || []) parts.push(`Workflow: ${x.name} (tag: ${x.trigger_tag || "n/a"})`);
   }
@@ -331,6 +334,84 @@ export const unifiedTicketHandler = inngest.createFunction(
         return { status: "journey_renudged", journey: nudged.entry.journey_name };
       }
       if (nudged?.action === "escalate") return { status: "escalated", reason: "journey_declined" };
+    }
+
+    // ── 3b. Active playbook — skip normal pipeline, execute next step ──
+    if (!isNew) {
+      const pbActive = await step.run("check-playbook", async () => {
+        const { data: t } = await admin.from("tickets").select("active_playbook_id").eq("id", tid).single();
+        return t?.active_playbook_id || null;
+      });
+
+      if (pbActive) {
+        const delay = await step.run("playbook-delay", () => responseDelay(admin, wsId, st.ch));
+        if (delay > 0) await step.sleep("playbook-wait", `${delay}s`);
+
+        const pbResult = await step.run("exec-playbook-step", async () => {
+          if (await newerActivity(admin, tid, t0)) return { action: "cancelled" as const };
+          return executePlaybookStep(wsId, tid, msg, pers);
+        });
+
+        if (pbResult.action === "cancelled") return { status: "cancelled" };
+
+        // Log system note
+        if (pbResult.systemNote) await step.run("pb-note", () => sysNote(admin, tid, pbResult.systemNote!));
+
+        // Send response if one was generated
+        if (pbResult.response) {
+          await step.run("pb-send", () => send(admin, wsId, tid, st.ch, pbResult.response!, cfg.sandbox));
+        }
+
+        // Handle API failure escalation
+        if (pbResult.action === "escalate_api_failure") {
+          await step.run("pb-api-fail", async () => {
+            await sysNote(admin, tid, `[System] Playbook API failure: ${pbResult.error}. Escalating to agent.`);
+            await admin.from("tickets").update({ status: "open" }).eq("id", tid);
+            // Slack notification
+            try {
+              const { data: ws } = await admin.from("workspaces").select("slack_webhook_url").eq("id", wsId).single();
+              if (ws?.slack_webhook_url) {
+                const { data: pb } = await admin.from("playbooks").select("name").eq("id", pbActive).single();
+                const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", st.custId!).single();
+                await fetch(ws.slack_webhook_url, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ text: `🚨 *Playbook Action Failed*\nPlaybook: ${pb?.name || "Unknown"}\nCustomer: ${cust?.first_name || ""} (${cust?.email || ""})\nError: ${pbResult.error}\nTicket: https://shopcx.ai/dashboard/tickets/${tid}` }),
+                });
+              }
+            } catch {}
+          });
+          return { status: "playbook_api_failure", error: pbResult.error };
+        }
+
+        // Complete → check queue for next playbook
+        if (pbResult.action === "complete") {
+          await step.run("pb-complete", async () => {
+            const { data: t } = await admin.from("tickets").select("playbook_queue").eq("id", tid).single();
+            const queue = (t?.playbook_queue as string[]) || [];
+            if (queue.length > 0) {
+              const nextId = queue[0];
+              const remaining = queue.slice(1);
+              await startPlaybook(admin, tid, nextId);
+              await admin.from("tickets").update({ playbook_queue: remaining }).eq("id", tid);
+              const { data: nextPb } = await admin.from("playbooks").select("name").eq("id", nextId).single();
+              await sysNote(admin, tid, `[System] Starting queued playbook: ${nextPb?.name || nextId}`);
+            } else {
+              await admin.from("tickets").update({
+                active_playbook_id: null, playbook_step: 0,
+                playbook_context: {}, playbook_exceptions_used: 0,
+                status: pbResult.response ? "pending" : "closed",
+              }).eq("id", tid);
+            }
+          });
+        } else if (pbResult.action === "respond") {
+          // Waiting for customer reply — set to pending
+          await step.run("pb-pending", () =>
+            admin.from("tickets").update({ status: "pending" }).eq("id", tid));
+        }
+
+        return { status: "playbook_step", action: pbResult.action };
+      }
     }
 
     // ── 4. Positive close ──
@@ -533,7 +614,32 @@ async function routeExec(
     }
   }
 
-  // 2. Workflow
+  // 2. Playbook
+  if (hasCust && !social) {
+    const pbMatch = await matchPlaybook(admin, wsId, intent, msg);
+    if (pbMatch) {
+      await sysNote(admin, tid, `[System] → Playbook: ${pbMatch.name} (${conf}%)`);
+      await startPlaybook(admin, tid, pbMatch.id);
+      await admin.from("tickets").update({ handled_by: `Playbook: ${pbMatch.name}` }).eq("id", tid);
+      await addTicketTag(tid, `pb:${pbMatch.name.toLowerCase().replace(/\s+/g, "_")}`);
+      await markFirstTouch(tid, "ai");
+
+      // Execute first step immediately
+      if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
+      if (await newerActivity(admin, tid, t0)) return;
+      const result = await executePlaybookStep(wsId, tid, msg, pers);
+      if (result.systemNote) await sysNote(admin, tid, result.systemNote);
+      if (result.response) await send(admin, wsId, tid, ch, result.response, cfg.sandbox);
+      if (result.action === "respond") {
+        await admin.from("tickets").update({ status: "pending" }).eq("id", tid);
+      } else {
+        await setStatus(admin, tid, cfg.auto_resolve);
+      }
+      return;
+    }
+  }
+
+  // 3. Workflow
   if (hasCust && !social) {
     const { data: wfs } = await admin.from("workflows").select("id, name, trigger_tag").eq("workspace_id", wsId).eq("enabled", true);
     for (const w of wfs || []) {
