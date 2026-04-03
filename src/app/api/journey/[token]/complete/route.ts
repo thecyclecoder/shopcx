@@ -413,8 +413,8 @@ export async function POST(
     return NextResponse.json({ success: true, message });
   }
 
-  // Process multi-step discount journey responses
-  if (config.multiStep && responses && outcome !== "declined") {
+  // Process multi-step discount journey responses (legacy — only for non-codeDriven sessions)
+  if (config.multiStep && !config.codeDriven && responses && outcome !== "declined") {
     const metadata = (config.metadata || {}) as Record<string, unknown>;
     const allCustomerIds = (metadata.allCustomerIds as string[]) || [];
     const wsId = session.workspace_id;
