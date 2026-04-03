@@ -31,6 +31,143 @@ export async function POST(
   if (!outcome) return NextResponse.json({ error: "outcome required" }, { status: 400 });
 
   const config = session.config_snapshot as Record<string, unknown> || {};
+  const journeyType = config.journeyType as string || null;
+
+  // ── Code-driven journey completion (step-builder based) ──
+  if (config.codeDriven && journeyType) {
+    const wsId = session.workspace_id;
+    const actionLog: string[] = [];
+    const metadata = (config.metadata || {}) as Record<string, unknown>;
+
+    if (journeyType === "account_linking") {
+      const unlinked = (metadata.unlinkedMatches as { id: string; email: string }[]) || [];
+      const existingGroupId = (metadata.existingGroupId as string) || null;
+      const linkResponse = responses?.link_accounts;
+      const confirmResponse = responses?.confirm_link;
+
+      if (confirmResponse?.value === "yes" && linkResponse?.value) {
+        const confirmedIds = linkResponse.value.split(",").map((v: string) => v.trim()).filter(Boolean);
+        const confirmedSet = new Set(confirmedIds);
+
+        if (confirmedIds.length > 0) {
+          const { randomUUID } = await import("crypto");
+          const groupId = existingGroupId || randomUUID();
+
+          // Link the primary customer if not already linked
+          if (!existingGroupId) {
+            await admin.from("customer_links").upsert({
+              customer_id: session.customer_id, workspace_id: wsId, group_id: groupId, is_primary: true,
+            }, { onConflict: "customer_id" });
+          }
+          // Link confirmed accounts
+          for (const id of confirmedIds) {
+            await admin.from("customer_links").upsert({
+              customer_id: id, workspace_id: wsId, group_id: groupId, is_primary: false,
+            }, { onConflict: "customer_id" });
+          }
+          const linkedEmails = unlinked.filter(m => confirmedSet.has(m.id)).map(m => m.email);
+          actionLog.push(`Linked accounts: ${linkedEmails.join(", ")}`);
+
+          if (session.ticket_id) {
+            const { addTicketTag } = await import("@/lib/ticket-tags");
+            await addTicketTag(session.ticket_id, "link");
+          }
+        }
+
+        // Reject non-confirmed
+        for (const m of unlinked) {
+          if (!confirmedSet.has(m.id)) {
+            await admin.from("customer_link_rejections").upsert({
+              workspace_id: wsId, customer_id: session.customer_id, rejected_customer_id: m.id,
+            }, { onConflict: "customer_id,rejected_customer_id" });
+            actionLog.push(`Rejected account: ${m.email}`);
+          }
+        }
+      } else if (confirmResponse?.value === "no" || outcome === "declined") {
+        // Reject all
+        for (const m of unlinked) {
+          await admin.from("customer_link_rejections").upsert({
+            workspace_id: wsId, customer_id: session.customer_id, rejected_customer_id: m.id,
+          }, { onConflict: "customer_id,rejected_customer_id" });
+        }
+        actionLog.push(`Rejected all ${unlinked.length} suggested accounts`);
+      }
+    }
+
+    if (journeyType === "discount_signup" || journeyType === "marketing_signup") {
+      const consentResponse = responses?.consent;
+      if (consentResponse?.value === "yes") {
+        const { data: customer } = await admin.from("customers")
+          .select("shopify_customer_id, phone").eq("id", session.customer_id).single();
+
+        if (customer?.shopify_customer_id) {
+          await subscribeToEmailMarketing(wsId, customer.shopify_customer_id);
+          await admin.from("customers").update({ email_marketing_status: "subscribed" }).eq("id", session.customer_id);
+          actionLog.push("Email marketing: subscribed");
+
+          const phoneInput = responses?.phone?.value?.trim().replace(/[\s\-\(\)\.]/g, "") || "";
+          const phone = phoneInput ? (phoneInput.startsWith("+") ? phoneInput : `+1${phoneInput.replace(/^1/, "")}`) : customer.phone;
+          if (phone) {
+            if (phoneInput && !customer.phone) {
+              await admin.from("customers").update({ phone }).eq("id", session.customer_id);
+            }
+            await subscribeToSmsMarketing(wsId, customer.shopify_customer_id, phone);
+            await admin.from("customers").update({ sms_marketing_status: "subscribed" }).eq("id", session.customer_id);
+            actionLog.push(`SMS marketing: subscribed (${phone})`);
+          }
+        }
+      } else {
+        actionLog.push("Customer declined marketing signup");
+      }
+    }
+
+    // Post internal note with all actions
+    if (session.ticket_id && actionLog.length > 0) {
+      await admin.from("ticket_messages").insert({
+        ticket_id: session.ticket_id,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: `[System] Journey "${journeyType}" completed:\n${actionLog.map(a => `• ${a}`).join("\n")}`,
+      });
+    }
+
+    // Update journey_history on ticket
+    if (session.ticket_id) {
+      const { data: ticketData } = await admin.from("tickets").select("journey_history").eq("id", session.ticket_id).single();
+      const history = (ticketData?.journey_history as { journey_id: string; completed: boolean }[]) || [];
+      const entry = history.find(h => h.journey_id === session.journey_id);
+      if (entry) entry.completed = true;
+      await admin.from("tickets").update({ journey_history: history }).eq("id", session.ticket_id);
+
+      const { addTicketTag } = await import("@/lib/ticket-tags");
+      await addTicketTag(session.ticket_id, outcome === "declined" ? "jo:negative" : "jo:positive");
+    }
+
+    // Mark session completed
+    await admin.from("journey_sessions").update({
+      status: "completed",
+      completed_at: new Date().toISOString(),
+      outcome,
+      responses,
+    }).eq("id", session.id);
+
+    // Re-trigger unified handler so AI can process the original request
+    if (session.ticket_id && journeyType === "account_linking" && outcome !== "declined") {
+      await inngest.send({
+        name: "ticket/inbound-message",
+        data: {
+          workspace_id: wsId,
+          ticket_id: session.ticket_id,
+          message_body: "[Account linking completed — re-processing original request]",
+          channel: "email",
+          is_new_ticket: false,
+        },
+      });
+    }
+
+    return NextResponse.json({ success: true, message: actionLog.length > 0 ? "All done! We've updated your account." : "Thanks for letting us know!" });
+  }
 
   // Process cancel journey completion
   if (config.cancelJourney) {
