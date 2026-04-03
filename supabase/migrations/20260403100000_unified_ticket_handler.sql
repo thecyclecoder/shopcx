@@ -28,9 +28,12 @@ DO $$ BEGIN
     ON public.escalation_gaps FOR ALL TO service_role USING (true) WITH CHECK (true);
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
-CREATE POLICY "Members can view escalation_gaps"
-  ON public.escalation_gaps FOR SELECT TO authenticated
-  USING (workspace_id IN (SELECT workspace_id FROM public.workspace_members WHERE user_id = auth.uid()));
+DO $$ BEGIN
+  CREATE POLICY "Members can view escalation_gaps"
+    ON public.escalation_gaps FOR SELECT TO authenticated
+    USING (workspace_id IN (SELECT workspace_id FROM public.workspace_members WHERE user_id = auth.uid()));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Add escalation_gap to notification types
 ALTER TABLE public.dashboard_notifications
