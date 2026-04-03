@@ -107,4 +107,8 @@ CREATE TABLE IF NOT EXISTS public.escalation_gaps (
 );
 
 ALTER TABLE public.escalation_gaps ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Service role full on escalation_gaps" ON public.escalation_gaps FOR ALL TO service_role USING (true) WITH CHECK (true);
+-- Policy may already exist from unified handler migration
+DO $$ BEGIN
+  CREATE POLICY "Service role full on escalation_gaps" ON public.escalation_gaps FOR ALL TO service_role USING (true) WITH CHECK (true);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
