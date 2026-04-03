@@ -152,15 +152,32 @@ export async function POST(
       responses,
     }).eq("id", session.id);
 
-    // Re-trigger unified handler so AI can process the original request
+    // Re-trigger unified handler with the ORIGINAL customer message
     if (session.ticket_id && journeyType === "account_linking" && outcome !== "declined") {
+      // Find the first inbound customer message on this ticket
+      const { data: originalMsg } = await admin.from("ticket_messages")
+        .select("body")
+        .eq("ticket_id", session.ticket_id)
+        .eq("direction", "inbound")
+        .eq("author_type", "customer")
+        .order("created_at", { ascending: true })
+        .limit(1).single();
+
+      const { data: ticketInfo } = await admin.from("tickets")
+        .select("channel").eq("id", session.ticket_id).single();
+
+      await admin.from("ticket_messages").insert({
+        ticket_id: session.ticket_id, direction: "outbound", visibility: "internal",
+        author_type: "system", body: "[System] Account linking completed. Re-processing original request with enriched context.",
+      });
+
       await inngest.send({
         name: "ticket/inbound-message",
         data: {
           workspace_id: wsId,
           ticket_id: session.ticket_id,
-          message_body: "[Account linking completed — re-processing original request]",
-          channel: "email",
+          message_body: originalMsg?.body || "",
+          channel: ticketInfo?.channel || "email",
           is_new_ticket: false,
         },
       });
