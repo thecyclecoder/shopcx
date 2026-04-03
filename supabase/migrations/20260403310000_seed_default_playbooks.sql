@@ -1,4 +1,17 @@
 -- Seed default playbooks for workspace fdc11e10-b89f-4989-8b73-ed6526c4d906
+-- Idempotent: skips if playbooks already exist
+
+DO $$
+DECLARE
+  ws_id UUID := 'fdc11e10-b89f-4989-8b73-ed6526c4d906';
+  existing_count INTEGER;
+BEGIN
+  SELECT COUNT(*) INTO existing_count FROM public.playbooks WHERE workspace_id = ws_id;
+  IF existing_count > 0 THEN
+    RAISE NOTICE 'Playbooks already exist, skipping seed';
+    RETURN;
+  END IF;
+END $$;
 
 DO $$
 DECLARE
