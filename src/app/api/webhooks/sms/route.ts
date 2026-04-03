@@ -166,11 +166,13 @@ export async function POST(request: Request) {
 
       if (aiConfig?.enabled && (isAutoHandled || isUnassigned)) {
         await inngest.send({
-          name: "ai/reply-received",
+          name: "ticket/inbound-message",
           data: {
             workspace_id: workspaceId,
             ticket_id: ticketId,
             message_body: messageBody,
+            channel: "sms",
+            is_new_ticket: false,
           },
         });
       }
@@ -220,8 +222,8 @@ export async function POST(request: Request) {
         }).eq("id", ticket.id);
 
         await inngest.send({
-          name: "ai/draft-ticket",
-          data: { workspace_id: workspaceId, ticket_id: ticket.id, channel: "sms", delay_seconds: delaySec },
+          name: "ticket/inbound-message",
+          data: { workspace_id: workspaceId, ticket_id: ticket.id, message_body: messageBody, channel: "sms", is_new_ticket: true },
         });
       }
 

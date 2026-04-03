@@ -284,11 +284,13 @@ export async function POST(request: Request) {
 
       if (aiConfig?.enabled && (isAutoHandled || isUnassigned)) {
         await inngest.send({
-          name: "ai/reply-received",
+          name: "ticket/inbound-message",
           data: {
             workspace_id: workspaceId,
             ticket_id: ticketId,
             message_body: cleanBody,
+            channel: "email",
+            is_new_ticket: false,
           },
         });
       } else if (ticketData.assigned_to) {
@@ -501,8 +503,8 @@ export async function POST(request: Request) {
 
           // Fire AI draft via Inngest (respects delay inside the function)
           await inngest.send({
-            name: "ai/draft-ticket",
-            data: { workspace_id: workspaceId, ticket_id: ticket.id, channel: "email", delay_seconds: aiDelaySec },
+            name: "ticket/inbound-message",
+            data: { workspace_id: workspaceId, ticket_id: ticket.id, message_body: messageBody || subject || "", channel: "email", is_new_ticket: true },
           });
         }
       }

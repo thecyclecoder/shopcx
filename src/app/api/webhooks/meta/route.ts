@@ -129,10 +129,10 @@ export async function POST(request: Request) {
             last_customer_reply_at: new Date().toISOString(),
           }).eq("id", existingTicket.id);
 
-          // Trigger AI multi-turn
+          // Trigger unified handler
           await inngest.send({
-            name: "ticket/customer.replied",
-            data: { ticket_id: existingTicket.id, workspace_id: workspace.id },
+            name: "ticket/inbound-message",
+            data: { workspace_id: workspace.id, ticket_id: existingTicket.id, message_body: messageText, channel: "meta_dm", is_new_ticket: false },
           });
         } else {
           // Create new ticket
@@ -155,10 +155,10 @@ export async function POST(request: Request) {
               meta_message_id: messageId,
             });
 
-            // Trigger AI
+            // Trigger unified handler
             await inngest.send({
-              name: "ticket/customer.replied",
-              data: { ticket_id: ticket.id, workspace_id: workspace.id },
+              name: "ticket/inbound-message",
+              data: { workspace_id: workspace.id, ticket_id: ticket.id, message_body: messageText, channel: "meta_dm", is_new_ticket: true },
             });
           }
         }
@@ -205,10 +205,10 @@ export async function POST(request: Request) {
             meta_message_id: commentId,
           });
 
-          // Trigger AI with turn limit 1 for comments
+          // Trigger unified handler (social comments = macro only)
           await inngest.send({
-            name: "ticket/customer.replied",
-            data: { ticket_id: ticket.id, workspace_id: workspace.id },
+            name: "ticket/inbound-message",
+            data: { workspace_id: workspace.id, ticket_id: ticket.id, message_body: commentText, channel: "social_comments", is_new_ticket: true },
           });
         }
       }
