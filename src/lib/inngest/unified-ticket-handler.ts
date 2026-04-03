@@ -24,7 +24,7 @@ import { matchPatterns } from "@/lib/pattern-matcher";
 import { sendTicketReply } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { markFirstTouch } from "@/lib/first-touch";
-import { buildCombinedEmailJourney } from "@/lib/email-journey-builder";
+import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -138,6 +138,31 @@ async function kbResponse(article: string, title: string, msg: string, ch: strin
 Question: "${msg}"
 KB "${title}": ${article.slice(0, 1500)}
 Only your response.`, "haiku", 200)) || article.slice(0, 500);
+}
+
+async function generateJourneyLeadIn(msg: string, journeyName: string, ch: string, p: { name?: string; tone?: string } | null): Promise<{ leadIn: string; ctaText: string }> {
+  const short = ["chat", "sms", "meta_dm"].includes(ch);
+  const persona = p ? `Your name is ${p.name}. Tone: ${p.tone}.` : "You are a friendly support agent.";
+  const raw = await claude(`${persona} Never reveal AI. Customer sent: "${msg}". You're routing them to a "${journeyName}" form.
+
+Write two things:
+1. A brief lead-in message (${short ? "1 sentence" : "2-3 sentences"}) that acknowledges their message tone and naturally introduces why they need to use the form. Match their energy — if angry, be empathetic; if casual, be casual.
+2. A CTA button label (3-5 words, action-oriented, specific to their request).
+
+Return JSON: { "lead_in": "...", "cta_text": "..." }`, "haiku", 150);
+  try {
+    const parsed = JSON.parse(raw.replace(/^```json?\n?/, "").replace(/\n?```$/, ""));
+    return { leadIn: parsed.lead_in || `Let me help you with that.`, ctaText: parsed.cta_text || `${journeyName} →` };
+  } catch {
+    return { leadIn: `Let me help you with that.`, ctaText: `${journeyName} →` };
+  }
+}
+
+async function generatePositiveClose(msg: string, ch: string, p: { name?: string; tone?: string; sign_off?: string | null } | null, autoCloseReply: string | null): Promise<string> {
+  const short = ["chat", "sms", "meta_dm"].includes(ch);
+  const persona = p ? `Your name is ${p.name}. Tone: ${p.tone}.` : "You are a friendly support agent.";
+  const raw = await claude(`${persona} Never reveal AI. Customer sent a positive closing message: "${msg}". Write a brief, warm closing reply. ${short ? "Max 1 sentence." : "Max 2 sentences."} ${p?.sign_off ? `End with: ${p.sign_off}` : ""} Only the reply, no markdown.`, "haiku", 60);
+  return raw || autoCloseReply || (p?.sign_off ? `You're welcome! ${p.sign_off}` : "You're welcome! Let us know if you need anything else.");
 }
 
 // ── Send & Status ──
@@ -256,30 +281,71 @@ export const unifiedTicketHandler = inngest.createFunction(
         const { data: jd } = await admin.from("journey_definitions").select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "account_linking").eq("is_active", true).limit(1).single();
         if (!jd) return false;
         await sysNote(admin, tid, `[System] Potential unlinked accounts. Launching account linking.`);
-        await buildCombinedEmailJourney({ workspaceId: wsId, ticketId: tid, customerId: st.custId!, matchedJourneyIntent: "account_linking", matchedJourneyId: jd.id });
-        await addTicketTag(tid, "j:account_linking"); await markFirstTouch(tid, "journey");
-        await admin.from("tickets").update({ handled_by: `Journey: ${jd.name}` }).eq("id", tid);
+        const { leadIn, ctaText } = await generateJourneyLeadIn(msg, "Account Linking", st.ch, pers);
+        await launchJourneyForTicket({
+          workspaceId: wsId, ticketId: tid, customerId: st.custId!,
+          journeyId: jd.id, journeyName: jd.name, triggerIntent: "account_linking",
+          channel: st.ch, leadIn, ctaText,
+        });
         await setStatus(admin, tid, cfg.auto_resolve);
         return true;
       });
       if (linked) return { status: "account_linking" };
     }
 
-    // ── 3. Positive close ──
-    if (!isNew && st.handledBy) {
-      const closed = await step.run("positive-close", async () => {
-        const auto = st.handledBy === "AI Agent" || st.handledBy.startsWith("Workflow:") || st.handledBy.startsWith("Journey:");
-        if (!auto || !isPositive(msg)) return false;
-        const delay = await responseDelay(admin, wsId, st.ch);
-        if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
-        if (await newerActivity(admin, tid, t0)) return false;
-        const closing = pers?.sign_off ? `You're welcome! ${pers.sign_off}` : "You're welcome! Let us know if you need anything else.";
-        await send(admin, wsId, tid, st.ch, closing, cfg.sandbox);
-        await setStatus(admin, tid, true);
-        await sysNote(admin, tid, `[System] Positive close. Ticket closed.`);
-        return true;
+    // ── 3. Journey re-nudge detection ──
+    if (!isNew && st.handledBy?.startsWith("Journey:")) {
+      const nudged = await step.run("check-journey-nudge", async () => {
+        const { data: ticketData } = await admin.from("tickets").select("journey_history").eq("id", tid).single();
+        const history = (ticketData?.journey_history as { journey_id: string; journey_name: string; nudged_at: string | null; completed: boolean }[]) || [];
+        const activeJourney = history.find(h => !h.completed);
+        if (!activeJourney) return null;
+
+        if (!activeJourney.nudged_at) {
+          // First re-nudge
+          await sysNote(admin, tid, `[System] Customer replied without completing journey "${activeJourney.journey_name}". Re-nudging.`);
+          return { action: "nudge" as const, entry: activeJourney };
+        } else {
+          // Already nudged once → escalate
+          await sysNote(admin, tid, `[System] Customer declined journey "${activeJourney.journey_name}" after re-nudge. Escalating.`);
+          await admin.from("tickets").update({ status: "open", ai_clarification_turn: 0 }).eq("id", tid);
+          return { action: "escalate" as const, entry: activeJourney };
+        }
       });
-      if (closed) return { status: "positive_close" };
+
+      if (nudged?.action === "nudge") {
+        const delay = await step.run("nudge-delay", () => responseDelay(admin, wsId, st.ch));
+        if (delay > 0) await step.sleep("nudge-wait", `${delay}s`);
+        await step.run("send-nudge", async () => {
+          if (await newerActivity(admin, tid, t0)) return;
+          await nudgeJourney(wsId, tid, nudged.entry, st.ch, msg, pers);
+        });
+        return { status: "journey_renudged", journey: nudged.entry.journey_name };
+      }
+      if (nudged?.action === "escalate") return { status: "escalated", reason: "journey_declined" };
+    }
+
+    // ── 4. Positive close ──
+    if (!isNew && st.handledBy) {
+      const isClose = await step.run("check-positive-close", async () => {
+        const auto = st.handledBy === "AI Agent" || st.handledBy.startsWith("Workflow:") || st.handledBy.startsWith("Journey:");
+        if (!auto) return false;
+        return isPositive(msg);
+      });
+
+      if (isClose) {
+        const delay = await step.run("close-delay", () => responseDelay(admin, wsId, st.ch));
+        if (delay > 0) await step.sleep("close-wait", `${delay}s`);
+        await step.run("send-close", async () => {
+          if (await newerActivity(admin, tid, t0)) return;
+          const { data: ws } = await admin.from("workspaces").select("auto_close_reply").eq("id", wsId).single();
+          const closing = await generatePositiveClose(msg, st.ch, pers, ws?.auto_close_reply || null);
+          await send(admin, wsId, tid, st.ch, closing, cfg.sandbox);
+          await setStatus(admin, tid, true);
+          await sysNote(admin, tid, `[System] Positive close. Ticket closed.`);
+        });
+        return { status: "positive_close" };
+      }
     }
 
     // ── 4. Clarification mode ──
@@ -348,16 +414,18 @@ export const unifiedTicketHandler = inngest.createFunction(
       });
 
       if (patternRouted) {
+        const pDelay = await step.run("pattern-delay-calc", () => responseDelay(admin, wsId, st.ch));
+        if (pDelay > 0) await step.sleep("pattern-delay", `${pDelay}s`);
         await step.run("exec-pattern", async () => {
-          const delay = await responseDelay(admin, wsId, st.ch);
-          if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
           if (await newerActivity(admin, tid, t0)) return;
           if (patternRouted.type === "journey") {
             const { data: t } = await admin.from("tickets").select("customer_id").eq("id", tid).single();
-            await buildCombinedEmailJourney({ workspaceId: wsId, ticketId: tid, customerId: t?.customer_id || undefined, matchedJourneyIntent: patternRouted.intent, matchedJourneyId: patternRouted.id });
-            await addTicketTag(tid, `j:${patternRouted.name.toLowerCase().replace(/\s+/g, "_")}`);
-            await markFirstTouch(tid, "journey");
-            await admin.from("tickets").update({ handled_by: `Journey: ${patternRouted.name}`, ai_clarification_turn: 0 }).eq("id", tid);
+            const { leadIn, ctaText } = await generateJourneyLeadIn(msg, patternRouted.name, st.ch, pers);
+            await launchJourneyForTicket({
+              workspaceId: wsId, ticketId: tid, customerId: t?.customer_id || "",
+              journeyId: patternRouted.id, journeyName: patternRouted.name,
+              triggerIntent: patternRouted.intent, channel: st.ch, leadIn, ctaText,
+            });
           } else {
             const { executeWorkflow } = await import("@/lib/workflow-executor");
             await executeWorkflow(wsId, tid, pmatch.tag!);
@@ -445,10 +513,12 @@ async function routeExec(
         if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
         if (await newerActivity(admin, tid, t0)) return;
         const { data: t } = await admin.from("tickets").select("customer_id").eq("id", tid).single();
-        await buildCombinedEmailJourney({ workspaceId: wsId, ticketId: tid, customerId: t?.customer_id || undefined, matchedJourneyIntent: j.trigger_intent || intent, matchedJourneyId: j.id });
-        await addTicketTag(tid, `j:${j.name.toLowerCase().replace(/\s+/g, "_")}`);
-        await markFirstTouch(tid, "journey");
-        await admin.from("tickets").update({ handled_by: `Journey: ${j.name}` }).eq("id", tid);
+        const { leadIn, ctaText } = await generateJourneyLeadIn(msg, j.name, ch, pers);
+        await launchJourneyForTicket({
+          workspaceId: wsId, ticketId: tid, customerId: t?.customer_id || "",
+          journeyId: j.id, journeyName: j.name, triggerIntent: j.trigger_intent || intent,
+          channel: ch, leadIn, ctaText,
+        });
         await setStatus(admin, tid, cfg.auto_resolve);
         return;
       }
