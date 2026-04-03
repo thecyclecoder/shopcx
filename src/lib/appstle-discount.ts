@@ -82,14 +82,32 @@ export async function applyDiscountWithReplace(
     return { success: false, removed, error: `Appstle API error: ${res.status}`, status: res.status };
   }
 
-  // Step 3: Update local DB immediately with the new discount
-  // We store what we know — the webhook will reconcile with full details later
+  // Step 3: Parse the response to get the real discount ID and details
   const admin = createAdminClient();
+  let appliedDiscounts: StoredDiscount[] = [];
+
+  try {
+    const data = await res.json();
+    const discountEdges = (data?.discounts?.edges || data?.discounts?.nodes || []) as { node?: Record<string, unknown> }[];
+    const nodes = discountEdges.map(e => e.node || e).filter(Boolean);
+
+    appliedDiscounts = (nodes as Record<string, unknown>[]).map(node => {
+      const val = node.value as Record<string, unknown> | undefined;
+      return {
+        id: (node.id as string) || "",
+        title: (node.title as string) || discountCode,
+        type: (node.type as string) || "CODE_DISCOUNT",
+        value: val?.percentage ? Number(val.percentage) : val?.amount ? Number(val.amount) : 0,
+        valueType: val?.percentage ? "PERCENTAGE" : "FIXED_AMOUNT",
+      };
+    });
+  } catch {
+    // Fallback if response isn't JSON (204 no content)
+    appliedDiscounts = [{ id: "", title: discountCode, type: "CODE_DISCOUNT", value: 0, valueType: "UNKNOWN" }];
+  }
+
   await admin.from("subscriptions")
-    .update({
-      applied_discounts: [{ id: "", title: discountCode, type: "CODE_DISCOUNT", value: 0, valueType: "UNKNOWN" }],
-      updated_at: new Date().toISOString(),
-    })
+    .update({ applied_discounts: appliedDiscounts, updated_at: new Date().toISOString() })
     .eq("shopify_contract_id", contractId);
 
   return { success: true, removed };
