@@ -1,479 +1,519 @@
 /**
- * Unified Ticket Handler
+ * Unified Ticket Handler v2
  *
- * Single entry point for ALL inbound messages across all channels.
- * Pipeline: resolve customer → check linking → check state → classify intent → confidence gate → route
+ * Single pipeline for ALL inbound messages, all channels.
  *
- * Priority: Account linking → Journey → Workflow → Macro → KB article → Escalate
+ * 1. Resolve customer
+ * 2. Account linking (always, no confidence needed)
+ * 3. Positive close detection
+ * 4. Clarification mode (Sonnet on turn 2+)
+ * 5. Pattern match first (deterministic)
+ * 6. AI classify intent (Haiku backup)
+ * 7. Confidence gate (per-channel)
+ * 8. Route: journey → workflow → macro → KB → escalate
+ * 9. Response delay (per-channel, pre-send stale check)
+ * 10. Send (sandbox = draft, live = send)
+ * 11. Status (auto_resolve → closed, else → pending)
  */
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assembleTicketContext } from "@/lib/ai-context";
 import { retrieveContext } from "@/lib/rag";
+import { matchPatterns } from "@/lib/pattern-matcher";
 import { sendTicketReply } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { markFirstTouch } from "@/lib/first-touch";
 import { buildCombinedEmailJourney } from "@/lib/email-journey-builder";
 
-// ── Types ──
+type Admin = ReturnType<typeof createAdminClient>;
 
-interface InboundEvent {
-  workspace_id: string;
-  ticket_id: string;
-  message_body: string;
-  channel: string;
-  is_new_ticket: boolean;
-}
+// ── Constants ──
+
+const POSITIVE_PHRASES = [
+  "thanks", "thank you", "thank u", "thx", "ty", "got it", "great",
+  "perfect", "awesome", "wonderful", "appreciate", "that helps",
+  "all good", "all set", "sounds good", "ok great", "ok thanks",
+  "ok thank you", "ok cool", "understood", "noted", "good to know",
+  "excellent", "much appreciated", "cool thanks", "love it",
+];
+const MAX_CLARIFY = 3;
 
 // ── Helpers ──
 
-function toHtmlParagraphs(text: string): string {
-  return text.split(/\n\n+/).map(p => p.trim()).filter(Boolean)
-    .map(p => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
+const toHtml = (t: string) => t.split(/\n\n+/).map(p => p.trim()).filter(Boolean).map(p => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
+
+const sysNote = (admin: Admin, tid: string, msg: string) =>
+  admin.from("ticket_messages").insert({ ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "system", body: msg });
+
+function isPositive(body: string): boolean {
+  const c = body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").toLowerCase()
+    .split(/(?:sent from|get outlook|on .+ wrote:|from:|----)/)[0].trim();
+  return c.split(/\s+/).length <= 50 && POSITIVE_PHRASES.some(p => c.includes(p));
 }
 
-function postInternalNote(admin: ReturnType<typeof createAdminClient>, ticketId: string, note: string) {
-  return admin.from("ticket_messages").insert({
-    ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system", body: note,
-  });
-}
-
-async function getChannelConfig(admin: ReturnType<typeof createAdminClient>, workspaceId: string, channel: string) {
-  const { data } = await admin.from("ai_channel_config")
-    .select("enabled, confidence_threshold, auto_resolve, sandbox, ticket_status_after_ai")
-    .eq("workspace_id", workspaceId).eq("channel", channel).single();
-  return {
-    enabled: data?.enabled ?? true,
-    confidence_threshold: data?.confidence_threshold ?? 70,
-    auto_resolve: data?.auto_resolve ?? false,
-    sandbox: data?.sandbox ?? true,
-    ticket_status_after_ai: data?.ticket_status_after_ai || "closed",
-  };
-}
-
-function isAccountRelatedIntent(intent: string): boolean {
-  return ["order", "subscription", "cancel", "billing", "refund", "return", "exchange", "address", "payment", "account", "delivery", "shipping", "tracking"]
+function isAccountRelated(intent: string): boolean {
+  return ["order", "subscription", "cancel", "billing", "refund", "return", "exchange",
+    "address", "payment", "account", "delivery", "shipping", "tracking"]
     .some(k => intent.toLowerCase().includes(k));
 }
 
-// ── AI Calls ──
+async function channelCfg(admin: Admin, wsId: string, ch: string) {
+  const { data } = await admin.from("ai_channel_config")
+    .select("enabled, confidence_threshold, auto_resolve, sandbox, personality_id, instructions, ai_turn_limit")
+    .eq("workspace_id", wsId).eq("channel", ch).single();
+  return {
+    enabled: data?.enabled ?? true, threshold: data?.confidence_threshold ?? 70,
+    auto_resolve: data?.auto_resolve ?? false, sandbox: data?.sandbox ?? true,
+    personality_id: data?.personality_id || null,
+  };
+}
 
-async function callClaude(prompt: string, maxTokens = 200): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return "{}";
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] }),
+async function loadPersonality(admin: Admin, pid: string | null) {
+  if (!pid) return null;
+  const { data } = await admin.from("ai_personalities")
+    .select("name, tone, style_instructions, sign_off, greeting, emoji_usage").eq("id", pid).single();
+  return data;
+}
+
+async function responseDelay(admin: Admin, wsId: string, ch: string): Promise<number> {
+  const { data } = await admin.from("workspaces").select("response_delays").eq("id", wsId).single();
+  const d = (data?.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5, social_comments: 10 }) as Record<string, number>;
+  return d[ch] || d.email || 60;
+}
+
+async function newerActivity(admin: Admin, tid: string, since: string): Promise<boolean> {
+  const { data } = await admin.from("ticket_messages").select("id")
+    .eq("ticket_id", tid).or("author_type.eq.customer,author_type.eq.agent").gt("created_at", since).limit(1);
+  return (data?.length || 0) > 0;
+}
+
+// ── AI ──
+
+async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max = 200): Promise<string> {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return "";
+  const mid = model === "sonnet" ? "claude-sonnet-4-5-20250514" : "claude-haiku-4-5-20251001";
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST", headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+    body: JSON.stringify({ model: mid, max_tokens: max, messages: [{ role: "user", content: prompt }] }),
   });
-  if (!res.ok) return "";
-  const data = await res.json();
-  return (data.content?.[0] as { text: string })?.text?.trim() || "";
+  if (!r.ok) return "";
+  const d = await r.json();
+  return (d.content?.[0] as { text: string })?.text?.trim() || "";
 }
 
-async function classifyIntent(messageBody: string, customerCtx: string, history: string, handlerNames: string): Promise<{ intent: string; confidence: number; reasoning: string; handler_type: string; handler_name: string }> {
-  const raw = await callClaude(`You are an intent classifier for customer support. Given the message, customer context, and available handlers, identify the intent.
+async function classifyIntent(msg: string, ctx: string, hist: string, handlers: string, model: "haiku" | "sonnet" = "haiku") {
+  const raw = await claude(`You are an intent classifier for customer support.
 
-Customer message: "${messageBody}"
-${customerCtx ? `Customer context:\n${customerCtx}\n` : "No customer found."}
-${history ? `Conversation:\n${history}\n` : ""}
-Available handlers:\n${handlerNames || "None"}
+Customer message: "${msg}"
+${ctx ? `Customer:\n${ctx}\n` : "No customer found."}
+${hist ? `Conversation:\n${hist}\n` : ""}
+Handlers:\n${handlers || "None"}
 
-Return JSON only: { "intent": "brief label", "confidence": 0-100, "reasoning": "one sentence", "handler_type": "journey|workflow|macro|none", "handler_name": "name or null" }`);
-
-  try {
-    return JSON.parse(raw.replace(/^```json?\n?/, "").replace(/\n?```$/, ""));
-  } catch {
-    return { intent: "unknown", confidence: 0, reasoning: "parse error", handler_type: "none", handler_name: "" };
-  }
+Return JSON: { "intent": "brief label", "confidence": 0-100, "reasoning": "one sentence" }`, model);
+  try { return JSON.parse(raw.replace(/^```json?\n?/, "").replace(/\n?```$/, "")); }
+  catch { return { intent: "unknown", confidence: 0, reasoning: "parse error" }; }
 }
 
-async function generateClarification(messageBody: string, intent: string, confidence: number, channel: string): Promise<string> {
-  const short = ["chat", "sms", "meta_dm"].includes(channel);
-  const raw = await callClaude(`You are a customer support agent (never reveal AI). Customer sent: "${messageBody}". Best guess: "${intent}" (${confidence}% confidence). Ask ONE specific clarifying question. ${short ? "Max 20 words." : "Max 30 words."} Return only the question.`, 80);
-  return raw || "Could you tell me a bit more about what you need help with?";
+async function clarifyQ(msg: string, intent: string, conf: number, ch: string, p: { name?: string; tone?: string } | null) {
+  const short = ["chat", "sms", "meta_dm"].includes(ch);
+  const persona = p ? `Your name is ${p.name}. Tone: ${p.tone}.` : "You are a friendly support agent.";
+  return (await claude(`${persona} Never reveal AI. Customer: "${msg}". Guess: "${intent}" (${conf}%). Ask ONE clarifying question. ${short ? "Max 20 words." : "Max 30 words."} Only the question.`, "haiku", 80))
+    || "Could you tell me a bit more about what you need help with?";
 }
 
-async function personalizeMacro(content: string, customerCtx: string, messageBody: string, channel: string): Promise<string> {
-  const short = ["chat", "sms", "meta_dm"].includes(channel);
-  const raw = await callClaude(`Lightly personalize this support response. Insert customer name/order details where natural. Do NOT make it longer or more verbose. ${short ? "Keep very short." : ""}
-
+async function personalizeMacroText(content: string, ctx: string, msg: string, ch: string, p: { tone?: string } | null) {
+  const short = ["chat", "sms", "meta_dm"].includes(ch);
+  return (await claude(`Lightly personalize. Insert name/order details. Do NOT make longer. ${p?.tone ? `Tone: ${p.tone}.` : ""} ${short ? "Very short." : ""}
 Original: ${content}
-Customer message: "${messageBody}"
-${customerCtx ? `Customer: ${customerCtx.slice(0, 300)}` : ""}
-
-Return only the personalized response. No markdown.`, 300);
-  return raw || content;
+Customer: "${msg}"
+${ctx ? `Context: ${ctx.slice(0, 300)}` : ""}
+Only the response. No markdown.`, "haiku", 300)) || content;
 }
 
-async function craftKBResponse(article: string, title: string, messageBody: string, channel: string): Promise<string> {
-  const short = ["chat", "sms", "meta_dm"].includes(channel);
-  const raw = await callClaude(`Answer the customer's question using ONLY this KB article. Extract the relevant answer. ${short ? "Max 2 sentences." : "Max 3-4 sentences."} No markdown. Be a human agent.
-
-Question: "${messageBody}"
+async function kbResponse(article: string, title: string, msg: string, ch: string, p: { tone?: string } | null) {
+  const short = ["chat", "sms", "meta_dm"].includes(ch);
+  return (await claude(`Answer using ONLY this KB article. Extract relevant answer. ${short ? "Max 2 sentences." : "Max 3-4 sentences."} No markdown. ${p?.tone ? `Tone: ${p.tone}.` : ""}
+Question: "${msg}"
 KB "${title}": ${article.slice(0, 1500)}
-
-Return only your response.`, 200);
-  return raw || article.slice(0, 500);
+Only your response.`, "haiku", 200)) || article.slice(0, 500);
 }
 
-// ── Send Response ──
+// ── Send & Status ──
 
-async function sendResponse(admin: ReturnType<typeof createAdminClient>, workspaceId: string, ticketId: string, channel: string, message: string) {
-  const html = toHtmlParagraphs(message);
-  const { data: ws } = await admin.from("workspaces").select("sandbox_mode").eq("id", workspaceId).single();
-  const config = await getChannelConfig(admin, workspaceId, channel);
-  const sandbox = ws?.sandbox_mode || config.sandbox;
-
+async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: string, sandbox: boolean) {
+  const html = toHtml(msg);
   if (sandbox) {
-    await admin.from("ticket_messages").insert({
-      ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "ai", body: `[AI Draft] ${html}`,
-    });
+    await admin.from("ticket_messages").insert({ ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "ai", body: `[AI Draft] ${html}` });
   } else {
-    await admin.from("ticket_messages").insert({
-      ticket_id: ticketId, direction: "outbound", visibility: "external", author_type: "ai", body: html,
-    });
-    if (channel === "email") {
-      const { data: ticket } = await admin.from("tickets")
-        .select("subject, customers(email)")
-        .eq("id", ticketId).single();
-      const email = (ticket?.customers as unknown as { email: string })?.email;
+    await admin.from("ticket_messages").insert({ ticket_id: tid, direction: "outbound", visibility: "external", author_type: "ai", body: html });
+    if (ch === "email") {
+      const { data: t } = await admin.from("tickets").select("subject, customers(email)").eq("id", tid).single();
+      const email = (t?.customers as unknown as { email: string })?.email;
       if (email) {
-        const { data: wsName } = await admin.from("workspaces").select("name").eq("id", workspaceId).single();
-        await sendTicketReply({
-          workspaceId, toEmail: email, subject: ticket?.subject || "Re: Your request",
-          body: html, inReplyTo: ticketId, agentName: "Support", workspaceName: wsName?.name || "",
-        });
+        const { data: ws } = await admin.from("workspaces").select("name").eq("id", wsId).single();
+        await sendTicketReply({ workspaceId: wsId, toEmail: email, subject: t?.subject || "Re: Your request", body: html, inReplyTo: tid, agentName: "Support", workspaceName: ws?.name || "" });
       }
     }
   }
 }
 
-// ── Main Handler ──
+const setStatus = (admin: Admin, tid: string, autoResolve: boolean) =>
+  admin.from("tickets").update({ status: autoResolve ? "closed" : "pending" }).eq("id", tid);
 
-export const unifiedTicketHandler = inngest.createFunction(
-  {
-    id: "unified-ticket-handler",
-    retries: 1,
-    concurrency: [{ limit: 1, key: "event.data.ticket_id" }],
-    triggers: [{ event: "ticket/inbound-message" }],
-  },
-  async ({ event, step }) => {
-    const { workspace_id, ticket_id, message_body, channel, is_new_ticket } = event.data as InboundEvent;
-    const admin = createAdminClient();
+// ── Handler names for AI context ──
 
-    // ── Step 1: Resolve state ──
-    const state = await step.run("resolve-state", async () => {
-      const { data: ticket } = await admin.from("tickets")
-        .select("customer_id, channel, ai_clarification_turn, ai_detected_intent, agent_intervened")
-        .eq("id", ticket_id).single();
-      if (!ticket) throw new Error("Ticket not found");
-
-      let customer: { id: string; email: string; first_name: string | null; shopify_customer_id: string | null } | null = null;
-      if (ticket.customer_id) {
-        const { data } = await admin.from("customers")
-          .select("id, email, first_name, shopify_customer_id")
-          .eq("id", ticket.customer_id).single();
-        customer = data;
-      }
-
-      if (customer && is_new_ticket) {
-        await postInternalNote(admin, ticket_id, `[System] Customer resolved: ${customer.first_name || ""} (${customer.email})`);
-      } else if (!customer && is_new_ticket) {
-        await postInternalNote(admin, ticket_id, `[System] No customer match found`);
-      }
-
-      return {
-        hasCustomer: !!customer,
-        customerId: customer?.id || null,
-        shopifyCustomerId: customer?.shopify_customer_id || null,
-        ch: ticket.channel || channel,
-        clarifyTurn: ticket.ai_clarification_turn || 0,
-        agentIntervened: !!ticket.agent_intervened,
-      };
-    });
-
-    if (state.agentIntervened) return { status: "skipped", reason: "agent_intervened" };
-
-    // ── Step 2: Check for potential account linking (supercedes everything) ──
-    if (state.hasCustomer && is_new_ticket) {
-      const needsLinking = await step.run("check-account-linking", async () => {
-        const { data: links } = await admin.from("customer_links")
-          .select("group_id").eq("customer_id", state.customerId!);
-        if (links?.length) return false; // Already linked
-
-        // Check for potential matches by email domain, phone, name
-        const { data: customer } = await admin.from("customers")
-          .select("email, phone, first_name, last_name")
-          .eq("id", state.customerId!).single();
-        if (!customer) return false;
-
-        // Look for other customers with same phone or similar email
-        const conditions: string[] = [];
-        if (customer.phone) conditions.push(`phone.eq.${customer.phone}`);
-        const emailParts = customer.email?.split("@");
-        if (emailParts?.[0]) conditions.push(`email.ilike.${emailParts[0]}@%`);
-
-        if (!conditions.length) return false;
-
-        const { data: potentialMatches } = await admin.from("customers")
-          .select("id")
-          .eq("workspace_id", workspace_id)
-          .neq("id", state.customerId!)
-          .or(conditions.join(","))
-          .limit(1);
-
-        return (potentialMatches?.length || 0) > 0;
-      });
-
-      if (needsLinking) {
-        const launched = await step.run("launch-account-linking", async () => {
-          const { data: linkJourney } = await admin.from("journey_definitions")
-            .select("id, name")
-            .eq("workspace_id", workspace_id)
-            .eq("trigger_intent", "account_linking")
-            .eq("enabled", true)
-            .limit(1).single();
-
-          if (!linkJourney) return false;
-
-          await postInternalNote(admin, ticket_id,
-            `[System] Potential unlinked accounts detected. Launching account linking journey before processing request.`);
-
-          await buildCombinedEmailJourney({
-            workspaceId: workspace_id, ticketId: ticket_id, customerId: state.customerId!,
-            matchedJourneyIntent: "account_linking", matchedJourneyId: linkJourney.id,
-          });
-          await addTicketTag(ticket_id, "j:account_linking");
-          await markFirstTouch(ticket_id, "journey");
-          await admin.from("tickets").update({ handled_by: `Journey: ${linkJourney.name}` }).eq("id", ticket_id);
-
-          const config = await getChannelConfig(admin, workspace_id, state.ch);
-          await admin.from("tickets").update({ status: config.ticket_status_after_ai }).eq("id", ticket_id);
-          return true;
-        });
-
-        if (launched) return { status: "account_linking_launched" };
-      }
-    }
-
-    // ── Step 3: Clarification mode ──
-    if (state.clarifyTurn > 0 && state.clarifyTurn < 3) {
-      return await step.run("handle-clarification", async () => {
-        const config = await getChannelConfig(admin, workspace_id, state.ch);
-        const ctx = await assembleTicketContext(workspace_id, ticket_id);
-        const customerCtx = ctx.systemPrompt.split("CUSTOMER CONTEXT:")[1]?.split("CHANNEL")[0]?.trim() || "";
-        const history = ctx.conversationHistory.map(m => `${m.role}: ${m.content}`).join("\n");
-        const handlers = await getHandlerNames(admin, workspace_id, state.hasCustomer, state.ch);
-        const intent = await classifyIntent(message_body, customerCtx, history, handlers);
-
-        await postInternalNote(admin, ticket_id,
-          `[System] AI clarification turn ${state.clarifyTurn + 1}: "${intent.intent}" (${intent.confidence}%)`);
-        await admin.from("tickets").update({ ai_detected_intent: intent.intent, ai_intent_confidence: intent.confidence }).eq("id", ticket_id);
-
-        if (intent.confidence >= config.confidence_threshold) {
-          await admin.from("tickets").update({ ai_clarification_turn: 0 }).eq("id", ticket_id);
-          await routeAndExecute(admin, workspace_id, ticket_id, state.ch, intent, message_body, customerCtx, state.hasCustomer);
-          return { status: "routed_after_clarification", handler: intent.handler_type };
-        }
-
-        const newTurn = state.clarifyTurn + 1;
-        await admin.from("tickets").update({ ai_clarification_turn: newTurn }).eq("id", ticket_id);
-
-        if (newTurn >= 3) {
-          await postInternalNote(admin, ticket_id, `[System] AI clarification limit reached (3 turns). Escalating.`);
-          await escalateToAgent(admin, workspace_id, ticket_id, state.ch, intent.intent, intent.confidence, message_body, customerCtx);
-          return { status: "escalated", reason: "clarification_limit" };
-        }
-
-        const question = await generateClarification(message_body, intent.intent, intent.confidence, state.ch);
-        await sendResponse(admin, workspace_id, ticket_id, state.ch, question);
-        await admin.from("tickets").update({ status: config.ticket_status_after_ai }).eq("id", ticket_id);
-        return { status: "clarification_sent", turn: newTurn };
-      });
-    }
-
-    // ── Step 4: Full pipeline ──
-    return await step.run("full-pipeline", async () => {
-      const config = await getChannelConfig(admin, workspace_id, state.ch);
-      if (!config.enabled) return { status: "skipped", reason: "ai_disabled" };
-
-      const ctx = await assembleTicketContext(workspace_id, ticket_id);
-      const customerCtx = ctx.systemPrompt.split("CUSTOMER CONTEXT:")[1]?.split("CHANNEL")[0]?.trim() || "";
-      const history = ctx.conversationHistory.map(m => `${m.role}: ${m.content}`).join("\n");
-      const handlers = await getHandlerNames(admin, workspace_id, state.hasCustomer, state.ch);
-      const intent = await classifyIntent(message_body, customerCtx, history, handlers);
-
-      await postInternalNote(admin, ticket_id,
-        `[System] Intent: "${intent.intent}" (${intent.confidence}%). Threshold: ${config.confidence_threshold}%`);
-      await admin.from("tickets").update({ ai_detected_intent: intent.intent, ai_intent_confidence: intent.confidence }).eq("id", ticket_id);
-
-      // No customer + account-related intent → ask for identification
-      if (!state.hasCustomer && isAccountRelatedIntent(intent.intent)) {
-        await postInternalNote(admin, ticket_id, `[System] Account-related intent but no customer. Asking for email/order number.`);
-        await admin.from("tickets").update({ ai_clarification_turn: 1 }).eq("id", ticket_id);
-        await sendResponse(admin, workspace_id, ticket_id, state.ch,
-          "I'd be happy to help! Could you share the email address or order number associated with your account so I can pull up your details?");
-        await admin.from("tickets").update({ status: config.ticket_status_after_ai }).eq("id", ticket_id);
-        return { status: "asking_for_customer" };
-      }
-
-      // Confidence gate
-      if (intent.confidence < config.confidence_threshold) {
-        await postInternalNote(admin, ticket_id,
-          `[System] Confidence ${intent.confidence}% below ${config.confidence_threshold}%. Entering clarification.`);
-        await admin.from("tickets").update({ ai_clarification_turn: 1 }).eq("id", ticket_id);
-        const question = await generateClarification(message_body, intent.intent, intent.confidence, state.ch);
-        await sendResponse(admin, workspace_id, ticket_id, state.ch, question);
-        await admin.from("tickets").update({ status: config.ticket_status_after_ai }).eq("id", ticket_id);
-        return { status: "clarification_started", confidence: intent.confidence };
-      }
-
-      // Route and execute
-      await routeAndExecute(admin, workspace_id, ticket_id, state.ch, intent, message_body, customerCtx, state.hasCustomer);
-      return { status: "routed", handler: intent.handler_type, name: intent.handler_name };
-    });
-  },
-);
-
-// ── Routing ──
-
-async function getHandlerNames(admin: ReturnType<typeof createAdminClient>, workspaceId: string, hasCustomer: boolean, channel: string): Promise<string> {
-  const isSocial = channel === "social_comments";
+async function handlerNames(admin: Admin, wsId: string, hasCust: boolean, ch: string) {
+  const social = ch === "social_comments";
   const parts: string[] = [];
-
-  if (hasCustomer && !isSocial) {
-    const { data: journeys } = await admin.from("journey_definitions")
-      .select("name, trigger_intent").eq("workspace_id", workspaceId).eq("enabled", true);
-    for (const j of journeys || []) parts.push(`Journey: ${j.name} (intent: ${j.trigger_intent || "n/a"})`);
-
-    const { data: workflows } = await admin.from("workflows")
-      .select("name, trigger_type").eq("workspace_id", workspaceId).eq("enabled", true);
-    for (const w of workflows || []) parts.push(`Workflow: ${w.name} (type: ${w.trigger_type || "n/a"})`);
+  if (hasCust && !social) {
+    const { data: j } = await admin.from("journey_definitions").select("name, trigger_intent").eq("workspace_id", wsId).eq("is_active", true);
+    for (const x of j || []) parts.push(`Journey: ${x.name} (intent: ${x.trigger_intent || "n/a"})`);
+    const { data: w } = await admin.from("workflows").select("name, trigger_tag").eq("workspace_id", wsId).eq("enabled", true);
+    for (const x of w || []) parts.push(`Workflow: ${x.name} (tag: ${x.trigger_tag || "n/a"})`);
   }
-
-  const { data: macros } = await admin.from("macros")
-    .select("name, category").eq("workspace_id", workspaceId).limit(50);
-  for (const m of macros || []) parts.push(`Macro: ${m.name}${m.category ? ` [${m.category}]` : ""}`);
-
+  const { data: m } = await admin.from("macros").select("name, category").eq("workspace_id", wsId).limit(50);
+  for (const x of m || []) parts.push(`Macro: ${x.name}${x.category ? ` [${x.category}]` : ""}`);
   return parts.join("\n");
 }
 
-async function routeAndExecute(
-  admin: ReturnType<typeof createAdminClient>,
-  workspaceId: string, ticketId: string, channel: string,
-  intent: { intent: string; confidence: number; handler_type: string; handler_name: string },
-  messageBody: string, customerCtx: string, hasCustomer: boolean,
+// ── Escalation ──
+
+async function escalate(admin: Admin, wsId: string, tid: string, ch: string, intent: string, conf: number, msg: string, ctx: string) {
+  const suggestion = conf >= 50
+    ? `AI suggests: "${intent}" (${conf}%). Check journeys/workflows for this intent.`
+    : `Unable to determine customer intent after clarification.`;
+  await sysNote(admin, tid, `[System] Escalating. ${suggestion}`);
+  const { data: t } = await admin.from("tickets").select("customer_id").eq("id", tid).single();
+  await admin.from("escalation_gaps").insert({
+    workspace_id: wsId, ticket_id: tid, customer_id: t?.customer_id || null,
+    channel: ch, detected_intent: intent, confidence: conf,
+    original_message: msg.slice(0, 2000), customer_context_summary: ctx.slice(0, 1000),
+  });
+  await admin.from("dashboard_notifications").insert({
+    workspace_id: wsId, type: "escalation_gap",
+    title: `AI escalated: ${intent || "unknown"}`, body: `"${msg.slice(0, 100)}..."`,
+    metadata: { ticket_id: tid, intent, confidence: conf },
+  });
+  await admin.from("tickets").update({ status: "open", ai_clarification_turn: 0 }).eq("id", tid);
+}
+
+// ══════════════════════════════════════════════════
+// ── MAIN ──
+// ══════════════════════════════════════════════════
+
+export const unifiedTicketHandler = inngest.createFunction(
+  { id: "unified-ticket-handler", retries: 1, concurrency: [{ limit: 1, key: "event.data.ticket_id" }], triggers: [{ event: "ticket/inbound-message" }] },
+  async ({ event, step }) => {
+    const { workspace_id: wsId, ticket_id: tid, message_body: msg, channel: ch, is_new_ticket: isNew } = event.data as {
+      workspace_id: string; ticket_id: string; message_body: string; channel: string; is_new_ticket: boolean;
+    };
+    const t0 = new Date().toISOString();
+    const admin = createAdminClient();
+
+    // ── 1. Resolve ──
+    const st = await step.run("resolve", async () => {
+      const { data: ticket } = await admin.from("tickets")
+        .select("customer_id, channel, ai_clarification_turn, handled_by, agent_intervened, subject")
+        .eq("id", tid).single();
+      if (!ticket) throw new Error("Ticket not found");
+      let cust: { id: string; email: string; first_name: string | null; phone: string | null } | null = null;
+      if (ticket.customer_id) {
+        const { data } = await admin.from("customers").select("id, email, first_name, phone").eq("id", ticket.customer_id).single();
+        cust = data;
+      }
+      if (cust && isNew) await sysNote(admin, tid, `[System] Customer: ${cust.first_name || ""} (${cust.email})`);
+      else if (!cust && isNew) await sysNote(admin, tid, `[System] No customer match`);
+      return {
+        hasCust: !!cust, custId: cust?.id || null,
+        ch: ticket.channel || ch, turn: ticket.ai_clarification_turn || 0,
+        intervened: !!ticket.agent_intervened, handledBy: ticket.handled_by || "",
+        subject: ticket.subject || "",
+      };
+    });
+
+    if (st.intervened) return { status: "skipped", reason: "agent_intervened" };
+
+    const cfg = await step.run("config", () => channelCfg(admin, wsId, st.ch));
+    if (!cfg.enabled) return { status: "skipped", reason: "ai_disabled" };
+    const pers = await step.run("personality", () => loadPersonality(admin, cfg.personality_id));
+
+    // ── 2. Account linking (supercedes all, no confidence) ──
+    if (st.hasCust && isNew) {
+      const linked = await step.run("check-linking", async () => {
+        const { data: existing } = await admin.from("customer_links").select("group_id").eq("customer_id", st.custId!);
+        if (existing?.length) return false;
+        const { data: c } = await admin.from("customers").select("email, phone").eq("id", st.custId!).single();
+        if (!c) return false;
+        const conds: string[] = [];
+        if (c.phone) conds.push(`phone.eq.${c.phone}`);
+        const local = c.email?.split("@")[0];
+        if (local) conds.push(`email.ilike.${local}@%`);
+        if (!conds.length) return false;
+        const { data: m } = await admin.from("customers").select("id").eq("workspace_id", wsId).neq("id", st.custId!).or(conds.join(",")).limit(1);
+        if (!m?.length) return false;
+        const { data: jd } = await admin.from("journey_definitions").select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "account_linking").eq("is_active", true).limit(1).single();
+        if (!jd) return false;
+        await sysNote(admin, tid, `[System] Potential unlinked accounts. Launching account linking.`);
+        await buildCombinedEmailJourney({ workspaceId: wsId, ticketId: tid, customerId: st.custId!, matchedJourneyIntent: "account_linking", matchedJourneyId: jd.id });
+        await addTicketTag(tid, "j:account_linking"); await markFirstTouch(tid, "journey");
+        await admin.from("tickets").update({ handled_by: `Journey: ${jd.name}` }).eq("id", tid);
+        await setStatus(admin, tid, cfg.auto_resolve);
+        return true;
+      });
+      if (linked) return { status: "account_linking" };
+    }
+
+    // ── 3. Positive close ──
+    if (!isNew && st.handledBy) {
+      const closed = await step.run("positive-close", async () => {
+        const auto = st.handledBy === "AI Agent" || st.handledBy.startsWith("Workflow:") || st.handledBy.startsWith("Journey:");
+        if (!auto || !isPositive(msg)) return false;
+        const delay = await responseDelay(admin, wsId, st.ch);
+        if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
+        if (await newerActivity(admin, tid, t0)) return false;
+        const closing = pers?.sign_off ? `You're welcome! ${pers.sign_off}` : "You're welcome! Let us know if you need anything else.";
+        await send(admin, wsId, tid, st.ch, closing, cfg.sandbox);
+        await setStatus(admin, tid, true);
+        await sysNote(admin, tid, `[System] Positive close. Ticket closed.`);
+        return true;
+      });
+      if (closed) return { status: "positive_close" };
+    }
+
+    // ── 4. Clarification mode ──
+    if (st.turn > 0 && st.turn < MAX_CLARIFY) {
+      return await step.run("clarify", async () => {
+        const model = st.turn >= 1 ? "sonnet" as const : "haiku" as const;
+        const ctx = await assembleTicketContext(wsId, tid);
+        const custCtx = ctx.systemPrompt.split("CUSTOMER CONTEXT:")[1]?.split("CHANNEL")[0]?.trim() || "";
+        const hist = ctx.conversationHistory.map(m => `${m.role}: ${m.content}`).join("\n");
+        const hNames = await handlerNames(admin, wsId, st.hasCust, st.ch);
+        const intent = await classifyIntent(msg, custCtx, hist, hNames, model);
+        await sysNote(admin, tid, `[System] Clarify turn ${st.turn + 1}: "${intent.intent}" (${intent.confidence}%) [${model}]`);
+        await admin.from("tickets").update({ ai_detected_intent: intent.intent, ai_intent_confidence: intent.confidence }).eq("id", tid);
+
+        if (intent.confidence >= cfg.threshold) {
+          await admin.from("tickets").update({ ai_clarification_turn: 0 }).eq("id", tid);
+          await routeExec(admin, wsId, tid, st.ch, intent.intent, intent.confidence, msg, custCtx, st.hasCust, cfg, pers, t0);
+          return { status: "routed_after_clarify", intent: intent.intent };
+        }
+        const next = st.turn + 1;
+        await admin.from("tickets").update({ ai_clarification_turn: next }).eq("id", tid);
+        if (next >= MAX_CLARIFY) {
+          await escalate(admin, wsId, tid, st.ch, intent.intent, intent.confidence, msg, custCtx);
+          return { status: "escalated", reason: "max_clarify" };
+        }
+        const q = await clarifyQ(msg, intent.intent, intent.confidence, st.ch, pers);
+        const delay = await responseDelay(admin, wsId, st.ch);
+        if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
+        if (await newerActivity(admin, tid, t0)) return { status: "bailed", reason: "newer_msg" };
+        await send(admin, wsId, tid, st.ch, q, cfg.sandbox);
+        await setStatus(admin, tid, cfg.auto_resolve);
+        return { status: "clarify_sent", turn: next };
+      });
+    }
+
+    // ── 5. Pattern match first ──
+    const pmatch = await step.run("pattern-match", async () => {
+      const m = await matchPatterns(wsId, st.subject, msg);
+      if (m && m.confidence >= 0.7) {
+        await sysNote(admin, tid, `[System] Pattern: "${m.name}" (${m.category}) ${(m.confidence * 100).toFixed(0)}% via ${m.method}`);
+        return { hit: true, tag: m.autoTag, cat: m.category, name: m.name };
+      }
+      return { hit: false, tag: null, cat: null, name: null };
+    });
+
+    if (pmatch.hit && pmatch.tag && st.hasCust && st.ch !== "social_comments") {
+      const patternRouted = await step.run("route-pattern", async () => {
+        // Journey?
+        const { data: j } = await admin.from("journey_definitions").select("id, name, trigger_intent")
+          .eq("workspace_id", wsId).eq("is_active", true);
+        for (const jd of j || []) {
+          const intentMatch = jd.trigger_intent && pmatch.cat?.toLowerCase().includes(jd.trigger_intent.toLowerCase());
+          if (intentMatch) {
+            await sysNote(admin, tid, `[System] Pattern → Journey: ${jd.name}`);
+            return { type: "journey" as const, id: jd.id, name: jd.name, intent: jd.trigger_intent || pmatch.cat! };
+          }
+        }
+        // Workflow?
+        const { data: w } = await admin.from("workflows").select("id, name, trigger_tag")
+          .eq("workspace_id", wsId).eq("enabled", true).eq("trigger_tag", pmatch.tag!);
+        if (w?.length) {
+          await sysNote(admin, tid, `[System] Pattern → Workflow: ${w[0].name}`);
+          return { type: "workflow" as const, id: w[0].id, name: w[0].name, intent: pmatch.cat! };
+        }
+        return null;
+      });
+
+      if (patternRouted) {
+        await step.run("exec-pattern", async () => {
+          const delay = await responseDelay(admin, wsId, st.ch);
+          if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
+          if (await newerActivity(admin, tid, t0)) return;
+          if (patternRouted.type === "journey") {
+            const { data: t } = await admin.from("tickets").select("customer_id").eq("id", tid).single();
+            await buildCombinedEmailJourney({ workspaceId: wsId, ticketId: tid, customerId: t?.customer_id || undefined, matchedJourneyIntent: patternRouted.intent, matchedJourneyId: patternRouted.id });
+            await addTicketTag(tid, `j:${patternRouted.name.toLowerCase().replace(/\s+/g, "_")}`);
+            await markFirstTouch(tid, "journey");
+            await admin.from("tickets").update({ handled_by: `Journey: ${patternRouted.name}`, ai_clarification_turn: 0 }).eq("id", tid);
+          } else {
+            const { executeWorkflow } = await import("@/lib/workflow-executor");
+            await executeWorkflow(wsId, tid, pmatch.tag!);
+            await addTicketTag(tid, `w:${patternRouted.name.toLowerCase().replace(/\s+/g, "_")}`);
+            await markFirstTouch(tid, "workflow");
+            await admin.from("tickets").update({ handled_by: `Workflow: ${patternRouted.name}`, ai_clarification_turn: 0 }).eq("id", tid);
+          }
+          await setStatus(admin, tid, cfg.auto_resolve);
+        });
+        return { status: "pattern_routed", type: patternRouted.type, name: patternRouted.name };
+      }
+    }
+
+    // ── 6. AI classify (Haiku) ──
+    const ai = await step.run("classify", async () => {
+      const ctx = await assembleTicketContext(wsId, tid);
+      const custCtx = ctx.systemPrompt.split("CUSTOMER CONTEXT:")[1]?.split("CHANNEL")[0]?.trim() || "";
+      const hist = ctx.conversationHistory.map(m => `${m.role}: ${m.content}`).join("\n");
+      const hNames = await handlerNames(admin, wsId, st.hasCust, st.ch);
+      const intent = await classifyIntent(msg, custCtx, hist, hNames);
+      await sysNote(admin, tid, `[System] Intent: "${intent.intent}" (${intent.confidence}%). Threshold: ${cfg.threshold}%`);
+      await admin.from("tickets").update({ ai_detected_intent: intent.intent, ai_intent_confidence: intent.confidence }).eq("id", tid);
+      return { intent: intent.intent as string, confidence: intent.confidence as number, custCtx, hNames };
+    });
+
+    // No customer + account-related → ask for ID
+    if (!st.hasCust && isAccountRelated(ai.intent)) {
+      await step.run("ask-customer-id", async () => {
+        await sysNote(admin, tid, `[System] Account-related but no customer. Asking for email/order number.`);
+        await admin.from("tickets").update({ ai_clarification_turn: 1 }).eq("id", tid);
+        const delay = await responseDelay(admin, wsId, st.ch);
+        if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
+        if (await newerActivity(admin, tid, t0)) return;
+        await send(admin, wsId, tid, st.ch, "I'd be happy to help! Could you share the email address or order number associated with your account so I can pull up your details?", cfg.sandbox);
+        await setStatus(admin, tid, cfg.auto_resolve);
+      });
+      return { status: "asking_customer" };
+    }
+
+    // Confidence gate
+    if (ai.confidence < cfg.threshold) {
+      await step.run("start-clarify", async () => {
+        await sysNote(admin, tid, `[System] Confidence ${ai.confidence}% < ${cfg.threshold}%. Clarifying.`);
+        await admin.from("tickets").update({ ai_clarification_turn: 1 }).eq("id", tid);
+        const q = await clarifyQ(msg, ai.intent, ai.confidence, st.ch, pers);
+        const delay = await responseDelay(admin, wsId, st.ch);
+        if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
+        if (await newerActivity(admin, tid, t0)) return;
+        await send(admin, wsId, tid, st.ch, q, cfg.sandbox);
+        await setStatus(admin, tid, cfg.auto_resolve);
+      });
+      return { status: "clarify_started", confidence: ai.confidence };
+    }
+
+    // ── 7. Route ──
+    await step.run("route", async () => {
+      await routeExec(admin, wsId, tid, st.ch, ai.intent, ai.confidence, msg, ai.custCtx, st.hasCust, cfg, pers, t0);
+    });
+    return { status: "routed", intent: ai.intent, confidence: ai.confidence };
+  },
+);
+
+// ══════════════════════════════════════════════════
+// ── ROUTE & EXECUTE ──
+// ══════════════════════════════════════════════════
+
+async function routeExec(
+  admin: Admin, wsId: string, tid: string, ch: string,
+  intent: string, conf: number, msg: string, custCtx: string,
+  hasCust: boolean, cfg: { auto_resolve: boolean; sandbox: boolean },
+  pers: { name?: string; tone?: string; sign_off?: string | null } | null, t0: string,
 ) {
-  const isSocial = channel === "social_comments";
-
-  // Reset clarification on successful route
-  await admin.from("tickets").update({ ai_clarification_turn: 0 }).eq("id", ticketId);
-  const config = await getChannelConfig(admin, workspaceId, channel);
-
-  // Get customer_id for journey launches
-  const { data: ticketData } = await admin.from("tickets").select("customer_id").eq("id", ticketId).single();
-  const customerId = ticketData?.customer_id || null;
+  const social = ch === "social_comments";
+  await admin.from("tickets").update({ ai_clarification_turn: 0 }).eq("id", tid);
+  const delay = await responseDelay(admin, wsId, ch);
 
   // 1. Journey
-  if (hasCustomer && !isSocial && intent.handler_type === "journey") {
-    const { data: journey } = await admin.from("journey_definitions")
-      .select("id, name, trigger_intent").eq("workspace_id", workspaceId).eq("enabled", true)
-      .ilike("name", `%${intent.handler_name}%`).limit(1).single();
-
-    if (journey) {
-      await postInternalNote(admin, ticketId, `[System] Routed to journey: ${journey.name} (${intent.confidence}%)`);
-      await buildCombinedEmailJourney({
-        workspaceId, ticketId, customerId: customerId || undefined,
-        matchedJourneyIntent: journey.trigger_intent || intent.intent,
-        matchedJourneyId: journey.id,
-      });
-      await addTicketTag(ticketId, `j:${journey.name.toLowerCase().replace(/\s+/g, "_")}`);
-      await markFirstTouch(ticketId, "journey");
-      await admin.from("tickets").update({ handled_by: `Journey: ${journey.name}`, status: config.ticket_status_after_ai }).eq("id", ticketId);
-      return;
+  if (hasCust && !social) {
+    const { data: jds } = await admin.from("journey_definitions").select("id, name, trigger_intent, match_patterns").eq("workspace_id", wsId).eq("is_active", true);
+    for (const j of jds || []) {
+      const iMatch = j.trigger_intent && intent.toLowerCase().includes(j.trigger_intent.toLowerCase());
+      const pMatch = (j.match_patterns as string[] || []).some((p: string) => msg.toLowerCase().includes(p.toLowerCase()));
+      if (iMatch || pMatch) {
+        await sysNote(admin, tid, `[System] → Journey: ${j.name} (${conf}%)`);
+        if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
+        if (await newerActivity(admin, tid, t0)) return;
+        const { data: t } = await admin.from("tickets").select("customer_id").eq("id", tid).single();
+        await buildCombinedEmailJourney({ workspaceId: wsId, ticketId: tid, customerId: t?.customer_id || undefined, matchedJourneyIntent: j.trigger_intent || intent, matchedJourneyId: j.id });
+        await addTicketTag(tid, `j:${j.name.toLowerCase().replace(/\s+/g, "_")}`);
+        await markFirstTouch(tid, "journey");
+        await admin.from("tickets").update({ handled_by: `Journey: ${j.name}` }).eq("id", tid);
+        await setStatus(admin, tid, cfg.auto_resolve);
+        return;
+      }
     }
   }
 
   // 2. Workflow
-  if (hasCustomer && !isSocial && intent.handler_type === "workflow") {
-    const { data: workflow } = await admin.from("workflows")
-      .select("id, name, trigger_type").eq("workspace_id", workspaceId).eq("enabled", true)
-      .ilike("name", `%${intent.handler_name}%`).limit(1).single();
-
-    if (workflow) {
-      await postInternalNote(admin, ticketId, `[System] Routed to workflow: ${workflow.name} (${intent.confidence}%)`);
-      const { executeWorkflow } = await import("@/lib/workflow-executor");
-      await executeWorkflow(workspaceId, ticketId, workflow.trigger_type || workflow.name);
-      await addTicketTag(ticketId, `w:${workflow.name.toLowerCase().replace(/\s+/g, "_")}`);
-      await markFirstTouch(ticketId, "workflow");
-      await admin.from("tickets").update({ handled_by: `Workflow: ${workflow.name}`, status: config.ticket_status_after_ai }).eq("id", ticketId);
-      return;
+  if (hasCust && !social) {
+    const { data: wfs } = await admin.from("workflows").select("id, name, trigger_tag").eq("workspace_id", wsId).eq("enabled", true);
+    for (const w of wfs || []) {
+      const tagIntent = (w.trigger_tag || "").replace("smart:", "").replace(/-/g, "_");
+      if (tagIntent && intent.toLowerCase().includes(tagIntent)) {
+        await sysNote(admin, tid, `[System] → Workflow: ${w.name} (${conf}%)`);
+        if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
+        if (await newerActivity(admin, tid, t0)) return;
+        const { executeWorkflow } = await import("@/lib/workflow-executor");
+        await executeWorkflow(wsId, tid, w.trigger_tag);
+        await addTicketTag(tid, `w:${w.name.toLowerCase().replace(/\s+/g, "_")}`);
+        await markFirstTouch(tid, "workflow");
+        await admin.from("tickets").update({ handled_by: `Workflow: ${w.name}` }).eq("id", tid);
+        await setStatus(admin, tid, cfg.auto_resolve);
+        return;
+      }
     }
   }
 
-  // 3. Macro
-  if (intent.handler_type === "macro") {
-    const { data: macro } = await admin.from("macros")
-      .select("id, name, content").eq("workspace_id", workspaceId)
-      .ilike("name", `%${intent.handler_name}%`).limit(1).single();
-
+  // 3. Macro (via pattern matcher)
+  const pmatch = await matchPatterns(wsId, null, msg);
+  if (pmatch && pmatch.confidence >= 0.6) {
+    const { data: macros } = await admin.from("macros").select("id, name, content").eq("workspace_id", wsId);
+    const macro = (macros || []).find(m => m.name.toLowerCase() === pmatch.name.toLowerCase())
+      || (macros || []).find(m => m.name.toLowerCase().includes(pmatch.name.toLowerCase()));
     if (macro) {
-      await postInternalNote(admin, ticketId, `[System] Routed to macro: ${macro.name} (${intent.confidence}%)`);
-      const personalized = await personalizeMacro(macro.content, customerCtx, messageBody, channel);
-      await sendResponse(admin, workspaceId, ticketId, channel, personalized);
-      await markFirstTouch(ticketId, "ai");
-      await admin.from("tickets").update({ handled_by: "AI Agent", status: config.ticket_status_after_ai }).eq("id", ticketId);
+      await sysNote(admin, tid, `[System] → Macro: ${macro.name} (${conf}%)`);
+      const text = await personalizeMacroText(macro.content, custCtx, msg, ch, pers);
+      if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
+      if (await newerActivity(admin, tid, t0)) return;
+      await send(admin, wsId, tid, ch, text, cfg.sandbox);
+      await markFirstTouch(tid, "ai");
+      await admin.from("tickets").update({ handled_by: "AI Agent" }).eq("id", tid);
+      await setStatus(admin, tid, cfg.auto_resolve);
       return;
     }
   }
 
-  // 4. KB article fallback
-  const ragResult = await retrieveContext(workspaceId, messageBody, 3);
-  if (ragResult.chunks?.length && ragResult.chunks[0].similarity > 0.7) {
-    const chunk = ragResult.chunks[0];
-    await postInternalNote(admin, ticketId,
-      `[System] KB fallback: "${chunk.kb_title}" (${intent.confidence}%). No macro found — notification created.`);
+  // 4. KB fallback
+  const rag = await retrieveContext(wsId, msg, 3);
+  if (rag.chunks?.length && rag.chunks[0].similarity > 0.7) {
+    const c = rag.chunks[0];
+    await sysNote(admin, tid, `[System] → KB: "${c.kb_title}" (${conf}%). Missing macro — notified.`);
     await admin.from("dashboard_notifications").insert({
-      workspace_id: workspaceId, type: "knowledge_gap",
-      title: `Missing macro for intent: ${intent.intent}`,
-      body: `KB article "${chunk.kb_title}" used. Consider creating a macro.`,
-      metadata: { intent: intent.intent, ticket_id: ticketId },
+      workspace_id: wsId, type: "knowledge_gap",
+      title: `Missing macro: ${intent}`, body: `KB "${c.kb_title}" used. Create a macro.`,
+      metadata: { intent, ticket_id: tid },
     });
-    const response = await craftKBResponse(chunk.chunk_text, chunk.kb_title || "", messageBody, channel);
-    await sendResponse(admin, workspaceId, ticketId, channel, response);
-    await markFirstTouch(ticketId, "ai");
-    await admin.from("tickets").update({ handled_by: "AI Agent", status: config.ticket_status_after_ai }).eq("id", ticketId);
+    const text = await kbResponse(c.chunk_text, c.kb_title || "", msg, ch, pers);
+    if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
+    if (await newerActivity(admin, tid, t0)) return;
+    await send(admin, wsId, tid, ch, text, cfg.sandbox);
+    await markFirstTouch(tid, "ai");
+    await admin.from("tickets").update({ handled_by: "AI Agent" }).eq("id", tid);
+    await setStatus(admin, tid, cfg.auto_resolve);
     return;
   }
 
   // 5. Escalate
-  await escalateToAgent(admin, workspaceId, ticketId, channel, intent.intent, intent.confidence, messageBody, customerCtx);
-}
-
-async function escalateToAgent(
-  admin: ReturnType<typeof createAdminClient>,
-  workspaceId: string, ticketId: string, channel: string,
-  intent: string, confidence: number, messageBody: string, customerCtx: string,
-) {
-  await postInternalNote(admin, ticketId,
-    `[System] No handler matched for "${intent}" (${confidence}%). Escalating. Gap logged.`);
-
-  const { data: ticket } = await admin.from("tickets").select("customer_id").eq("id", ticketId).single();
-
-  await admin.from("escalation_gaps").insert({
-    workspace_id: workspaceId, ticket_id: ticketId, customer_id: ticket?.customer_id || null,
-    channel, detected_intent: intent, confidence, original_message: messageBody.slice(0, 2000),
-    customer_context_summary: customerCtx.slice(0, 1000),
-  });
-
-  await admin.from("dashboard_notifications").insert({
-    workspace_id: workspaceId, type: "escalation_gap",
-    title: `AI escalated: ${intent || "unknown"}`,
-    body: `No handler matched. "${messageBody.slice(0, 100)}..."`,
-    metadata: { ticket_id: ticketId, intent, confidence },
-  });
-
-  await admin.from("tickets").update({ status: "open", ai_clarification_turn: 0 }).eq("id", ticketId);
+  await escalate(admin, wsId, tid, ch, intent, conf, msg, custCtx);
 }

@@ -12,11 +12,9 @@ import {
 } from "@/lib/inngest/import-subscriptions";
 import { workflowDelayed, positiveCloseDelayed } from "@/lib/inngest/workflow-delayed";
 import { kbEmbedDocument } from "@/lib/inngest/kb-embed";
-import { aiDraftTicket, aiTriggerWorkflow } from "@/lib/inngest/ai-draft";
 import { unifiedTicketHandler } from "@/lib/inngest/unified-ticket-handler";
 import { journeySessionCompleted, journeySessionAbandoned } from "@/lib/inngest/journey-outcomes";
 import { scrapeHelpCenter } from "@/lib/inngest/scrape-help-center";
-import { aiMultiTurn } from "@/lib/inngest/ai-multi-turn";
 import { aiNightlyAnalysis } from "@/lib/inngest/ai-nightly-analysis";
 import {
   fraudNightlyScan,
@@ -60,12 +58,9 @@ export const { GET, POST, PUT } = serve({
     workflowDelayed,
     positiveCloseDelayed,
     kbEmbedDocument,
-    aiDraftTicket,
-    aiTriggerWorkflow,
     journeySessionCompleted,
     journeySessionAbandoned,
     scrapeHelpCenter,
-    aiMultiTurn,
     aiNightlyAnalysis,
     fraudNightlyScan,
     fraudGenerateSummary,
