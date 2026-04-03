@@ -23,8 +23,11 @@ CREATE INDEX IF NOT EXISTS idx_escalation_gaps_unresolved
   WHERE resolved_as IS NULL;
 
 ALTER TABLE public.escalation_gaps ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Service role full access on escalation_gaps"
-  ON public.escalation_gaps FOR ALL TO service_role USING (true) WITH CHECK (true);
+DO $$ BEGIN
+  CREATE POLICY "Service role full access on escalation_gaps"
+    ON public.escalation_gaps FOR ALL TO service_role USING (true) WITH CHECK (true);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 CREATE POLICY "Members can view escalation_gaps"
   ON public.escalation_gaps FOR SELECT TO authenticated
   USING (workspace_id IN (SELECT workspace_id FROM public.workspace_members WHERE user_id = auth.uid()));
