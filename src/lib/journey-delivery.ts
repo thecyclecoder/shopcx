@@ -47,13 +47,25 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
 
   if (!journeyDef) return false;
 
-  // Build config — optionally prepend account linking step
-  let configSnapshot = journeyDef.config as Record<string, unknown>;
-  if (prependAccountLinking) {
+  // Build config — detect code-driven journeys (empty config or specific types)
+  const rawConfig = journeyDef.config;
+  const isEmptyConfig = !rawConfig || (Array.isArray(rawConfig) && rawConfig.length === 0) || (typeof rawConfig === "object" && !Array.isArray(rawConfig) && Object.keys(rawConfig as Record<string, unknown>).length === 0);
+
+  let configSnapshot: Record<string, unknown>;
+  if (isEmptyConfig) {
+    // Code-driven journey — the mini-site uses journeyType to run the right executor
     configSnapshot = {
-      ...configSnapshot,
-      prependAccountLinking: true,
+      codeDriven: true,
+      journeyType: triggerIntent,
+      ticketId,
+      workspaceId,
     };
+  } else {
+    configSnapshot = rawConfig as Record<string, unknown>;
+  }
+
+  if (prependAccountLinking) {
+    configSnapshot = { ...configSnapshot, prependAccountLinking: true };
   }
 
   // Create session
