@@ -49,7 +49,23 @@ export async function GET(
   }
 
   // Use config_snapshot (frozen at session creation) or fall back to definition
-  const config = session.config_snapshot || (session.journey_definitions as { config: unknown })?.config || {};
+  let config = session.config_snapshot || (session.journey_definitions as { config: unknown })?.config || {};
+
+  // For code-driven journeys, dynamically build steps if not already built
+  const configObj = config as Record<string, unknown>;
+  if (configObj.codeDriven && configObj.journeyType && !(configObj.steps as unknown[])?.length && !configObj.cancelJourney) {
+    const { buildJourneySteps } = await import("@/lib/journey-step-builder");
+    const built = await buildJourneySteps(
+      session.workspace_id,
+      configObj.journeyType as string,
+      session.customer_id,
+      session.ticket_id || "",
+    );
+    config = { ...configObj, ...built };
+
+    // Cache the built steps back to the session so subsequent loads are instant
+    await admin.from("journey_sessions").update({ config_snapshot: config }).eq("id", session.id);
+  }
 
   // Merge workspace branding into config if not already present
   const ws = session.workspaces as { name?: string; help_logo_url?: string; help_primary_color?: string } | null;
