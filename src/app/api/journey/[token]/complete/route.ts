@@ -663,95 +663,29 @@ export async function POST(
     }
   }
 
-  // Handle declined — check nudge count, either re-nudge or close
+  // Handle declined — use journey-delivery nudge system
   if (outcome === "declined" && session.ticket_id) {
     const { data: ticketData } = await admin.from("tickets")
-      .select("journey_nudge_count, subject, email_message_id, channel, customer_id")
+      .select("journey_history, channel, customer_id")
       .eq("id", session.ticket_id)
       .single();
 
-    const nudgeCount = ticketData?.journey_nudge_count || 0;
-    const nudgeWsId = session.workspace_id;
+    const history = (ticketData?.journey_history as { journey_id: string; nudged_at: string | null }[]) || [];
+    const entry = history.find(h => h.journey_id === session.journey_id);
 
-    if (nudgeCount === 0) {
-      // First decline — send re-nudge CTA email with new combined journey
-      await admin.from("tickets").update({
-        journey_nudge_count: 1,
-        status: "closed",
-        resolved_at: new Date().toISOString(),
-      }).eq("id", session.ticket_id);
-
-      await admin.from("ticket_messages").insert({
-        ticket_id: session.ticket_id,
-        direction: "outbound",
-        visibility: "internal",
-        author_type: "system",
-        body: "[System] Customer declined marketing signup. Sending re-nudge CTA.",
-      });
-
-      // Send re-nudge CTA email
-      if (ticketData?.customer_id) {
-        const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", ticketData.customer_id).single();
-        const { data: ws } = await admin.from("workspaces").select("name, help_primary_color").eq("id", session.workspace_id).single();
-
-        if (cust?.email) {
-          // Build a new combined journey session
-          const { buildCombinedEmailJourney } = await import("@/lib/email-journey-builder");
-
-          // Override the CTA message for re-nudge
-          const { sendJourneyCTA } = await import("@/lib/email");
-          const { buildDiscountJourneySteps } = await import("@/lib/discount-journey-builder");
-          const crypto = await import("crypto");
-
-          const { steps, metadata } = await buildDiscountJourneySteps(nudgeWsId, ticketData.customer_id);
-          if (steps.length > 0) {
-            const nudgeToken = crypto.randomBytes(24).toString("hex");
-            const journeyId = session.journey_id;
-
-            await admin.from("journey_sessions").insert({
-              workspace_id: nudgeWsId,
-              journey_id: journeyId,
-              customer_id: ticketData.customer_id,
-              ticket_id: session.ticket_id,
-              token: nudgeToken,
-              token_expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-              status: "pending",
-              config_snapshot: { codeDriven: true, multiStep: true, steps, metadata: { ...metadata, ticketId: session.ticket_id, workspaceId: nudgeWsId }, needsLinking: false },
-            });
-
-            await sendJourneyCTA({
-              workspaceId: nudgeWsId,
-              toEmail: cust.email,
-              customerName: cust.first_name || "",
-              journeyToken: nudgeToken,
-              contextMessage: "We can't send you a coupon unless you sign up for our email list. We only send coupons, sales, and latest product drops — never spam.",
-              workspaceName: ws?.name || "Support",
-              primaryColor: ws?.help_primary_color || undefined,
-              subject: `Re: ${ticketData.subject || "Your request"}`,
-              buttonLabel: "Yes, get my coupon &rarr;",
-              inReplyTo: ticketData.email_message_id || null,
-            });
-
-            await admin.from("ticket_messages").insert({
-              ticket_id: session.ticket_id,
-              direction: "outbound",
-              visibility: "internal",
-              author_type: "system",
-              body: `[System] Sent re-nudge CTA email to ${cust.email}`,
-            });
-
-            const { addTicketTag } = await import("@/lib/ticket-tags");
-            await addTicketTag(session.ticket_id, "jr:discount");
-          }
-        }
-      }
+    if (entry && !entry.nudged_at) {
+      // First decline — re-nudge via journey-delivery
+      const { nudgeJourney } = await import("@/lib/journey-delivery");
+      await nudgeJourney(
+        session.workspace_id, session.ticket_id,
+        { journey_id: session.journey_id, journey_name: "Journey" },
+        ticketData?.channel || "email", "Customer declined", null,
+      );
     } else {
-      // Second decline — close ticket, clear journey, AI takes over on next reply
+      // Already nudged or no entry — close ticket
       await admin.from("tickets").update({
         status: "closed",
         resolved_at: new Date().toISOString(),
-        journey_id: null,
-        journey_step: 99,
         journey_data: {},
         journey_nudge_count: 0,
         handled_by: null,
