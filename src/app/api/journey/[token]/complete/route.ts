@@ -275,7 +275,7 @@ export async function POST(
           const result = await appstleUpdateBillingInterval(wsId, selectedSub.contractId, "MONTH", 2);
           actionLog.push(result.success ? `Changed frequency to every 2 months for ${selectedSub.contractId}` : `Failed to change frequency: ${result.error}`);
         } else if (actionType === "coupon") {
-          // Apply coupon via Appstle
+          // Apply coupon via shared helper (removes existing, applies new, updates local DB)
           const couponCode = responses?.remedy_coupon?.value;
           if (couponCode) {
             try {
@@ -283,36 +283,13 @@ export async function POST(
               if (wsData?.appstle_api_key_encrypted) {
                 const { decrypt } = await import("@/lib/crypto");
                 const apiKey = decrypt(wsData.appstle_api_key_encrypted);
-
-                // Remove existing discounts first
-                const rawRes = await fetch(
-                  `https://subscription-admin.appstle.com/api/external/v2/contract-raw-response?contractId=${selectedSub.contractId}&api_key=${apiKey}`,
-                  { headers: { "X-API-Key": apiKey } },
-                );
-                if (rawRes.ok) {
-                  const rawText = await rawRes.text();
-                  const nodesMatch = rawText.match(/"discounts"[\s\S]*?"nodes"\s*:\s*\[([\s\S]*?)\]/);
-                  if (nodesMatch && nodesMatch[1].trim()) {
-                    try {
-                      const nodes = JSON.parse(`[${nodesMatch[1]}]`);
-                      for (const node of nodes) {
-                        if (node.id) {
-                          await fetch(
-                            `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${selectedSub.contractId}&discountId=${encodeURIComponent(node.id)}&api_key=${apiKey}`,
-                            { method: "PUT", headers: { "X-API-Key": apiKey } },
-                          );
-                        }
-                      }
-                    } catch {}
-                  }
+                const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
+                const result = await applyDiscountWithReplace(apiKey, selectedSub.contractId, couponCode);
+                if (result.success) {
+                  actionLog.push(`Applied coupon ${couponCode} to subscription ${selectedSub.contractId}`);
+                } else {
+                  actionLog.push(`Failed to apply coupon: ${result.error}`);
                 }
-
-                // Apply new coupon
-                await fetch(
-                  `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-apply-discount?contractId=${selectedSub.contractId}&discountCode=${couponCode}&api_key=${apiKey}`,
-                  { method: "PUT", headers: { "X-API-Key": apiKey } },
-                );
-                actionLog.push(`Applied coupon ${couponCode} to subscription ${selectedSub.contractId}`);
               }
             } catch (err) {
               actionLog.push(`Failed to apply coupon: ${err}`);

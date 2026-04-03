@@ -172,6 +172,19 @@ async function handleSubscriptionEvent(
     phone: rawAddr.phone || "",
   } : null;
 
+  // Extract applied discounts from webhook payload
+  const discountNodes = ((data.discounts as { nodes?: Record<string, unknown>[] })?.nodes) || [];
+  const appliedDiscounts = discountNodes.map(node => {
+    const val = node.value as Record<string, unknown> | undefined;
+    return {
+      id: node.id as string,
+      title: (node.title as string) || "",
+      type: (node.type as string) || "",
+      value: val?.percentage ? Number(val.percentage) : val?.fixedAmount ? Number((val.fixedAmount as { amount?: string })?.amount || 0) : 0,
+      valueType: val?.percentage ? "PERCENTAGE" : "FIXED_AMOUNT",
+    };
+  });
+
   // Upsert subscription
   if (contractId) {
     await admin.from("subscriptions").upsert({
@@ -188,8 +201,27 @@ async function handleSubscriptionEvent(
       delivery_price_cents: dollarsToCents(deliveryPrice?.amount),
       shipping_address: shippingAddress,
       subscription_created_at: (data.createdAt as string) || null,
+      applied_discounts: appliedDiscounts,
       updated_at: new Date().toISOString(),
     }, { onConflict: "workspace_id,shopify_contract_id" });
+
+    // Self-heal: if multiple discounts detected, remove extras
+    if (appliedDiscounts.length > 1) {
+      console.log(`[Appstle] Multiple discounts on contract ${contractId}: ${appliedDiscounts.map(d => d.title).join(", ")}. Auto-removing extras.`);
+      try {
+        const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", workspaceId).single();
+        if (ws?.appstle_api_key_encrypted) {
+          const apiKey = decrypt(ws.appstle_api_key_encrypted);
+          // Keep the first discount, remove the rest
+          for (const extra of appliedDiscounts.slice(1)) {
+            await fetch(
+              `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}&discountId=${encodeURIComponent(extra.id)}&api_key=${apiKey}`,
+              { method: "PUT", headers: { "X-API-Key": apiKey } },
+            ).catch(() => {});
+          }
+        }
+      } catch {}
+    }
   }
 
   // Determine overall customer subscription status from all their subscriptions
