@@ -43,24 +43,27 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
     if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
     const apiKey = decrypt(ws.appstle_api_key_encrypted);
 
-    let qp = `contractId=${contractId}`;
-    if (mode === "apply") qp += `&discountCode=${encodeURIComponent(discountCode)}`;
-    else qp += `&discountId=${encodeURIComponent(discountId)}`;
-
-    const endpoint = mode === "apply"
-      ? `/api/external/v2/subscription-contracts-apply-discount?${qp}`
-      : `/api/external/v2/subscription-contracts-remove-discount?${qp}`;
-
-    const res = await fetch(`https://subscription-admin.appstle.com${endpoint}`, {
-      method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store",
-    });
-
-    if (!res.ok) {
-      const isExpected = [400, 404, 409, 422].includes(res.status);
-      if (isExpected) {
-        return jsonOk({ ok: false, route, contractId, mode, error: mapCouponError(mode, res.status) });
+    if (mode === "apply") {
+      // Remove existing discounts first, then apply new one (only 1 coupon per subscription)
+      const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
+      const result = await applyDiscountWithReplace(apiKey, String(contractId), discountCode);
+      if (!result.success) {
+        const isExpected = result.status && [400, 404, 409, 422].includes(result.status);
+        if (isExpected) {
+          return jsonOk({ ok: false, route, contractId, mode, error: mapCouponError(mode, result.status!) });
+        }
+        throw new Error(result.error || "Appstle API error");
       }
-      throw new Error(`Appstle API error: ${res.status}`);
+    } else {
+      const res = await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}&discountId=${encodeURIComponent(discountId)}`,
+        { method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store" },
+      );
+      if (!res.ok) {
+        const isExpected = [400, 404, 422].includes(res.status);
+        if (isExpected) return jsonOk({ ok: false, route, contractId, mode, error: mapCouponError(mode, res.status) });
+        throw new Error(`Appstle API error: ${res.status}`);
+      }
     }
   } catch (e) {
     if ((e as Error).message?.startsWith("Appstle")) return handleAppstleError(e);

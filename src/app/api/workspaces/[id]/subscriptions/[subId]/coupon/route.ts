@@ -35,14 +35,11 @@ export async function POST(
   const { couponCode } = await request.json();
   if (!couponCode) return NextResponse.json({ error: "couponCode required" }, { status: 400 });
 
-  const res = await fetch(
-    `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-apply-discount?contractId=${sub.shopify_contract_id}&discountCode=${encodeURIComponent(couponCode)}`,
-    { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
-  );
-
-  if (!res.ok && res.status !== 204) {
-    const text = await res.text();
-    return NextResponse.json({ error: `Appstle error: ${res.status} ${text}` }, { status: 500 });
+  // Remove existing discounts first, then apply (only 1 coupon per subscription)
+  const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
+  const result = await applyDiscountWithReplace(creds.apiKey, sub.shopify_contract_id, couponCode);
+  if (!result.success) {
+    return NextResponse.json({ error: result.error || "Failed to apply coupon" }, { status: 500 });
   }
 
   if (sub.customer_id) {

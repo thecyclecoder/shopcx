@@ -169,26 +169,16 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     }
   }
 
-  // Apply coupon to subscription via Appstle (remove existing first if needed)
+  // Apply coupon to subscription via Appstle (remove existing first — only 1 coupon per subscription)
   try {
     const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
     if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
     const apiKey = decrypt(ws.appstle_api_key_encrypted);
 
-    // Remove any existing discount first to avoid Appstle rejection
-    const removeEndpoint = `/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}`;
-    await fetch(`https://subscription-admin.appstle.com${removeEndpoint}`, {
-      method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store",
-    }).catch(() => {}); // ignore if no coupon was applied
-
-    // Apply the new coupon
-    const applyEndpoint = `/api/external/v2/subscription-contracts-apply-discount?contractId=${contractId}&discountCode=${encodeURIComponent(code)}`;
-    const res = await fetch(`https://subscription-admin.appstle.com${applyEndpoint}`, {
-      method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store",
-    });
-
-    if (!res.ok) {
-      return jsonErr({ error: "coupon_apply_failed", status: res.status }, 502);
+    const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
+    const result = await applyDiscountWithReplace(apiKey, String(contractId), code);
+    if (!result.success) {
+      return jsonErr({ error: "coupon_apply_failed", message: result.error }, 502);
     }
   } catch (e) {
     return handleAppstleError(e);

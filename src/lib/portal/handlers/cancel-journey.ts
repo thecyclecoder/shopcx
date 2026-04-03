@@ -76,36 +76,10 @@ async function executeRemedyAction(
       const { decrypt } = await import("@/lib/crypto");
       const apiKey = decrypt(wsData.appstle_api_key_encrypted);
 
-      // Remove existing discounts first
-      try {
-        const rawRes = await fetch(
-          `https://subscription-admin.appstle.com/api/external/v2/contract-raw-response?contractId=${contractId}&api_key=${apiKey}`,
-          { headers: { "X-API-Key": apiKey } },
-        );
-        if (rawRes.ok) {
-          const rawText = await rawRes.text();
-          const nodesMatch = rawText.match(/"discounts"[\s\S]*?"nodes"\s*:\s*\[([\s\S]*?)\]/);
-          if (nodesMatch && nodesMatch[1].trim()) {
-            try {
-              const nodes = JSON.parse(`[${nodesMatch[1]}]`);
-              for (const node of nodes) {
-                if (node.id) {
-                  await fetch(
-                    `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}&discountId=${encodeURIComponent(node.id)}&api_key=${apiKey}`,
-                    { method: "PUT", headers: { "X-API-Key": apiKey } },
-                  );
-                }
-              }
-            } catch {}
-          }
-        }
-      } catch {}
-
-      // Apply new coupon
-      await fetch(
-        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-apply-discount?contractId=${contractId}&discountCode=${mapping.code}&api_key=${apiKey}`,
-        { method: "PUT", headers: { "X-API-Key": apiKey } },
-      );
+      // Remove existing discounts first, then apply (only 1 coupon per subscription)
+      const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
+      const result = await applyDiscountWithReplace(apiKey, contractId, mapping.code);
+      if (!result.success) return { success: false, error: result.error };
 
       return { success: true, savedAction: `saved with coupon ${mapping.code}`, patch: {} };
     }
