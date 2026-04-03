@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
-import { executeAccountLinkingJourney, executeDiscountJourney } from "@/lib/chat-journey";
+import { launchJourneyForTicket } from "@/lib/journey-delivery";
 
 export async function POST(
   request: Request,
@@ -23,7 +23,6 @@ export async function POST(
 
   const admin = createAdminClient();
 
-  // Verify membership
   const { data: member } = await admin
     .from("workspace_members")
     .select("role, display_name")
@@ -33,7 +32,6 @@ export async function POST(
 
   if (!member) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-  // Get journey definition
   const { data: journey } = await admin
     .from("journey_definitions")
     .select("id, name, trigger_intent")
@@ -43,10 +41,9 @@ export async function POST(
 
   if (!journey) return NextResponse.json({ error: "Journey not found" }, { status: 404 });
 
-  // Get ticket
   const { data: ticket } = await admin
     .from("tickets")
-    .select("channel, customer_id, profile_link_completed")
+    .select("channel, customer_id")
     .eq("id", ticketId)
     .single();
 
@@ -54,43 +51,25 @@ export async function POST(
 
   const agentName = member.display_name || user.user_metadata?.full_name || "Agent";
 
-  // Set up journey on the ticket
-  await admin.from("tickets").update({
-    journey_id: journey.id,
-    journey_step: 0,
-    journey_data: {},
-    journey_nudge_count: 0,
-    handled_by: `Journey: ${journey.trigger_intent}`,
-  }).eq("id", ticketId);
-
-  // Log that the agent sent the journey
   await admin.from("ticket_messages").insert({
     ticket_id: ticketId,
     direction: "outbound",
     visibility: "internal",
     author_type: "system",
-    body: `[System] ${agentName} sent the "${journey.name}" journey to customer`,
+    body: `[System] ${agentName} manually sent the "${journey.name}" journey`,
   });
 
-  // Execute the journey (which will send CTA email for email channel, or inline form for chat)
-  let result = { completed: false };
+  const launched = await launchJourneyForTicket({
+    workspaceId,
+    ticketId,
+    customerId: ticket.customer_id,
+    journeyId: journey.id,
+    journeyName: journey.name,
+    triggerIntent: journey.trigger_intent || journey.name,
+    channel: ticket.channel,
+    leadIn: `We'd like to help you with this. Please use the form below to get started.`,
+    ctaText: `${journey.name} →`,
+  });
 
-  // Try account linking first if not completed
-  if (!ticket.profile_link_completed && journey.trigger_intent !== "account_linking") {
-    const linkResult = await executeAccountLinkingJourney(workspaceId, ticketId, "", ticket.channel);
-    if (!linkResult.completed) {
-      return NextResponse.json({ sent: true, journey: journey.name, step: "account_linking" });
-    }
-    await admin.from("tickets").update({ profile_link_completed: true, journey_step: 0, journey_data: {} }).eq("id", ticketId);
-  }
-
-  if (journey.trigger_intent === "account_linking") {
-    const r = await executeAccountLinkingJourney(workspaceId, ticketId, "", ticket.channel);
-    result = { completed: r.completed };
-  } else if (journey.trigger_intent === "discount_signup") {
-    const r = await executeDiscountJourney(workspaceId, ticketId, "", ticket.channel);
-    result = { completed: r.completed };
-  }
-
-  return NextResponse.json({ sent: true, journey: journey.name, completed: result.completed });
+  return NextResponse.json({ sent: launched, journey: journey.name });
 }

@@ -5,9 +5,7 @@ import { stripQuotedReply } from "@/lib/email-utils";
 import { decrypt } from "@/lib/crypto";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
-import { matchPatterns } from "@/lib/pattern-matcher";
 import { inngest } from "@/lib/inngest/client";
-import { buildContext, resolveTemplate } from "@/lib/workflow-executor";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
 
 // Detect short positive confirmation replies (thanks, got it, etc.)
@@ -293,10 +291,6 @@ export async function POST(request: Request) {
             is_new_ticket: false,
           },
         });
-      } else if (ticketData.assigned_to) {
-        // Agent-assigned ticket — check if a journey should be suggested
-        const { suggestJourneyForAgent } = await import("@/lib/journey-suggest");
-        await suggestJourneyForAgent(workspaceId, ticketId, cleanBody);
       }
     }
   } else {
@@ -373,141 +367,11 @@ export async function POST(request: Request) {
         subject: subject || "(No subject)",
       }).catch(() => {});
 
-      // Check if a journey should handle this (priority: Journey > Workflow > AI)
-      const { data: journeyDefs } = await admin
-        .from("journey_definitions")
-        .select("id, trigger_intent, match_patterns, channels")
-        .eq("workspace_id", workspaceId)
-        .eq("is_active", true)
-        .not("trigger_intent", "is", null)
-        .order("priority", { ascending: false });
-
-      const msgLower = messageBody.toLowerCase();
-      const matchedJourney = (journeyDefs || []).find(j => {
-        if (!j.match_patterns?.length) return false;
-        if (j.channels?.length && !j.channels.includes("email")) return false;
-        return j.match_patterns.some((p: string) => msgLower.includes(p.toLowerCase()));
+      // Unified handler handles all routing: journey → workflow → macro → KB → escalate
+      await inngest.send({
+        name: "ticket/inbound-message",
+        data: { workspace_id: workspaceId, ticket_id: ticket.id, message_body: messageBody || subject || "", channel: "email", is_new_ticket: true },
       });
-
-      if (matchedJourney) {
-        console.log(`Journey matched: ${matchedJourney.trigger_intent} for new ticket ${ticket.id}`);
-
-        // Build combined mini-site journey (account linking + matched journey in one CTA)
-        const { buildCombinedEmailJourney } = await import("@/lib/email-journey-builder");
-        await buildCombinedEmailJourney({
-          workspaceId,
-          ticketId: ticket.id,
-          customerId: customerId || undefined,
-          matchedJourneyIntent: matchedJourney.trigger_intent,
-          matchedJourneyId: matchedJourney.id,
-        });
-      }
-
-      // Smart pattern matching — 3-layer: keywords → embeddings → AI
-      const matched = !matchedJourney ? await matchPatterns(workspaceId, subject, messageBody) : null;
-      let workflowFired = false;
-      if (matched?.autoTag) {
-        // Only apply smart tag + fire workflow if an enabled workflow exists for this tag
-        const { data: wf } = await admin.from("workflows").select("id, config, template")
-          .eq("workspace_id", workspaceId).eq("trigger_tag", matched.autoTag).eq("enabled", true).single();
-
-        if (!wf) {
-          console.log(`Pattern matched: ${matched.category} (${matched.method}) → ${matched.autoTag} — no enabled workflow, skipping`);
-        } else {
-        workflowFired = true;
-        const { data: t } = await admin.from("tickets").select("tags").eq("id", ticket.id).single();
-        const tags = [...((t?.tags as string[]) || []), matched.autoTag];
-        await admin.from("tickets").update({ tags: [...new Set(tags)] }).eq("id", ticket.id);
-
-        console.log(`Pattern matched: ${matched.category} (${matched.method}, confidence: ${matched.confidence}) → ${matched.autoTag}`);
-
-        // Fire workflow execution via Inngest (respects channel response delay)
-        // Set auto_reply_at + pending preview so agents can see what's queued
-        const { data: wsDelay } = await admin.from("workspaces").select("response_delays").eq("id", workspaceId).single();
-        const delays = (wsDelay?.response_delays || { email: 60 }) as Record<string, number>;
-        const delaySec = delays.email || 60;
-        const autoReplyAt = new Date(Date.now() + delaySec * 1000).toISOString();
-        let pendingPreview = "Preparing a response...";
-        if (wf?.config) {
-          try {
-            const ctx = await buildContext(admin, workspaceId, ticket.id);
-            const cfg = wf.config as Record<string, unknown>;
-            const threshold = (cfg.delay_threshold_days as number) || 10;
-
-            // Follow the same logic as the workflow executor to pick the right template
-            let templateText: string | null = null;
-            if (!ctx.order) {
-              templateText = (cfg.reply_no_order as string) || null;
-            } else {
-              const fStatus = ctx.order.fulfillment_status as string | null;
-              if (!fStatus || fStatus === "UNFULFILLED") {
-                templateText = (cfg.reply_preparing as string) || null;
-              } else if (!ctx.fulfillment?.tracking_number) {
-                templateText = (cfg.reply_no_tracking as string) || null;
-              } else {
-                const status = (ctx.fulfillment.shopify_status || "").toUpperCase();
-                if (status === "DELIVERED") {
-                  templateText = (cfg.reply_delivered as string) || null;
-                } else if (ctx.fulfillment.days_since >= threshold) {
-                  templateText = (cfg.reply_escalated as string) || null;
-                } else if (status === "OUT_FOR_DELIVERY") {
-                  templateText = (cfg.reply_out_for_delivery as string) || null;
-                } else {
-                  templateText = (cfg.reply_in_transit as string) || null;
-                }
-              }
-            }
-            if (templateText) {
-              pendingPreview = resolveTemplate(templateText, ctx);
-            }
-          } catch (err) {
-            console.error("Preview generation error:", err);
-          }
-        }
-
-        await admin.from("tickets").update({ auto_reply_at: autoReplyAt, pending_auto_reply: pendingPreview }).eq("id", ticket.id);
-
-        await inngest.send({
-          name: "workflow/execute",
-          data: { workspace_id: workspaceId, ticket_id: ticket.id, trigger_tag: matched.autoTag, channel: "email" },
-        });
-
-        // Tag ticket with workflow type
-        const { addTicketTag } = await import("@/lib/ticket-tags");
-        const wfShort = matched.autoTag.replace("smart:", "").replace("order-", "").replace("-request", "").replace("-inquiry", "");
-        await addTicketTag(ticket.id, `w:${wfShort}`);
-        } // end: enabled workflow exists
-      }
-
-      // AI auto-draft: only if no journey or workflow was triggered
-      if (!matchedJourney && !workflowFired) {
-        // Check if AI is enabled for email channel
-        const { data: aiConfig } = await admin
-          .from("ai_channel_config")
-          .select("enabled, sandbox, confidence_threshold, auto_resolve")
-          .eq("workspace_id", workspaceId)
-          .eq("channel", "email")
-          .single();
-
-        if (aiConfig?.enabled) {
-          // Respect per-channel delays (same as workflows)
-          const { data: wsDelay2 } = await admin.from("workspaces").select("response_delays").eq("id", workspaceId).single();
-          const delays2 = (wsDelay2?.response_delays || { email: 300 }) as Record<string, number>;
-          const aiDelaySec = delays2.email || 300;
-          const aiAutoReplyAt = new Date(Date.now() + aiDelaySec * 1000).toISOString();
-
-          await admin.from("tickets").update({
-            auto_reply_at: aiAutoReplyAt,
-            pending_auto_reply: "AI is drafting a response...",
-          }).eq("id", ticket.id);
-
-          // Fire AI draft via Inngest (respects delay inside the function)
-          await inngest.send({
-            name: "ticket/inbound-message",
-            data: { workspace_id: workspaceId, ticket_id: ticket.id, message_body: messageBody || subject || "", channel: "email", is_new_ticket: true },
-          });
-        }
-      }
 
       // Evaluate rules for new ticket (tags are set, so rules can trigger on them)
       const { data: fullTicket } = await admin.from("tickets").select("*").eq("id", ticket.id).single();
