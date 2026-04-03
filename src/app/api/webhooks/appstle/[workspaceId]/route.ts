@@ -205,15 +205,17 @@ async function handleSubscriptionEvent(
       updated_at: new Date().toISOString(),
     }, { onConflict: "workspace_id,shopify_contract_id" });
 
-    // Self-heal: if multiple discounts detected, remove extras
-    if (appliedDiscounts.length > 1) {
-      console.log(`[Appstle] Multiple discounts on contract ${contractId}: ${appliedDiscounts.map(d => d.title).join(", ")}. Auto-removing extras.`);
+    // Self-heal: if multiple CODE_DISCOUNT coupons detected, remove extras
+    // AUTOMATIC_DISCOUNT types (Buy 2, Free Shipping) are managed by Shopify — don't touch
+    const codeDiscounts = appliedDiscounts.filter(d => d.type === "CODE_DISCOUNT");
+    if (codeDiscounts.length > 1) {
+      console.log(`[Appstle] Multiple code discounts on contract ${contractId}: ${codeDiscounts.map(d => d.title).join(", ")}. Auto-removing extras.`);
       try {
         const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", workspaceId).single();
         if (ws?.appstle_api_key_encrypted) {
           const apiKey = decrypt(ws.appstle_api_key_encrypted);
-          // Keep the first discount, remove the rest
-          for (const extra of appliedDiscounts.slice(1)) {
+          // Keep the first code discount, remove the rest
+          for (const extra of codeDiscounts.slice(1)) {
             await fetch(
               `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}&discountId=${encodeURIComponent(extra.id)}&api_key=${apiKey}`,
               { method: "PUT", headers: { "X-API-Key": apiKey } },
