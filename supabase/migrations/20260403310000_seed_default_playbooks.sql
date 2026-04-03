@@ -109,7 +109,7 @@ INSERT INTO public.playbook_steps (workspace_id, playbook_id, step_order, type, 
 (ws_id, pb1_id, 7, 'stand_firm',
   'Stand firm if all offers rejected',
   'If the customer rejects all offers, acknowledge their frustration but don''t budge beyond the defined exceptions. Never argue. Restate the best available offer in different words each time. After max repetitions, send a final message leaving the offer on the table.',
-  ARRAY[], 'resolved', '{}', false);
+  ARRAY[]::text[], 'resolved', '{}', false);
 
 
 -- ══ Playbook 2: Missing / Lost Order ══
@@ -153,6 +153,6 @@ INSERT INTO public.playbook_steps (workspace_id, playbook_id, step_order, type, 
 (ws_id, pb2_id, 3, 'stand_firm',
   'Handle pushback',
   'If customer is unsatisfied with the resolution offered, acknowledge frustration. For delivered-but-not-received, explain we need to work with the carrier. Don''t offer refunds on delivered packages without investigation.',
-  ARRAY[], 'resolved', '{}', false);
+  ARRAY[]::text[], 'resolved', '{}', false);
 
 END $$;
