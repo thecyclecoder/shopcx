@@ -180,7 +180,10 @@ async function handleSubscriptionEvent(
       id: node.id as string,
       title: (node.title as string) || "",
       type: (node.type as string) || "",
-      value: val?.percentage ? Number(val.percentage) : val?.fixedAmount ? Number((val.fixedAmount as { amount?: string })?.amount || 0) : 0,
+      value: val?.percentage ? Number(val.percentage)
+        : (val?.amount as { amount?: string })?.amount ? Number((val.amount as { amount: string }).amount)
+        : val?.fixedAmount ? Number((val.fixedAmount as { amount?: string })?.amount || 0)
+        : 0,
       valueType: val?.percentage ? "PERCENTAGE" : "FIXED_AMOUNT",
     };
   });
