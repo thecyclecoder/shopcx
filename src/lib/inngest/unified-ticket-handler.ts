@@ -63,7 +63,8 @@ async function channelCfg(admin: Admin, wsId: string, ch: string) {
     .select("enabled, confidence_threshold, auto_resolve, sandbox, personality_id, instructions, ai_turn_limit")
     .eq("workspace_id", wsId).eq("channel", ch).single();
   return {
-    enabled: data?.enabled ?? true, threshold: data?.confidence_threshold ?? 70,
+    enabled: data?.enabled ?? true,
+    threshold: (data?.confidence_threshold ?? 0.7) <= 1 ? Math.round((data?.confidence_threshold ?? 0.7) * 100) : (data?.confidence_threshold ?? 70),
     auto_resolve: data?.auto_resolve ?? false, sandbox: data?.sandbox ?? true,
     personality_id: data?.personality_id || null,
   };
@@ -104,14 +105,21 @@ async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max =
 }
 
 async function classifyIntent(msg: string, ctx: string, hist: string, handlers: string, model: "haiku" | "sonnet" = "haiku") {
-  const raw = await claude(`You are an intent classifier for customer support.
+  const raw = await claude(`You are an intent classifier for customer support. Your job is to match the customer's message to one of the available handlers below. Do NOT invent intents — only use the handler intents listed, or "unknown" if none fit.
 
 Customer message: "${msg}"
 ${ctx ? `Customer:\n${ctx}\n` : "No customer found."}
 ${hist ? `Conversation:\n${hist}\n` : ""}
-Handlers:\n${handlers || "None"}
+Available handlers (you MUST pick from these intents or "unknown"):
+${handlers || "None"}
 
-Return JSON: { "intent": "brief label", "confidence": 0-100, "reasoning": "one sentence" }`, model);
+Rules:
+- "intent" must be the exact trigger intent/tag from the handler list above, or "unknown"
+- "confidence" is how sure you are that the customer's message matches that specific handler (0-100)
+- If the message is vague, emotional, or doesn't clearly match any handler, return "unknown" with low confidence
+- A complaint without a specific actionable request is "unknown" — the customer hasn't told us what they need yet
+
+Return JSON: { "intent": "handler intent from list above or unknown", "confidence": 0-100, "reasoning": "one sentence" }`, model);
   try { return JSON.parse(raw.replace(/^```json?\n?/, "").replace(/\n?```$/, "")); }
   catch { return { intent: "unknown", confidence: 0, reasoning: "parse error" }; }
 }
