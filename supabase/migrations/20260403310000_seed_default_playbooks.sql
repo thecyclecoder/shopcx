@@ -5,22 +5,17 @@ DO $$
 DECLARE
   ws_id UUID := 'fdc11e10-b89f-4989-8b73-ed6526c4d906';
   existing_count INTEGER;
-BEGIN
-  SELECT COUNT(*) INTO existing_count FROM public.playbooks WHERE workspace_id = ws_id;
-  IF existing_count > 0 THEN
-    RAISE NOTICE 'Playbooks already exist, skipping seed';
-    RETURN;
-  END IF;
-END $$;
-
-DO $$
-DECLARE
-  ws_id UUID := 'fdc11e10-b89f-4989-8b73-ed6526c4d906';
   pb1_id UUID := gen_random_uuid();
   pb2_id UUID := gen_random_uuid();
   pol1_id UUID := gen_random_uuid();
   pol2_id UUID := gen_random_uuid();
 BEGIN
+
+SELECT COUNT(*) INTO existing_count FROM public.playbooks WHERE workspace_id = ws_id;
+IF existing_count > 0 THEN
+  RAISE NOTICE 'Playbooks already exist for this workspace, skipping seed';
+  RETURN;
+END IF;
 
 -- ══ Playbook 1: Unwanted Charge / Subscription Dispute ══
 INSERT INTO public.playbooks (id, workspace_id, name, description, trigger_intents, trigger_patterns, priority, is_active, exception_limit, stand_firm_max)
