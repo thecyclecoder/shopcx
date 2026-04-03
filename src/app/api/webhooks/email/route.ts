@@ -8,32 +8,7 @@ import { evaluateRules } from "@/lib/rules-engine";
 import { inngest } from "@/lib/inngest/client";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
 
-// Detect short positive confirmation replies (thanks, got it, etc.)
-const POSITIVE_PHRASES = [
-  "thanks", "thank you", "thank u", "thx", "ty", "got it", "great",
-  "perfect", "awesome", "wonderful", "appreciate", "that helps",
-  "all good", "all set", "sounds good", "ok great", "ok thanks",
-  "ok thank you", "ok cool", "understood", "noted", "good to know",
-  "excellent", "much appreciated", "cool thanks", "love it",
-  "problem solved", "no further", "that worked",
-];
-
-function isShortPositiveReply(body: string): boolean {
-  const cleaned = body
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\n/g, " ")
-    .replace(/\s+/g, " ")
-    .toLowerCase()
-    .split(/(?:sent from|get outlook|on .+ wrote:|from:|----)/)[0]
-    .trim();
-
-  // Must be short (under 50 words) — long replies are real messages
-  const wordCount = cleaned.split(/\s+/).length;
-  if (wordCount > 50) return false;
-
-  return POSITIVE_PHRASES.some(phrase => cleaned.includes(phrase));
-}
-
+// Positive close detection moved to unified ticket handler
 // Fetch email body from Resend's receiving API
 async function fetchEmailBody(
   apiKey: string,
@@ -216,9 +191,6 @@ export async function POST(request: Request) {
       .eq("id", ticketId)
       .single();
 
-    const hasSmartTag = (ticket?.tags as string[] || []).some(t => t.startsWith("smart:"));
-    const isPositiveConfirmation = hasSmartTag && isShortPositiveReply(messageBody);
-
     // Always reopen closed/pending tickets on customer reply + track last reply
     if (ticket && (ticket.status === "pending" || ticket.status === "closed")) {
       await admin.from("tickets").update({
@@ -234,25 +206,7 @@ export async function POST(request: Request) {
       }).eq("id", ticketId);
     }
 
-    // If positive confirmation on a smart-tagged ticket, queue auto-close
-    if (isPositiveConfirmation && ticket) {
-      const currentTags = (ticket.tags as string[]) || [];
-      if (!currentTags.includes("smart:positive-confirmation")) {
-        await admin.from("tickets").update({ tags: [...currentTags, "smart:positive-confirmation"] }).eq("id", ticketId);
-      }
-
-      const { data: wsDelay } = await admin.from("workspaces").select("response_delays, auto_close_reply").eq("id", workspaceId).single();
-      const delays = (wsDelay?.response_delays || { email: 60 }) as Record<string, number>;
-      const delaySec = delays.email || 60;
-      const autoReplyAt = new Date(Date.now() + delaySec * 1000).toISOString();
-      const pendingPreview = wsDelay?.auto_close_reply || "You're welcome! If you need anything else, we're always here to help.";
-      await admin.from("tickets").update({ auto_reply_at: autoReplyAt, pending_auto_reply: pendingPreview }).eq("id", ticketId);
-
-      await inngest.send({
-        name: "workflow/positive-close",
-        data: { workspace_id: workspaceId, ticket_id: ticketId, channel: "email" },
-      });
-    }
+    // Positive close is handled by the unified ticket handler
 
     // Evaluate rules for message received on existing ticket
     const { data: ticketData } = await admin.from("tickets").select("*").eq("id", ticketId).single();
@@ -265,8 +219,8 @@ export async function POST(request: Request) {
       message: { body: messageBody, direction: "inbound", author_type: "customer" },
     });
 
-    // Multi-turn AI: if ticket was AI-handled or has no assignee, let AI continue
-    if (!isPositiveConfirmation && ticketData) {
+    // Unified handler handles all routing including positive close
+    if (ticketData) {
       const handledBy = ticketData.handled_by || "";
       const isAutoHandled = handledBy === "AI Agent" || handledBy.startsWith("Workflow:") || handledBy.startsWith("Journey:") || ticketData.ai_handled;
       const isUnassigned = !ticketData.assigned_to;

@@ -194,11 +194,13 @@ export async function POST(
     // Trigger AI for: AI-handled, workflow-handled, journey-handled, or unassigned
     if (isAutoHandled || isUnassigned) {
       await inngest.send({
-        name: "ai/reply-received",
+        name: "ticket/inbound-message",
         data: {
           workspace_id: workspaceId,
           ticket_id: ticketId,
           message_body: message,
+          channel: "chat",
+          is_new_ticket: false,
         },
       });
 

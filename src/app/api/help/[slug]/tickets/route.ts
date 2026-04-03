@@ -76,10 +76,10 @@ export async function POST(
       body: message,
     });
 
-    // Fire pattern matching + workflow via Inngest
+    // Unified handler handles routing
     await inngest.send({
-      name: "workflow/execute",
-      data: { workspace_id: workspace.id, ticket_id: ticket.id, trigger_tag: tags[0] || "", channel: "help_center" },
+      name: "ticket/inbound-message",
+      data: { workspace_id: workspace.id, ticket_id: ticket.id, message_body: message, channel: "help_center", is_new_ticket: true },
     });
   }
 

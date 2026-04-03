@@ -10,7 +10,6 @@ import {
   importFinalizeBatch,
   importJobComplete,
 } from "@/lib/inngest/import-subscriptions";
-import { workflowDelayed, positiveCloseDelayed } from "@/lib/inngest/workflow-delayed";
 import { kbEmbedDocument } from "@/lib/inngest/kb-embed";
 import { unifiedTicketHandler } from "@/lib/inngest/unified-ticket-handler";
 import { journeySessionCompleted, journeySessionAbandoned } from "@/lib/inngest/journey-outcomes";
@@ -55,8 +54,6 @@ export const { GET, POST, PUT } = serve({
     importChunksComplete,
     importFinalizeBatch,
     importJobComplete,
-    workflowDelayed,
-    positiveCloseDelayed,
     kbEmbedDocument,
     journeySessionCompleted,
     journeySessionAbandoned,
