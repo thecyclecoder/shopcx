@@ -182,11 +182,20 @@ async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: st
   } else {
     await admin.from("ticket_messages").insert({ ticket_id: tid, direction: "outbound", visibility: "external", author_type: "ai", body: html });
     if (ch === "email") {
-      const { data: t } = await admin.from("tickets").select("subject, customers(email)").eq("id", tid).single();
+      const { data: t } = await admin.from("tickets").select("subject, email_message_id, customers(email)").eq("id", tid).single();
       const email = (t?.customers as unknown as { email: string })?.email;
       if (email) {
+        // Get In-Reply-To from ticket or last message with an email_message_id
+        let inReplyTo: string | null = t?.email_message_id || null;
+        if (!inReplyTo) {
+          const { data: lastMsg } = await admin.from("ticket_messages")
+            .select("email_message_id").eq("ticket_id", tid)
+            .not("email_message_id", "is", null)
+            .order("created_at", { ascending: false }).limit(1).maybeSingle();
+          inReplyTo = lastMsg?.email_message_id || null;
+        }
         const { data: ws } = await admin.from("workspaces").select("name").eq("id", wsId).single();
-        await sendTicketReply({ workspaceId: wsId, toEmail: email, subject: t?.subject || "Re: Your request", body: html, inReplyTo: tid, agentName: "Support", workspaceName: ws?.name || "" });
+        await sendTicketReply({ workspaceId: wsId, toEmail: email, subject: `Re: ${t?.subject || "Your request"}`, body: html, inReplyTo, agentName: "Support", workspaceName: ws?.name || "" });
       }
     }
   }
