@@ -95,6 +95,19 @@ export default function IntegrationsPage() {
   const [slackMembersTotal, setSlackMembersTotal] = useState(0);
   const [slackSyncing, setSlackSyncing] = useState(false);
 
+  // EasyPost / Returns
+  const [easypostApiKey, setEasypostApiKey] = useState("");
+  const [easypostConnected, setEasypostConnected] = useState(false);
+  const [easypostApiKeyHint, setEasypostApiKeyHint] = useState<string | null>(null);
+  const [returnAddress, setReturnAddress] = useState<{
+    name: string; street1: string; street2: string; city: string; state: string; zip: string; country: string; phone: string;
+  }>({ name: "", street1: "", street2: "", city: "", state: "", zip: "", country: "US", phone: "" });
+  const [defaultParcel, setDefaultParcel] = useState<{
+    length: number; width: number; height: number; weight: number;
+  }>({ length: 12, width: 10, height: 6, weight: 16 });
+  const [easypostTesting, setEasypostTesting] = useState(false);
+  const [easypostTestResult, setEasypostTestResult] = useState<string | null>(null);
+
   // Sandbox
   const [sandboxMode, setSandboxMode] = useState(true);
 
@@ -156,6 +169,10 @@ export default function IntegrationsPage() {
             .then(wh => setAmplifierWebhooksRegistered(!!wh.registered))
             .catch(() => {});
         }
+        setEasypostConnected(!!data.easypost_connected);
+        setEasypostApiKeyHint(data.easypost_api_key_hint || null);
+        if (data.return_address) setReturnAddress({ name: "", street1: "", street2: "", city: "", state: "", zip: "", country: "US", phone: "", ...data.return_address });
+        if (data.default_return_parcel) setDefaultParcel(data.default_return_parcel);
         setSlackConnected(!!data.slack_connected);
         setSlackTeamName(data.slack_team_name || null);
         setSlackConnectedAt(data.slack_connected_at || null);
@@ -337,6 +354,48 @@ export default function IntegrationsPage() {
       setMessage("Review sync failed");
     }
     setKlaviyoSyncing(false);
+  };
+
+  // EasyPost handlers
+  const handleSaveEasypost = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const body: Record<string, unknown> = {};
+    if (easypostApiKey) body.easypost_api_key = easypostApiKey;
+    if (returnAddress.street1) body.return_address = returnAddress;
+    body.default_return_parcel = defaultParcel;
+    if (await patchIntegrations(body)) {
+      setMessage("Returns / EasyPost configuration saved");
+      if (easypostApiKey) {
+        setEasypostConnected(true);
+        setEasypostApiKeyHint(`EZ...${easypostApiKey.slice(-4)}`);
+        setEasypostApiKey("");
+      }
+    }
+  };
+
+  const handleDisconnectEasypost = async () => {
+    if (await patchIntegrations({ easypost_api_key: null, return_address: null })) {
+      setEasypostConnected(false);
+      setEasypostApiKeyHint(null);
+      setMessage("EasyPost disconnected");
+    }
+  };
+
+  const handleTestEasypost = async () => {
+    setEasypostTesting(true);
+    setEasypostTestResult(null);
+    try {
+      const res = await fetch(`/api/workspaces/${workspace.id}/returns/test-connection`, { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        setEasypostTestResult("Connection successful");
+      } else {
+        setEasypostTestResult(data.error || "Connection failed");
+      }
+    } catch {
+      setEasypostTestResult("Connection failed");
+    }
+    setEasypostTesting(false);
   };
 
   // Amplifier handlers
@@ -1263,6 +1322,188 @@ export default function IntegrationsPage() {
             </div>
           )}
         </div>
+      </div>
+      {/* ── Returns / EasyPost ── */}
+      <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-600/10">
+              <svg className="h-5 w-5 text-amber-600 dark:text-amber-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M16 16l3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z" />
+                <path d="M2 16l3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z" />
+                <path d="M7 21h10" />
+                <path d="M12 3v18" />
+                <path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Returns / EasyPost</h2>
+              <p className="text-xs text-zinc-500">Return shipping labels and tracking</p>
+            </div>
+          </div>
+          {easypostConnected && (
+            <span className="inline-flex items-center rounded-full bg-green-50 px-2 py-1 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20 dark:bg-green-500/10 dark:text-green-400 dark:ring-green-500/20">
+              Connected
+            </span>
+          )}
+        </div>
+        {canEdit && (
+          <form onSubmit={handleSaveEasypost} className="mt-5 space-y-4">
+            {/* API Key */}
+            <div>
+              <label className="mb-1 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                EasyPost API Key {easypostApiKeyHint && <span className="font-mono text-zinc-400">({easypostApiKeyHint})</span>}
+              </label>
+              <input
+                type="password"
+                value={easypostApiKey}
+                onChange={(e) => setEasypostApiKey(e.target.value)}
+                placeholder={easypostConnected ? "Enter new key to update" : "EasyPost API key"}
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+              />
+            </div>
+
+            {/* Return Address */}
+            <fieldset className="space-y-3">
+              <legend className="text-xs font-medium text-zinc-700 dark:text-zinc-300">Return Address (warehouse)</legend>
+              <input
+                value={returnAddress.name}
+                onChange={(e) => setReturnAddress({ ...returnAddress, name: e.target.value })}
+                placeholder="Company / Name"
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+              />
+              <input
+                value={returnAddress.street1}
+                onChange={(e) => setReturnAddress({ ...returnAddress, street1: e.target.value })}
+                placeholder="Street address"
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+              />
+              <input
+                value={returnAddress.street2}
+                onChange={(e) => setReturnAddress({ ...returnAddress, street2: e.target.value })}
+                placeholder="Suite / Unit (optional)"
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+              />
+              <div className="grid grid-cols-3 gap-2">
+                <input
+                  value={returnAddress.city}
+                  onChange={(e) => setReturnAddress({ ...returnAddress, city: e.target.value })}
+                  placeholder="City"
+                  className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+                <input
+                  value={returnAddress.state}
+                  onChange={(e) => setReturnAddress({ ...returnAddress, state: e.target.value })}
+                  placeholder="State"
+                  className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+                <input
+                  value={returnAddress.zip}
+                  onChange={(e) => setReturnAddress({ ...returnAddress, zip: e.target.value })}
+                  placeholder="ZIP"
+                  className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  value={returnAddress.country}
+                  onChange={(e) => setReturnAddress({ ...returnAddress, country: e.target.value })}
+                  placeholder="Country (US)"
+                  className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+                <input
+                  value={returnAddress.phone}
+                  onChange={(e) => setReturnAddress({ ...returnAddress, phone: e.target.value })}
+                  placeholder="Phone (optional)"
+                  className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+            </fieldset>
+
+            {/* Default Parcel Dimensions */}
+            <fieldset className="space-y-2">
+              <legend className="text-xs font-medium text-zinc-700 dark:text-zinc-300">Default Parcel (inches / oz)</legend>
+              <div className="grid grid-cols-4 gap-2">
+                <div>
+                  <label className="mb-1 block text-[11px] text-zinc-500">Length</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={defaultParcel.length}
+                    onChange={(e) => setDefaultParcel({ ...defaultParcel, length: parseFloat(e.target.value) || 0 })}
+                    className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] text-zinc-500">Width</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={defaultParcel.width}
+                    onChange={(e) => setDefaultParcel({ ...defaultParcel, width: parseFloat(e.target.value) || 0 })}
+                    className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] text-zinc-500">Height</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={defaultParcel.height}
+                    onChange={(e) => setDefaultParcel({ ...defaultParcel, height: parseFloat(e.target.value) || 0 })}
+                    className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] text-zinc-500">Weight (oz)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={defaultParcel.weight}
+                    onChange={(e) => setDefaultParcel({ ...defaultParcel, weight: parseFloat(e.target.value) || 0 })}
+                    className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  />
+                </div>
+              </div>
+            </fieldset>
+
+            {/* Actions */}
+            <div className="flex items-center gap-3">
+              <button
+                type="submit"
+                disabled={saving}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+              >
+                Save
+              </button>
+              {easypostConnected && (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleTestEasypost}
+                    disabled={easypostTesting}
+                    className="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  >
+                    {easypostTesting ? "Testing..." : "Test Connection"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDisconnectEasypost}
+                    disabled={saving}
+                    className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                  >
+                    Disconnect
+                  </button>
+                </>
+              )}
+            </div>
+            {easypostTestResult && (
+              <p className={`text-sm ${easypostTestResult.includes("successful") ? "text-green-600" : "text-red-600"}`}>
+                {easypostTestResult}
+              </p>
+            )}
+          </form>
+        )}
       </div>
       {/* ── Amplifier ── */}
         <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">

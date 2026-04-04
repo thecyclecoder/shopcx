@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_api_key_encrypted, return_address, default_return_parcel"
     )
     .eq("id", workspaceId)
     .single();
@@ -107,6 +107,14 @@ export async function GET(
       ? decrypt(workspace.shopify_multipass_secret_encrypted).slice(-4)
       : null,
 
+    // EasyPost / Returns
+    easypost_connected: !!workspace.easypost_api_key_encrypted,
+    easypost_api_key_hint: workspace.easypost_api_key_encrypted
+      ? `EZ...${decrypt(workspace.easypost_api_key_encrypted).slice(-4)}`
+      : null,
+    return_address: workspace.return_address || null,
+    default_return_parcel: workspace.default_return_parcel || { length: 12, width: 10, height: 6, weight: 16 },
+
     // Slack
     slack_connected: !!workspace.slack_bot_token_encrypted,
     slack_team_name: workspace.slack_team_name,
@@ -155,7 +163,8 @@ export async function PATCH(
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const updates: Record<string, string | boolean | number | null> = {};
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const updates: Record<string, any> = {};
 
   try {
     // Resend
@@ -293,6 +302,23 @@ export async function PATCH(
 
     if ("amplifier_shipping_days" in body) {
       updates.amplifier_shipping_days = body.amplifier_shipping_days || [1, 2, 3, 4, 5];
+    }
+
+    // EasyPost / Returns
+    if ("easypost_api_key" in body) {
+      if (body.easypost_api_key) {
+        updates.easypost_api_key_encrypted = encrypt(body.easypost_api_key);
+      } else {
+        updates.easypost_api_key_encrypted = null;
+      }
+    }
+
+    if ("return_address" in body) {
+      updates.return_address = body.return_address || null;
+    }
+
+    if ("default_return_parcel" in body) {
+      updates.default_return_parcel = body.default_return_parcel || { length: 12, width: 10, height: 6, weight: 16 };
     }
 
     // VIP threshold
