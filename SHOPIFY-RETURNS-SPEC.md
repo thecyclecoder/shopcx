@@ -172,7 +172,26 @@ mutation ReturnCreate($input: ReturnInput!) {
 }
 ```
 
-**Important:** Set `notifyCustomer: false` — we send our own emails with the return label.
+**Important:** `notifyCustomer` is deprecated and defaults to `false`. We send our own emails with the return label.
+
+**Full ReturnInput type:**
+```graphql
+input ReturnInput {
+  orderId: ID!
+  returnLineItems: [ReturnLineItemInput!]!
+  returnReasonNote: String                # Optional, max 255 chars
+  requestedAt: DateTime                   # Optional
+  notifyCustomer: Boolean                 # Deprecated (default: false)
+}
+
+input ReturnLineItemInput {
+  fulfillmentLineItemId: ID!
+  quantity: Int!
+  returnReasonNote: String                # Optional, max 255 chars
+}
+```
+
+**Return status values:** `OPEN`, `CLOSED`, `CANCELED`, `REQUESTED`, `DECLINED`
 
 **After creation:**
 - Store `return.id` as `shopify_return_gid`
@@ -287,15 +306,54 @@ mutation DisposeItems($dispositionInputs: [ReverseFulfillmentOrderDisposeInput!]
 }
 ```
 
-**Note:** Can only dispose each unit once. Build disposition inputs from the reverse fulfillment order line items stored during `createShopifyReturn`.
+**Disposition types:**
+- `RESTOCKED` — item restocked, inventory incremented. **Requires `locationId`.**
+- `MISSING` — item expected but absent
+- `PROCESSING_REQUIRED` — needs further evaluation
+- `NOT_RESTOCKED` — item received but not restocked
+
+**Note:** Can only dispose each unit once (e.g. 4 items = max 4 dispositions). Cannot update after creation. Build disposition inputs from the reverse fulfillment order line items stored during `createShopifyReturn`.
 
 **After dispose:**
 - Update return status to `restocked`
 - Set `processed_at`
 
-#### 4. `closeReturn(workspaceId, returnId)`
+#### 4. `processReturn(workspaceId, returnId)` (preferred)
 
-Closes the return after refund/credit is issued.
+Processes a return in one call: confirms quantities, handles disposition (restocking), issues refund, and closes the return. This is the **preferred approach** over separate dispose + refund + close calls.
+
+```graphql
+mutation ReturnProcess($input: ReturnProcessInput!) {
+  returnProcess(returnProcessInput: $input) {
+    return {
+      id
+      status
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+```
+
+**Input:**
+```json
+{
+  "returnProcessInput": {
+    "returnId": "gid://shopify/Return/123",
+    "returnLineItems": [
+      { "id": "gid://shopify/ReturnLineItem/456", "quantity": 1 }
+    ]
+  }
+}
+```
+
+Sets return status to CLOSED when all items processed. Creates refund records in Shopify financial reports.
+
+#### 5. `closeReturn(workspaceId, returnId)`
+
+Simple close — marks return as complete without processing. Use when refund was handled separately (e.g. store credit issued via our system, not Shopify refund).
 
 ```graphql
 mutation ReturnClose($id: ID!) {
@@ -367,11 +425,22 @@ This tells us: which items were fulfilled, which have already been returned, and
 
 Register these webhooks during Shopify OAuth setup:
 
-### `returns/create`
-Fires when a return is created (by us or by Shopify admin). Useful for syncing returns created manually in Shopify.
+**Note: There is NO `returns/create` webhook.** Use `returns/approve` instead.
+
+### `returns/request`
+Fires when a customer requests a return (status: REQUESTED). Only relevant if using Shopify's self-serve returns.
+
+### `returns/approve`
+Fires when a return is approved (status: OPEN). Since our `returnCreate` creates in OPEN state directly, this fires for our returns too.
 
 ### `returns/update`  
 Fires when return status changes. Update our `returns.status` accordingly.
+
+### `returns/close`
+Fires when return status becomes CLOSED.
+
+### `returns/process`
+Fires when return is fully or partially processed (refunds issued).
 
 ### `reverse_fulfillment_orders/dispose`
 Fires when items are disposed (restocked/missing). Useful if warehouse staff disposes via Shopify admin rather than our API.
@@ -383,8 +452,10 @@ Fires when items are disposed (restocked/missing). Useful if warehouse staff dis
 // 1. Verify HMAC
 // 2. Parse topic from X-Shopify-Topic header
 // 3. Switch on topic:
-//    - returns/create: upsert to returns table if not already tracked
+//    - returns/approve: upsert to returns table if not already tracked
 //    - returns/update: update status
+//    - returns/close: update status to closed
+//    - returns/process: update status, mark refunded
 //    - reverse_fulfillment_orders/dispose: update status to restocked, trigger refund flow
 ```
 
