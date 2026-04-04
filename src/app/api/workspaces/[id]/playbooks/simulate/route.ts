@@ -372,9 +372,16 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
             const inPolicy = (ctx.in_policy as string[]) || [];
             const exceptionOrders = ctx.exception_offered ? [(ctx.out_of_policy as string[] || []).slice(-1)[0]].filter(Boolean) : [];
             const returnable = [...new Set([...inPolicy, ...exceptionOrders])];
-            dataFound = `Returnable orders: ${returnable.join(", ") || "none"}`;
+            const resType = ctx.resolution_type as string || "store_credit_return";
+            const labelCost = ctx.label_cost_cents as number | undefined;
+            const netRefund = ctx.net_refund_cents as number | undefined;
+            const orderTotal = ctx.order_total_cents as number | undefined;
+            const breakdownStr = labelCost && netRefund && orderTotal
+              ? `\nBreakdown: $${(orderTotal / 100).toFixed(2)} minus ~$${(labelCost / 100).toFixed(2)} shipping = ~$${(netRefund / 100).toFixed(2)}`
+              : "";
+            dataFound = `Returnable orders: ${returnable.join(", ") || "none"}${breakdownStr}\nLabel generated + emailed to customer + link in response`;
             conditionResult = returnable.length > 0
-              ? `Return initiated for: ${returnable.join(", ")} (${ctx.resolution_type || "store_credit_return"})`
+              ? `Return created, label purchased for: ${returnable.join(", ")} (${resType})`
               : "No orders eligible for return";
             ctx.return_initiated = returnable.length > 0;
             ctx.return_orders = returnable;
@@ -442,10 +449,18 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
                 const resType = ctx.resolution_type as string || "store_credit_return";
                 const resLabel = resType.includes("refund") ? "full refund" : "store credit";
 
+                const labelCostCents = ctx.label_cost_cents as number | undefined;
+                const netRefundCents = ctx.net_refund_cents as number | undefined;
+                const orderTotalCents = ctx.order_total_cents as number | undefined;
+                const breakdownSim = labelCostCents && netRefundCents && orderTotalCents
+                  ? `\nApproximate breakdown: order $${(orderTotalCents / 100).toFixed(2)} minus ~$${(labelCostCents / 100).toFixed(2)} shipping = ~$${(netRefundCents / 100).toFixed(2)} ${resLabel}.`
+                  : "";
+                const fakeLabelUrl = "https://easypost-files.s3.amazonaws.com/files/postage_label/EXAMPLE_LABEL.pdf";
+
                 const returnAI = await genAI(
-                  { name: returnStep?.name || "Initiate Return", type: "initiate_return", instructions: returnStep?.instructions || "" },
-                  `Returnable orders: ${returnable.join(", ")}. Resolution: ${resLabel}`,
-                  `Customer accepted the ${resLabel} offer. Processing return.`,
+                  { name: returnStep?.name || "Initiate Return", type: "initiate_return", instructions: `${returnStep?.instructions || ""}\n\nA return shipping label has been generated. Include this download link in your response: ${fakeLabelUrl}\nAlso mention the label was sent to their email as a backup. Follow the store policy rules.` },
+                  `Returnable orders: ${returnable.join(", ")}. Resolution: ${resLabel}${breakdownSim}\nLabel URL: ${fakeLabelUrl}`,
+                  `Customer accepted the ${resLabel} offer. Return created, label purchased, emailed to customer.`,
                   acceptMock,
                 );
 
@@ -457,8 +472,8 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
                 emitStep({
                   step_name: "Initiate Return (accepted mid-stand-firm)",
                   step_type: "initiate_return", step_order: returnStep?.step_order || step.step_order,
-                  data_found: `Customer accepted after ${rep + 1} stand firm rounds.\nReturnable orders: ${returnable.join(", ")}\nResolution: ${resLabel}`,
-                  condition_result: `Acceptance detected — initiating return for ${returnable.join(", ")}`,
+                  data_found: `Customer accepted after ${rep + 1} stand firm rounds.\nReturnable orders: ${returnable.join(", ")}\nResolution: ${resLabel}${breakdownSim}\nLabel generated: ${fakeLabelUrl}\nLabel emailed to customer + link included in response`,
+                  condition_result: `Acceptance detected — return created, label purchased, initiating for ${returnable.join(", ")}`,
                   ai_response: returnAI, mock_customer_reply: sassyReply,
                   warnings: [], skipped: false,
                 });

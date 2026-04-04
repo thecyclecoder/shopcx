@@ -880,6 +880,8 @@ async function handleInitiateReturn(
           }
 
           labelInfo = `\nReturn label purchased: ${label.carrier} tracking ${label.trackingNumber}. Label emailed to customer. Cost: $${(label.costCents / 100).toFixed(2)}.`;
+          // Store label URL in context so AI response can include the link
+          ctx.label_url = label.labelUrl;
         }
       } catch (labelErr) {
         console.error("Label purchase failed (non-fatal, return still created):", labelErr);
@@ -901,13 +903,17 @@ async function handleInitiateReturn(
 
   const netRefundCents = ctx.net_refund_cents as number | undefined;
   const labelCostCents = ctx.label_cost_cents as number | undefined;
+  const labelUrl = ctx.label_url as string | undefined;
   const breakdownInfo = netRefundCents && labelCostCents
-    ? `\nThe return label has been generated and emailed to the customer. Approximate breakdown: order $${((ctx.order_total_cents as number) / 100).toFixed(2)} minus ~$${(labelCostCents / 100).toFixed(2)} shipping = ~$${(netRefundCents / 100).toFixed(2)} ${resLabel}.`
+    ? `\nApproximate breakdown: order $${((ctx.order_total_cents as number) / 100).toFixed(2)} minus ~$${(labelCostCents / 100).toFixed(2)} shipping = ~$${(netRefundCents / 100).toFixed(2)} ${resLabel}.`
     : "";
+  const labelLinkInfo = labelUrl
+    ? `\nA return shipping label has been generated. Include this download link in your response: ${labelUrl}\nAlso mention that the label was sent to their email as a backup.`
+    : "\nA return shipping label has been emailed to the customer.";
 
   const response = await aiGenerate(
     basePrompt(step, pers, policyRules),
-    `Customer data:\n${dataCtx}\n\nOrders with return created: ${created.join(", ")}\n${failed.length ? `Orders that failed: ${failed.join(", ")}\n` : ""}Resolution: ${resLabel}${breakdownInfo}\n\nThe customer has accepted the ${resLabel} offer. The return has been created and the return shipping label has been generated and emailed to them. Confirm this. Tell them to check their email for the label, print it, attach to the package, and drop it off. Once we receive the item, their ${resLabel} will be processed. Follow the store policy rules.`,
+    `Customer data:\n${dataCtx}\n\nOrders with return created: ${created.join(", ")}\n${failed.length ? `Orders that failed: ${failed.join(", ")}\n` : ""}Resolution: ${resLabel}${breakdownInfo}${labelLinkInfo}\n\nThe customer has accepted the ${resLabel} offer. Confirm the return is set up. Tell them to print the label, attach it to the package, and drop it off. Once we receive the item, their ${resLabel} will be processed. Follow the store policy rules.`,
   );
 
   return {
