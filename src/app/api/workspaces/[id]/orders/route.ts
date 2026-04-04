@@ -95,10 +95,11 @@ export async function GET(
       base().ilike("delivery_status", "delivered"),
       // Refunded
       base().or("financial_status.ilike.refunded,financial_status.ilike.partially_refunded"),
-      // Awaiting tracking: paid + not fulfilled (unfulfilled/partial/null) + not suspicious
+      // Awaiting tracking: paid + not fulfilled + no 3PL tracking + not suspicious
       base()
         .eq("financial_status", "paid")
         .or("fulfillment_status.is.null,fulfillment_status.neq.fulfilled")
+        .is("amplifier_shipped_at", null)
         .not("tags", "ilike", "%suspicious%"),
       // Late tracking: Amplifier orders past SLA (need JS split)
       admin.from("orders")
@@ -169,6 +170,19 @@ export async function GET(
     query = query.ilike("delivery_status", "delivered");
   } else if (filter === "refunded") {
     query = query.or("financial_status.ilike.refunded,financial_status.ilike.partially_refunded");
+  } else if (filter === "awaiting_tracking") {
+    query = query
+      .eq("financial_status", "paid")
+      .or("fulfillment_status.is.null,fulfillment_status.neq.fulfilled")
+      .is("amplifier_shipped_at", null)
+      .not("tags", "ilike", "%suspicious%");
+  } else if (filter === "late_tracking") {
+    query = query
+      .not("amplifier_order_id", "is", null)
+      .not("amplifier_received_at", "is", null)
+      .is("amplifier_shipped_at", null)
+      .not("fulfillment_status", "ilike", "fulfilled")
+      .eq("financial_status", "paid");
   }
 
   // Search
