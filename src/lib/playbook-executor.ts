@@ -183,50 +183,65 @@ async function executeStep(
 
   const dataContext = buildDataContext(customer, orders, subs, ctx, timelineChanges);
 
+  // Load the playbook's policy once — used by apply_policy, offer_exception, initiate_return, stand_firm
+  let policy: PlaybookPolicy | null = null;
+  const policyStep = allSteps.find(s => s.type === "apply_policy" || s.type === "offer_exception");
+  const policyId = (step.config.policy_id || policyStep?.config?.policy_id) as string | undefined;
+  if (policyId) {
+    const { data } = await admin.from("playbook_policies").select("*").eq("id", policyId).single();
+    policy = data as PlaybookPolicy | null;
+  }
+
+  // Build policy rules string from the policy's description + talking points
+  const policyRules = policy
+    ? [policy.description, policy.ai_talking_points].filter(Boolean).join("\n")
+    : (ctx.policy_rules as string) || "";
+
+  // Store policy rules in context so downstream steps (stand_firm) can access them
+  if (policyRules && !ctx.policy_rules) {
+    ctx.policy_rules = policyRules;
+  }
+
   switch (step.type) {
     case "identify_order":
-      return handleIdentifyOrder(orders, msg, step, dataContext, pers);
+      return handleIdentifyOrder(orders, msg, step, dataContext, pers, policyRules);
 
     case "identify_subscription":
-      return handleIdentifySubscription(subs, orders, ctx, step, dataContext, pers);
+      return handleIdentifySubscription(subs, orders, ctx, step, dataContext, pers, policyRules);
 
     case "check_other_subscriptions":
       return handleCheckOtherSubs(subs, ctx, step, dataContext, pers);
 
     case "apply_policy": {
-      const policyId = step.config.policy_id as string;
-      if (!policyId) return { action: "advance", newStep: step.step_order + 1, systemNote: "No policy configured." };
-      const { data: policy } = await admin.from("playbook_policies").select("*").eq("id", policyId).single();
-      if (!policy) return { action: "advance", newStep: step.step_order + 1, systemNote: "Policy not found." };
-      return handleApplyPolicy(policy, orders, ctx, step, dataContext, pers);
+      if (!policy) return { action: "advance", newStep: step.step_order + 1, systemNote: "No policy configured." };
+      return handleApplyPolicy(policy, orders, ctx, step, dataContext, pers, policyRules);
     }
 
     case "offer_exception": {
-      const policyId = step.config.policy_id as string;
       if (!policyId) return { action: "advance", newStep: step.step_order + 1, systemNote: "No policy for exception." };
       const { data: exceptions } = await admin.from("playbook_exceptions")
         .select("*").eq("policy_id", policyId).order("tier");
       return handleOfferException(
         exceptions || [], customer, orders, ctx, step, dataContext, pers,
-        exceptionsUsed, playbook.exception_limit, tid, admin, msg,
+        exceptionsUsed, playbook.exception_limit, tid, admin, msg, policyRules,
       );
     }
 
     case "initiate_return":
-      return handleInitiateReturn(admin, wsId, orders, ctx, step, dataContext, pers, msg);
+      return handleInitiateReturn(admin, wsId, orders, ctx, step, dataContext, pers, msg, policyRules);
 
     case "cancel_subscription":
-      return handleCancelSubscription(admin, wsId, subs, ctx, step, dataContext, pers);
+      return handleCancelSubscription(admin, wsId, subs, ctx, step, dataContext, pers, policyRules);
 
     case "issue_store_credit":
       return handleIssueStoreCredit(admin, wsId, customer, orders, ctx, step, tid);
 
     case "stand_firm":
-      return handleStandFirm(ctx, step, playbook.stand_firm_max, msg, dataContext, pers);
+      return handleStandFirm(ctx, step, playbook.stand_firm_max, msg, dataContext, pers, policyRules);
 
     case "explain":
     case "custom":
-      return handleGenericStep(step, dataContext, msg, pers);
+      return handleGenericStep(step, dataContext, msg, pers, policyRules);
 
     default:
       return { action: "advance", newStep: step.step_order + 1, systemNote: `Unknown step type: ${step.type}` };
@@ -354,18 +369,12 @@ async function aiGenerate(systemPrompt: string, userPrompt: string, model = "cla
   return (data.content?.[0] as { text: string })?.text?.trim() || "";
 }
 
-const RETURN_RULES = `Return/shipping rules (NEVER violate these):
-- Customer pays their own shipping. We do NOT provide a prepaid return label. Never say "prepaid label" or "no cost to you" for shipping.
-- Customer MUST send us the tracking number once they ship so we can confirm delivery.
-- Store credit or refund is issued ONLY after we receive and verify the returned product. Never promise immediate refund.
-- Never promise to "connect with a specialist" or "escalate to supervisor." You handle the full resolution.`;
-
-function basePrompt(step: PlaybookStep, pers: { name?: string; tone?: string } | null): string {
+function basePrompt(step: PlaybookStep, pers: { name?: string; tone?: string } | null, policyRules?: string): string {
   return [
     "You are a customer support agent.",
     pers?.tone ? `Tone: ${pers.tone}` : "Be empathetic and professional.",
-    "Rules: max 2-3 sentences per paragraph. Plain text only, no markdown. Never promise actions you haven't verified.",
-    RETURN_RULES,
+    "Rules: max 2-3 sentences per paragraph. Plain text only, no markdown. Never promise actions you haven't verified. Never promise to connect with a specialist or escalate to a supervisor — you handle the full resolution.",
+    policyRules ? `Store policy rules:\n${policyRules}` : "",
     step.instructions ? `Step instructions: ${step.instructions}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -374,11 +383,11 @@ function basePrompt(step: PlaybookStep, pers: { name?: string; tone?: string } |
 
 async function handleIdentifyOrder(
   orders: OrderData[], msg: string, step: PlaybookStep,
-  dataCtx: string, pers: { name?: string; tone?: string } | null,
+  dataCtx: string, pers: { name?: string; tone?: string } | null, policyRules: string,
 ): Promise<PlaybookExecResult> {
   if (orders.length === 0) {
     const response = await aiGenerate(
-      basePrompt(step, pers),
+      basePrompt(step, pers, policyRules),
       `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\nThe customer has no recent orders. Acknowledge their concern and ask for an order number or more details.`,
     );
     return { action: "respond", response, systemNote: "[Playbook] No recent orders found." };
@@ -388,7 +397,7 @@ async function handleIdentifyOrder(
     const o = orders[0];
     const items = (o.line_items as { title?: string }[] || []).map(i => i.title).join(", ");
     const response = await aiGenerate(
-      basePrompt(step, pers),
+      basePrompt(step, pers, policyRules),
       `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\nThey have one recent order: ${o.order_number} on ${new Date(o.created_at).toLocaleDateString()} for ${items} ($${(o.total_cents / 100).toFixed(2)}). Confirm this is the order they're asking about.`,
     );
     return {
@@ -438,7 +447,7 @@ async function handleIdentifyOrder(
   }).join("\n");
 
   const response = await aiGenerate(
-    basePrompt(step, pers),
+    basePrompt(step, pers, policyRules),
     `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\nThey have ${orders.length} recent orders:\n${orderList}\n\nAsk which order(s) they're referring to. List the orders so they can identify theirs.`,
   );
 
@@ -447,7 +456,7 @@ async function handleIdentifyOrder(
 
 async function handleIdentifySubscription(
   subs: SubscriptionData[], orders: OrderData[], ctx: Record<string, unknown>,
-  step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null,
+  step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null, policyRules: string,
 ): Promise<PlaybookExecResult> {
   const identifiedOrders = (ctx.identified_orders as string[]) || [];
   if (!identifiedOrders.length) {
@@ -491,7 +500,7 @@ async function handleCheckOtherSubs(
 
 async function handleApplyPolicy(
   policy: PlaybookPolicy, orders: OrderData[], ctx: Record<string, unknown>,
-  step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null,
+  step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null, policyRules: string,
 ): Promise<PlaybookExecResult> {
   const identifiedOrders = (ctx.identified_orders as string[]) || [];
   const orderObjs = orders.filter(o => identifiedOrders.includes(o.order_number));
@@ -530,7 +539,7 @@ async function handleApplyPolicy(
   const otherSubsInfo = otherSubs > 0 ? `Note: customer has ${otherSubs} other active subscription(s) — mention proactively.` : "";
 
   const response = await aiGenerate(
-    basePrompt(step, pers),
+    basePrompt(step, pers, policyRules),
     `Customer data:\n${dataCtx}\n\nPolicy: "${policy.name}"\nPolicy details: ${policy.description || ""}\nAI talking points: ${policy.ai_talking_points || ""}\n${subInfo}\n${otherSubsInfo}\n\nOrders in policy (eligible for return): ${inPolicy.join(", ") || "none"}\nOrders out of policy: ${outOfPolicy.join(", ") || "none"}\n\nSpecific reasons each order fails:\n${failureReasons.join("\n") || "none"}\n\nExplain the situation to the customer. For EACH order, explain specifically why it does or doesn't qualify — mention the exact reason (e.g. "recurring subscription order" or "outside 30-day window"). Be neutral — say "here's what happened" not "you signed up for this." If there are other active subscriptions, mention them proactively.`,
   );
 
@@ -546,7 +555,7 @@ async function handleOfferException(
   ctx: Record<string, unknown>, step: PlaybookStep, dataCtx: string,
   pers: { name?: string; tone?: string } | null,
   exceptionsUsed: number, exceptionLimit: number, tid: string, admin: Admin,
-  msg: string,
+  msg: string, policyRules: string,
 ): Promise<PlaybookExecResult> {
   const outOfPolicy = (ctx.out_of_policy as string[]) || [];
   if (outOfPolicy.length === 0) {
@@ -600,7 +609,7 @@ async function handleOfferException(
     const remaining = nextTierExceptions.filter(e => e.tier > nextException.tier);
     for (const fallback of remaining) {
       if (evaluateCustomerConditions(fallback.conditions, customer)) {
-        return offerException(fallback, outOfPolicy, step, dataCtx, pers, exceptionsUsed, exceptionLimit, tid, admin);
+        return offerException(fallback, outOfPolicy, step, dataCtx, pers, exceptionsUsed, exceptionLimit, tid, admin, policyRules);
       }
     }
     return {
@@ -610,23 +619,20 @@ async function handleOfferException(
     };
   }
 
-  return offerException(nextException, outOfPolicy, step, dataCtx, pers, exceptionsUsed, exceptionLimit, tid, admin);
+  return offerException(nextException, outOfPolicy, step, dataCtx, pers, exceptionsUsed, exceptionLimit, tid, admin, policyRules);
 }
 
 async function offerException(
   ex: PlaybookException, outOfPolicy: string[], step: PlaybookStep, dataCtx: string,
   pers: { name?: string; tone?: string } | null,
-  exceptionsUsed: number, exceptionLimit: number, tid: string, admin: Admin,
+  exceptionsUsed: number, exceptionLimit: number, tid: string, admin: Admin, policyRules: string,
 ): Promise<PlaybookExecResult> {
   const mostRecentOutOfPolicy = outOfPolicy[outOfPolicy.length - 1];
   const isEscalation = Number(ex.tier) > 1;
 
-  const resLabel = ex.resolution_type.includes("refund") ? "full refund" : "store credit";
-  const requiresReturn = ex.resolution_type.includes("return");
-
   const response = await aiGenerate(
-    basePrompt(step, pers),
-    `Customer data:\n${dataCtx}\n\nException instructions: ${ex.instructions || ""}\nException: "${ex.name}" (${ex.resolution_type})\nApplies to: ${mostRecentOutOfPolicy}\n${isEscalation ? "The customer rejected the previous offer. This is an escalated offer — present it as a better alternative without mentioning that other options exist beyond this one." : "Present this offer clearly. Do NOT hint that better alternatives exist."}\n\n${requiresReturn ? `Return process: customer ships the product back at their own expense (we do NOT provide a prepaid label). Customer must send us the tracking number once shipped. ${resLabel} is issued only after we receive and verify the product.` : `${resLabel} will be issued without requiring a return.`}\n\nOffer this exception. ${outOfPolicy.length > 1 ? `Note: applies to 1 order (${mostRecentOutOfPolicy}). Orders ${outOfPolicy.filter(o => o !== mostRecentOutOfPolicy).join(", ")} do not qualify.` : ""}`,
+    basePrompt(step, pers, policyRules),
+    `Customer data:\n${dataCtx}\n\nException instructions: ${ex.instructions || ""}\nException: "${ex.name}" (${ex.resolution_type})\nApplies to: ${mostRecentOutOfPolicy}\n${isEscalation ? "The customer rejected the previous offer. This is an escalated offer — present it as a better alternative without mentioning that other options exist beyond this one." : "Present this offer clearly. Do NOT hint that better alternatives exist."}\n\nFollow store policy rules exactly when describing the return/refund process.\n\nOffer this exception. ${outOfPolicy.length > 1 ? `Note: applies to 1 order (${mostRecentOutOfPolicy}). Orders ${outOfPolicy.filter(o => o !== mostRecentOutOfPolicy).join(", ")} do not qualify.` : ""}`,
   );
 
   await admin.from("tickets").update({ playbook_exceptions_used: exceptionsUsed + 1 }).eq("id", tid);
@@ -650,7 +656,7 @@ function detectAcceptance(msg: string): boolean {
 async function handleInitiateReturn(
   admin: Admin, wsId: string, orders: OrderData[], ctx: Record<string, unknown>,
   step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null,
-  msg: string,
+  msg: string, policyRules: string,
 ): Promise<PlaybookExecResult> {
   const inPolicy = (ctx.in_policy as string[]) || [];
   const exceptionOrder = ctx.exception_offered ? [(ctx.out_of_policy as string[] || []).slice(-1)[0]] : [];
@@ -680,8 +686,8 @@ async function handleInitiateReturn(
   const resLabel = resolution.includes("refund") ? "refund" : "store credit";
 
   const response = await aiGenerate(
-    basePrompt(step, pers),
-    `Customer data:\n${dataCtx}\n\nOrders approved for return: ${returnable.join(", ")}\nResolution: ${resLabel}\n\nThe customer has accepted the ${resLabel} offer. Set up the return. Important rules:\n- Customer pays their own shipping. We do NOT provide a prepaid label.\n- Customer must send us the tracking number once they ship so we can track receipt.\n- ${resLabel} is issued only after we receive and verify the returned product.\n- Be clear about these requirements.`,
+    basePrompt(step, pers, policyRules),
+    `Customer data:\n${dataCtx}\n\nOrders approved for return: ${returnable.join(", ")}\nResolution: ${resLabel}\n\nThe customer has accepted the ${resLabel} offer. Set up the return. Follow the store policy rules exactly when explaining the return process to the customer.`,
   );
 
   return {
@@ -693,7 +699,7 @@ async function handleInitiateReturn(
 
 async function handleCancelSubscription(
   admin: Admin, wsId: string, subs: SubscriptionData[], ctx: Record<string, unknown>,
-  step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null,
+  step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null, policyRules: string,
 ): Promise<PlaybookExecResult> {
   const identifiedSub = ctx.identified_subscription as string | undefined;
   const otherActive = (ctx.other_active_subs as string[]) || [];
@@ -724,7 +730,7 @@ async function handleCancelSubscription(
   }
 
   const response = await aiGenerate(
-    basePrompt(step, pers),
+    basePrompt(step, pers, policyRules),
     `Customer data:\n${dataCtx}\n\nCancelled subscriptions: ${cancelled.join(", ")}\n\nConfirm the cancellation. If there were multiple, list them all. Reassure them they won't be charged again.`,
   );
 
@@ -754,22 +760,18 @@ async function handleIssueStoreCredit(
 
 async function handleStandFirm(
   ctx: Record<string, unknown>, step: PlaybookStep, maxReps: number,
-  msg: string, dataCtx: string, pers: { name?: string; tone?: string } | null,
+  msg: string, dataCtx: string, pers: { name?: string; tone?: string } | null, policyRules: string,
 ): Promise<PlaybookExecResult> {
   const reps = Number(ctx.stand_firm_count) || 0;
 
   const bestOffer = ctx.exception_offered || "return";
   const resType = ctx.resolution_type as string || "store_credit_return";
   const resLabel = resType.includes("refund") ? "full refund" : "store credit";
-  const requiresReturn = resType.includes("return");
-  const returnDetail = requiresReturn
-    ? `The offer is: ${resLabel} after customer returns the product. Customer pays their own shipping (NO prepaid label). Customer must send us the tracking number. ${resLabel} issued only after we receive the product.`
-    : `The offer is: ${resLabel} without requiring a return.`;
 
   if (reps >= maxReps) {
     const response = await aiGenerate(
-      basePrompt(step, pers),
-      `Customer data:\n${dataCtx}\n\nThe customer has rejected all offers ${maxReps} times. This is the FINAL message.\n${returnDetail}\n\nState your best offer one last time with these exact terms. Say "If you change your mind, just reply and we'll get it started for you." Warm but final tone. Do not argue. Do NOT offer prepaid labels or free shipping.`,
+      basePrompt(step, pers, policyRules),
+      `Customer data:\n${dataCtx}\n\nThe customer has rejected all offers ${maxReps} times. This is the FINAL message.\nBest offer: ${bestOffer} (${resLabel})\n\nState your best offer one last time following store policy rules exactly. Say "If you change your mind, just reply and we'll get it started for you." Warm but final tone. Do not argue.`,
     );
     return {
       action: "complete", response,
@@ -779,8 +781,8 @@ async function handleStandFirm(
   }
 
   const response = await aiGenerate(
-    basePrompt(step, pers),
-    `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\nThe customer rejected the offer. This is attempt ${reps + 1}/${maxReps}.\n${returnDetail}\n\nAcknowledge frustration. Restate the best available offer (${bestOffer}) with these exact return terms. Do NOT repeat verbatim — use different wording. Do not argue or get defensive. Do NOT offer prepaid labels or free shipping.`,
+    basePrompt(step, pers, policyRules),
+    `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\nThe customer rejected the offer. This is attempt ${reps + 1}/${maxReps}.\nBest offer: ${bestOffer} (${resLabel})\n\nAcknowledge frustration. Restate the best available offer following store policy rules exactly. Do NOT repeat verbatim — use different wording. Do not argue or get defensive.`,
   );
 
   return {
@@ -792,10 +794,10 @@ async function handleStandFirm(
 
 async function handleGenericStep(
   step: PlaybookStep, dataCtx: string, msg: string,
-  pers: { name?: string; tone?: string } | null,
+  pers: { name?: string; tone?: string } | null, policyRules: string,
 ): Promise<PlaybookExecResult> {
   const response = await aiGenerate(
-    basePrompt(step, pers),
+    basePrompt(step, pers, policyRules),
     `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\n${step.instructions || "Respond to the customer."}`,
   );
   return {
