@@ -53,7 +53,7 @@ const GORGIAS_BASE = `https://${GORGIAS_DOMAIN}.gorgias.com/api`;
 
 // State file to track which tickets we've already seen
 const stateFile = resolve(process.cwd(), "scripts/.gorgias-test-cursor.json");
-let cursor: { page: number; skipped: string[] } = { page: 1, skipped: [] };
+let cursor: { apiCursor: string | null; skipped: string[] } = { apiCursor: null, skipped: [] };
 try { cursor = JSON.parse(readFileSync(stateFile, "utf8")); } catch {}
 
 function saveCursor() {
@@ -61,12 +61,24 @@ function saveCursor() {
   writeFileSync(stateFile, JSON.stringify(cursor, null, 2));
 }
 
-async function gorgiasGet(path: string) {
+let lastReqAt = 0;
+async function gorgiasGet(path: string): Promise<Record<string, unknown>> {
+  // Rate limit: max 2 req/sec
+  const elapsed = Date.now() - lastReqAt;
+  if (elapsed < 600) await new Promise(r => setTimeout(r, 600 - elapsed));
+  lastReqAt = Date.now();
+
   const res = await fetch(`${GORGIAS_BASE}${path}`, {
     headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/json" },
   });
+  if (res.status === 429) {
+    const wait = parseInt(res.headers.get("Retry-After") || "5", 10);
+    console.log(`  Rate limited, waiting ${wait}s...`);
+    await new Promise(r => setTimeout(r, wait * 1000));
+    return gorgiasGet(path);
+  }
   if (!res.ok) throw new Error(`Gorgias API ${res.status}: ${await res.text()}`);
-  return res.json();
+  return res.json() as Promise<Record<string, unknown>>;
 }
 
 function stripHtml(html: string): string {
@@ -98,29 +110,34 @@ interface GorgiasTicket {
 
 async function findCandidates(count: number): Promise<GorgiasTicket[]> {
   const candidates: GorgiasTicket[] = [];
-  let page = cursor.page;
+  let apiCursor: string | null = cursor.apiCursor || null;
 
   while (candidates.length < count) {
-    console.log(`  Fetching Gorgias page ${page}...`);
-    const data = await gorgiasGet(`/tickets?limit=25&page=${page}&order_by=created_datetime:desc&status=closed`);
+    const params = new URLSearchParams({ limit: "25", order_by: "created_datetime:desc" });
+    if (apiCursor) params.set("cursor", apiCursor);
+
+    console.log(`  Fetching Gorgias tickets...`);
+    const data = await gorgiasGet(`/tickets?${params}`);
     const tickets = data.data || [];
 
     if (tickets.length === 0) break;
+    apiCursor = data.meta?.next_cursor || null;
+    cursor.apiCursor = apiCursor;
+    saveCursor();
 
     for (const t of tickets) {
+      if (t.status !== "closed") continue;
       if (cursor.skipped.includes(String(t.id))) continue;
 
-      // Fetch full ticket with messages
+      // Fetch messages
       const full = await gorgiasGet(`/tickets/${t.id}/messages?limit=50`);
       const messages = full.data || [];
 
-      // Must have 3+ messages (multi-turn) and at least one agent reply
       if (messages.length < 3) continue;
       const hasAgentReply = messages.some((m: { sender: { type: string } }) => m.sender?.type === "user");
       if (!hasAgentReply) continue;
 
-      // First message must be from customer
-      const firstMsg = messages[messages.length - 1]; // Gorgias returns newest first
+      const firstMsg = messages[messages.length - 1]; // newest first from API
       if (firstMsg?.sender?.type !== "customer") continue;
 
       const ticket: GorgiasTicket = {
@@ -131,15 +148,10 @@ async function findCandidates(count: number): Promise<GorgiasTicket[]> {
       candidates.push(ticket);
       if (candidates.length >= count) break;
 
-      // Rate limit
       await new Promise(r => setTimeout(r, 500));
     }
 
-    page++;
-    cursor.page = page;
-    saveCursor();
-
-    if (tickets.length < 25) break;
+    if (!apiCursor) break;
   }
 
   return candidates;
