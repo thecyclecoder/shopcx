@@ -25,7 +25,7 @@ import { sendTicketReply } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { markFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
-import { matchPlaybook, startPlaybook, executePlaybookStep } from "@/lib/playbook-executor";
+import { matchPlaybook, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -411,6 +411,38 @@ export const unifiedTicketHandler = inngest.createFunction(
         } else if (pbResult.action === "respond") {
           // Waiting for customer reply — honor auto-resolve setting
           await step.run("pb-status", () => setStatus(admin, tid, cfg.auto_resolve));
+        }
+
+        // Auto-advance: if step resolved without sending a response (e.g. order already
+        // identified, subscription lookup, check_other_subs), keep executing next steps
+        // until we hit a step that sends a response or completes.
+        let advResult: PlaybookExecResult | { action: "cancelled" } = pbResult;
+        let advCount = 0;
+        const MAX_AUTO_ADVANCE = 10; // safety limit
+        while (advResult.action === "advance" && !("response" in advResult && advResult.response) && advCount < MAX_AUTO_ADVANCE) {
+          advCount++;
+          const r = await step.run(`exec-playbook-advance-${advCount}`, async () => {
+            if (await newerActivity(admin, tid, t0)) return { action: "cancelled" as const };
+            return executePlaybookStep(wsId, tid, msg, pers);
+          });
+          advResult = r;
+          if (r.action === "cancelled") break;
+          const pr = r as PlaybookExecResult;
+          if (pr.systemNote) await step.run(`pb-adv-note-${advCount}`, () => sysNote(admin, tid, pr.systemNote!));
+          if (pr.response) await step.run(`pb-adv-send-${advCount}`, () => send(admin, wsId, tid, st.ch, pr.response!, cfg.sandbox));
+        }
+
+        // Handle the final result after auto-advancing
+        if (advCount > 0 && advResult.action !== "cancelled") {
+          const finalR = advResult as PlaybookExecResult;
+          if (finalR.action === "complete") {
+            await step.run("pb-adv-complete", async () => {
+              await admin.from("tickets").update({ active_playbook_id: null, playbook_step: 0, playbook_exceptions_used: 0 }).eq("id", tid);
+              await setStatus(admin, tid, cfg.auto_resolve);
+            });
+          } else if (finalR.action === "respond" || finalR.response) {
+            await step.run("pb-adv-status", () => setStatus(admin, tid, cfg.auto_resolve));
+          }
         }
 
         return { status: "playbook_step", action: pbResult.action };
