@@ -97,7 +97,7 @@ export async function executePlaybookStep(
 
   // Load ticket state
   const { data: ticket } = await admin.from("tickets")
-    .select("active_playbook_id, playbook_step, playbook_context, playbook_exceptions_used, customer_id, created_at")
+    .select("active_playbook_id, playbook_step, playbook_context, playbook_exceptions_used, customer_id, created_at, channel")
     .eq("id", ticketId).single();
 
   if (!ticket?.active_playbook_id || !ticket.customer_id) {
@@ -123,6 +123,7 @@ export async function executePlaybookStep(
   if (!currentStep) return { action: "complete", systemNote: "All playbook steps completed." };
 
   const ctx = (ticket.playbook_context || {}) as Record<string, unknown>;
+  ctx._channel = ticket.channel || "email"; // Pass channel to handlers for formatting
 
   // Fetch live customer data
   const customer = await fetchCustomerData(admin, workspaceId, ticket.customer_id);
@@ -150,6 +151,15 @@ export async function executePlaybookStep(
     customer, orders, subs, ctx, customerMessage, personality,
     ticket.playbook_exceptions_used, timelineChanges,
   );
+
+  // Wrap response with intro (first message) and sign-off
+  if (stepResult.response) {
+    const isFirstMessage = !ctx.playbook_intro_sent;
+    stepResult.response = wrapResponse(stepResult.response, personality, isFirstMessage);
+    if (isFirstMessage) {
+      stepResult.context = { ...stepResult.context, playbook_intro_sent: true };
+    }
+  }
 
   // Update ticket context
   if (stepResult.context) {
@@ -409,14 +419,43 @@ async function aiGenerate(systemPrompt: string, userPrompt: string, model = "cla
   return (data.content?.[0] as { text: string })?.text?.trim() || "";
 }
 
-function basePrompt(step: PlaybookStep, pers: { name?: string; tone?: string } | null, policyRules?: string): string {
+function basePrompt(step: PlaybookStep, pers: { name?: string; tone?: string; sign_off?: string | null } | null, policyRules?: string): string {
   return [
-    "You are a customer support agent.",
+    `You are a customer support agent${pers?.name ? ` named ${pers.name}` : ""}.`,
     pers?.tone ? `Tone: ${pers.tone}` : "Be empathetic and professional.",
-    "Rules: max 2-3 sentences per paragraph. Plain text only, no markdown. Never promise actions you haven't verified. Never promise to connect with a specialist or escalate to a supervisor — you handle the full resolution.",
+    `FORMATTING RULES:
+- Use HTML for formatting (<p>, <b>, <ul>, <li>). Do NOT use markdown.
+- Max 2-3 sentences per paragraph.
+- NEVER include order numbers (like SC127106) or subscription contract numbers in your response. Refer to orders by date and amount: "your April 4th order for $5.87". Log IDs in system notes only.
+- NEVER re-greet the customer. No "Hi [name]," after the first message.
+- NEVER repeat context already covered (order details, subscription timeline, product lists). The customer already knows — just talk about the current offer.
+- Messages should get SHORTER as the conversation progresses.
+- NEVER promise to connect with a specialist or escalate to a supervisor — you handle the full resolution.
+- Only apologize if there is concrete evidence of an error on our part.`,
+    pers?.sign_off ? `SIGN-OFF: End every response with:\n${pers.sign_off}` : "",
     policyRules ? `Store policy rules:\n${policyRules}` : "",
     step.instructions ? `Step instructions: ${step.instructions}` : "",
   ].filter(Boolean).join("\n");
+}
+
+/** Wrap AI response with intro (first message only) and sign-off */
+function wrapResponse(response: string, pers: { name?: string; sign_off?: string | null } | null, isFirstMessage: boolean): string {
+  let result = response;
+
+  // Add intro on first message
+  if (isFirstMessage && pers?.name) {
+    const hasGreeting = /^(hi|hey|hello|dear)\b/i.test(result.trim());
+    if (!hasGreeting) {
+      result = `Hi, I'm ${pers.name} and I'm here to help you with this.\n\n${result}`;
+    }
+  }
+
+  // Add sign-off if not already present
+  if (pers?.sign_off && !result.includes(pers.sign_off)) {
+    result = `${result}\n\n${pers.sign_off}`;
+  }
+
+  return result;
 }
 
 // ── Step handlers ──
@@ -436,9 +475,10 @@ async function handleIdentifyOrder(
   if (orders.length === 1) {
     const o = orders[0];
     const items = (o.line_items as { title?: string }[] || []).map(i => i.title).join(", ");
+    const date = new Date(o.created_at).toLocaleDateString("en-US", { month: "long", day: "numeric" });
     const response = await aiGenerate(
       basePrompt(step, pers, policyRules),
-      `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\nThey have one recent order: ${o.order_number} on ${new Date(o.created_at).toLocaleDateString()} for ${items} ($${(o.total_cents / 100).toFixed(2)}). Confirm this is the order they're asking about.`,
+      `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\nThey have one recent order from ${date} for ${items} ($${(o.total_cents / 100).toFixed(2)}). Confirm this is the order they're asking about. Do NOT include the order number — refer to it by date and amount only.`,
     );
     return {
       action: "respond", response,
@@ -480,18 +520,26 @@ async function handleIdentifyOrder(
     };
   }
 
-  // Can't determine — ask
-  const orderList = orders.slice(0, 5).map(o => {
-    const items = (o.line_items as { title?: string }[] || []).map(i => i.title).join(", ");
-    return `${o.order_number} — ${new Date(o.created_at).toLocaleDateString()} — ${items} ($${(o.total_cents / 100).toFixed(2)})`;
-  }).join("\n");
+  // Build order list — HTML for email/chat, plain text for SMS/DM
+  // Channel comes from the ticket but handlers don't have ctx — default to email (HTML)
+  const channel = "email"; // TODO: pass channel through when needed
+  const useHtml = ["email", "chat", "help_center"].includes(channel);
 
-  const response = await aiGenerate(
-    basePrompt(step, pers, policyRules),
-    `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\nThey have ${orders.length} recent orders:\n${orderList}\n\nAsk which order(s) they're referring to. List the orders so they can identify theirs.`,
-  );
+  const orderListFormatted = orders.slice(0, 5).map(o => {
+    const date = new Date(o.created_at);
+    const monthDay = date.toLocaleDateString("en-US", { month: "long", day: "numeric" });
+    const items = (o.line_items as { title?: string }[] || []).map(i => i.title || "item");
+    if (useHtml) {
+      return `<p><b>${monthDay}</b> - $${(o.total_cents / 100).toFixed(2)}</p><ul>${items.map(i => `<li>${i}</li>`).join("")}</ul>`;
+    }
+    return `${monthDay} - $${(o.total_cents / 100).toFixed(2)}\n  ${items.join(", ")}`;
+  }).join(useHtml ? "" : "\n\n");
 
-  return { action: "respond", response, systemNote: `[Playbook] ${orders.length} orders found. Asking customer to identify.` };
+  const response = `I can see you have several recent orders on your account. Which one are you referring to?\n\n${orderListFormatted}`;
+
+  // Log order numbers in system note only
+  const orderIdsForNote = orders.slice(0, 5).map(o => o.order_number).join(", ");
+  return { action: "respond", response, systemNote: `[Playbook] ${orders.length} orders found (${orderIdsForNote}). Asking customer to identify.` };
 }
 
 async function handleIdentifySubscription(
@@ -819,9 +867,18 @@ Tell the customer the EXACT breakdown with these numbers. Say "approximately" si
     }
   }
 
+  const resLabel = ex.resolution_type.includes("refund") ? "refund" : "store credit";
+  const netAmount = rateContext.net_refund_cents ? `$${((rateContext.net_refund_cents as number) / 100).toFixed(2)}` : "";
+  const orderAmount = rateContext.order_total_cents ? `$${((rateContext.order_total_cents as number) / 100).toFixed(2)}` : "";
+  const labelAmount = rateContext.label_cost_cents ? `$${((rateContext.label_cost_cents as number) / 100).toFixed(2)}` : "";
+  const mathBreakdown = netAmount && orderAmount && labelAmount ? `${netAmount} (${orderAmount} - ${labelAmount} shipping label)` : "";
+
   const response = await aiGenerate(
     basePrompt(step, pers, policyRules),
-    `Customer data:\n${dataCtx}\n\nException instructions: ${ex.instructions || ""}\nException: "${ex.name}" (${ex.resolution_type})\nApplies to: ${mostRecentOutOfPolicy}\n${isEscalation ? "The customer rejected the previous offer. This is an escalated offer — present it as a better alternative without mentioning that other options exist beyond this one." : "Present this offer clearly. Do NOT hint that better alternatives exist."}\n\nFollow store policy rules exactly when describing the return/refund process.${rateQuoteInfo}\n\nOffer this exception. ${outOfPolicy.length > 1 ? `Note: applies to 1 order (${mostRecentOutOfPolicy}). Orders ${outOfPolicy.filter(o => o !== mostRecentOutOfPolicy).join(", ")} do not qualify.` : ""}`,
+    `Customer data:\n${dataCtx}\n\nException: "${ex.name}" (${resLabel})\n${ex.instructions || ""}\n\n${isEscalation
+      ? `FRAMING: Say "I was able to get this upgraded" — present as an escalated offer. Do NOT mention any other options exist.`
+      : `FRAMING: Say "I was able to get a one-time return exception approved" for their specific situation. Do NOT hint that better alternatives exist.`
+    }\n\nFORMAT: Write ONE paragraph only. Include these key phrases: "in your situation", "one-time", "exception". ${mathBreakdown ? `Include the exact breakdown: ${mathBreakdown}.` : ""} End with a direct yes/no question: "Would you like me to get that setup for you now?"${rateQuoteInfo}`,
   );
 
   await admin.from("tickets").update({ playbook_exceptions_used: exceptionsUsed + 1 }).eq("id", tid);
@@ -1069,31 +1126,45 @@ async function handleStandFirm(
 ): Promise<PlaybookExecResult> {
   const reps = Number(ctx.stand_firm_count) || 0;
 
-  const bestOffer = ctx.exception_offered || "return";
-  const resType = ctx.resolution_type as string || "store_credit_return";
-  const resLabel = resType.includes("refund") ? "full refund" : "store credit";
+  const bestOffer = ctx.exception_offered as string | undefined;
+  const resType = ctx.resolution_type as string || "";
+  const resLabel = resType.includes("refund") ? "full refund" : resType.includes("credit") ? "store credit" : "";
+  const netAmount = ctx.net_refund_cents ? `$${((ctx.net_refund_cents as number) / 100).toFixed(2)}` : "";
+  const orderAmount = ctx.order_total_cents ? `$${((ctx.order_total_cents as number) / 100).toFixed(2)}` : "";
+  const labelAmount = ctx.label_cost_cents ? `$${((ctx.label_cost_cents as number) / 100).toFixed(2)}` : "";
+  const mathBreakdown = netAmount && orderAmount && labelAmount ? `${netAmount} (${orderAmount} - ${labelAmount} shipping label)` : "";
 
   if (reps >= maxReps) {
     const response = await aiGenerate(
       basePrompt(step, pers, policyRules),
-      `Customer data:\n${dataCtx}\n\nThe customer has rejected all offers ${maxReps} times. This is the FINAL message.\nBest offer: ${bestOffer} (${resLabel})\n\nState your best offer one last time following store policy rules exactly. Say "If you change your mind, just reply and we'll get it started for you." Warm but final tone. Do not argue.`,
+      `Customer message: "${msg}"\n\nThis is the FINAL message (${maxReps} attempts reached).\n\nFORMAT: ONE sentence about the offer + ONE sentence leaving the door open. Example: "This is the best I'm able to offer for your situation. Your ${resLabel} would be ${mathBreakdown || "processed"} once we receive the product back. If you change your mind, just reply and I'll get it started for you."`,
     );
     return {
       action: "complete", response,
       context: { stand_firm_count: reps + 1, stand_firm_final: true },
-      systemNote: `[Playbook] Stand firm max reached (${maxReps}). Final message sent. Ticket set to pending.`,
+      systemNote: `[Playbook] Stand firm max reached (${maxReps}). Final message sent.`,
     };
+  }
+
+  // Build the right stand firm prompt based on whether an exception has been offered
+  let standFirmPrompt: string;
+  if (!bestOffer) {
+    // Pre-exception: just restate policy
+    standFirmPrompt = `Customer message: "${msg}"\n\nCRITICAL: No exception has been offered. You CANNOT offer anything. Restate ONLY the policy position. Do NOT mention store credit, refund, exception, or any future options. Do NOT say "let me check" or "let me review." Keep to 2-3 sentences max.`;
+  } else {
+    // Post-exception: restate current offer with policy contrast
+    standFirmPrompt = `Customer message: "${msg}"\n\nFORMAT: ONE paragraph. Start with policy contrast: "While it's not in our policy to allow returns on recurring orders, I was able to get a one-time exception approved in your situation." Then restate the offer: ${resLabel} for ${mathBreakdown || "the order amount minus shipping"}. End with: "Would you like me to get that setup for you now?" Do NOT mention any other option. Do NOT repeat order details or subscription info.`;
   }
 
   const response = await aiGenerate(
     basePrompt(step, pers, policyRules),
-    `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\nThe customer rejected the offer. This is attempt ${reps + 1}/${maxReps}.\nBest offer: ${bestOffer} (${resLabel})\n\nAcknowledge frustration. Restate the best available offer following store policy rules exactly. Do NOT repeat verbatim — use different wording. Do not argue or get defensive.`,
+    standFirmPrompt,
   );
 
   return {
     action: "respond", response,
     context: { stand_firm_count: reps + 1 },
-    systemNote: `[Playbook] Stand firm ${reps + 1}/${maxReps}. Customer rejected offer.`,
+    systemNote: `[Playbook] Stand firm ${reps + 1}/${maxReps}. ${bestOffer ? `Restating: ${bestOffer}` : "Policy only."}`,
   };
 }
 
