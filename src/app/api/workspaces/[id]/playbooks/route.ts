@@ -63,7 +63,7 @@ export async function POST(
   return NextResponse.json({ ok: true, id: data.id });
 }
 
-// PATCH: Update playbook
+// PATCH: Update playbook (supports bulk save of steps, policies, exceptions)
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -75,14 +75,109 @@ export async function PATCH(
 
   const admin = createAdminClient();
   const body = await request.json();
-  const { playbook_id, ...updates } = body;
+  const { playbook_id, steps, policies, exceptions, ...updates } = body;
 
   if (!playbook_id) return NextResponse.json({ error: "playbook_id required" }, { status: 400 });
 
-  await admin.from("playbooks").update({
-    ...updates,
-    updated_at: new Date().toISOString(),
-  }).eq("id", playbook_id).eq("workspace_id", workspaceId);
+  // Update playbook-level fields
+  const playbookFields: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  for (const key of ["name", "description", "trigger_intents", "trigger_patterns", "priority", "is_active", "exception_limit", "stand_firm_max"]) {
+    if (key in updates) playbookFields[key] = updates[key];
+  }
+  await admin.from("playbooks").update(playbookFields).eq("id", playbook_id).eq("workspace_id", workspaceId);
+
+  // Reconcile steps: delete removed, upsert remaining
+  if (Array.isArray(steps)) {
+    const incomingIds = steps.filter((s: { id?: string }) => s.id && !s.id.startsWith("new_")).map((s: { id: string }) => s.id);
+    // Delete steps not in incoming list
+    const { data: existing } = await admin.from("playbook_steps").select("id").eq("playbook_id", playbook_id);
+    const toDelete = (existing || []).filter(e => !incomingIds.includes(e.id)).map(e => e.id);
+    if (toDelete.length) await admin.from("playbook_steps").delete().in("id", toDelete);
+    // Upsert steps
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i];
+      const row = {
+        workspace_id: workspaceId,
+        playbook_id,
+        step_order: i,
+        type: s.type,
+        name: s.name,
+        instructions: s.instructions || null,
+        data_access: s.data_access || [],
+        resolved_condition: s.resolved_condition || null,
+        config: s.config || {},
+        skippable: s.skippable ?? true,
+      };
+      if (s.id && !s.id.startsWith("new_")) {
+        await admin.from("playbook_steps").update(row).eq("id", s.id);
+      } else {
+        await admin.from("playbook_steps").insert(row);
+      }
+    }
+  }
+
+  // Reconcile policies: delete removed, upsert remaining
+  if (Array.isArray(policies)) {
+    const incomingIds = policies.filter((p: { id?: string }) => p.id && !p.id.startsWith("new_")).map((p: { id: string }) => p.id);
+    const { data: existing } = await admin.from("playbook_policies").select("id").eq("playbook_id", playbook_id);
+    const toDelete = (existing || []).filter(e => !incomingIds.includes(e.id)).map(e => e.id);
+    // Delete exceptions tied to deleted policies first
+    if (toDelete.length) {
+      await admin.from("playbook_exceptions").delete().in("policy_id", toDelete);
+      await admin.from("playbook_policies").delete().in("id", toDelete);
+    }
+    // Upsert policies — return IDs for exception mapping
+    const policyIdMap: Record<string, string> = {};
+    for (let i = 0; i < policies.length; i++) {
+      const p = policies[i];
+      const row = {
+        workspace_id: workspaceId,
+        playbook_id,
+        name: p.name,
+        description: p.description || null,
+        conditions: p.conditions || {},
+        ai_talking_points: p.ai_talking_points || null,
+        sort_order: i,
+      };
+      if (p.id && !p.id.startsWith("new_")) {
+        await admin.from("playbook_policies").update(row).eq("id", p.id);
+        policyIdMap[p.id] = p.id;
+      } else {
+        const { data } = await admin.from("playbook_policies").insert(row).select("id").single();
+        if (data) policyIdMap[p.id || `idx_${i}`] = data.id;
+      }
+    }
+
+    // Reconcile exceptions if provided
+    if (Array.isArray(exceptions)) {
+      const incomingExIds = exceptions.filter((e: { id?: string }) => e.id && !e.id.startsWith("new_")).map((e: { id: string }) => e.id);
+      const { data: existingEx } = await admin.from("playbook_exceptions").select("id").eq("playbook_id", playbook_id);
+      const toDeleteEx = (existingEx || []).filter(e => !incomingExIds.includes(e.id)).map(e => e.id);
+      if (toDeleteEx.length) await admin.from("playbook_exceptions").delete().in("id", toDeleteEx);
+      for (let i = 0; i < exceptions.length; i++) {
+        const e = exceptions[i];
+        const resolvedPolicyId = policyIdMap[e.policy_id] || e.policy_id;
+        const row = {
+          workspace_id: workspaceId,
+          playbook_id,
+          policy_id: resolvedPolicyId,
+          tier: e.tier || 1,
+          name: e.name,
+          conditions: e.conditions || {},
+          resolution_type: e.resolution_type,
+          instructions: e.instructions || null,
+          auto_grant: e.auto_grant || false,
+          auto_grant_trigger: e.auto_grant_trigger || null,
+          sort_order: i,
+        };
+        if (e.id && !e.id.startsWith("new_")) {
+          await admin.from("playbook_exceptions").update(row).eq("id", e.id);
+        } else {
+          await admin.from("playbook_exceptions").insert(row);
+        }
+      }
+    }
+  }
 
   return NextResponse.json({ ok: true });
 }
