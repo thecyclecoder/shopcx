@@ -716,9 +716,17 @@ async function handleIdentifyOrder(
     };
   }
 
-  // Build order list — HTML for email/chat, plain text for SMS/DM
-  // Channel comes from the ticket but handlers don't have ctx — default to email (HTML)
-  const channel = "email"; // TODO: pass channel through when needed
+  // If we already asked and customer replied but we couldn't match — default to most recent
+  if (ctx.order_list_shown) {
+    return {
+      action: "advance", newStep: step.step_order + 1,
+      context: { identified_orders: [orders[0].order_number] },
+      systemNote: `[Playbook] Could not match customer reply to specific order. Defaulting to most recent: ${orders[0].order_number}.`,
+    };
+  }
+
+  // First time — show the order list and ask
+  const channel = (ctx._channel as string) || "email";
   const useHtml = ["email", "chat", "help_center"].includes(channel);
 
   const orderListFormatted = orders.slice(0, 5).map(o => {
@@ -733,9 +741,8 @@ async function handleIdentifyOrder(
 
   const response = `I can see you have several recent orders on your account. Which one are you referring to?\n\n${orderListFormatted}`;
 
-  // Log order numbers in system note only
   const orderIdsForNote = orders.slice(0, 5).map(o => o.order_number).join(", ");
-  return { action: "respond", response, systemNote: `[Playbook] ${orders.length} orders found (${orderIdsForNote}). Asking customer to identify.` };
+  return { action: "respond", response, context: { order_list_shown: true }, systemNote: `[Playbook] ${orders.length} orders found (${orderIdsForNote}). Asking customer to identify.` };
 }
 
 async function handleIdentifySubscription(
