@@ -105,23 +105,42 @@ async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max =
   return (d.content?.[0] as { text: string })?.text?.trim() || "";
 }
 
-async function classifyIntent(msg: string, ctx: string, hist: string, handlers: string, model: "haiku" | "sonnet" = "haiku", isClarification = false) {
-  const raw = await claude(`You are an intent classifier for customer support. Your job is to match the customer's message to one of the available handlers below. Do NOT invent intents — only use the handler intents listed, or "unknown" if none fit.
+function stripEmailSignature(msg: string): string {
+  // Remove common email signature patterns
+  return msg
+    .replace(/<[^>]*>/g, " ")            // Strip HTML tags
+    .replace(/&[^;]+;/g, " ")            // Strip HTML entities
+    .replace(/Sent from my iPhone/gi, "")
+    .replace(/Sent from my iPad/gi, "")
+    .replace(/Get Outlook for iOS/gi, "")
+    // Strip signature blocks: name + title + phone + email + address patterns
+    .replace(/(?:^|\n)[-–—]\s*\n[\s\S]*$/m, "") // -- signature delimiter
+    .replace(/\n[A-Z][a-z]+ [A-Z][a-z]+\n(?:(?:Founder|CEO|President|Director|Manager|Support|Sales|VP|CTO|COO|CFO).*\n)?(?:\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}.*\n)?(?:[\w.+-]+@[\w.-]+\.\w+.*\n)?(?:\d+\s+\w+.*\n)?/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-${isClarification ? `IMPORTANT: This is a follow-up message after we asked the customer to clarify. Focus ONLY on what the customer is saying in their latest message below — ignore any previous journey or account linking context in the conversation history. The customer is telling us what they actually need help with.\n\n` : ""}Customer message: "${msg}"
-${ctx ? `Customer:\n${ctx}\n` : "No customer found."}
-${hist ? `Conversation:\n${hist}\n` : ""}
-Available handlers (you MUST pick from these intents or "unknown"):
+async function classifyIntent(msg: string, ctx: string, hist: string, handlers: string, model: "haiku" | "sonnet" = "haiku", isClarification = false) {
+  // Clean the message — strip signatures, HTML, noise
+  const cleanMsg = stripEmailSignature(msg);
+
+  const clarifyBoost = isClarification ? `
+IMPORTANT: This is a CLARIFICATION response — the customer was asked to explain their issue and is now telling us. They are clearly stating what they need. Be AGGRESSIVE in matching — if there is ANY mention of charges, refunds, cancellations, subscriptions, orders, or billing issues, match to the most relevant handler with HIGH confidence (80+). Do NOT return "unknown" unless the message truly has no actionable request. Ignore any email signature noise at the end of the message.` : "";
+
+  const raw = await claude(`You are an intent classifier for customer support. Match the customer's message to one of the available handlers below. Only use handler intents listed, or "unknown" if none fit.
+${clarifyBoost}
+Customer message: "${cleanMsg}"
+${ctx ? `Customer:\n${ctx}\n` : ""}
+Available handlers:
 ${handlers || "None"}
 
 Rules:
-- "intent" must be the exact trigger intent/tag from the handler list above, or "unknown"
-- "confidence" is how sure you are that the customer's message matches that specific handler (0-100)
-- If the message is vague, emotional, or doesn't clearly match any handler, return "unknown" with low confidence
-- A complaint without a specific actionable request is "unknown" — the customer hasn't told us what they need yet
-- If the customer mentions being charged without permission, unauthorized charges, or unwanted subscriptions, match to the appropriate playbook intent
+- "intent" must be an exact trigger intent from the handlers above, or "unknown"
+- "confidence" is 0-100
+- If vague with no actionable request, return "unknown"
+- Charges, refunds, subscriptions, cancellations = match to relevant playbook/journey intent with high confidence
 
-Return JSON: { "intent": "handler intent from list above or unknown", "confidence": 0-100, "reasoning": "one sentence" }`, model);
+Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sentence" }`, model);
   try { return JSON.parse(raw.replace(/^```json?\n?/, "").replace(/\n?```$/, "")); }
   catch { return { intent: "unknown", confidence: 0, reasoning: "parse error" }; }
 }
@@ -478,12 +497,13 @@ export const unifiedTicketHandler = inngest.createFunction(
         // First try pattern matching on the clarification message (deterministic, fast)
         // Normalize: strip HTML entities, apostrophes, smart quotes for fuzzy matching
         const normalize = (s: string) => s.toLowerCase()
-          .replace(/&[^;]+;/g, "")     // HTML entities
+          .replace(/<[^>]*>/g, " ")     // HTML tags
+          .replace(/&[^;]+;/g, "")      // HTML entities
           .replace(/[\u2018\u2019\u0027\u2032]/g, "")  // smart quotes + apostrophes
           .replace(/[''`]/g, "")        // other quote chars
           .replace(/\s+/g, " ")         // normalize whitespace
           .trim();
-        const msgNorm = normalize(msg);
+        const msgNorm = normalize(stripEmailSignature(msg));
 
         const { data: playbooks } = await admin.from("playbooks")
           .select("id, name, trigger_intents, trigger_patterns")
