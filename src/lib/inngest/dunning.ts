@@ -157,19 +157,21 @@ export const dunningPaymentFailed = inngest.createFunction(
     const paymentMethods = await step.run("get-payment-methods", async () => {
       try {
         const methods = await getCustomerPaymentMethods(workspace_id, shopify_customer_id);
-        return deduplicatePaymentMethods(methods);
+        const deduped = deduplicatePaymentMethods(methods);
+        console.log(`[Dunning] Contract ${shopify_contract_id}: ${methods.length} payment methods, ${deduped.length} after dedup for customer ${shopify_customer_id}`);
+        if (deduped.length === 0) {
+          console.log(`[Dunning] WARNING: 0 payment methods returned for customer ${shopify_customer_id}. Raw methods:`, JSON.stringify(methods));
+        }
+        return deduped;
       } catch (err) {
-        console.error("Failed to get payment methods:", err);
+        console.error(`[Dunning] CRITICAL: getCustomerPaymentMethods failed for customer ${shopify_customer_id} (contract ${shopify_contract_id}):`, String(err));
         return [];
       }
     });
 
     // Step 5: Card rotation — try each untried card with 2h delays
-    // Note: billingAttempt success only means the API accepted the request,
-    // NOT that the payment succeeded. Real success comes via billing-success webhook.
-    // We rotate cards and wait — if a billing-success webhook fires, dunningBillingSuccess
-    // will mark the cycle as recovered.
     const maxRotations = Math.min(settings.dunning_max_card_rotations, paymentMethods.length);
+    console.log(`[Dunning] Contract ${shopify_contract_id}: maxRotations=${maxRotations} (settings=${settings.dunning_max_card_rotations}, methods=${paymentMethods.length})`);
     let attemptNumber = 2; // #1 was the initial failure
 
     for (let i = 0; i < maxRotations; i++) {
