@@ -271,6 +271,7 @@ export default function PlaybooksSettingsPage() {
   const [simSentiment, setSimSentiment] = useState("angry");
   const [simRunning, setSimRunning] = useState(false);
   const [simResult, setSimResult] = useState<SimResult | null>(null);
+  const [simProgress, setSimProgress] = useState<{ current: number; total: number; stepName: string } | null>(null);
   const [simClarification, setSimClarification] = useState<SimClarification | null>(null);
   const [simClarResponse, setSimClarResponse] = useState("");
   const [fixNotes, setFixNotes] = useState("");
@@ -331,6 +332,7 @@ export default function PlaybooksSettingsPage() {
     if (!simModal || !simCustomerId || !simMessage) return;
     setSimRunning(true);
     setSimResult(null);
+    setSimProgress(null);
     if (!clarificationReply) setSimClarification(null);
     try {
       const res = await fetch(`/api/workspaces/${workspace.id}/playbooks/simulate`, {
@@ -344,17 +346,68 @@ export default function PlaybooksSettingsPage() {
           ...(clarificationReply ? { clarification_response: clarificationReply } : {}),
         }),
       });
-      if (res.ok) {
+
+      // Check if streaming response (ndjson) or regular JSON (clarification)
+      const contentType = res.headers.get("content-type") || "";
+      if (contentType.includes("ndjson")) {
+        // Streaming — read line by line
+        const reader = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let meta: Record<string, unknown> = {};
+        const steps: SimStepResult[] = [];
+        let ref: string | null = null;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const event = JSON.parse(line);
+              if (event.type === "meta") {
+                meta = event;
+                setSimProgress({ current: 0, total: event.total_steps, stepName: "Starting..." });
+              } else if (event.type === "step") {
+                steps.push(event as SimStepResult);
+                setSimProgress({ current: steps.length, total: event.total_steps, stepName: event.step_name });
+              } else if (event.type === "complete") {
+                ref = event.ref;
+              }
+            } catch {}
+          }
+        }
+
+        setSimClarification(null);
+        setSimResult({
+          playbook_name: meta.playbook_name as string || "",
+          customer_name: meta.customer_name as string || "",
+          customer_email: meta.customer_email as string || "",
+          sentiment: meta.sentiment as string || "",
+          initial_message: meta.initial_message as string || "",
+          clarification_response: meta.clarification_response as string | null || null,
+          confidence: meta.confidence as number || 0,
+          detected_intent: meta.detected_intent as string || "",
+          classification_reasoning: meta.classification_reasoning as string || "",
+          threshold: meta.threshold as number || 70,
+          steps,
+          ref,
+        });
+      } else if (res.ok) {
+        // Regular JSON — clarification response
         const data = await res.json();
         if (data.needs_clarification) {
           setSimClarification(data as SimClarification);
-        } else {
-          setSimClarification(null);
-          setSimResult(data);
         }
       }
     } catch {}
     setSimRunning(false);
+    setSimProgress(null);
   };
 
   const runFix = async () => {
@@ -1381,9 +1434,31 @@ export default function PlaybooksSettingsPage() {
 
             {/* Results */}
             {simRunning && (
-              <div className="px-6 py-8 text-center">
-                <div className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-violet-500 border-t-transparent" />
-                <p className="mt-2 text-sm text-zinc-500">Running simulation with Sonnet... this takes 15-30 seconds.</p>
+              <div className="px-6 py-6">
+                {simProgress ? (
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        Step {simProgress.current}/{simProgress.total}: {simProgress.stepName}
+                      </span>
+                      <span className="text-xs text-zinc-500">
+                        {Math.round((simProgress.current / simProgress.total) * 100)}%
+                      </span>
+                    </div>
+                    <div className="h-2 w-full rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-violet-500 transition-all duration-500 ease-out"
+                        style={{ width: `${Math.max(5, (simProgress.current / simProgress.total) * 100)}%` }}
+                      />
+                    </div>
+                    <p className="mt-2 text-xs text-zinc-400">Sonnet is generating AI responses and mock customer replies for each step...</p>
+                  </div>
+                ) : (
+                  <div className="text-center">
+                    <div className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-violet-500 border-t-transparent" />
+                    <p className="mt-2 text-sm text-zinc-500">Classifying intent and loading customer data...</p>
+                  </div>
+                )}
               </div>
             )}
 

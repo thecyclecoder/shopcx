@@ -166,15 +166,36 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
   // Build data summary
   const customerName = `${customer.first_name || ""} ${customer.last_name || ""}`.trim() || customer.email;
   const dataSummary = buildDataSummary(customer, orders || [], subs || []);
-
-  // Simulate step by step
-  const simSteps: SimStep[] = [];
-  let currentMessage = message;
-  const ctx: Record<string, unknown> = {};
-  let exceptionsUsed = 0;
   const sentimentLabel = sentiment || "neutral";
 
-  for (const step of steps) {
+  // Stream response — each step sent as it completes
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (data: unknown) => controller.enqueue(encoder.encode(JSON.stringify(data) + "\n"));
+
+      // Send metadata first
+      send({
+        type: "meta",
+        playbook_name: playbook.name,
+        customer_name: customerName,
+        customer_email: customer.email,
+        sentiment: sentimentLabel,
+        initial_message: message,
+        clarification_response: clarification_response || null,
+        confidence: classification.confidence,
+        detected_intent: classification.intent,
+        classification_reasoning: classification.reasoning,
+        threshold,
+        total_steps: steps.length,
+      });
+
+      const simSteps: SimStep[] = [];
+      let currentMessage = message;
+      const ctx: Record<string, unknown> = {};
+      let exceptionsUsed = 0;
+
+      for (const step of steps) {
     const warnings: string[] = [];
     let dataFound = "";
     let conditionResult = "";
@@ -387,7 +408,7 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
       );
     }
 
-    simSteps.push({
+    const stepResult = {
       step_name: step.name,
       step_type: step.type,
       step_order: step.step_order,
@@ -397,7 +418,11 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
       mock_customer_reply: mockReply,
       warnings,
       skipped,
-    });
+    };
+    simSteps.push(stepResult);
+
+    // Stream this step to the client
+    send({ type: "step", step_index: simSteps.length - 1, total_steps: steps.length, ...stepResult });
   }
 
   const resultPayload = {
@@ -426,7 +451,14 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
     result: resultPayload,
   }).select("id").single();
 
-  return NextResponse.json({ ...resultPayload, ref: saved?.id || null });
+  send({ type: "complete", ref: saved?.id || null });
+  controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache" },
+  });
 }
 
 // GET: Retrieve simulation by reference ID
