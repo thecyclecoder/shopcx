@@ -285,10 +285,11 @@ async function executeStep(
           ctx.paused_for_cancel = true;
           ctx.cancel_target_sub = targetSub.shopify_contract_id;
 
-          // Don't send a separate response — the journey launcher already sent the email with the lead-in
+          // Don't send a separate response — the journey launcher already sent the email
+          // Use "respond" (not "advance") to prevent auto-advance loop from re-entering
           return {
-            action: "advance", newStep: step.step_order,
-            context: { paused_for_cancel: true, cancel_target_sub: targetSub.shopify_contract_id },
+            action: "respond",
+            context: { paused_for_cancel: true, cancel_target_sub: targetSub.shopify_contract_id, cancel_journey_launched: true },
             systemNote: `[Playbook] Cancel detected — launching cancel journey for subscription #${targetSub.shopify_contract_id}. Playbook paused.`,
           };
         }
@@ -1080,11 +1081,19 @@ async function handleOfferException(
     const resType = ctx.resolution_type as string || "";
     const resLabel = resType.includes("refund") ? "refund" : resType.includes("credit") ? "store credit" : "policy";
 
+    // Get policy URL for stand firm messages
+    const sfPolicyId = step.config?.policy_id as string | undefined;
+    let sfPolicyUrl = "";
+    if (sfPolicyId) {
+      const { data: pol } = await admin.from("playbook_policies").select("policy_url").eq("id", sfPolicyId).single();
+      if (pol?.policy_url) sfPolicyUrl = `\nInclude this policy link in your response: ${pol.policy_url}`;
+    }
+
     const response = await aiGenerate(
       basePrompt(step, pers, policyRules),
-      `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\n${currentTier === 0
-        ? "CRITICAL: The customer's order is out of policy. You have NOT offered any exception, store credit, refund, or alternative. You CANNOT offer anything. Restate ONLY that the order does not qualify under the store policy. Do NOT say \"let me check\" or \"let me review\" or \"let me see what I can do.\" Do NOT hint at any future options or escalations."
-        : `CRITICAL: The customer rejected the ${bestOffer} offer (${resLabel}). Restate ONLY the ${bestOffer} offer with different wording. Do NOT mention any other option. Do NOT hint that something better exists.`
+      `Customer message: "${msg}"\n\n${currentTier === 0
+        ? `CRITICAL: The customer's order is out of policy. You have NOT offered any exception. Restate ONLY that the order does not qualify under the store policy. Keep it to 2-3 sentences. Use different wording than previous messages.${sfPolicyUrl}`
+        : `CRITICAL: The customer rejected the ${bestOffer} offer (${resLabel}). Restate ONLY the ${bestOffer} offer with different wording. Do NOT mention any other option.`
       } Acknowledge frustration briefly (one sentence max), then restate the current position. Do not argue or get defensive.`,
     );
 
