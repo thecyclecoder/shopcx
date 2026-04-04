@@ -100,7 +100,15 @@ export default function ReturnDetailPage() {
       let method = "PATCH";
       let payload = body || {};
 
-      if (action === "dispose_restocked" || action === "dispose_missing") {
+      if (action === "approve") {
+        url += "/approve";
+        method = "POST";
+        payload = {};
+      } else if (action === "decline") {
+        url += "/decline";
+        method = "POST";
+        payload = { declineReason: "FINAL_SALE" };
+      } else if (action === "dispose_restocked" || action === "dispose_missing") {
         url += "/dispose";
         method = "POST";
         payload = { disposition: action === "dispose_restocked" ? "RESTOCKED" : "MISSING" };
@@ -275,6 +283,20 @@ export default function ReturnDetailPage() {
             <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
               <h3 className="mb-4 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Actions</h3>
               <div className="space-y-2">
+                {/* Approve / Decline — for pending returns (customer-initiated) */}
+                {ret.status === "pending" && (
+                  <>
+                    <button onClick={() => { if (confirm("Approve this return request?")) doAction("approve"); }} disabled={!!acting}
+                      className="w-full rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-50">
+                      {acting === "approve" ? "Approving..." : "Approve Return"}
+                    </button>
+                    <button onClick={() => { if (confirm("Decline this return request? The customer will be notified.")) doAction("decline"); }} disabled={!!acting}
+                      className="w-full rounded-md bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50">
+                      {acting === "decline" ? "Declining..." : "Decline Return"}
+                    </button>
+                  </>
+                )}
+
                 {/* Add Tracking — for open or label_created without tracking */}
                 {["open", "label_created"].includes(ret.status) && !ret.tracking_number && (
                   <button onClick={() => setShowTrackingModal(true)} disabled={!!acting}

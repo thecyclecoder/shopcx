@@ -37,7 +37,7 @@ const STATUS_OPTIONS = [
 ];
 
 const STATUS_BADGE: Record<string, { label: string; classes: string }> = {
-  pending: { label: "Pending", classes: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400" },
+  pending: { label: "Pending", classes: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" },
   open: { label: "Open", classes: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" },
   label_created: { label: "Label Sent", classes: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400" },
   in_transit: { label: "In Transit", classes: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" },
@@ -210,6 +210,11 @@ export default function ReturnsPage() {
                       <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${badge.classes}`}>
                         {badge.label}
                       </span>
+                      {ret.status === "pending" && (
+                        <span className="ml-1.5 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                          Needs Review
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5 text-zinc-500">
                       {RESOLUTION_LABELS[ret.resolution_type] || ret.resolution_type}

@@ -36,6 +36,10 @@ export async function POST(request: Request) {
 
   try {
     switch (topic) {
+      case "returns/request":
+        await handleReturnRequest(admin, workspace.id, payload);
+        break;
+
       case "returns/approve":
         await handleReturnApprove(admin, workspace.id, payload);
         break;
@@ -68,6 +72,63 @@ export async function POST(request: Request) {
 }
 
 type Admin = ReturnType<typeof createAdminClient>;
+
+// returns/request — customer-initiated return request via Shopify self-serve
+async function handleReturnRequest(
+  admin: Admin,
+  workspaceId: string,
+  payload: { id: number; order_id: number; admin_graphql_api_id: string; status: string },
+) {
+  const shopifyReturnGid = payload.admin_graphql_api_id;
+
+  // Check if we already track this return
+  const { data: existing } = await admin
+    .from("returns")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_return_gid", shopifyReturnGid)
+    .single();
+
+  if (existing) return; // Already tracked
+
+  // Look up the order in our DB
+  const shopifyOrderGid = `gid://shopify/Order/${payload.order_id}`;
+  const { data: order } = await admin
+    .from("orders")
+    .select("id, order_number, customer_id")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_order_id", String(payload.order_id))
+    .single();
+
+  const orderNumber = order?.order_number || `#${payload.order_id}`;
+
+  const { data: returnRow } = await admin
+    .from("returns")
+    .insert({
+      workspace_id: workspaceId,
+      order_id: order?.id || null,
+      order_number: orderNumber,
+      shopify_order_gid: shopifyOrderGid,
+      customer_id: order?.customer_id || null,
+      shopify_return_gid: shopifyReturnGid,
+      status: "pending",
+      resolution_type: "refund_return",
+      source: "shopify",
+    })
+    .select("id")
+    .single();
+
+  // Create dashboard notification
+  if (returnRow) {
+    await admin.from("dashboard_notifications").insert({
+      workspace_id: workspaceId,
+      type: "return_request",
+      title: "Return Request",
+      body: `Customer requested a return for order ${orderNumber}`,
+      link: `/dashboard/returns/${returnRow.id}`,
+    });
+  }
+}
 
 // returns/approve — upsert if not already tracked (Shopify-initiated returns)
 async function handleReturnApprove(
