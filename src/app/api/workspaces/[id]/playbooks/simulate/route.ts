@@ -465,7 +465,7 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
 
                 // Final AI response handling the sassy parting shot
                 const closingAI = await genAI(
-                  { name: "Closing Response", type: "custom", instructions: "The customer accepted the return offer but is clearly unhappy. Send a brief, professional closing. Thank them, confirm next steps (ship product, send tracking number, credit/refund on receipt). Don't over-apologize or grovel. Keep it short and warm. Follow the store policy rules." },
+                  { name: "Closing Response", type: "custom", instructions: "The customer accepted but left a sassy/rude parting shot. Be completely unfazed — do NOT acknowledge the negativity, do NOT apologize, do NOT empathize with their frustration. Just be positive and forward-looking. Something like: 'I'm glad I was able to get the return processed for you. Once you ship the product back, just send us the tracking number and we'll get your [refund/credit] issued as soon as we receive it.' Keep it to 2-3 sentences max. Warm but unbothered." },
                   `Customer accepted ${resLabel} for ${returnable.join(", ")}. Return being processed.`,
                   `Customer accepted but is upset about the experience.`,
                   sassyReply,
