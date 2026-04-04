@@ -201,7 +201,7 @@ export default function TicketDetailPage() {
   const [sending, setSending] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"messages" | "history">("messages");
-  const [mobileSection, setMobileSection] = useState<"conversation" | "details" | "customer" | "subscriptions" | "orders" | "loyalty" | "reviews" | "actions">("conversation");
+  const [mobileSection, setMobileSection] = useState<"conversation" | "details" | "customer" | "subscriptions" | "orders" | "returns" | "loyalty" | "reviews" | "actions">("conversation");
   const [customerEvents, setCustomerEvents] = useState<{ id: string; event_type: string; source: string; summary: string; created_at: string }[]>([]);
   const [closeWithReply, setCloseWithReply] = useState(true);
   const [editorFocused, setEditorFocused] = useState(false);
@@ -244,6 +244,10 @@ export default function TicketDetailPage() {
   const [redeeming, setRedeeming] = useState(false);
   const [redeemResult, setRedeemResult] = useState<string | null>(null);
   const [selectedRedeemTier, setSelectedRedeemTier] = useState<number | null>(null);
+
+  // Returns state
+  const [ticketReturns, setTicketReturns] = useState<{ id: string; order_number: string; status: string; resolution_type: string; net_refund_cents: number; tracking_number: string | null; created_at: string }[]>([]);
+  const [returnsCardOpen, setReturnsCardOpen] = useState(false);
 
   // Collapsible card states (all collapsed by default)
   const [customerCardOpen, setCustomerCardOpen] = useState(false);
@@ -359,6 +363,20 @@ export default function TicketDetailPage() {
           .then((r) => r.json())
           .then((d) => { if (d.enabled) setLoyaltySettings(d); })
           .catch(() => {});
+      }
+
+      // Load returns for this ticket and customer
+      if (data.customer) {
+        Promise.all([
+          fetch(`/api/workspaces/${workspace.id}/returns?ticket_id=${id}&limit=50`).then(r => r.json()),
+          fetch(`/api/workspaces/${workspace.id}/returns?customer_id=${data.customer.id}&limit=50`).then(r => r.json()),
+        ]).then(([byTicket, byCustomer]) => {
+          const map = new Map<string, typeof ticketReturns[0]>();
+          for (const r of [...(byTicket.returns || []), ...(byCustomer.returns || [])]) {
+            map.set(r.id, r);
+          }
+          setTicketReturns(Array.from(map.values()));
+        }).catch(() => {});
       }
 
       // Load existing AI draft
@@ -719,6 +737,7 @@ export default function TicketDetailPage() {
           <option value="customer">Customer</option>
           <option value="subscriptions">Subscriptions</option>
           <option value="orders">Orders</option>
+          <option value="returns">Returns</option>
           <option value="loyalty">Loyalty</option>
           <option value="reviews">Reviews</option>
           <option value="actions">Actions</option>
@@ -2541,6 +2560,55 @@ export default function TicketDetailPage() {
                 </div>
               ))}
             </div>
+            )}
+          </div>
+        )}
+        </div>
+
+        {/* ═══ RETURNS CARD ═══ */}
+        <div className={`${mobileSection !== "returns" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
+        {ticketReturns.length > 0 && (
+          <div className="mt-4 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            <button
+              onClick={() => setReturnsCardOpen(!returnsCardOpen)}
+              className="flex w-full items-center justify-between p-4"
+            >
+              <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-200">
+                Returns <span className="text-xs text-zinc-400">({ticketReturns.length})</span>
+              </h3>
+              <svg className={`h-4 w-4 text-zinc-400 transition-transform ${returnsCardOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+              </svg>
+            </button>
+            {returnsCardOpen && (
+              <div className="border-t border-zinc-100 px-4 pb-3 dark:border-zinc-800">
+                {ticketReturns.map((r) => {
+                  const badge = r.status === "open" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+                    : r.status === "in_transit" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                    : r.status === "refunded" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                    : r.status === "cancelled" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                    : r.status === "restocked" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                    : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400";
+                  const resLabel = r.resolution_type === "store_credit_return" ? "Store Credit"
+                    : r.resolution_type === "refund_return" ? "Refund"
+                    : r.resolution_type === "store_credit_no_return" ? "Store Credit"
+                    : r.resolution_type === "refund_no_return" ? "Refund"
+                    : r.resolution_type;
+                  return (
+                    <a key={r.id} href={`/dashboard/returns/${r.id}`} target="_blank" rel="noopener noreferrer"
+                      className="flex items-center justify-between rounded px-1 py-1.5 text-sm transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                      <div className="flex items-center gap-2">
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badge}`}>{r.status}</span>
+                        <span className="text-zinc-700 dark:text-zinc-300">{r.order_number}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-zinc-400">{resLabel}</span>
+                        <span className="tabular-nums text-zinc-500">${(r.net_refund_cents / 100).toFixed(2)}</span>
+                      </div>
+                    </a>
+                  );
+                })}
+              </div>
             )}
           </div>
         )}

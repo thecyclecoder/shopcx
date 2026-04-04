@@ -206,6 +206,7 @@ export default function CustomerDetailPage() {
   const [loyaltyRedeeming, setLoyaltyRedeeming] = useState(false);
   const [loyaltyRedeemTier, setLoyaltyRedeemTier] = useState("");
   const [loyaltyResult, setLoyaltyResult] = useState<{ code: string; value: number } | null>(null);
+  const [customerReturns, setCustomerReturns] = useState<{ id: string; order_number: string; status: string; resolution_type: string; net_refund_cents: number; created_at: string }[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -255,6 +256,11 @@ export default function CustomerDetailPage() {
       fetch(`/api/store-credit/history?customerId=${id}`)
         .then(r => r.json())
         .then(h => setStoreCreditHistory(h.history || []))
+        .catch(() => {});
+      // Returns
+      fetch(`/api/workspaces/${workspace.id}/returns?customer_id=${id}&limit=50`)
+        .then(r => r.json())
+        .then(d => setCustomerReturns(d.returns || []))
         .catch(() => {});
       // Loyalty
       fetch(`/api/loyalty/members?workspace_id=${workspace.id}&customer_id=${id}`)
@@ -683,6 +689,44 @@ export default function CustomerDetailPage() {
                 <span className="ml-2 shrink-0 text-sm text-zinc-400">{formatDate(t.created_at)}</span>
               </button>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Returns */}
+      {customerReturns.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+            Returns ({customerReturns.length})
+          </h2>
+          <div className="mt-3 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
+            {customerReturns.map((r) => {
+              const badge = r.status === "open" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+                : r.status === "in_transit" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                : r.status === "refunded" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                : r.status === "cancelled" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                : r.status === "restocked" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400";
+              const resLabel = r.resolution_type === "store_credit_return" ? "Store Credit"
+                : r.resolution_type === "refund_return" ? "Refund"
+                : r.resolution_type === "store_credit_no_return" ? "Store Credit (no return)"
+                : r.resolution_type === "refund_no_return" ? "Refund (no return)"
+                : r.resolution_type;
+              return (
+                <button key={r.id} onClick={() => router.push(`/dashboard/returns/${r.id}`)}
+                  className="flex w-full items-center justify-between px-4 py-2.5 text-left transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badge}`}>{r.status}</span>
+                    <span className="text-sm text-zinc-900 dark:text-zinc-100">{r.order_number}</span>
+                    <span className="text-xs text-zinc-400">{resLabel}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm tabular-nums text-zinc-500">{formatCents(r.net_refund_cents)}</span>
+                    <span className="text-xs text-zinc-400">{formatDate(r.created_at)}</span>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
