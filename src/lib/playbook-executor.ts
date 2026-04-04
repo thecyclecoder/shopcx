@@ -55,6 +55,7 @@ interface CustomerData {
 interface OrderData {
   id: string;
   order_number: string;
+  shopify_order_id: string | null;
   created_at: string;
   total_cents: number;
   financial_status: string;
@@ -236,7 +237,7 @@ async function executeStep(
           playbook_step: returnStep.step_order,
           playbook_context: { ...ctx, offer_accepted: true },
         }).eq("id", tid);
-        return handleInitiateReturn(admin, wsId, orders, ctx, returnStep, dataContext, pers, msg, policyRules);
+        return handleInitiateReturn(admin, wsId, tid, customer, orders, ctx, returnStep, dataContext, pers, msg, policyRules);
       }
     }
   }
@@ -267,7 +268,7 @@ async function executeStep(
     }
 
     case "initiate_return":
-      return handleInitiateReturn(admin, wsId, orders, ctx, step, dataContext, pers, msg, policyRules);
+      return handleInitiateReturn(admin, wsId, tid, customer, orders, ctx, step, dataContext, pers, msg, policyRules);
 
     case "cancel_subscription":
       return handleCancelSubscription(admin, wsId, subs, ctx, step, dataContext, pers, policyRules);
@@ -327,7 +328,7 @@ async function fetchOrders(admin: Admin, wsId: string, custId: string, config: R
   }
 
   const { data } = await admin.from("orders")
-    .select("id, order_number, created_at, total_cents, financial_status, fulfillment_status, line_items, fulfillments, source_name")
+    .select("id, order_number, shopify_order_id, created_at, total_cents, financial_status, fulfillment_status, line_items, fulfillments, source_name")
     .eq("workspace_id", wsId)
     .in("customer_id", linkedIds)
     .gte("created_at", since)
@@ -693,7 +694,8 @@ function detectAcceptance(msg: string): boolean {
 }
 
 async function handleInitiateReturn(
-  admin: Admin, wsId: string, orders: OrderData[], ctx: Record<string, unknown>,
+  admin: Admin, wsId: string, tid: string, customer: CustomerData,
+  orders: OrderData[], ctx: Record<string, unknown>,
   step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null,
   msg: string, policyRules: string,
 ): Promise<PlaybookExecResult> {
@@ -707,32 +709,79 @@ async function handleInitiateReturn(
 
   // Gate: only proceed if customer accepted the offer
   if (!ctx.offer_accepted) {
-    // Check if this message is the acceptance
     const accepted = detectAcceptance(msg);
     if (!accepted) {
-      // Customer hasn't accepted — don't initiate. Send back to offer step or stand firm
       return {
         action: "advance", newStep: step.step_order + 1,
         context: { offer_accepted: false },
         systemNote: "[Playbook] Customer hasn't accepted return offer. Skipping initiate_return.",
       };
     }
-    // Customer accepted in this message
     ctx.offer_accepted = true;
   }
 
   const resolution = ctx.resolution_type as string || "store_credit_return";
   const resLabel = resolution.includes("refund") ? "refund" : "store credit";
 
+  // Create returns in Shopify for each returnable order
+  const { createShopifyReturn, getReturnableItems } = await import("@/lib/shopify-returns");
+  const created: string[] = [];
+  const failed: string[] = [];
+
+  for (const orderNum of returnable) {
+    const order = orders.find(o => o.order_number === orderNum);
+    if (!order?.shopify_order_id) {
+      failed.push(orderNum);
+      continue;
+    }
+
+    const shopifyOrderGid = `gid://shopify/Order/${order.shopify_order_id}`;
+
+    try {
+      const items = await getReturnableItems(wsId, shopifyOrderGid);
+      if (items.length === 0) {
+        failed.push(orderNum);
+        continue;
+      }
+
+      await createShopifyReturn(wsId, {
+        orderId: order.id,
+        orderNumber: order.order_number,
+        shopifyOrderGid,
+        customerId: customer.id,
+        ticketId: tid,
+        resolutionType: resolution as "store_credit_return" | "refund_return" | "store_credit_no_return" | "refund_no_return",
+        returnLineItems: items.map(i => ({
+          fulfillmentLineItemId: i.fulfillmentLineItemId,
+          quantity: i.remainingQuantity,
+          title: i.title,
+        })),
+        source: "playbook",
+      });
+      created.push(orderNum);
+    } catch (err) {
+      console.error(`Failed to create Shopify return for ${orderNum}:`, err);
+      failed.push(orderNum);
+    }
+  }
+
+  if (created.length === 0) {
+    return {
+      action: "escalate_api_failure",
+      error: `Failed to create return(s) in Shopify for: ${failed.join(", ")}`,
+      systemNote: `[Playbook] All return creations failed: ${failed.join(", ")}.`,
+    };
+  }
+
   const response = await aiGenerate(
     basePrompt(step, pers, policyRules),
-    `Customer data:\n${dataCtx}\n\nOrders approved for return: ${returnable.join(", ")}\nResolution: ${resLabel}\n\nThe customer has accepted the ${resLabel} offer. Set up the return. Follow the store policy rules exactly when explaining the return process to the customer.`,
+    `Customer data:\n${dataCtx}\n\nOrders with return created: ${created.join(", ")}\n${failed.length ? `Orders that failed: ${failed.join(", ")}\n` : ""}Resolution: ${resLabel}\n\nThe customer has accepted the ${resLabel} offer. Confirm the return has been set up. Follow the store policy rules exactly when explaining the return process to the customer.`,
   );
 
   return {
     action: "advance", newStep: step.step_order + 1, response,
-    context: { return_initiated: true, return_orders: returnable, offer_accepted: true },
-    systemNote: `[Playbook] Return initiated for: ${returnable.join(", ")}. Resolution: ${resolution}. Customer accepted.`,
+    context: { return_initiated: true, return_orders: created, return_failed: failed, offer_accepted: true },
+    systemNote: `[Playbook] Return created in Shopify for: ${created.join(", ")}. ${failed.length ? `Failed: ${failed.join(", ")}.` : ""} Resolution: ${resolution}.`,
   };
 }
 

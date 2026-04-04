@@ -385,3 +385,48 @@ export async function sendDunningPausedEmail({
   if (error) return { error: error.message };
   return {};
 }
+
+export async function sendReturnConfirmationEmail({
+  workspaceId,
+  toEmail,
+  customerName,
+  orderNumber,
+  resolutionType,
+}: {
+  workspaceId: string;
+  toEmail: string;
+  customerName: string | null;
+  orderNumber: string;
+  resolutionType: string;
+}): Promise<{ error?: string }> {
+  const client = await getResendClient(workspaceId, toEmail);
+  if (!client) return { error: "Resend not configured" };
+
+  const admin = createAdminClient();
+  const { data: ws } = await admin.from("workspaces").select("name").eq("id", workspaceId).single();
+  const workspaceName = ws?.name || "Support";
+
+  const greeting = customerName ? `Hi ${customerName},` : "Hi there,";
+  const isCredit = resolutionType.includes("store_credit");
+  const resolutionLabel = isCredit ? "store credit" : "refund";
+
+  const { error } = await client.resend.emails.send({
+    from: `${workspaceName} <support@${client.domain}>`,
+    to: toEmail,
+    subject: `Your return for order ${orderNumber} has been processed`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+        <h2 style="color: #18181b; font-size: 20px; margin-bottom: 8px;">${greeting}</h2>
+        <p style="color: #71717a; font-size: 14px; line-height: 1.6;">
+          Your return for order <strong>${orderNumber}</strong> has been processed and your ${resolutionLabel} has been issued.${isCredit ? " The credit has been added to your account." : " Please allow a few business days for the refund to appear on your statement."}
+        </p>
+        <p style="color: #a1a1aa; font-size: 12px; margin-top: 32px;">
+          If you have questions, just reply to this email and we'll help you out.
+        </p>
+      </div>
+    `,
+  });
+
+  if (error) return { error: error.message };
+  return {};
+}
