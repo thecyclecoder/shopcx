@@ -278,17 +278,16 @@ async function executeStep(
             journeyId: journeyDef.id, journeyName: journeyDef.name,
             triggerIntent: "cancel_subscription",
             channel: (ctx._channel as string) || "email",
-            leadIn: `I can help you with that. I've sent you a link to manage your subscription — you can cancel, pause, or adjust your delivery schedule there.`,
+            leadIn: `I can help you with that — I've sent you a link to manage your subscription for ${targetItems}. You can cancel, pause, or adjust your delivery schedule there.`,
             ctaText: "Manage Subscription",
           });
 
           ctx.paused_for_cancel = true;
           ctx.cancel_target_sub = targetSub.shopify_contract_id;
 
-          const response = `I can help you with that. I've sent you a link to manage your subscription for ${targetItems} — you can cancel, pause, or adjust your delivery schedule there.`;
-
+          // Don't send a separate response — the journey launcher already sent the email with the lead-in
           return {
-            action: "respond", response,
+            action: "advance", newStep: step.step_order,
             context: { paused_for_cancel: true, cancel_target_sub: targetSub.shopify_contract_id },
             systemNote: `[Playbook] Cancel detected — launching cancel journey for subscription #${targetSub.shopify_contract_id}. Playbook paused.`,
           };
