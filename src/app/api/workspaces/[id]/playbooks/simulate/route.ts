@@ -399,38 +399,74 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
           }
           case "stand_firm": {
             const wasOffered = ctx.exception_offered as string | undefined;
+            const currentTier = Number(ctx.current_exception_tier) || 0;
             const maxReps = playbook.stand_firm_max || 3;
-            dataFound = `Best offer: ${wasOffered || "none"} (${ctx.resolution_type || "none"}). Max repetitions: ${maxReps}`;
+            dataFound = `Best offer: ${wasOffered || "none"} (Tier ${currentTier}, ${ctx.resolution_type || "none"}). Max repetitions: ${maxReps}`;
             if (!wasOffered) warnings.push("No exception was offered before stand_firm.");
 
-            // Simulate the full stand_firm loop
+            // Simulate stand_firm loop — customer accepts after 2nd round (or all rejections if maxReps <= 2)
+            const acceptAfterRound = Math.min(2, maxReps); // Accept after round 2
+
             for (let rep = 0; rep < maxReps; rep++) {
-              const isFinal = rep === maxReps - 1;
-              const repCondResult = isFinal
-                ? `FINAL stand firm (${rep + 1}/${maxReps}). After this, AI stops responding.`
-                : `Stand firm ${rep + 1}/${maxReps}. Restating offer with different wording.`;
+              const repCondResult = `Stand firm ${rep + 1}/${maxReps}. Restating offer with different wording.`;
 
-              const resType = ctx.resolution_type as string || "store_credit_return";
-              const resLabel = resType.includes("refund") ? "full refund" : "store credit";
-              const requiresReturn = resType.includes("return");
-              const returnDetail = requiresReturn
-                ? `The offer is: ${resLabel} after customer returns the product. Customer pays their own shipping (NO prepaid label). Customer must send us the tracking number. ${resLabel} issued only after we receive the product.`
-                : `The offer is: ${resLabel} without requiring a return.`;
-
-              const sfInstructions = isFinal
-                ? `${step.instructions || ""}\n\nThis is the FINAL message (attempt ${rep + 1}/${maxReps}).\n${returnDetail}\n\nState your best offer one last time with these exact terms. Say "If you change your mind, just reply and we'll get it started." Warm but final tone. Do not argue. Do NOT offer prepaid labels or free shipping.`
-                : `${step.instructions || ""}\n\nThis is attempt ${rep + 1}/${maxReps}.\n${returnDetail}\n\nAcknowledge frustration. Restate the best available offer (${wasOffered || "return"}) with these exact return terms. Use DIFFERENT wording than previous attempts. Do not argue or get defensive. Do NOT offer prepaid labels or free shipping.`;
+              const sfInstructions = `${step.instructions || ""}\n\nThis is attempt ${rep + 1}/${maxReps}.\n\nAcknowledge frustration. Restate the best available offer (${wasOffered || "return"}) following store policy rules. Use DIFFERENT wording than previous attempts. Do not argue or get defensive.`;
 
               const sfAI = await genAI(
                 { name: step.name, type: step.type, instructions: sfInstructions },
                 dataFound, repCondResult, currentMessage,
               );
 
-              const sfMock = isFinal ? "" : await genMock(sfAI, `${step.name} (${rep + 1}/${maxReps})`, true);
-              if (!isFinal) currentMessage = sfMock;
+              // After acceptAfterRound, mock customer accepts
+              if (rep + 1 >= acceptAfterRound) {
+                const acceptMock = await aiCall(
+                  `You are simulating a ${sentimentLabel} customer who has been going back and forth but is now RELUCTANTLY accepting the offer. Generate a brief acceptance (1-2 sentences). Still ${sentimentLabel} but agreeing. Say something like "fine" or "ok whatever just do it."`,
+                  `AI offered: "${sfAI}"\nSentiment: ${sentimentLabel}\nThe customer has rejected ${rep + 1} times but is now giving in.`, 100);
+                currentMessage = acceptMock;
+
+                emitStep({
+                  step_name: `${step.name} (${rep + 1}/${maxReps})`,
+                  step_type: "stand_firm", step_order: step.step_order,
+                  data_found: rep === 0 ? dataFound : `Stand firm round ${rep + 1}.`,
+                  condition_result: repCondResult, ai_response: sfAI,
+                  mock_customer_reply: acceptMock,
+                  warnings: rep === 0 ? warnings : [], skipped: false,
+                });
+
+                // Customer accepted — emit initiate_return
+                ctx.offer_accepted = true;
+                const returnStep = steps.find((s: { type: string }) => s.type === "initiate_return");
+                const inPolicy = (ctx.in_policy as string[]) || [];
+                const exceptionOrders = ctx.exception_offered ? [(ctx.out_of_policy as string[] || []).slice(-1)[0]].filter(Boolean) : [];
+                const returnable = [...new Set([...inPolicy, ...exceptionOrders])];
+                const resType = ctx.resolution_type as string || "store_credit_return";
+                const resLabel = resType.includes("refund") ? "full refund" : "store credit";
+
+                const returnAI = await genAI(
+                  { name: returnStep?.name || "Initiate Return", type: "initiate_return", instructions: returnStep?.instructions || "" },
+                  `Returnable orders: ${returnable.join(", ")}. Resolution: ${resLabel}`,
+                  `Customer accepted the ${resLabel} offer. Processing return.`,
+                  acceptMock,
+                );
+
+                emitStep({
+                  step_name: "Initiate Return (accepted mid-stand-firm)",
+                  step_type: "initiate_return", step_order: returnStep?.step_order || step.step_order,
+                  data_found: `Customer accepted after ${rep + 1} stand firm rounds.\nReturnable orders: ${returnable.join(", ")}\nResolution: ${resLabel}`,
+                  condition_result: `Acceptance detected — initiating return for ${returnable.join(", ")}`,
+                  ai_response: returnAI, mock_customer_reply: "",
+                  warnings: [], skipped: false,
+                });
+
+                break; // Exit stand_firm loop
+              }
+
+              // Still rejecting
+              const sfMock = await genMock(sfAI, `${step.name} (${rep + 1}/${maxReps})`, true);
+              currentMessage = sfMock;
 
               emitStep({
-                step_name: `${step.name} (${rep + 1}/${maxReps})${isFinal ? " — FINAL" : ""}`,
+                step_name: `${step.name} (${rep + 1}/${maxReps})`,
                 step_type: "stand_firm", step_order: step.step_order,
                 data_found: rep === 0 ? dataFound : `Rejection ${rep + 1}. Customer still refusing.`,
                 condition_result: repCondResult, ai_response: sfAI,
@@ -438,7 +474,7 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
                 warnings: rep === 0 ? warnings : [], skipped: false,
               });
             }
-            conditionResult = `All ${maxReps} stand firm rounds completed. AI stops responding.`;
+            conditionResult = ctx.offer_accepted ? `Customer accepted after stand firm.` : `All ${maxReps} stand firm rounds completed.`;
             continue; // Skip default emit
           }
           default: {

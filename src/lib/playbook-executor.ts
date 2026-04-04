@@ -202,6 +202,25 @@ async function executeStep(
     ctx.policy_rules = policyRules;
   }
 
+  // ── Global acceptance detection ──
+  // If an offer has been made and not yet accepted, check every incoming message for acceptance.
+  // If accepted, jump directly to initiate_return regardless of current step.
+  if (ctx.exception_offered && !ctx.offer_accepted && step.type !== "offer_exception") {
+    const accepted = detectAcceptance(msg);
+    if (accepted) {
+      ctx.offer_accepted = true;
+      // Find the initiate_return step and jump to it
+      const returnStep = allSteps.find(s => s.type === "initiate_return");
+      if (returnStep) {
+        await admin.from("tickets").update({
+          playbook_step: returnStep.step_order,
+          playbook_context: { ...ctx, offer_accepted: true },
+        }).eq("id", tid);
+        return handleInitiateReturn(admin, wsId, orders, ctx, returnStep, dataContext, pers, msg, policyRules);
+      }
+    }
+  }
+
   switch (step.type) {
     case "identify_order":
       return handleIdentifyOrder(orders, msg, step, dataContext, pers, policyRules);
