@@ -57,6 +57,10 @@ export async function POST(
     is_active: body.is_active ?? true,
     exception_limit: body.exception_limit || 1,
     stand_firm_max: body.stand_firm_max || 3,
+    stand_firm_before_exceptions: body.stand_firm_before_exceptions ?? 2,
+    stand_firm_between_tiers: body.stand_firm_between_tiers ?? 2,
+    exception_disqualifiers: body.exception_disqualifiers || [],
+    disqualifier_behavior: body.disqualifier_behavior || "silent",
   }).select("id").single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -81,7 +85,7 @@ export async function PATCH(
 
   // Update playbook-level fields
   const playbookFields: Record<string, unknown> = { updated_at: new Date().toISOString() };
-  for (const key of ["name", "description", "trigger_intents", "trigger_patterns", "priority", "is_active", "exception_limit", "stand_firm_max"]) {
+  for (const key of ["name", "description", "trigger_intents", "trigger_patterns", "priority", "is_active", "exception_limit", "stand_firm_max", "stand_firm_before_exceptions", "stand_firm_between_tiers", "exception_disqualifiers", "disqualifier_behavior"]) {
     if (key in updates) playbookFields[key] = updates[key];
   }
   await admin.from("playbooks").update(playbookFields).eq("id", playbook_id).eq("workspace_id", workspaceId);

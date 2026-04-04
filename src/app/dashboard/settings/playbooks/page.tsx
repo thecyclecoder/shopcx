@@ -97,6 +97,10 @@ interface Playbook {
   is_active: boolean;
   exception_limit: number;
   stand_firm_max: number;
+  stand_firm_before_exceptions: number;
+  stand_firm_between_tiers: number;
+  exception_disqualifiers: { type: string; source?: string; description?: string }[];
+  disqualifier_behavior: string;
   policies: PlaybookPolicy[];
   exceptions: PlaybookException[];
   steps: PlaybookStep[];
@@ -496,6 +500,10 @@ export default function PlaybooksSettingsPage() {
           is_active: draft.is_active,
           exception_limit: draft.exception_limit,
           stand_firm_max: draft.stand_firm_max,
+          stand_firm_before_exceptions: draft.stand_firm_before_exceptions,
+          stand_firm_between_tiers: draft.stand_firm_between_tiers,
+          exception_disqualifiers: draft.exception_disqualifiers,
+          disqualifier_behavior: draft.disqualifier_behavior,
         }),
       });
       if (res.ok) {
@@ -525,6 +533,10 @@ export default function PlaybooksSettingsPage() {
           priority: draft.priority,
           exception_limit: draft.exception_limit,
           stand_firm_max: draft.stand_firm_max,
+          stand_firm_before_exceptions: draft.stand_firm_before_exceptions,
+          stand_firm_between_tiers: draft.stand_firm_between_tiers,
+          exception_disqualifiers: draft.exception_disqualifiers,
+          disqualifier_behavior: draft.disqualifier_behavior,
           steps: draft.steps,
           policies: draft.policies,
           exceptions: draft.exceptions,
@@ -556,6 +568,10 @@ export default function PlaybooksSettingsPage() {
       is_active: true,
       exception_limit: 1,
       stand_firm_max: 3,
+      stand_firm_before_exceptions: 2,
+      stand_firm_between_tiers: 2,
+      exception_disqualifiers: [],
+      disqualifier_behavior: "silent",
       policies: [],
       exceptions: [],
       steps: [],
@@ -827,7 +843,7 @@ export default function PlaybooksSettingsPage() {
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-zinc-500 mb-1">Stand firm max repetitions</label>
+                      <label className="block text-xs font-medium text-zinc-500 mb-1">Stand firm max (final)</label>
                       <input
                         type="number"
                         min={1}
@@ -835,6 +851,70 @@ export default function PlaybooksSettingsPage() {
                         onChange={(e) => setDraft({ ...draft, stand_firm_max: parseInt(e.target.value) || 3 })}
                         className="w-24 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
                       />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-500 mb-1">Stand firm rounds before first exception</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={draft.stand_firm_before_exceptions}
+                        onChange={(e) => setDraft({ ...draft, stand_firm_before_exceptions: parseInt(e.target.value) || 0 })}
+                        className="w-24 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-500 mb-1">Stand firm rounds between tiers</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={draft.stand_firm_between_tiers}
+                        onChange={(e) => setDraft({ ...draft, stand_firm_between_tiers: parseInt(e.target.value) || 0 })}
+                        className="w-24 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Exception disqualifiers */}
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-500 mb-2">Exception Disqualifiers</label>
+                    <p className="text-[10px] text-zinc-400 mb-2">Conditions that silently block ALL exceptions for a customer.</p>
+                    <div className="space-y-2">
+                      {[
+                        { type: "previous_exception", source: "playbook", label: "Has a previous playbook exception (return)" },
+                        { type: "has_chargeback", label: "Has filed a chargeback" },
+                      ].map(dq => {
+                        const enabled = draft.exception_disqualifiers.some(d => d.type === dq.type);
+                        return (
+                          <label key={dq.type} className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">
+                            <input
+                              type="checkbox"
+                              checked={enabled}
+                              onChange={(e) => {
+                                const updated = e.target.checked
+                                  ? [...draft.exception_disqualifiers, { type: dq.type, source: dq.source, description: dq.label }]
+                                  : draft.exception_disqualifiers.filter(d => d.type !== dq.type);
+                                setDraft({ ...draft, exception_disqualifiers: updated });
+                              }}
+                              className="rounded border-zinc-300"
+                            />
+                            {dq.label}
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <div className="mt-2">
+                      <label className="block text-[10px] font-medium text-zinc-400 mb-1">When disqualified</label>
+                      <select
+                        value={draft.disqualifier_behavior}
+                        onChange={(e) => setDraft({ ...draft, disqualifier_behavior: e.target.value })}
+                        className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                      >
+                        <option value="silent">Silent (just stand firm, never explain why)</option>
+                        <option value="explicit">Explicit (tell customer why no exception)</option>
+                      </select>
                     </div>
                   </div>
 
@@ -1184,7 +1264,10 @@ export default function PlaybooksSettingsPage() {
                     <span>{pb.policies.length} {pb.policies.length === 1 ? "policy" : "policies"}</span>
                     <span>{pb.exceptions.length} exceptions</span>
                     <span>Exception limit: {pb.exception_limit}/ticket</span>
-                    <span>Stand firm max: {pb.stand_firm_max}</span>
+                    <span>SF before exceptions: {pb.stand_firm_before_exceptions || 2}</span>
+                    <span>SF between tiers: {pb.stand_firm_between_tiers || 2}</span>
+                    <span>Final SF max: {pb.stand_firm_max}</span>
+                    {pb.exception_disqualifiers?.length > 0 && <span>Disqualifiers: {pb.exception_disqualifiers.length}</span>}
                   </div>
 
                   {/* Trigger patterns */}

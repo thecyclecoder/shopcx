@@ -321,9 +321,43 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
             const eligibleTiers = tiered.filter((ex: { conditions: Record<string, unknown> }) => evalCustomerConditions(ex.conditions, customer).pass);
             const ineligibleTiers = tiered.filter((ex: { conditions: Record<string, unknown> }) => !evalCustomerConditions(ex.conditions, customer).pass);
 
+            const preExRounds = playbook.stand_firm_before_exceptions || 2;
+            const betweenRounds = playbook.stand_firm_between_tiers || 2;
+            const disqualifiers = (playbook.exception_disqualifiers || []) as { type: string; source?: string }[];
+
             dataFound += `Customer LTV: $${(customer.ltv_cents / 100).toFixed(2)}, Orders: ${customer.total_orders}\n`;
+            dataFound += `Stand firm before exceptions: ${preExRounds}, between tiers: ${betweenRounds}\n`;
             dataFound += eligibleTiers.map((e: { tier: number; name: string; resolution_type: string }) => `Tier ${e.tier}: ${e.name} (${e.resolution_type}) — ELIGIBLE`).join("\n");
             if (ineligibleTiers.length) dataFound += "\n" + ineligibleTiers.map((e: { tier: number; name: string }) => `Tier ${e.tier}: ${e.name} — NOT eligible`).join("\n");
+            if (disqualifiers.length) dataFound += `\nDisqualifiers: ${disqualifiers.map(d => d.type).join(", ")}`;
+
+            // ── Check disqualifiers ──
+            let disqualified = false;
+            let dqReason = "";
+            for (const dq of disqualifiers) {
+              if (dq.type === "previous_exception") {
+                const { count } = await admin.from("returns").select("id", { count: "exact", head: true })
+                  .eq("workspace_id", workspaceId).eq("customer_id", customer_id).eq("source", dq.source || "playbook").not("status", "eq", "cancelled");
+                if ((count || 0) > 0) { disqualified = true; dqReason = `Previous ${dq.source || "playbook"} exception found`; break; }
+              }
+              if (dq.type === "has_chargeback") {
+                const { count } = await admin.from("chargeback_events").select("id", { count: "exact", head: true })
+                  .eq("workspace_id", workspaceId).eq("customer_id", customer_id);
+                if ((count || 0) > 0) { disqualified = true; dqReason = "Customer has filed a chargeback"; break; }
+              }
+            }
+
+            if (disqualified) {
+              emitStep({
+                step_name: `${step.name} — DISQUALIFIED`, step_type: "offer_exception", step_order: step.step_order,
+                data_found: dataFound, condition_result: `Disqualified: ${dqReason}. No exceptions will be offered (${playbook.disqualifier_behavior || "silent"}).`,
+                ai_response: "", mock_customer_reply: "",
+                warnings: [`Customer disqualified from exceptions: ${dqReason}`], skipped: true,
+              });
+              ctx.disqualified = true;
+              ctx.exception_exhausted = true;
+              continue;
+            }
 
             if (eligibleTiers.length === 0) {
               conditionResult = "No exceptions match this customer";
@@ -331,16 +365,40 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
               break;
             }
 
-            // Simulate each eligible tier: offer → rejection → next tier
+            // ── Simulate: pre-exception stand firm → tier → between-tier stand firm → tier ──
             for (let t = 0; t < eligibleTiers.length; t++) {
               const ex = eligibleTiers[t] as { tier: number; name: string; resolution_type: string; instructions: string | null };
-              const isEscalation = t > 0;
+              const roundsNeeded = t === 0 ? preExRounds : betweenRounds;
+
+              // Stand firm rounds before this tier
+              for (let sf = 0; sf < roundsNeeded; sf++) {
+                const sfPosition = t === 0 ? "before any exception" : `before Tier ${ex.tier}`;
+                const sfAI = await genAI(
+                  { name: `Stand Firm (${sfPosition})`, type: "stand_firm", instructions: step.instructions },
+                  `Stand firm ${sf + 1}/${roundsNeeded} ${sfPosition}`,
+                  `Stand firm round ${sf + 1}/${roundsNeeded} ${sfPosition}. No exception offered yet at this point.`,
+                  currentMessage,
+                );
+                const sfMock = await genMock(sfAI, `Stand firm ${sfPosition}`, true);
+                currentMessage = sfMock;
+
+                emitStep({
+                  step_name: `Stand Firm ${sf + 1}/${roundsNeeded} (${sfPosition})`,
+                  step_type: "stand_firm", step_order: step.step_order,
+                  data_found: `Pre-exception stand firm. ${t === 0 ? "Policy only, no exception yet." : `Customer rejected Tier ${eligibleTiers[t - 1].tier}.`}`,
+                  condition_result: `Stand firm ${sf + 1}/${roundsNeeded} ${sfPosition}`,
+                  ai_response: sfAI, mock_customer_reply: sfMock,
+                  warnings: [], skipped: false,
+                });
+              }
+
+              // Now offer the tier
               ctx.current_exception_tier = ex.tier;
               ctx.exception_offered = ex.name;
               ctx.resolution_type = ex.resolution_type;
               exceptionsUsed++;
 
-              const tierCondResult = `Offering Tier ${ex.tier}: ${ex.name} (${ex.resolution_type})${isEscalation ? " — escalated after rejection" : ""}`;
+              const tierCondResult = `Offering Tier ${ex.tier}: ${ex.name} (${ex.resolution_type})${t > 0 ? " — escalated after stand firm" : ""}`;
               const tierAI = await genAI(
                 { name: step.name, type: step.type, instructions: ex.instructions || step.instructions },
                 dataFound, tierCondResult, currentMessage,
@@ -348,18 +406,18 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
               const tierMock = await genMock(tierAI, `${step.name} — Tier ${ex.tier}`, true);
               currentMessage = tierMock;
 
-              const tierLabel = t === 0 ? step.name : `${step.name} — Tier ${ex.tier} (escalated)`;
               emitStep({
-                step_name: tierLabel, step_type: "offer_exception", step_order: step.step_order,
-                data_found: t === 0 ? dataFound : `Escalated: customer rejected Tier ${eligibleTiers[t - 1].tier}`,
+                step_name: t === 0 ? step.name : `${step.name} — Tier ${ex.tier} (escalated)`,
+                step_type: "offer_exception", step_order: step.step_order,
+                data_found: t === 0 ? dataFound : `Escalated after ${roundsNeeded} stand firm rounds`,
                 condition_result: tierCondResult, ai_response: tierAI,
                 mock_customer_reply: tierMock, warnings: t === 0 ? warnings : [], skipped: false,
               });
             }
 
-            conditionResult = `All ${eligibleTiers.length} eligible tiers offered and rejected`;
+            conditionResult = `All ${eligibleTiers.length} eligible tiers offered (with stand firm rounds) and rejected`;
             ctx.exception_exhausted = true;
-            continue; // Skip the default emit below — we already emitted per-tier
+            continue;
           }
           case "initiate_return": {
             // Gate: customer must have accepted

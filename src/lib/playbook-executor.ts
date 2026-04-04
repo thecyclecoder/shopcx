@@ -106,7 +106,7 @@ export async function executePlaybookStep(
 
   // Load playbook + steps
   const { data: playbook } = await admin.from("playbooks")
-    .select("id, name, exception_limit, stand_firm_max")
+    .select("id, name, exception_limit, stand_firm_max, stand_firm_before_exceptions, stand_firm_between_tiers, exception_disqualifiers, disqualifier_behavior")
     .eq("id", ticket.active_playbook_id).single();
 
   if (!playbook) return { action: "complete", systemNote: "Playbook not found." };
@@ -194,7 +194,7 @@ export async function executePlaybookStep(
 
 async function executeStep(
   admin: Admin, wsId: string, tid: string,
-  playbook: { id: string; name: string; exception_limit: number; stand_firm_max: number },
+  playbook: { id: string; name: string; exception_limit: number; stand_firm_max: number; stand_firm_before_exceptions: number; stand_firm_between_tiers: number; exception_disqualifiers: { type: string; source?: string }[]; disqualifier_behavior: string },
   step: PlaybookStep, allSteps: PlaybookStep[],
   customer: CustomerData, orders: OrderData[], subs: SubscriptionData[],
   ctx: Record<string, unknown>, msg: string,
@@ -263,7 +263,7 @@ async function executeStep(
         .select("*").eq("policy_id", policyId).order("tier");
       return handleOfferException(
         exceptions || [], customer, orders, ctx, step, dataContext, pers,
-        exceptionsUsed, playbook.exception_limit, tid, admin, msg, policyRules, wsId,
+        exceptionsUsed, playbook, tid, admin, msg, policyRules, wsId,
       );
     }
 
@@ -594,7 +594,9 @@ async function handleOfferException(
   exceptions: PlaybookException[], customer: CustomerData, orders: OrderData[],
   ctx: Record<string, unknown>, step: PlaybookStep, dataCtx: string,
   pers: { name?: string; tone?: string } | null,
-  exceptionsUsed: number, exceptionLimit: number, tid: string, admin: Admin,
+  exceptionsUsed: number,
+  playbook: { id: string; name: string; exception_limit: number; stand_firm_max: number; stand_firm_before_exceptions: number; stand_firm_between_tiers: number; exception_disqualifiers: { type: string; source?: string }[]; disqualifier_behavior: string },
+  tid: string, admin: Admin,
   msg: string, policyRules: string, wsId: string,
 ): Promise<PlaybookExecResult> {
   const outOfPolicy = (ctx.out_of_policy as string[]) || [];
@@ -614,9 +616,61 @@ async function handleOfferException(
     }
   }
 
+  // ── Check disqualifiers (silent or explicit) ──
+  if (!ctx.disqualifier_checked) {
+    const disqualifiers = playbook.exception_disqualifiers || [];
+    let disqualified = false;
+    let disqualifyReason = "";
+
+    for (const dq of disqualifiers) {
+      if (dq.type === "previous_exception") {
+        const { count } = await admin.from("returns")
+          .select("id", { count: "exact", head: true })
+          .eq("workspace_id", wsId)
+          .eq("customer_id", customer.id)
+          .eq("source", dq.source || "playbook")
+          .not("status", "eq", "cancelled");
+        if ((count || 0) > 0) {
+          disqualified = true;
+          disqualifyReason = "Customer has a previous playbook exception on record.";
+          break;
+        }
+      }
+      if (dq.type === "has_chargeback") {
+        const { count } = await admin.from("chargeback_events")
+          .select("id", { count: "exact", head: true })
+          .eq("workspace_id", wsId)
+          .eq("customer_id", customer.id);
+        if ((count || 0) > 0) {
+          disqualified = true;
+          disqualifyReason = "Customer has filed a chargeback.";
+          break;
+        }
+      }
+    }
+
+    if (disqualified) {
+      return {
+        action: "advance", newStep: step.step_order + 1,
+        context: { disqualifier_checked: true, disqualified: true, disqualify_reason: disqualifyReason, exception_exhausted: true },
+        systemNote: `[Playbook] Customer disqualified from exceptions: ${disqualifyReason} Behavior: ${playbook.disqualifier_behavior}. Moving to stand firm.`,
+      };
+    }
+    ctx.disqualifier_checked = true;
+  }
+
+  // If already disqualified (checked on a previous round), skip to stand firm
+  if (ctx.disqualified) {
+    return {
+      action: "advance", newStep: step.step_order + 1,
+      context: { exception_exhausted: true },
+      systemNote: "[Playbook] Customer previously disqualified. Stand firm.",
+    };
+  }
+
   const currentTier = Number(ctx.current_exception_tier) || 0;
 
-  // If we already offered an exception, check if customer accepted or rejected
+  // ── If we already offered an exception, check acceptance ──
   if (currentTier > 0 && ctx.exception_offered) {
     const accepted = detectAcceptance(msg);
     if (accepted) {
@@ -626,40 +680,62 @@ async function handleOfferException(
         systemNote: `[Playbook] Customer accepted exception: ${ctx.exception_offered} (${ctx.resolution_type}).`,
       };
     }
-    // Customer rejected — try next tier
+    // Customer rejected — need stand firm rounds before next tier
   }
 
-  // Check tiered exceptions (next tier after current)
-  const nextTierExceptions = exceptions.filter(e => !e.auto_grant && e.tier > currentTier);
+  // ── Stand firm rounds before offering exception ──
+  const preExceptionRounds = playbook.stand_firm_before_exceptions || 0;
+  const betweenTierRounds = playbook.stand_firm_between_tiers || 0;
+  const sfCount = Number(ctx.exception_stand_firm_count) || 0;
 
-  if (nextTierExceptions.length === 0 || exceptionsUsed >= exceptionLimit) {
-    // No more tiers or limit reached — advance (will hit stand_firm)
+  // Determine required stand firm rounds for current phase
+  const requiredRounds = currentTier === 0 ? preExceptionRounds : betweenTierRounds;
+
+  if (sfCount < requiredRounds) {
+    // Need more stand firm rounds before escalating
+    const bestOffer = ctx.exception_offered as string || "policy";
+    const resType = ctx.resolution_type as string || "";
+    const resLabel = resType.includes("refund") ? "refund" : resType.includes("credit") ? "store credit" : "policy";
+
+    const response = await aiGenerate(
+      basePrompt(step, pers, policyRules),
+      `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\n${currentTier === 0 ? "The customer's order is out of policy. Stand firm on the policy." : `The customer rejected the ${bestOffer} offer.`} This is stand firm round ${sfCount + 1}/${requiredRounds} before ${currentTier === 0 ? "any exception can be offered" : "the next tier can be offered"}. Acknowledge frustration. Restate the current position (${currentTier === 0 ? "policy" : resLabel}). Do NOT offer anything new yet. Use different wording than previous attempts. Do not argue or get defensive.`,
+    );
+
     return {
-      action: "advance", newStep: step.step_order + 1,
-      context: { exception_exhausted: true },
-      systemNote: `[Playbook] ${nextTierExceptions.length === 0 ? "All exception tiers exhausted" : `Exception limit reached (${exceptionsUsed}/${exceptionLimit})`}. Moving to stand firm.`,
+      action: "respond", response,
+      context: { exception_stand_firm_count: sfCount + 1 },
+      systemNote: `[Playbook] Pre-exception stand firm ${sfCount + 1}/${requiredRounds} (tier ${currentTier}).`,
     };
   }
 
-  const nextException = nextTierExceptions[0];
-  const eligible = evaluateCustomerConditions(nextException.conditions, customer);
+  // Reset stand firm counter for next phase
+  ctx.exception_stand_firm_count = 0;
 
-  if (!eligible) {
-    // Try remaining tiers
-    const remaining = nextTierExceptions.filter(e => e.tier > nextException.tier);
-    for (const fallback of remaining) {
-      if (evaluateCustomerConditions(fallback.conditions, customer)) {
-        return offerException(fallback, outOfPolicy, step, dataCtx, pers, exceptionsUsed, exceptionLimit, tid, admin, policyRules, wsId, orders);
-      }
+  // ── Find next eligible tier ──
+  const tieredExceptions = exceptions.filter(e => !e.auto_grant && e.tier > currentTier);
+
+  if (tieredExceptions.length === 0 || exceptionsUsed >= playbook.exception_limit) {
+    return {
+      action: "advance", newStep: step.step_order + 1,
+      context: { exception_exhausted: true, exception_stand_firm_count: 0 },
+      systemNote: `[Playbook] ${tieredExceptions.length === 0 ? "All exception tiers exhausted" : `Exception limit reached (${exceptionsUsed}/${playbook.exception_limit})`}. Moving to stand firm.`,
+    };
+  }
+
+  // Find first eligible tier
+  for (const ex of tieredExceptions) {
+    if (evaluateCustomerConditions(ex.conditions, customer)) {
+      return offerException(ex, outOfPolicy, step, dataCtx, pers, exceptionsUsed, playbook.exception_limit, tid, admin, policyRules, wsId, orders);
     }
-    return {
-      action: "advance", newStep: step.step_order + 1,
-      context: { exception_exhausted: true },
-      systemNote: `[Playbook] Customer doesn't meet conditions for any remaining exception tier.`,
-    };
   }
 
-  return offerException(nextException, outOfPolicy, step, dataCtx, pers, exceptionsUsed, exceptionLimit, tid, admin, policyRules, wsId, orders);
+  // No eligible tiers
+  return {
+    action: "advance", newStep: step.step_order + 1,
+    context: { exception_exhausted: true, exception_stand_firm_count: 0 },
+    systemNote: `[Playbook] Customer doesn't meet conditions for any remaining exception tier.`,
+  };
 }
 
 async function offerException(
