@@ -1155,6 +1155,15 @@ export default function PlaybooksSettingsPage() {
                             placeholder="How to explain the policy without sounding robotic"
                           />
                         </div>
+                        <div>
+                          <label className="block text-xs font-medium text-zinc-500 mb-1">Policy URL (linked in customer messages)</label>
+                          <input
+                            value={(editingPolicy as unknown as Record<string, unknown>).policy_url as string || ""}
+                            onChange={(e) => setEditingPolicy({ ...editingPolicy, policy_url: e.target.value || null } as unknown as typeof editingPolicy)}
+                            className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                            placeholder="https://yourstore.com/policies/return-policy"
+                          />
+                        </div>
                         <div className="flex gap-2">
                           <button onClick={savePolicy} disabled={!editingPolicy.name} className="rounded-md bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-50">Save Policy</button>
                           <button onClick={() => setEditingPolicy(null)} className="text-xs text-zinc-500 hover:text-zinc-700">Cancel</button>

@@ -39,6 +39,7 @@ interface PlaybookPolicy {
   description: string | null;
   conditions: Record<string, unknown>;
   ai_talking_points: string | null;
+  policy_url: string | null;
 }
 
 interface CustomerData {
@@ -264,7 +265,7 @@ async function executeStep(
 
     case "apply_policy": {
       if (!policy) return { action: "advance", newStep: step.step_order + 1, systemNote: "No policy configured." };
-      return handleApplyPolicy(policy, orders, ctx, step, dataContext, pers, policyRules);
+      return handleApplyPolicy(admin, wsId, policy, orders, subs, ctx, step, dataContext, pers, policyRules);
     }
 
     case "offer_exception": {
@@ -587,13 +588,18 @@ async function handleCheckOtherSubs(
 }
 
 async function handleApplyPolicy(
-  policy: PlaybookPolicy, orders: OrderData[], ctx: Record<string, unknown>,
+  admin: Admin, wsId: string,
+  policy: PlaybookPolicy, orders: OrderData[], subs: SubscriptionData[],
+  ctx: Record<string, unknown>,
   step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null, policyRules: string,
 ): Promise<PlaybookExecResult> {
   const identifiedOrders = (ctx.identified_orders as string[]) || [];
   const orderObjs = orders.filter(o => identifiedOrders.includes(o.order_number));
+  const identifiedSub = ctx.identified_subscription as string | undefined;
+  const subCreated = ctx.subscription_created as string | undefined;
+  const subStatus = ctx.subscription_status as string | undefined;
 
-  // Evaluate each order against policy conditions, tracking WHY each fails
+  // Evaluate each order against policy conditions
   const inPolicy: string[] = [];
   const outOfPolicy: string[] = [];
   const failureReasons: string[] = [];
@@ -604,32 +610,140 @@ async function handleApplyPolicy(
       inPolicy.push(o.order_number);
     } else {
       outOfPolicy.push(o.order_number);
-      // Build human-readable reason
       const reasons: string[] = [];
       const daysSince = Math.floor((Date.now() - new Date(o.created_at).getTime()) / 86400000);
       const src = o.source_name || "";
       for (const [key, rule] of Object.entries(policy.conditions)) {
         const r = rule as Record<string, unknown>;
         if ((key === "days_since_order" || key === "days_since_fulfillment" || key === "days_since_delivery") && r["<="] && daysSince > Number(r["<="])) {
-          reasons.push(`ordered ${daysSince} days ago, outside the ${r["<="]}‑day return window`);
+          reasons.push(`outside ${r["<="]}‑day return window (${daysSince} days ago)`);
         }
         if (key === "source_name" && r["not_contains"] && src.toLowerCase().includes(String(r["not_contains"]).toLowerCase())) {
-          reasons.push(`source is "${src}" — this is a recurring subscription order, not a checkout order`);
+          reasons.push(`recurring subscription order`);
         }
       }
-      failureReasons.push(`${o.order_number} (${new Date(o.created_at).toLocaleDateString()}): ${reasons.join("; ") || "does not meet policy conditions"}`);
+      failureReasons.push(`${o.order_number}: ${reasons.join("; ") || "does not meet policy conditions"}`);
     }
   }
 
-  const subCreated = ctx.subscription_created as string | undefined;
-  const subInfo = subCreated ? `Subscription created: ${new Date(subCreated).toLocaleDateString()}.` : "";
-  const otherSubs = Number(ctx.other_active_count) || 0;
-  const otherSubsInfo = otherSubs > 0 ? `Note: customer has ${otherSubs} other active subscription(s) — mention proactively.` : "";
+  // Check if playbook was resumed after cancel journey (brief format with link)
+  if (ctx.cancel_journey_completed) {
+    const policyLink = policy.policy_url ? ` Our policies (${policy.policy_url}) state that` : " Our policies state that";
+    const isRecurring = failureReasons.some(r => r.includes("recurring"));
+    const isExpired = failureReasons.some(r => r.includes("return window"));
 
-  const response = await aiGenerate(
-    basePrompt(step, pers, policyRules),
-    `Customer data:\n${dataCtx}\n\nPolicy: "${policy.name}"\nPolicy details: ${policy.description || ""}\nAI talking points: ${policy.ai_talking_points || ""}\n${subInfo}\n${otherSubsInfo}\n\nOrders in policy (eligible for return): ${inPolicy.join(", ") || "none"}\nOrders out of policy: ${outOfPolicy.join(", ") || "none"}\n\nSpecific reasons each order fails:\n${failureReasons.join("\n") || "none"}\n\nExplain the situation to the customer. For EACH order, explain specifically why it does or doesn't qualify — mention the exact reason (e.g. "recurring subscription order" or "outside 30-day window"). Be neutral — say "here's what happened" not "you signed up for this." If there are other active subscriptions, mention them proactively.`,
-  );
+    let briefReason = "this order does not qualify for return.";
+    if (isRecurring) briefReason = "renewal orders are not eligible for return.";
+    else if (isExpired) briefReason = "this order is outside the return window.";
+
+    const cancelConfirm = subStatus === "cancelled" || ctx.subscription_cancelled
+      ? " I can confirm that your subscription is cancelled and no more orders will be shipped."
+      : "";
+
+    const response = `I'm looking at your account and the order you are having an issue with.${policyLink} ${briefReason} I won't be able to approve a return request since the order you mentioned is a recurring order.${cancelConfirm}`;
+
+    return {
+      action: "respond", response,
+      context: { in_policy: inPolicy, out_of_policy: outOfPolicy, policy_applied: policy.name, failure_reasons: failureReasons },
+      systemNote: `[Playbook] Policy "${policy.name}" (brief, post-cancel): ${inPolicy.length} in-policy, ${outOfPolicy.length} out-of-policy.`,
+    };
+  }
+
+  // ── Build deterministic timeline ──
+  const timelineEvents: { date: Date; label: string }[] = [];
+
+  // Subscription created
+  if (subCreated) {
+    const sub = subs.find(s => s.shopify_contract_id === identifiedSub);
+    const items = sub ? (sub.items as { title?: string }[] || []).map(i => i.title || "item").join(" and ") : "your products";
+    const interval = sub ? `${sub.billing_interval_count} ${sub.billing_interval}${sub.billing_interval_count > 1 ? "s" : ""}` : "a recurring schedule";
+    timelineEvents.push({
+      date: new Date(subCreated),
+      label: `You checked out on our website and selected the subscribe and save option. That created your first order and set up a recurring subscription for ${items}, which was set to renew every ${interval}. You can always cancel a subscription anytime, but if you cancel after an order is made, it will stop future orders but can't stop an order that's already processed.`,
+    });
+  }
+
+  // Customer events (portal actions)
+  const customerId = orderObjs[0] ? await (async () => {
+    const { data: o } = await admin.from("orders").select("customer_id").eq("order_number", orderObjs[0].order_number).eq("workspace_id", wsId).single();
+    return o?.customer_id;
+  })() : null;
+
+  if (customerId) {
+    const { data: events } = await admin.from("customer_events")
+      .select("event_type, summary, created_at")
+      .eq("workspace_id", wsId)
+      .eq("customer_id", customerId)
+      .in("event_type", ["portal.subscription.date_changed", "portal.subscription.paused", "portal.subscription.cancelled", "portal.subscription.resumed", "portal.subscription.frequency_changed"])
+      .order("created_at", { ascending: true })
+      .limit(10);
+
+    for (const ev of events || []) {
+      const summary = ev.summary || ev.event_type.replace("portal.subscription.", "").replace(/_/g, " ");
+      timelineEvents.push({ date: new Date(ev.created_at), label: summary });
+    }
+  }
+
+  // Order processed
+  for (const o of orderObjs) {
+    timelineEvents.push({
+      date: new Date(o.created_at),
+      label: "Your renewal order processed.",
+    });
+  }
+
+  // Subscription cancelled (if applicable)
+  if (subStatus === "cancelled" && identifiedSub) {
+    // Try to find cancellation event
+    if (customerId) {
+      const { data: cancelEvent } = await admin.from("customer_events")
+        .select("created_at, summary")
+        .eq("workspace_id", wsId)
+        .eq("customer_id", customerId)
+        .ilike("event_type", "%cancel%")
+        .order("created_at", { ascending: false })
+        .limit(1).single();
+
+      if (cancelEvent) {
+        timelineEvents.push({ date: new Date(cancelEvent.created_at), label: cancelEvent.summary || "Your subscription was cancelled." });
+      } else {
+        timelineEvents.push({ date: new Date(), label: "Your subscription is currently cancelled." });
+      }
+    }
+  }
+
+  // Sort by date and build HTML
+  timelineEvents.sort((a, b) => a.date.getTime() - b.date.getTime());
+
+  const channel = (ctx._channel as string) || "email";
+  const useHtml = ["email", "chat", "help_center"].includes(channel);
+
+  let timeline: string;
+  if (useHtml) {
+    timeline = timelineEvents.map(e => {
+      const dateStr = e.date.toLocaleDateString("en-US", { month: "long", day: "numeric" });
+      return `<p><b>${dateStr}</b><br>${e.label}</p>`;
+    }).join("");
+  } else {
+    timeline = timelineEvents.map(e => {
+      const dateStr = e.date.toLocaleDateString("en-US", { month: "long", day: "numeric" });
+      return `${dateStr}\n${e.label}`;
+    }).join("\n\n");
+  }
+
+  // Build the response: intro + timeline + other subs note
+  const otherSubs = Number(ctx.other_active_count) || 0;
+  let response = `I've reviewed your account and want to walk you through what's going on with your recent order.\n\n${timeline}`;
+
+  if (subStatus !== "cancelled" && identifiedSub) {
+    response += `\n\nIf you'd like to stop receiving these orders, I'm able to help you cancel or modify that subscription.`;
+  }
+
+  if (otherSubs > 0) {
+    response += `\n\nI also noticed you have ${otherSubs} other active subscription${otherSubs > 1 ? "s" : ""} on your account.`;
+  }
+
+  response += `\n\nLet me know if I can help with anything.`;
 
   return {
     action: "respond", response,
