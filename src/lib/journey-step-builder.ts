@@ -46,8 +46,9 @@ export async function buildJourneySteps(
     case "marketing_signup":
       return buildMarketingSignupSteps(admin, workspaceId, customerId, ticketId);
     case "cancel":
-      // Cancel journey uses the portal cancel flow, not step-based forms
-      return { codeDriven: true, cancelJourney: true, multiStep: false, steps: [] } as BuiltJourneyConfig & { cancelJourney: boolean };
+    case "cancellation":
+    case "cancel_subscription":
+      return buildCancelSteps(admin, workspaceId, customerId, ticketId);
     default:
       return { codeDriven: true, multiStep: false, steps: [] };
   }
@@ -204,4 +205,71 @@ async function buildMarketingSignupSteps(
   }
 
   return { codeDriven: true, multiStep: true, steps };
+}
+
+// ── Cancel Journey Steps ──
+
+async function buildCancelSteps(
+  admin: Admin, workspaceId: string, customerId: string, ticketId?: string,
+): Promise<BuiltJourneyConfig & { cancelJourney: boolean }> {
+  // Fetch customer's active subscriptions
+  const { data: subs } = await admin.from("subscriptions")
+    .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count, next_billing_date, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", customerId)
+    .in("status", ["active", "paused"])
+    .order("created_at", { ascending: false });
+
+  // Also check linked customer profiles
+  const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", customerId).single();
+  let allSubs = subs || [];
+  if (link) {
+    const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
+    const linkedIds = (grp || []).map(g => g.customer_id).filter(id => id !== customerId);
+    if (linkedIds.length > 0) {
+      const { data: linkedSubs } = await admin.from("subscriptions")
+        .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count, next_billing_date, created_at")
+        .eq("workspace_id", workspaceId)
+        .in("customer_id", linkedIds)
+        .in("status", ["active", "paused"]);
+      allSubs = [...allSubs, ...(linkedSubs || [])];
+    }
+  }
+
+  // Calculate first-renewal detection
+  const subscriptionData = allSubs.map(s => {
+    const ageDays = Math.floor((Date.now() - new Date(s.created_at).getTime()) / 86400000);
+    const intervalDays = s.billing_interval === "MONTH" ? s.billing_interval_count * 30
+      : s.billing_interval === "WEEK" ? s.billing_interval_count * 7
+      : s.billing_interval_count * 30;
+    const isFirstRenewal = ageDays < intervalDays;
+    const items = (s.items as { title?: string; variant_title?: string; image_url?: string }[] || []).map(i => ({
+      title: i.title || "Product",
+      variant_title: i.variant_title || null,
+      image_url: i.image_url || null,
+    }));
+    return {
+      id: s.id,
+      contractId: s.shopify_contract_id,
+      status: s.status,
+      items,
+      billingInterval: s.billing_interval,
+      billingIntervalCount: s.billing_interval_count,
+      nextBillingDate: s.next_billing_date,
+      isFirstRenewal,
+      subscriptionAgeDays: ageDays,
+    };
+  });
+
+  return {
+    codeDriven: true,
+    cancelJourney: true,
+    multiStep: false,
+    steps: [],
+    metadata: {
+      subscriptions: subscriptionData,
+      selectedSubscriptionId: subscriptionData[0]?.id || null,
+    },
+    ticketId,
+  } as BuiltJourneyConfig & { cancelJourney: boolean };
 }

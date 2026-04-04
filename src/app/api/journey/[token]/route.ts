@@ -53,6 +53,20 @@ export async function GET(
 
   // For code-driven journeys, dynamically build steps if not already built
   const configObj = config as Record<string, unknown>;
+
+  // Rebuild cancel journey config if metadata/subscriptions is missing
+  if (configObj.codeDriven && configObj.cancelJourney && !(configObj.metadata as Record<string, unknown>)?.subscriptions) {
+    const { buildJourneySteps } = await import("@/lib/journey-step-builder");
+    const built = await buildJourneySteps(
+      session.workspace_id,
+      (configObj.journeyType as string) || "cancel_subscription",
+      session.customer_id,
+      session.ticket_id || "",
+    );
+    config = { ...configObj, ...built };
+    await admin.from("journey_sessions").update({ config_snapshot: config }).eq("id", session.id);
+  }
+
   if (configObj.codeDriven && configObj.journeyType && !(configObj.steps as unknown[])?.length && !configObj.cancelJourney) {
     const { buildJourneySteps } = await import("@/lib/journey-step-builder");
     const built = await buildJourneySteps(
