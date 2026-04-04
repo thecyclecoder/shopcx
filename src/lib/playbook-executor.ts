@@ -605,23 +605,80 @@ async function handleIdentifyOrder(
     };
   }
 
-  // Multiple orders — check if customer's message specifies one
-  const msgLower = msg.toLowerCase();
-  const matchedOrders = orders.filter(o => {
+  // Multiple orders — try to match customer's message to an order
+  const msgLower = msg.toLowerCase().replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ");
+
+  // Match by order number (if customer somehow knows it)
+  const matchedByNumber = orders.filter(o => {
     const num = o.order_number.replace(/^[^0-9]*/, "");
     return msgLower.includes(o.order_number.toLowerCase()) || msgLower.includes(num);
   });
-
-  if (matchedOrders.length > 0) {
+  if (matchedByNumber.length > 0) {
     return {
       action: "advance", newStep: step.step_order + 1,
-      context: { identified_orders: matchedOrders.map(o => o.order_number) },
-      systemNote: `[Playbook] Customer specified order(s): ${matchedOrders.map(o => o.order_number).join(", ")}`,
+      context: { identified_orders: matchedByNumber.map(o => o.order_number) },
+      systemNote: `[Playbook] Customer specified order(s): ${matchedByNumber.map(o => o.order_number).join(", ")}`,
     };
   }
 
-  // Check for "all orders" / "all of them" type messages
-  if (/all (of )?(them|my orders|orders)|every order|each order/i.test(msg)) {
+  // Match by date reference ("the April 4 one", "april 4th", "4/4")
+  const matchedByDate = orders.filter(o => {
+    const d = new Date(o.created_at);
+    const monthNames = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+    const monthShort = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+    const month = monthNames[d.getMonth()];
+    const mShort = monthShort[d.getMonth()];
+    const day = d.getDate();
+    const dayStr = String(day);
+    const monthNum = String(d.getMonth() + 1);
+
+    // "April 4", "april 4th", "Apr 4", "4/4", "the 4th"
+    return msgLower.includes(`${month} ${dayStr}`) ||
+      msgLower.includes(`${month} ${day}th`) ||
+      msgLower.includes(`${month} ${day}st`) ||
+      msgLower.includes(`${month} ${day}nd`) ||
+      msgLower.includes(`${month} ${day}rd`) ||
+      msgLower.includes(`${mShort} ${dayStr}`) ||
+      msgLower.includes(`${monthNum}/${dayStr}`) ||
+      msgLower.includes(`${monthNum}-${dayStr}`);
+  });
+  if (matchedByDate.length > 0) {
+    return {
+      action: "advance", newStep: step.step_order + 1,
+      context: { identified_orders: matchedByDate.map(o => o.order_number) },
+      systemNote: `[Playbook] Customer identified order by date: ${matchedByDate.map(o => o.order_number).join(", ")}`,
+    };
+  }
+
+  // Match by product name
+  const matchedByProduct = orders.filter(o => {
+    const items = (o.line_items as { title?: string }[] || []);
+    return items.some(i => i.title && msgLower.includes(i.title.toLowerCase()));
+  });
+  if (matchedByProduct.length === 1) {
+    return {
+      action: "advance", newStep: step.step_order + 1,
+      context: { identified_orders: [matchedByProduct[0].order_number] },
+      systemNote: `[Playbook] Customer identified order by product name: ${matchedByProduct[0].order_number}`,
+    };
+  }
+
+  // Match by dollar amount ("the $5.87 one")
+  const amountMatch = msgLower.match(/\$(\d+(?:\.\d{2})?)/);
+  if (amountMatch) {
+    const amountCents = Math.round(parseFloat(amountMatch[1]) * 100);
+    const matchedByAmount = orders.filter(o => o.total_cents === amountCents);
+    if (matchedByAmount.length === 1) {
+      return {
+        action: "advance", newStep: step.step_order + 1,
+        context: { identified_orders: [matchedByAmount[0].order_number] },
+        systemNote: `[Playbook] Customer identified order by amount: ${matchedByAmount[0].order_number}`,
+      };
+    }
+  }
+
+  // "All orders" / "all of them"
+  if (/all (of )?(them|my orders|orders)|every order|each order|both/i.test(msg)) {
     return {
       action: "advance", newStep: step.step_order + 1,
       context: { identified_orders: orders.map(o => o.order_number) },
@@ -629,12 +686,33 @@ async function handleIdentifyOrder(
     };
   }
 
-  // Check for "last order" / "most recent"
-  if (/last order|most recent|latest order|recent charge/i.test(msg)) {
+  // Positional: "the first one", "the last one", "the most recent", "the second one"
+  if (/\b(last|most recent|latest|recent)\b/i.test(msg)) {
     return {
       action: "advance", newStep: step.step_order + 1,
       context: { identified_orders: [orders[0].order_number] },
       systemNote: `[Playbook] Customer referenced most recent order: ${orders[0].order_number}.`,
+    };
+  }
+  if (/\b(first|oldest|earliest)\b/i.test(msg)) {
+    return {
+      action: "advance", newStep: step.step_order + 1,
+      context: { identified_orders: [orders[orders.length - 1].order_number] },
+      systemNote: `[Playbook] Customer referenced first/oldest order: ${orders[orders.length - 1].order_number}.`,
+    };
+  }
+  if (/\bsecond\b/i.test(msg) && orders.length >= 2) {
+    return {
+      action: "advance", newStep: step.step_order + 1,
+      context: { identified_orders: [orders[1].order_number] },
+      systemNote: `[Playbook] Customer referenced second order: ${orders[1].order_number}.`,
+    };
+  }
+  if (/\bthird\b/i.test(msg) && orders.length >= 3) {
+    return {
+      action: "advance", newStep: step.step_order + 1,
+      context: { identified_orders: [orders[2].order_number] },
+      systemNote: `[Playbook] Customer referenced third order: ${orders[2].order_number}.`,
     };
   }
 
