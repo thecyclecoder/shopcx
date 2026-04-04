@@ -196,10 +196,23 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
       let exceptionsUsed = 0;
 
       // Helper: generate AI response for a step
+      // Load policy rules for all AI prompts
+      const policyStep = steps.find((s: { type: string }) => s.type === "apply_policy" || s.type === "offer_exception");
+      const simPolicyId = (policyStep?.config as { policy_id?: string } | undefined)?.policy_id;
+      const simPolicy = simPolicyId ? (policies || []).find((p: { id: string }) => p.id === simPolicyId) : null;
+      const simPolicyRules = simPolicy
+        ? [(simPolicy as { description?: string }).description, (simPolicy as { ai_talking_points?: string }).ai_talking_points].filter(Boolean).join("\n")
+        : "";
+
+      // Find the stand_firm step instructions (NOT the offer_exception step)
+      const standFirmStep = steps.find((s: { type: string }) => s.type === "stand_firm");
+      const standFirmInstructions = (standFirmStep as { instructions?: string } | undefined)?.instructions || "";
+
       async function genAI(step: { name: string; type: string; instructions?: string | null }, dataFound: string, condResult: string, custMsg: string) {
         return aiCall(
           ["You are simulating a customer support AI for a playbook dry-run. Generate the AI response for this step.",
-           "Rules: max 2-3 sentences per paragraph. Plain text only, no markdown.",
+           "Rules: max 2-3 sentences per paragraph. Plain text only, no markdown. Never promise to connect with a specialist or supervisor.",
+           simPolicyRules ? `Store policy rules:\n${simPolicyRules}` : "",
            step.instructions ? `Step instructions: ${step.instructions}` : ""].filter(Boolean).join("\n"),
           `Customer data:\n${dataSummary}\n\nPlaybook context: ${JSON.stringify(ctx)}\nStep: "${step.name}" (${step.type})\nData found: ${dataFound}\nCondition result: ${condResult}\n\nCustomer message: "${custMsg}"\n\nGenerate what the AI would say. Keep it realistic.`, 300);
       }
@@ -383,11 +396,18 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
 
               // Stand firm rounds before this tier
               for (let sf = 0; sf < roundsNeeded; sf++) {
-                const sfPosition = t === 0 ? "before any exception" : `before Tier ${ex.tier}`;
+                const sfPosition = t === 0 ? "before any exception" : `after Tier ${eligibleTiers[t - 1].tier} rejection`;
+                const previousOffer = t === 0 ? null : eligibleTiers[t - 1] as { name: string; resolution_type: string };
+
+                // Build very explicit stand firm constraints
+                const sfConstraints = t === 0
+                  ? `CRITICAL: You have NOT offered any exception, store credit, refund, or alternative. You CANNOT offer anything. The customer's order does not qualify for return under the store policy. That is the ONLY thing you can say. Acknowledge their frustration once, then restate that the order does not qualify. Do NOT say "let me check," "let me review," "let me see what I can do," or hint at any future options.`
+                  : `CRITICAL: The customer rejected ${previousOffer?.name} (${previousOffer?.resolution_type}). Restate ONLY the ${previousOffer?.name} offer. Do NOT mention refund, do NOT mention any other option, do NOT hint that something better exists. Just restate the current offer (${previousOffer?.name}) with different wording.`;
+
                 const sfAI = await genAI(
-                  { name: `Stand Firm (${sfPosition})`, type: "stand_firm", instructions: step.instructions },
+                  { name: `Stand Firm (${sfPosition})`, type: "stand_firm", instructions: standFirmInstructions + "\n\n" + sfConstraints },
                   `Stand firm ${sf + 1}/${roundsNeeded} ${sfPosition}`,
-                  `Stand firm round ${sf + 1}/${roundsNeeded} ${sfPosition}. No exception offered yet at this point.`,
+                  `Stand firm round ${sf + 1}/${roundsNeeded}. ${sfConstraints}`,
                   currentMessage,
                 );
                 const sfMock = await genMock(sfAI, `Stand firm ${sfPosition}`, true);
