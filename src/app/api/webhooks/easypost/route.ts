@@ -1,15 +1,50 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { decrypt } from "@/lib/crypto";
+import crypto from "crypto";
 
 // EasyPost sends tracker.updated events when tracking status changes.
 // We match by easypost_shipment_id or tracking_number to update our returns table.
 
+function verifyEasyPostHmac(body: string, signature: string | null, secret: string): boolean {
+  if (!signature) return false;
+  const expected = crypto.createHmac("sha256", secret).update(body).digest("hex");
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+
 export async function POST(request: Request) {
+  const rawBody = await request.text();
   let eventBody: Record<string, unknown>;
   try {
-    eventBody = await request.json();
+    eventBody = JSON.parse(rawBody);
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  // Verify HMAC signature if we have a webhook secret
+  const hmacSignature = request.headers.get("x-hmac-signature");
+  if (hmacSignature) {
+    const admin = createAdminClient();
+    // Find the workspace with an EasyPost webhook secret — check all workspaces
+    const { data: workspaces } = await admin.from("workspaces")
+      .select("id, easypost_webhook_secret")
+      .not("easypost_webhook_secret", "is", null);
+
+    let verified = false;
+    for (const ws of workspaces || []) {
+      try {
+        const secret = decrypt(ws.easypost_webhook_secret);
+        if (verifyEasyPostHmac(rawBody, hmacSignature, secret)) {
+          verified = true;
+          break;
+        }
+      } catch {}
+    }
+
+    if (!verified) {
+      console.error("[easypost-webhook] HMAC verification failed");
+      return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+    }
   }
 
   // EasyPost webhook events have a description field
