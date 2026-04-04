@@ -1080,7 +1080,7 @@ export default function TicketDetailPage() {
                     </div>
                     <div
                       className={`prose prose-sm max-w-none break-words overflow-hidden [overflow-wrap:anywhere] ${textClass} ${!isInbound && !isInternal ? "prose-invert" : ""}`}
-                      dangerouslySetInnerHTML={{ __html: m.body }}
+                      dangerouslySetInnerHTML={{ __html: (m.direction === "inbound" && (m as unknown as Record<string, unknown>).body_clean) ? String((m as unknown as Record<string, unknown>).body_clean) : m.body }}
                     />
                     {(m as TicketMessage & { _sandbox_suppressed?: boolean })._sandbox_suppressed && (
                       <div className="mt-1.5 flex items-center gap-1 text-sm text-amber-300">
