@@ -284,33 +284,8 @@ export const unifiedTicketHandler = inngest.createFunction(
     // ── 2. Account linking (supercedes all, no confidence) ──
     if (st.hasCust && isNew) {
       const linked = await step.run("check-linking", async () => {
-        const { data: c } = await admin.from("customers").select("email, phone, first_name, last_name").eq("id", st.custId!).single();
-        if (!c) return false;
-
-        // Find potential matches by name, phone, or email prefix
-        const conds: string[] = [];
-        if (c.first_name && c.last_name) {
-          conds.push(`and(first_name.eq.${c.first_name},last_name.eq.${c.last_name})`);
-        }
-        if (c.phone) conds.push(`phone.eq.${c.phone}`);
-        const local = c.email?.split("@")[0];
-        if (local) conds.push(`email.ilike.${local}@%`);
-        if (!conds.length) return false;
-
-        const { data: potentialMatches } = await admin.from("customers")
-          .select("id").eq("workspace_id", wsId).neq("id", st.custId!).or(conds.join(",")).limit(10);
-        if (!potentialMatches?.length) return false;
-
-        // Check if any potential matches are NOT already linked (to this customer or at all)
-        const { data: existingLinks } = await admin.from("customer_links").select("customer_id").in("customer_id", potentialMatches.map(m => m.id));
-        const linkedIds = new Set((existingLinks || []).map(l => l.customer_id));
-
-        // Also check rejections — don't re-offer rejected matches
-        const { data: rejections } = await admin.from("customer_link_rejections")
-          .select("rejected_customer_id").eq("customer_id", st.custId!);
-        const rejectedIds = new Set((rejections || []).map(r => r.rejected_customer_id));
-
-        const unlinked = potentialMatches.filter(m => !linkedIds.has(m.id) && !rejectedIds.has(m.id));
+        const { findUnlinkedMatches } = await import("@/lib/account-matching");
+        const unlinked = await findUnlinkedMatches(wsId, st.custId!, admin);
         if (!unlinked.length) return false;
         const { data: jd } = await admin.from("journey_definitions").select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "account_linking").eq("is_active", true).limit(1).single();
         if (!jd) return false;

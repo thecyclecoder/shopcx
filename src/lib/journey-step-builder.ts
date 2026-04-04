@@ -59,51 +59,13 @@ export async function buildJourneySteps(
 async function buildAccountLinkingSteps(
   admin: Admin, workspaceId: string, customerId: string, ticketId: string,
 ): Promise<BuiltJourneyConfig> {
-  const { data: cust } = await admin.from("customers")
-    .select("id, email, first_name, last_name, phone")
-    .eq("id", customerId).single();
+  const { findUnlinkedMatches } = await import("@/lib/account-matching");
+  const unlinked = await findUnlinkedMatches(workspaceId, customerId, admin);
 
-  if (!cust) return { codeDriven: true, multiStep: false, steps: [] };
-
-  // Find already-linked accounts
+  // Get existing group ID for metadata
   const { data: existingLinks } = await admin.from("customer_links")
-    .select("group_id").eq("customer_id", cust.id);
+    .select("group_id").eq("customer_id", customerId);
   const groupId = existingLinks?.[0]?.group_id || null;
-
-  let alreadyLinkedIds: string[] = [];
-  if (groupId) {
-    const { data: members } = await admin.from("customer_links")
-      .select("customer_id").eq("group_id", groupId);
-    alreadyLinkedIds = (members || []).map(m => m.customer_id);
-  }
-
-  // Find rejected
-  const { data: rejections } = await admin.from("customer_link_rejections")
-    .select("rejected_customer_id").eq("customer_id", cust.id);
-  const rejectedIds = (rejections || []).map(r => r.rejected_customer_id);
-
-  // Find potential matches by name, phone, or email prefix
-  const conditions: string[] = [];
-  if (cust.first_name && cust.last_name) {
-    conditions.push(`and(first_name.eq.${cust.first_name},last_name.eq.${cust.last_name})`);
-  }
-  if (cust.phone) conditions.push(`phone.eq.${cust.phone}`);
-  const emailLocal = cust.email?.split("@")[0];
-  if (emailLocal) conditions.push(`email.ilike.${emailLocal}@%`);
-
-  if (!conditions.length) return { codeDriven: true, multiStep: false, steps: [] };
-
-  const { data: matches } = await admin.from("customers")
-    .select("id, email")
-    .eq("workspace_id", workspaceId)
-    .neq("id", cust.id)
-    .neq("email", cust.email)
-    .or(conditions.join(","))
-    .limit(10);
-
-  const unlinked = (matches || []).filter(m =>
-    !alreadyLinkedIds.includes(m.id) && !rejectedIds.includes(m.id)
-  );
 
   if (unlinked.length === 0) {
     return { codeDriven: true, multiStep: false, steps: [{
