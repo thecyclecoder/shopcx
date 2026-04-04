@@ -284,11 +284,14 @@ export const unifiedTicketHandler = inngest.createFunction(
     // ── 2. Account linking (supercedes all, no confidence) ──
     if (st.hasCust && isNew) {
       const linked = await step.run("check-linking", async () => {
-        const { data: c } = await admin.from("customers").select("email, phone").eq("id", st.custId!).single();
+        const { data: c } = await admin.from("customers").select("email, phone, first_name, last_name").eq("id", st.custId!).single();
         if (!c) return false;
 
-        // Find potential matches by email local part or phone
+        // Find potential matches by name, phone, or email prefix
         const conds: string[] = [];
+        if (c.first_name && c.last_name) {
+          conds.push(`and(first_name.eq.${c.first_name},last_name.eq.${c.last_name})`);
+        }
         if (c.phone) conds.push(`phone.eq.${c.phone}`);
         const local = c.email?.split("@")[0];
         if (local) conds.push(`email.ilike.${local}@%`);
