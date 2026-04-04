@@ -238,18 +238,17 @@ export async function sendJourneyCTA({
     subject: emailSubject,
     headers: Object.keys(headers).length > 0 ? headers : undefined,
     html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
-        <h2 style="color: #18181b; font-size: 20px; margin-bottom: 8px;">${greeting}</h2>
-        <p style="color: #71717a; font-size: 14px; line-height: 1.6;">
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 540px; padding: 20px 0;">
+        <p style="color: #18181b; font-size: 15px; line-height: 1.6; margin: 0 0 16px 0;">
           ${contextMessage || "We'd love to help you with your request. Please click the button below to continue."}
         </p>
-        <div style="text-align: center; margin-top: 32px;">
+        <div style="margin-top: 24px;">
           <a href="${journeyUrl}" style="display: inline-block; padding: 14px 32px; background: ${color}; color: white; text-decoration: none; border-radius: 10px; font-size: 15px; font-weight: 600;">
             ${btn}
           </a>
         </div>
-        <p style="color: #a1a1aa; font-size: 12px; margin-top: 32px; text-align: center;">
-          This link expires in 24 hours. If you didn't expect this email, you can safely ignore it.
+        <p style="color: #a1a1aa; font-size: 12px; margin-top: 24px;">
+          This link expires in 24 hours.
         </p>
       </div>
     `,
