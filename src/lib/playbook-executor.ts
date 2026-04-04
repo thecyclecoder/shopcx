@@ -160,10 +160,30 @@ export async function executePlaybookStep(
   if (stepResult.action === "advance" && stepResult.newStep !== undefined) {
     const nextStepIdx = stepResult.newStep;
     if (nextStepIdx >= steps.length) {
-      // All steps done — complete playbook
-      return { ...stepResult, action: "complete", systemNote: stepResult.systemNote || `Playbook "${playbook.name}" completed.` };
+      // All steps done — build summary and complete
+      const summary = buildPlaybookSummary(playbook.name, { ...ctx, ...stepResult.context }, customer, ticket.playbook_exceptions_used);
+      const updatedCtx = { ...ctx, ...stepResult.context, summary };
+      await admin.from("tickets").update({ playbook_context: updatedCtx }).eq("id", ticketId);
+      return {
+        ...stepResult, action: "complete",
+        systemNote: `[Playbook Complete] ${playbook.name}\n${summary}`,
+        context: { ...stepResult.context, summary },
+      };
     }
     await admin.from("tickets").update({ playbook_step: nextStepIdx }).eq("id", ticketId);
+  }
+
+  // If stand_firm final or other explicit complete, also build summary
+  if (stepResult.action === "complete" && !((stepResult.context || {}) as Record<string, unknown>).summary) {
+    const mergedCtx = { ...ctx, ...stepResult.context };
+    const summary = buildPlaybookSummary(playbook.name, mergedCtx, customer, ticket.playbook_exceptions_used);
+    const updatedCtx = { ...mergedCtx, summary };
+    await admin.from("tickets").update({ playbook_context: updatedCtx }).eq("id", ticketId);
+    return {
+      ...stepResult,
+      systemNote: `[Playbook Complete] ${playbook.name}\n${summary}`,
+      context: { ...stepResult.context, summary },
+    };
   }
 
   return stepResult;
@@ -200,20 +220,6 @@ async function executeStep(
   // Store policy rules in context so downstream steps (stand_firm) can access them
   if (policyRules && !ctx.policy_rules) {
     ctx.policy_rules = policyRules;
-  }
-
-  // ── Post-acceptance loop ──
-  // Once the offer was accepted and return initiated, any further messages get a
-  // "broken record" response: restate next steps, never re-negotiate.
-  if (ctx.offer_accepted && ctx.return_initiated) {
-    const response = await aiGenerate(
-      basePrompt(step, pers, policyRules),
-      `Customer data:\n${dataContext}\n\nCustomer message: "${msg}"\n\nThe customer already accepted the ${ctx.resolution_type === "refund_return" ? "refund" : "store credit"} return offer and we already initiated the return for orders: ${(ctx.return_orders as string[] || []).join(", ")}.\n\nDo NOT re-negotiate, do NOT offer anything new, do NOT apologize. Just be positive and briefly restate what they need to do next according to store policy rules. Be unfazed by any negativity — just repeat the next steps warmly and move on.`,
-    );
-    return {
-      action: "respond", response,
-      systemNote: `[Playbook] Post-acceptance loop: restated next steps. Not re-negotiating.`,
-    };
   }
 
   // ── Global acceptance detection ──
@@ -908,6 +914,60 @@ function checkAutoGrant(trigger: string | null, orders: OrderData[], ctx: Record
   if (trigger === "cancelled_but_charged") return false; // Needs sub cancellation date vs order date check
   if (trigger === "never_delivered") return false; // Needs fulfillment/tracking check
   return false;
+}
+
+// ── Summary builder ──
+
+function buildPlaybookSummary(
+  playbookName: string, ctx: Record<string, unknown>,
+  customer: CustomerData, exceptionsUsed: number,
+): string {
+  const lines: string[] = [];
+
+  // Orders
+  const orders = (ctx.identified_orders as string[]) || [];
+  if (orders.length) lines.push(`Orders: ${orders.join(", ")}`);
+
+  // Policy
+  if (ctx.policy_applied) {
+    const inPolicy = (ctx.in_policy as string[]) || [];
+    const outOfPolicy = (ctx.out_of_policy as string[]) || [];
+    lines.push(`Policy: ${ctx.policy_applied}`);
+    if (inPolicy.length) lines.push(`  In policy: ${inPolicy.join(", ")}`);
+    if (outOfPolicy.length) lines.push(`  Out of policy: ${outOfPolicy.join(", ")}`);
+    if (ctx.failure_reasons) lines.push(`  Reasons: ${(ctx.failure_reasons as string[]).join("; ")}`);
+  }
+
+  // Exception
+  if (ctx.exception_offered) {
+    const accepted = ctx.offer_accepted ? "ACCEPTED" : ctx.exception_exhausted ? "ALL REJECTED" : "OFFERED";
+    lines.push(`Exception: ${ctx.exception_offered} (Tier ${ctx.current_exception_tier}) — ${accepted}`);
+    lines.push(`  Resolution: ${ctx.resolution_type || "none"}`);
+    lines.push(`  Exceptions used: ${exceptionsUsed}`);
+  }
+
+  // Return
+  if (ctx.return_initiated) {
+    lines.push(`Return: Initiated for ${(ctx.return_orders as string[] || []).join(", ")}`);
+  }
+
+  // Subscription
+  if (ctx.subs_cancelled) {
+    lines.push(`Subscriptions cancelled: ${(ctx.subs_cancelled as string[]).join(", ")}`);
+  } else if (ctx.identified_subscription) {
+    lines.push(`Subscription: #${ctx.identified_subscription} (${ctx.subscription_status || "unknown"})`);
+  }
+
+  // Stand firm
+  if (ctx.stand_firm_count) {
+    lines.push(`Stand firm: ${ctx.stand_firm_count} rounds${ctx.stand_firm_final ? " (reached max, ticket left pending)" : ""}`);
+  }
+
+  // Customer
+  lines.push(`Customer: ${customer.first_name || ""} ${customer.last_name || ""} (${customer.email})`);
+  lines.push(`LTV: $${(customer.ltv_cents / 100).toFixed(2)} | Orders: ${customer.total_orders}`);
+
+  return lines.join("\n");
 }
 
 // ── Playbook matcher ──

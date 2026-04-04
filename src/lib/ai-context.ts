@@ -294,6 +294,14 @@ export async function assembleTicketContext(
     promptParts.push(customerParts.join("\n"));
   }
 
+  // Playbook summary (from a previously completed playbook on this ticket)
+  const playbookCtx = ticket.playbook_context as Record<string, unknown> | null;
+  if (playbookCtx?.summary && !ticket.active_playbook_id) {
+    promptParts.push("\nPREVIOUS PLAYBOOK RESOLUTION:");
+    promptParts.push(String(playbookCtx.summary));
+    promptParts.push("Use this context to understand what was already resolved. Do not re-negotiate or re-offer. If the customer references this issue, acknowledge what was decided and restate next steps if applicable.");
+  }
+
   // Channel instructions
   if (channelConfig?.instructions) {
     promptParts.push("\nCHANNEL INSTRUCTIONS:");

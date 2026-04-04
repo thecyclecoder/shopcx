@@ -387,7 +387,7 @@ export const unifiedTicketHandler = inngest.createFunction(
         // Complete → check queue for next playbook
         if (pbResult.action === "complete") {
           await step.run("pb-complete", async () => {
-            const { data: t } = await admin.from("tickets").select("playbook_queue").eq("id", tid).single();
+            const { data: t } = await admin.from("tickets").select("playbook_queue, playbook_context").eq("id", tid).single();
             const queue = (t?.playbook_queue as string[]) || [];
             if (queue.length > 0) {
               const nextId = queue[0];
@@ -397,17 +397,19 @@ export const unifiedTicketHandler = inngest.createFunction(
               const { data: nextPb } = await admin.from("playbooks").select("name").eq("id", nextId).single();
               await sysNote(admin, tid, `[System] Starting queued playbook: ${nextPb?.name || nextId}`);
             } else {
+              // Preserve playbook_context (contains summary for future reference)
+              // Clear active playbook but keep context
               await admin.from("tickets").update({
                 active_playbook_id: null, playbook_step: 0,
-                playbook_context: {}, playbook_exceptions_used: 0,
-                status: pbResult.response ? "pending" : "closed",
+                playbook_exceptions_used: 0,
               }).eq("id", tid);
+              // Honor auto-resolve setting
+              await setStatus(admin, tid, cfg.auto_resolve);
             }
           });
         } else if (pbResult.action === "respond") {
-          // Waiting for customer reply — set to pending
-          await step.run("pb-pending", () =>
-            admin.from("tickets").update({ status: "pending" }).eq("id", tid));
+          // Waiting for customer reply — honor auto-resolve setting
+          await step.run("pb-status", () => setStatus(admin, tid, cfg.auto_resolve));
         }
 
         return { status: "playbook_step", action: pbResult.action };
@@ -630,11 +632,8 @@ async function routeExec(
       const result = await executePlaybookStep(wsId, tid, msg, pers);
       if (result.systemNote) await sysNote(admin, tid, result.systemNote);
       if (result.response) await send(admin, wsId, tid, ch, result.response, cfg.sandbox);
-      if (result.action === "respond") {
-        await admin.from("tickets").update({ status: "pending" }).eq("id", tid);
-      } else {
-        await setStatus(admin, tid, cfg.auto_resolve);
-      }
+      // Always honor auto-resolve setting
+      await setStatus(admin, tid, cfg.auto_resolve);
       return;
     }
   }
