@@ -506,8 +506,8 @@ async function handleAllCardsExhausted(
   const action = cycle.cycle_number >= 2 ? settings.dunning_cycle_2_action : settings.dunning_cycle_1_action;
 
   if (action === "skip") {
-    // Skip the upcoming order
-    await appstleSkipUpcomingOrder(workspaceId, shopifyContractId);
+    // Appstle auto-skips on billing failure — don't skip again
+    // Just mark our cycle status and continue with payment update email
     await updateDunningCycle(cycle.id, { status: "skipped", skipped_at: new Date().toISOString() });
     await tagCustomerTickets(workspaceId, customerId, "dunning:skipped");
   } else if (action === "pause") {
