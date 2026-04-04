@@ -61,6 +61,7 @@ interface OrderData {
   fulfillment_status: string | null;
   line_items: unknown[];
   fulfillments: unknown[];
+  source_name: string | null;
 }
 
 interface SubscriptionData {
@@ -272,7 +273,7 @@ async function fetchOrders(admin: Admin, wsId: string, custId: string, config: R
   }
 
   const { data } = await admin.from("orders")
-    .select("id, order_number, created_at, total_cents, financial_status, fulfillment_status, line_items, fulfillments")
+    .select("id, order_number, created_at, total_cents, financial_status, fulfillment_status, line_items, fulfillments, source_name")
     .eq("workspace_id", wsId)
     .in("customer_id", linkedIds)
     .gte("created_at", since)
@@ -725,6 +726,20 @@ function evaluateConditions(conditions: Record<string, unknown>, order: OrderDat
     if (key === "financial_status") {
       if (ruleObj["eq"] && order.financial_status !== ruleObj["eq"]) return false;
       if (ruleObj["in"] && !(ruleObj["in"] as string[]).includes(order.financial_status)) return false;
+    }
+
+    if (key === "source_name") {
+      const src = order.source_name || "";
+      if (ruleObj["not_contains"] && src.toLowerCase().includes(String(ruleObj["not_contains"]).toLowerCase())) return false;
+      if (ruleObj["contains"] && !src.toLowerCase().includes(String(ruleObj["contains"]).toLowerCase())) return false;
+      if (ruleObj["eq"] && src !== ruleObj["eq"]) return false;
+      if (ruleObj["in"] && !(ruleObj["in"] as string[]).includes(src)) return false;
+    }
+
+    if (key === "days_since_order") {
+      const daysSince = Math.floor((Date.now() - new Date(order.created_at).getTime()) / 86400000);
+      if (ruleObj["<="] && daysSince > Number(ruleObj["<="])) return false;
+      if (ruleObj[">="] && daysSince < Number(ruleObj[">="])) return false;
     }
   }
   return true;
