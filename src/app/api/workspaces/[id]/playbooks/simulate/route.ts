@@ -39,8 +39,9 @@ export async function POST(
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();
-  const { playbook_id, customer_id, message, sentiment } = body as {
+  const { playbook_id, customer_id, message, sentiment, clarification_response } = body as {
     playbook_id: string; customer_id: string; message: string; sentiment: string;
+    clarification_response?: string;
   };
 
   if (!playbook_id || !customer_id || !message) {
@@ -53,6 +54,74 @@ export async function POST(
   const { data: playbook } = await admin.from("playbooks")
     .select("*").eq("id", playbook_id).single();
   if (!playbook) return NextResponse.json({ error: "Playbook not found" }, { status: 404 });
+
+  // Load all active playbooks/journeys/workflows to build handler list for classification
+  const { data: allPlaybooks } = await admin.from("playbooks")
+    .select("trigger_intents").eq("workspace_id", workspaceId).eq("is_active", true);
+  const allIntents = (allPlaybooks || []).flatMap((p: { trigger_intents: string[] }) => p.trigger_intents);
+  const handlerList = [...new Set(allIntents)].map(i => `- ${i}`).join("\n");
+
+  // ── Confidence classification ──
+  const classifyMessage = clarification_response
+    ? `Original: "${message}"\nClarification response: "${clarification_response}"`
+    : message;
+
+  const classifyResult = await aiCall(
+    `You are an intent classifier for customer support. Match the customer's message to one of the available handler intents below. Do NOT invent intents.
+
+Available handler intents:
+${handlerList || "None configured"}
+
+Rules:
+- "intent" must be an exact intent from the list above, or "unknown"
+- "confidence" is 0-100 how sure you are
+- If vague/emotional without clear actionable request, return "unknown" with low confidence
+- Trigger patterns for this playbook: ${(playbook.trigger_patterns || []).join(", ")}
+
+Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sentence" }`,
+    `Customer message: "${classifyMessage}"`,
+    150,
+  );
+
+  let classification = { intent: "unknown", confidence: 0, reasoning: "parse error" };
+  try {
+    classification = JSON.parse(classifyResult.replace(/^```json?\n?/, "").replace(/\n?```$/, ""));
+  } catch {}
+
+  // Also check pattern match (keyword matching against trigger_patterns)
+  const msgLower = (clarification_response || message).toLowerCase();
+  const patternMatch = (playbook.trigger_patterns || []).some((p: string) => msgLower.includes(p.toLowerCase()));
+  if (patternMatch && classification.confidence < 80) {
+    classification.confidence = Math.max(classification.confidence, 85);
+    classification.reasoning += " (boosted by pattern match)";
+    classification.intent = playbook.trigger_intents?.[0] || classification.intent;
+  }
+
+  // Get channel threshold (default 70)
+  const { data: channelCfg } = await admin.from("ai_channel_config")
+    .select("confidence_threshold").eq("workspace_id", workspaceId).eq("channel", "email").single();
+  const threshold = channelCfg?.confidence_threshold
+    ? (channelCfg.confidence_threshold <= 1 ? Math.round(channelCfg.confidence_threshold * 100) : channelCfg.confidence_threshold)
+    : 70;
+
+  // If below threshold and no clarification provided yet, return clarification needed
+  if (classification.confidence < threshold && !clarification_response) {
+    const clarifyQuestion = await aiCall(
+      "You are a friendly support agent. The customer's message wasn't clear enough to route. Ask ONE specific clarifying question to understand what they need. Max 30 words. Only the question.",
+      `Customer said: "${message}"\nBest guess: "${classification.intent}" (${classification.confidence}% confidence)\nPlaybook this might match: "${playbook.name}"`,
+      80,
+    );
+
+    return NextResponse.json({
+      needs_clarification: true,
+      confidence: classification.confidence,
+      threshold,
+      detected_intent: classification.intent,
+      reasoning: classification.reasoning,
+      clarification_question: clarifyQuestion,
+      playbook_name: playbook.name,
+    });
+  }
 
   const { data: steps } = await admin.from("playbook_steps")
     .select("*").eq("playbook_id", playbook_id).order("step_order");
@@ -337,6 +406,11 @@ export async function POST(
     customer_email: customer.email,
     sentiment: sentimentLabel,
     initial_message: message,
+    clarification_response: clarification_response || null,
+    confidence: classification.confidence,
+    detected_intent: classification.intent,
+    classification_reasoning: classification.reasoning,
+    threshold,
     steps: simSteps,
   };
 

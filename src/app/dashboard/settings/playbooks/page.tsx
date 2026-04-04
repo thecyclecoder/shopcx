@@ -15,12 +15,27 @@ interface SimStepResult {
   skipped: boolean;
 }
 
+interface SimClarification {
+  needs_clarification: true;
+  confidence: number;
+  threshold: number;
+  detected_intent: string;
+  reasoning: string;
+  clarification_question: string;
+  playbook_name: string;
+}
+
 interface SimResult {
   playbook_name: string;
   customer_name: string;
   customer_email: string;
   sentiment: string;
   initial_message: string;
+  clarification_response: string | null;
+  confidence: number;
+  detected_intent: string;
+  classification_reasoning: string;
+  threshold: number;
   steps: SimStepResult[];
   ref: string | null;
 }
@@ -202,7 +217,12 @@ function formatSimForLLM(sim: SimResult): string {
   lines.push(`Customer: ${sim.customer_name} (${sim.customer_email})`);
   lines.push(`Sentiment: ${sim.sentiment}`);
   if (sim.ref) lines.push(`Ref: ${sim.ref.slice(0, 8)}`);
+  lines.push(`Confidence: ${sim.confidence}% (threshold: ${sim.threshold}%) — Intent: ${sim.detected_intent}`);
+  lines.push(`Reasoning: ${sim.classification_reasoning}`);
   lines.push(`\n## Initial Message\n"${sim.initial_message}"`);
+  if (sim.clarification_response) {
+    lines.push(`\n## Clarification Response\n"${sim.clarification_response}"`);
+  }
 
   for (const s of sim.steps) {
     lines.push(`\n---\n## Step ${s.step_order + 1}: ${s.step_name} [${s.step_type}]${s.skipped ? " (SKIPPED)" : ""}`);
@@ -251,6 +271,8 @@ export default function PlaybooksSettingsPage() {
   const [simSentiment, setSimSentiment] = useState("angry");
   const [simRunning, setSimRunning] = useState(false);
   const [simResult, setSimResult] = useState<SimResult | null>(null);
+  const [simClarification, setSimClarification] = useState<SimClarification | null>(null);
+  const [simClarResponse, setSimClarResponse] = useState("");
   const simSearchTimer = useRef<NodeJS.Timeout | null>(null);
 
   const fetchData = useCallback(async () => {
@@ -288,6 +310,8 @@ export default function PlaybooksSettingsPage() {
   const openSimModal = (pbId: string) => {
     setSimModal(pbId);
     setSimResult(null);
+    setSimClarification(null);
+    setSimClarResponse("");
     setSimCustomerId("");
     setSimSearch("");
     setSimMessage("");
@@ -295,10 +319,11 @@ export default function PlaybooksSettingsPage() {
     setSimCustomers([]);
   };
 
-  const runSimulation = async () => {
+  const runSimulation = async (clarificationReply?: string) => {
     if (!simModal || !simCustomerId || !simMessage) return;
     setSimRunning(true);
     setSimResult(null);
+    if (!clarificationReply) setSimClarification(null);
     try {
       const res = await fetch(`/api/workspaces/${workspace.id}/playbooks/simulate`, {
         method: "POST",
@@ -308,10 +333,17 @@ export default function PlaybooksSettingsPage() {
           customer_id: simCustomerId,
           message: simMessage,
           sentiment: simSentiment,
+          ...(clarificationReply ? { clarification_response: clarificationReply } : {}),
         }),
       });
       if (res.ok) {
-        setSimResult(await res.json());
+        const data = await res.json();
+        if (data.needs_clarification) {
+          setSimClarification(data as SimClarification);
+        } else {
+          setSimClarification(null);
+          setSimResult(data);
+        }
       }
     } catch {}
     setSimRunning(false);
@@ -1252,13 +1284,51 @@ export default function PlaybooksSettingsPage() {
 
               {/* Run button */}
               <button
-                onClick={runSimulation}
+                onClick={() => runSimulation()}
                 disabled={simRunning || !simCustomerId || !simMessage}
                 className="rounded-md bg-violet-500 px-4 py-2 text-sm font-medium text-white hover:bg-violet-600 disabled:opacity-50"
               >
                 {simRunning ? "Simulating..." : "Run Simulation"}
               </button>
             </div>
+
+            {/* Clarification needed */}
+            {simClarification && !simRunning && (
+              <div className="px-6 py-4 border-b border-zinc-200 dark:border-zinc-700">
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-amber-600 text-lg">&#9888;</span>
+                    <span className="text-sm font-semibold text-amber-800 dark:text-amber-200">Clarification Needed</span>
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${simClarification.confidence < 40 ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"}`}>
+                      {simClarification.confidence}% confidence
+                    </span>
+                    <span className="text-xs text-zinc-500">(threshold: {simClarification.threshold}%)</span>
+                  </div>
+                  <p className="text-xs text-zinc-600 dark:text-zinc-400 mb-1">
+                    Detected intent: <span className="font-mono">{simClarification.detected_intent}</span> — {simClarification.reasoning}
+                  </p>
+                  <p className="text-sm text-zinc-800 dark:text-zinc-200 mb-3">
+                    The AI would ask: &ldquo;{simClarification.clarification_question}&rdquo;
+                  </p>
+                  <div className="flex gap-2">
+                    <input
+                      value={simClarResponse}
+                      onChange={(e) => setSimClarResponse(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter" && simClarResponse) runSimulation(simClarResponse); }}
+                      placeholder="Type the customer's follow-up response..."
+                      className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                    />
+                    <button
+                      onClick={() => runSimulation(simClarResponse)}
+                      disabled={!simClarResponse}
+                      className="rounded-md bg-amber-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-600 disabled:opacity-50"
+                    >
+                      Continue
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Results */}
             {simRunning && (
@@ -1274,7 +1344,12 @@ export default function PlaybooksSettingsPage() {
                   <div className="text-xs text-zinc-500">
                     <span className="font-medium">Playbook:</span> {simResult.playbook_name} |
                     <span className="ml-2 font-medium">Customer:</span> {simResult.customer_name} ({simResult.customer_email}) |
-                    <span className="ml-2 font-medium">Sentiment:</span> {simResult.sentiment}
+                    <span className="ml-2 font-medium">Sentiment:</span> {simResult.sentiment} |
+                    <span className="ml-2 font-medium">Confidence:</span>{" "}
+                    <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${simResult.confidence >= simResult.threshold ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                      {simResult.confidence}%
+                    </span>
+                    <span className="text-zinc-400 ml-1">({simResult.detected_intent})</span>
                   </div>
                   <div className="mt-1 rounded bg-zinc-200 px-2 py-1 text-xs dark:bg-zinc-700 dark:text-zinc-300">
                     &ldquo;{simResult.initial_message}&rdquo;
