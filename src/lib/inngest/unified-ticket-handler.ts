@@ -105,24 +105,10 @@ async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max =
   return (d.content?.[0] as { text: string })?.text?.trim() || "";
 }
 
-function stripEmailSignature(msg: string): string {
-  // Remove common email signature patterns
-  return msg
-    .replace(/<[^>]*>/g, " ")            // Strip HTML tags
-    .replace(/&[^;]+;/g, " ")            // Strip HTML entities
-    .replace(/Sent from my iPhone/gi, "")
-    .replace(/Sent from my iPad/gi, "")
-    .replace(/Get Outlook for iOS/gi, "")
-    // Strip signature blocks: name + title + phone + email + address patterns
-    .replace(/(?:^|\n)[-–—]\s*\n[\s\S]*$/m, "") // -- signature delimiter
-    .replace(/\n[A-Z][a-z]+ [A-Z][a-z]+\n(?:(?:Founder|CEO|President|Director|Manager|Support|Sales|VP|CTO|COO|CFO).*\n)?(?:\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}.*\n)?(?:[\w.+-]+@[\w.-]+\.\w+.*\n)?(?:\d+\s+\w+.*\n)?/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 async function classifyIntent(msg: string, ctx: string, hist: string, handlers: string, model: "haiku" | "sonnet" = "haiku", isClarification = false) {
-  // Clean the message — strip signatures, HTML, noise
-  const cleanMsg = stripEmailSignature(msg);
+  // Message should already be cleaned by email webhook pipeline
+  // but normalize for safety
+  const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
 
   const clarifyBoost = isClarification ? `
 IMPORTANT: This is a CLARIFICATION response — the customer was asked to explain their issue and is now telling us. They are clearly stating what they need. Be AGGRESSIVE in matching — if there is ANY mention of charges, refunds, cancellations, subscriptions, orders, or billing issues, match to the most relevant handler with HIGH confidence (80+). Do NOT return "unknown" unless the message truly has no actionable request. Ignore any email signature noise at the end of the message.` : "";
@@ -503,7 +489,7 @@ export const unifiedTicketHandler = inngest.createFunction(
           .replace(/[''`]/g, "")        // other quote chars
           .replace(/\s+/g, " ")         // normalize whitespace
           .trim();
-        const msgNorm = normalize(stripEmailSignature(msg));
+        const msgNorm = normalize(msg);
 
         const { data: playbooks } = await admin.from("playbooks")
           .select("id, name, trigger_intents, trigger_patterns")

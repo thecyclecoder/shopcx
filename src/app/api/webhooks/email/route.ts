@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getResendClient, sendTicketReply } from "@/lib/email";
 import { stripQuotedReply } from "@/lib/email-utils";
+import { cleanEmailBody } from "@/lib/email-cleaner";
 import { decrypt } from "@/lib/crypto";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
@@ -173,6 +174,8 @@ export async function POST(request: Request) {
   if (ticketId) {
     // Strip quoted reply content (the previous message) from the body
     const cleanBody = stripQuotedReply(messageBody) || messageBody;
+    // Deep clean for AI: strip HTML, signatures, quoted history, noise
+    const bodyClean = cleanEmailBody(cleanBody, fromEmail);
 
     // Add message to existing ticket
     await admin.from("ticket_messages").insert({
@@ -181,6 +184,7 @@ export async function POST(request: Request) {
       visibility: "external",
       author_type: "customer",
       body: cleanBody,
+      body_clean: bodyClean,
       email_message_id: messageId,
     });
 
@@ -240,7 +244,7 @@ export async function POST(request: Request) {
           data: {
             workspace_id: workspaceId,
             ticket_id: ticketId,
-            message_body: cleanBody,
+            message_body: bodyClean,
             channel: "email",
             is_new_ticket: false,
           },
@@ -295,12 +299,14 @@ export async function POST(request: Request) {
       .single();
 
     if (ticket) {
+      const newBodyClean = cleanEmailBody(messageBody, fromEmail);
       await admin.from("ticket_messages").insert({
         ticket_id: ticket.id,
         direction: "inbound",
         visibility: "external",
         author_type: "customer",
         body: messageBody,
+        body_clean: newBodyClean,
         email_message_id: messageId,
       });
 
@@ -324,7 +330,7 @@ export async function POST(request: Request) {
       // Unified handler handles all routing: journey → workflow → macro → KB → escalate
       await inngest.send({
         name: "ticket/inbound-message",
-        data: { workspace_id: workspaceId, ticket_id: ticket.id, message_body: messageBody || subject || "", channel: "email", is_new_ticket: true },
+        data: { workspace_id: workspaceId, ticket_id: ticket.id, message_body: newBodyClean || messageBody || subject || "", channel: "email", is_new_ticket: true },
       });
 
       // Evaluate rules for new ticket (tags are set, so rules can trigger on them)
