@@ -312,6 +312,17 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
             const outOfPolicy = (ctx.out_of_policy as string[]) || [];
             if (outOfPolicy.length === 0) { conditionResult = "All orders in policy — no exception needed"; skipped = true; break; }
 
+            // Set a consistent mock shipping rate for the entire simulation
+            if (!ctx.label_cost_cents) {
+              const identifiedOrders = (ctx.identified_orders as string[]) || [];
+              const orderObj = (orders || []).find((o: { order_number: string }) => identifiedOrders.includes(o.order_number));
+              const mockLabelCost = 795; // $7.95 consistent mock rate
+              const orderTotal = orderObj?.total_cents || 7481;
+              ctx.label_cost_cents = mockLabelCost;
+              ctx.order_total_cents = orderTotal;
+              ctx.net_refund_cents = orderTotal - mockLabelCost;
+            }
+
             const autoGrants = polExceptions.filter((e: { auto_grant: boolean }) => e.auto_grant);
             if (autoGrants.length) {
               dataFound += `Auto-grant exceptions: ${autoGrants.map((e: { name: string; auto_grant_trigger: string | null }) => `${e.name} (${e.auto_grant_trigger})`).join(", ")}\nNote: Auto-grant detection not yet fully implemented.\n`;
@@ -399,8 +410,9 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
               exceptionsUsed++;
 
               const tierCondResult = `Offering Tier ${ex.tier}: ${ex.name} (${ex.resolution_type})${t > 0 ? " — escalated after stand firm" : ""}`;
+              const mockBreakdown = `\nShipping rate: $${((ctx.label_cost_cents as number) / 100).toFixed(2)}. Order: $${((ctx.order_total_cents as number) / 100).toFixed(2)}. Net ${ex.resolution_type.includes("refund") ? "refund" : "store credit"}: $${((ctx.net_refund_cents as number) / 100).toFixed(2)}. Tell the customer this exact breakdown. Say "approximately" since final cost may vary slightly.`;
               const tierAI = await genAI(
-                { name: step.name, type: step.type, instructions: ex.instructions || step.instructions },
+                { name: step.name, type: step.type, instructions: (ex.instructions || step.instructions) + mockBreakdown },
                 dataFound, tierCondResult, currentMessage,
               );
               const tierMock = await genMock(tierAI, `${step.name} — Tier ${ex.tier}`, true);
@@ -542,9 +554,10 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
                 const acceptedEx = (exceptions || []).find((e: { tier: number; auto_grant: boolean }) => !e.auto_grant && e.tier === acceptedTier);
                 const exNextSteps = (acceptedEx as { instructions?: string } | undefined)?.instructions || "";
 
+                const closingBreakdown = `Order: $${((ctx.order_total_cents as number) / 100).toFixed(2)}, label: ~$${((ctx.label_cost_cents as number) / 100).toFixed(2)}, net ${resLabel}: ~$${((ctx.net_refund_cents as number) / 100).toFixed(2)}.`;
                 const closingAI = await genAI(
-                  { name: "Closing Response", type: "custom", instructions: `The customer accepted but left a sassy/rude parting shot. Be completely unfazed — do NOT acknowledge the negativity, do NOT apologize, do NOT empathize with their frustration. Just be positive and forward-looking. Briefly restate what they need to do next based on the store policy rules and the return process: ${exNextSteps}\n\nKeep it to 2-3 sentences max. Warm but unbothered. Example tone: "I'm glad I was able to get this processed for you. [next steps from policy]. We'll take care of the rest from there."` },
-                  `Customer accepted ${resLabel} for ${returnable.join(", ")}. Return being processed.`,
+                  { name: "Closing Response", type: "custom", instructions: `The customer accepted but left a sassy/rude parting shot. Be completely unfazed — do NOT acknowledge the negativity, do NOT apologize, do NOT empathize with their frustration. Just be positive and forward-looking. Briefly restate what they need to do next based on the store policy rules and the return process: ${exNextSteps}\n\nUse these EXACT numbers: ${closingBreakdown}\n\nKeep it to 2-3 sentences max. Warm but unbothered. When saying "prepaid label," always mention the cost is deducted from the refund/credit.` },
+                  `Customer accepted ${resLabel} for ${returnable.join(", ")}. Return being processed. ${closingBreakdown}`,
                   `Customer accepted but is upset about the experience.`,
                   sassyReply,
                 );
@@ -564,9 +577,9 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
                   `The return was processed. Customer is ${sentimentLabel}. Generate one more parting shot.`, 80);
 
                 const postAcceptAI = await genAI(
-                  { name: "Post-Acceptance Loop", type: "custom", instructions: `The customer already accepted the return and we already told them next steps. They're just venting now. Do NOT re-negotiate, do NOT offer anything new, do NOT apologize. Just be positive, briefly restate what they need to do next based on store policy rules and the return process: ${exNextSteps}\n\nBe unfazed. 1-2 sentences max.` },
-                  `Post-acceptance: customer venting after return was processed.`,
-                  `Customer already accepted. Return initiated. Just restating next steps.`,
+                  { name: "Post-Acceptance Loop", type: "custom", instructions: `The customer already accepted the return and we already told them next steps. They're just venting now. Do NOT re-negotiate, do NOT offer anything new, do NOT apologize. Just be positive, briefly restate what they need to do next based on store policy rules and the return process: ${exNextSteps}\n\nUse these EXACT numbers: ${closingBreakdown}\n\nBe unfazed. 1-2 sentences max. When saying "prepaid label," always mention the cost is deducted from the refund/credit.` },
+                  `Post-acceptance: customer venting. ${closingBreakdown}`,
+                  `Customer already accepted. Return initiated. Restate next steps with exact numbers.`,
                   postAcceptMock,
                 );
 
