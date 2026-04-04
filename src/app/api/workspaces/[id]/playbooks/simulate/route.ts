@@ -410,9 +410,16 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
                 ? `FINAL stand firm (${rep + 1}/${maxReps}). After this, AI stops responding.`
                 : `Stand firm ${rep + 1}/${maxReps}. Restating offer with different wording.`;
 
+              const resType = ctx.resolution_type as string || "store_credit_return";
+              const resLabel = resType.includes("refund") ? "full refund" : "store credit";
+              const requiresReturn = resType.includes("return");
+              const returnDetail = requiresReturn
+                ? `The offer is: ${resLabel} after customer returns the product. Customer pays their own shipping (NO prepaid label). Customer must send us the tracking number. ${resLabel} issued only after we receive the product.`
+                : `The offer is: ${resLabel} without requiring a return.`;
+
               const sfInstructions = isFinal
-                ? `${step.instructions || ""}\n\nThis is the FINAL message (attempt ${rep + 1}/${maxReps}). State your best offer one last time. Say "If you change your mind, just reply and we'll get it started." Warm but final tone. Do not argue.`
-                : `${step.instructions || ""}\n\nThis is attempt ${rep + 1}/${maxReps}. Acknowledge frustration. Restate the best available offer (${wasOffered || "return"}). Use DIFFERENT wording than previous attempts. Do not argue or get defensive.`;
+                ? `${step.instructions || ""}\n\nThis is the FINAL message (attempt ${rep + 1}/${maxReps}).\n${returnDetail}\n\nState your best offer one last time with these exact terms. Say "If you change your mind, just reply and we'll get it started." Warm but final tone. Do not argue. Do NOT offer prepaid labels or free shipping.`
+                : `${step.instructions || ""}\n\nThis is attempt ${rep + 1}/${maxReps}.\n${returnDetail}\n\nAcknowledge frustration. Restate the best available offer (${wasOffered || "return"}) with these exact return terms. Use DIFFERENT wording than previous attempts. Do not argue or get defensive. Do NOT offer prepaid labels or free shipping.`;
 
               const sfAI = await genAI(
                 { name: step.name, type: step.type, instructions: sfInstructions },

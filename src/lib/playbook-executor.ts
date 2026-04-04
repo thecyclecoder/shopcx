@@ -354,11 +354,18 @@ async function aiGenerate(systemPrompt: string, userPrompt: string, model = "cla
   return (data.content?.[0] as { text: string })?.text?.trim() || "";
 }
 
+const RETURN_RULES = `Return/shipping rules (NEVER violate these):
+- Customer pays their own shipping. We do NOT provide a prepaid return label. Never say "prepaid label" or "no cost to you" for shipping.
+- Customer MUST send us the tracking number once they ship so we can confirm delivery.
+- Store credit or refund is issued ONLY after we receive and verify the returned product. Never promise immediate refund.
+- Never promise to "connect with a specialist" or "escalate to supervisor." You handle the full resolution.`;
+
 function basePrompt(step: PlaybookStep, pers: { name?: string; tone?: string } | null): string {
   return [
     "You are a customer support agent.",
     pers?.tone ? `Tone: ${pers.tone}` : "Be empathetic and professional.",
     "Rules: max 2-3 sentences per paragraph. Plain text only, no markdown. Never promise actions you haven't verified.",
+    RETURN_RULES,
     step.instructions ? `Step instructions: ${step.instructions}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -489,14 +496,32 @@ async function handleApplyPolicy(
   const identifiedOrders = (ctx.identified_orders as string[]) || [];
   const orderObjs = orders.filter(o => identifiedOrders.includes(o.order_number));
 
-  // Evaluate each order against policy conditions
+  // Evaluate each order against policy conditions, tracking WHY each fails
   const inPolicy: string[] = [];
   const outOfPolicy: string[] = [];
+  const failureReasons: string[] = [];
 
   for (const o of orderObjs) {
     const eligible = evaluateConditions(policy.conditions, o);
-    if (eligible) inPolicy.push(o.order_number);
-    else outOfPolicy.push(o.order_number);
+    if (eligible) {
+      inPolicy.push(o.order_number);
+    } else {
+      outOfPolicy.push(o.order_number);
+      // Build human-readable reason
+      const reasons: string[] = [];
+      const daysSince = Math.floor((Date.now() - new Date(o.created_at).getTime()) / 86400000);
+      const src = o.source_name || "";
+      for (const [key, rule] of Object.entries(policy.conditions)) {
+        const r = rule as Record<string, unknown>;
+        if ((key === "days_since_order" || key === "days_since_fulfillment" || key === "days_since_delivery") && r["<="] && daysSince > Number(r["<="])) {
+          reasons.push(`ordered ${daysSince} days ago, outside the ${r["<="]}‑day return window`);
+        }
+        if (key === "source_name" && r["not_contains"] && src.toLowerCase().includes(String(r["not_contains"]).toLowerCase())) {
+          reasons.push(`source is "${src}" — this is a recurring subscription order, not a checkout order`);
+        }
+      }
+      failureReasons.push(`${o.order_number} (${new Date(o.created_at).toLocaleDateString()}): ${reasons.join("; ") || "does not meet policy conditions"}`);
+    }
   }
 
   const subCreated = ctx.subscription_created as string | undefined;
@@ -506,13 +531,13 @@ async function handleApplyPolicy(
 
   const response = await aiGenerate(
     basePrompt(step, pers),
-    `Customer data:\n${dataCtx}\n\nPolicy: "${policy.name}"\nPolicy details: ${policy.description || ""}\nAI talking points: ${policy.ai_talking_points || ""}\n${subInfo}\n${otherSubsInfo}\n\nOrders in policy (eligible for return): ${inPolicy.join(", ") || "none"}\nOrders out of policy: ${outOfPolicy.join(", ") || "none"}\n\nExplain the situation to the customer. Be neutral about the subscription — say "here's what happened" not "you signed up for this." If there are other active subscriptions, mention them proactively.`,
+    `Customer data:\n${dataCtx}\n\nPolicy: "${policy.name}"\nPolicy details: ${policy.description || ""}\nAI talking points: ${policy.ai_talking_points || ""}\n${subInfo}\n${otherSubsInfo}\n\nOrders in policy (eligible for return): ${inPolicy.join(", ") || "none"}\nOrders out of policy: ${outOfPolicy.join(", ") || "none"}\n\nSpecific reasons each order fails:\n${failureReasons.join("\n") || "none"}\n\nExplain the situation to the customer. For EACH order, explain specifically why it does or doesn't qualify — mention the exact reason (e.g. "recurring subscription order" or "outside 30-day window"). Be neutral — say "here's what happened" not "you signed up for this." If there are other active subscriptions, mention them proactively.`,
   );
 
   return {
     action: "respond", response,
-    context: { in_policy: inPolicy, out_of_policy: outOfPolicy, policy_applied: policy.name },
-    systemNote: `[Playbook] Policy "${policy.name}": ${inPolicy.length} in-policy, ${outOfPolicy.length} out-of-policy.`,
+    context: { in_policy: inPolicy, out_of_policy: outOfPolicy, policy_applied: policy.name, failure_reasons: failureReasons },
+    systemNote: `[Playbook] Policy "${policy.name}": ${inPolicy.length} in-policy, ${outOfPolicy.length} out-of-policy. Reasons: ${failureReasons.join("; ")}`,
   };
 }
 
@@ -596,9 +621,12 @@ async function offerException(
   const mostRecentOutOfPolicy = outOfPolicy[outOfPolicy.length - 1];
   const isEscalation = Number(ex.tier) > 1;
 
+  const resLabel = ex.resolution_type.includes("refund") ? "full refund" : "store credit";
+  const requiresReturn = ex.resolution_type.includes("return");
+
   const response = await aiGenerate(
     basePrompt(step, pers),
-    `Customer data:\n${dataCtx}\n\nException instructions: ${ex.instructions || ""}\nException: "${ex.name}" (${ex.resolution_type})\nApplies to: ${mostRecentOutOfPolicy}\n${isEscalation ? "The customer rejected the previous offer. This is an escalated offer — present it as a better alternative without mentioning that other options exist beyond this one." : "Present this offer clearly. Do NOT hint that better alternatives exist."}\n\nOffer this exception. ${outOfPolicy.length > 1 ? `Note: applies to 1 order (${mostRecentOutOfPolicy}). Orders ${outOfPolicy.filter(o => o !== mostRecentOutOfPolicy).join(", ")} do not qualify.` : ""}`,
+    `Customer data:\n${dataCtx}\n\nException instructions: ${ex.instructions || ""}\nException: "${ex.name}" (${ex.resolution_type})\nApplies to: ${mostRecentOutOfPolicy}\n${isEscalation ? "The customer rejected the previous offer. This is an escalated offer — present it as a better alternative without mentioning that other options exist beyond this one." : "Present this offer clearly. Do NOT hint that better alternatives exist."}\n\n${requiresReturn ? `Return process: customer ships the product back at their own expense (we do NOT provide a prepaid label). Customer must send us the tracking number once shipped. ${resLabel} is issued only after we receive and verify the product.` : `${resLabel} will be issued without requiring a return.`}\n\nOffer this exception. ${outOfPolicy.length > 1 ? `Note: applies to 1 order (${mostRecentOutOfPolicy}). Orders ${outOfPolicy.filter(o => o !== mostRecentOutOfPolicy).join(", ")} do not qualify.` : ""}`,
   );
 
   await admin.from("tickets").update({ playbook_exceptions_used: exceptionsUsed + 1 }).eq("id", tid);
@@ -730,10 +758,18 @@ async function handleStandFirm(
 ): Promise<PlaybookExecResult> {
   const reps = Number(ctx.stand_firm_count) || 0;
 
+  const bestOffer = ctx.exception_offered || "return";
+  const resType = ctx.resolution_type as string || "store_credit_return";
+  const resLabel = resType.includes("refund") ? "full refund" : "store credit";
+  const requiresReturn = resType.includes("return");
+  const returnDetail = requiresReturn
+    ? `The offer is: ${resLabel} after customer returns the product. Customer pays their own shipping (NO prepaid label). Customer must send us the tracking number. ${resLabel} issued only after we receive the product.`
+    : `The offer is: ${resLabel} without requiring a return.`;
+
   if (reps >= maxReps) {
     const response = await aiGenerate(
       basePrompt(step, pers),
-      `Customer data:\n${dataCtx}\n\nThe customer has rejected all offers ${maxReps} times. This is the FINAL message. State your best offer one last time. Say "If you change your mind, just reply to this email and we'll get it started for you." Set a warm but final tone. Do not argue.`,
+      `Customer data:\n${dataCtx}\n\nThe customer has rejected all offers ${maxReps} times. This is the FINAL message.\n${returnDetail}\n\nState your best offer one last time with these exact terms. Say "If you change your mind, just reply and we'll get it started for you." Warm but final tone. Do not argue. Do NOT offer prepaid labels or free shipping.`,
     );
     return {
       action: "complete", response,
@@ -744,7 +780,7 @@ async function handleStandFirm(
 
   const response = await aiGenerate(
     basePrompt(step, pers),
-    `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\nThe customer rejected the offer. This is attempt ${reps + 1}/${maxReps}. Acknowledge frustration. Restate the best available offer (${ctx.exception_offered || "return"}). Do NOT repeat verbatim — use different wording. Do not argue or get defensive.`,
+    `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\nThe customer rejected the offer. This is attempt ${reps + 1}/${maxReps}.\n${returnDetail}\n\nAcknowledge frustration. Restate the best available offer (${bestOffer}) with these exact return terms. Do NOT repeat verbatim — use different wording. Do not argue or get defensive. Do NOT offer prepaid labels or free shipping.`,
   );
 
   return {
