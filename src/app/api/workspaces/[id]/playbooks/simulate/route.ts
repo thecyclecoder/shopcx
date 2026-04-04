@@ -331,14 +331,54 @@ export async function POST(
     });
   }
 
-  return NextResponse.json({
+  const resultPayload = {
     playbook_name: playbook.name,
     customer_name: customerName,
     customer_email: customer.email,
     sentiment: sentimentLabel,
     initial_message: message,
     steps: simSteps,
-  });
+  };
+
+  // Save to DB for reference
+  const { data: saved } = await admin.from("playbook_simulations").insert({
+    workspace_id: workspaceId,
+    playbook_id,
+    customer_id,
+    customer_name: customerName,
+    customer_email: customer.email,
+    message,
+    sentiment: sentimentLabel,
+    result: resultPayload,
+  }).select("id").single();
+
+  return NextResponse.json({ ...resultPayload, ref: saved?.id || null });
+}
+
+// GET: Retrieve simulation by reference ID
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: workspaceId } = await params;
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const url = new URL(request.url);
+  const ref = url.searchParams.get("ref");
+  if (!ref) return NextResponse.json({ error: "ref required" }, { status: 400 });
+
+  const admin = createAdminClient();
+  const { data } = await admin.from("playbook_simulations")
+    .select("*")
+    .eq("id", ref)
+    .eq("workspace_id", workspaceId)
+    .single();
+
+  if (!data) return NextResponse.json({ error: "Simulation not found" }, { status: 404 });
+
+  return NextResponse.json(data.result);
 }
 
 // ── Helpers ──

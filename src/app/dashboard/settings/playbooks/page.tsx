@@ -22,6 +22,7 @@ interface SimResult {
   sentiment: string;
   initial_message: string;
   steps: SimStepResult[];
+  ref: string | null;
 }
 
 interface CustomerOption {
@@ -193,6 +194,37 @@ function ConditionEditor({ value, onChange }: { value: Record<string, unknown>; 
       </p>
     </div>
   );
+}
+
+function formatSimForLLM(sim: SimResult): string {
+  const lines: string[] = [];
+  lines.push(`# Playbook Simulation: ${sim.playbook_name}`);
+  lines.push(`Customer: ${sim.customer_name} (${sim.customer_email})`);
+  lines.push(`Sentiment: ${sim.sentiment}`);
+  if (sim.ref) lines.push(`Ref: ${sim.ref.slice(0, 8)}`);
+  lines.push(`\n## Initial Message\n"${sim.initial_message}"`);
+
+  for (const s of sim.steps) {
+    lines.push(`\n---\n## Step ${s.step_order + 1}: ${s.step_name} [${s.step_type}]${s.skipped ? " (SKIPPED)" : ""}`);
+    lines.push(`\n**Data Found:**\n${s.data_found || "—"}`);
+    lines.push(`\n**Condition Result:** ${s.condition_result || "—"}`);
+    if (s.warnings.length > 0) {
+      lines.push(`\n**Warnings:**`);
+      for (const w of s.warnings) lines.push(`- ${w}`);
+    }
+    if (s.ai_response && !s.skipped) {
+      lines.push(`\n**AI Response:**\n> ${s.ai_response}`);
+    }
+    if (s.mock_customer_reply) {
+      lines.push(`\n**Mock Customer Reply (${sim.sentiment}):**\n> "${s.mock_customer_reply}"`);
+    }
+  }
+
+  const totalWarnings = sim.steps.reduce((n, s) => n + s.warnings.length, 0);
+  lines.push(`\n---\n## Summary`);
+  lines.push(`- ${sim.steps.length} steps, ${sim.steps.filter(s => s.skipped).length} skipped`);
+  lines.push(`- ${totalWarnings} warnings`);
+  return lines.join("\n");
 }
 
 export default function PlaybooksSettingsPage() {
@@ -1309,17 +1341,36 @@ export default function PlaybooksSettingsPage() {
                   ))}
                 </div>
 
-                {/* Summary */}
+                {/* Summary + Actions */}
                 <div className="mt-4 rounded-md bg-zinc-50 p-3 dark:bg-zinc-800/50">
-                  <div className="text-xs font-medium text-zinc-500 mb-1">Summary</div>
-                  <div className="text-xs text-zinc-600 dark:text-zinc-400 space-y-0.5">
-                    <p>{simResult.steps.length} steps total, {simResult.steps.filter(s => s.skipped).length} skipped</p>
-                    <p>{simResult.steps.reduce((n, s) => n + s.warnings.length, 0)} warnings found</p>
-                    {simResult.steps.some(s => s.warnings.length > 0) && (
-                      <p className="text-amber-600 dark:text-amber-400 font-medium mt-1">
-                        Review warnings above to ensure your playbook handles this scenario correctly.
-                      </p>
-                    )}
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <div className="text-xs font-medium text-zinc-500 mb-1">Summary</div>
+                      <div className="text-xs text-zinc-600 dark:text-zinc-400 space-y-0.5">
+                        <p>{simResult.steps.length} steps total, {simResult.steps.filter(s => s.skipped).length} skipped</p>
+                        <p>{simResult.steps.reduce((n, s) => n + s.warnings.length, 0)} warnings found</p>
+                        {simResult.ref && (
+                          <p className="font-mono text-zinc-400">Ref: {simResult.ref.slice(0, 8)}</p>
+                        )}
+                        {simResult.steps.some(s => s.warnings.length > 0) && (
+                          <p className="text-amber-600 dark:text-amber-400 font-medium mt-1">
+                            Review warnings above to ensure your playbook handles this scenario correctly.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          const text = formatSimForLLM(simResult);
+                          navigator.clipboard.writeText(text);
+                          alert("Copied to clipboard!");
+                        }}
+                        className="rounded-md bg-violet-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-600"
+                      >
+                        Copy for LLM
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
