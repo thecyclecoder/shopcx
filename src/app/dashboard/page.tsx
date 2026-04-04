@@ -21,6 +21,10 @@ interface DashboardStats {
   dunning_recovered: number;
   dunning_active_failures: number;
   dunning_in_progress: number;
+  dunning_failed_today: number;
+  dunning_paused: number;
+  dunning_awaiting_update: number;
+  dunning_recovery_rate: number;
 }
 
 const RANGES = [
@@ -114,6 +118,10 @@ export default function DashboardPage() {
       dunning_recovered: extra.dunning_recovered || 0,
       dunning_active_failures: extra.dunning_active_failures || 0,
       dunning_in_progress: extra.dunning_in_progress || 0,
+      dunning_failed_today: extra.dunning_failed_today || 0,
+      dunning_paused: extra.dunning_paused || 0,
+      dunning_awaiting_update: extra.dunning_awaiting_update || 0,
+      dunning_recovery_rate: extra.dunning_recovery_rate || 0,
     });
   }, [workspace.id, range]);
 
@@ -258,6 +266,11 @@ export default function DashboardPage() {
           {/* Dunning & Recovery */}
           <Section title="Dunning & Recovery">
             <StatCardEl card={{
+              label: "Failed Today",
+              value: stats.dunning_failed_today.toLocaleString(),
+              color: stats.dunning_failed_today > 0 ? "text-red-600" : "",
+            }} />
+            <StatCardEl card={{
               label: "In Dunning",
               value: stats.dunning_in_progress.toLocaleString(),
               color: stats.dunning_in_progress > 0 ? "text-amber-600" : "",
@@ -268,9 +281,24 @@ export default function DashboardPage() {
               color: stats.dunning_active_failures > 0 ? "text-red-600" : "",
             }} />
             <StatCardEl card={{
+              label: "Paused",
+              value: stats.dunning_paused.toLocaleString(),
+              color: stats.dunning_paused > 0 ? "text-red-600" : "",
+            }} />
+            <StatCardEl card={{
+              label: "Awaiting Update",
+              value: stats.dunning_awaiting_update.toLocaleString(),
+              color: stats.dunning_awaiting_update > 0 ? "text-amber-600" : "",
+            }} />
+            <StatCardEl card={{
               label: "Recovered",
               value: stats.dunning_recovered.toLocaleString(),
               color: stats.dunning_recovered > 0 ? "text-emerald-600" : "",
+            }} />
+            <StatCardEl card={{
+              label: "Recovery Rate",
+              value: `${stats.dunning_recovery_rate}%`,
+              color: stats.dunning_recovery_rate >= 50 ? "text-emerald-600" : stats.dunning_recovery_rate >= 25 ? "text-amber-600" : "text-red-600",
             }} />
           </Section>
 

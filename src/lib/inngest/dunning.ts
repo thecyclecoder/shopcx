@@ -245,50 +245,63 @@ export const dunningPaymentFailed = inngest.createFunction(
       await handleAllCardsExhausted(workspace_id, shopify_contract_id, customer_id, cycle, settings);
     });
 
-    // Step 7: Payday-aware retries (if enabled)
+    // Step 7: Payday-aware retries — rotate through ALL cards on each payday
     if (settings.dunning_payday_retry_enabled) {
       const paydayDates = getNextPaydayDates(new Date(), 3);
+      let paydayAttempt = attemptNumber;
 
       for (let i = 0; i < paydayDates.length; i++) {
         const retryTime = getRetryTime(paydayDates[i]);
         await step.sleepUntil(`payday-retry-wait-${i}`, retryTime);
 
-        // Check if cycle was recovered externally (billing-success webhook or new card)
+        // Check if cycle was recovered
         const cycleCheck = await step.run(`check-cycle-payday-${i}`, async () => {
           return getActiveDunningCycle(workspace_id, shopify_contract_id);
         });
         if (!cycleCheck || cycleCheck.status === "recovered") break;
 
-        await step.run(`payday-retry-${i}`, async () => {
-          const lastCard = customer_id ? await getLastSuccessfulCard(workspace_id, customer_id) : null;
-          const targetMethod = lastCard?.payment_method_id || paymentMethods[0]?.id;
-          if (!targetMethod) return;
+        // Try ALL payment methods on this payday (2h between each)
+        const dbCardsTried = (cycleCheck.cards_tried as string[]) || [];
+        // Reset tried cards for payday — we want to retry all of them
+        const allMethods = paymentMethods.length > 0 ? paymentMethods : [];
 
-          await appstleSwitchPaymentMethod(workspace_id, shopify_contract_id, targetMethod);
+        for (let j = 0; j < allMethods.length; j++) {
+          if (j > 0) await step.sleep(`payday-card-wait-${i}-${j}`, "2h");
 
-          const ordersRes = await appstleGetUpcomingOrders(workspace_id, shopify_contract_id);
-          if (!ordersRes.success || !ordersRes.orders?.length) return;
-
-          const attemptId = ordersRes.orders[0].id;
-          await appstleAttemptBilling(workspace_id, attemptId);
-
-          await logPaymentFailure({
-            workspaceId: workspace_id,
-            customerId: customer_id,
-            subscriptionId: subscription_id,
-            shopifyContractId: shopify_contract_id,
-            billingAttemptId: attemptId,
-            paymentMethodLast4: lastCard?.payment_method_last4 || paymentMethods[0]?.last4 || null,
-            paymentMethodId: targetMethod,
-            attemptNumber: attemptNumber + i,
-            attemptType: "payday_retry",
-            succeeded: false, // Will be updated by billing-success webhook
+          const paydayCheck = await step.run(`payday-card-check-${i}-${j}`, async () => {
+            return getActiveDunningCycle(workspace_id, shopify_contract_id);
           });
+          if (!paydayCheck || paydayCheck.status === "recovered") break;
 
-          await updateDunningCycle(cycleCheck.id, { billing_attempt_id: attemptId });
-        });
+          const card = allMethods[j];
+          await step.run(`payday-retry-${i}-${j}`, async () => {
+            await appstleSwitchPaymentMethod(workspace_id, shopify_contract_id, card.id);
 
-        // Wait for billing result
+            const ordersRes = await appstleGetUpcomingOrders(workspace_id, shopify_contract_id);
+            if (!ordersRes.success || !ordersRes.orders?.length) return;
+
+            const attemptId = ordersRes.orders[0].id;
+            await appstleAttemptBilling(workspace_id, attemptId);
+
+            await logPaymentFailure({
+              workspaceId: workspace_id,
+              customerId: customer_id,
+              subscriptionId: subscription_id,
+              shopifyContractId: shopify_contract_id,
+              billingAttemptId: attemptId,
+              paymentMethodLast4: card.last4,
+              paymentMethodId: card.id,
+              attemptNumber: paydayAttempt,
+              attemptType: "payday_retry",
+              succeeded: false,
+            });
+
+            await updateDunningCycle(paydayCheck.id, { billing_attempt_id: attemptId });
+            paydayAttempt++;
+          });
+        }
+
+        // Wait for billing result after trying all cards
         await step.sleep(`payday-result-wait-${i}`, "30m");
 
         const postPaydayCheck = await step.run(`post-payday-check-${i}`, async () => {

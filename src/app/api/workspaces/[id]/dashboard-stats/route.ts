@@ -60,6 +60,7 @@ export async function GET(
     cancelsRange, cancelsPrev, failuresRange, failuresPrev,
     dunningRecovered, dunningActiveFailures, dunningInProgress,
     activeSubs,
+    dunningFailedToday, dunningPaused, dunningAwaitingUpdate, dunningTotalCycles,
   ] = await Promise.all([
     admin.from("customers").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId),
     ticketsRangeQ,
@@ -76,6 +77,11 @@ export async function GET(
     admin.from("subscriptions").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("last_payment_status", "failed").eq("status", "active"),
     admin.from("dunning_cycles").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).in("status", ["active", "skipped", "paused"]),
     admin.from("subscriptions").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "active"),
+    // New dunning stats
+    admin.from("dunning_cycles").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).gte("created_at", new Date(new Date().setHours(0,0,0,0)).toISOString()),
+    admin.from("dunning_cycles").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "paused"),
+    admin.from("dunning_cycles").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "skipped").eq("payment_update_sent", true),
+    admin.from("dunning_cycles").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId),
   ]);
 
   // Compute avg retention — exclude secondary linked profiles
@@ -119,5 +125,9 @@ export async function GET(
     dunning_recovered: cnt(dunningRecovered),
     dunning_active_failures: cnt(dunningActiveFailures),
     dunning_in_progress: cnt(dunningInProgress),
+    dunning_failed_today: cnt(dunningFailedToday),
+    dunning_paused: cnt(dunningPaused),
+    dunning_awaiting_update: cnt(dunningAwaitingUpdate),
+    dunning_recovery_rate: cnt(dunningTotalCycles) > 0 ? Math.round((cnt(dunningRecovered) / cnt(dunningTotalCycles)) * 100) : 0,
   });
 }
