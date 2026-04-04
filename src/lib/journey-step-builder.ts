@@ -261,11 +261,36 @@ async function buildCancelSteps(
     };
   });
 
+  // Fetch cancel reasons from workspace portal_config
+  const { data: wsConfig } = await admin.from("workspaces")
+    .select("portal_config")
+    .eq("id", workspaceId)
+    .single();
+
+  const portalConfig = (wsConfig?.portal_config || {}) as Record<string, unknown>;
+  const cancelFlowConfig = (portalConfig.cancel_flow || {}) as Record<string, unknown>;
+  const reasons = (Array.isArray(cancelFlowConfig.reasons) ? cancelFlowConfig.reasons : []) as {
+    slug: string; label: string; type: string; enabled: boolean;
+  }[];
+
+  const enabledReasons = reasons.filter(r => r.enabled !== false);
+
+  // Build the cancel_reason step with options from the cancel flow settings
+  const cancelReasonStep: JourneyStep = {
+    key: "cancel_reason",
+    type: "select",
+    question: "Why are you looking to cancel?",
+    options: enabledReasons.map(r => ({
+      value: r.slug,
+      label: r.label,
+    })),
+  };
+
   return {
     codeDriven: true,
     cancelJourney: true,
     multiStep: false,
-    steps: [],
+    steps: [cancelReasonStep],
     metadata: {
       subscriptions: subscriptionData,
       selectedSubscriptionId: subscriptionData[0]?.id || null,
