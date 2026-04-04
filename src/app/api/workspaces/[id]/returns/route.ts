@@ -20,6 +20,10 @@ export async function GET(
   const resolution = url.searchParams.get("resolution");
   const source = url.searchParams.get("source");
   const search = url.searchParams.get("search");
+  const customerId = url.searchParams.get("customer_id");
+  const ticketId = url.searchParams.get("ticket_id");
+  const sortCol = url.searchParams.get("sort") || "created_at";
+  const sortOrder = url.searchParams.get("order") === "asc" ? true : false;
   const limit = parseInt(url.searchParams.get("limit") || "25");
   const offset = parseInt(url.searchParams.get("offset") || "0");
 
@@ -43,6 +47,12 @@ export async function GET(
   }
   if (source && source !== "all") {
     query = query.eq("source", source);
+  }
+  if (customerId) {
+    query = query.eq("customer_id", customerId);
+  }
+  if (ticketId) {
+    query = query.eq("ticket_id", ticketId);
   }
 
   if (search) {
@@ -77,7 +87,9 @@ export async function GET(
     }
   }
 
-  query = query.order("created_at", { ascending: false });
+  const validSortCols = ["created_at", "order_number", "status", "net_refund_cents"];
+  const actualSort = validSortCols.includes(sortCol) ? sortCol : "created_at";
+  query = query.order(actualSort, { ascending: sortOrder });
   query = query.range(offset, offset + limit - 1);
 
   const { data: returns, count, error } = await query;

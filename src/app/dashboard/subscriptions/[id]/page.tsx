@@ -214,6 +214,7 @@ export default function SubscriptionDetailPage() {
   const [swapVariantId, setSwapVariantId] = useState("");
   const [storeCreditBalance, setStoreCreditBalance] = useState<number | null>(null);
   const [showStoreCreditModal, setShowStoreCreditModal] = useState(false);
+  const [subReturns, setSubReturns] = useState<{ id: string; order_number: string; status: string; resolution_type: string; net_refund_cents: number; created_at: string }[]>([]);
 
   const loadSub = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}`);
@@ -231,6 +232,15 @@ export default function SubscriptionDetailPage() {
         .then(r => r.json())
         .then(b => setStoreCreditBalance(b.balance ?? 0))
         .catch(() => setStoreCreditBalance(0));
+      // Fetch returns for this customer (filter by subscription orders client-side)
+      fetch(`/api/workspaces/${workspace.id}/returns?customer_id=${data.subscription.customer_id}&limit=50`)
+        .then(r => r.json())
+        .then(d => {
+          const orderNums = new Set((data.orders || []).map((o: { order_number: string | null }) => o.order_number));
+          const matched = (d.returns || []).filter((r: { order_number: string }) => orderNums.has(r.order_number));
+          setSubReturns(matched);
+        })
+        .catch(() => {});
     }
   }, [workspace.id, subId, router]);
 
@@ -756,6 +766,39 @@ export default function SubscriptionDetailPage() {
               </div>
             )}
           </div>
+
+          {/* Returns */}
+          {subReturns.length > 0 && (
+            <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+              <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Returns ({subReturns.length})</h3>
+              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                {subReturns.map((r) => {
+                  const badge = r.status === "open" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+                    : r.status === "in_transit" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                    : r.status === "refunded" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                    : r.status === "cancelled" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                    : r.status === "restocked" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                    : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400";
+                  const resLabel = r.resolution_type === "store_credit_return" ? "Store Credit"
+                    : r.resolution_type === "refund_return" ? "Refund"
+                    : r.resolution_type === "store_credit_no_return" ? "Store Credit (no return)"
+                    : r.resolution_type === "refund_no_return" ? "Refund (no return)"
+                    : r.resolution_type;
+                  return (
+                    <button key={r.id} onClick={() => router.push(`/dashboard/returns/${r.id}`)}
+                      className="flex w-full items-center justify-between py-2 text-left transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                      <div className="flex items-center gap-2">
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badge}`}>{r.status}</span>
+                        <span className="text-sm text-zinc-900 dark:text-zinc-100">{r.order_number}</span>
+                        <span className="text-xs text-zinc-400">{resLabel}</span>
+                      </div>
+                      <span className="text-sm tabular-nums text-zinc-500">{formatCents(r.net_refund_cents)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Activity Timeline */}
           {events.length > 0 && (
