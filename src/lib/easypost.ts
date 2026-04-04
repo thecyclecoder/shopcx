@@ -98,6 +98,48 @@ export async function getEasyPostClient(
 }
 
 /**
+ * Check if workspace is using a test EasyPost API key.
+ * Test keys start with "EZTK", production keys start with "EZAK".
+ */
+export async function isTestMode(workspaceId: string): Promise<boolean> {
+  const admin = createAdminClient();
+  const { data: ws } = await admin
+    .from("workspaces")
+    .select("easypost_api_key_encrypted")
+    .eq("id", workspaceId)
+    .single();
+  if (!ws?.easypost_api_key_encrypted) return true;
+  const apiKey = decrypt(ws.easypost_api_key_encrypted);
+  return apiKey.startsWith("EZTK");
+}
+
+/**
+ * Re-fetch a shipment to check for rate adjustments after delivery.
+ * Returns the actual cost (may differ from original quote if carrier adjusted).
+ */
+export async function getActualShippingCost(
+  workspaceId: string,
+  shipmentId: string,
+): Promise<{ actualCostCents: number; adjusted: boolean }> {
+  const client = await getEasyPostClient(workspaceId);
+  const shipment = await client.Shipment.retrieve(shipmentId);
+
+  const quotedCents = Math.round(parseFloat(shipment.selected_rate?.rate || "0") * 100);
+
+  // Check for fee adjustments
+  const fees = (shipment.fees || []) as { type: string; amount: string }[];
+  const adjustmentFees = fees.filter((f) => f.type === "AdjustmentFee" || f.type === "PostageFee");
+  const totalFeeCents = adjustmentFees.reduce((sum, f) => sum + Math.round(parseFloat(f.amount) * 100), 0);
+
+  const actualCostCents = quotedCents + totalFeeCents;
+
+  return {
+    actualCostCents,
+    adjusted: totalFeeCents !== 0,
+  };
+}
+
+/**
  * Get workspace return address and default parcel dimensions.
  */
 async function getWorkspaceReturnConfig(workspaceId: string) {

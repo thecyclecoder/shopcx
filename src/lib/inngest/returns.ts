@@ -105,7 +105,7 @@ export const returnsIssueRefund = inngest.createFunction(
         .from("returns")
         .select(`
           id, status, resolution_type, order_number, net_refund_cents, order_total_cents,
-          label_cost_cents, shopify_return_gid, customer_id,
+          label_cost_cents, easypost_shipment_id, shopify_return_gid, customer_id,
           customers(email, first_name)
         `)
         .eq("id", return_id)
@@ -120,6 +120,39 @@ export const returnsIssueRefund = inngest.createFunction(
 
     const customers = ret.customers as unknown as { email: string; first_name: string | null }[] | null;
     const customer = customers?.[0] || null;
+
+    // Check for rate adjustments from EasyPost (adjustments settle by delivery time)
+    let finalLabelCostCents = ret.label_cost_cents || 0;
+    let finalNetRefundCents = ret.net_refund_cents || 0;
+
+    if (ret.easypost_shipment_id) {
+      const adjusted = await step.run("check-rate-adjustment", async () => {
+        try {
+          const { getActualShippingCost } = await import("@/lib/easypost");
+          return getActualShippingCost(workspace_id, ret.easypost_shipment_id);
+        } catch (err) {
+          console.error("Rate adjustment check failed:", err);
+          return null;
+        }
+      });
+
+      if (adjusted) {
+        finalLabelCostCents = adjusted.actualCostCents;
+        finalNetRefundCents = (ret.order_total_cents || 0) - finalLabelCostCents;
+        if (adjusted.adjusted) {
+          console.log(`Rate adjusted for return ${return_id}: quoted ${ret.label_cost_cents}c → actual ${finalLabelCostCents}c`);
+        }
+      }
+    }
+
+    // Update return with final amounts
+    await step.run("update-final-amounts", async () => {
+      await admin.from("returns").update({
+        label_cost_cents: finalLabelCostCents,
+        net_refund_cents: finalNetRefundCents,
+        updated_at: new Date().toISOString(),
+      }).eq("id", return_id);
+    });
 
     // Close the return in Shopify
     const closeResult = await step.run("close-return", async () => {

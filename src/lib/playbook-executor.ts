@@ -263,7 +263,7 @@ async function executeStep(
         .select("*").eq("policy_id", policyId).order("tier");
       return handleOfferException(
         exceptions || [], customer, orders, ctx, step, dataContext, pers,
-        exceptionsUsed, playbook.exception_limit, tid, admin, msg, policyRules,
+        exceptionsUsed, playbook.exception_limit, tid, admin, msg, policyRules, wsId,
       );
     }
 
@@ -595,7 +595,7 @@ async function handleOfferException(
   ctx: Record<string, unknown>, step: PlaybookStep, dataCtx: string,
   pers: { name?: string; tone?: string } | null,
   exceptionsUsed: number, exceptionLimit: number, tid: string, admin: Admin,
-  msg: string, policyRules: string,
+  msg: string, policyRules: string, wsId: string,
 ): Promise<PlaybookExecResult> {
   const outOfPolicy = (ctx.out_of_policy as string[]) || [];
   if (outOfPolicy.length === 0) {
@@ -649,7 +649,7 @@ async function handleOfferException(
     const remaining = nextTierExceptions.filter(e => e.tier > nextException.tier);
     for (const fallback of remaining) {
       if (evaluateCustomerConditions(fallback.conditions, customer)) {
-        return offerException(fallback, outOfPolicy, step, dataCtx, pers, exceptionsUsed, exceptionLimit, tid, admin, policyRules);
+        return offerException(fallback, outOfPolicy, step, dataCtx, pers, exceptionsUsed, exceptionLimit, tid, admin, policyRules, wsId, orders);
       }
     }
     return {
@@ -659,28 +659,98 @@ async function handleOfferException(
     };
   }
 
-  return offerException(nextException, outOfPolicy, step, dataCtx, pers, exceptionsUsed, exceptionLimit, tid, admin, policyRules);
+  return offerException(nextException, outOfPolicy, step, dataCtx, pers, exceptionsUsed, exceptionLimit, tid, admin, policyRules, wsId, orders);
 }
 
 async function offerException(
   ex: PlaybookException, outOfPolicy: string[], step: PlaybookStep, dataCtx: string,
   pers: { name?: string; tone?: string } | null,
   exceptionsUsed: number, exceptionLimit: number, tid: string, admin: Admin, policyRules: string,
+  wsId: string, orders: OrderData[],
 ): Promise<PlaybookExecResult> {
   const mostRecentOutOfPolicy = outOfPolicy[outOfPolicy.length - 1];
   const isEscalation = Number(ex.tier) > 1;
 
+  // Get shipping rate quote if this is a return-type resolution
+  let rateQuoteInfo = "";
+  let rateContext: Record<string, unknown> = {};
+  const requiresReturn = ex.resolution_type.includes("return");
+
+  if (requiresReturn) {
+    const order = orders.find(o => o.order_number === mostRecentOutOfPolicy);
+    if (order) {
+      try {
+        const { getReturnShippingRate, isTestMode } = await import("@/lib/easypost");
+        const testMode = await isTestMode(wsId);
+
+        // Get shipping address from order fulfillments
+        const { data: dbOrder } = await admin.from("orders")
+          .select("fulfillments")
+          .eq("id", order.id).single();
+
+        const fulfillments = (dbOrder?.fulfillments || []) as { destination?: { address1?: string; city?: string; state?: string; zip?: string; country?: string; name?: string; phone?: string } }[];
+        const dest = fulfillments[0]?.destination;
+
+        if (dest?.address1 && dest?.city && dest?.state && dest?.zip) {
+          const lineItems = (order.line_items as { sku?: string; quantity?: number }[]) || [];
+          const { data: products } = await admin.from("products").select("variants").eq("workspace_id", wsId);
+
+          const weightItems = lineItems.map(li => {
+            for (const p of products || []) {
+              const variants = (p.variants || []) as { sku?: string; weight?: number }[];
+              const v = variants.find(v => v.sku === li.sku);
+              if (v?.weight) return { title: li.sku || "item", weight: v.weight, weightUnit: "POUNDS" as const, quantity: li.quantity || 1 };
+            }
+            return { title: li.sku || "item", weight: 0, weightUnit: "OUNCES" as const, quantity: li.quantity || 1 };
+          });
+
+          const rate = await getReturnShippingRate(wsId, {
+            customerAddress: {
+              name: dest.name || "Customer",
+              street1: dest.address1,
+              city: dest.city,
+              state: dest.state,
+              zip: dest.zip,
+              country: dest.country || "US",
+              phone: dest.phone,
+            },
+            lineItems: weightItems,
+          });
+
+          const orderTotalCents = order.total_cents;
+          const netCents = orderTotalCents - rate.rate.costCents;
+          const resLabel = ex.resolution_type.includes("refund") ? "refund" : "store credit";
+
+          rateQuoteInfo = `\n\nShipping rate quote: $${(rate.rate.costCents / 100).toFixed(2)} (${rate.rate.carrier} ${rate.rate.service}).
+Order total: $${(orderTotalCents / 100).toFixed(2)}. Estimated shipping deduction: $${(rate.rate.costCents / 100).toFixed(2)}. Estimated net ${resLabel}: $${(netCents / 100).toFixed(2)}.
+Tell the customer the EXACT breakdown with these numbers. Say "approximately" since the final shipping cost may vary slightly.${testMode ? "\n(NOTE: Using EasyPost test mode — rates are simulated)" : ""}`;
+
+          rateContext = {
+            easypost_shipment_id: rate.shipmentId,
+            easypost_rate_id: rate.rate.id,
+            label_cost_cents: rate.rate.costCents,
+            net_refund_cents: netCents,
+            order_total_cents: orderTotalCents,
+          };
+        }
+      } catch (err) {
+        console.error("Rate quote failed (non-fatal):", err);
+        rateQuoteInfo = "\n\nShipping rate quote unavailable. Tell the customer a return shipping label will be provided and the cost will be deducted from their refund/credit.";
+      }
+    }
+  }
+
   const response = await aiGenerate(
     basePrompt(step, pers, policyRules),
-    `Customer data:\n${dataCtx}\n\nException instructions: ${ex.instructions || ""}\nException: "${ex.name}" (${ex.resolution_type})\nApplies to: ${mostRecentOutOfPolicy}\n${isEscalation ? "The customer rejected the previous offer. This is an escalated offer — present it as a better alternative without mentioning that other options exist beyond this one." : "Present this offer clearly. Do NOT hint that better alternatives exist."}\n\nFollow store policy rules exactly when describing the return/refund process.\n\nOffer this exception. ${outOfPolicy.length > 1 ? `Note: applies to 1 order (${mostRecentOutOfPolicy}). Orders ${outOfPolicy.filter(o => o !== mostRecentOutOfPolicy).join(", ")} do not qualify.` : ""}`,
+    `Customer data:\n${dataCtx}\n\nException instructions: ${ex.instructions || ""}\nException: "${ex.name}" (${ex.resolution_type})\nApplies to: ${mostRecentOutOfPolicy}\n${isEscalation ? "The customer rejected the previous offer. This is an escalated offer — present it as a better alternative without mentioning that other options exist beyond this one." : "Present this offer clearly. Do NOT hint that better alternatives exist."}\n\nFollow store policy rules exactly when describing the return/refund process.${rateQuoteInfo}\n\nOffer this exception. ${outOfPolicy.length > 1 ? `Note: applies to 1 order (${mostRecentOutOfPolicy}). Orders ${outOfPolicy.filter(o => o !== mostRecentOutOfPolicy).join(", ")} do not qualify.` : ""}`,
   );
 
   await admin.from("tickets").update({ playbook_exceptions_used: exceptionsUsed + 1 }).eq("id", tid);
 
   return {
     action: "respond", response,
-    context: { current_exception_tier: ex.tier, exception_offered: ex.name, resolution_type: ex.resolution_type },
-    systemNote: `[Playbook] Offered tier ${ex.tier} exception: ${ex.name} for ${mostRecentOutOfPolicy}.`,
+    context: { current_exception_tier: ex.tier, exception_offered: ex.name, resolution_type: ex.resolution_type, ...rateContext },
+    systemNote: `[Playbook] Offered tier ${ex.tier} exception: ${ex.name} for ${mostRecentOutOfPolicy}.${rateContext.label_cost_cents ? ` Estimated shipping: $${((rateContext.label_cost_cents as number) / 100).toFixed(2)}` : ""}`,
   };
 }
 
@@ -723,10 +793,11 @@ async function handleInitiateReturn(
   const resolution = ctx.resolution_type as string || "store_credit_return";
   const resLabel = resolution.includes("refund") ? "refund" : "store credit";
 
-  // Create returns in Shopify for each returnable order
-  const { createShopifyReturn, getReturnableItems } = await import("@/lib/shopify-returns");
+  // Create returns in Shopify + buy label for each returnable order
+  const { createShopifyReturn, getReturnableItems, attachReturnTracking } = await import("@/lib/shopify-returns");
   const created: string[] = [];
   const failed: string[] = [];
+  let labelInfo = "";
 
   for (const orderNum of returnable) {
     const order = orders.find(o => o.order_number === orderNum);
@@ -744,7 +815,7 @@ async function handleInitiateReturn(
         continue;
       }
 
-      await createShopifyReturn(wsId, {
+      const returnResult = await createShopifyReturn(wsId, {
         orderId: order.id,
         orderNumber: order.order_number,
         shopifyOrderGid,
@@ -759,6 +830,61 @@ async function handleInitiateReturn(
         source: "playbook",
       });
       created.push(orderNum);
+
+      // Buy the return label via EasyPost
+      try {
+        const shipmentId = ctx.easypost_shipment_id as string | undefined;
+        if (shipmentId) {
+          const { purchaseReturnLabel } = await import("@/lib/easypost");
+          const rateId = ctx.easypost_rate_id as string | undefined;
+          const label = await purchaseReturnLabel(wsId, shipmentId, rateId);
+
+          // Update the return record with tracking + label
+          await admin.from("returns").update({
+            tracking_number: label.trackingNumber,
+            carrier: label.carrier,
+            label_url: label.labelUrl,
+            label_cost_cents: label.costCents,
+            net_refund_cents: (ctx.order_total_cents as number || order.total_cents) - label.costCents,
+            easypost_shipment_id: shipmentId,
+            status: "label_created",
+            updated_at: new Date().toISOString(),
+          }).eq("id", returnResult.returnId);
+
+          // Attach tracking to Shopify
+          await attachReturnTracking(wsId, {
+            returnId: returnResult.returnId,
+            trackingNumber: label.trackingNumber,
+            carrier: label.carrier,
+            labelUrl: label.labelUrl,
+          });
+
+          // Email the label to the customer
+          try {
+            const { sendReturnLabelEmail } = await import("@/lib/easypost-email");
+            await sendReturnLabelEmail({
+              workspaceId: wsId,
+              toEmail: customer.email,
+              customerName: customer.first_name,
+              orderNumber: order.order_number,
+              labelUrl: label.labelUrl,
+              trackingNumber: label.trackingNumber,
+              carrier: label.carrier,
+              orderTotalCents: ctx.order_total_cents as number || order.total_cents,
+              labelCostCents: label.costCents,
+              netRefundCents: (ctx.order_total_cents as number || order.total_cents) - label.costCents,
+              resolutionType: resolution,
+            });
+          } catch (emailErr) {
+            console.error("Failed to send return label email:", emailErr);
+          }
+
+          labelInfo = `\nReturn label purchased: ${label.carrier} tracking ${label.trackingNumber}. Label emailed to customer. Cost: $${(label.costCents / 100).toFixed(2)}.`;
+        }
+      } catch (labelErr) {
+        console.error("Label purchase failed (non-fatal, return still created):", labelErr);
+        labelInfo = "\nNote: Return created but label purchase failed. Agent may need to generate label manually.";
+      }
     } catch (err) {
       console.error(`Failed to create Shopify return for ${orderNum}:`, err);
       failed.push(orderNum);
@@ -773,15 +899,21 @@ async function handleInitiateReturn(
     };
   }
 
+  const netRefundCents = ctx.net_refund_cents as number | undefined;
+  const labelCostCents = ctx.label_cost_cents as number | undefined;
+  const breakdownInfo = netRefundCents && labelCostCents
+    ? `\nThe return label has been generated and emailed to the customer. Approximate breakdown: order $${((ctx.order_total_cents as number) / 100).toFixed(2)} minus ~$${(labelCostCents / 100).toFixed(2)} shipping = ~$${(netRefundCents / 100).toFixed(2)} ${resLabel}.`
+    : "";
+
   const response = await aiGenerate(
     basePrompt(step, pers, policyRules),
-    `Customer data:\n${dataCtx}\n\nOrders with return created: ${created.join(", ")}\n${failed.length ? `Orders that failed: ${failed.join(", ")}\n` : ""}Resolution: ${resLabel}\n\nThe customer has accepted the ${resLabel} offer. Confirm the return has been set up. Follow the store policy rules exactly when explaining the return process to the customer.`,
+    `Customer data:\n${dataCtx}\n\nOrders with return created: ${created.join(", ")}\n${failed.length ? `Orders that failed: ${failed.join(", ")}\n` : ""}Resolution: ${resLabel}${breakdownInfo}\n\nThe customer has accepted the ${resLabel} offer. The return has been created and the return shipping label has been generated and emailed to them. Confirm this. Tell them to check their email for the label, print it, attach to the package, and drop it off. Once we receive the item, their ${resLabel} will be processed. Follow the store policy rules.`,
   );
 
   return {
     action: "advance", newStep: step.step_order + 1, response,
     context: { return_initiated: true, return_orders: created, return_failed: failed, offer_accepted: true },
-    systemNote: `[Playbook] Return created in Shopify for: ${created.join(", ")}. ${failed.length ? `Failed: ${failed.join(", ")}.` : ""} Resolution: ${resolution}.`,
+    systemNote: `[Playbook] Return created in Shopify for: ${created.join(", ")}.${labelInfo} ${failed.length ? `Failed: ${failed.join(", ")}.` : ""} Resolution: ${resolution}.`,
   };
 }
 
