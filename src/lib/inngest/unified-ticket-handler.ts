@@ -105,10 +105,10 @@ async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max =
   return (d.content?.[0] as { text: string })?.text?.trim() || "";
 }
 
-async function classifyIntent(msg: string, ctx: string, hist: string, handlers: string, model: "haiku" | "sonnet" = "haiku") {
+async function classifyIntent(msg: string, ctx: string, hist: string, handlers: string, model: "haiku" | "sonnet" = "haiku", isClarification = false) {
   const raw = await claude(`You are an intent classifier for customer support. Your job is to match the customer's message to one of the available handlers below. Do NOT invent intents — only use the handler intents listed, or "unknown" if none fit.
 
-Customer message: "${msg}"
+${isClarification ? `IMPORTANT: This is a follow-up message after we asked the customer to clarify. Focus ONLY on what the customer is saying in their latest message below — ignore any previous journey or account linking context in the conversation history. The customer is telling us what they actually need help with.\n\n` : ""}Customer message: "${msg}"
 ${ctx ? `Customer:\n${ctx}\n` : "No customer found."}
 ${hist ? `Conversation:\n${hist}\n` : ""}
 Available handlers (you MUST pick from these intents or "unknown"):
@@ -119,6 +119,7 @@ Rules:
 - "confidence" is how sure you are that the customer's message matches that specific handler (0-100)
 - If the message is vague, emotional, or doesn't clearly match any handler, return "unknown" with low confidence
 - A complaint without a specific actionable request is "unknown" — the customer hasn't told us what they need yet
+- If the customer mentions being charged without permission, unauthorized charges, or unwanted subscriptions, match to the appropriate playbook intent
 
 Return JSON: { "intent": "handler intent from list above or unknown", "confidence": 0-100, "reasoning": "one sentence" }`, model);
   try { return JSON.parse(raw.replace(/^```json?\n?/, "").replace(/\n?```$/, "")); }
@@ -442,12 +443,29 @@ export const unifiedTicketHandler = inngest.createFunction(
     // ── 4. Clarification mode ──
     if (st.turn > 0 && st.turn < MAX_CLARIFY) {
       return await step.run("clarify", async () => {
+        // First try pattern matching on the clarification message (deterministic, fast)
+        const { data: playbooks } = await admin.from("playbooks")
+          .select("id, name, trigger_intents, trigger_patterns")
+          .eq("workspace_id", wsId).eq("is_active", true);
+        const msgLower = msg.toLowerCase();
+        for (const pb of playbooks || []) {
+          const patterns = (pb.trigger_patterns as string[]) || [];
+          const matched = patterns.some(p => msgLower.includes(p.toLowerCase()));
+          if (matched) {
+            const intent = (pb.trigger_intents as string[])?.[0] || "unknown";
+            await sysNote(admin, tid, `[System] Clarify pattern match: "${intent}" via playbook "${pb.name}"`);
+            await admin.from("tickets").update({ ai_detected_intent: intent, ai_intent_confidence: 95, ai_clarification_turn: 0 }).eq("id", tid);
+            await routeExec(admin, wsId, tid, st.ch, intent, 95, msg, "", st.hasCust, cfg, pers, t0);
+            return { status: "routed_after_clarify_pattern", intent };
+          }
+        }
+
         const model = st.turn >= 1 ? "sonnet" as const : "haiku" as const;
         const ctx = await assembleTicketContext(wsId, tid);
         const custCtx = ctx.systemPrompt.split("CUSTOMER CONTEXT:")[1]?.split("CHANNEL")[0]?.trim() || "";
         const hist = ctx.conversationHistory.map(m => `${m.role}: ${m.content}`).join("\n");
         const hNames = await handlerNames(admin, wsId, st.hasCust, st.ch);
-        const intent = await classifyIntent(msg, custCtx, hist, hNames, model);
+        const intent = await classifyIntent(msg, custCtx, hist, hNames, model, true);
         await sysNote(admin, tid, `[System] Clarify turn ${st.turn + 1}: "${intent.intent}" (${intent.confidence}%) [${model}]`);
         await admin.from("tickets").update({ ai_detected_intent: intent.intent, ai_intent_confidence: intent.confidence }).eq("id", tid);
 
