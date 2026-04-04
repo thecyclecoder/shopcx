@@ -234,6 +234,124 @@ async function executeStep(
     ctx.policy_rules = policyRules;
   }
 
+  // ── Global cancel detection ──
+  // After step 2 (identify_subscription), if customer mentions "cancel" at any point,
+  // pause the playbook and handle the cancel flow.
+  const cancelPatterns = /\b(cancel|stop charging|stop my subscription|don't want.*subscription|end.*subscription)\b/i;
+  const pastStep2 = step.step_order >= 2 || ctx.identified_subscription;
+  if (pastStep2 && !ctx.paused_for_cancel && !ctx.cancel_handled && cancelPatterns.test(msg) && step.type !== "cancel_subscription") {
+    // Check subscription status
+    const identifiedSub = ctx.identified_subscription as string | undefined;
+    const activeSubs = subs.filter(s => s.status === "active" || s.status === "paused");
+    const identifiedSubObj = identifiedSub ? subs.find(s => s.shopify_contract_id === identifiedSub) : null;
+    const isAlreadyCancelled = identifiedSubObj?.status === "cancelled";
+
+    if (isAlreadyCancelled && activeSubs.length === 0) {
+      // All subs cancelled — confirm and don't mention refund
+      const response = `I checked on your account and your subscription is cancelled. No more orders will be sent to you. No further action is needed on your part.`;
+      ctx.cancel_handled = true;
+      return {
+        action: "respond", response,
+        context: { cancel_handled: true, subscription_cancelled: true },
+        systemNote: `[Playbook] Cancel detected — subscription already cancelled. No active subs. Playbook paused, not mentioning refund.`,
+      };
+    }
+
+    if (activeSubs.length > 0) {
+      // Has active subs — launch cancel journey
+      const targetSub = identifiedSubObj?.status === "active" ? identifiedSubObj : activeSubs[0];
+      const targetItems = (targetSub.items as { title?: string }[] || []).map(i => i.title || "item").join(", ");
+
+      // Launch the cancel journey
+      try {
+        const { data: journeyDef } = await admin.from("journey_definitions")
+          .select("id, name")
+          .eq("workspace_id", wsId)
+          .eq("journey_type", "cancellation")
+          .eq("is_active", true)
+          .limit(1).single();
+
+        if (journeyDef) {
+          const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
+          await launchJourneyForTicket({
+            workspaceId: wsId, ticketId: tid, customerId: customer.id,
+            journeyId: journeyDef.id, journeyName: journeyDef.name,
+            triggerIntent: "cancel_subscription",
+            channel: (ctx._channel as string) || "email",
+            leadIn: `I can help you with that. I've sent you a link to manage your subscription — you can cancel, pause, or adjust your delivery schedule there.`,
+            ctaText: "Manage Subscription",
+          });
+
+          ctx.paused_for_cancel = true;
+          ctx.cancel_target_sub = targetSub.shopify_contract_id;
+
+          const response = `I can help you with that. I've sent you a link to manage your subscription for ${targetItems} — you can cancel, pause, or adjust your delivery schedule there.`;
+
+          return {
+            action: "respond", response,
+            context: { paused_for_cancel: true, cancel_target_sub: targetSub.shopify_contract_id },
+            systemNote: `[Playbook] Cancel detected — launching cancel journey for subscription #${targetSub.shopify_contract_id}. Playbook paused.`,
+          };
+        }
+      } catch (err) {
+        console.error("Failed to launch cancel journey:", err);
+      }
+    }
+  }
+
+  // If playbook is paused for cancel, don't run normal steps — wait for journey completion
+  if (ctx.paused_for_cancel && !ctx.cancel_journey_completed) {
+    // Check if the journey has completed
+    const { data: sessions } = await admin.from("journey_sessions")
+      .select("status, outcome")
+      .eq("ticket_id", tid)
+      .eq("workspace_id", wsId)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    const latest = sessions?.[0];
+    if (latest?.status === "completed") {
+      ctx.cancel_journey_completed = true;
+      ctx.paused_for_cancel = false;
+      const cancelled = latest.outcome === "cancelled";
+
+      // Confirm the result
+      let response: string;
+      if (cancelled) {
+        response = `Your subscription is now cancelled and no future orders will be sent.`;
+        ctx.subscription_cancelled = true;
+      } else {
+        response = `Your subscription has been updated based on your selections.`;
+      }
+
+      // Check for other active subs
+      const remainingActive = subs.filter(s => s.status === "active" && s.shopify_contract_id !== ctx.cancel_target_sub);
+      if (remainingActive.length > 0) {
+        const subItems = (remainingActive[0].items as { title?: string }[] || []).map(i => i.title || "item").join(", ");
+        response += ` I also noticed you have another active subscription for ${subItems}. Would you like to cancel that one as well?`;
+      }
+
+      // Reset playbook step to apply_policy so if customer brings up refund, it resumes there
+      const applyPolicyStep = allSteps.find(s => s.type === "apply_policy");
+      if (applyPolicyStep) {
+        await admin.from("tickets").update({ playbook_step: applyPolicyStep.step_order }).eq("id", tid);
+      }
+
+      return {
+        action: "respond", response,
+        context: { cancel_journey_completed: true, paused_for_cancel: false, subscription_cancelled: cancelled, cancel_handled: true },
+        systemNote: `[Playbook] Cancel journey completed. Outcome: ${latest.outcome}. ${cancelled ? "Subscription cancelled." : "Subscription saved."} Not mentioning refund. Playbook reset to apply_policy.`,
+      };
+    }
+
+    // Journey not yet completed — nudge or wait
+    const response = `I've sent you a link to manage your subscription. Please complete the steps there and I'll be here to help with anything else afterward.`;
+    return {
+      action: "respond", response,
+      systemNote: `[Playbook] Waiting for cancel journey completion. Playbook paused.`,
+    };
+  }
+
   // ── Global acceptance detection ──
   // If an offer has been made and not yet accepted, check every incoming message for acceptance.
   // If accepted, jump directly to initiate_return regardless of current step.
