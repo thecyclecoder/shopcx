@@ -464,8 +464,13 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
                 });
 
                 // Final AI response handling the sassy parting shot
+                // Pull next-steps from the accepted exception's instructions (tenant-specific, not hardcoded)
+                const acceptedTier = Number(ctx.current_exception_tier) || 1;
+                const acceptedEx = (exceptions || []).find((e: { tier: number; auto_grant: boolean }) => !e.auto_grant && e.tier === acceptedTier);
+                const exNextSteps = (acceptedEx as { instructions?: string } | undefined)?.instructions || "";
+
                 const closingAI = await genAI(
-                  { name: "Closing Response", type: "custom", instructions: "The customer accepted but left a sassy/rude parting shot. Be completely unfazed — do NOT acknowledge the negativity, do NOT apologize, do NOT empathize with their frustration. Just be positive and forward-looking. Something like: 'I'm glad I was able to get the return processed for you. Once you ship the product back, just send us the tracking number and we'll get your [refund/credit] issued as soon as we receive it.' Keep it to 2-3 sentences max. Warm but unbothered." },
+                  { name: "Closing Response", type: "custom", instructions: `The customer accepted but left a sassy/rude parting shot. Be completely unfazed — do NOT acknowledge the negativity, do NOT apologize, do NOT empathize with their frustration. Just be positive and forward-looking. Briefly restate what they need to do next based on the store policy rules and the return process: ${exNextSteps}\n\nKeep it to 2-3 sentences max. Warm but unbothered. Example tone: "I'm glad I was able to get this processed for you. [next steps from policy]. We'll take care of the rest from there."` },
                   `Customer accepted ${resLabel} for ${returnable.join(", ")}. Return being processed.`,
                   `Customer accepted but is upset about the experience.`,
                   sassyReply,
@@ -477,6 +482,27 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
                   data_found: "Customer accepted but left a sassy parting shot.",
                   condition_result: "AI sends professional closing with next steps.",
                   ai_response: closingAI, mock_customer_reply: "",
+                  warnings: [], skipped: false,
+                });
+
+                // Simulate post-acceptance loop: customer replies again with sass
+                const postAcceptMock = await aiCall(
+                  `You are simulating a ${sentimentLabel} customer who already accepted a return but is sending one more angry/sassy message. 1-2 sentences. Complaining about the experience, threatening to leave a bad review, or just venting.`,
+                  `The return was processed. Customer is ${sentimentLabel}. Generate one more parting shot.`, 80);
+
+                const postAcceptAI = await genAI(
+                  { name: "Post-Acceptance Loop", type: "custom", instructions: `The customer already accepted the return and we already told them next steps. They're just venting now. Do NOT re-negotiate, do NOT offer anything new, do NOT apologize. Just be positive, briefly restate what they need to do next based on store policy rules and the return process: ${exNextSteps}\n\nBe unfazed. 1-2 sentences max.` },
+                  `Post-acceptance: customer venting after return was processed.`,
+                  `Customer already accepted. Return initiated. Just restating next steps.`,
+                  postAcceptMock,
+                );
+
+                emitStep({
+                  step_name: "Post-Acceptance Loop (customer replies again)",
+                  step_type: "custom", step_order: (returnStep?.step_order || step.step_order) + 2,
+                  data_found: "Customer sent another message after accepting. Executor stays in post-acceptance loop.",
+                  condition_result: "AI restates next steps without re-negotiating. This loops indefinitely.",
+                  ai_response: postAcceptAI, mock_customer_reply: postAcceptMock,
                   warnings: [], skipped: false,
                 });
 

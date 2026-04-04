@@ -202,6 +202,20 @@ async function executeStep(
     ctx.policy_rules = policyRules;
   }
 
+  // ── Post-acceptance loop ──
+  // Once the offer was accepted and return initiated, any further messages get a
+  // "broken record" response: restate next steps, never re-negotiate.
+  if (ctx.offer_accepted && ctx.return_initiated) {
+    const response = await aiGenerate(
+      basePrompt(step, pers, policyRules),
+      `Customer data:\n${dataContext}\n\nCustomer message: "${msg}"\n\nThe customer already accepted the ${ctx.resolution_type === "refund_return" ? "refund" : "store credit"} return offer and we already initiated the return for orders: ${(ctx.return_orders as string[] || []).join(", ")}.\n\nDo NOT re-negotiate, do NOT offer anything new, do NOT apologize. Just be positive and briefly restate what they need to do next according to store policy rules. Be unfazed by any negativity — just repeat the next steps warmly and move on.`,
+    );
+    return {
+      action: "respond", response,
+      systemNote: `[Playbook] Post-acceptance loop: restated next steps. Not re-negotiating.`,
+    };
+  }
+
   // ── Global acceptance detection ──
   // If an offer has been made and not yet accepted, check every incoming message for acceptance.
   // If accepted, jump directly to initiate_return regardless of current step.
