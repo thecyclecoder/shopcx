@@ -476,13 +476,21 @@ export const unifiedTicketHandler = inngest.createFunction(
     if (st.turn > 0 && st.turn < MAX_CLARIFY) {
       return await step.run("clarify", async () => {
         // First try pattern matching on the clarification message (deterministic, fast)
+        // Normalize: strip HTML entities, apostrophes, smart quotes for fuzzy matching
+        const normalize = (s: string) => s.toLowerCase()
+          .replace(/&[^;]+;/g, "")     // HTML entities
+          .replace(/[\u2018\u2019\u0027\u2032]/g, "")  // smart quotes + apostrophes
+          .replace(/[''`]/g, "")        // other quote chars
+          .replace(/\s+/g, " ")         // normalize whitespace
+          .trim();
+        const msgNorm = normalize(msg);
+
         const { data: playbooks } = await admin.from("playbooks")
           .select("id, name, trigger_intents, trigger_patterns")
           .eq("workspace_id", wsId).eq("is_active", true);
-        const msgLower = msg.toLowerCase();
         for (const pb of playbooks || []) {
           const patterns = (pb.trigger_patterns as string[]) || [];
-          const matched = patterns.some(p => msgLower.includes(p.toLowerCase()));
+          const matched = patterns.some(p => msgNorm.includes(normalize(p)));
           if (matched) {
             const intent = (pb.trigger_intents as string[])?.[0] || "unknown";
             await sysNote(admin, tid, `[System] Clarify pattern match: "${intent}" via playbook "${pb.name}"`);
