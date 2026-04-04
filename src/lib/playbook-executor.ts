@@ -343,11 +343,21 @@ async function executeStep(
       };
     }
 
-    // Journey not yet completed — nudge or wait
-    const response = `I've sent you a link to manage your subscription. Please complete the steps there and I'll be here to help with anything else afterward.`;
+    // Journey not yet completed
+    // Only send a nudge if the customer sent a NEW message (not the auto-advance after launch)
+    if (ctx.cancel_journey_launched) {
+      // Customer messaged again while journey is pending — nudge them
+      const response = `I've sent you a link to manage your subscription. Please complete the steps there and I'll be here to help with anything else afterward.`;
+      return {
+        action: "respond", response,
+        systemNote: `[Playbook] Waiting for cancel journey completion. Nudging customer.`,
+      };
+    }
+    // First entry after launch — just mark as launched, don't send anything
     return {
-      action: "respond", response,
-      systemNote: `[Playbook] Waiting for cancel journey completion. Playbook paused.`,
+      action: "advance", newStep: step.step_order,
+      context: { cancel_journey_launched: true },
+      systemNote: `[Playbook] Cancel journey launched. Waiting for completion. No message sent.`,
     };
   }
 
