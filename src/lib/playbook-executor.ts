@@ -372,7 +372,7 @@ async function executeStep(
 
   switch (step.type) {
     case "identify_order":
-      return handleIdentifyOrder(orders, msg, step, dataContext, pers, policyRules);
+      return handleIdentifyOrder(orders, msg, step, dataContext, pers, policyRules, ctx);
 
     case "identify_subscription":
       return handleIdentifySubscription(subs, orders, ctx, step, dataContext, pers, policyRules);
@@ -581,6 +581,7 @@ function wrapResponse(response: string, pers: { name?: string; sign_off?: string
 async function handleIdentifyOrder(
   orders: OrderData[], msg: string, step: PlaybookStep,
   dataCtx: string, pers: { name?: string; tone?: string } | null, policyRules: string,
+  ctx: Record<string, unknown>,
 ): Promise<PlaybookExecResult> {
   if (orders.length === 0) {
     const response = await aiGenerate(
