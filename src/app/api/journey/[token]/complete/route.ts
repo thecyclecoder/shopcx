@@ -94,6 +94,12 @@ export async function POST(
       }
     }
 
+    if (journeyType === "cancel_subscription" || journeyType === "cancellation" || journeyType === "cancel") {
+      // Delegate to the cancelJourney handler below
+      // Set the flag so the handler picks it up after the code-driven block
+      config.cancelJourney = true;
+    }
+
     if (journeyType === "discount_signup" || journeyType === "marketing_signup") {
       const consentResponse = responses?.consent;
       if (consentResponse?.value === "yes") {
@@ -183,7 +189,10 @@ export async function POST(
       });
     }
 
-    return NextResponse.json({ success: true, message: actionLog.length > 0 ? "All done! We've updated your account." : "Thanks for letting us know!" });
+    // Don't return early for cancel journeys — let them fall through to the cancel handler
+    if (!config.cancelJourney) {
+      return NextResponse.json({ success: true, message: actionLog.length > 0 ? "All done! We've updated your account." : "Thanks for letting us know!" });
+    }
   }
 
   // Process cancel journey completion
