@@ -864,9 +864,9 @@ async function handleApplyPolicy(
     const response = `I'm looking at your account and the order you are having an issue with.${policyLink} ${briefReason} I won't be able to approve a return request since the order you mentioned is a recurring order.${cancelConfirm}`;
 
     return {
-      action: "respond", response,
-      context: { in_policy: inPolicy, out_of_policy: outOfPolicy, policy_applied: policy.name, failure_reasons: failureReasons },
-      systemNote: `[Playbook] Policy "${policy.name}" (brief, post-cancel): ${inPolicy.length} in-policy, ${outOfPolicy.length} out-of-policy.`,
+      action: "advance", newStep: step.step_order + 1, response,
+      context: { in_policy: inPolicy, out_of_policy: outOfPolicy, policy_applied: policy.name, failure_reasons: failureReasons, policy_explained_post_cancel: true },
+      systemNote: `[Playbook] Policy "${policy.name}" (brief, post-cancel): ${inPolicy.length} in-policy, ${outOfPolicy.length} out-of-policy. Advancing to exception flow.`,
     };
   }
 
