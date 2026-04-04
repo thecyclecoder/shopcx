@@ -181,16 +181,31 @@ async function handleSubscriptionEvent(
       title: (node.title as string) || "",
       type: (node.type as string) || "",
       value: val?.percentage ? Number(val.percentage)
-        : (val?.amount as { amount?: string })?.amount ? Number((val.amount as { amount: string }).amount)
+        : (val?.amount as { amount?: string } | undefined)?.amount ? Number((val!.amount as { amount: string }).amount)
         : val?.fixedAmount ? Number((val.fixedAmount as { amount?: string })?.amount || 0)
         : 0,
       valueType: val?.percentage ? "PERCENTAGE" : "FIXED_AMOUNT",
     };
   });
 
-  // Upsert subscription
+  // Upsert subscription — protect next_billing_date during active dunning
   if (contractId) {
-    await admin.from("subscriptions").upsert({
+    // Check if there's an active dunning cycle for this contract
+    const { data: activeDunning } = await admin.from("dunning_cycles")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .in("status", ["active", "skipped"])
+      .limit(1)
+      .single();
+
+    // If dunning is active, don't let the webhook override next_billing_date
+    // Our dunning system will set the correct date when it finishes
+    const nextBillingDate = activeDunning
+      ? undefined // Skip updating this field
+      : (data.nextBillingDate as string) || null;
+
+    const upsertData: Record<string, unknown> = {
       workspace_id: workspaceId,
       customer_id: dbCustomer.id,
       shopify_contract_id: contractId,
@@ -198,7 +213,6 @@ async function handleSubscriptionEvent(
       status: mapStatus(status),
       billing_interval: billingPolicy?.interval?.toLowerCase() || null,
       billing_interval_count: billingPolicy?.intervalCount || null,
-      next_billing_date: (data.nextBillingDate as string) || null,
       last_payment_status: (data.lastPaymentStatus as string)?.toLowerCase() || null,
       items,
       delivery_price_cents: dollarsToCents(deliveryPrice?.amount),
@@ -206,7 +220,14 @@ async function handleSubscriptionEvent(
       subscription_created_at: (data.createdAt as string) || null,
       applied_discounts: appliedDiscounts,
       updated_at: new Date().toISOString(),
-    }, { onConflict: "workspace_id,shopify_contract_id" });
+    };
+
+    // Only update next_billing_date if dunning isn't active
+    if (nextBillingDate !== undefined) {
+      upsertData.next_billing_date = nextBillingDate;
+    }
+
+    await admin.from("subscriptions").upsert(upsertData, { onConflict: "workspace_id,shopify_contract_id" });
 
     // Self-heal: if multiple CODE_DISCOUNT coupons detected, remove extras
     // AUTOMATIC_DISCOUNT types (Buy 2, Free Shipping) are managed by Shopify — don't touch
@@ -302,6 +323,13 @@ async function handleBillingEvent(
     return;
   }
 
+  // Ignore billing-skipped when Appstle defers to our dunning management
+  // These are just Appstle's internal state changes from our retry attempts
+  if (eventType === "subscription.billing-skipped" && data.status === "SKIPPED_DUNNING_MGMT") {
+    console.log(`Appstle billing-skipped (SKIPPED_DUNNING_MGMT) for contract ${contractId} — ignoring, our dunning manages this.`);
+    return;
+  }
+
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
 
   if (eventType === "subscription.billing-failure") {
@@ -315,7 +343,7 @@ async function handleBillingEvent(
 
   await admin.from("subscriptions").update(updates).eq("id", sub.id);
 
-  // Atomic increment consecutive_skips on billing-skipped
+  // Atomic increment consecutive_skips on billing-skipped (only non-dunning skips reach here)
   if (eventType === "subscription.billing-skipped") {
     await admin.rpc("increment_consecutive_skips", { p_sub_id: sub.id });
   }
@@ -433,6 +461,8 @@ async function handleBillingEvent(
         const cycleNumber = prev ? prev.cycle_number + 1 : 1;
         const billingAttemptId = data.billingAttemptId ? String(data.billingAttemptId) : null;
 
+        const originalBillingDate = data.billingDate ? String(data.billingDate) : new Date().toISOString();
+
         const { data: newCycle, error: cycleError } = await admin
           .from("dunning_cycles")
           .insert({
@@ -443,6 +473,7 @@ async function handleBillingEvent(
             cycle_number: cycleNumber,
             status: "active",
             billing_attempt_id: billingAttemptId,
+            original_billing_date: originalBillingDate,
           })
           .select("id, cycle_number")
           .single();

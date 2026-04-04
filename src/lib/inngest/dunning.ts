@@ -234,6 +234,7 @@ export const dunningPaymentFailed = inngest.createFunction(
       return getActiveDunningCycle(workspace_id, shopify_contract_id);
     });
     if (!postRotationCheck || postRotationCheck.status === "recovered") {
+      await step.run("reset-date-rotation", () => resetBillingDateAfterDunning(workspace_id, shopify_contract_id, cycle.id, true));
       return { status: "recovered", method: "card_rotation", cycle_id: cycle.id };
     }
 
@@ -300,12 +301,14 @@ export const dunningPaymentFailed = inngest.createFunction(
       return getActiveDunningCycle(workspace_id, shopify_contract_id);
     });
     if (!finalCheck || finalCheck.status === "recovered") {
+      await step.run("reset-date-payday", () => resetBillingDateAfterDunning(workspace_id, shopify_contract_id, cycle.id, true));
       return { status: "recovered", method: "payday_retry", cycle_id: cycle.id };
     }
 
-    // Step 8: Exhausted — mark cycle
+    // Step 8: Exhausted — mark cycle + reset billing date to stay on schedule
     await step.run("mark-exhausted", async () => {
       await updateDunningCycle(cycle.id, { status: "exhausted" });
+      await resetBillingDateAfterDunning(workspace_id, shopify_contract_id, cycle.id, false);
     });
 
     // Slack notification for exhausted dunning
@@ -403,6 +406,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
 
           if (billingRes.success) {
             await updateDunningCycle(cycle.id, { status: "recovered", recovered_at: new Date().toISOString() });
+            await resetBillingDateAfterDunning(workspace_id, cycle.shopify_contract_id, cycle.id, true);
           }
 
           return { contractId: cycle.shopify_contract_id, recovered: billingRes.success };
@@ -632,5 +636,68 @@ async function tagCustomerTickets(
 
   for (const ticket of tickets) {
     await addTicketTag(ticket.id, tag);
+  }
+}
+
+/**
+ * Reset the subscription's next billing date after dunning recovery or exhaustion.
+ *
+ * On RECOVERY: next date = now + billing interval (order was just placed)
+ * On EXHAUSTION: next date = original failure date + billing interval (missed one cycle, stay on schedule)
+ */
+async function resetBillingDateAfterDunning(
+  workspaceId: string,
+  shopifyContractId: string,
+  cycleId: string,
+  recovered: boolean,
+) {
+  const admin = createAdminClient();
+
+  const { data: cycle } = await admin.from("dunning_cycles")
+    .select("original_billing_date")
+    .eq("id", cycleId).single();
+
+  const { data: sub } = await admin.from("subscriptions")
+    .select("billing_interval, billing_interval_count")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", shopifyContractId).single();
+
+  if (!sub) return;
+
+  const interval = sub.billing_interval || "month";
+  const count = sub.billing_interval_count || 1;
+
+  // Calculate the base date
+  const baseDate = recovered
+    ? new Date() // Recovery: next billing from now
+    : new Date(cycle?.original_billing_date || new Date()); // Exhaustion: from original failure date
+
+  // Add one billing interval
+  const nextDate = new Date(baseDate);
+  if (interval === "week") nextDate.setDate(nextDate.getDate() + 7 * count);
+  else if (interval === "month") nextDate.setMonth(nextDate.getMonth() + count);
+  else if (interval === "year") nextDate.setFullYear(nextDate.getFullYear() + count);
+  else if (interval === "day") nextDate.setDate(nextDate.getDate() + count);
+
+  // Update locally
+  await admin.from("subscriptions")
+    .update({ next_billing_date: nextDate.toISOString(), updated_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", shopifyContractId);
+
+  // Update in Appstle via billing date change endpoint
+  try {
+    const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", workspaceId).single();
+    if (ws?.appstle_api_key_encrypted) {
+      const { decrypt } = await import("@/lib/crypto");
+      const apiKey = decrypt(ws.appstle_api_key_encrypted);
+      const dateStr = nextDate.toISOString().split("T")[0]; // YYYY-MM-DD
+      await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-date?contractId=${shopifyContractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(dateStr)}`,
+        { method: "PUT", headers: { "X-API-Key": apiKey } },
+      );
+    }
+  } catch (err) {
+    console.error(`Failed to reset billing date for ${shopifyContractId}:`, err);
   }
 }
