@@ -55,6 +55,7 @@ interface CustomerData {
 interface OrderData {
   id: string;
   order_number: string;
+  shopify_order_id: string;
   created_at: string;
   total_cents: number;
   financial_status: string;
@@ -327,7 +328,7 @@ async function fetchOrders(admin: Admin, wsId: string, custId: string, config: R
   }
 
   const { data } = await admin.from("orders")
-    .select("id, order_number, created_at, total_cents, financial_status, fulfillment_status, line_items, fulfillments, source_name")
+    .select("id, order_number, shopify_order_id, created_at, total_cents, financial_status, fulfillment_status, line_items, fulfillments, source_name")
     .eq("workspace_id", wsId)
     .in("customer_id", linkedIds)
     .gte("created_at", since)
@@ -724,15 +725,73 @@ async function handleInitiateReturn(
   const resolution = ctx.resolution_type as string || "store_credit_return";
   const resLabel = resolution.includes("refund") ? "refund" : "store credit";
 
+  // Create Shopify returns for each returnable order
+  const { createShopifyReturn, getReturnableItems } = await import("@/lib/shopify-returns");
+  const created: string[] = [];
+  const failed: string[] = [];
+
+  // Get the ticket ID from context
+  const { data: ticket } = await admin.from("tickets")
+    .select("id, customer_id")
+    .eq("id", ctx._ticket_id as string || "")
+    .single();
+  const ticketId = ticket?.id;
+
+  for (const orderNum of returnable) {
+    const order = orders.find(o => o.order_number === orderNum);
+    if (!order || !order.shopify_order_id) {
+      failed.push(orderNum);
+      continue;
+    }
+
+    try {
+      const shopifyOrderGid = `gid://shopify/Order/${order.shopify_order_id}`;
+      const returnableItems = await getReturnableItems(wsId, shopifyOrderGid);
+
+      if (returnableItems.length === 0) {
+        failed.push(orderNum);
+        continue;
+      }
+
+      await createShopifyReturn(wsId, {
+        orderId: order.id,
+        orderNumber: order.order_number,
+        shopifyOrderGid,
+        customerId: ticket?.customer_id || order.id,
+        ticketId,
+        resolutionType: resolution as "store_credit_return" | "refund_return" | "store_credit_no_return" | "refund_no_return",
+        returnLineItems: returnableItems.map(item => ({
+          fulfillmentLineItemId: item.fulfillmentLineItemId,
+          quantity: item.quantity,
+          title: item.title,
+        })),
+        source: "playbook",
+      });
+      created.push(orderNum);
+    } catch (err) {
+      console.error(`Failed to create return for order ${orderNum}:`, err);
+      failed.push(orderNum);
+    }
+  }
+
+  if (created.length === 0 && failed.length > 0) {
+    return {
+      action: "escalate_api_failure",
+      error: `Failed to create returns for: ${failed.join(", ")}`,
+      systemNote: `[Playbook] All return creations failed: ${failed.join(", ")}.`,
+      context: { offer_accepted: true },
+    };
+  }
+
   const response = await aiGenerate(
     basePrompt(step, pers, policyRules),
-    `Customer data:\n${dataCtx}\n\nOrders approved for return: ${returnable.join(", ")}\nResolution: ${resLabel}\n\nThe customer has accepted the ${resLabel} offer. Set up the return. Follow the store policy rules exactly when explaining the return process to the customer.`,
+    `Customer data:\n${dataCtx}\n\nOrders approved for return: ${created.join(", ")}${failed.length ? `\nFailed to process: ${failed.join(", ")}` : ""}\nResolution: ${resLabel}\n\nThe customer has accepted the ${resLabel} offer. Set up the return. Follow the store policy rules exactly when explaining the return process to the customer.`,
   );
 
   return {
     action: "advance", newStep: step.step_order + 1, response,
-    context: { return_initiated: true, return_orders: returnable, offer_accepted: true },
-    systemNote: `[Playbook] Return initiated for: ${returnable.join(", ")}. Resolution: ${resolution}. Customer accepted.`,
+    context: { return_initiated: true, return_orders: created, return_failed: failed, offer_accepted: true },
+    systemNote: `[Playbook] Return created in Shopify for: ${created.join(", ")}${failed.length ? `. Failed: ${failed.join(", ")}` : ""}. Resolution: ${resolution}.`,
   };
 }
 
