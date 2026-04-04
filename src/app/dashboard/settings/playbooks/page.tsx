@@ -1,7 +1,43 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
+
+interface SimStepResult {
+  step_name: string;
+  step_type: string;
+  step_order: number;
+  data_found: string;
+  condition_result: string;
+  ai_response: string;
+  mock_customer_reply: string;
+  warnings: string[];
+  skipped: boolean;
+}
+
+interface SimResult {
+  playbook_name: string;
+  customer_name: string;
+  customer_email: string;
+  sentiment: string;
+  initial_message: string;
+  steps: SimStepResult[];
+}
+
+interface CustomerOption {
+  id: string;
+  email: string;
+  first_name: string | null;
+  last_name: string | null;
+}
+
+const SENTIMENTS = [
+  { value: "angry", label: "Angry", color: "text-red-600 bg-red-50" },
+  { value: "frustrated", label: "Frustrated", color: "text-amber-600 bg-amber-50" },
+  { value: "confused", label: "Confused", color: "text-blue-600 bg-blue-50" },
+  { value: "neutral", label: "Neutral", color: "text-zinc-600 bg-zinc-100" },
+  { value: "polite", label: "Polite", color: "text-emerald-600 bg-emerald-50" },
+];
 
 interface PlaybookStep {
   id: string;
@@ -174,6 +210,17 @@ export default function PlaybooksSettingsPage() {
   const [editingPolicy, setEditingPolicy] = useState<PlaybookPolicy | null>(null);
   const [editingException, setEditingException] = useState<PlaybookException | null>(null);
 
+  // Simulation state
+  const [simModal, setSimModal] = useState<string | null>(null); // playbook ID
+  const [simCustomers, setSimCustomers] = useState<CustomerOption[]>([]);
+  const [simSearch, setSimSearch] = useState("");
+  const [simCustomerId, setSimCustomerId] = useState("");
+  const [simMessage, setSimMessage] = useState("");
+  const [simSentiment, setSimSentiment] = useState("angry");
+  const [simRunning, setSimRunning] = useState(false);
+  const [simResult, setSimResult] = useState<SimResult | null>(null);
+  const simSearchTimer = useRef<NodeJS.Timeout | null>(null);
+
   const fetchData = useCallback(async () => {
     try {
       const res = await fetch(`/api/workspaces/${workspace.id}/playbooks`);
@@ -186,6 +233,57 @@ export default function PlaybooksSettingsPage() {
   }, [workspace.id]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  const searchCustomers = useCallback(async (q: string) => {
+    if (q.length < 2) { setSimCustomers([]); return; }
+    try {
+      const res = await fetch(`/api/customers?search=${encodeURIComponent(q)}&limit=10`);
+      if (res.ok) {
+        const data = await res.json();
+        setSimCustomers((data.customers || []).map((c: CustomerOption & Record<string, unknown>) => ({
+          id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name,
+        })));
+      }
+    } catch {}
+  }, []);
+
+  const handleSimSearchChange = (q: string) => {
+    setSimSearch(q);
+    if (simSearchTimer.current) clearTimeout(simSearchTimer.current);
+    simSearchTimer.current = setTimeout(() => searchCustomers(q), 300);
+  };
+
+  const openSimModal = (pbId: string) => {
+    setSimModal(pbId);
+    setSimResult(null);
+    setSimCustomerId("");
+    setSimSearch("");
+    setSimMessage("");
+    setSimSentiment("angry");
+    setSimCustomers([]);
+  };
+
+  const runSimulation = async () => {
+    if (!simModal || !simCustomerId || !simMessage) return;
+    setSimRunning(true);
+    setSimResult(null);
+    try {
+      const res = await fetch(`/api/workspaces/${workspace.id}/playbooks/simulate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          playbook_id: simModal,
+          customer_id: simCustomerId,
+          message: simMessage,
+          sentiment: simSentiment,
+        }),
+      });
+      if (res.ok) {
+        setSimResult(await res.json());
+      }
+    } catch {}
+    setSimRunning(false);
+  };
 
   const toggleActive = async (pb: Playbook) => {
     await fetch(`/api/workspaces/${workspace.id}/playbooks`, {
@@ -492,6 +590,7 @@ export default function PlaybooksSettingsPage() {
                 </button>
                 {!isEditing && (
                   <div className="flex items-center gap-2">
+                    <button onClick={() => openSimModal(pb.id)} className="text-xs text-violet-500 hover:text-violet-700">Simulate</button>
                     <button onClick={() => startEdit(pb)} className="text-xs text-indigo-500 hover:text-indigo-700">Edit</button>
                     <button onClick={() => deletePlaybook(pb.id)} className="text-xs text-red-400 hover:text-red-600">Delete</button>
                     <button
@@ -1037,6 +1136,197 @@ export default function PlaybooksSettingsPage() {
           </div>
         </div>
       </div>
+
+      {/* ── SIMULATION MODAL ── */}
+      {simModal && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 pt-12">
+          <div className="w-full max-w-3xl rounded-lg border border-zinc-200 bg-white shadow-2xl dark:border-zinc-700 dark:bg-zinc-900">
+            {/* Modal header */}
+            <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-700">
+              <div>
+                <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Simulate Playbook</h2>
+                <p className="text-xs text-zinc-500">Run a dry-run against real customer data to test your playbook configuration.</p>
+              </div>
+              <button onClick={() => { setSimModal(null); setSimResult(null); }} className="text-zinc-400 hover:text-zinc-600 text-xl leading-none">&times;</button>
+            </div>
+
+            {/* Input form */}
+            <div className="border-b border-zinc-200 px-6 py-4 dark:border-zinc-700 space-y-4">
+              {/* Customer search */}
+              <div>
+                <label className="block text-xs font-medium text-zinc-500 mb-1">Customer</label>
+                {simCustomerId ? (
+                  <div className="flex items-center gap-2">
+                    <span className="rounded bg-indigo-50 px-3 py-1.5 text-sm text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
+                      {simCustomers.find(c => c.id === simCustomerId)?.email || simCustomerId}
+                    </span>
+                    <button onClick={() => { setSimCustomerId(""); setSimSearch(""); }} className="text-xs text-red-400 hover:text-red-600">Change</button>
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <input
+                      value={simSearch}
+                      onChange={(e) => handleSimSearchChange(e.target.value)}
+                      placeholder="Search by name or email..."
+                      className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                    />
+                    {simCustomers.length > 0 && (
+                      <div className="absolute top-full left-0 right-0 z-10 mt-1 max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+                        {simCustomers.map(c => (
+                          <button
+                            key={c.id}
+                            onClick={() => { setSimCustomerId(c.id); setSimSearch(""); }}
+                            className="block w-full px-3 py-2 text-left text-sm hover:bg-zinc-50 dark:hover:bg-zinc-700"
+                          >
+                            <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                              {c.first_name || ""} {c.last_name || ""}
+                            </span>
+                            <span className="ml-2 text-zinc-500">{c.email}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Message */}
+              <div>
+                <label className="block text-xs font-medium text-zinc-500 mb-1">Customer message</label>
+                <textarea
+                  value={simMessage}
+                  onChange={(e) => setSimMessage(e.target.value)}
+                  rows={2}
+                  placeholder="e.g. You charged me without permission, I never signed up for this"
+                  className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                />
+              </div>
+
+              {/* Sentiment */}
+              <div>
+                <label className="block text-xs font-medium text-zinc-500 mb-1">Customer sentiment</label>
+                <div className="flex gap-2">
+                  {SENTIMENTS.map(s => (
+                    <button
+                      key={s.value}
+                      onClick={() => setSimSentiment(s.value)}
+                      className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${simSentiment === s.value ? s.color + " ring-2 ring-offset-1 ring-current" : "text-zinc-400 bg-zinc-100 dark:bg-zinc-800"}`}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Run button */}
+              <button
+                onClick={runSimulation}
+                disabled={simRunning || !simCustomerId || !simMessage}
+                className="rounded-md bg-violet-500 px-4 py-2 text-sm font-medium text-white hover:bg-violet-600 disabled:opacity-50"
+              >
+                {simRunning ? "Simulating..." : "Run Simulation"}
+              </button>
+            </div>
+
+            {/* Results */}
+            {simRunning && (
+              <div className="px-6 py-8 text-center">
+                <div className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-violet-500 border-t-transparent" />
+                <p className="mt-2 text-sm text-zinc-500">Running simulation with Sonnet... this takes 15-30 seconds.</p>
+              </div>
+            )}
+
+            {simResult && (
+              <div className="px-6 py-4 max-h-[60vh] overflow-y-auto">
+                <div className="mb-4 rounded-md bg-zinc-50 p-3 dark:bg-zinc-800/50">
+                  <div className="text-xs text-zinc-500">
+                    <span className="font-medium">Playbook:</span> {simResult.playbook_name} |
+                    <span className="ml-2 font-medium">Customer:</span> {simResult.customer_name} ({simResult.customer_email}) |
+                    <span className="ml-2 font-medium">Sentiment:</span> {simResult.sentiment}
+                  </div>
+                  <div className="mt-1 rounded bg-zinc-200 px-2 py-1 text-xs dark:bg-zinc-700 dark:text-zinc-300">
+                    &ldquo;{simResult.initial_message}&rdquo;
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  {simResult.steps.map((s, i) => (
+                    <div key={i} className={`rounded-lg border p-4 ${s.warnings.length > 0 ? "border-amber-200 dark:border-amber-800" : "border-zinc-200 dark:border-zinc-700"}`}>
+                      {/* Step header */}
+                      <div className="flex items-center gap-2 mb-3">
+                        <StepIcon type={s.step_type} />
+                        <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                          Step {s.step_order + 1}: {s.step_name}
+                        </span>
+                        <span className="rounded bg-zinc-200 px-1 py-0.5 text-[10px] font-mono text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">{s.step_type}</span>
+                        {s.skipped && <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-500">SKIPPED</span>}
+                      </div>
+
+                      {/* Data found */}
+                      <div className="mb-2">
+                        <div className="text-[10px] font-medium text-zinc-400 uppercase tracking-wider mb-0.5">Data Found</div>
+                        <pre className="whitespace-pre-wrap rounded bg-zinc-50 px-2 py-1.5 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">{s.data_found || "—"}</pre>
+                      </div>
+
+                      {/* Condition result */}
+                      <div className="mb-2">
+                        <div className="text-[10px] font-medium text-zinc-400 uppercase tracking-wider mb-0.5">Condition Result</div>
+                        <div className="text-xs text-zinc-700 dark:text-zinc-300">{s.condition_result || "—"}</div>
+                      </div>
+
+                      {/* Warnings */}
+                      {s.warnings.length > 0 && (
+                        <div className="mb-2 space-y-1">
+                          {s.warnings.map((w, wi) => (
+                            <div key={wi} className="flex items-start gap-1.5 rounded bg-amber-50 px-2 py-1.5 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+                              <span className="shrink-0 mt-0.5">&#9888;</span>
+                              <span>{w}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* AI response */}
+                      {s.ai_response && !s.skipped && (
+                        <div className="mb-2">
+                          <div className="text-[10px] font-medium text-indigo-400 uppercase tracking-wider mb-0.5">AI Response</div>
+                          <div className="rounded-md border-l-2 border-indigo-300 bg-indigo-50 px-3 py-2 text-sm text-zinc-800 dark:border-indigo-700 dark:bg-indigo-950 dark:text-zinc-200">
+                            {s.ai_response}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Mock customer reply */}
+                      {s.mock_customer_reply && (
+                        <div>
+                          <div className="text-[10px] font-medium text-violet-400 uppercase tracking-wider mb-0.5">Mock Customer Reply ({simResult.sentiment})</div>
+                          <div className="rounded-md border-l-2 border-violet-300 bg-violet-50 px-3 py-2 text-sm text-zinc-800 dark:border-violet-700 dark:bg-violet-950 dark:text-zinc-200">
+                            &ldquo;{s.mock_customer_reply}&rdquo;
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Summary */}
+                <div className="mt-4 rounded-md bg-zinc-50 p-3 dark:bg-zinc-800/50">
+                  <div className="text-xs font-medium text-zinc-500 mb-1">Summary</div>
+                  <div className="text-xs text-zinc-600 dark:text-zinc-400 space-y-0.5">
+                    <p>{simResult.steps.length} steps total, {simResult.steps.filter(s => s.skipped).length} skipped</p>
+                    <p>{simResult.steps.reduce((n, s) => n + s.warnings.length, 0)} warnings found</p>
+                    {simResult.steps.some(s => s.warnings.length > 0) && (
+                      <p className="text-amber-600 dark:text-amber-400 font-medium mt-1">
+                        Review warnings above to ensure your playbook handles this scenario correctly.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
