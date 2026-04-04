@@ -45,7 +45,7 @@ export async function POST(
       const linkResponse = responses?.link_accounts;
       const confirmResponse = responses?.confirm_link;
 
-      if (confirmResponse?.value === "yes" && linkResponse?.value) {
+      if (confirmResponse?.value?.toLowerCase() === "yes" && linkResponse?.value) {
         const confirmedIds = linkResponse.value.split(",").map((v: string) => v.trim()).filter(Boolean);
         const confirmedSet = new Set(confirmedIds);
 
@@ -83,7 +83,7 @@ export async function POST(
             actionLog.push(`Rejected account: ${m.email}`);
           }
         }
-      } else if (confirmResponse?.value === "no" || outcome === "declined") {
+      } else if (confirmResponse?.value?.toLowerCase() === "no" || outcome === "declined") {
         // Reject all
         for (const m of unlinked) {
           await admin.from("customer_link_rejections").upsert({
