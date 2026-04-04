@@ -273,6 +273,11 @@ export default function PlaybooksSettingsPage() {
   const [simResult, setSimResult] = useState<SimResult | null>(null);
   const [simClarification, setSimClarification] = useState<SimClarification | null>(null);
   const [simClarResponse, setSimClarResponse] = useState("");
+  const [fixNotes, setFixNotes] = useState("");
+  const [fixRunning, setFixRunning] = useState(false);
+  const [fixChanges, setFixChanges] = useState<{ target: string; field_label: string; old_value: string; new_value: string; reason: string; db_id: string; table: string; field: string; enabled: boolean }[] | null>(null);
+  const [fixApplying, setFixApplying] = useState(false);
+  const [fixApplied, setFixApplied] = useState(false);
   const simSearchTimer = useRef<NodeJS.Timeout | null>(null);
 
   const fetchData = useCallback(async () => {
@@ -317,6 +322,9 @@ export default function PlaybooksSettingsPage() {
     setSimMessage("");
     setSimSentiment("angry");
     setSimCustomers([]);
+    setFixNotes("");
+    setFixChanges(null);
+    setFixApplied(false);
   };
 
   const runSimulation = async (clarificationReply?: string) => {
@@ -347,6 +355,47 @@ export default function PlaybooksSettingsPage() {
       }
     } catch {}
     setSimRunning(false);
+  };
+
+  const runFix = async () => {
+    if (!simModal || !fixNotes || !simResult) return;
+    setFixRunning(true);
+    setFixChanges(null);
+    setFixApplied(false);
+    try {
+      const res = await fetch(`/api/workspaces/${workspace.id}/playbooks/fix`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          playbook_id: simModal,
+          notes: fixNotes,
+          simulation_result: simResult,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setFixChanges((data.changes || []).map((c: Record<string, unknown>) => ({ ...c, enabled: true })));
+      }
+    } catch {}
+    setFixRunning(false);
+  };
+
+  const applyFix = async () => {
+    if (!fixChanges || !simModal) return;
+    setFixApplying(true);
+    const enabled = fixChanges.filter(c => c.enabled);
+    try {
+      const res = await fetch(`/api/workspaces/${workspace.id}/playbooks/fix`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ changes: enabled }),
+      });
+      if (res.ok) {
+        setFixApplied(true);
+        await fetchData();
+      }
+    } catch {}
+    setFixApplying(false);
   };
 
   const toggleActive = async (pb: Playbook) => {
@@ -1447,6 +1496,90 @@ export default function PlaybooksSettingsPage() {
                       </button>
                     </div>
                   </div>
+                </div>
+
+                {/* Fix with AI */}
+                <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
+                  <h4 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-2">Fix with AI</h4>
+                  <p className="text-xs text-zinc-500 mb-3">
+                    Describe what&apos;s wrong and Sonnet will propose changes to your playbook settings.
+                  </p>
+                  <textarea
+                    value={fixNotes}
+                    onChange={(e) => setFixNotes(e.target.value)}
+                    rows={3}
+                    placeholder={"e.g.\n- Too apologetic in step 4, be more neutral\n- AI offered to pay for shipping — we never do that\n- Step 6 reverted to tier 1 instead of escalating to tier 2"}
+                    className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 mb-3"
+                  />
+                  <button
+                    onClick={runFix}
+                    disabled={fixRunning || !fixNotes}
+                    className="rounded-md bg-cyan-500 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
+                  >
+                    {fixRunning ? "Analyzing..." : "Fix with AI"}
+                  </button>
+
+                  {/* Proposed changes */}
+                  {fixChanges && fixChanges.length > 0 && (
+                    <div className="mt-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h5 className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">{fixChanges.length} proposed change{fixChanges.length !== 1 ? "s" : ""}</h5>
+                        {!fixApplied && (
+                          <button
+                            onClick={applyFix}
+                            disabled={fixApplying || fixChanges.every(c => !c.enabled)}
+                            className="rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+                          >
+                            {fixApplying ? "Applying..." : `Apply ${fixChanges.filter(c => c.enabled).length} Change${fixChanges.filter(c => c.enabled).length !== 1 ? "s" : ""}`}
+                          </button>
+                        )}
+                        {fixApplied && (
+                          <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-700">Applied</span>
+                        )}
+                      </div>
+
+                      {fixChanges.map((c, i) => (
+                        <div key={i} className={`rounded-md border p-3 ${c.enabled ? "border-cyan-200 bg-cyan-50 dark:border-cyan-800 dark:bg-cyan-950" : "border-zinc-200 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800 opacity-50"}`}>
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={c.enabled}
+                                onChange={() => {
+                                  const updated = [...fixChanges];
+                                  updated[i] = { ...updated[i], enabled: !updated[i].enabled };
+                                  setFixChanges(updated);
+                                }}
+                                disabled={fixApplied}
+                                className="rounded border-zinc-300"
+                              />
+                              <span className="text-xs font-semibold text-zinc-800 dark:text-zinc-200">{c.field_label}</span>
+                            </div>
+                            <span className="text-[10px] text-zinc-400 font-mono shrink-0">{c.target}</span>
+                          </div>
+                          <p className="text-[10px] text-cyan-700 dark:text-cyan-300 mb-2">{c.reason}</p>
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            <div>
+                              <div className="text-[10px] font-medium text-red-400 uppercase tracking-wider mb-0.5">Before</div>
+                              <div className="rounded bg-red-50 px-2 py-1.5 text-xs text-red-800 dark:bg-red-950 dark:text-red-200 whitespace-pre-wrap">
+                                {c.old_value || "(empty)"}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] font-medium text-emerald-400 uppercase tracking-wider mb-0.5">After</div>
+                              <div className="rounded bg-emerald-50 px-2 py-1.5 text-xs text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200 whitespace-pre-wrap">
+                                {c.new_value || "(empty)"}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {fixChanges && fixChanges.length === 0 && (
+                    <p className="mt-3 text-xs text-zinc-500">No changes needed — the playbook looks correct for these notes.</p>
+                  )}
                 </div>
               </div>
             )}
