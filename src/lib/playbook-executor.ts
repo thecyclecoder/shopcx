@@ -208,12 +208,12 @@ async function executeStep(
         .select("*").eq("policy_id", policyId).order("tier");
       return handleOfferException(
         exceptions || [], customer, orders, ctx, step, dataContext, pers,
-        exceptionsUsed, playbook.exception_limit, tid, admin,
+        exceptionsUsed, playbook.exception_limit, tid, admin, msg,
       );
     }
 
     case "initiate_return":
-      return handleInitiateReturn(admin, wsId, orders, ctx, step, dataContext, pers);
+      return handleInitiateReturn(admin, wsId, orders, ctx, step, dataContext, pers, msg);
 
     case "cancel_subscription":
       return handleCancelSubscription(admin, wsId, subs, ctx, step, dataContext, pers);
@@ -521,6 +521,7 @@ async function handleOfferException(
   ctx: Record<string, unknown>, step: PlaybookStep, dataCtx: string,
   pers: { name?: string; tone?: string } | null,
   exceptionsUsed: number, exceptionLimit: number, tid: string, admin: Admin,
+  msg: string,
 ): Promise<PlaybookExecResult> {
   const outOfPolicy = (ctx.out_of_policy as string[]) || [];
   if (outOfPolicy.length === 0) {
@@ -529,27 +530,40 @@ async function handleOfferException(
 
   // Check auto-grant exceptions first
   for (const ex of exceptions.filter(e => e.auto_grant)) {
-    // Auto-grants bypass conditions — check trigger type against order data
     const autoGranted = checkAutoGrant(ex.auto_grant_trigger, orders, ctx);
     if (autoGranted) {
       return {
         action: "advance", newStep: step.step_order + 1,
-        context: { exception_granted: ex.name, exception_tier: 0, resolution_type: ex.resolution_type, auto_granted: true },
+        context: { exception_granted: ex.name, exception_tier: 0, resolution_type: ex.resolution_type, auto_granted: true, offer_accepted: true },
         systemNote: `[Playbook] Auto-granted exception: ${ex.name} (${ex.auto_grant_trigger}).`,
       };
     }
   }
 
-  // Check tiered exceptions
   const currentTier = Number(ctx.current_exception_tier) || 0;
+
+  // If we already offered an exception, check if customer accepted or rejected
+  if (currentTier > 0 && ctx.exception_offered) {
+    const accepted = detectAcceptance(msg);
+    if (accepted) {
+      return {
+        action: "advance", newStep: step.step_order + 1,
+        context: { offer_accepted: true },
+        systemNote: `[Playbook] Customer accepted exception: ${ctx.exception_offered} (${ctx.resolution_type}).`,
+      };
+    }
+    // Customer rejected — try next tier
+  }
+
+  // Check tiered exceptions (next tier after current)
   const nextTierExceptions = exceptions.filter(e => !e.auto_grant && e.tier > currentTier);
 
   if (nextTierExceptions.length === 0 || exceptionsUsed >= exceptionLimit) {
-    // No more tiers or limit reached
+    // No more tiers or limit reached — advance (will hit stand_firm)
     return {
       action: "advance", newStep: step.step_order + 1,
       context: { exception_exhausted: true },
-      systemNote: `[Playbook] Exception limit reached (${exceptionsUsed}/${exceptionLimit}) or no more tiers.`,
+      systemNote: `[Playbook] ${nextTierExceptions.length === 0 ? "All exception tiers exhausted" : `Exception limit reached (${exceptionsUsed}/${exceptionLimit})`}. Moving to stand firm.`,
     };
   }
 
@@ -557,35 +571,59 @@ async function handleOfferException(
   const eligible = evaluateCustomerConditions(nextException.conditions, customer);
 
   if (!eligible) {
+    // Try remaining tiers
+    const remaining = nextTierExceptions.filter(e => e.tier > nextException.tier);
+    for (const fallback of remaining) {
+      if (evaluateCustomerConditions(fallback.conditions, customer)) {
+        return offerException(fallback, outOfPolicy, step, dataCtx, pers, exceptionsUsed, exceptionLimit, tid, admin);
+      }
+    }
     return {
       action: "advance", newStep: step.step_order + 1,
       context: { exception_exhausted: true },
-      systemNote: `[Playbook] Customer doesn't meet exception conditions for tier ${nextException.tier}.`,
+      systemNote: `[Playbook] Customer doesn't meet conditions for any remaining exception tier.`,
     };
   }
 
-  // Offer the exception
+  return offerException(nextException, outOfPolicy, step, dataCtx, pers, exceptionsUsed, exceptionLimit, tid, admin);
+}
+
+async function offerException(
+  ex: PlaybookException, outOfPolicy: string[], step: PlaybookStep, dataCtx: string,
+  pers: { name?: string; tone?: string } | null,
+  exceptionsUsed: number, exceptionLimit: number, tid: string, admin: Admin,
+): Promise<PlaybookExecResult> {
   const mostRecentOutOfPolicy = outOfPolicy[outOfPolicy.length - 1];
+  const isEscalation = Number(ex.tier) > 1;
+
   const response = await aiGenerate(
     basePrompt(step, pers),
-    `Customer data:\n${dataCtx}\n\nException instructions: ${nextException.instructions || ""}\nException: "${nextException.name}" (${nextException.resolution_type})\nApplies to: ${mostRecentOutOfPolicy}\n\nOffer this exception to the customer. ${outOfPolicy.length > 1 ? `Note: this exception only applies to 1 order (${mostRecentOutOfPolicy}). Orders ${outOfPolicy.filter(o => o !== mostRecentOutOfPolicy).join(", ")} do not qualify.` : ""}`,
+    `Customer data:\n${dataCtx}\n\nException instructions: ${ex.instructions || ""}\nException: "${ex.name}" (${ex.resolution_type})\nApplies to: ${mostRecentOutOfPolicy}\n${isEscalation ? "The customer rejected the previous offer. This is an escalated offer — present it as a better alternative without mentioning that other options exist beyond this one." : "Present this offer clearly. Do NOT hint that better alternatives exist."}\n\nOffer this exception. ${outOfPolicy.length > 1 ? `Note: applies to 1 order (${mostRecentOutOfPolicy}). Orders ${outOfPolicy.filter(o => o !== mostRecentOutOfPolicy).join(", ")} do not qualify.` : ""}`,
   );
 
   await admin.from("tickets").update({ playbook_exceptions_used: exceptionsUsed + 1 }).eq("id", tid);
 
   return {
     action: "respond", response,
-    context: { current_exception_tier: nextException.tier, exception_offered: nextException.name, resolution_type: nextException.resolution_type },
-    systemNote: `[Playbook] Offered tier ${nextException.tier} exception: ${nextException.name} for ${mostRecentOutOfPolicy}.`,
+    context: { current_exception_tier: ex.tier, exception_offered: ex.name, resolution_type: ex.resolution_type },
+    systemNote: `[Playbook] Offered tier ${ex.tier} exception: ${ex.name} for ${mostRecentOutOfPolicy}.`,
   };
+}
+
+function detectAcceptance(msg: string): boolean {
+  const lower = msg.toLowerCase();
+  const acceptPatterns = /\b(yes|yeah|yep|ok|okay|sure|fine|sounds good|i('ll| will) (take|accept|do)|go ahead|let('s| us) do|that works|proceed|i('d| would) like that|deal)\b/i;
+  const rejectPatterns = /\b(no|nope|not acceptable|refuse|ridiculous|unacceptable|won't|don't want|i want my money|real money|cash refund|full refund|not good enough|hell no|absolutely not|are you kidding|bs|bullshit)\b/i;
+  if (rejectPatterns.test(lower)) return false;
+  if (acceptPatterns.test(lower)) return true;
+  return false; // Ambiguous — treat as rejection to escalate
 }
 
 async function handleInitiateReturn(
   admin: Admin, wsId: string, orders: OrderData[], ctx: Record<string, unknown>,
   step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null,
+  msg: string,
 ): Promise<PlaybookExecResult> {
-  // For now, log what we would do — full Shopify return integration is a follow-up
-  const identifiedOrders = (ctx.identified_orders as string[]) || [];
   const inPolicy = (ctx.in_policy as string[]) || [];
   const exceptionOrder = ctx.exception_offered ? [(ctx.out_of_policy as string[] || []).slice(-1)[0]] : [];
   const returnable = [...new Set([...inPolicy, ...exceptionOrder])];
@@ -594,15 +632,34 @@ async function handleInitiateReturn(
     return { action: "advance", newStep: step.step_order + 1, systemNote: "[Playbook] No returnable orders." };
   }
 
+  // Gate: only proceed if customer accepted the offer
+  if (!ctx.offer_accepted) {
+    // Check if this message is the acceptance
+    const accepted = detectAcceptance(msg);
+    if (!accepted) {
+      // Customer hasn't accepted — don't initiate. Send back to offer step or stand firm
+      return {
+        action: "advance", newStep: step.step_order + 1,
+        context: { offer_accepted: false },
+        systemNote: "[Playbook] Customer hasn't accepted return offer. Skipping initiate_return.",
+      };
+    }
+    // Customer accepted in this message
+    ctx.offer_accepted = true;
+  }
+
+  const resolution = ctx.resolution_type as string || "store_credit_return";
+  const resLabel = resolution.includes("refund") ? "refund" : "store credit";
+
   const response = await aiGenerate(
     basePrompt(step, pers),
-    `Customer data:\n${dataCtx}\n\nOrders approved for return: ${returnable.join(", ")}\nResolution: ${ctx.resolution_type || "store_credit_return"}\n\nLet the customer know you're setting up the return. They'll receive return instructions via email. They'll need to ship the product back (they cover shipping). Once received, their ${ctx.resolution_type === "refund_return" ? "refund" : "store credit"} will be issued.`,
+    `Customer data:\n${dataCtx}\n\nOrders approved for return: ${returnable.join(", ")}\nResolution: ${resLabel}\n\nThe customer has accepted the ${resLabel} offer. Set up the return. Important rules:\n- Customer pays their own shipping. We do NOT provide a prepaid label.\n- Customer must send us the tracking number once they ship so we can track receipt.\n- ${resLabel} is issued only after we receive and verify the returned product.\n- Be clear about these requirements.`,
   );
 
   return {
     action: "advance", newStep: step.step_order + 1, response,
-    context: { return_initiated: true, return_orders: returnable },
-    systemNote: `[Playbook] Return initiated for: ${returnable.join(", ")}. Resolution: ${ctx.resolution_type || "store_credit_return"}.`,
+    context: { return_initiated: true, return_orders: returnable, offer_accepted: true },
+    systemNote: `[Playbook] Return initiated for: ${returnable.join(", ")}. Resolution: ${resolution}. Customer accepted.`,
   };
 }
 

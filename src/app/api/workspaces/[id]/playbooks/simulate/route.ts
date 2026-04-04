@@ -195,235 +195,270 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
       const ctx: Record<string, unknown> = {};
       let exceptionsUsed = 0;
 
+      // Helper: generate AI response for a step
+      async function genAI(step: { name: string; type: string; instructions?: string | null }, dataFound: string, condResult: string, custMsg: string) {
+        return aiCall(
+          ["You are simulating a customer support AI for a playbook dry-run. Generate the AI response for this step.",
+           "Rules: max 2-3 sentences per paragraph. Plain text only, no markdown.",
+           step.instructions ? `Step instructions: ${step.instructions}` : ""].filter(Boolean).join("\n"),
+          `Customer data:\n${dataSummary}\n\nPlaybook context: ${JSON.stringify(ctx)}\nStep: "${step.name}" (${step.type})\nData found: ${dataFound}\nCondition result: ${condResult}\n\nCustomer message: "${custMsg}"\n\nGenerate what the AI would say. Keep it realistic.`, 300);
+      }
+
+      // Helper: generate mock customer reply
+      async function genMock(aiSaid: string, stepName: string, reject = false) {
+        if (reject) {
+          return aiCall(
+            `You are simulating a ${sentimentLabel} customer who has REJECTED the offer. Generate a brief rejection reply (1-2 sentences). Sentiment: ${sentimentLabel}.`,
+            `AI offered: "${aiSaid}"\nGenerate a rejection. The customer doesn't want this offer.`, 100);
+        }
+        return aiCall(
+          [`You are simulating a ${sentimentLabel} customer replying to a support agent. Sentiment: ${sentimentLabel}.`,
+           "Generate a realistic, brief customer reply (1-3 sentences). Match the sentiment exactly.",
+           sentimentLabel === "angry" ? "Be hostile, use caps or exclamations. Demand resolution." : "",
+           sentimentLabel === "frustrated" ? "Be exasperated, short-tempered." : "",
+           sentimentLabel === "confused" ? "Ask clarifying questions." : "",
+           sentimentLabel === "polite" ? "Be cooperative and understanding." : "",
+           sentimentLabel === "neutral" ? "Be straightforward." : "",
+           "Do NOT include any metadata, just the customer's words."].filter(Boolean).join("\n"),
+          `AI said:\n"${aiSaid}"\n\nContext: customer originally said "${message}" about ${playbook.name.toLowerCase()}.\nStep: ${stepName}\n\nGenerate a realistic reply from the ${sentimentLabel} customer.`, 150);
+      }
+
+      // Helper: push + stream a step
+      function emitStep(s: SimStep) {
+        simSteps.push(s);
+        // Calculate total including projected stand_firm rounds
+        const totalProjected = (steps?.length || 0) + Math.max(0, (playbook.stand_firm_max || 3) - 1) + eligibleTierCount - 1;
+        send({ type: "step", step_index: simSteps.length - 1, total_steps: Math.max(totalProjected, simSteps.length), ...s });
+      }
+
+      // Pre-calculate eligible tiers for progress bar
+      const policyStepCfg = steps.find((s: { type: string }) => s.type === "offer_exception")?.config;
+      const polExAll = policyStepCfg?.policy_id
+        ? (exceptions || []).filter((e: { policy_id: string; auto_grant: boolean }) => e.policy_id === (policyStepCfg as { policy_id: string }).policy_id && !e.auto_grant)
+        : [];
+      const eligibleTierCount = polExAll.filter((e: { conditions: Record<string, unknown> }) => evalCustomerConditions(e.conditions, customer).pass).length;
+
       for (const step of steps) {
-    const warnings: string[] = [];
-    let dataFound = "";
-    let conditionResult = "";
-    let aiResponse = "";
-    let mockReply = "";
-    let skipped = false;
+        const warnings: string[] = [];
+        let dataFound = "";
+        let conditionResult = "";
+        let aiResponse = "";
+        let mockReply = "";
+        let skipped = false;
 
-    // ── Data found for this step ──
-    switch (step.type) {
-      case "identify_order": {
-        dataFound = `${(orders || []).length} orders found in last ${lookbackDays} days`;
-        if ((orders || []).length === 0) warnings.push("Customer has no recent orders. The playbook will ask for an order number.");
-        if ((orders || []).length === 1) {
-          const o = (orders || [])[0];
-          ctx.identified_orders = [o.order_number];
-          dataFound += `\nAuto-identified: ${o.order_number} ($${(o.total_cents / 100).toFixed(2)}, ${new Date(o.created_at).toLocaleDateString()}, source: ${o.source_name || "unknown"})`;
-        }
-        if ((orders || []).length > 1) {
-          dataFound += `\nOrders: ${(orders || []).slice(0, 5).map((o: { order_number: string; total_cents: number; created_at: string; source_name: string | null }) => `${o.order_number} ($${(o.total_cents / 100).toFixed(2)}, ${new Date(o.created_at).toLocaleDateString()}, ${o.source_name || "unknown"})`).join("; ")}`;
-          // Simulate: AI would ask which order. Mock reply picks the most recent.
-          ctx.identified_orders = [(orders || [])[0].order_number];
-        }
-        conditionResult = `Identified: ${(ctx.identified_orders as string[] || []).join(", ") || "none"}`;
-        break;
-      }
-      case "identify_subscription": {
-        const activeSubs = (subs || []).filter((s: { status: string }) => s.status === "active" || s.status === "paused");
-        const cancelledSubs = (subs || []).filter((s: { status: string }) => s.status === "cancelled");
-        const matched = activeSubs[0] || cancelledSubs[0];
-        if (matched) {
-          ctx.identified_subscription = matched.shopify_contract_id;
-          ctx.subscription_status = matched.status;
-          ctx.subscription_created = matched.created_at;
-          dataFound = `Matched subscription #${matched.shopify_contract_id} (${matched.status}, created ${new Date(matched.created_at).toLocaleDateString()})`;
-        } else {
-          dataFound = "No matching subscription found";
-          warnings.push("No subscription found for this customer. Steps that reference subscription data may not work.");
-        }
-        conditionResult = matched ? `Linked to order(s): ${(ctx.identified_orders as string[] || []).join(", ")}` : "No subscription match";
-        skipped = !matched && step.skippable;
-        break;
-      }
-      case "check_other_subscriptions": {
-        const identifiedSub = ctx.identified_subscription as string | undefined;
-        const otherActive = (subs || []).filter((s: { status: string; shopify_contract_id: string }) => s.status === "active" && s.shopify_contract_id !== identifiedSub);
-        ctx.other_active_subs = otherActive.map((s: { shopify_contract_id: string }) => s.shopify_contract_id);
-        ctx.other_active_count = otherActive.length;
-        dataFound = `${otherActive.length} other active subscription(s)`;
-        if (otherActive.length > 0) {
-          dataFound += `: ${otherActive.map((s: { shopify_contract_id: string }) => `#${s.shopify_contract_id}`).join(", ")}`;
-        }
-        conditionResult = otherActive.length > 0 ? "AI will proactively mention other subs" : "No other subs to mention";
-        skipped = true; // This step always auto-advances
-        break;
-      }
-      case "apply_policy": {
-        const policyId = step.config?.policy_id as string;
-        const policy = (policies || []).find((p: { id: string }) => p.id === policyId);
-        if (!policy) {
-          warnings.push("No policy linked to this step. Configure a policy_id in the step config.");
-          conditionResult = "ERROR: No policy configured";
-          break;
-        }
-        const identifiedOrders = (ctx.identified_orders as string[]) || [];
-        const orderObjs = (orders || []).filter((o: { order_number: string }) => identifiedOrders.includes(o.order_number));
-        const inPolicy: string[] = [];
-        const outOfPolicy: string[] = [];
-        for (const o of orderObjs) {
-          const eligible = evalConditions(policy.conditions, o);
-          if (eligible.pass) inPolicy.push(o.order_number);
-          else {
-            outOfPolicy.push(o.order_number);
-            warnings.push(`Order ${o.order_number} FAILS policy: ${eligible.reason}`);
+        switch (step.type) {
+          case "identify_order": {
+            dataFound = `${(orders || []).length} orders found in last ${lookbackDays} days`;
+            if ((orders || []).length === 0) warnings.push("Customer has no recent orders.");
+            if ((orders || []).length === 1) {
+              const o = (orders || [])[0];
+              ctx.identified_orders = [o.order_number];
+              dataFound += `\nAuto-identified: ${o.order_number} ($${(o.total_cents / 100).toFixed(2)}, ${new Date(o.created_at).toLocaleDateString()}, source: ${o.source_name || "unknown"})`;
+            }
+            if ((orders || []).length > 1) {
+              dataFound += `\nOrders: ${(orders || []).slice(0, 5).map((o: { order_number: string; total_cents: number; created_at: string; source_name: string | null }) => `${o.order_number} ($${(o.total_cents / 100).toFixed(2)}, ${new Date(o.created_at).toLocaleDateString()}, ${o.source_name || "unknown"})`).join("; ")}`;
+              ctx.identified_orders = [(orders || [])[0].order_number];
+            }
+            conditionResult = `Identified: ${(ctx.identified_orders as string[] || []).join(", ") || "none"}`;
+            break;
+          }
+          case "identify_subscription": {
+            const activeSubs = (subs || []).filter((s: { status: string }) => s.status === "active" || s.status === "paused");
+            const cancelledSubs = (subs || []).filter((s: { status: string }) => s.status === "cancelled");
+            const matched = activeSubs[0] || cancelledSubs[0];
+            if (matched) {
+              ctx.identified_subscription = matched.shopify_contract_id;
+              ctx.subscription_status = matched.status;
+              ctx.subscription_created = matched.created_at;
+              dataFound = `Matched subscription #${matched.shopify_contract_id} (${matched.status}, created ${new Date(matched.created_at).toLocaleDateString()})`;
+            } else {
+              dataFound = "No matching subscription found";
+              warnings.push("No subscription found for this customer.");
+            }
+            conditionResult = matched ? `Linked to order(s): ${(ctx.identified_orders as string[] || []).join(", ")}` : "No subscription match";
+            skipped = !matched && step.skippable;
+            break;
+          }
+          case "check_other_subscriptions": {
+            const identifiedSub = ctx.identified_subscription as string | undefined;
+            const otherActive = (subs || []).filter((s: { status: string; shopify_contract_id: string }) => s.status === "active" && s.shopify_contract_id !== identifiedSub);
+            ctx.other_active_subs = otherActive.map((s: { shopify_contract_id: string }) => s.shopify_contract_id);
+            ctx.other_active_count = otherActive.length;
+            dataFound = `${otherActive.length} other active subscription(s)`;
+            conditionResult = otherActive.length > 0 ? "AI will proactively mention other subs" : "No other subs to mention";
+            skipped = true;
+            break;
+          }
+          case "apply_policy": {
+            const policyId = step.config?.policy_id as string;
+            const policy = (policies || []).find((p: { id: string }) => p.id === policyId);
+            if (!policy) { warnings.push("No policy linked to this step."); conditionResult = "ERROR: No policy configured"; break; }
+            const identifiedOrders = (ctx.identified_orders as string[]) || [];
+            const orderObjs = (orders || []).filter((o: { order_number: string }) => identifiedOrders.includes(o.order_number));
+            const inPolicy: string[] = []; const outOfPolicy: string[] = [];
+            for (const o of orderObjs) {
+              const eligible = evalConditions(policy.conditions, o);
+              if (eligible.pass) inPolicy.push(o.order_number);
+              else { outOfPolicy.push(o.order_number); warnings.push(`Order ${o.order_number} FAILS policy: ${eligible.reason}`); }
+            }
+            ctx.in_policy = inPolicy; ctx.out_of_policy = outOfPolicy; ctx.policy_applied = policy.name;
+            dataFound = `Policy: "${policy.name}"\nConditions: ${JSON.stringify(policy.conditions)}`;
+            conditionResult = `In policy: ${inPolicy.join(", ") || "none"} | Out of policy: ${outOfPolicy.join(", ") || "none"}`;
+            break;
+          }
+          case "offer_exception": {
+            const policyId = step.config?.policy_id as string;
+            const polExceptions = (exceptions || []).filter((e: { policy_id: string }) => e.policy_id === policyId);
+            const outOfPolicy = (ctx.out_of_policy as string[]) || [];
+            if (outOfPolicy.length === 0) { conditionResult = "All orders in policy — no exception needed"; skipped = true; break; }
+
+            const autoGrants = polExceptions.filter((e: { auto_grant: boolean }) => e.auto_grant);
+            if (autoGrants.length) {
+              dataFound += `Auto-grant exceptions: ${autoGrants.map((e: { name: string; auto_grant_trigger: string | null }) => `${e.name} (${e.auto_grant_trigger})`).join(", ")}\nNote: Auto-grant detection not yet fully implemented.\n`;
+            }
+
+            const tiered = polExceptions.filter((e: { auto_grant: boolean }) => !e.auto_grant).sort((a: { tier: number }, b: { tier: number }) => a.tier - b.tier);
+            const eligibleTiers = tiered.filter((ex: { conditions: Record<string, unknown> }) => evalCustomerConditions(ex.conditions, customer).pass);
+            const ineligibleTiers = tiered.filter((ex: { conditions: Record<string, unknown> }) => !evalCustomerConditions(ex.conditions, customer).pass);
+
+            dataFound += `Customer LTV: $${(customer.ltv_cents / 100).toFixed(2)}, Orders: ${customer.total_orders}\n`;
+            dataFound += eligibleTiers.map((e: { tier: number; name: string; resolution_type: string }) => `Tier ${e.tier}: ${e.name} (${e.resolution_type}) — ELIGIBLE`).join("\n");
+            if (ineligibleTiers.length) dataFound += "\n" + ineligibleTiers.map((e: { tier: number; name: string }) => `Tier ${e.tier}: ${e.name} — NOT eligible`).join("\n");
+
+            if (eligibleTiers.length === 0) {
+              conditionResult = "No exceptions match this customer";
+              warnings.push("Customer doesn't qualify for any exception tier.");
+              break;
+            }
+
+            // Simulate each eligible tier: offer → rejection → next tier
+            for (let t = 0; t < eligibleTiers.length; t++) {
+              const ex = eligibleTiers[t] as { tier: number; name: string; resolution_type: string; instructions: string | null };
+              const isEscalation = t > 0;
+              ctx.current_exception_tier = ex.tier;
+              ctx.exception_offered = ex.name;
+              ctx.resolution_type = ex.resolution_type;
+              exceptionsUsed++;
+
+              const tierCondResult = `Offering Tier ${ex.tier}: ${ex.name} (${ex.resolution_type})${isEscalation ? " — escalated after rejection" : ""}`;
+              const tierAI = await genAI(
+                { name: step.name, type: step.type, instructions: ex.instructions || step.instructions },
+                dataFound, tierCondResult, currentMessage,
+              );
+              const tierMock = await genMock(tierAI, `${step.name} — Tier ${ex.tier}`, true);
+              currentMessage = tierMock;
+
+              const tierLabel = t === 0 ? step.name : `${step.name} — Tier ${ex.tier} (escalated)`;
+              emitStep({
+                step_name: tierLabel, step_type: "offer_exception", step_order: step.step_order,
+                data_found: t === 0 ? dataFound : `Escalated: customer rejected Tier ${eligibleTiers[t - 1].tier}`,
+                condition_result: tierCondResult, ai_response: tierAI,
+                mock_customer_reply: tierMock, warnings: t === 0 ? warnings : [], skipped: false,
+              });
+            }
+
+            conditionResult = `All ${eligibleTiers.length} eligible tiers offered and rejected`;
+            ctx.exception_exhausted = true;
+            continue; // Skip the default emit below — we already emitted per-tier
+          }
+          case "initiate_return": {
+            // Gate: customer must have accepted
+            if (!ctx.offer_accepted) {
+              dataFound = "Customer has NOT accepted any offer";
+              conditionResult = "SKIPPED — no acceptance detected. Customer rejected all tiers.";
+              skipped = true;
+              break;
+            }
+            const inPolicy = (ctx.in_policy as string[]) || [];
+            const exceptionOrders = ctx.exception_offered ? [(ctx.out_of_policy as string[] || []).slice(-1)[0]].filter(Boolean) : [];
+            const returnable = [...new Set([...inPolicy, ...exceptionOrders])];
+            dataFound = `Returnable orders: ${returnable.join(", ") || "none"}`;
+            conditionResult = returnable.length > 0
+              ? `Return initiated for: ${returnable.join(", ")} (${ctx.resolution_type || "store_credit_return"})`
+              : "No orders eligible for return";
+            ctx.return_initiated = returnable.length > 0;
+            ctx.return_orders = returnable;
+            break;
+          }
+          case "cancel_subscription": {
+            const identifiedSub = ctx.identified_subscription as string | undefined;
+            const otherActive = (ctx.other_active_subs as string[]) || [];
+            const allToCancel = identifiedSub ? [identifiedSub, ...otherActive] : otherActive;
+            dataFound = `Subscriptions to cancel: ${allToCancel.map(s => `#${s}`).join(", ") || "none"}`;
+            conditionResult = allToCancel.length > 0 ? `Will cancel ${allToCancel.length} subscription(s)` : "No subscriptions to cancel";
+            if (allToCancel.length === 0) warnings.push("No subscriptions found to cancel.");
+            break;
+          }
+          case "issue_store_credit": {
+            const returnOrders = (ctx.return_orders as string[]) || [];
+            const orderObjs = (orders || []).filter((o: { order_number: string }) => returnOrders.includes(o.order_number));
+            const totalCents = orderObjs.reduce((s: number, o: { total_cents: number }) => s + o.total_cents, 0);
+            dataFound = `Store credit amount: $${(totalCents / 100).toFixed(2)} from orders: ${returnOrders.join(", ")}`;
+            conditionResult = totalCents > 0 ? `$${(totalCents / 100).toFixed(2)} pending return receipt` : "No amount to credit";
+            break;
+          }
+          case "stand_firm": {
+            const wasOffered = ctx.exception_offered as string | undefined;
+            const maxReps = playbook.stand_firm_max || 3;
+            dataFound = `Best offer: ${wasOffered || "none"} (${ctx.resolution_type || "none"}). Max repetitions: ${maxReps}`;
+            if (!wasOffered) warnings.push("No exception was offered before stand_firm.");
+
+            // Simulate the full stand_firm loop
+            for (let rep = 0; rep < maxReps; rep++) {
+              const isFinal = rep === maxReps - 1;
+              const repCondResult = isFinal
+                ? `FINAL stand firm (${rep + 1}/${maxReps}). After this, AI stops responding.`
+                : `Stand firm ${rep + 1}/${maxReps}. Restating offer with different wording.`;
+
+              const sfInstructions = isFinal
+                ? `${step.instructions || ""}\n\nThis is the FINAL message (attempt ${rep + 1}/${maxReps}). State your best offer one last time. Say "If you change your mind, just reply and we'll get it started." Warm but final tone. Do not argue.`
+                : `${step.instructions || ""}\n\nThis is attempt ${rep + 1}/${maxReps}. Acknowledge frustration. Restate the best available offer (${wasOffered || "return"}). Use DIFFERENT wording than previous attempts. Do not argue or get defensive.`;
+
+              const sfAI = await genAI(
+                { name: step.name, type: step.type, instructions: sfInstructions },
+                dataFound, repCondResult, currentMessage,
+              );
+
+              const sfMock = isFinal ? "" : await genMock(sfAI, `${step.name} (${rep + 1}/${maxReps})`, true);
+              if (!isFinal) currentMessage = sfMock;
+
+              emitStep({
+                step_name: `${step.name} (${rep + 1}/${maxReps})${isFinal ? " — FINAL" : ""}`,
+                step_type: "stand_firm", step_order: step.step_order,
+                data_found: rep === 0 ? dataFound : `Rejection ${rep + 1}. Customer still refusing.`,
+                condition_result: repCondResult, ai_response: sfAI,
+                mock_customer_reply: sfMock,
+                warnings: rep === 0 ? warnings : [], skipped: false,
+              });
+            }
+            conditionResult = `All ${maxReps} stand firm rounds completed. AI stops responding.`;
+            continue; // Skip default emit
+          }
+          default: {
+            dataFound = `Step type: ${step.type}`;
+            conditionResult = step.instructions ? "Has instructions" : "No instructions configured";
+            if (!step.instructions) warnings.push("This step has no instructions.");
           }
         }
-        ctx.in_policy = inPolicy;
-        ctx.out_of_policy = outOfPolicy;
-        ctx.policy_applied = policy.name;
-        dataFound = `Policy: "${policy.name}"\nConditions: ${JSON.stringify(policy.conditions)}`;
-        conditionResult = `In policy: ${inPolicy.join(", ") || "none"} | Out of policy: ${outOfPolicy.join(", ") || "none"}`;
-        break;
-      }
-      case "offer_exception": {
-        const policyId = step.config?.policy_id as string;
-        const polExceptions = (exceptions || []).filter((e: { policy_id: string }) => e.policy_id === policyId);
-        const outOfPolicy = (ctx.out_of_policy as string[]) || [];
-        if (outOfPolicy.length === 0) {
-          conditionResult = "All orders in policy — no exception needed";
-          skipped = true;
-          break;
-        }
-        // Check auto-grants
-        const autoGrants = polExceptions.filter((e: { auto_grant: boolean }) => e.auto_grant);
-        if (autoGrants.length) {
-          dataFound += `Auto-grant exceptions: ${autoGrants.map((e: { name: string; auto_grant_trigger: string | null }) => `${e.name} (${e.auto_grant_trigger})`).join(", ")}\n`;
-          dataFound += `Note: Auto-grant detection is not yet fully implemented for triggers.`;
-        }
-        // Check tiered
-        const tiered = polExceptions.filter((e: { auto_grant: boolean }) => !e.auto_grant).sort((a: { tier: number }, b: { tier: number }) => a.tier - b.tier);
-        const eligible: string[] = [];
-        const ineligible: string[] = [];
-        for (const ex of tiered) {
-          const result = evalCustomerConditions(ex.conditions, customer);
-          if (result.pass) eligible.push(`Tier ${ex.tier}: ${ex.name} (${ex.resolution_type}) — ELIGIBLE`);
-          else ineligible.push(`Tier ${ex.tier}: ${ex.name} — NOT eligible: ${result.reason}`);
-        }
-        dataFound += `Customer LTV: $${(customer.ltv_cents / 100).toFixed(2)}, Orders: ${customer.total_orders}\n`;
-        dataFound += [...eligible, ...ineligible].join("\n");
-        if (eligible.length > 0) {
-          const firstEligible = tiered.find((_e: { auto_grant: boolean }, i: number) => {
-            return evalCustomerConditions(polExceptions.filter((e: { auto_grant: boolean }) => !e.auto_grant).sort((a: { tier: number }, b: { tier: number }) => a.tier - b.tier)[i]?.conditions || {}, customer).pass;
-          });
-          if (firstEligible) {
-            ctx.exception_offered = firstEligible.name;
-            ctx.resolution_type = firstEligible.resolution_type;
-            ctx.current_exception_tier = firstEligible.tier;
-            exceptionsUsed++;
-          }
-          conditionResult = `Offering: ${eligible[0]}`;
-        } else {
-          conditionResult = "No exceptions match this customer";
-          warnings.push("Customer doesn't qualify for any exception tier. They'll hit the stand_firm step.");
-        }
-        if (ineligible.length > 0) {
-          for (const note of ineligible) warnings.push(note);
-        }
-        break;
-      }
-      case "initiate_return": {
-        const inPolicy = (ctx.in_policy as string[]) || [];
-        const exceptionOrders = ctx.exception_offered ? [(ctx.out_of_policy as string[] || []).slice(-1)[0]].filter(Boolean) : [];
-        const returnable = [...new Set([...inPolicy, ...exceptionOrders])];
-        dataFound = `Returnable orders: ${returnable.join(", ") || "none"}`;
-        conditionResult = returnable.length > 0
-          ? `Return will be initiated for: ${returnable.join(", ")} (${ctx.resolution_type || "store_credit_return"})`
-          : "No orders eligible for return";
-        if (returnable.length === 0) warnings.push("No orders are returnable at this point. The step will be skipped.");
-        ctx.return_initiated = returnable.length > 0;
-        ctx.return_orders = returnable;
-        break;
-      }
-      case "cancel_subscription": {
-        const identifiedSub = ctx.identified_subscription as string | undefined;
-        const otherActive = (ctx.other_active_subs as string[]) || [];
-        const allToCancel = identifiedSub ? [identifiedSub, ...otherActive] : otherActive;
-        dataFound = `Subscriptions to cancel: ${allToCancel.map(s => `#${s}`).join(", ") || "none"}`;
-        conditionResult = allToCancel.length > 0 ? `Will cancel ${allToCancel.length} subscription(s)` : "No subscriptions to cancel";
-        if (allToCancel.length === 0) warnings.push("No subscriptions found to cancel.");
-        break;
-      }
-      case "issue_store_credit": {
-        const returnOrders = (ctx.return_orders as string[]) || [];
-        const orderObjs = (orders || []).filter((o: { order_number: string }) => returnOrders.includes(o.order_number));
-        const totalCents = orderObjs.reduce((s: number, o: { total_cents: number }) => s + o.total_cents, 0);
-        dataFound = `Store credit amount: $${(totalCents / 100).toFixed(2)} from orders: ${returnOrders.join(", ")}`;
-        conditionResult = totalCents > 0 ? `$${(totalCents / 100).toFixed(2)} pending return receipt` : "No amount to credit";
-        break;
-      }
-      case "stand_firm": {
-        const wasOffered = ctx.exception_offered as string | undefined;
-        dataFound = `Best offer: ${wasOffered || "none"}. Max repetitions: ${playbook.stand_firm_max}`;
-        conditionResult = `AI will restate offer up to ${playbook.stand_firm_max} times, then send final message and stop`;
-        if (!wasOffered) warnings.push("No exception was offered before stand_firm. AI will have nothing specific to restate.");
-        break;
-      }
-      default: {
-        dataFound = `Step type: ${step.type}`;
-        conditionResult = step.instructions ? "Has instructions" : "No instructions configured";
-        if (!step.instructions) warnings.push("This step has no instructions. AI won't know what to do.");
-      }
-    }
 
-    // Generate AI response for this step (dry run)
-    if (!skipped) {
-      aiResponse = await aiCall(
-        [
-          "You are simulating a customer support AI for a playbook dry-run. Generate the AI response for this step.",
-          "Rules: max 2-3 sentences per paragraph. Plain text only, no markdown. Be empathetic.",
-          step.instructions ? `Step instructions: ${step.instructions}` : "",
-        ].filter(Boolean).join("\n"),
-        `Customer data:\n${dataSummary}\n\nPlaybook context so far: ${JSON.stringify(ctx)}\nStep: "${step.name}" (${step.type})\nData found: ${dataFound}\nCondition result: ${conditionResult}\n\nCustomer message: "${currentMessage}"\n\nGenerate what the AI would say to the customer at this step. Keep it realistic.`,
-        300,
-      );
-    }
+        // Generate AI response (for non-looping steps)
+        if (!skipped) {
+          aiResponse = await genAI(step, dataFound, conditionResult, currentMessage);
+        }
 
-    // Generate mock customer reply for next step (except last step and stand_firm)
-    const isLast = step.step_order === steps[steps.length - 1].step_order;
-    const isStandFirm = step.type === "stand_firm";
-    if (!isLast && !skipped && !isStandFirm) {
-      mockReply = await aiCall(
-        [
-          `You are simulating a ${sentimentLabel} customer replying to a support agent. Sentiment: ${sentimentLabel}.`,
-          "Generate a realistic, brief customer reply (1-3 sentences). Match the sentiment exactly.",
-          sentimentLabel === "angry" ? "Be hostile, use caps or exclamations. Demand resolution. Express outrage." : "",
-          sentimentLabel === "frustrated" ? "Be exasperated, short-tempered. Show impatience but not abusive." : "",
-          sentimentLabel === "confused" ? "Ask clarifying questions. Show uncertainty about what happened." : "",
-          sentimentLabel === "polite" ? "Be cooperative and understanding. Thank them but still want resolution." : "",
-          sentimentLabel === "neutral" ? "Be straightforward. Just answer the question or confirm." : "",
-          "Do NOT include any metadata, just the customer's words.",
-        ].filter(Boolean).join("\n"),
-        `The AI just said:\n"${aiResponse}"\n\nPlaybook context: The customer originally said "${message}" about ${playbook.name.toLowerCase()}.\nStep just completed: ${step.name} (${step.type})\nCondition result: ${conditionResult}\n\nGenerate a realistic mock reply from the ${sentimentLabel} customer.`,
-        150,
-      );
-      currentMessage = mockReply;
-    } else if (isStandFirm) {
-      mockReply = await aiCall(
-        `You are simulating a ${sentimentLabel} customer who has REJECTED the offer. Generate a brief rejection reply.`,
-        `AI offered: "${aiResponse}"\nSentiment: ${sentimentLabel}\n\nGenerate a 1-2 sentence rejection. The customer doesn't want this offer.`,
-        100,
-      );
-    }
+        // Generate mock customer reply (for non-looping, non-last steps)
+        const isLast = step.step_order === steps[steps.length - 1].step_order;
+        if (!isLast && !skipped) {
+          mockReply = await genMock(aiResponse, step.name);
+          currentMessage = mockReply;
+        }
 
-    const stepResult = {
-      step_name: step.name,
-      step_type: step.type,
-      step_order: step.step_order,
-      data_found: dataFound,
-      condition_result: conditionResult,
-      ai_response: aiResponse,
-      mock_customer_reply: mockReply,
-      warnings,
-      skipped,
-    };
-    simSteps.push(stepResult);
-
-    // Stream this step to the client
-    send({ type: "step", step_index: simSteps.length - 1, total_steps: steps.length, ...stepResult });
-  }
+        emitStep({
+          step_name: step.name, step_type: step.type, step_order: step.step_order,
+          data_found: dataFound, condition_result: conditionResult, ai_response: aiResponse,
+          mock_customer_reply: mockReply, warnings, skipped,
+        });
+      }
 
   const resultPayload = {
     playbook_name: playbook.name,
