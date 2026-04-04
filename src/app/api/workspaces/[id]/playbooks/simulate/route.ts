@@ -449,12 +449,34 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
                   acceptMock,
                 );
 
+                // Generate a sassy parting shot from the customer after the return is set up
+                const sassyReply = await aiCall(
+                  `You are simulating a ${sentimentLabel} customer who just reluctantly accepted a return offer after a heated exchange. Generate a final parting shot (1-2 sentences). They're accepting but making it clear they're unhappy about the whole experience. Sassy, bitter, threatening to never shop again. Sentiment: ${sentimentLabel}.`,
+                  `AI just said: "${returnAI}"\nThe customer agreed to the ${resLabel} but is still furious about the whole ordeal.`, 100);
+
                 emitStep({
                   step_name: "Initiate Return (accepted mid-stand-firm)",
                   step_type: "initiate_return", step_order: returnStep?.step_order || step.step_order,
                   data_found: `Customer accepted after ${rep + 1} stand firm rounds.\nReturnable orders: ${returnable.join(", ")}\nResolution: ${resLabel}`,
                   condition_result: `Acceptance detected — initiating return for ${returnable.join(", ")}`,
-                  ai_response: returnAI, mock_customer_reply: "",
+                  ai_response: returnAI, mock_customer_reply: sassyReply,
+                  warnings: [], skipped: false,
+                });
+
+                // Final AI response handling the sassy parting shot
+                const closingAI = await genAI(
+                  { name: "Closing Response", type: "custom", instructions: "The customer accepted the return offer but is clearly unhappy. Send a brief, professional closing. Thank them, confirm next steps (ship product, send tracking number, credit/refund on receipt). Don't over-apologize or grovel. Keep it short and warm. Follow the store policy rules." },
+                  `Customer accepted ${resLabel} for ${returnable.join(", ")}. Return being processed.`,
+                  `Customer accepted but is upset about the experience.`,
+                  sassyReply,
+                );
+
+                emitStep({
+                  step_name: "Closing Response",
+                  step_type: "custom", step_order: (returnStep?.step_order || step.step_order) + 1,
+                  data_found: "Customer accepted but left a sassy parting shot.",
+                  condition_result: "AI sends professional closing with next steps.",
+                  ai_response: closingAI, mock_customer_reply: "",
                   warnings: [], skipped: false,
                 });
 
