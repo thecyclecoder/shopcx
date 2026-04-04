@@ -705,11 +705,19 @@ async function handleIdentifyOrder(
       systemNote: `[Playbook] Customer referenced most recent order: ${orders[0].order_number}.`,
     };
   }
-  if (/\b(first|oldest|earliest)\b/i.test(msg)) {
+  if (/\b(first one|first order|the first)\b/i.test(msg)) {
+    // "First one" = first in the displayed list = most recent
+    return {
+      action: "advance", newStep: step.step_order + 1,
+      context: { identified_orders: [orders[0].order_number] },
+      systemNote: `[Playbook] Customer referenced "first one" (first in list = most recent): ${orders[0].order_number}.`,
+    };
+  }
+  if (/\b(oldest|earliest)\b/i.test(msg)) {
     return {
       action: "advance", newStep: step.step_order + 1,
       context: { identified_orders: [orders[orders.length - 1].order_number] },
-      systemNote: `[Playbook] Customer referenced first/oldest order: ${orders[orders.length - 1].order_number}.`,
+      systemNote: `[Playbook] Customer referenced oldest order: ${orders[orders.length - 1].order_number}.`,
     };
   }
   if (/\bsecond\b/i.test(msg) && orders.length >= 2) {
