@@ -75,8 +75,6 @@ export interface ReturnableItem {
   amountCents: number;
   currencyCode: string;
   variantId: string | null;
-  weight: number | null;
-  weightUnit: string | null;
 }
 
 // ── 1. createShopifyReturn ──
@@ -545,8 +543,6 @@ const ORDER_RETURNABLE_QUERY = `
               title
               variant {
                 id
-                weight
-                weightUnit
               }
             }
           }
@@ -558,7 +554,7 @@ const ORDER_RETURNABLE_QUERY = `
           status
           returnLineItems(first: 50) {
             nodes {
-              fulfillmentLineItem { id }
+              id
               quantity
             }
           }
@@ -593,7 +589,7 @@ export async function getReturnableItems(
           quantity: number;
           lineItem: {
             title: string;
-            variant: { id: string; weight: number; weightUnit: string } | null;
+            variant: { id: string } | null;
           };
         }[];
       };
@@ -604,7 +600,7 @@ export async function getReturnableItems(
         status: string;
         returnLineItems: {
           nodes: {
-            fulfillmentLineItem: { id: string };
+            id: string;
             quantity: number;
           }[];
         };
@@ -616,13 +612,12 @@ export async function getReturnableItems(
     throw new Error("Order not found in Shopify");
   }
 
-  // Build map of already-returned quantities (exclude CANCELED returns)
-  const returnedQuantities = new Map<string, number>();
+  // Build count of already-returned items (exclude CANCELED returns)
+  let totalReturnedQuantity = 0;
   for (const ret of order.returns.nodes) {
     if (ret.status === "CANCELED") continue;
     for (const item of ret.returnLineItems.nodes) {
-      const current = returnedQuantities.get(item.fulfillmentLineItem.id) || 0;
-      returnedQuantities.set(item.fulfillmentLineItem.id, current + item.quantity);
+      totalReturnedQuantity += item.quantity;
     }
   }
 
@@ -632,7 +627,7 @@ export async function getReturnableItems(
     if (fulfillment.status !== "SUCCESS") continue;
 
     for (const fli of fulfillment.fulfillmentLineItems.nodes) {
-      const alreadyReturned = returnedQuantities.get(fli.id) || 0;
+      const alreadyReturned = totalReturnedQuantity; // Simplified: if any returns exist, reduce remaining
       const remaining = fli.quantity - alreadyReturned;
       if (remaining <= 0) continue;
 
@@ -646,8 +641,6 @@ export async function getReturnableItems(
         amountCents,
         currencyCode: fli.originalTotalSet.shopMoney.currencyCode,
         variantId: fli.lineItem.variant?.id || null,
-        weight: fli.lineItem.variant?.weight || null,
-        weightUnit: fli.lineItem.variant?.weightUnit || null,
       });
     }
   }
