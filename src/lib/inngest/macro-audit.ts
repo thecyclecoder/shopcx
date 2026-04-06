@@ -78,12 +78,22 @@ RULES:
 - No emoji. No greetings (no "Hi!", "Hello!", "Hey there!"). No fluff closings ("Have a great day!", "Thanks for being part of our community!").
 - Remove ALL YouTube links.
 - Fix or remove broken links (ending in ! , . or with trailing punctuation).
-- Replace old/broken links with the correct labeled product URLs provided below. Include relevant links in macros — customers appreciate direct links to reviews, ingredients, how it works, etc.
 - Cross-reference claims against the product intelligence — fix any inaccurate claims.
 - Keep it concise — max 2-3 sentences per paragraph. No walls of text. Short, scannable paragraphs.
 - If the macro references a specific product feature, use the EXACT claim from the product intelligence (ingredients, dosages, clinical studies).
-- Output HTML format: use <p> tags for paragraphs, <a href="url"> for hyperlinked text (not raw URLs — always hyperlink with descriptive text like "check out our reviews" or "see the full ingredient list").
 - The AI agent will add greetings and sign-offs — the macro should be just the factual content.
+
+CRITICAL — LINKS:
+- You MUST include at least one hyperlink in every rewritten macro using the PRODUCT URLS listed below.
+- Use HTML anchor tags: <a href="THE_ACTUAL_URL">descriptive text</a>
+- Example: <a href="https://superfoodscompany.com/pages/reviews-for-amazing-coffee">check out what other customers are saying</a>
+- Example: <a href="https://superfoodscompany.com/pages/ingredients-in-amazing-coffee">see the full ingredient list</a>
+- NEVER write a vague reference like "check out our reviews" WITHOUT wrapping it in an <a> tag with the real URL.
+- Match the link to the content: ingredients discussion → Ingredients URL, results/testimonials → Reviews URL, product info → PDP URL, clinical studies → Science URL.
+
+CRITICAL — HTML FORMAT:
+- The rewritten_html field MUST be valid HTML with <p> tags for paragraphs and <a> tags for links.
+- Do NOT output plain text in rewritten_html — it must have HTML tags.
 
 Return JSON: { "rewritten_html": "the rewritten macro in HTML", "rewritten_text": "plain text version", "changes": ["list of changes made"], "accuracy_issues": ["any claims that don't match the intelligence"] }`;
 
