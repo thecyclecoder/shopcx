@@ -5,6 +5,10 @@ import { useParams, useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 import Link from "next/link";
 import StoreCreditModal from "@/components/store-credit-modal";
+import ReturnsList from "@/components/shared/ReturnsList";
+import OrdersTable from "@/components/shared/OrdersTable";
+import { formatCents, formatDate } from "@/components/shared/format-utils";
+import type { OrderRow } from "@/components/shared/OrdersTable";
 
 interface CustomerData {
   id: string;
@@ -142,14 +146,7 @@ const EVENT_ICONS: Record<string, { icon: string; color: string }> = {
   "subscription.item_updated": { icon: "M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182", color: "text-indigo-500" },
 };
 
-function formatCents(cents: number, currency = "USD"): string {
-  return new Intl.NumberFormat("en-US", { style: "currency", currency, minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(cents / 100);
-}
-
-function formatDate(d: string | null): string {
-  if (!d) return "--";
-  return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
+/* formatCents, formatDate imported from @/components/shared/format-utils */
 
 function formatInterval(interval: string | null, count: number | null): string {
   if (!interval) return "--";
@@ -167,21 +164,6 @@ function RetentionBadge({ score }: { score: number }) {
   return <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${classes}`}>{score}/100</span>;
 }
 
-function StatusBadge({ status }: { status: string | null }) {
-  if (!status) return <span className="text-xs text-zinc-400">--</span>;
-  const map: Record<string, string> = {
-    paid: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
-    refunded: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
-    pending: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
-    fulfilled: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
-  };
-  return (
-    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium capitalize ${map[status] || "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"}`}>
-      {status.replace("_", " ")}
-    </span>
-  );
-}
-
 export default function SubscriptionDetailPage() {
   const workspace = useWorkspace();
   const router = useRouter();
@@ -195,7 +177,7 @@ export default function SubscriptionDetailPage() {
   const [events, setEvents] = useState<CustomerEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState<string | null>(null);
-  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
+  // selectedOrderId now managed internally by OrdersTable
 
   // Action form state
   const [cancelReason, setCancelReason] = useState("");
@@ -649,154 +631,20 @@ export default function SubscriptionDetailPage() {
             </div>
           )}
 
-          {/* Order History — full expandable table like customer detail */}
-          <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-            <div className="border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
-              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Order History ({orders.length})</h3>
-            </div>
-            {orders.length === 0 ? (
-              <p className="px-5 py-8 text-center text-sm text-zinc-400">No orders found</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
-                  <thead>
-                    <tr className="text-left text-xs font-medium uppercase text-zinc-400">
-                      <th className="px-4 py-2.5">Order</th>
-                      <th className="px-4 py-2.5">Type</th>
-                      <th className="px-4 py-2.5">Date</th>
-                      <th className="px-4 py-2.5">Total</th>
-                      <th className="px-4 py-2.5">Payment</th>
-                      <th className="px-4 py-2.5">Fulfillment</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                    {orders.map(o => (
-                      <React.Fragment key={o.id}>
-                        <tr
-                          onClick={() => setSelectedOrderId(selectedOrderId === o.id ? null : o.id)}
-                          className="cursor-pointer transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
-                        >
-                          <td className="whitespace-nowrap px-4 py-2.5 font-medium text-zinc-900 dark:text-zinc-100">
-                            <div className="flex items-center gap-1.5">
-                              <svg className={`h-3 w-3 text-zinc-400 transition-transform ${selectedOrderId === o.id ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-                              </svg>
-                              #{o.order_number || o.shopify_order_id}
-                            </div>
-                          </td>
-                          <td className="whitespace-nowrap px-4 py-2.5">
-                            {o.order_type === "recurring" ? (
-                              <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400">Recurring</span>
-                            ) : o.order_type === "checkout" ? (
-                              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Checkout</span>
-                            ) : o.order_type === "replacement" ? (
-                              <span className="rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">Replacement</span>
-                            ) : (
-                              <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.source_name || "--"}</span>
-                            )}
-                          </td>
-                          <td className="whitespace-nowrap px-4 py-2.5 text-zinc-500">{formatDate(o.created_at)}</td>
-                          <td className="whitespace-nowrap px-4 py-2.5 text-zinc-700 dark:text-zinc-300">{o.total_cents ? formatCents(o.total_cents, o.currency) : "--"}</td>
-                          <td className="whitespace-nowrap px-4 py-2.5"><StatusBadge status={o.financial_status} /></td>
-                          <td className="whitespace-nowrap px-4 py-2.5"><StatusBadge status={o.fulfillment_status} /></td>
-                        </tr>
-
-                        {/* Expanded order detail */}
-                        {selectedOrderId === o.id && (
-                          <tr>
-                            <td colSpan={6} className="bg-zinc-50 px-4 py-4 dark:bg-zinc-800/30">
-                              <div className="space-y-3">
-                                <div className="flex flex-wrap gap-4 text-xs text-zinc-500">
-                                  {o.source_name && <span>Source: <span className="font-medium text-zinc-700 dark:text-zinc-300">{o.source_name}</span></span>}
-                                  {o.tags && <span>Tags: <span className="font-medium text-zinc-700 dark:text-zinc-300">{o.tags}</span></span>}
-                                </div>
-
-                                {o.fulfillments && o.fulfillments.length > 0 && (
-                                  <div className="space-y-1.5">
-                                    {o.fulfillments.map((f, fi) => (
-                                      <div key={fi} className="flex flex-wrap items-center gap-2 text-xs">
-                                        <span className={`rounded-full px-2 py-0.5 font-medium ${
-                                          f.status === "SUCCESS" || f.status === "success"
-                                            ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
-                                            : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-                                        }`}>{f.status || "Pending"}</span>
-                                        {f.trackingInfo?.map((t, ti) => (
-                                          <span key={ti} className="flex items-center gap-1">
-                                            {t.company && <span className="text-zinc-400">{t.company}:</span>}
-                                            {t.url ? (
-                                              <a href={t.url} target="_blank" rel="noopener noreferrer" className="font-mono text-indigo-600 hover:underline dark:text-indigo-400">{t.number}</a>
-                                            ) : (
-                                              <span className="font-mono text-zinc-600 dark:text-zinc-300">{t.number}</span>
-                                            )}
-                                          </span>
-                                        ))}
-                                        {f.createdAt && <span className="text-zinc-400">{formatDate(f.createdAt)}</span>}
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-
-                                {o.line_items && o.line_items.length > 0 && (
-                                  <div>
-                                    <p className="mb-2 text-xs font-medium uppercase text-zinc-500">Items</p>
-                                    <div className="divide-y divide-zinc-200 rounded border border-zinc-200 bg-white dark:divide-zinc-700 dark:border-zinc-700 dark:bg-zinc-900">
-                                      {o.line_items.map((li, idx) => (
-                                        <div key={idx} className="flex items-center justify-between px-3 py-2">
-                                          <div>
-                                            <p className="text-sm text-zinc-900 dark:text-zinc-100">{li.title}</p>
-                                            {li.sku && <p className="text-xs text-zinc-400">SKU: {li.sku}</p>}
-                                          </div>
-                                          <div className="text-right">
-                                            <p className="text-sm text-zinc-700 dark:text-zinc-300">{li.quantity} x {formatCents(li.price_cents)}</p>
-                                            <p className="text-xs text-zinc-400">{formatCents(li.quantity * li.price_cents)}</p>
-                                          </div>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
+          {/* Order History */}
+          <OrdersTable
+            orders={orders as OrderRow[]}
+            title="Order History"
+            showCount
+            cardWrapper
+            detailTextSize="xs"
+          />
 
           {/* Returns */}
           {subReturns.length > 0 && (
             <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
               <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Returns ({subReturns.length})</h3>
-              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                {subReturns.map((r) => {
-                  const badge = r.status === "open" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
-                    : r.status === "in_transit" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-                    : r.status === "refunded" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-                    : r.status === "cancelled" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
-                    : r.status === "restocked" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
-                    : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400";
-                  const resLabel = r.resolution_type === "store_credit_return" ? "Store Credit"
-                    : r.resolution_type === "refund_return" ? "Refund"
-                    : r.resolution_type === "store_credit_no_return" ? "Store Credit (no return)"
-                    : r.resolution_type === "refund_no_return" ? "Refund (no return)"
-                    : r.resolution_type;
-                  return (
-                    <button key={r.id} onClick={() => router.push(`/dashboard/returns/${r.id}`)}
-                      className="flex w-full items-center justify-between py-2 text-left transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
-                      <div className="flex items-center gap-2">
-                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badge}`}>{r.status}</span>
-                        <span className="text-sm text-zinc-900 dark:text-zinc-100">{r.order_number}</span>
-                        <span className="text-xs text-zinc-400">{resLabel}</span>
-                      </div>
-                      <span className="text-sm tabular-nums text-zinc-500">{formatCents(r.net_refund_cents)}</span>
-                    </button>
-                  );
-                })}
-              </div>
+              <ReturnsList returns={subReturns} variant="bare" />
             </div>
           )}
 
