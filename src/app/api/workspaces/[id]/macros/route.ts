@@ -23,7 +23,7 @@ export async function GET(
   const limit = parseInt(url.searchParams.get("limit") || "0");
   const offset = parseInt(url.searchParams.get("offset") || "0");
 
-  const selectCols = "id, name, body_text, body_html, category, tags, active, usage_count, gorgias_id, ai_suggest_count, ai_accept_count, ai_reject_count, ai_edit_count, created_at, updated_at";
+  const selectCols = "id, name, body_text, body_html, category, tags, active, product_id, usage_count, gorgias_id, ai_suggest_count, ai_accept_count, ai_reject_count, ai_edit_count, created_at, updated_at, products(id, title)";
 
   let query = admin
     .from("macros")

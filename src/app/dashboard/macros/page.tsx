@@ -220,6 +220,7 @@ export default function MacrosPage() {
                   Category
                   <SortIcon col="category" />
                 </th>
+                <th className="px-4 py-2.5">Product</th>
                 <th className="px-4 py-2.5">Active</th>
                 <th className="cursor-pointer px-4 py-2.5" onClick={() => handleSort("usage_count")}>
                   Usage
@@ -239,13 +240,13 @@ export default function MacrosPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-zinc-400">
+                  <td colSpan={8} className="px-4 py-8 text-center text-zinc-400">
                     Loading...
                   </td>
                 </tr>
               ) : macros.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-zinc-400">
+                  <td colSpan={8} className="px-4 py-8 text-center text-zinc-400">
                     No macros found
                   </td>
                 </tr>
@@ -269,6 +270,15 @@ export default function MacrosPage() {
                           >
                             {macro.category}
                           </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        {(macro as unknown as Record<string, unknown>).products ? (
+                          <span className="text-xs text-zinc-600 dark:text-zinc-400">
+                            {((macro as unknown as Record<string, unknown>).products as { title: string }).title}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-zinc-300 dark:text-zinc-600">—</span>
                         )}
                       </td>
                       <td className="px-4 py-2.5">
