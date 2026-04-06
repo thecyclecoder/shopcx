@@ -280,8 +280,8 @@ export async function POST(
           if (remainingSubs && remainingSubs.length > 0) {
             const subItems = (remainingSubs[0].items as { title?: string }[] || []).map(i => i.title || "item").join(", ");
             const otherSubMsg = remainingSubs.length === 1
-              ? `I also noticed you have another active subscription for ${subItems}. Would you like to cancel that one as well? Just reply and I can send you a link to manage it.`
-              : `I also noticed you have ${remainingSubs.length} other active subscriptions. Would you like to cancel any of those as well? Just reply and I can help.`;
+              ? `You also have another active subscription for ${subItems}.`
+              : `You also have ${remainingSubs.length} other active subscriptions on your account.`;
 
             await admin.from("ticket_messages").insert({
               ticket_id: session.ticket_id,
