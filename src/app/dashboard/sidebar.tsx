@@ -72,6 +72,7 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
     items: [
       { href: "/dashboard/knowledge-base", label: "Articles", icon: ICONS.articles },
       { href: "/dashboard/macros", label: "Macros", icon: ICONS.macros },
+      { href: "/dashboard/products", label: "Products", icon: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" },
     ],
   },
   {
@@ -226,7 +227,7 @@ export default function Sidebar({
             const isExpanded = expandedSections.has(section.label);
             const sectionHasActive = section.items.some(i => pathname.startsWith(i.href) && i.href !== "#");
             return (
-              <div key={section.label} className={idx > 0 ? "mt-3" : ""}>
+              <div key={section.label}>
                 <button
                   type="button"
                   onClick={() => setExpandedSections(prev => {
@@ -234,27 +235,29 @@ export default function Sidebar({
                     if (next.has(section.label)) next.delete(section.label); else next.add(section.label);
                     return next;
                   })}
-                  className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-wider transition-colors ${
-                    sectionHasActive ? "text-indigo-500 dark:text-indigo-400" : "text-zinc-400 dark:text-zinc-500"
+                  className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2.5 md:py-2 text-[15px] md:text-sm transition-colors ${
+                    sectionHasActive
+                      ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
+                      : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
                   }`}
                 >
                   {section.icon && (
-                    <svg className="h-3.5 w-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <svg className="h-5 w-5 md:h-4 md:w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                       <path strokeLinecap="round" strokeLinejoin="round" d={section.icon} />
                     </svg>
                   )}
-                  <span className="flex-1">{section.label}</span>
-                  <span className={`text-[10px] transition-transform ${isExpanded ? "rotate-90" : ""}`}>&#9656;</span>
+                  <span className="flex-1 text-left">{section.label}</span>
+                  <span className={`text-zinc-400 transition-transform ${isExpanded ? "rotate-90" : ""}`}>&#9656;</span>
                 </button>
                 {isExpanded && (
-                  <div className="mt-0.5 space-y-0.5">
+                  <div className="ml-6 mt-0.5 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-800">
                     {section.items.map(item => {
                       const isActive = pathname === item.href || (item.href !== "#" && pathname.startsWith(item.href));
                       return (
                         <Link
                           key={item.href + item.label}
                           href={item.comingSoon ? "#" : item.href}
-                          className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 md:py-1.5 text-[14px] md:text-[13px] transition-colors ${
+                          className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 md:py-1 text-[13px] md:text-[12px] transition-colors ${
                             item.comingSoon
                               ? "cursor-default text-zinc-300 dark:text-zinc-600"
                               : isActive
@@ -263,7 +266,7 @@ export default function Sidebar({
                           }`}
                           onClick={item.comingSoon ? (e) => e.preventDefault() : undefined}
                         >
-                          <svg className="h-4 w-4 md:h-3.5 md:w-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                          <svg className="h-3.5 w-3.5 md:h-3 md:w-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                             <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
                           </svg>
                           <span className="flex-1">{item.label}</span>
@@ -305,7 +308,7 @@ export default function Sidebar({
           const isSettings = item.href === "/dashboard/settings";
 
           return (
-            <div key={item.href} className={isSettings ? "mt-3" : ""}>
+            <div key={item.href}>
               {isTickets ? (
                 <button
                   type="button"
