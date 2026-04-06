@@ -290,11 +290,13 @@ export const unifiedTicketHandler = inngest.createFunction(
         const { data: jd } = await admin.from("journey_definitions").select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "account_linking").eq("is_active", true).limit(1).single();
         if (!jd) return false;
         await sysNote(admin, tid, `[System] Potential unlinked accounts. Launching account linking.`);
-        const { leadIn, ctaText } = await generateJourneyLeadIn(msg, "Account Linking", st.ch, pers);
+        // Fixed lead-in for account linking — don't use AI generation which picks up the customer's intent
+        const linkLeadIn = "I've got your request. It looks like you may have more than one profile in our system. Please click the button below to link your accounts so I can pull up your full customer information and help you right away.";
+        const linkCta = "Link My Accounts";
         await launchJourneyForTicket({
           workspaceId: wsId, ticketId: tid, customerId: st.custId!,
           journeyId: jd.id, journeyName: jd.name, triggerIntent: "account_linking",
-          channel: st.ch, leadIn, ctaText,
+          channel: st.ch, leadIn: linkLeadIn, ctaText: linkCta,
         });
         await setStatus(admin, tid, cfg.auto_resolve);
         return true;
