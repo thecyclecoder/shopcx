@@ -259,6 +259,39 @@ export async function POST(
           resolved_at: new Date().toISOString(),
           journey_step: 99,
         }).eq("id", session.ticket_id);
+
+        // Check for other active subscriptions and notify customer
+        if (session.customer_id && selectedSub) {
+          // Get all active subs for this customer (including linked profiles)
+          const linkedIds = [session.customer_id];
+          const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", session.customer_id).single();
+          if (link) {
+            const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
+            for (const g of grp || []) if (!linkedIds.includes(g.customer_id)) linkedIds.push(g.customer_id);
+          }
+
+          const { data: remainingSubs } = await admin.from("subscriptions")
+            .select("shopify_contract_id, status, items")
+            .eq("workspace_id", wsId)
+            .in("customer_id", linkedIds)
+            .in("status", ["active", "paused"])
+            .neq("shopify_contract_id", selectedSub.contractId);
+
+          if (remainingSubs && remainingSubs.length > 0) {
+            const subItems = (remainingSubs[0].items as { title?: string }[] || []).map(i => i.title || "item").join(", ");
+            const otherSubMsg = remainingSubs.length === 1
+              ? `I also noticed you have another active subscription for ${subItems}. Would you like to cancel that one as well? Just reply and I can send you a link to manage it.`
+              : `I also noticed you have ${remainingSubs.length} other active subscriptions. Would you like to cancel any of those as well? Just reply and I can help.`;
+
+            await admin.from("ticket_messages").insert({
+              ticket_id: session.ticket_id,
+              direction: "outbound",
+              visibility: "external",
+              author_type: "ai",
+              body: otherSubMsg,
+            });
+          }
+        }
       }
     } else if (outcome?.startsWith("saved_")) {
       // Customer accepted a remedy — look up type from DB
