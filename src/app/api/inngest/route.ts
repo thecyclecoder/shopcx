@@ -40,6 +40,7 @@ import { ticketAutoArchive } from "@/lib/inngest/auto-archive";
 import { tagCancelRelevanceBulk, tagCancelRelevanceCron } from "@/lib/inngest/review-tagging";
 import { amplifierWebhookProcess } from "@/lib/inngest/amplifier-webhooks";
 import { returnsProcessDelivery, returnsIssueRefund } from "@/lib/inngest/returns";
+import { macroAuditFunction } from "@/lib/inngest/macro-audit";
 
 export const maxDuration = 300;
 
@@ -82,5 +83,6 @@ export const { GET, POST, PUT } = serve({
     unifiedTicketHandler,
     returnsProcessDelivery,
     returnsIssueRefund,
+    macroAuditFunction,
   ],
 });

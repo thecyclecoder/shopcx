@@ -44,16 +44,18 @@ export default function ProductIntelligenceDetailPage() {
 
   // Macro Audit
   const [auditing, setAuditing] = useState(false);
+  const [auditJobId, setAuditJobId] = useState<string | null>(null);
+  const [auditProgress, setAuditProgress] = useState<{ total: number; completed: number; status: string }>({ total: 0, completed: 0, status: "pending" });
   const [auditResults, setAuditResults] = useState<{
-    product: string; total: number; with_changes: number; with_accuracy_issues: number;
-    audits: {
-      macro_id: string; macro_name: string; category: string; active: boolean;
-      original: string; rewritten: string; rewritten_html: string; changes: string[]; accuracy_issues: string[];
-      issues_detected: string[]; has_changes: boolean;
-    }[];
-  } | null>(null);
+    macro_id: string; macro_name: string; category: string; active: boolean;
+    original: string; rewritten: string; rewritten_html: string; changes: string[]; accuracy_issues: string[];
+    issues_detected: string[]; has_changes: boolean;
+  }[] | null>(null);
   const [auditApplied, setAuditApplied] = useState<Set<string>>(new Set());
   const [auditApplying, setAuditApplying] = useState(false);
+
+  // Content collapsed
+  const [contentExpanded, setContentExpanded] = useState(false);
 
   const fetchData = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/product-intelligence/${piId}`);
@@ -243,11 +245,18 @@ export default function ProductIntelligenceDetailPage() {
         </div>
       </div>
 
-      {/* Content */}
+      {/* Content (collapsible) */}
       <div className="mb-6 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-        <div className="border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
+        <button
+          onClick={() => setContentExpanded(!contentExpanded)}
+          className="flex w-full items-center justify-between border-b border-zinc-200 px-5 py-3 dark:border-zinc-800 text-left"
+        >
           <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Intelligence Content</h3>
-        </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-zinc-400">{data.content.length.toLocaleString()} chars</span>
+            <span className={`text-zinc-400 transition-transform ${contentExpanded ? "rotate-90" : ""}`}>&#9656;</span>
+          </div>
+        </button>
         {editing ? (
           <div className="p-5">
             <div className="mb-3">
@@ -265,11 +274,11 @@ export default function ProductIntelligenceDetailPage() {
               className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-mono dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
             />
           </div>
-        ) : (
-          <div className="p-5 prose prose-sm max-w-none dark:prose-invert whitespace-pre-wrap text-sm text-zinc-700 dark:text-zinc-300 font-mono">
+        ) : contentExpanded ? (
+          <div className="p-5 prose prose-sm max-w-none dark:prose-invert whitespace-pre-wrap text-sm text-zinc-700 dark:text-zinc-300 font-mono max-h-[500px] overflow-y-auto">
             {data.content}
           </div>
-        )}
+        ) : null}
       </div>
 
       {/* Enrich */}
@@ -324,13 +333,30 @@ export default function ProductIntelligenceDetailPage() {
                 setAuditing(true);
                 setAuditResults(null);
                 setAuditApplied(new Set());
+                setAuditProgress({ total: 0, completed: 0, status: "pending" });
                 try {
-                  const res = await fetch(`/api/workspaces/${workspace.id}/product-intelligence/${piId}/audit-macros`, {
-                    method: "POST",
-                  });
-                  if (res.ok) setAuditResults(await res.json());
-                } catch {}
-                setAuditing(false);
+                  const res = await fetch(`/api/workspaces/${workspace.id}/product-intelligence/${piId}/audit-macros`, { method: "POST" });
+                  if (res.ok) {
+                    const { job_id } = await res.json();
+                    setAuditJobId(job_id);
+                    // Poll for progress
+                    const poll = setInterval(async () => {
+                      const pollRes = await fetch(`/api/workspaces/${workspace.id}/product-intelligence/${piId}/audit-macros?job_id=${job_id}`);
+                      if (pollRes.ok) {
+                        const job = await pollRes.json();
+                        setAuditProgress({ total: job.total, completed: job.completed, status: job.status });
+                        if (job.status === "completed") {
+                          clearInterval(poll);
+                          setAuditResults(job.results || []);
+                          setAuditing(false);
+                        } else if (job.status === "failed") {
+                          clearInterval(poll);
+                          setAuditing(false);
+                        }
+                      }
+                    }, 2000);
+                  }
+                } catch { setAuditing(false); }
               }}
               disabled={auditing}
               className="rounded-md bg-violet-500 px-4 py-2 text-sm font-medium text-white hover:bg-violet-600 disabled:opacity-50"
@@ -340,29 +366,43 @@ export default function ProductIntelligenceDetailPage() {
           </div>
 
           {auditing && (
-            <div className="py-8 text-center">
-              <div className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-violet-500 border-t-transparent" />
-              <p className="mt-2 text-sm text-zinc-500">ShopCX is reviewing macros against product intelligence... this may take a minute.</p>
+            <div className="py-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm text-zinc-600 dark:text-zinc-400">
+                  {auditProgress.total > 0
+                    ? `Reviewing macro ${auditProgress.completed}/${auditProgress.total}...`
+                    : "Starting audit..."}
+                </span>
+                {auditProgress.total > 0 && (
+                  <span className="text-xs text-zinc-500">{Math.round((auditProgress.completed / auditProgress.total) * 100)}%</span>
+                )}
+              </div>
+              <div className="h-2 w-full rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-violet-500 transition-all duration-500"
+                  style={{ width: auditProgress.total > 0 ? `${Math.max(2, (auditProgress.completed / auditProgress.total) * 100)}%` : "2%" }}
+                />
+              </div>
             </div>
           )}
 
-          {auditResults && (
+          {auditResults && auditResults.length > 0 && (
             <div>
               {/* Summary */}
               <div className="mb-4 flex gap-4 text-xs text-zinc-500">
-                <span>{auditResults.total} macros audited</span>
-                <span>{auditResults.with_changes} need changes</span>
-                <span>{auditResults.with_accuracy_issues} have accuracy issues</span>
+                <span>{auditResults.length} macros audited</span>
+                <span>{auditResults.filter(a => a.has_changes).length} need changes</span>
+                <span>{auditResults.filter(a => a.accuracy_issues.length > 0).length} have accuracy issues</span>
                 <span className="text-green-600">{auditApplied.size} applied</span>
               </div>
 
               {/* Apply all button */}
-              {auditResults.with_changes > 0 && (
+              {auditResults.filter(a => a.has_changes).length > 0 && (
                 <div className="mb-4">
                   <button
                     onClick={async () => {
                       setAuditApplying(true);
-                      const updates = auditResults.audits
+                      const updates = auditResults
                         .filter(a => a.has_changes && !auditApplied.has(a.macro_id))
                         .map(a => ({ macro_id: a.macro_id, body_text: a.rewritten, body_html: a.rewritten_html }));
                       const res = await fetch(`/api/workspaces/${workspace.id}/product-intelligence/${piId}/audit-macros`, {
@@ -375,17 +415,17 @@ export default function ProductIntelligenceDetailPage() {
                       }
                       setAuditApplying(false);
                     }}
-                    disabled={auditApplying || auditApplied.size === auditResults.with_changes}
+                    disabled={auditApplying || auditApplied.size >= auditResults.filter(a => a.has_changes).length}
                     className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
                   >
-                    {auditApplying ? "Applying..." : `Apply All ${auditResults.with_changes - auditApplied.size} Changes`}
+                    {auditApplying ? "Applying..." : `Apply All ${auditResults.filter(a => a.has_changes).length - auditApplied.size} Changes`}
                   </button>
                 </div>
               )}
 
               {/* Individual audits */}
               <div className="space-y-3">
-                {auditResults.audits.map(a => (
+                {auditResults.map(a => (
                   <div key={a.macro_id} className={`rounded-lg border p-4 ${
                     a.accuracy_issues.length > 0 ? "border-red-200 dark:border-red-800" :
                     a.has_changes ? "border-amber-200 dark:border-amber-800" :
