@@ -8,6 +8,7 @@ import { cleanEmailForDisplay } from "@/lib/email-utils";
 import TicketPresenceBanner, { useTicketPresence } from "@/components/ticket-presence";
 import { createClient } from "@/lib/supabase/client";
 import StoreCreditModal from "@/components/store-credit-modal";
+import ReturnsList from "@/components/shared/ReturnsList";
 
 interface Member {
   user_id: string;
@@ -2582,32 +2583,7 @@ export default function TicketDetailPage() {
             </button>
             {returnsCardOpen && (
               <div className="border-t border-zinc-100 px-4 pb-3 dark:border-zinc-800">
-                {ticketReturns.map((r) => {
-                  const badge = r.status === "open" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
-                    : r.status === "in_transit" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-                    : r.status === "refunded" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-                    : r.status === "cancelled" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
-                    : r.status === "restocked" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
-                    : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400";
-                  const resLabel = r.resolution_type === "store_credit_return" ? "Store Credit"
-                    : r.resolution_type === "refund_return" ? "Refund"
-                    : r.resolution_type === "store_credit_no_return" ? "Store Credit"
-                    : r.resolution_type === "refund_no_return" ? "Refund"
-                    : r.resolution_type;
-                  return (
-                    <a key={r.id} href={`/dashboard/returns/${r.id}`} target="_blank" rel="noopener noreferrer"
-                      className="flex items-center justify-between rounded px-1 py-1.5 text-sm transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
-                      <div className="flex items-center gap-2">
-                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badge}`}>{r.status}</span>
-                        <span className="text-zinc-700 dark:text-zinc-300">{r.order_number}</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-zinc-400">{resLabel}</span>
-                        <span className="tabular-nums text-zinc-500">${(r.net_refund_cents / 100).toFixed(2)}</span>
-                      </div>
-                    </a>
-                  );
-                })}
+                <ReturnsList returns={ticketReturns} variant="compact" />
               </div>
             )}
           </div>
