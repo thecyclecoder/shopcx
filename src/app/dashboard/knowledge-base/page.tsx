@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
-import { useSearchParams } from "next/navigation";
+import { useEffect, useState, useCallback } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface Article {
@@ -16,155 +16,113 @@ interface Article {
   product_name: string | null;
   source: string;
   excerpt: string | null;
+  view_count: number;
+  helpful_yes: number;
+  helpful_no: number;
   created_at: string;
+  updated_at: string;
 }
 
-interface Product {
-  id: string;
-  title: string;
-}
+const PAGE_SIZE = 25;
 
 const CATEGORIES = ["product", "policy", "shipping", "billing", "general", "faq", "troubleshooting"];
 
+function formatDate(d: string | null): string {
+  if (!d) return "--";
+  return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
 export default function KnowledgeBasePage() {
   const workspace = useWorkspace();
-  const [articles, setArticles] = useState<Article[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editing, setEditing] = useState<Partial<Article> | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("");
-  const [productFilter, setProductFilter] = useState("");
-  const [helpSlug, setHelpSlug] = useState<string | null>(null);
-  const [showGenerate, setShowGenerate] = useState(false);
-  const [generating, setGenerating] = useState(false);
-  const [genTopic, setGenTopic] = useState("");
-  const [genRawMaterial, setGenRawMaterial] = useState("");
-  const [genCategory, setGenCategory] = useState("general");
-  const [genProductId, setGenProductId] = useState("");
-  const [genError, setGenError] = useState("");
+  const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Pre-fill generate form from knowledge_gap notification query param
+  const [articles, setArticles] = useState<Article[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [helpSlug, setHelpSlug] = useState<string | null>(null);
+
+  // Filters
+  const [search, setSearch] = useState("");
+  const [appliedSearch, setAppliedSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [sort, setSort] = useState("updated_at");
+  const [order, setOrder] = useState<"asc" | "desc">("desc");
+  const [offset, setOffset] = useState(0);
+
+  // If ?generate= param exists, redirect to new article page
   useEffect(() => {
     const generateQuery = searchParams.get("generate");
     if (generateQuery) {
-      setShowGenerate(true);
-      setGenTopic(generateQuery);
+      router.push(`/dashboard/knowledge-base/new?generate=${encodeURIComponent(generateQuery)}`);
     }
-  }, [searchParams]);
+  }, [searchParams, router]);
 
+  // Fetch help slug once
   useEffect(() => {
-    Promise.all([
-      fetch(`/api/workspaces/${workspace.id}/knowledge-base`).then(r => r.json()),
-      fetch(`/api/workspaces/${workspace.id}/products`).then(r => r.json()).catch(() => []),
-      fetch(`/api/workspaces/${workspace.id}/integrations`).then(r => r.json()).catch(() => ({})),
-    ]).then(([a, p, integrations]) => {
-      if (Array.isArray(a)) setArticles(a);
-      if (Array.isArray(p)) setProducts(p);
-      if (integrations.help_slug) setHelpSlug(integrations.help_slug);
-    }).finally(() => setLoading(false));
+    fetch(`/api/workspaces/${workspace.id}/integrations`)
+      .then(r => r.json())
+      .then(data => { if (data.help_slug) setHelpSlug(data.help_slug); })
+      .catch(() => {});
   }, [workspace.id]);
 
+  const fetchArticles = useCallback(async () => {
+    setLoading(true);
+    const res = await fetch(`/api/workspaces/${workspace.id}/knowledge-base`);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) setArticles(data);
+    }
+    setLoading(false);
+  }, [workspace.id]);
+
+  useEffect(() => { fetchArticles(); }, [fetchArticles]);
+
+  // Client-side filter, sort, paginate
   const filtered = articles.filter(a => {
-    if (categoryFilter && a.category !== categoryFilter) return false;
-    if (productFilter && a.product_id !== productFilter) return false;
-    if (!search.trim()) return true;
-    const q = search.toLowerCase();
+    if (categoryFilter !== "all" && a.category !== categoryFilter) return false;
+    if (statusFilter === "published" && !a.published) return false;
+    if (statusFilter === "draft" && a.published) return false;
+    if (!appliedSearch.trim()) return true;
+    const q = appliedSearch.toLowerCase();
     return a.title.toLowerCase().includes(q) || a.content.toLowerCase().includes(q);
   });
 
-  const handleSave = async () => {
-    if (!editing?.title || (!editing?.content && !editing?.content_html)) return;
-    setSaving(true);
-    const base = `/api/workspaces/${workspace.id}/knowledge-base`;
-    const isNew = !editing.id;
+  const sorted = [...filtered].sort((a, b) => {
+    let aVal: string | number = "";
+    let bVal: string | number = "";
+    if (sort === "title") { aVal = a.title.toLowerCase(); bVal = b.title.toLowerCase(); }
+    else if (sort === "category") { aVal = a.category; bVal = b.category; }
+    else if (sort === "published") { aVal = a.published ? 1 : 0; bVal = b.published ? 1 : 0; }
+    else if (sort === "view_count") { aVal = a.view_count || 0; bVal = b.view_count || 0; }
+    else if (sort === "helpful") { aVal = (a.helpful_yes || 0) - (a.helpful_no || 0); bVal = (b.helpful_yes || 0) - (b.helpful_no || 0); }
+    else if (sort === "updated_at") { aVal = a.updated_at || a.created_at; bVal = b.updated_at || b.created_at; }
+    if (aVal < bVal) return order === "asc" ? -1 : 1;
+    if (aVal > bVal) return order === "asc" ? 1 : -1;
+    return 0;
+  });
 
-    // Auto-generate slug from title if not set
-    if (!editing.slug && editing.title) {
-      editing.slug = editing.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    }
+  const total = sorted.length;
+  const page = sorted.slice(offset, offset + PAGE_SIZE);
 
-    const res = await fetch(isNew ? base : `${base}/${editing.id}`, {
-      method: isNew ? "POST" : "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(editing),
-    });
-
-    if (res.ok) {
-      const saved = await res.json();
-      if (isNew) setArticles(prev => [saved, ...prev]);
-      else setArticles(prev => prev.map(a => a.id === saved.id ? saved : a));
-      setEditingId(null);
-      setEditing(null);
-    }
-    setSaving(false);
+  const handleSort = (col: string) => {
+    if (sort === col) setOrder(o => o === "asc" ? "desc" : "asc");
+    else { setSort(col); setOrder(col === "updated_at" ? "desc" : "asc"); }
+    setOffset(0);
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm("Delete this article?")) return;
-    await fetch(`/api/workspaces/${workspace.id}/knowledge-base/${id}`, { method: "DELETE" });
-    setArticles(prev => prev.filter(a => a.id !== id));
-  };
-
-  const handleGenerate = async () => {
-    if (!genTopic.trim() || !genRawMaterial.trim()) return;
-    setGenerating(true);
-    setGenError("");
-    try {
-      const res = await fetch(`/api/workspaces/${workspace.id}/knowledge-base/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          topic: genTopic,
-          raw_material: genRawMaterial,
-          category: genCategory,
-          product_id: genProductId || undefined,
-        }),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        setGenError(err.error || "Generation failed");
-        return;
-      }
-      const generated = await res.json();
-      // Open the article editor with the generated content for review
-      setShowGenerate(false);
-      setGenTopic("");
-      setGenRawMaterial("");
-      setGenCategory("general");
-      setGenProductId("");
-      setEditingId("new");
-      setEditing({
-        title: generated.title,
-        content: generated.content,
-        content_html: generated.content_html,
-        category: generated.category,
-        slug: generated.slug,
-        excerpt: generated.excerpt,
-        product_id: generated.product_id,
-        published: false,
-        source: "ai_generated",
-      });
-    } catch {
-      setGenError("Failed to generate article");
-    } finally {
-      setGenerating(false);
-    }
-  };
-
-  if (loading) return <div className="p-8 text-sm text-zinc-400">Loading...</div>;
-
-  const publishedCount = articles.filter(a => a.published).length;
+  const SortIcon = ({ col }: { col: string }) => (
+    sort === col ? <span className="ml-1 text-[10px]">{order === "asc" ? "\u25B2" : "\u25BC"}</span> : null
+  );
 
   return (
-    <div className="p-8">
-      <div className="flex items-center justify-between">
+    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Knowledge Base</h1>
-          <p className="mt-1 text-sm text-zinc-500">{articles.length} articles ({publishedCount} published)</p>
+          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Articles</h1>
+          <p className="mt-1 text-sm text-zinc-500">
+            {articles.length} articles ({articles.filter(a => a.published).length} published)
+          </p>
         </div>
         <div className="flex items-center gap-2">
           {helpSlug && (
@@ -178,16 +136,7 @@ export default function KnowledgeBasePage() {
             </a>
           )}
           <button
-            onClick={() => setShowGenerate(!showGenerate)}
-            className="rounded-md border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100 dark:border-indigo-700 dark:bg-indigo-950 dark:text-indigo-300 dark:hover:bg-indigo-900"
-          >
-            AI Generate
-          </button>
-          <button
-            onClick={() => {
-              setEditingId("new");
-              setEditing({ title: "", content: "", category: "general", published: false, product_id: null });
-            }}
+            onClick={() => router.push("/dashboard/knowledge-base/new")}
             className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
           >
             New Article
@@ -196,235 +145,96 @@ export default function KnowledgeBasePage() {
       </div>
 
       {/* Filters */}
-      <div className="mt-4 flex gap-3">
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search articles..."
-          className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
-        <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}
-          className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
-          <option value="">All categories</option>
-          {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <select value={categoryFilter} onChange={e => { setCategoryFilter(e.target.value); setOffset(0); }}
+          className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+          <option value="all">All Categories</option>
+          {CATEGORIES.map(c => <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>)}
         </select>
-        {products.length > 0 && (
-          <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)}
-            className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
-            <option value="">All products</option>
-            {products.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
-          </select>
-        )}
+
+        <select value={statusFilter} onChange={e => { setStatusFilter(e.target.value); setOffset(0); }}
+          className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+          <option value="all">All Statuses</option>
+          <option value="published">Published</option>
+          <option value="draft">Draft</option>
+        </select>
+
+        <form onSubmit={e => { e.preventDefault(); setAppliedSearch(search); setOffset(0); }} className="flex gap-1">
+          <input type="text" value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Search articles..."
+            className="w-56 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300" />
+          <button type="submit" className="rounded-md bg-zinc-100 px-3 py-1.5 text-sm dark:bg-zinc-700 dark:text-zinc-300">Go</button>
+        </form>
       </div>
 
-      {/* AI Generate form */}
-      {showGenerate && (
-        <div className="mt-4 rounded-lg border border-purple-200 bg-purple-50 p-4 dark:border-purple-800 dark:bg-purple-950">
-          <h3 className="text-sm font-semibold text-purple-900 dark:text-purple-200">AI Article Generator</h3>
-          <p className="mb-3 text-xs text-purple-600 dark:text-purple-400">Paste raw product info and let AI write a polished KB article.</p>
-          <div className="space-y-3">
-            <input
-              type="text"
-              value={genTopic}
-              onChange={(e) => setGenTopic(e.target.value)}
-              placeholder="Article topic (e.g. 'Is Ashwavana safe during pregnancy?')"
-              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-            />
-            <textarea
-              value={genRawMaterial}
-              onChange={(e) => setGenRawMaterial(e.target.value)}
-              placeholder="Paste raw material here: product specs, ingredient lists, notes, FAQs, marketing copy..."
-              rows={6}
-              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-            />
-            <div className="flex gap-3">
-              <select
-                value={genCategory}
-                onChange={(e) => setGenCategory(e.target.value)}
-                className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-              >
-                {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-              {products.length > 0 && (
-                <select
-                  value={genProductId}
-                  onChange={(e) => setGenProductId(e.target.value)}
-                  className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                >
-                  <option value="">No product</option>
-                  {products.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
-                </select>
-              )}
-            </div>
-            {genError && <p className="text-xs text-red-600">{genError}</p>}
+      {/* Table */}
+      <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-zinc-100 text-left text-xs font-medium uppercase text-zinc-400 dark:border-zinc-800">
+                <th className="cursor-pointer px-4 py-2.5" onClick={() => handleSort("title")}>Title<SortIcon col="title" /></th>
+                <th className="cursor-pointer px-4 py-2.5" onClick={() => handleSort("category")}>Category<SortIcon col="category" /></th>
+                <th className="cursor-pointer px-4 py-2.5" onClick={() => handleSort("published")}>Status<SortIcon col="published" /></th>
+                <th className="cursor-pointer px-4 py-2.5 text-right" onClick={() => handleSort("view_count")}>Views<SortIcon col="view_count" /></th>
+                <th className="cursor-pointer px-4 py-2.5 text-right" onClick={() => handleSort("helpful")}>Helpful<SortIcon col="helpful" /></th>
+                <th className="cursor-pointer px-4 py-2.5" onClick={() => handleSort("updated_at")}>Updated<SortIcon col="updated_at" /></th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-zinc-400">Loading...</td></tr>
+              ) : page.length === 0 ? (
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-zinc-400">No articles found</td></tr>
+              ) : page.map(a => (
+                <tr key={a.id}
+                  onClick={() => router.push(`/dashboard/knowledge-base/${a.id}`)}
+                  className="cursor-pointer border-b border-zinc-50 transition-colors hover:bg-zinc-50 dark:border-zinc-800/50 dark:hover:bg-zinc-800/30">
+                  <td className="px-4 py-2.5">
+                    <div className="font-medium text-zinc-900 dark:text-zinc-100">{a.title}</div>
+                    {a.excerpt && <div className="mt-0.5 max-w-md truncate text-xs text-zinc-400">{a.excerpt}</div>}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                      {a.category}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                      a.published
+                        ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                        : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                    }`}>
+                      {a.published ? "Published" : "Draft"}
+                    </span>
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums text-zinc-500">
+                    {a.view_count || 0}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums text-zinc-500">
+                    <span className="text-emerald-600">{a.helpful_yes || 0}</span>
+                    {" / "}
+                    <span className="text-red-500">{a.helpful_no || 0}</span>
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">{formatDate(a.updated_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Pagination */}
+        {total > PAGE_SIZE && (
+          <div className="flex items-center justify-between border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+            <p className="text-xs text-zinc-500">{offset + 1}--{Math.min(offset + PAGE_SIZE, total)} of {total}</p>
             <div className="flex gap-2">
-              <button
-                onClick={handleGenerate}
-                disabled={generating || !genTopic.trim() || !genRawMaterial.trim()}
-                className="rounded-md bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-500 disabled:opacity-50"
-              >
-                {generating ? "Generating..." : "Generate"}
-              </button>
-              <button
-                onClick={() => { setShowGenerate(false); setGenError(""); }}
-                className="rounded-md border border-zinc-300 px-4 py-2 text-sm text-zinc-600 dark:border-zinc-700 dark:text-zinc-400"
-              >
-                Cancel
-              </button>
+              <button onClick={() => setOffset(o => Math.max(0, o - PAGE_SIZE))} disabled={offset === 0}
+                className="rounded-md border border-zinc-300 px-3 py-1 text-xs disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300">Previous</button>
+              <button onClick={() => setOffset(o => o + PAGE_SIZE)} disabled={offset + PAGE_SIZE >= total}
+                className="rounded-md border border-zinc-300 px-3 py-1 text-xs disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300">Next</button>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* New article form */}
-      {editingId === "new" && editing && (
-        <div className="mt-4 rounded-lg border border-indigo-200 bg-indigo-50 p-4 dark:border-indigo-800 dark:bg-indigo-950">
-          <ArticleForm article={editing} products={products} saving={saving}
-            onChange={setEditing} onSave={handleSave} onCancel={() => { setEditingId(null); setEditing(null); }} />
-        </div>
-      )}
-
-      {/* Article list */}
-      <div className="mt-4 divide-y divide-zinc-200 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
-        {filtered.length === 0 && <p className="p-4 text-sm text-zinc-400">No articles found.</p>}
-        {filtered.map(a => (
-          <div key={a.id}>
-            <div className="flex items-center justify-between p-4">
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{a.title}</span>
-                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${a.published ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400" : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"}`}>
-                    {a.published ? "Published" : "Draft"}
-                  </span>
-                  <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800">{a.category}</span>
-                  {a.source !== "manual" && <span className="text-xs text-zinc-400">via {a.source}</span>}
-                </div>
-                <p className="mt-1 truncate text-xs text-zinc-500">{a.excerpt || a.content.slice(0, 120)}</p>
-              </div>
-              <div className="ml-3 flex shrink-0 items-center gap-2">
-                <button
-                  onClick={() => {
-                    if (editingId === a.id) { setEditingId(null); setEditing(null); }
-                    else { setEditingId(a.id); setEditing(a); }
-                  }}
-                  className="text-xs text-indigo-600 hover:underline dark:text-indigo-400"
-                >
-                  {editingId === a.id ? "Close" : "Edit"}
-                </button>
-                <button onClick={() => handleDelete(a.id)} className="text-xs text-red-500 hover:underline">Delete</button>
-              </div>
-            </div>
-            {editingId === a.id && editing && (
-              <div className="border-t border-indigo-200 bg-indigo-50 p-4 dark:border-indigo-800 dark:bg-indigo-950">
-                <ArticleForm article={editing} products={products} saving={saving}
-                  onChange={setEditing} onSave={handleSave} onCancel={() => { setEditingId(null); setEditing(null); }} />
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ArticleForm({ article, products, saving, onChange, onSave, onCancel }: {
-  article: Partial<Article>;
-  products: Product[];
-  saving: boolean;
-  onChange: (a: Partial<Article>) => void;
-  onSave: () => void;
-  onCancel: () => void;
-}) {
-  const editorRef = useRef<HTMLDivElement>(null);
-  const lastArticleId = useRef<string | undefined>(undefined);
-
-  useEffect(() => {
-    // Re-initialize editor when switching to a different article (or new article with different content)
-    const articleKey = article.id || article.title || "";
-    if (editorRef.current && lastArticleId.current !== articleKey) {
-      editorRef.current.innerHTML = article.content_html || article.content || "";
-      lastArticleId.current = articleKey;
-    }
-  }, [article.id, article.title, article.content_html, article.content]);
-
-  const syncContent = () => {
-    if (!editorRef.current) return;
-    const html = editorRef.current.innerHTML;
-    const text = editorRef.current.innerText || "";
-    onChange({ ...article, content: text, content_html: html });
-  };
-
-  return (
-    <div className="space-y-3">
-      <input type="text" value={article.title || ""} onChange={(e) => onChange({ ...article, title: e.target.value })}
-        placeholder="Article title" className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
-      <div className="flex gap-3">
-        <select value={article.category || "general"} onChange={(e) => onChange({ ...article, category: e.target.value })}
-          className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
-          {["product", "policy", "shipping", "billing", "general", "faq", "troubleshooting"].map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
-        <select value={article.product_id || ""} onChange={(e) => onChange({ ...article, product_id: e.target.value || null })}
-          className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
-          <option value="">No product</option>
-          {products.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
-        </select>
-      </div>
-      <div className="flex gap-3">
-        <input type="text" value={article.slug || ""} onChange={(e) => onChange({ ...article, slug: e.target.value })}
-          placeholder="URL slug (auto-generated)" className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
-        <label className="flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
-          <input type="checkbox" checked={article.published || false} onChange={(e) => onChange({ ...article, published: e.target.checked })}
-            className="h-4 w-4 rounded border-zinc-300 text-emerald-600" />
-          Published
-        </label>
-      </div>
-
-      {/* Rich text toolbar */}
-      <div className="rounded-md border border-zinc-300 dark:border-zinc-700">
-        <div className="flex items-center gap-0.5 border-b border-zinc-300 bg-zinc-50 px-2 py-1 dark:border-zinc-700 dark:bg-zinc-800">
-          {[
-            { cmd: "bold", icon: "B", cls: "font-bold" },
-            { cmd: "italic", icon: "I", cls: "italic" },
-            { cmd: "underline", icon: "U", cls: "underline" },
-          ].map(({ cmd, icon, cls }) => (
-            <button key={cmd} type="button"
-              onMouseDown={(e) => { e.preventDefault(); document.execCommand(cmd); }}
-              className={`rounded px-2 py-0.5 text-sm text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700 ${cls}`}
-            >{icon}</button>
-          ))}
-          <span className="mx-1 h-4 w-px bg-zinc-300 dark:bg-zinc-600" />
-          <button type="button" onMouseDown={(e) => { e.preventDefault(); document.execCommand("formatBlock", false, "h2"); }}
-            className="rounded px-2 py-0.5 text-sm font-bold text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700">H2</button>
-          <button type="button" onMouseDown={(e) => { e.preventDefault(); document.execCommand("formatBlock", false, "h3"); }}
-            className="rounded px-2 py-0.5 text-sm font-bold text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700">H3</button>
-          <span className="mx-1 h-4 w-px bg-zinc-300 dark:bg-zinc-600" />
-          <button type="button" onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertUnorderedList"); }}
-            className="rounded px-2 py-0.5 text-sm text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700">• List</button>
-          <button type="button" onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertOrderedList"); }}
-            className="rounded px-2 py-0.5 text-sm text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700">1. List</button>
-          <span className="mx-1 h-4 w-px bg-zinc-300 dark:bg-zinc-600" />
-          <button type="button" onMouseDown={(e) => {
-            e.preventDefault();
-            const url = prompt("Enter URL:");
-            if (url) document.execCommand("createLink", false, url);
-          }} className="rounded px-2 py-0.5 text-sm text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700">Link</button>
-        </div>
-        <div
-          ref={editorRef}
-          contentEditable
-          onInput={syncContent}
-          onBlur={syncContent}
-          className="prose prose-sm max-w-none min-h-[250px] bg-white px-3 py-2 text-sm outline-none dark:bg-zinc-800 dark:text-zinc-100 dark:prose-invert"
-          data-placeholder="Article content..."
-        />
-      </div>
-
-      <div className="flex gap-2">
-        <button onClick={() => { onChange({ ...article, published: false }); onSave(); }} disabled={saving}
-          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50">
-          {saving ? "Saving..." : "Save as Draft"}
-        </button>
-        <button onClick={() => { onChange({ ...article, published: true }); onSave(); }} disabled={saving}
-          className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50">
-          Publish
-        </button>
-        <button onClick={onCancel} className="rounded-md border border-zinc-300 px-4 py-2 text-sm text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">Cancel</button>
+        )}
       </div>
     </div>
   );
