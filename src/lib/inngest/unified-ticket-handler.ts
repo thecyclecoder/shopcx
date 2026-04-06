@@ -158,11 +158,11 @@ Only your response.`, "haiku", 200)) || article.slice(0, 500);
 async function generateJourneyLeadIn(msg: string, journeyName: string, ch: string, p: { name?: string; tone?: string } | null): Promise<{ leadIn: string; ctaText: string }> {
   const short = ["chat", "sms", "meta_dm"].includes(ch);
   const persona = p ? `Your name is ${p.name}. Tone: ${p.tone}.` : "You are a friendly support agent.";
-  const raw = await claude(`${persona} Never reveal AI. Customer sent: "${msg}". You're routing them to a "${journeyName}" form.
+  const raw = await claude(`${persona} Never reveal AI. Customer sent: "${msg}". You're helping them with "${journeyName}".
 
 Write two things:
-1. A brief lead-in message (${short ? "1 sentence" : "2-3 sentences"}) that acknowledges their message tone and naturally introduces why they need to use the form. Match their energy — if angry, be empathetic; if casual, be casual.
-2. A CTA button label (3-5 words, action-oriented, specific to their request).
+1. A brief lead-in message (${short ? "1 sentence" : "2-3 sentences"}) that acknowledges their request and lets them know you're sending a link to help them. Do NOT mention "form", "team", "specialized team", or "department". Keep it simple: "I can help you with that" or "Let me get that taken care of for you." Match their energy.
+2. A CTA button label (3-5 words, action-oriented). Use "Manage Subscription" for cancel journeys, not "Cancel Orders Form".
 
 Return JSON: { "lead_in": "...", "cta_text": "..." }`, "haiku", 150);
   try {
@@ -300,6 +300,94 @@ export const unifiedTicketHandler = inngest.createFunction(
         return true;
       });
       if (linked) return { status: "account_linking" };
+    }
+
+    // ── 2b. Early pattern match — runs before re-nudge/playbook checks ──
+    // If the customer's message clearly matches a journey/playbook pattern,
+    // skip re-nudge and route fresh (e.g. "cancel the other one" after a completed cancel journey)
+    const earlyPattern = await step.run("early-pattern-match", async () => {
+      const m = await matchPatterns(wsId, null, msg);
+      if (m && m.confidence >= 0.7) {
+        // Check if this pattern maps to a journey
+        const { data: j } = await admin.from("journey_definitions").select("id, name, trigger_intent, match_patterns")
+          .eq("workspace_id", wsId).eq("is_active", true);
+        for (const jd of j || []) {
+          const intentMatch = jd.trigger_intent && m.category?.toLowerCase().includes(jd.trigger_intent.toLowerCase());
+          const patternMatch = (jd.match_patterns as string[] || []).some((p: string) =>
+            msg.toLowerCase().includes(p.toLowerCase()));
+          if (intentMatch || patternMatch) return { hit: true, type: "journey" as const, id: jd.id, name: jd.name, intent: jd.trigger_intent, patternName: m.name, confidence: m.confidence };
+        }
+        // Check playbooks
+        const { data: pb } = await admin.from("playbooks").select("id, name, trigger_intents, trigger_patterns")
+          .eq("workspace_id", wsId).eq("is_active", true);
+        for (const p of pb || []) {
+          const intents = (p.trigger_intents as string[]) || [];
+          const patterns = (p.trigger_patterns as string[]) || [];
+          const intentMatch = intents.some(i => m.category?.toLowerCase().includes(i.toLowerCase()));
+          const patternMatch = patterns.some(pt => msg.toLowerCase().includes(pt.toLowerCase()));
+          if (intentMatch || patternMatch) return { hit: true, type: "playbook" as const, id: p.id, name: p.name, intent: intents[0], patternName: m.name, confidence: m.confidence };
+        }
+      }
+      // Also check direct journey pattern match (bypass smart patterns)
+      const { data: journeys } = await admin.from("journey_definitions").select("id, name, trigger_intent, match_patterns")
+        .eq("workspace_id", wsId).eq("is_active", true);
+      const msgLower = msg.toLowerCase().replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/[\u2018\u2019'`]/g, "").replace(/\s+/g, " ").trim();
+      for (const jd of journeys || []) {
+        const patterns = (jd.match_patterns as string[] || []);
+        const matched = patterns.some(p => msgLower.includes(p.toLowerCase().replace(/[''`]/g, "")));
+        if (matched) return { hit: true, type: "journey" as const, id: jd.id, name: jd.name, intent: jd.trigger_intent, patternName: "direct pattern", confidence: 1 };
+      }
+      return { hit: false } as { hit: false };
+    });
+
+    if (earlyPattern.hit) {
+      const ep = earlyPattern as { hit: true; type: string; id: string; name: string; intent: string; patternName: string; confidence: number };
+      await step.run("early-pattern-note", () =>
+        sysNote(admin, tid, `[System] Early pattern match: "${ep.patternName}" → ${ep.type}: ${ep.name} (${(ep.confidence * 100).toFixed(0)}%)`));
+
+      // Clear handled_by so this routes fresh
+      await step.run("clear-handled-by", () =>
+        admin.from("tickets").update({ handled_by: null, ai_clarification_turn: 0 }).eq("id", tid));
+
+      if (ep.type === "journey" && st.hasCust) {
+        const delay = await step.run("ep-delay", () => responseDelay(admin, wsId, st.ch));
+        if (delay > 0) await step.sleep("ep-wait", `${delay}s`);
+        await step.run("ep-journey", async () => {
+          if (await newerActivity(admin, tid, t0)) return;
+          const { leadIn, ctaText } = await generateJourneyLeadIn(msg, ep.name, st.ch, pers);
+          await launchJourneyForTicket({
+            workspaceId: wsId, ticketId: tid, customerId: st.custId!,
+            journeyId: ep.id, journeyName: ep.name, triggerIntent: ep.intent || "",
+            channel: st.ch, leadIn, ctaText,
+          });
+          await admin.from("tickets").update({ handled_by: `Journey: ${ep.name}` }).eq("id", tid);
+          await setStatus(admin, tid, cfg.auto_resolve);
+        });
+        return { status: "early_pattern_journey", journey: ep.name };
+      }
+
+      if (ep.type === "playbook" && st.hasCust) {
+        await step.run("ep-playbook", async () => {
+          const { startPlaybook } = await import("@/lib/playbook-executor");
+          await startPlaybook(admin, tid, ep.id);
+          await sysNote(admin, tid, `[System] → Playbook: ${ep.name} (${(ep.confidence * 100).toFixed(0)}%)`);
+          await markFirstTouch(tid, "ai");
+          await admin.from("tickets").update({ handled_by: `Playbook: ${ep.name}` }).eq("id", tid);
+        });
+        // Execute first step
+        const delay = await step.run("ep-pb-delay", () => responseDelay(admin, wsId, st.ch));
+        if (delay > 0) await step.sleep("ep-pb-wait", `${delay}s`);
+        const pbResult = await step.run("ep-exec-pb", async () => {
+          if (await newerActivity(admin, tid, t0)) return { action: "cancelled" as const };
+          return executePlaybookStep(wsId, tid, msg, pers);
+        });
+        if (pbResult.action !== "cancelled") {
+          if (pbResult.systemNote) await step.run("ep-pb-note", () => sysNote(admin, tid, pbResult.systemNote!));
+          if (pbResult.response) await step.run("ep-pb-send", () => send(admin, wsId, tid, st.ch, pbResult.response!, cfg.sandbox));
+          await step.run("ep-pb-status", () => setStatus(admin, tid, cfg.auto_resolve));
+        }
+        return { status: "early_pattern_playbook", playbook: ep.name };
+      }
     }
 
     // ── 3. Journey re-nudge detection ──

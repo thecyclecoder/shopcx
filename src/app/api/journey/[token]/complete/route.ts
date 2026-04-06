@@ -258,6 +258,7 @@ export async function POST(
           status: "closed",
           resolved_at: new Date().toISOString(),
           journey_step: 99,
+          handled_by: null,
         }).eq("id", session.ticket_id);
 
       }
@@ -332,6 +333,7 @@ export async function POST(
           status: "closed",
           resolved_at: new Date().toISOString(),
           journey_step: 99,
+          handled_by: null,
         }).eq("id", session.ticket_id);
       }
     }
