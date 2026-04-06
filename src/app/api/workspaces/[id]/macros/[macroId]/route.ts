@@ -2,6 +2,31 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ id: string; macroId: string }> }
+) {
+  const { id: workspaceId, macroId } = await params;
+  void request;
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const admin = createAdminClient();
+
+  const { data: macro, error } = await admin
+    .from("macros")
+    .select("id, name, body_text, body_html, category, tags, active, usage_count, gorgias_id, ai_suggest_count, ai_accept_count, ai_reject_count, ai_edit_count, created_at, updated_at")
+    .eq("id", macroId)
+    .eq("workspace_id", workspaceId)
+    .single();
+
+  if (error || !macro) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  return NextResponse.json(macro);
+}
+
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string; macroId: string }> }

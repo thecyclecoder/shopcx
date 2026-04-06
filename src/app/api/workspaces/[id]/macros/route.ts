@@ -7,20 +7,57 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: workspaceId } = await params;
-  void request;
 
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const admin = createAdminClient();
+  const url = new URL(request.url);
 
-  const { data: macros } = await admin
+  const search = url.searchParams.get("search");
+  const category = url.searchParams.get("category");
+  const active = url.searchParams.get("active"); // "true", "false", or null for all
+  const sort = url.searchParams.get("sort") || "name";
+  const order = url.searchParams.get("order") || "asc";
+  const limit = parseInt(url.searchParams.get("limit") || "0");
+  const offset = parseInt(url.searchParams.get("offset") || "0");
+
+  const selectCols = "id, name, body_text, body_html, category, tags, active, usage_count, gorgias_id, ai_suggest_count, ai_accept_count, ai_reject_count, ai_edit_count, created_at, updated_at";
+
+  let query = admin
     .from("macros")
-    .select("id, name, body_text, body_html, category, tags, active, usage_count, gorgias_id, created_at, updated_at")
-    .eq("workspace_id", workspaceId)
-    .order("name", { ascending: true });
+    .select(selectCols, limit > 0 ? { count: "exact" } : undefined)
+    .eq("workspace_id", workspaceId);
 
+  if (category && category !== "all") {
+    query = query.eq("category", category);
+  }
+
+  if (active === "true") query = query.eq("active", true);
+  else if (active === "false") query = query.eq("active", false);
+
+  if (search) {
+    query = query.or(`name.ilike.%${search}%,body_text.ilike.%${search}%,category.ilike.%${search}%`);
+  }
+
+  // Sorting
+  const ascending = order === "asc";
+  query = query.order(sort, { ascending });
+
+  // Pagination (only when limit > 0, for backwards compatibility)
+  if (limit > 0) {
+    query = query.range(offset, offset + limit - 1);
+  }
+
+  const { data: macros, count } = await query;
+
+  // If paginated request, return object with total
+  if (limit > 0) {
+    return NextResponse.json({ macros: macros || [], total: count || 0 });
+  }
+
+  // Legacy: return flat array for settings page compatibility
   return NextResponse.json(macros || []);
 }
 
