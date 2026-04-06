@@ -257,7 +257,7 @@ export default function Sidebar({
                         <Link
                           key={item.href + item.label}
                           href={item.comingSoon ? "#" : item.href}
-                          className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 md:py-1 text-[13px] md:text-[12px] transition-colors ${
+                          className={`flex items-center gap-2.5 rounded px-2 py-1 text-sm transition-colors ${
                             item.comingSoon
                               ? "cursor-default text-zinc-300 dark:text-zinc-600"
                               : isActive
@@ -266,7 +266,7 @@ export default function Sidebar({
                           }`}
                           onClick={item.comingSoon ? (e) => e.preventDefault() : undefined}
                         >
-                          <svg className="h-3.5 w-3.5 md:h-3 md:w-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                          <svg className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                             <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
                           </svg>
                           <span className="flex-1">{item.label}</span>
