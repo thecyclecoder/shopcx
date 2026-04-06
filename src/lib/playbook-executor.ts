@@ -965,6 +965,66 @@ async function handleApplyPolicy(
     response += `\n\nI also noticed you have ${otherSubs} other active subscription${otherSubs > 1 ? "s" : ""} on your account.`;
   }
 
+  // ── In-policy orders: offer return directly (no exception needed) ──
+  if (inPolicy.length > 0 && outOfPolicy.length === 0) {
+    // All identified orders qualify — offer return with rate quote
+    const order = orderObjs.find(o => inPolicy.includes(o.order_number));
+    let rateInfo = "";
+    let rateCtx: Record<string, unknown> = {};
+
+    if (order) {
+      try {
+        const { getReturnShippingRate, isTestMode } = await import("@/lib/easypost");
+        const testMode = await isTestMode(wsId);
+        const { data: dbOrder } = await admin.from("orders").select("fulfillments").eq("id", order.id).single();
+        const fulfillments = (dbOrder?.fulfillments || []) as { destination?: { address1?: string; city?: string; state?: string; zip?: string; country?: string; name?: string; phone?: string } }[];
+        const dest = fulfillments[0]?.destination;
+
+        if (dest?.address1 && dest?.city && dest?.state && dest?.zip) {
+          const lineItems = (order.line_items as { sku?: string; quantity?: number }[]) || [];
+          const { data: products } = await admin.from("products").select("variants").eq("workspace_id", wsId);
+          const weightItems = lineItems.map(li => {
+            for (const p of products || []) {
+              const variants = (p.variants || []) as { sku?: string; weight?: number }[];
+              const v = variants.find(v => v.sku === li.sku);
+              if (v?.weight) return { title: li.sku || "item", weight: v.weight, weightUnit: "POUNDS" as const, quantity: li.quantity || 1 };
+            }
+            return { title: li.sku || "item", weight: 0, weightUnit: "OUNCES" as const, quantity: li.quantity || 1 };
+          });
+
+          const rate = await getReturnShippingRate(wsId, {
+            customerAddress: { name: dest.name || "Customer", street1: dest.address1, city: dest.city, state: dest.state, zip: dest.zip, country: dest.country || "US", phone: dest.phone },
+            lineItems: weightItems,
+          });
+
+          const netCents = order.total_cents - rate.rate.costCents;
+          rateInfo = ` I can send you a prepaid return label, and once we receive the product back, your refund will be $${(netCents / 100).toFixed(2)} ($${(order.total_cents / 100).toFixed(2)} minus $${(rate.rate.costCents / 100).toFixed(2)} shipping label). Would you like me to get that started?`;
+          rateCtx = { easypost_shipment_id: rate.shipmentId, easypost_rate_id: rate.rate.id, label_cost_cents: rate.rate.costCents, net_refund_cents: netCents, order_total_cents: order.total_cents };
+          if (testMode) rateInfo += " (test mode)";
+        }
+      } catch (err) {
+        console.error("Rate quote for in-policy order failed (non-fatal):", err);
+        rateInfo = " I can process a return for you — the shipping label cost will be deducted from your refund. Would you like me to get that started?";
+      }
+    }
+
+    if (!rateInfo) {
+      rateInfo = " I can process a return for you. Would you like me to get that started?";
+    }
+
+    response += `\n\nYour order qualifies for a return under our 30-day policy.${rateInfo}`;
+
+    return {
+      action: "respond", response,
+      context: {
+        in_policy: inPolicy, out_of_policy: outOfPolicy, policy_applied: policy.name, failure_reasons: failureReasons,
+        in_policy_offer_made: true, resolution_type: "refund_return", exception_offered: "In-Policy Return",
+        ...rateCtx,
+      },
+      systemNote: `[Playbook] Policy "${policy.name}": ${inPolicy.length} in-policy. Offered return directly.${rateCtx.label_cost_cents ? ` Estimated shipping: $${((rateCtx.label_cost_cents as number) / 100).toFixed(2)}` : ""}`,
+    };
+  }
+
   response += `\n\nLet me know if I can help with anything.`;
 
   return {
