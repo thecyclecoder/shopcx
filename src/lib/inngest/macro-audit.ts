@@ -138,17 +138,41 @@ Return JSON: { "rewritten_html": "the rewritten macro in HTML", "rewritten_text"
           if (firstBrace >= 0 && lastBrace > firstBrace) {
             jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
           }
-          const parsed = JSON.parse(jsonStr);
+          // Fix unescaped newlines inside JSON string values
+          // Replace actual newlines between quotes with \n
+          jsonStr = jsonStr.replace(/(?<=: "(?:[^"\\]|\\.)*)(\n)(?=(?:[^"\\]|\\.)*")/g, "\\n");
+          let parsed;
+          try {
+            parsed = JSON.parse(jsonStr);
+          } catch {
+            // If still fails, try a more aggressive fix: replace all newlines
+            jsonStr = jsonStr.replace(/\n/g, "\\n").replace(/\\n\\n/g, "\\n");
+            parsed = JSON.parse(jsonStr);
+          }
           rewrittenText = parsed.rewritten_text || parsed.rewritten || text;
           rewrittenHtml = parsed.rewritten_html || "";
           changes = parsed.changes || [];
           accuracyIssues = parsed.accuracy_issues || [];
         } catch {
-          // Last resort: if AI returned plain text, use it as-is
+          // Last resort: extract content from the raw response
           if (raw.length > 20 && !raw.startsWith("(AI error")) {
-            rewrittenText = raw;
-            rewrittenHtml = raw.split("\n").map((p: string) => p.trim() ? `<p>${p.trim()}</p>` : "").join("");
-            changes = ["AI response was not JSON — used raw text"];
+            // Try to extract rewritten_html value from the raw text
+            const htmlMatch = raw.match(/"rewritten_html"\s*:\s*"([\s\S]*?)(?:"\s*,\s*"rewritten_text|"\s*,\s*"changes|"\s*})/);
+            if (htmlMatch) {
+              rewrittenHtml = htmlMatch[1].replace(/\\n/g, "\n").replace(/\\"/g, '"');
+              rewrittenText = rewrittenHtml.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+              changes = ["Extracted from partial JSON"];
+            } else {
+              // Strip any JSON artifacts and use as plain text
+              let cleaned = raw.replace(/```json?\s*/gi, "").replace(/```/g, "")
+                .replace(/"rewritten_html"\s*:\s*"/g, "").replace(/"rewritten_text"\s*:\s*"/g, "")
+                .replace(/^\s*\{/, "").replace(/\}\s*$/, "")
+                .replace(/",?\s*"changes"\s*:[\s\S]*$/, "")
+                .replace(/\\n/g, "\n").replace(/\\"/g, '"').trim();
+              rewrittenText = cleaned.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+              rewrittenHtml = cleaned.includes("<") ? cleaned : cleaned.split("\n").filter(Boolean).map((p: string) => `<p>${p.trim()}</p>`).join("");
+              changes = ["Extracted from raw AI response"];
+            }
           } else {
             changes = ["Failed to parse AI response"];
           }
