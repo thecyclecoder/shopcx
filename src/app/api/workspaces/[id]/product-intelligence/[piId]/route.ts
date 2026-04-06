@@ -15,7 +15,7 @@ export async function GET(
   const admin = createAdminClient();
   const { data, error } = await admin.from("product_intelligence")
     .select(`
-      id, workspace_id, product_id, title, content, source, source_urls, created_at, updated_at,
+      id, workspace_id, product_id, title, content, source, source_urls, labeled_urls, created_at, updated_at,
       products(id, title, image_url, shopify_product_id)
     `)
     .eq("id", piId)
