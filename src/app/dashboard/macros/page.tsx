@@ -55,15 +55,25 @@ export default function MacrosPage() {
   const [macros, setMacros] = useState<Macro[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [products, setProducts] = useState<{ id: string; title: string }[]>([]);
 
   // Filters
   const [category, setCategory] = useState("all");
   const [activeFilter, setActiveFilter] = useState("all");
+  const [productFilter, setProductFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [appliedSearch, setAppliedSearch] = useState("");
   const [sort, setSort] = useState("name");
   const [order, setOrder] = useState<"asc" | "desc">("asc");
   const [offset, setOffset] = useState(0);
+
+  // Load products for filter
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspace.id}/products`)
+      .then(r => r.ok ? r.json() : [])
+      .then(d => setProducts(Array.isArray(d) ? d.map((p: { id: string; title: string }) => ({ id: p.id, title: p.title })) : []))
+      .catch(() => {});
+  }, [workspace.id]);
 
   const fetchMacros = useCallback(async () => {
     setLoading(true);
@@ -75,6 +85,7 @@ export default function MacrosPage() {
     });
     if (category !== "all") params.set("category", category);
     if (activeFilter !== "all") params.set("active", activeFilter);
+    if (productFilter !== "all") params.set("product_id", productFilter);
     if (appliedSearch) params.set("search", appliedSearch);
 
     const res = await fetch(`/api/workspaces/${workspace.id}/macros?${params}`);
@@ -84,7 +95,7 @@ export default function MacrosPage() {
       setTotal(data.total || 0);
     }
     setLoading(false);
-  }, [workspace.id, category, activeFilter, appliedSearch, sort, order, offset]);
+  }, [workspace.id, category, activeFilter, productFilter, appliedSearch, sort, order, offset]);
 
   useEffect(() => {
     fetchMacros();
@@ -158,6 +169,20 @@ export default function MacrosPage() {
           <option value="all">All Status</option>
           <option value="true">Active</option>
           <option value="false">Inactive</option>
+        </select>
+
+        <select
+          value={productFilter}
+          onChange={e => {
+            setProductFilter(e.target.value);
+            setOffset(0);
+          }}
+          className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+        >
+          <option value="all">All Products</option>
+          {products.map(p => (
+            <option key={p.id} value={p.id}>{p.title}</option>
+          ))}
         </select>
 
         <form
