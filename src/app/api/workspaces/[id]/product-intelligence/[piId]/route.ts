@@ -44,6 +44,7 @@ export async function PATCH(
   if (body.content !== undefined) updates.content = body.content;
   if (body.source !== undefined) updates.source = body.source;
   if (body.source_urls !== undefined) updates.source_urls = body.source_urls;
+  if (body.labeled_urls !== undefined) updates.labeled_urls = body.labeled_urls;
 
   // Append mode: add content to existing instead of replacing
   if (body.append_content) {

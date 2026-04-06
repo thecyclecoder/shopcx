@@ -35,6 +35,26 @@ export default function ProductIntelligenceDetailPage() {
   const [scrapeUrl, setScrapeUrl] = useState("");
   const [scraping, setScraping] = useState(false);
 
+  // Labeled URLs
+  const [labeledUrls, setLabeledUrls] = useState<{ url: string; label: string }[]>([]);
+  const [newUrl, setNewUrl] = useState("");
+  const [newUrlLabel, setNewUrlLabel] = useState("PDP");
+  const [savingUrls, setSavingUrls] = useState(false);
+  const URL_LABELS = ["Science", "Ingredients", "How It Works", "Reviews", "PDP"];
+
+  // Macro Audit
+  const [auditing, setAuditing] = useState(false);
+  const [auditResults, setAuditResults] = useState<{
+    product: string; total: number; with_changes: number; with_accuracy_issues: number;
+    audits: {
+      macro_id: string; macro_name: string; category: string; active: boolean;
+      original: string; rewritten: string; rewritten_html: string; changes: string[]; accuracy_issues: string[];
+      issues_detected: string[]; has_changes: boolean;
+    }[];
+  } | null>(null);
+  const [auditApplied, setAuditApplied] = useState<Set<string>>(new Set());
+  const [auditApplying, setAuditApplying] = useState(false);
+
   const fetchData = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/product-intelligence/${piId}`);
     if (res.ok) {
@@ -42,6 +62,7 @@ export default function ProductIntelligenceDetailPage() {
       setData(d);
       setEditContent(d.content);
       setEditTitle(d.title);
+      setLabeledUrls((d as Record<string, unknown>).labeled_urls as { url: string; label: string }[] || []);
     }
     setLoading(false);
   }, [workspace.id, piId]);
@@ -175,6 +196,53 @@ export default function ProductIntelligenceDetailPage() {
         </div>
       )}
 
+      {/* Labeled URLs */}
+      <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 className="text-xs font-medium text-zinc-400 uppercase tracking-wider mb-3">Product URLs</h3>
+        <p className="text-[10px] text-zinc-400 mb-3">These URLs are referenced by AI when rewriting macros.</p>
+        {labeledUrls.length > 0 && (
+          <div className="space-y-1.5 mb-3">
+            {labeledUrls.map((lu, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300 w-20 text-center shrink-0">{lu.label}</span>
+                <a href={lu.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-500 hover:text-indigo-700 truncate flex-1">{lu.url}</a>
+                <button onClick={async () => {
+                  const updated = labeledUrls.filter((_, j) => j !== i);
+                  setLabeledUrls(updated);
+                  await fetch(`/api/workspaces/${workspace.id}/product-intelligence/${piId}`, {
+                    method: "PATCH", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ labeled_urls: updated }),
+                  });
+                }} className="text-[10px] text-red-400 hover:text-red-600 shrink-0">Remove</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <select value={newUrlLabel} onChange={e => setNewUrlLabel(e.target.value)}
+            className="rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+            {URL_LABELS.map(l => <option key={l} value={l}>{l}</option>)}
+          </select>
+          <input value={newUrl} onChange={e => setNewUrl(e.target.value)} placeholder="https://superfoodscompany.com/..."
+            className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300" />
+          <button onClick={async () => {
+            if (!newUrl) return;
+            const updated = [...labeledUrls, { url: newUrl, label: newUrlLabel }];
+            setLabeledUrls(updated);
+            setNewUrl("");
+            setSavingUrls(true);
+            await fetch(`/api/workspaces/${workspace.id}/product-intelligence/${piId}`, {
+              method: "PATCH", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ labeled_urls: updated }),
+            });
+            setSavingUrls(false);
+          }} disabled={!newUrl || savingUrls}
+            className="rounded-md bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-50">
+            {savingUrls ? "..." : "Add"}
+          </button>
+        </div>
+      </div>
+
       {/* Content */}
       <div className="mb-6 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
         <div className="border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
@@ -243,6 +311,145 @@ export default function ProductIntelligenceDetailPage() {
               {scraping ? "Scraping..." : "Scrape & Append"}
             </button>
           </div>
+        </div>
+        {/* Macro Audit */}
+        <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Audit Macros</h3>
+              <p className="text-xs text-zinc-400">Compare macros against product intelligence. Sonnet rewrites inaccurate or outdated macros.</p>
+            </div>
+            <button
+              onClick={async () => {
+                setAuditing(true);
+                setAuditResults(null);
+                setAuditApplied(new Set());
+                try {
+                  const res = await fetch(`/api/workspaces/${workspace.id}/product-intelligence/${piId}/audit-macros`, {
+                    method: "POST",
+                  });
+                  if (res.ok) setAuditResults(await res.json());
+                } catch {}
+                setAuditing(false);
+              }}
+              disabled={auditing}
+              className="rounded-md bg-violet-500 px-4 py-2 text-sm font-medium text-white hover:bg-violet-600 disabled:opacity-50"
+            >
+              {auditing ? "Auditing..." : "Audit Macros"}
+            </button>
+          </div>
+
+          {auditing && (
+            <div className="py-8 text-center">
+              <div className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-violet-500 border-t-transparent" />
+              <p className="mt-2 text-sm text-zinc-500">Sonnet is reviewing macros against product intelligence... this may take a minute.</p>
+            </div>
+          )}
+
+          {auditResults && (
+            <div>
+              {/* Summary */}
+              <div className="mb-4 flex gap-4 text-xs text-zinc-500">
+                <span>{auditResults.total} macros audited</span>
+                <span>{auditResults.with_changes} need changes</span>
+                <span>{auditResults.with_accuracy_issues} have accuracy issues</span>
+                <span className="text-green-600">{auditApplied.size} applied</span>
+              </div>
+
+              {/* Apply all button */}
+              {auditResults.with_changes > 0 && (
+                <div className="mb-4">
+                  <button
+                    onClick={async () => {
+                      setAuditApplying(true);
+                      const updates = auditResults.audits
+                        .filter(a => a.has_changes && !auditApplied.has(a.macro_id))
+                        .map(a => ({ macro_id: a.macro_id, body_text: a.rewritten, body_html: a.rewritten_html }));
+                      const res = await fetch(`/api/workspaces/${workspace.id}/product-intelligence/${piId}/audit-macros`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ updates }),
+                      });
+                      if (res.ok) {
+                        setAuditApplied(new Set(updates.map(u => u.macro_id)));
+                      }
+                      setAuditApplying(false);
+                    }}
+                    disabled={auditApplying || auditApplied.size === auditResults.with_changes}
+                    className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+                  >
+                    {auditApplying ? "Applying..." : `Apply All ${auditResults.with_changes - auditApplied.size} Changes`}
+                  </button>
+                </div>
+              )}
+
+              {/* Individual audits */}
+              <div className="space-y-3">
+                {auditResults.audits.map(a => (
+                  <div key={a.macro_id} className={`rounded-lg border p-4 ${
+                    a.accuracy_issues.length > 0 ? "border-red-200 dark:border-red-800" :
+                    a.has_changes ? "border-amber-200 dark:border-amber-800" :
+                    "border-zinc-200 dark:border-zinc-700"
+                  }`}>
+                    <div className="flex items-start justify-between mb-2">
+                      <div>
+                        <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{a.macro_name}</span>
+                        <span className="ml-2 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800">{a.category}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {a.issues_detected.map((issue, i) => (
+                          <span key={i} className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900 dark:text-amber-300">{issue}</span>
+                        ))}
+                        {!a.has_changes && <span className="rounded bg-green-100 px-1.5 py-0.5 text-[10px] text-green-700 dark:bg-green-900 dark:text-green-300">OK</span>}
+                        {auditApplied.has(a.macro_id) && <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">Applied</span>}
+                      </div>
+                    </div>
+
+                    {a.has_changes && (
+                      <div className="grid gap-3 sm:grid-cols-2 mb-2">
+                        <div>
+                          <div className="text-[10px] font-medium text-red-400 uppercase tracking-wider mb-0.5">Before</div>
+                          <div className="rounded bg-red-50 px-2 py-1.5 text-xs text-red-800 dark:bg-red-950 dark:text-red-200 whitespace-pre-wrap max-h-40 overflow-y-auto">{a.original}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] font-medium text-emerald-400 uppercase tracking-wider mb-0.5">After</div>
+                          <div className="rounded bg-emerald-50 px-2 py-1.5 text-xs text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200 max-h-40 overflow-y-auto prose prose-xs max-w-none"
+                            dangerouslySetInnerHTML={{ __html: a.rewritten_html || a.rewritten }} />
+                        </div>
+                      </div>
+                    )}
+
+                    {a.changes.length > 0 && (
+                      <div className="text-[10px] text-zinc-500 mb-1">
+                        Changes: {a.changes.join(" · ")}
+                      </div>
+                    )}
+                    {a.accuracy_issues.length > 0 && (
+                      <div className="text-[10px] text-red-500">
+                        Accuracy: {a.accuracy_issues.join(" · ")}
+                      </div>
+                    )}
+
+                    {a.has_changes && !auditApplied.has(a.macro_id) && (
+                      <button
+                        onClick={async () => {
+                          const res = await fetch(`/api/workspaces/${workspace.id}/product-intelligence/${piId}/audit-macros`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ updates: [{ macro_id: a.macro_id, body_text: a.rewritten, body_html: a.rewritten_html }] }),
+                          });
+                          if (res.ok) setAuditApplied(prev => new Set([...prev, a.macro_id]));
+                        }}
+                        className="mt-2 rounded bg-emerald-500 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600"
+                      >
+                        Apply
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
