@@ -180,6 +180,7 @@ export default function MacrosPage() {
           className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
         >
           <option value="all">All Products</option>
+          <option value="none">No Product</option>
           {products.map(p => (
             <option key={p.id} value={p.id}>{p.title}</option>
           ))}
