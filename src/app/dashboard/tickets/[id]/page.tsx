@@ -9,6 +9,10 @@ import TicketPresenceBanner, { useTicketPresence } from "@/components/ticket-pre
 import { createClient } from "@/lib/supabase/client";
 import StoreCreditModal from "@/components/store-credit-modal";
 import ReturnsList from "@/components/shared/ReturnsList";
+import SubscriptionsList from "@/components/shared/SubscriptionsList";
+import LoyaltyCard from "@/components/shared/LoyaltyCard";
+import type { LoyaltyMemberData } from "@/components/shared/LoyaltyCard";
+import type { SubscriptionData as CustomerSubscription } from "@/components/shared/SubscriptionsList";
 
 interface Member {
   user_id: string;
@@ -44,21 +48,7 @@ interface RecentOrder {
   created_at: string;
 }
 
-interface SubscriptionItem {
-  title: string | null;
-  quantity: number;
-  price_cents: number;
-}
-
-interface CustomerSubscription {
-  id: string;
-  status: string;
-  billing_interval: string | null;
-  billing_interval_count: number | null;
-  next_billing_date: string | null;
-  last_payment_status: string | null;
-  items: SubscriptionItem[];
-}
+/* SubscriptionItem / CustomerSubscription types use SubscriptionData from shared component */
 
 interface LinkedIdentity {
   id: string;
@@ -235,16 +225,11 @@ export default function TicketDetailPage() {
   const [showStoreCreditModal, setShowStoreCreditModal] = useState(false);
 
   // Loyalty state
-  const [loyaltyMember, setLoyaltyMember] = useState<{
-    id: string; points_balance: number; points_earned: number; points_spent: number;
-  } | null>(null);
+  const [loyaltyMember, setLoyaltyMember] = useState<LoyaltyMemberData | null>(null);
   const [loyaltySettings, setLoyaltySettings] = useState<{
     enabled: boolean;
     redemption_tiers: { label: string; points_cost: number; discount_value: number }[];
   } | null>(null);
-  const [redeeming, setRedeeming] = useState(false);
-  const [redeemResult, setRedeemResult] = useState<string | null>(null);
-  const [selectedRedeemTier, setSelectedRedeemTier] = useState<number | null>(null);
 
   // Returns state
   const [ticketReturns, setTicketReturns] = useState<{ id: string; order_number: string; status: string; resolution_type: string; net_refund_cents: number; tracking_number: string | null; created_at: string }[]>([]);
@@ -2148,44 +2133,10 @@ export default function TicketDetailPage() {
               </svg>
             </button>
             {subscriptionsCardOpen && (
-            <div className="space-y-2 border-t border-zinc-100 px-4 pb-4 pt-3 dark:border-zinc-800">
+            <div className="border-t border-zinc-100 px-4 pb-4 pt-3 dark:border-zinc-800">
               {customer.subscriptions.map((sub) => (
-                <div key={sub.id} className="rounded border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800">
-                  <div className="flex items-center justify-between">
-                    <button
-                      onClick={() => router.push(`/dashboard/subscriptions/${sub.id}`)}
-                      className="flex items-center gap-1.5"
-                    >
-                      <span className={`rounded px-1.5 py-0.5 text-sm font-medium ${
-                        sub.status === "active" ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
-                        : sub.status === "paused" ? "bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
-                        : "bg-zinc-100 text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400"
-                      }`}>
-                        {sub.status}
-                      </span>
-                      <svg className="h-3 w-3 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" /></svg>
-                    </button>
-                    {sub.billing_interval && (
-                      <span className="text-sm text-zinc-400">
-                        {sub.billing_interval_count}/{sub.billing_interval}
-                      </span>
-                    )}
-                  </div>
-                  {sub.items?.length > 0 && (
-                    <div className="mt-1 space-y-0.5">
-                      {sub.items.slice(0, 3).map((item, idx) => (
-                        <p key={idx} className="truncate text-sm text-zinc-500 dark:text-zinc-400">
-                          {item.quantity}x {item.title}
-                        </p>
-                      ))}
-                      {sub.items.length > 3 && (
-                        <p className="text-sm text-zinc-400">+{sub.items.length - 3} more</p>
-                      )}
-                    </div>
-                  )}
-                  {sub.next_billing_date && (
-                    <p className="mt-1 text-sm text-zinc-400">Next: {formatDate(sub.next_billing_date)}</p>
-                  )}
+                <div key={sub.id}>
+                  <SubscriptionsList subscriptions={[sub]} variant="compact" />
 
                   {/* Inline subscription actions */}
                   {(sub.status === "active" || sub.status === "paused") && (
@@ -2607,76 +2558,15 @@ export default function TicketDetailPage() {
             </button>
             {loyaltyCardOpen && (
             <div className="space-y-2 border-t border-zinc-100 px-4 pb-4 pt-3 dark:border-zinc-800">
-              <div className="rounded bg-zinc-50 px-2 py-1.5 dark:bg-zinc-800">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-zinc-500">Points Balance</span>
-                  <span className="text-sm font-semibold text-purple-600 dark:text-purple-400">
-                    {loyaltyMember.points_balance.toLocaleString()}
-                  </span>
-                </div>
-                <div className="mt-1 flex items-center justify-between text-xs text-zinc-400">
-                  <span>Earned: {loyaltyMember.points_earned.toLocaleString()}</span>
-                  <span>Spent: {loyaltyMember.points_spent.toLocaleString()}</span>
-                </div>
-              </div>
-
-              {/* Redemption workflow: dropdown + submit */}
-              <div className="rounded border border-purple-200 bg-purple-50/50 p-2.5 dark:border-purple-800 dark:bg-purple-900/10">
-                <p className="text-xs font-medium text-purple-700 dark:text-purple-400">Create Redemption</p>
-                <select
-                  value={selectedRedeemTier ?? ""}
-                  onChange={(e) => setSelectedRedeemTier(e.target.value ? Number(e.target.value) : null)}
-                  className="mt-1.5 w-full rounded border border-purple-300 bg-white px-2 py-1 text-xs dark:border-purple-700 dark:bg-zinc-800 dark:text-zinc-100"
-                >
-                  <option value="">Select tier...</option>
-                  {loyaltySettings.redemption_tiers.map((tier, idx) => {
-                    const affordable = loyaltyMember.points_balance >= tier.points_cost;
-                    return (
-                      <option key={idx} value={idx} disabled={!affordable}>
-                        {tier.label} — {tier.points_cost.toLocaleString()} pts{!affordable ? " (not enough)" : ""}
-                      </option>
-                    );
-                  })}
-                </select>
-                <button
-                  disabled={selectedRedeemTier === null || redeeming}
-                  onClick={async () => {
-                    if (selectedRedeemTier === null) return;
-                    setRedeeming(true);
-                    setRedeemResult(null);
-                    try {
-                      const res = await fetch("/api/loyalty/redeem", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          workspace_id: workspace.id,
-                          member_id: loyaltyMember.id,
-                          tier_index: selectedRedeemTier,
-                        }),
-                      });
-                      const data = await res.json();
-                      if (res.ok) {
-                        setRedeemResult(`Code: ${data.code}`);
-                        setLoyaltyMember((prev) => prev ? { ...prev, points_balance: data.new_balance } : prev);
-                        setSelectedRedeemTier(null);
-                      } else {
-                        setRedeemResult(data.error || "Failed");
-                      }
-                    } catch {
-                      setRedeemResult("Failed");
-                    }
-                    setRedeeming(false);
-                  }}
-                  className="mt-2 w-full rounded bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-500 disabled:opacity-50"
-                >
-                  {redeeming ? "Redeeming..." : "Redeem"}
-                </button>
-                {redeemResult && (
-                  <p className={`mt-1.5 text-sm font-medium ${redeemResult.startsWith("Code:") ? "text-emerald-600 dark:text-emerald-400" : "text-red-500"}`}>
-                    {redeemResult}
-                  </p>
-                )}
-              </div>
+              <LoyaltyCard
+                member={loyaltyMember}
+                tiers={loyaltySettings.redemption_tiers}
+                workspaceId={workspace.id}
+                variant="compact"
+                onRedeem={(newBalance) => {
+                  setLoyaltyMember((prev) => prev ? { ...prev, points_balance: newBalance } : prev);
+                }}
+              />
             </div>
             )}
           </div>

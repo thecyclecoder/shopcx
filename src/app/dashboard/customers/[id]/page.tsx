@@ -6,8 +6,12 @@ import { useWorkspace } from "@/lib/workspace-context";
 import StoreCreditModal from "@/components/store-credit-modal";
 import ReturnsList from "@/components/shared/ReturnsList";
 import OrdersTable from "@/components/shared/OrdersTable";
+import SubscriptionsList from "@/components/shared/SubscriptionsList";
+import LoyaltyCard from "@/components/shared/LoyaltyCard";
 import { formatCents, formatDate } from "@/components/shared/format-utils";
 import type { OrderRow } from "@/components/shared/OrdersTable";
+import type { SubscriptionData } from "@/components/shared/SubscriptionsList";
+import type { LoyaltyMemberData } from "@/components/shared/LoyaltyCard";
 
 interface Customer {
   id: string;
@@ -75,27 +79,7 @@ interface Order {
   created_at: string;
 }
 
-interface SubscriptionItem {
-  title: string | null;
-  sku: string | null;
-  quantity: number;
-  price_cents: number;
-  selling_plan: string | null;
-}
-
-interface Subscription {
-  id: string;
-  shopify_contract_id?: string;
-  status: string;
-  billing_interval: string | null;
-  billing_interval_count: number | null;
-  next_billing_date: string | null;
-  last_payment_status: string | null;
-  items: SubscriptionItem[];
-  delivery_price_cents: number;
-  created_at: string;
-  updated_at: string;
-}
+/* SubscriptionItem / Subscription types imported from @/components/shared/SubscriptionsList */
 
 /* formatCents, formatDate imported from @/components/shared */
 
@@ -148,7 +132,7 @@ export default function CustomerDetailPage() {
   const workspace = useWorkspace();
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
-  const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
+  const [subscriptions, setSubscriptions] = useState<SubscriptionData[]>([]);
   const [customerTickets, setCustomerTickets] = useState<{ id: string; subject: string | null; status: string; channel: string; tags: string[]; created_at: string; last_customer_reply_at: string | null }[]>([]);
   const [linkedIdentities, setLinkedIdentities] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; is_primary: boolean }[]>([]);
   const [loading, setLoading] = useState(true);
@@ -166,11 +150,8 @@ export default function CustomerDetailPage() {
   const [showStoreCreditModal, setShowStoreCreditModal] = useState(false);
   const [storeCreditHistory, setStoreCreditHistory] = useState<{ id: string; type: string; amount: number; reason: string | null; issued_by_name: string; balance_after: number | null; created_at: string; ticket_id: string | null }[]>([]);
   const [showCreditHistory, setShowCreditHistory] = useState(false);
-  const [loyaltyMember, setLoyaltyMember] = useState<{ id: string; points_balance: number; points_earned: number; points_spent: number } | null>(null);
+  const [loyaltyMember, setLoyaltyMember] = useState<LoyaltyMemberData | null>(null);
   const [loyaltyTiers, setLoyaltyTiers] = useState<{ label: string; points_cost: number; discount_value: number; affordable: boolean }[]>([]);
-  const [loyaltyRedeeming, setLoyaltyRedeeming] = useState(false);
-  const [loyaltyRedeemTier, setLoyaltyRedeemTier] = useState("");
-  const [loyaltyResult, setLoyaltyResult] = useState<{ code: string; value: number } | null>(null);
   const [customerReturns, setCustomerReturns] = useState<{ id: string; order_number: string; status: string; resolution_type: string; net_refund_cents: number; created_at: string }[]>([]);
 
   useEffect(() => {
@@ -673,69 +654,16 @@ export default function CustomerDetailPage() {
       {/* Loyalty */}
       {loyaltyMember && (
         <div className="mt-6 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <button
-            onClick={() => router.push(`/dashboard/loyalty/${(loyaltyMember as Record<string, unknown>).id}`)}
-            className="flex w-full items-center justify-between"
-          >
-            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Loyalty Points</h2>
-            <svg className="h-4 w-4 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-            </svg>
-          </button>
-          <div className="mt-3 grid grid-cols-3 gap-3">
-            <div>
-              <p className="text-xs text-zinc-400">Balance</p>
-              <p className="text-lg font-bold text-zinc-900 dark:text-zinc-100">{loyaltyMember.points_balance.toLocaleString()}</p>
-            </div>
-            <div>
-              <p className="text-xs text-zinc-400">Earned</p>
-              <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{loyaltyMember.points_earned.toLocaleString()}</p>
-            </div>
-            <div>
-              <p className="text-xs text-zinc-400">Spent</p>
-              <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{loyaltyMember.points_spent.toLocaleString()}</p>
-            </div>
-          </div>
-          {loyaltyResult && (
-            <div className="mt-3 rounded-md bg-emerald-50 p-3 dark:bg-emerald-900/20">
-              <p className="text-sm text-emerald-700 dark:text-emerald-400">Coupon created: <strong>{loyaltyResult.code}</strong> (${loyaltyResult.value} off)</p>
-            </div>
-          )}
-          {loyaltyTiers.length > 0 && (
-            <div className="mt-3 flex items-center gap-2">
-              <select value={loyaltyRedeemTier} onChange={(e) => setLoyaltyRedeemTier(e.target.value)}
-                className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
-                <option value="">Redeem points...</option>
-                {loyaltyTiers.map((t, i) => {
-                  const canAfford = (loyaltyMember?.points_balance || 0) >= t.points_cost;
-                  return (
-                    <option key={i} value={String(i)} disabled={!canAfford}>
-                      {t.label} — {t.points_cost.toLocaleString()} pts{!canAfford ? " (insufficient)" : ""}
-                    </option>
-                  );
-                })}
-              </select>
-              <button disabled={!loyaltyRedeemTier || loyaltyRedeeming} onClick={async () => {
-                setLoyaltyRedeeming(true);
-                setLoyaltyResult(null);
-                try {
-                  const res = await fetch("/api/loyalty/redeem", {
-                    method: "POST", headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ workspace_id: workspace.id, member_id: (loyaltyMember as Record<string, unknown>)?.id, tier_index: parseInt(loyaltyRedeemTier) }),
-                  });
-                  const data = await res.json();
-                  if (data.ok) {
-                    setLoyaltyResult({ code: data.code, value: data.discount_value });
-                    setLoyaltyMember(prev => prev ? { ...prev, points_balance: data.new_balance, points_spent: prev.points_spent + (loyaltyTiers[parseInt(loyaltyRedeemTier)]?.points_cost || 0) } : prev);
-                    setLoyaltyRedeemTier("");
-                  }
-                } catch {}
-                setLoyaltyRedeeming(false);
-              }} className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900">
-                {loyaltyRedeeming ? "..." : "Redeem"}
-              </button>
-            </div>
-          )}
+          <LoyaltyCard
+            member={loyaltyMember}
+            tiers={loyaltyTiers}
+            workspaceId={workspace.id}
+            variant="full"
+            onNavigate={() => router.push(`/dashboard/loyalty/${loyaltyMember.id}`)}
+            onRedeem={(newBalance, _code, _value, pointsCost) => {
+              setLoyaltyMember(prev => prev ? { ...prev, points_balance: newBalance, points_spent: prev.points_spent + pointsCost } : prev);
+            }}
+          />
         </div>
       )}
 
@@ -745,58 +673,8 @@ export default function CustomerDetailPage() {
           <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
             Subscriptions
           </h2>
-          <div className="mt-3 space-y-2">
-            {subscriptions.map((sub) => (
-              <div key={sub.id}
-                onClick={() => router.push(`/dashboard/subscriptions/${sub.id}`)}
-                className={`cursor-pointer rounded-lg border p-3 transition-colors hover:border-zinc-300 dark:hover:border-zinc-700 ${
-                  sub.last_payment_status === "failed" ? "border-amber-200 bg-amber-50/30 dark:border-amber-800/50 dark:bg-amber-950/20" : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
-                }`}>
-                <div className="flex items-center justify-between">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className={`rounded-full px-2 py-0.5 text-sm font-medium ${
-                      sub.status === "active" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
-                      : sub.status === "paused" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-                      : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
-                    }`}>
-                      {sub.status}
-                    </span>
-                    {sub.billing_interval && sub.billing_interval_count && (
-                      <span className="text-sm text-zinc-500">
-                        Every {sub.billing_interval_count} {sub.billing_interval}{sub.billing_interval_count > 1 ? "s" : ""}
-                      </span>
-                    )}
-                    {sub.last_payment_status === "failed" && (
-                      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">In Recovery</span>
-                    )}
-                  </div>
-                  {sub.last_payment_status && (
-                    <span className={`text-sm ${
-                      sub.last_payment_status === "succeeded" ? "text-emerald-500"
-                      : sub.last_payment_status === "failed" ? "text-red-500"
-                      : "text-zinc-400"
-                    }`}>
-                      {sub.last_payment_status}
-                    </span>
-                  )}
-                </div>
-                {sub.items?.length > 0 && (
-                  <div className="mt-2 space-y-0.5">
-                    {sub.items.map((item, idx) => (
-                      <div key={idx} className="flex justify-between text-sm">
-                        <span className="text-zinc-600 dark:text-zinc-400">{item.quantity}x {item.title}</span>
-                        <span className="text-zinc-400">{formatCents(item.price_cents * item.quantity)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {sub.next_billing_date && (
-                  <p className="mt-1.5 text-sm text-zinc-400">
-                    Next billing: {formatDate(sub.next_billing_date)}
-                  </p>
-                )}
-              </div>
-            ))}
+          <div className="mt-3">
+            <SubscriptionsList subscriptions={subscriptions} variant="full" />
           </div>
         </div>
       )}
