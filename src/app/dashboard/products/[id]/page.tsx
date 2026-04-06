@@ -342,7 +342,7 @@ export default function ProductIntelligenceDetailPage() {
           {auditing && (
             <div className="py-8 text-center">
               <div className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-violet-500 border-t-transparent" />
-              <p className="mt-2 text-sm text-zinc-500">Sonnet is reviewing macros against product intelligence... this may take a minute.</p>
+              <p className="mt-2 text-sm text-zinc-500">ShopCX is reviewing macros against product intelligence... this may take a minute.</p>
             </div>
           )}
 
