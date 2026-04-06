@@ -82,6 +82,7 @@ RULES:
 - Keep it concise — max 2-3 sentences per paragraph. No walls of text. Short, scannable paragraphs.
 - If the macro references a specific product feature, use the EXACT claim from the product intelligence (ingredients, dosages, clinical studies).
 - The AI agent will add greetings and sign-offs — the macro should be just the factual content.
+- If the macro goes off-topic (e.g. answers a question then adds a sales pitch, upsell, or unrelated product promotion), DELETE the off-topic part entirely. Do not rewrite it — just remove it. The macro should only answer the specific question in its title, nothing more.
 
 CRITICAL — LINKS:
 - You MUST include at least one hyperlink in every rewritten macro using the PRODUCT URLS listed below.
