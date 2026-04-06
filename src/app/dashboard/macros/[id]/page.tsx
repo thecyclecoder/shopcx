@@ -12,6 +12,7 @@ interface Macro {
   category: string;
   tags: string[];
   active: boolean;
+  product_id: string | null;
   usage_count: number;
   ai_suggest_count: number;
   ai_accept_count: number;
@@ -54,6 +55,7 @@ export default function MacroDetailPage({ params }: { params: Promise<{ id: stri
           category: "general",
           tags: [],
           active: true,
+          product_id: null,
           usage_count: 0,
           ai_suggest_count: 0,
           ai_accept_count: 0,
@@ -66,6 +68,7 @@ export default function MacroDetailPage({ params }: { params: Promise<{ id: stri
   );
   const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
+  const [products, setProducts] = useState<{ id: string; title: string }[]>([]);
   const [deleting, setDeleting] = useState(false);
   const [dirty, setDirty] = useState(false);
 
@@ -83,7 +86,11 @@ export default function MacroDetailPage({ params }: { params: Promise<{ id: stri
 
   useEffect(() => {
     fetchMacro();
-  }, [fetchMacro]);
+    fetch(`/api/workspaces/${workspace.id}/products`)
+      .then(r => r.ok ? r.json() : [])
+      .then(d => setProducts(Array.isArray(d) ? d.map((p: { id: string; title: string }) => ({ id: p.id, title: p.title })) : []))
+      .catch(() => {});
+  }, [fetchMacro, workspace.id]);
 
   const updateField = <K extends keyof Macro>(field: K, value: Macro[K]) => {
     if (!macro) return;
@@ -103,6 +110,7 @@ export default function MacroDetailPage({ params }: { params: Promise<{ id: stri
       category: macro.category,
       tags: macro.tags,
       active: macro.active,
+      product_id: macro.product_id,
     };
 
     const res = await fetch(isNew ? base : `${base}/${macroId}`, {
@@ -255,6 +263,21 @@ export default function MacroDetailPage({ params }: { params: Promise<{ id: stri
                 {macro.category}
               </span>
             )}
+          </div>
+
+          {/* Product */}
+          <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+            <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Product</label>
+            <select
+              value={macro.product_id || ""}
+              onChange={e => updateField("product_id", e.target.value || null)}
+              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+            >
+              <option value="">No product</option>
+              {products.map(p => (
+                <option key={p.id} value={p.id}>{p.title}</option>
+              ))}
+            </select>
           </div>
 
           {/* Usage Stats */}
