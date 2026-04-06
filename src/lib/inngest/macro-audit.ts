@@ -6,7 +6,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 const SONNET = "claude-sonnet-4-20250514";
 
-async function aiCall(system: string, user: string, maxTokens = 600): Promise<string> {
+async function aiCall(system: string, user: string, maxTokens = 1200): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return "";
   const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -95,6 +95,11 @@ CRITICAL — LINKS:
 CRITICAL — HTML FORMAT:
 - The rewritten_html field MUST be valid HTML with <p> tags for paragraphs and <a> tags for links.
 - Do NOT output plain text in rewritten_html — it must have HTML tags.
+
+CRITICAL — JSON FORMAT:
+- Output the JSON on as few lines as possible. Use \n for newlines inside string values, NOT actual line breaks.
+- Keep changes and accuracy_issues arrays short — max 3 items each, brief descriptions.
+- The entire response must be valid parseable JSON. No text before or after the JSON object.
 
 Return JSON: { "rewritten_html": "the rewritten macro in HTML", "rewritten_text": "plain text version", "changes": ["list of changes made"], "accuracy_issues": ["any claims that don't match the intelligence"] }`;
 
