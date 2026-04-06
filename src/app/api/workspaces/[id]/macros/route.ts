@@ -37,7 +37,7 @@ export async function GET(
   if (active === "true") query = query.eq("active", true);
   else if (active === "false") query = query.eq("active", false);
 
-  const productId = searchParams.get("product_id");
+  const productId = url.searchParams.get("product_id");
   if (productId && productId !== "all") {
     query = query.eq("product_id", productId);
   }
