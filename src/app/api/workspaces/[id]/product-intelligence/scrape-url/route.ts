@@ -75,7 +75,7 @@ export async function POST(
       .replace(/&[a-z]+;/gi, " ")
       // Remove common junk text patterns
       .replace(/Skip to content/gi, "")
-      .replace(/Your cart.*?(?:checkout|empty)/gis, "")
+      .replace(/Your cart[\s\S]*?(?:checkout|empty)/gi, "")
       .replace(/(?:Free shipping|free gift).*?away/gi, "")
       .replace(/Share\s*(?:Facebook|Twitter|Pinterest|Email|Copy link)/gi, "")
       .replace(/Opens in a new window\.?/gi, "")
