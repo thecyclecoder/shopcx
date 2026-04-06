@@ -227,28 +227,37 @@ export default function MacroDetailPage({ params }: { params: Promise<{ id: stri
             />
           </div>
 
-          {/* Content */}
+          {/* Rich Text Editor */}
           <div>
-            <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Content (plain text)</label>
-            <textarea
-              value={macro.body_text}
-              onChange={e => updateField("body_text", e.target.value)}
-              placeholder="Macro response text..."
-              rows={10}
-              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+            <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Content</label>
+            {/* Toolbar */}
+            <div className="flex gap-1 rounded-t-md border border-b-0 border-zinc-300 bg-zinc-50 px-2 py-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+              <button type="button" onClick={() => document.execCommand("bold")} className="rounded px-2 py-1 text-xs font-bold text-zinc-600 hover:bg-zinc-200 dark:text-zinc-300 dark:hover:bg-zinc-700" title="Bold">B</button>
+              <button type="button" onClick={() => document.execCommand("italic")} className="rounded px-2 py-1 text-xs italic text-zinc-600 hover:bg-zinc-200 dark:text-zinc-300 dark:hover:bg-zinc-700" title="Italic">I</button>
+              <button type="button" onClick={() => document.execCommand("underline")} className="rounded px-2 py-1 text-xs underline text-zinc-600 hover:bg-zinc-200 dark:text-zinc-300 dark:hover:bg-zinc-700" title="Underline">U</button>
+              <span className="mx-1 border-l border-zinc-300 dark:border-zinc-600" />
+              <button type="button" onClick={() => {
+                const url = prompt("Enter URL:");
+                if (url) document.execCommand("createLink", false, url);
+              }} className="rounded px-2 py-1 text-xs text-indigo-500 hover:bg-zinc-200 dark:hover:bg-zinc-700" title="Insert Link">Link</button>
+              <button type="button" onClick={() => document.execCommand("unlink")} className="rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700" title="Remove Link">Unlink</button>
+              <span className="mx-1 border-l border-zinc-300 dark:border-zinc-600" />
+              <button type="button" onClick={() => document.execCommand("insertUnorderedList")} className="rounded px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-200 dark:text-zinc-300 dark:hover:bg-zinc-700" title="Bullet List">List</button>
+            </div>
+            {/* Editable area */}
+            <div
+              contentEditable
+              suppressContentEditableWarning
+              className="min-h-[200px] rounded-b-md border border-zinc-300 bg-white px-4 py-3 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 prose prose-sm max-w-none dark:prose-invert [&_a]:text-indigo-600 [&_a]:underline dark:[&_a]:text-indigo-400 [&_p]:mb-3"
+              dangerouslySetInnerHTML={{ __html: macro.body_html || macro.body_text.replace(/\n\n/g, "</p><p>").replace(/\n/g, "<br>").replace(/^/, "<p>").replace(/$/, "</p>") }}
+              onBlur={(e) => {
+                const html = e.currentTarget.innerHTML;
+                const text = e.currentTarget.innerText;
+                updateField("body_html", html);
+                updateField("body_text", text);
+              }}
             />
           </div>
-
-          {/* HTML Preview */}
-          {macro.body_html && (
-            <div>
-              <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Rich Text Preview</label>
-              <div
-                className="rounded-md border border-zinc-300 bg-white px-4 py-3 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 prose prose-sm max-w-none dark:prose-invert [&_a]:text-indigo-600 [&_a]:underline dark:[&_a]:text-indigo-400"
-                dangerouslySetInnerHTML={{ __html: macro.body_html }}
-              />
-            </div>
-          )}
         </div>
 
         {/* Sidebar - 1 col */}
