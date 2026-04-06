@@ -100,7 +100,7 @@ export default function Sidebar({
   const [ticketViews, setTicketViews] = useState<TicketView[]>([]);
   const [collapsedViews, setCollapsedViews] = useState<Set<string>>(new Set());
   const [ticketsExpanded, setTicketsExpanded] = useState(false);
-  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(["Customers", "Risk", "Knowledge", "Marketing"]));
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [escalationCounts, setEscalationCounts] = useState<{ open: number; pending: number; closed: number }>({ open: 0, pending: 0, closed: 0 });
   const [fraudCount, setFraudCount] = useState<{ count: number; maxSeverity: string }>({ count: 0, maxSeverity: "low" });
   const [pendingReviewCount, setPendingReviewCount] = useState(0);
@@ -109,6 +109,20 @@ export default function Sidebar({
   useEffect(() => {
     setOpen(false);
     if (pathname.startsWith("/dashboard/tickets")) setTicketsExpanded(true);
+    // Auto-expand the section containing the active page
+    for (const entry of NAV_STRUCTURE) {
+      if ("items" in entry) {
+        const section = entry as NavSection;
+        if (section.items.some(i => i.href !== "#" && pathname.startsWith(i.href))) {
+          setExpandedSections(prev => {
+            if (prev.has(section.label)) return prev;
+            const next = new Set(prev);
+            next.add(section.label);
+            return next;
+          });
+        }
+      }
+    }
   }, [pathname]);
 
   // Load ticket views + counts — refetch on navigation + poll every 30s
