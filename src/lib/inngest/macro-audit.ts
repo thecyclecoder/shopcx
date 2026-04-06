@@ -117,13 +117,30 @@ Return JSON: { "rewritten_html": "the rewritten macro in HTML", "rewritten_text"
         let accuracyIssues: string[] = [];
 
         try {
-          const parsed = JSON.parse(raw.replace(/^```json?\n?/, "").replace(/\n?```$/, ""));
+          // Robust JSON extraction — find the JSON object in the response
+          let jsonStr = raw;
+          // Strip markdown fences
+          jsonStr = jsonStr.replace(/```json?\s*/gi, "").replace(/```\s*/g, "");
+          // Find the first { and last } to extract the JSON object
+          const firstBrace = jsonStr.indexOf("{");
+          const lastBrace = jsonStr.lastIndexOf("}");
+          if (firstBrace >= 0 && lastBrace > firstBrace) {
+            jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
+          }
+          const parsed = JSON.parse(jsonStr);
           rewrittenText = parsed.rewritten_text || parsed.rewritten || text;
           rewrittenHtml = parsed.rewritten_html || "";
           changes = parsed.changes || [];
           accuracyIssues = parsed.accuracy_issues || [];
         } catch {
-          changes = ["Failed to parse AI response"];
+          // Last resort: if AI returned plain text, use it as-is
+          if (raw.length > 20 && !raw.startsWith("(AI error")) {
+            rewrittenText = raw;
+            rewrittenHtml = raw.split("\n").map((p: string) => p.trim() ? `<p>${p.trim()}</p>` : "").join("");
+            changes = ["AI response was not JSON — used raw text"];
+          } else {
+            changes = ["Failed to parse AI response"];
+          }
         }
 
         return {

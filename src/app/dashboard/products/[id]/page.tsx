@@ -453,8 +453,8 @@ export default function ProductIntelligenceDetailPage() {
                         </div>
                         <div>
                           <div className="text-[10px] font-medium text-emerald-400 uppercase tracking-wider mb-0.5">After</div>
-                          <div className="rounded bg-emerald-50 px-2 py-1.5 text-xs text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200 max-h-40 overflow-y-auto prose prose-xs max-w-none"
-                            dangerouslySetInnerHTML={{ __html: a.rewritten_html || a.rewritten }} />
+                          <div className="rounded bg-emerald-50 px-2 py-1.5 text-xs text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200 max-h-40 overflow-y-auto prose prose-sm max-w-none [&_a]:text-indigo-600 [&_a]:underline dark:[&_a]:text-indigo-400 [&_p]:mb-2 [&_p]:last:mb-0"
+                            dangerouslySetInnerHTML={{ __html: a.rewritten_html || a.rewritten.replace(/\n/g, "<br>") }} />
                         </div>
                       </div>
                     )}
