@@ -16,21 +16,76 @@ interface TicketView {
   count: number | null;
 }
 
-const NAV_ITEMS = [
-  { href: "/dashboard", label: "Overview", icon: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1" },
-  { href: "/dashboard/tickets", label: "Tickets", icon: "M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" },
-  { href: "/dashboard/knowledge-base", label: "Knowledge Base", icon: "M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" },
-  { href: "/dashboard/customers", label: "Customers", icon: "M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" },
-  { href: "/dashboard/loyalty", label: "Loyalty", icon: "M21 11.25v8.25a1.5 1.5 0 01-1.5 1.5H5.25a1.5 1.5 0 01-1.5-1.5v-8.25M12 4.875A2.625 2.625 0 109.375 7.5H12m0-2.625V7.5m0-2.625A2.625 2.625 0 1114.625 7.5H12m0 0V21m-8.625-9.75h18c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125h-18c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" },
-  { href: "/dashboard/subscriptions", label: "Subscriptions", icon: "M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" },
-  { href: "/dashboard/portal-analytics", label: "Portal Analytics", icon: "M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" },
-  { href: "/dashboard/orders", label: "Orders", icon: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" },
-  { href: "/dashboard/returns", label: "Returns", icon: "M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" },
-  { href: "/dashboard/reviews", label: "Reviews", icon: "M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z" },
-  { href: "/dashboard/fraud", label: "Fraud Monitor", icon: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" },
-  { href: "/dashboard/chargebacks", label: "Chargebacks", icon: "M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25v10.5A2.25 2.25 0 004.5 19.5z" },
-  { href: "/dashboard/settings", label: "Settings", icon: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z" },
+// Icons
+const ICONS = {
+  dashboard: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1",
+  tickets: "M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z",
+  customers: "M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z",
+  subscriptions: "M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99",
+  orders: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4",
+  returns: "M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3",
+  loyalty: "M21 11.25v8.25a1.5 1.5 0 01-1.5 1.5H5.25a1.5 1.5 0 01-1.5-1.5v-8.25M12 4.875A2.625 2.625 0 109.375 7.5H12m0-2.625V7.5m0-2.625A2.625 2.625 0 1114.625 7.5H12m0 0V21m-8.625-9.75h18c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125h-18c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z",
+  reviews: "M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z",
+  portal: "M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z",
+  fraud: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z",
+  chargebacks: "M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25v10.5A2.25 2.25 0 004.5 19.5z",
+  knowledge: "M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25",
+  articles: "M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z",
+  macros: "M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z",
+  marketing: "M10.34 15.84c-.688-.06-1.386-.09-2.09-.09H7.5a4.5 4.5 0 110-9h.75c.704 0 1.402-.03 2.09-.09m0 9.18c.253.962.584 1.892.985 2.783.247.55.06 1.21-.463 1.511l-.657.38c-.551.318-1.26.117-1.527-.461a20.845 20.845 0 01-1.44-4.282m3.102.069a18.03 18.03 0 01-.59-4.59c0-1.586.205-3.124.59-4.59m0 9.18a23.848 23.848 0 018.835 2.535M10.34 6.66a23.847 23.847 0 008.835-2.535m0 0A23.74 23.74 0 0018.795 3m.38 1.125a23.91 23.91 0 011.014 5.395m-1.014 8.855c-.118.38-.245.754-.38 1.125m.38-1.125a23.91 23.91 0 001.014-5.395m0-3.46c.495.413.811 1.035.811 1.73 0 .695-.316 1.317-.811 1.73m0-3.46a24.347 24.347 0 010 3.46",
+  settings: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z",
+};
+
+interface NavItem { href: string; label: string; icon: string; comingSoon?: boolean }
+interface NavSection { label: string; items: NavItem[]; collapsible?: boolean }
+
+const NAV_STRUCTURE: (NavItem | NavSection)[] = [
+  { href: "/dashboard", label: "Dashboard", icon: ICONS.dashboard },
+  { href: "/dashboard/tickets", label: "Tickets", icon: ICONS.tickets },
+  {
+    label: "Customers",
+    collapsible: true,
+    items: [
+      { href: "/dashboard/customers", label: "Profiles", icon: ICONS.customers },
+      { href: "/dashboard/subscriptions", label: "Subscriptions", icon: ICONS.subscriptions },
+      { href: "/dashboard/orders", label: "Orders", icon: ICONS.orders },
+      { href: "/dashboard/returns", label: "Returns", icon: ICONS.returns },
+      { href: "/dashboard/loyalty", label: "Loyalty", icon: ICONS.loyalty },
+      { href: "/dashboard/reviews", label: "Reviews", icon: ICONS.reviews },
+      { href: "/dashboard/portal-analytics", label: "Portal", icon: ICONS.portal },
+    ],
+  },
+  {
+    label: "Risk",
+    collapsible: true,
+    items: [
+      { href: "/dashboard/chargebacks", label: "Chargebacks", icon: ICONS.chargebacks },
+      { href: "/dashboard/fraud", label: "Fraud", icon: ICONS.fraud },
+    ],
+  },
+  {
+    label: "Knowledge",
+    collapsible: true,
+    items: [
+      { href: "/dashboard/knowledge-base", label: "Articles", icon: ICONS.articles },
+      { href: "/dashboard/macros", label: "Macros", icon: ICONS.macros },
+    ],
+  },
+  {
+    label: "Marketing",
+    collapsible: true,
+    items: [
+      { href: "#", label: "SMS", icon: ICONS.marketing, comingSoon: true },
+      { href: "#", label: "Email", icon: ICONS.marketing, comingSoon: true },
+    ],
+  },
+  { href: "/dashboard/settings", label: "Settings", icon: ICONS.settings },
 ];
+
+// Legacy flat list for ticket view handling
+const NAV_ITEMS = NAV_STRUCTURE.flatMap(item =>
+  "items" in item ? item.items : [item]
+).filter(item => !("items" in item)) as NavItem[];
 
 export default function Sidebar({
   workspace,
@@ -45,6 +100,7 @@ export default function Sidebar({
   const [ticketViews, setTicketViews] = useState<TicketView[]>([]);
   const [collapsedViews, setCollapsedViews] = useState<Set<string>>(new Set());
   const [ticketsExpanded, setTicketsExpanded] = useState(false);
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(["Customers", "Risk", "Knowledge", "Marketing"]));
   const [escalationCounts, setEscalationCounts] = useState<{ open: number; pending: number; closed: number }>({ open: 0, pending: 0, closed: 0 });
   const [fraudCount, setFraudCount] = useState<{ count: number; maxSeverity: string }>({ count: 0, maxSeverity: "low" });
   const [pendingReviewCount, setPendingReviewCount] = useState(0);
@@ -144,13 +200,89 @@ export default function Sidebar({
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 space-y-1 md:space-y-0.5 overflow-y-auto px-3 py-3">
-        {NAV_ITEMS.map((item) => {
+      <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 py-3">
+        {NAV_STRUCTURE.map((entry, idx) => {
+          // Section with children
+          if ("items" in entry) {
+            const section = entry as NavSection;
+            const isExpanded = expandedSections.has(section.label);
+            const sectionHasActive = section.items.some(i => pathname.startsWith(i.href) && i.href !== "#");
+            return (
+              <div key={section.label} className={idx > 0 ? "mt-3" : ""}>
+                <button
+                  type="button"
+                  onClick={() => setExpandedSections(prev => {
+                    const next = new Set(prev);
+                    if (next.has(section.label)) next.delete(section.label); else next.add(section.label);
+                    return next;
+                  })}
+                  className={`flex w-full items-center justify-between px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-wider transition-colors ${
+                    sectionHasActive ? "text-indigo-500 dark:text-indigo-400" : "text-zinc-400 dark:text-zinc-500"
+                  }`}
+                >
+                  <span>{section.label}</span>
+                  <span className={`text-[10px] transition-transform ${isExpanded ? "rotate-90" : ""}`}>&#9656;</span>
+                </button>
+                {isExpanded && (
+                  <div className="mt-0.5 space-y-0.5">
+                    {section.items.map(item => {
+                      const isActive = pathname === item.href || (item.href !== "#" && pathname.startsWith(item.href));
+                      return (
+                        <Link
+                          key={item.href + item.label}
+                          href={item.comingSoon ? "#" : item.href}
+                          className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 md:py-1.5 text-[14px] md:text-[13px] transition-colors ${
+                            item.comingSoon
+                              ? "cursor-default text-zinc-300 dark:text-zinc-600"
+                              : isActive
+                              ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
+                              : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                          }`}
+                          onClick={item.comingSoon ? (e) => e.preventDefault() : undefined}
+                        >
+                          <svg className="h-4 w-4 md:h-3.5 md:w-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
+                          </svg>
+                          <span className="flex-1">{item.label}</span>
+                          {item.comingSoon && (
+                            <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-400 dark:bg-zinc-800">Soon</span>
+                          )}
+                          {item.href === "/dashboard/reviews" && pendingReviewCount > 0 && (
+                            <span className="rounded-full bg-yellow-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400">
+                              {pendingReviewCount > 99 ? "99+" : pendingReviewCount}
+                            </span>
+                          )}
+                          {item.href === "/dashboard/fraud" && fraudCount.count > 0 && (
+                            <span className={`rounded-full px-1.5 py-0.5 text-xs font-medium tabular-nums ${
+                              fraudCount.maxSeverity === "high"
+                                ? "bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
+                                : fraudCount.maxSeverity === "medium"
+                                ? "bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400"
+                                : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-500"
+                            }`}>
+                              {fraudCount.count > 99 ? "99+" : fraudCount.count}
+                            </span>
+                          )}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          // Top-level item (Dashboard, Tickets, Settings)
+          const item = entry as NavItem;
           const isActive = pathname === item.href ||
             (item.href !== "/dashboard" && pathname.startsWith(item.href));
           const isTickets = item.href === "/dashboard/tickets";
+
+          // Add separator before Settings
+          const isSettings = item.href === "/dashboard/settings";
+
           return (
-            <div key={item.href}>
+            <div key={item.href} className={isSettings ? "mt-3" : ""}>
               {isTickets ? (
                 <button
                   type="button"
@@ -180,22 +312,6 @@ export default function Sidebar({
                     <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
                   </svg>
                   <span className="flex-1">{item.label}</span>
-                  {item.href === "/dashboard/reviews" && pendingReviewCount > 0 && (
-                    <span className="rounded-full bg-yellow-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400">
-                      {pendingReviewCount > 99 ? "99+" : pendingReviewCount}
-                    </span>
-                  )}
-                  {item.href === "/dashboard/fraud" && fraudCount.count > 0 && (
-                    <span className={`rounded-full px-1.5 py-0.5 text-xs font-medium tabular-nums ${
-                      fraudCount.maxSeverity === "high"
-                        ? "bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
-                        : fraudCount.maxSeverity === "medium"
-                        ? "bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400"
-                        : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-500"
-                    }`}>
-                      {fraudCount.count > 99 ? "99+" : fraudCount.count}
-                    </span>
-                  )}
                 </Link>
               )}
               {/* Escalations submenu */}
