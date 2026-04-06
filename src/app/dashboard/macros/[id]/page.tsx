@@ -229,15 +229,26 @@ export default function MacroDetailPage({ params }: { params: Promise<{ id: stri
 
           {/* Content */}
           <div>
-            <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Content</label>
+            <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Content (plain text)</label>
             <textarea
               value={macro.body_text}
               onChange={e => updateField("body_text", e.target.value)}
               placeholder="Macro response text..."
-              rows={14}
+              rows={10}
               className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
             />
           </div>
+
+          {/* HTML Preview */}
+          {macro.body_html && (
+            <div>
+              <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Rich Text Preview</label>
+              <div
+                className="rounded-md border border-zinc-300 bg-white px-4 py-3 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 prose prose-sm max-w-none dark:prose-invert [&_a]:text-indigo-600 [&_a]:underline dark:[&_a]:text-indigo-400"
+                dangerouslySetInnerHTML={{ __html: macro.body_html }}
+              />
+            </div>
+          )}
         </div>
 
         {/* Sidebar - 1 col */}
