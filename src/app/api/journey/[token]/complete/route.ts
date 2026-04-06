@@ -260,38 +260,6 @@ export async function POST(
           journey_step: 99,
         }).eq("id", session.ticket_id);
 
-        // Check for other active subscriptions and notify customer
-        if (session.customer_id && selectedSub) {
-          // Get all active subs for this customer (including linked profiles)
-          const linkedIds = [session.customer_id];
-          const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", session.customer_id).single();
-          if (link) {
-            const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
-            for (const g of grp || []) if (!linkedIds.includes(g.customer_id)) linkedIds.push(g.customer_id);
-          }
-
-          const { data: remainingSubs } = await admin.from("subscriptions")
-            .select("shopify_contract_id, status, items")
-            .eq("workspace_id", wsId)
-            .in("customer_id", linkedIds)
-            .in("status", ["active", "paused"])
-            .neq("shopify_contract_id", selectedSub.contractId);
-
-          if (remainingSubs && remainingSubs.length > 0) {
-            const subItems = (remainingSubs[0].items as { title?: string }[] || []).map(i => i.title || "item").join(", ");
-            const otherSubMsg = remainingSubs.length === 1
-              ? `You also have another active subscription for ${subItems}.`
-              : `You also have ${remainingSubs.length} other active subscriptions on your account.`;
-
-            await admin.from("ticket_messages").insert({
-              ticket_id: session.ticket_id,
-              direction: "outbound",
-              visibility: "external",
-              author_type: "ai",
-              body: otherSubMsg,
-            });
-          }
-        }
       }
     } else if (outcome?.startsWith("saved_")) {
       // Customer accepted a remedy — look up type from DB
@@ -379,9 +347,29 @@ export async function POST(
         body: `[System] Cancel journey completed:\n${allActions.map(a => `• ${a}`).join("\n")}`,
       });
 
+      // Check for other active subscriptions to mention in confirmation
+      let otherSubsNote = "";
+      if (outcome === "cancelled" && session.customer_id && selectedSub) {
+        const linkedIds = [session.customer_id];
+        const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", session.customer_id).single();
+        if (link) {
+          const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
+          for (const g of grp || []) if (!linkedIds.includes(g.customer_id)) linkedIds.push(g.customer_id);
+        }
+        const { data: remainingSubs } = await admin.from("subscriptions")
+          .select("shopify_contract_id, status")
+          .eq("workspace_id", wsId)
+          .in("customer_id", linkedIds)
+          .in("status", ["active", "paused"])
+          .neq("shopify_contract_id", selectedSub.contractId);
+        if (remainingSubs && remainingSubs.length > 0) {
+          otherSubsNote = ` You still have ${remainingSubs.length} other active subscription${remainingSubs.length > 1 ? "s" : ""} on your account.`;
+        }
+      }
+
       // Send customer-facing confirmation
       const confirmMsg = outcome === "cancelled"
-        ? "<p>Your subscription has been cancelled. You won't be charged again. You're always welcome back.</p>"
+        ? `<p>Your subscription has been cancelled. You won't be charged again.${otherSubsNote}</p>`
         : "<p>We've updated your subscription. Thank you for staying with us!</p>";
 
       await admin.from("ticket_messages").insert({
