@@ -394,6 +394,11 @@ export default function JourneyPage() {
         )}
 
         {/* Item accounting — per-item radio groups */}
+        {/* Debug: show step type */}
+        {!["single_choice", "confirmation", "radio", "checklist", "text_input", "confirm"].includes(step.type) && (
+          <p className="mt-2 text-xs text-red-500">Step type: {step.type} | Options: {(step.options || []).length}</p>
+        )}
+
         {step.type === "item_accounting" && <ItemAccountingForm
           step={step}
           config={config}
@@ -1323,26 +1328,26 @@ function ItemAccountingForm({
   submitting: boolean;
   submitStep: (value: string, label: string) => Promise<void>;
 }) {
-  // Derive groups from flat options
-  const grouped = new Map<string, { value: string; label: string }[]>();
+  // Derive groups from flat options using a plain object instead of Map
+  const groupedObj: Record<string, { value: string; label: string }[]> = {};
   for (const opt of step.options || []) {
     const prefix = opt.value.split(":")[0];
-    if (!grouped.has(prefix)) grouped.set(prefix, []);
-    grouped.get(prefix)!.push(opt);
+    if (!groupedObj[prefix]) groupedObj[prefix] = [];
+    groupedObj[prefix].push({ value: opt.value, label: opt.label });
   }
 
   // Get titles from metadata
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const meta = (config as any)?.metadata as Record<string, unknown> | undefined;
+  const meta = config?.metadata as Record<string, unknown> | undefined;
   const metaGroups = (meta?.itemGroups as { key: string; title: string }[]) || [];
   const lineItems = (meta?.lineItems as { title: string; quantity: number }[]) || [];
-  const titleMap = new Map<string, string>();
-  for (const g of metaGroups) titleMap.set(g.key, g.title);
+  const titleObj: Record<string, string> = {};
+  for (const g of metaGroups) titleObj[g.key] = g.title;
 
-  const groups = Array.from(grouped.entries()).map(([key, options], idx) => ({
+  const groupKeys = Object.keys(groupedObj);
+  const groups = groupKeys.map((key, idx) => ({
     key,
-    title: titleMap.get(key) || (lineItems[idx] ? `${lineItems[idx].title}${lineItems[idx].quantity > 1 ? ` (x${lineItems[idx].quantity})` : ""}` : `Item ${idx + 1}`),
-    options,
+    title: titleObj[key] || (lineItems[idx] ? `${lineItems[idx].title}${lineItems[idx].quantity > 1 ? ` (x${lineItems[idx].quantity})` : ""}` : `Item ${idx + 1}`),
+    options: groupedObj[key],
   }));
 
   const allSelected = groups.every(g => itemSelections[g.key]);
