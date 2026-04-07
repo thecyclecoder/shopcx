@@ -97,9 +97,16 @@ export async function POST(
   }
   const token = decrypt(ws.slack_bot_token_encrypted);
 
-  const customerArr = ticket.customers as unknown as { first_name: string; last_name: string; email: string }[] | null;
-  const customer = customerArr?.[0] || null;
-  const customerName = customer ? `${customer.first_name} ${customer.last_name}`.trim() || customer.email : "Unknown";
+  let customerName = "Unknown";
+  if (ticket.customer_id) {
+    const { data: cust } = await admin.from("customers")
+      .select("first_name, last_name, email")
+      .eq("id", ticket.customer_id)
+      .single();
+    if (cust) {
+      customerName = `${cust.first_name || ""} ${cust.last_name || ""}`.trim() || cust.email || "Unknown";
+    }
+  }
   const ticketUrl = `${process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai"}/dashboard/tickets/${ticketId}`;
 
   // Build Slack message blocks
