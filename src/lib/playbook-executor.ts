@@ -167,6 +167,20 @@ export async function executePlaybookStep(
   // Update ticket context
   if (stepResult.context) {
     const updatedCtx = { ...ctx, ...stepResult.context };
+
+    // Auto-resolve identified_order_id from identified_orders if missing
+    if (updatedCtx.identified_orders && !updatedCtx.identified_order_id) {
+      const orderNumbers = updatedCtx.identified_orders as string[];
+      if (orderNumbers.length > 0) {
+        const { data: matched } = await admin.from("orders")
+          .select("id")
+          .eq("workspace_id", workspaceId)
+          .eq("order_number", orderNumbers[0])
+          .limit(1).single();
+        if (matched) updatedCtx.identified_order_id = matched.id;
+      }
+    }
+
     await admin.from("tickets").update({ playbook_context: updatedCtx }).eq("id", ticketId);
   }
 
@@ -2264,77 +2278,43 @@ async function handleConfirmShippingAddress(
   step: PlaybookStep,
   pers: { name?: string; tone?: string; sign_off?: string | null } | null,
 ): Promise<PlaybookExecResult> {
-  // Address already confirmed
+  // Address already confirmed (from journey completion)
   if (ctx.validated_address) {
     return { action: "advance", newStep: step.step_order + 1, context: ctx };
   }
 
-  // For delivery errors (wrong address, RTS), always ask for address
-  // For delivered+missing, use existing address
-  if (ctx.replacement_reason === "delivery_error" || ctx.replacement_reason === "wrong_address" || ctx.customer_error) {
-    if (!ctx.address_question_asked) {
-      ctx.address_question_asked = true;
-
-      // Launch address journey
-      try {
-        const { data: journeyDef } = await admin.from("journey_definitions")
-          .select("id, name")
-          .eq("workspace_id", wsId)
-          .eq("slug", "shipping-address")
-          .eq("is_active", true)
-          .limit(1).single();
-
-        if (journeyDef) {
-          const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
-          await launchJourneyForTicket({
-            workspaceId: wsId, ticketId: tid, customerId: customer.id,
-            journeyId: journeyDef.id, journeyName: journeyDef.name,
-            triggerIntent: "shipping_address", channel: ctx._channel as string || "email",
-            leadIn: "Before we can send a replacement, we need to confirm your shipping address.",
-            ctaText: "Confirm Address",
-          });
-        }
-      } catch { /* non-fatal */ }
-
-      return {
-        action: "respond", context: ctx,
-        response: "Before we can send a replacement, we need to confirm your shipping address. I'm sending you a quick form to verify your address.",
-      };
-    }
-    // Waiting for journey to complete and populate ctx.validated_address
-    return { action: "respond", response: "Please complete the address form so we can get your replacement shipped out." };
-  }
-
-  // Missing/damaged items on a delivered order — use the same address
-  // Pull from most recent order
-  const orderId = ctx.identified_order_id as string | undefined;
-  if (orderId) {
-    const { data: order } = await admin.from("orders")
-      .select("shipping_address")
-      .eq("id", orderId).single();
-
-    if (order?.shipping_address) {
-      const addr = order.shipping_address as Record<string, string>;
-      ctx.validated_address = {
-        street1: addr.address1 || addr.street1 || "",
-        street2: addr.address2 || addr.street2 || null,
-        city: addr.city || "",
-        state: addr.provinceCode || addr.state || "",
-        zip: addr.zip || "",
-        country: addr.countryCode || addr.country || "US",
-      };
-      return { action: "advance", newStep: step.step_order + 1, context: ctx };
-    }
-  }
-
-  // Fallback — ask for address
+  // Always launch the address journey — replacements cost money, never assume address
   if (!ctx.address_question_asked) {
     ctx.address_question_asked = true;
+
+    try {
+      const { data: journeyDef } = await admin.from("journey_definitions")
+        .select("id, name")
+        .eq("workspace_id", wsId)
+        .eq("slug", "shipping-address")
+        .eq("is_active", true)
+        .limit(1).single();
+
+      if (journeyDef) {
+        const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
+        await launchJourneyForTicket({
+          workspaceId: wsId, ticketId: tid, customerId: customer.id,
+          journeyId: journeyDef.id, journeyName: journeyDef.name,
+          triggerIntent: "shipping_address", channel: ctx._channel as string || "email",
+          leadIn: "Almost there! We just need to confirm your shipping address before we can send the replacement.",
+          ctaText: "Confirm Address",
+        });
+        return { action: "respond", response: "", context: ctx };
+      }
+    } catch { /* non-fatal */ }
+
     return {
       action: "respond", context: ctx,
-      response: "We need to confirm where to send the replacement. I'm sending you a quick form to verify your shipping address.",
+      response: "We need to confirm where to send the replacement. Could you provide your shipping address?",
     };
   }
+
+  // Waiting for journey to complete
   return { action: "respond", response: "Please complete the address form so we can get your replacement shipped out." };
 }
 
