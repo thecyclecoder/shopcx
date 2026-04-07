@@ -2225,10 +2225,11 @@ async function handleSelectMissingItems(
 
   // Launch missing items journey
   try {
+    // Find journey by slug or name (trigger_intent may be null if playbook owns routing)
     const { data: journeyDef } = await admin.from("journey_definitions")
       .select("id, name")
       .eq("workspace_id", wsId)
-      .eq("trigger_intent", "missing_items")
+      .eq("slug", "missing-items")
       .eq("is_active", true)
       .limit(1).single();
 
@@ -2240,13 +2241,17 @@ async function handleSelectMissingItems(
         workspaceId: wsId, ticketId: tid, customerId: ticket?.customer_id || "",
         journeyId: journeyDef.id, journeyName: journeyDef.name,
         triggerIntent: "missing_items", channel: ticket?.channel || "email",
-        leadIn: "I'd like to find out exactly which items were affected.",
-        ctaText: "Select Missing Items",
+        leadIn: "I'd like to find out exactly which items were affected. Here's a quick form where you can let us know what happened with each item.",
+        ctaText: "Report Missing/Damaged Items",
       });
+      return { action: "respond", response: "", context: { ...ctx, awaiting_item_selection: true } };
     }
-  } catch { /* non-fatal */ }
+  } catch (err) {
+    console.error("[playbook] Failed to launch missing items journey:", err);
+  }
 
-  return { action: "respond", response: "I'd like to find out exactly which items were affected. I'm sending you a quick form where you can select the items that were missing or damaged.", context: { ...ctx, awaiting_item_selection: true } };
+  // Fallback if journey not found
+  return { action: "respond", response: "I'd like to find out exactly which items were affected. Could you let me know which items were missing or damaged?", context: { ...ctx, awaiting_item_selection: true } };
 }
 
 /**
@@ -2275,7 +2280,7 @@ async function handleConfirmShippingAddress(
         const { data: journeyDef } = await admin.from("journey_definitions")
           .select("id, name")
           .eq("workspace_id", wsId)
-          .eq("trigger_intent", "shipping_address")
+          .eq("slug", "shipping-address")
           .eq("is_active", true)
           .limit(1).single();
 
