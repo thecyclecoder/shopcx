@@ -1,13 +1,17 @@
 "use client";
 
 import { useRef, useState, useCallback, useEffect, type ReactNode } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 
 const THRESHOLD = 80;
 const MAX_PULL = 120;
 
 export default function PullToRefresh({ children }: { children: ReactNode }) {
   const router = useRouter();
+  const pathname = usePathname();
+
+  // Disable on ticket detail pages — they have their own refresh
+  const disabled = /\/dashboard\/tickets\/[^/]+$/.test(pathname);
   const containerRef = useRef<HTMLDivElement>(null);
   const [pulling, setPulling] = useState(false);
   const [pullDistance, setPullDistance] = useState(0);
@@ -17,10 +21,11 @@ export default function PullToRefresh({ children }: { children: ReactNode }) {
   const isDragging = useRef(false);
 
   const canPull = useCallback(() => {
+    if (disabled) return false;
     const el = containerRef.current;
     if (!el) return false;
     return el.scrollTop <= 0;
-  }, []);
+  }, [disabled]);
 
   const handleTouchStart = useCallback((e: TouchEvent) => {
     if (!canPull()) return;
