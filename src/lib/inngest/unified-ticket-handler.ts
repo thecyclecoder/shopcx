@@ -392,7 +392,7 @@ export const unifiedTicketHandler = inngest.createFunction(
       }
     }
 
-    // ── 3. Journey re-nudge detection ──
+    // ── 3. Journey/playbook re-nudge with conversation drift detection ──
     if (!isNew && st.handledBy?.startsWith("Journey:")) {
       const nudged = await step.run("check-journey-nudge", async () => {
         const { data: ticketData } = await admin.from("tickets").select("journey_history").eq("id", tid).single();
@@ -400,19 +400,41 @@ export const unifiedTicketHandler = inngest.createFunction(
         const activeJourney = history.find(h => !h.completed);
         if (!activeJourney) return null;
 
+        // ── Drift detection: check if the customer's message is about something else ──
+        const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
+        const driftCheck = await claude(
+          `You are detecting conversation drift. A customer has an active journey/flow ("${activeJourney.journey_name}") but just sent a new message.
+Determine if their message is:
+- "drift" — asking about something completely unrelated to the active flow (e.g. product questions, new topic, general inquiry)
+- "related" — responding to or about the active flow (e.g. completing it, asking about it, confused about it, saying they did it)
+
+Customer message: "${cleanMsg}"
+
+Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
+        const isDrift = (driftCheck || "").toLowerCase().trim().includes("drift");
+
+        if (isDrift) {
+          await sysNote(admin, tid, `[System] Conversation drift detected — customer asked about something unrelated to "${activeJourney.journey_name}". Answering question first.`);
+          return { action: "drift" as const, entry: activeJourney };
+        }
+
         if (!activeJourney.nudged_at) {
-          // First re-nudge
           await sysNote(admin, tid, `[System] Customer replied without completing journey "${activeJourney.journey_name}". Re-nudging.`);
           return { action: "nudge" as const, entry: activeJourney };
         } else {
-          // Already nudged once → escalate
           await sysNote(admin, tid, `[System] Customer declined journey "${activeJourney.journey_name}" after re-nudge. Escalating.`);
           await admin.from("tickets").update({ status: "open", ai_clarification_turn: 0 }).eq("id", tid);
           return { action: "escalate" as const, entry: activeJourney };
         }
       });
 
-      if (nudged?.action === "nudge") {
+      if (nudged?.action === "drift") {
+        // Answer the question via normal AI pipeline, then gently nudge back
+        // Fall through to the AI draft pipeline below — it will generate a response
+        // After answering, add a nudge reminder
+        await sysNote(admin, tid, `[System] Drift: answering customer question, then will nudge back to "${nudged.entry.journey_name}".`);
+        // Don't return — let it fall through to normal AI processing
+      } else if (nudged?.action === "nudge") {
         const delay = await step.run("nudge-delay", () => responseDelay(admin, wsId, st.ch));
         if (delay > 0) await step.sleep("nudge-wait", `${delay}s`);
         await step.run("send-nudge", async () => {
@@ -420,8 +442,9 @@ export const unifiedTicketHandler = inngest.createFunction(
           await nudgeJourney(wsId, tid, nudged.entry, st.ch, msg, pers);
         });
         return { status: "journey_renudged", journey: nudged.entry.journey_name };
+      } else if (nudged?.action === "escalate") {
+        return { status: "escalated", reason: "journey_declined" };
       }
-      if (nudged?.action === "escalate") return { status: "escalated", reason: "journey_declined" };
     }
 
     // ── 3b. Active playbook — skip normal pipeline, execute next step ──
