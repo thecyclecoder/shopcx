@@ -61,6 +61,7 @@ interface OrderData {
   total_cents: number;
   financial_status: string;
   fulfillment_status: string | null;
+  delivery_status: string | null;
   line_items: unknown[];
   fulfillments: unknown[];
   source_name: string | null;
@@ -383,8 +384,20 @@ async function executeStep(
   }
 
   switch (step.type) {
-    case "identify_order":
-      return handleIdentifyOrder(orders, msg, step, dataContext, pers, policyRules, ctx);
+    case "identify_order": {
+      // For replacement playbook: filter orders based on clarify_issue response
+      let filteredOrders = orders;
+      if (ctx.received_order === true) {
+        // Only show delivered orders — customer received it but items missing/damaged
+        filteredOrders = orders.filter(o => (o.delivery_status || "") === "delivered");
+        if (filteredOrders.length === 0) filteredOrders = orders.filter(o => (o.fulfillment_status || "").toUpperCase() === "FULFILLED");
+      }
+      // Limit to 3 most recent for cleaner display
+      if (ctx.received_order !== undefined) {
+        filteredOrders = filteredOrders.slice(0, 3);
+      }
+      return handleIdentifyOrder(filteredOrders, msg, step, dataContext, pers, policyRules, ctx);
+    }
 
     case "identify_subscription":
       return handleIdentifySubscription(subs, orders, ctx, step, dataContext, pers, policyRules);
@@ -418,6 +431,9 @@ async function executeStep(
 
     case "stand_firm":
       return handleStandFirm(ctx, step, playbook.stand_firm_max, msg, dataContext, pers, policyRules);
+
+    case "clarify_issue":
+      return handleClarifyIssue(msg, ctx, step, pers);
 
     case "check_tracking":
       return handleCheckTracking(admin, wsId, tid, orders, ctx, step, pers);
@@ -486,7 +502,7 @@ async function fetchOrders(admin: Admin, wsId: string, custId: string, config: R
   }
 
   const { data } = await admin.from("orders")
-    .select("id, order_number, shopify_order_id, created_at, total_cents, financial_status, fulfillment_status, line_items, fulfillments, source_name, subscription_id")
+    .select("id, order_number, shopify_order_id, created_at, total_cents, financial_status, fulfillment_status, delivery_status, line_items, fulfillments, source_name, subscription_id")
     .eq("workspace_id", wsId)
     .in("customer_id", linkedIds)
     .gte("created_at", since)
@@ -1858,6 +1874,74 @@ async function resolveVariantIds(
 // ══════════════════════════════════════════════════════════════════
 // ── Replacement Playbook Step Handlers ──
 // ══════════════════════════════════════════════════════════════════
+
+/**
+ * clarify_issue — First question: "Did you receive your order (missing/damaged items)?
+ * Or did you not receive your order at all?"
+ * Sets ctx.received_order = true/false to control downstream flow.
+ * If pre-populated from workflow/cron, auto-advances.
+ */
+async function handleClarifyIssue(
+  msg: string, ctx: Record<string, unknown>,
+  step: PlaybookStep,
+  pers: { name?: string; tone?: string; sign_off?: string | null } | null,
+): Promise<PlaybookExecResult> {
+  // Pre-populated from tracking workflow/cron — skip clarification
+  if (ctx.replacement_reason) {
+    if (ctx.replacement_reason === "missing_items" || ctx.replacement_reason === "damaged_items") {
+      ctx.received_order = true;
+    } else {
+      ctx.received_order = false;
+    }
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
+  // Already clarified
+  if (ctx.received_order !== undefined) {
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
+  // First time — ask the clarification question
+  if (!ctx.clarify_asked) {
+    ctx.clarify_asked = true;
+    return {
+      action: "respond", context: ctx,
+      response: "I'd like to help get this resolved for you. Could you let me know — did you receive your order and something was missing or damaged? Or did you not receive your order at all?",
+    };
+  }
+
+  // Use AI to classify the response
+  const classification = await aiGenerate(
+    `You are classifying a customer's response about an order issue.
+The customer was asked: "Did you receive your order and something was missing or damaged? Or did you not receive your order at all?"
+
+Respond with EXACTLY one word:
+- "received" — if the customer received the package but items are missing, damaged, wrong, or incomplete
+- "not_received" — if the customer did not receive the package at all, it never arrived, it's lost
+- "unclear" — if you truly cannot determine which scenario from their response`,
+    `Customer's response: "${msg}"`,
+  );
+
+  const result = (classification || "").toLowerCase().trim();
+
+  if (result.includes("not_received")) {
+    ctx.received_order = false;
+    ctx.replacement_reason = "not_received";
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
+  if (result.includes("received")) {
+    ctx.received_order = true;
+    ctx.needs_item_selection = true;
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
+  // AI couldn't determine — ask again more specifically
+  return {
+    action: "respond",
+    response: "Just to make sure I understand — did the package arrive and something inside was missing or damaged? Or did the package itself not arrive?",
+  };
+}
 
 /**
  * check_tracking — Look up EasyPost tracking for the identified order.
