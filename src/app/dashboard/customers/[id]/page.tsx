@@ -5,6 +5,8 @@ import { useParams, useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 import StoreCreditModal from "@/components/store-credit-modal";
 import ReturnsList from "@/components/shared/ReturnsList";
+import { ReplacementsList } from "@/components/shared/ReplacementsList";
+import type { ReplacementItem } from "@/components/shared/ReplacementsList";
 import OrdersTable from "@/components/shared/OrdersTable";
 import SubscriptionsList from "@/components/shared/SubscriptionsList";
 import LoyaltyCard from "@/components/shared/LoyaltyCard";
@@ -153,6 +155,7 @@ export default function CustomerDetailPage() {
   const [loyaltyMember, setLoyaltyMember] = useState<LoyaltyMemberData | null>(null);
   const [loyaltyTiers, setLoyaltyTiers] = useState<{ label: string; points_cost: number; discount_value: number; affordable: boolean }[]>([]);
   const [customerReturns, setCustomerReturns] = useState<{ id: string; order_number: string; status: string; resolution_type: string; net_refund_cents: number; created_at: string }[]>([]);
+  const [customerReplacements, setCustomerReplacements] = useState<ReplacementItem[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -207,6 +210,11 @@ export default function CustomerDetailPage() {
       fetch(`/api/workspaces/${workspace.id}/returns?customer_id=${id}&limit=50`)
         .then(r => r.json())
         .then(d => setCustomerReturns(d.returns || []))
+        .catch(() => {});
+      // Replacements
+      fetch(`/api/workspaces/${workspace.id}/replacements?customer_id=${id}&limit=50`)
+        .then(r => r.json())
+        .then(d => setCustomerReplacements(d.replacements || []))
         .catch(() => {});
       // Loyalty
       fetch(`/api/loyalty/members?workspace_id=${workspace.id}&customer_id=${id}`)
@@ -647,6 +655,18 @@ export default function CustomerDetailPage() {
           </h2>
           <div className="mt-3">
             <ReturnsList returns={customerReturns} variant="full" showDate />
+          </div>
+        </div>
+      )}
+
+      {/* Replacements */}
+      {customerReplacements.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+            Replacements ({customerReplacements.length})
+          </h2>
+          <div className="mt-3 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            <ReplacementsList replacements={customerReplacements} />
           </div>
         </div>
       )}

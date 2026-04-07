@@ -49,6 +49,15 @@ export async function buildJourneySteps(
     case "cancellation":
     case "cancel_subscription":
       return buildCancelSteps(admin, workspaceId, customerId, ticketId);
+    case "shipping_address":
+    case "address_change": {
+      const { buildShippingAddressSteps } = await import("@/lib/shipping-address-journey-builder");
+      return buildShippingAddressSteps(admin, workspaceId, customerId, ticketId);
+    }
+    case "missing_items": {
+      const { buildMissingItemsSteps } = await import("@/lib/missing-items-journey-builder");
+      return buildMissingItemsSteps(admin, workspaceId, customerId, ticketId);
+    }
     default:
       return { codeDriven: true, multiStep: false, steps: [] };
   }

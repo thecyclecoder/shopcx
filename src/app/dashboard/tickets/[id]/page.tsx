@@ -9,6 +9,8 @@ import TicketPresenceBanner, { useTicketPresence } from "@/components/ticket-pre
 import { createClient } from "@/lib/supabase/client";
 import StoreCreditModal from "@/components/store-credit-modal";
 import ReturnsList from "@/components/shared/ReturnsList";
+import { ReplacementsList } from "@/components/shared/ReplacementsList";
+import type { ReplacementItem } from "@/components/shared/ReplacementsList";
 import SubscriptionsList from "@/components/shared/SubscriptionsList";
 import LoyaltyCard from "@/components/shared/LoyaltyCard";
 import type { LoyaltyMemberData } from "@/components/shared/LoyaltyCard";
@@ -203,6 +205,9 @@ export default function TicketDetailPage() {
   const [suggestingPattern, setSuggestingPattern] = useState(false);
   const [availableWorkflows, setAvailableWorkflows] = useState<{ id: string; name: string; template: string; trigger_tag: string }[]>([]);
   const [runningWorkflow, setRunningWorkflow] = useState(false);
+  const [availablePlaybooks, setAvailablePlaybooks] = useState<{ id: string; name: string }[]>([]);
+  const [applyingPlaybook, setApplyingPlaybook] = useState(false);
+  const [playbookContext, setPlaybookContext] = useState("");
   const [suggestCategory, setSuggestCategory] = useState("");
   const [patternCategories, setPatternCategories] = useState<{ category: string; name: string }[]>([]);
   const [patternSuggestion, setPatternSuggestion] = useState<{
@@ -233,6 +238,8 @@ export default function TicketDetailPage() {
 
   // Returns state
   const [ticketReturns, setTicketReturns] = useState<{ id: string; order_number: string; status: string; resolution_type: string; net_refund_cents: number; tracking_number: string | null; created_at: string }[]>([]);
+  const [ticketReplacements, setTicketReplacements] = useState<ReplacementItem[]>([]);
+  const [replacementsCardOpen, setReplacementsCardOpen] = useState(true);
   const [returnsCardOpen, setReturnsCardOpen] = useState(false);
 
   // Collapsible card states (all collapsed by default)
@@ -363,6 +370,18 @@ export default function TicketDetailPage() {
           }
           setTicketReturns(Array.from(map.values()));
         }).catch(() => {});
+
+        // Load replacements for this ticket and customer
+        Promise.all([
+          fetch(`/api/workspaces/${workspace.id}/replacements?ticket_id=${id}&limit=50`).then(r => r.json()),
+          fetch(`/api/workspaces/${workspace.id}/replacements?customer_id=${data.customer.id}&limit=50`).then(r => r.json()),
+        ]).then(([byTicket, byCustomer]) => {
+          const map = new Map<string, ReplacementItem>();
+          for (const r of [...(byTicket.replacements || []), ...(byCustomer.replacements || [])]) {
+            map.set(r.id, r);
+          }
+          setTicketReplacements(Array.from(map.values()));
+        }).catch(() => {});
       }
 
       // Load existing AI draft
@@ -415,6 +434,10 @@ export default function TicketDetailPage() {
     fetch(`/api/workspaces/${workspace.id}/workflows`)
       .then((res) => res.json())
       .then((data) => { if (Array.isArray(data)) setAvailableWorkflows(data.filter((w: { enabled: boolean }) => w.enabled)); })
+      .catch(() => {});
+    fetch(`/api/workspaces/${workspace.id}/playbooks`)
+      .then((res) => res.json())
+      .then((data) => { if (data?.playbooks) setAvailablePlaybooks(data.playbooks.filter((p: { enabled: boolean }) => p.enabled).map((p: { id: string; name: string }) => ({ id: p.id, name: p.name }))); })
       .catch(() => {});
     fetch(`/api/workspaces/${workspace.id}/patterns`)
       .then((res) => res.json())
@@ -1495,7 +1518,7 @@ export default function TicketDetailPage() {
       <div className={`w-full shrink-0 overflow-y-auto border-t border-zinc-200 bg-zinc-50 p-6 md:w-80 md:border-l md:border-t-0 dark:border-zinc-800 dark:bg-zinc-950 ${mobileSection === "conversation" ? "hidden md:block" : ""}`}>
         {/* Actions card (hidden for archived) */}
         <div className={`${mobileSection !== "actions" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
-        {ticket.status !== "archived" && (availableWorkflows.length > 0 || (!(ticket.tags || []).some(t => t.startsWith("smart:")) && !patternSuggestion)) && (
+        {ticket.status !== "archived" && (availableWorkflows.length > 0 || availablePlaybooks.length > 0 || (!(ticket.tags || []).some(t => t.startsWith("smart:")) && !patternSuggestion)) && (
           <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 p-4 dark:border-indigo-800 dark:bg-indigo-950">
             <h3 className="text-xs font-medium uppercase tracking-wider text-indigo-600 dark:text-indigo-400">Actions</h3>
             <div className="mt-3 space-y-3">
@@ -1542,6 +1565,62 @@ export default function TicketDetailPage() {
                       className="shrink-0 rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
                     >
                       {runningWorkflow ? "..." : "Run"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Apply playbook */}
+              {availablePlaybooks.length > 0 && (
+                <div>
+                  <label className="block text-xs text-indigo-500">Apply Playbook</label>
+                  <div className="mt-1 space-y-1.5">
+                    <select
+                      id="playbook-select"
+                      defaultValue=""
+                      className="w-full truncate rounded border border-indigo-300 bg-white px-2 py-1 text-xs dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    >
+                      <option value="" disabled>Select playbook...</option>
+                      {availablePlaybooks.map(pb => (
+                        <option key={pb.id} value={pb.id}>{pb.name}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="text"
+                      value={playbookContext}
+                      onChange={e => setPlaybookContext(e.target.value)}
+                      placeholder="Context, e.g. &quot;customer wants refund on SC12345&quot;"
+                      className="w-full rounded border border-indigo-300 bg-white px-2 py-1 text-xs placeholder-indigo-300 dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-indigo-600"
+                    />
+                    <button
+                      onClick={async () => {
+                        const select = document.getElementById("playbook-select") as HTMLSelectElement;
+                        const pbId = select?.value;
+                        if (!pbId) return;
+                        setApplyingPlaybook(true);
+                        try {
+                          const res = await fetch(`/api/tickets/${id}/apply-playbook`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ playbook_id: pbId, context: playbookContext }),
+                          });
+                          if (res.ok) {
+                            setPlaybookContext("");
+                            const ticketRes = await fetch(`/api/tickets/${id}`);
+                            if (ticketRes.ok) {
+                              const data = await ticketRes.json();
+                              setTicket(data.ticket);
+                              setMessages(data.messages);
+                            }
+                          }
+                        } finally {
+                          setApplyingPlaybook(false);
+                        }
+                      }}
+                      disabled={applyingPlaybook}
+                      className="w-full rounded bg-indigo-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {applyingPlaybook ? "Applying..." : "Apply Playbook"}
                     </button>
                   </div>
                 </div>
@@ -2540,6 +2619,28 @@ export default function TicketDetailPage() {
           </div>
         )}
         </div>
+
+        {/* ═══ REPLACEMENTS ═══ */}
+        {ticketReplacements.length > 0 && (
+          <div className="mt-4 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            <button
+              onClick={() => setReplacementsCardOpen(!replacementsCardOpen)}
+              className="flex w-full items-center justify-between p-4"
+            >
+              <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                Replacements <span className="text-xs text-zinc-400">({ticketReplacements.length})</span>
+              </h3>
+              <svg className={`h-4 w-4 text-zinc-400 transition-transform ${replacementsCardOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+              </svg>
+            </button>
+            {replacementsCardOpen && (
+              <div className="border-t border-zinc-100 px-4 pb-3 dark:border-zinc-800">
+                <ReplacementsList replacements={ticketReplacements} compact />
+              </div>
+            )}
+          </div>
+        )}
 
         {/* ═══ LOYALTY CARD ═══ */}
         <div className={`${mobileSection !== "loyalty" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
