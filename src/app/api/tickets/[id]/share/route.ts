@@ -43,7 +43,7 @@ export async function GET(
   if (slackConnected) {
     try {
       const token = decrypt(ws!.slack_bot_token_encrypted!);
-      const res = await fetch("https://slack.com/api/conversations.list?types=public_channel&exclude_archived=true&limit=200", {
+      const res = await fetch("https://slack.com/api/conversations.list?types=public_channel,private_channel&exclude_archived=true&limit=200", {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();

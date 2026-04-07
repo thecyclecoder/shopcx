@@ -182,21 +182,57 @@ async function generatePositiveClose(msg: string, ch: string, p: { name?: string
 
 // ── Send & Status ──
 
-async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: string, sandbox: boolean) {
+/**
+ * Insert an outbound message and send the email.
+ *
+ * If pending=true, inserts the message as "pending" (visible in UI with countdown)
+ * but does NOT send the email yet. The deliverPendingSends cron handles delivery.
+ * If pending=false (default), inserts and sends immediately.
+ */
+async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: string, sandbox: boolean, pending = false, delaySec = 0) {
   const html = toHtml(msg);
   if (sandbox) {
     await admin.from("ticket_messages").insert({ ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "ai", body: `[AI Draft] ${html}` });
-  } else {
-    await admin.from("ticket_messages").insert({ ticket_id: tid, direction: "outbound", visibility: "external", author_type: "ai", body: html });
-    if (ch === "email") {
-      const { data: t } = await admin.from("tickets").select("subject, email_message_id, customers(email)").eq("id", tid).single();
-      const email = (t?.customers as unknown as { email: string })?.email;
-      if (email) {
-        const { data: ws } = await admin.from("workspaces").select("name").eq("id", wsId).single();
-        await sendTicketReply({ workspaceId: wsId, toEmail: email, subject: `Re: ${t?.subject || "Your request"}`, body: html, inReplyTo: t?.email_message_id || null, agentName: "Support", workspaceName: ws?.name || "" });
-      }
+    return;
+  }
+
+  if (pending && delaySec > 0) {
+    // Insert as pending — visible in UI immediately, email delivered later by cron
+    await admin.from("ticket_messages").insert({
+      ticket_id: tid,
+      direction: "outbound",
+      visibility: "external",
+      author_type: "ai",
+      body: html,
+      pending_send_at: new Date(Date.now() + delaySec * 1000).toISOString(),
+    });
+    return;
+  }
+
+  // Insert and send immediately
+  await admin.from("ticket_messages").insert({
+    ticket_id: tid,
+    direction: "outbound",
+    visibility: "external",
+    author_type: "ai",
+    body: html,
+    sent_at: new Date().toISOString(),
+  });
+
+  if (ch === "email") {
+    const { data: t } = await admin.from("tickets").select("subject, email_message_id, customers(email)").eq("id", tid).single();
+    const email = (t?.customers as unknown as { email: string })?.email;
+    if (email) {
+      const { data: ws } = await admin.from("workspaces").select("name").eq("id", wsId).single();
+      await sendTicketReply({ workspaceId: wsId, toEmail: email, subject: `Re: ${t?.subject || "Your request"}`, body: html, inReplyTo: t?.email_message_id || null, agentName: "Support", workspaceName: ws?.name || "" });
     }
   }
+}
+
+/** Compute delay and call send() as pending if delay > 0, immediate otherwise */
+async function sendWithDelay(admin: Admin, wsId: string, tid: string, ch: string, msg: string, sandbox: boolean) {
+  const delay = await responseDelay(admin, wsId, ch);
+  await send(admin, wsId, tid, ch, msg, sandbox, delay > 0, delay);
 }
 
 const setStatus = (admin: Admin, tid: string, autoResolve: boolean) =>
@@ -826,7 +862,7 @@ async function routeExec(
       await markFirstTouch(tid, "ai");
 
       // Execute first step immediately
-      if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
+      // delay moved to send()
       if (await newerActivity(admin, tid, t0)) return;
       const result = await executePlaybookStep(wsId, tid, msg, pers);
       if (result.systemNote) await sysNote(admin, tid, result.systemNote);
@@ -866,9 +902,8 @@ async function routeExec(
     if (macro) {
       await sysNote(admin, tid, `[System] → Macro: ${macro.name} (${conf}%)`);
       const text = await personalizeMacroText(macro.content, custCtx, msg, ch, pers);
-      if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
       if (await newerActivity(admin, tid, t0)) return;
-      await send(admin, wsId, tid, ch, text, cfg.sandbox);
+      await sendWithDelay(admin, wsId, tid, ch, text, cfg.sandbox);
       await markFirstTouch(tid, "ai");
       await admin.from("tickets").update({ handled_by: "AI Agent" }).eq("id", tid);
       await setStatus(admin, tid, cfg.auto_resolve);
@@ -898,9 +933,8 @@ async function routeExec(
       metadata: { intent, ticket_id: tid },
     });
     const text = await kbResponse(c.chunk_text, c.kb_title || "", msg, ch, pers);
-    if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
     if (await newerActivity(admin, tid, t0)) return;
-    await send(admin, wsId, tid, ch, text, cfg.sandbox);
+    await sendWithDelay(admin, wsId, tid, ch, text, cfg.sandbox);
     await markFirstTouch(tid, "ai");
     await admin.from("tickets").update({ handled_by: "AI Agent" }).eq("id", tid);
     await setStatus(admin, tid, cfg.auto_resolve);

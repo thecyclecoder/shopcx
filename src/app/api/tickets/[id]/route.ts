@@ -202,6 +202,12 @@ export async function PATCH(
     return NextResponse.json({ error: "Archived tickets cannot be modified" }, { status: 400 });
   }
 
+  // Cancel a pending outbound message
+  if (body.cancel_pending_message) {
+    await admin.from("ticket_messages").update({ send_cancelled: true }).eq("id", body.cancel_pending_message).eq("ticket_id", ticketId);
+    return NextResponse.json({ success: true });
+  }
+
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
 
   if ("status" in body) {

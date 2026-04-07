@@ -1114,6 +1114,31 @@ export default function TicketDetailPage() {
                         Sandbox — not sent to customer
                       </div>
                     )}
+                    {/* Pending send indicator */}
+                    {(m as TicketMessage & { pending_send_at?: string | null; sent_at?: string | null; send_cancelled?: boolean }).pending_send_at && !(m as TicketMessage & { sent_at?: string | null }).sent_at && !(m as TicketMessage & { send_cancelled?: boolean }).send_cancelled && (
+                      <div className="mt-1.5 flex items-center gap-1.5 text-xs text-amber-300">
+                        <svg className="h-3 w-3 animate-pulse" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z" />
+                        </svg>
+                        Sending at {new Date((m as TicketMessage & { pending_send_at: string }).pending_send_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                        <button
+                          onClick={async () => {
+                            await fetch(`/api/tickets/${id}`, {
+                              method: "PATCH",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ cancel_pending_message: m.id }),
+                            });
+                            setMessages(prev => prev.map(pm => pm.id === m.id ? { ...pm, send_cancelled: true } as typeof pm : pm));
+                          }}
+                          className="ml-1 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300 hover:bg-amber-500/30"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                    {(m as TicketMessage & { send_cancelled?: boolean }).send_cancelled && (
+                      <div className="mt-1.5 text-xs text-zinc-400 line-through">Send cancelled</div>
+                    )}
                     {/* Approve & Send for AI sandbox drafts */}
                     {isInternal && m.author_type === "ai" && m.body.includes("[AI Draft") && (
                       <button
