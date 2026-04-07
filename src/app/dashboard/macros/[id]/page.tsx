@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, use } from "react";
+import { useEffect, useState, useCallback, useRef, use } from "react";
 import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 
@@ -68,6 +68,8 @@ export default function MacroDetailPage({ params }: { params: Promise<{ id: stri
   );
   const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
+  const editorRef = useRef<HTMLDivElement>(null);
+  const editorInitialized = useRef(false);
   const [products, setProducts] = useState<{ id: string; title: string }[]>([]);
   const [deleting, setDeleting] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -84,6 +86,15 @@ export default function MacroDetailPage({ params }: { params: Promise<{ id: stri
     setLoading(false);
   }, [workspace.id, macroId, isNew, router]);
 
+  // Initialize editor content when macro loads
+  useEffect(() => {
+    if (macro && editorRef.current && !editorInitialized.current) {
+      const html = macro.body_html || macro.body_text.replace(/\n\n/g, "</p><p>").replace(/\n/g, "<br>").replace(/^/, "<p>").replace(/$/, "</p>");
+      editorRef.current.innerHTML = html;
+      editorInitialized.current = true;
+    }
+  }, [macro]);
+
   useEffect(() => {
     fetchMacro();
     fetch(`/api/workspaces/${workspace.id}/products`)
@@ -99,14 +110,18 @@ export default function MacroDetailPage({ params }: { params: Promise<{ id: stri
   };
 
   const handleSave = async () => {
-    if (!macro || !macro.name.trim() || !macro.body_text.trim()) return;
+    if (!macro) return;
+    // Read latest content from editor ref
+    const bodyHtml = editorRef.current?.innerHTML || macro.body_html || "";
+    const bodyText = editorRef.current?.innerText || macro.body_text || "";
+    if (!macro.name.trim() || !bodyText.trim()) return;
     setSaving(true);
 
     const base = `/api/workspaces/${workspace.id}/macros`;
     const payload = {
       name: macro.name,
-      body_text: macro.body_text,
-      body_html: macro.body_html,
+      body_text: bodyText,
+      body_html: bodyHtml,
       category: macro.category,
       tags: macro.tags,
       active: macro.active,
@@ -246,15 +261,19 @@ export default function MacroDetailPage({ params }: { params: Promise<{ id: stri
             </div>
             {/* Editable area */}
             <div
+              ref={editorRef}
               contentEditable
               suppressContentEditableWarning
               className="min-h-[200px] rounded-b-md border border-zinc-300 bg-white px-4 py-3 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 prose prose-sm max-w-none dark:prose-invert [&_a]:text-indigo-600 [&_a]:underline dark:[&_a]:text-indigo-400 [&_p]:mb-3"
-              dangerouslySetInnerHTML={{ __html: macro.body_html || macro.body_text.replace(/\n\n/g, "</p><p>").replace(/\n/g, "<br>").replace(/^/, "<p>").replace(/$/, "</p>") }}
-              onBlur={(e) => {
-                const html = e.currentTarget.innerHTML;
-                const text = e.currentTarget.innerText;
-                updateField("body_html", html);
-                updateField("body_text", text);
+              onInput={() => {
+                if (!editorRef.current) return;
+                const html = editorRef.current.innerHTML;
+                const text = editorRef.current.innerText;
+                if (macro) {
+                  macro.body_html = html;
+                  macro.body_text = text;
+                  setDirty(true);
+                }
               }}
             />
           </div>
