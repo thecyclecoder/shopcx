@@ -18,6 +18,7 @@ export async function GET(
     .from("ticket_views")
     .select("*")
     .eq("workspace_id", workspaceId)
+    .eq("user_id", user.id)
     .order("sort_order", { ascending: true });
 
   // Compute ticket counts for each view (capped at 100 for performance)
@@ -61,6 +62,7 @@ export async function POST(
     .from("ticket_views")
     .insert({
       workspace_id: workspaceId,
+      user_id: user.id,
       name: body.name || "Untitled View",
       filters: body.filters || {},
       parent_id: body.parent_id || null,
