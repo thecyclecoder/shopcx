@@ -394,11 +394,6 @@ export default function JourneyPage() {
         )}
 
         {/* Item accounting — per-item radio groups */}
-        {/* Debug: show step type */}
-        {!["single_choice", "confirmation", "radio", "checklist", "text_input", "confirm"].includes(step.type) && (
-          <p className="mt-2 text-xs text-red-500">Step type: {step.type} | Options: {(step.options || []).length}</p>
-        )}
-
         {step.type === "item_accounting" && <ItemAccountingForm
           step={step}
           config={config}
@@ -979,6 +974,7 @@ function CodeDrivenJourney({
   const [submitted, setSubmitted] = useState(false);
   const [currentStepIdx, setCurrentStepIdx] = useState(0);
   const [responses, setResponses] = useState<Record<string, { value: string; label: string }>>({});
+  const [itemSelections, setItemSelections] = useState<Record<string, string>>({});
 
   const isMultiStep = !!(config as { multiStep?: boolean }).multiStep;
   const multiSteps = ((config as { steps?: JourneyForm[] }).steps || []) as JourneyForm[];
@@ -1099,6 +1095,18 @@ function CodeDrivenJourney({
               primaryColor={primaryColor}
               submitting={submitting}
               onSubmit={(value) => handleSubmit(value, value)}
+            />
+          )}
+
+          {form.type === "item_accounting" && (
+            <ItemAccountingForm
+              step={form as unknown as JourneyStep}
+              config={config}
+              primaryColor={primaryColor}
+              itemSelections={itemSelections}
+              setItemSelections={setItemSelections}
+              submitting={submitting}
+              submitStep={async (value, label) => handleSubmit(value, label)}
             />
           )}
         </div>
