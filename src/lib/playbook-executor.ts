@@ -441,7 +441,7 @@ async function executeStep(
       return handleCheckTracking(admin, wsId, tid, orders, ctx, step, pers);
 
     case "classify_issue":
-      return handleClassifyIssue(msg, ctx, step, pers);
+      return handleClassifyIssue(admin, tid, msg, ctx, step, pers);
 
     case "select_missing_items":
       return handleSelectMissingItems(admin, wsId, tid, orders, ctx, step, pers);
@@ -2087,6 +2087,7 @@ async function handleCheckTracking(
  * If delivered, ask customer what happened.
  */
 async function handleClassifyIssue(
+  admin: Admin, tid: string,
   msg: string, ctx: Record<string, unknown>,
   step: PlaybookStep,
   pers: { name?: string; tone?: string; sign_off?: string | null } | null,
@@ -2100,9 +2101,22 @@ async function handleClassifyIssue(
   if (ctx.replacement_reason && ctx.replacement_reason !== null) {
     // Refused — escalate, never replace
     if (ctx.replacement_reason === "refused") {
+      await admin.from("tickets").update({
+        status: "open",
+        active_playbook_id: null,
+        playbook_step: 0,
+        escalation_reason: "refused_replacement",
+        updated_at: new Date().toISOString(),
+      }).eq("id", tid);
+
+      await admin.from("ticket_messages").insert({
+        ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "system",
+        body: `[Escalation] Customer requesting replacement on a refused order. Needs admin review.`,
+      });
+
       return {
-        action: "complete",
-        response: "I can see from the tracking that this order was refused at delivery. I've flagged this for our team to review. Someone will be in touch with you.",
+        action: "respond",
+        response: "I've flagged this for our team to review. Someone will be in touch with you shortly.",
         systemNote: "Refused order — escalated to admin, no replacement.",
       };
     }
@@ -2319,10 +2333,24 @@ async function handleCreateReplacement(
       .neq("status", "denied");
 
     if ((count || 0) >= 1) {
+      // Escalate to admin — leave ticket open
+      await admin.from("tickets").update({
+        status: "open",
+        active_playbook_id: null,
+        playbook_step: 0,
+        escalation_reason: "replacement_limit",
+        updated_at: new Date().toISOString(),
+      }).eq("id", tid);
+
+      await admin.from("ticket_messages").insert({
+        ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "system",
+        body: `[Escalation] Replacement denied — customer already has a prior customer-error replacement. Needs admin review.`,
+      });
+
       return {
-        action: "complete",
-        response: "I'm sorry, but we're unable to issue another replacement for this type of issue. I've escalated this to our team for further review.",
-        systemNote: "Customer error replacement limit reached (1 per customer).",
+        action: "respond",
+        response: "I've escalated this to our team for further review. Someone will be in touch with you shortly.",
+        systemNote: "Customer error replacement limit reached (1 per customer). Escalated to admin.",
       };
     }
   }
