@@ -388,9 +388,11 @@ async function executeStep(
       // For replacement playbook: filter orders based on clarify_issue response
       let filteredOrders = orders;
       if (ctx.received_order === true) {
-        // Only show delivered orders — customer received it but items missing/damaged
+        // Customer received it but items missing/damaged — only show DELIVERED orders
         filteredOrders = orders.filter(o => (o.delivery_status || "") === "delivered");
-        if (filteredOrders.length === 0) filteredOrders = orders.filter(o => (o.fulfillment_status || "").toUpperCase() === "FULFILLED");
+      } else if (ctx.received_order === false) {
+        // Customer didn't receive it — show all fulfilled orders (in-transit + delivered)
+        filteredOrders = orders.filter(o => (o.fulfillment_status || "").toUpperCase() === "FULFILLED");
       }
       // Limit to 3 most recent for cleaner display
       if (ctx.received_order !== undefined) {

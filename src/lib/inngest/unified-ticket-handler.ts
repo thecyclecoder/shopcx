@@ -281,27 +281,56 @@ export const unifiedTicketHandler = inngest.createFunction(
     if (!cfg.enabled) return { status: "skipped", reason: "ai_disabled" };
     const pers = await step.run("personality", () => loadPersonality(admin, cfg.personality_id));
 
-    // ── 2. Account linking (supercedes all, no confidence) ──
+    // ── 2. Account linking check ──
+    // For account-related requests (refunds, cancels, orders, subscriptions): link first, then process.
+    // For non-account requests (product questions, general): answer first, mention linking casually.
+    let pendingAccountLink: { journeyId: string; journeyName: string } | null = null;
+
     if (st.hasCust && isNew) {
-      const linked = await step.run("check-linking", async () => {
+      const linkResult = await step.run("check-linking", async () => {
         const { findUnlinkedMatches } = await import("@/lib/account-matching");
         const unlinked = await findUnlinkedMatches(wsId, st.custId!, admin);
-        if (!unlinked.length) return false;
+        if (!unlinked.length) return { hasUnlinked: false, isAccountRelated: false };
+
         const { data: jd } = await admin.from("journey_definitions").select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "account_linking").eq("is_active", true).limit(1).single();
-        if (!jd) return false;
-        await sysNote(admin, tid, `[System] Potential unlinked accounts. Launching account linking.`);
-        // Fixed lead-in for account linking — don't use AI generation which picks up the customer's intent
-        const linkLeadIn = "I've got your request. It looks like you may have more than one profile in our system. Please click the button below to link your accounts so I can pull up your full customer information and help you right away.";
-        const linkCta = "Link My Accounts";
-        await launchJourneyForTicket({
-          workspaceId: wsId, ticketId: tid, customerId: st.custId!,
-          journeyId: jd.id, journeyName: jd.name, triggerIntent: "account_linking",
-          channel: st.ch, leadIn: linkLeadIn, ctaText: linkCta,
-        });
-        await setStatus(admin, tid, cfg.auto_resolve);
-        return true;
+        if (!jd) return { hasUnlinked: false, isAccountRelated: false };
+
+        // Quick classify: is this message account-related?
+        const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
+        const check = await claude(
+          `Classify this customer message as either "account" or "general".
+- "account" = needs customer account data to answer: refund, cancel, order status, subscription, billing, shipping, missing order, exchange, return, address change, payment issues
+- "general" = can be answered without account data: product questions, ingredients, how to use, pricing, availability, store hours, general company info
+
+Customer message: "${cleanMsg}"
+
+Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
+
+        const isAccountRelated = !(check || "").toLowerCase().trim().includes("general");
+
+        if (isAccountRelated) {
+          // Block: link accounts first, then process
+          await sysNote(admin, tid, `[System] Potential unlinked accounts (account-related request). Launching account linking first.`);
+          const linkLeadIn = "I've got your request. It looks like you may have more than one profile in our system. Please click the button below to link your accounts so I can pull up your full customer information and help you right away.";
+          const linkCta = "Link My Accounts";
+          await launchJourneyForTicket({
+            workspaceId: wsId, ticketId: tid, customerId: st.custId!,
+            journeyId: jd.id, journeyName: jd.name, triggerIntent: "account_linking",
+            channel: st.ch, leadIn: linkLeadIn, ctaText: linkCta,
+          });
+          await setStatus(admin, tid, cfg.auto_resolve);
+          return { hasUnlinked: true, isAccountRelated: true, journeyId: jd.id, journeyName: jd.name };
+        }
+
+        // Non-blocking: stash for later, let the question get answered first
+        await sysNote(admin, tid, `[System] Unlinked accounts found, but message is general — answering first, linking after.`);
+        return { hasUnlinked: true, isAccountRelated: false, journeyId: jd.id, journeyName: jd.name };
       });
-      if (linked) return { status: "account_linking" };
+
+      if (linkResult.isAccountRelated) return { status: "account_linking" };
+      if (linkResult.hasUnlinked && !linkResult.isAccountRelated && "journeyId" in linkResult) {
+        pendingAccountLink = { journeyId: linkResult.journeyId as string, journeyName: linkResult.journeyName as string };
+      }
     }
 
     // ── 2b. Early pattern match — runs before re-nudge/playbook checks ──
@@ -742,7 +771,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
 
     // ── 7. Route ──
     await step.run("route", async () => {
-      await routeExec(admin, wsId, tid, st.ch, ai.intent, ai.confidence, msg, ai.custCtx, st.hasCust, cfg, pers, t0);
+      await routeExec(admin, wsId, tid, st.ch, ai.intent, ai.confidence, msg, ai.custCtx, st.hasCust, cfg, pers, t0, st.custId || null, pendingAccountLink);
     });
     return { status: "routed", intent: ai.intent, confidence: ai.confidence };
   },
@@ -757,6 +786,8 @@ async function routeExec(
   intent: string, conf: number, msg: string, custCtx: string,
   hasCust: boolean, cfg: { auto_resolve: boolean; sandbox: boolean },
   pers: { name?: string; tone?: string; sign_off?: string | null } | null, t0: string,
+  custId?: string | null,
+  pendingAccountLink?: { journeyId: string; journeyName: string } | null,
 ) {
   const social = ch === "social_comments";
   await admin.from("tickets").update({ ai_clarification_turn: 0 }).eq("id", tid);
@@ -842,6 +873,17 @@ async function routeExec(
       await markFirstTouch(tid, "ai");
       await admin.from("tickets").update({ handled_by: "AI Agent" }).eq("id", tid);
       await setStatus(admin, tid, cfg.auto_resolve);
+      // Non-blocking account linking: mention it casually after answering
+      if (pendingAccountLink && custId) {
+        await launchJourneyForTicket({
+          workspaceId: wsId, ticketId: tid, customerId: custId,
+          journeyId: pendingAccountLink.journeyId, journeyName: pendingAccountLink.journeyName,
+          triggerIntent: "account_linking", channel: ch,
+          leadIn: "By the way, I noticed you may have another account with us. When you get a chance, linking them helps us serve you better.",
+          ctaText: "Link My Accounts",
+        });
+        pendingAccountLink = null;
+      }
       return;
     }
   }
@@ -863,6 +905,16 @@ async function routeExec(
     await markFirstTouch(tid, "ai");
     await admin.from("tickets").update({ handled_by: "AI Agent" }).eq("id", tid);
     await setStatus(admin, tid, cfg.auto_resolve);
+    if (pendingAccountLink && custId) {
+      await launchJourneyForTicket({
+        workspaceId: wsId, ticketId: tid, customerId: custId,
+        journeyId: pendingAccountLink.journeyId, journeyName: pendingAccountLink.journeyName,
+        triggerIntent: "account_linking", channel: ch,
+        leadIn: "By the way, I noticed you may have another account with us. When you get a chance, linking them helps us serve you better.",
+        ctaText: "Link My Accounts",
+      });
+      pendingAccountLink = null;
+    }
     return;
   }
 
