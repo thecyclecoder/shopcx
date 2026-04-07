@@ -80,7 +80,7 @@ export async function GET(
 
       const { data: orders } = await admin
         .from("orders")
-        .select("id, shopify_order_id, order_number, total_cents, currency, financial_status, fulfillment_status, source_name, order_type, line_items, fulfillments, created_at")
+        .select("id, shopify_order_id, order_number, total_cents, currency, financial_status, fulfillment_status, delivery_status, source_name, order_type, line_items, fulfillments, created_at")
         .in("customer_id", linkedCustomerIds)
         .order("created_at", { ascending: false })
         .limit(10);
@@ -152,7 +152,7 @@ export async function GET(
   // Get sandbox mode
   const { data: ws } = await admin
     .from("workspaces")
-    .select("sandbox_mode, resend_domain")
+    .select("sandbox_mode, resend_domain, shopify_domain")
     .eq("id", workspaceId)
     .single();
 
@@ -166,6 +166,7 @@ export async function GET(
     customer,
     sandbox_mode: sandboxMode,
     email_live: !sandboxMode || isInboundTicket,
+    shopify_domain: ws?.shopify_domain || null,
   });
 }
 

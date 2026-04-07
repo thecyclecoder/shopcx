@@ -13,6 +13,7 @@ interface OrderDetail {
   currency: string;
   financial_status: string;
   fulfillment_status: string;
+  delivery_status?: string | null;
   line_items: { sku?: string; title?: string; quantity?: number; price_cents?: number }[] | null;
   created_at: string;
   tags: string | null;
@@ -57,10 +58,24 @@ const FINANCIAL_BADGE: Record<string, string> = {
 };
 
 const FULFILLMENT_BADGE: Record<string, string> = {
+  delivered: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+  in_transit: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+  returned: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
   fulfilled: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
   partial: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   unfulfilled: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400",
 };
+
+function getShippingLabel(o: { fulfillment_status: string; delivery_status?: string | null }): string {
+  const fs = (o.fulfillment_status || "").toUpperCase();
+  const ds = o.delivery_status || "";
+  if (ds === "delivered") return "delivered";
+  if (ds === "returned") return "returned";
+  if (fs === "FULFILLED" && ds === "not_delivered") return "in_transit";
+  if (fs === "FULFILLED") return "in_transit";
+  if (!fs || fs === "UNFULFILLED" || fs === "NULL") return "unfulfilled";
+  return fs.toLowerCase();
+}
 
 function formatCents(cents: number): string {
   return `$${(cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -137,9 +152,14 @@ export default function OrderDetailPage() {
           <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${FINANCIAL_BADGE[order.financial_status] || FINANCIAL_BADGE.pending}`}>
             {order.financial_status}
           </span>
-          <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${FULFILLMENT_BADGE[order.fulfillment_status || "unfulfilled"] || FULFILLMENT_BADGE.unfulfilled}`}>
-            {order.fulfillment_status || "unfulfilled"}
-          </span>
+          {(() => {
+            const sl = getShippingLabel(order);
+            return (
+              <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium capitalize ${FULFILLMENT_BADGE[sl] || FULFILLMENT_BADGE.unfulfilled}`}>
+                {sl.replace("_", " ")}
+              </span>
+            );
+          })()}
           {order.amplifier_status && (
             <span className="rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
               Amplifier: {order.amplifier_status}

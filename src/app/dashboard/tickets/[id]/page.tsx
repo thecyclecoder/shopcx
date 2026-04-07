@@ -198,6 +198,7 @@ export default function TicketDetailPage() {
 
   // Sandbox
   const [sandboxMode, setSandboxMode] = useState(false);
+  const [shopifyDomain, setShopifyDomain] = useState<string | null>(null);
   const [emailLive, setEmailLive] = useState(true);
 
   // Composer state
@@ -317,6 +318,7 @@ export default function TicketDetailPage() {
       setMessages(data.messages);
       setCustomer(data.customer);
       setSandboxMode(data.sandbox_mode ?? false);
+      setShopifyDomain(data.shopify_domain || null);
       setEmailLive(data.email_live ?? true);
       setLoading(false);
 
@@ -2401,7 +2403,27 @@ export default function TicketDetailPage() {
                           return <span className={`rounded px-1.5 py-0.5 text-sm font-medium ${ss.classes}`}>{ss.label}</span>;
                         })()}
                       </div>
-                      <p className="mt-1 text-sm text-zinc-400">{formatDate(o.created_at)}</p>
+                      <div className="mt-1 flex items-center gap-2 text-sm text-zinc-400">
+                        <span>{formatDate(o.created_at)}</span>
+                        <a
+                          href={`/dashboard/orders?search=${o.order_number}`}
+                          onClick={e => e.stopPropagation()}
+                          className="text-indigo-500 hover:text-indigo-400"
+                        >
+                          View
+                        </a>
+                        {shopifyDomain && o.shopify_order_id && (
+                          <a
+                            href={`https://${shopifyDomain}/admin/orders/${o.shopify_order_id}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={e => e.stopPropagation()}
+                            className="text-zinc-500 hover:text-zinc-300"
+                          >
+                            Shopify
+                          </a>
+                        )}
+                      </div>
                       {/* Fulfillments */}
                       {o.fulfillments?.length > 0 && (
                         <div className="mt-1.5 space-y-1">
