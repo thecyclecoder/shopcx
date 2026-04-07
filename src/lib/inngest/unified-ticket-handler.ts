@@ -140,11 +140,13 @@ async function clarifyQ(msg: string, intent: string, conf: number, ch: string, p
 
 async function personalizeMacroText(content: string, ctx: string, msg: string, ch: string, p: { tone?: string } | null) {
   const short = ["chat", "sms", "meta_dm"].includes(ch);
-  return (await claude(`Lightly personalize. Insert name/order details. Do NOT make longer. ${p?.tone ? `Tone: ${p.tone}.` : ""} ${short ? "Very short." : ""}
+  const hasLinks = content.includes("<a ");
+  return (await claude(`Lightly personalize this response. Insert customer name and relevant details from context. Do NOT make it longer. ${p?.tone ? `Tone: ${p.tone}.` : ""} ${short ? "Very short." : ""}
+${hasLinks ? "IMPORTANT: Preserve ALL <a href> HTML links exactly as they appear in the original. Include them in your output." : "No markdown."}
 Original: ${content}
-Customer: "${msg}"
+Customer question: "${msg}"
 ${ctx ? `Context: ${ctx.slice(0, 300)}` : ""}
-Only the response. No markdown.`, "haiku", 300)) || content;
+Only the personalized response, nothing else.`, "haiku", 400)) || content;
 }
 
 async function kbResponse(article: string, title: string, msg: string, ch: string, p: { tone?: string } | null) {
