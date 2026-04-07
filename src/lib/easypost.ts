@@ -334,6 +334,116 @@ export async function getTrackingStatus(
   };
 }
 
+// ── Address Verification ──
+
+export interface AddressVerificationResult {
+  valid: boolean;
+  address: {
+    street1: string;
+    street2: string | null;
+    city: string;
+    state: string;
+    zip: string;
+    country: string;
+    phone: string | null;
+  };
+  suggestedAddress: {
+    street1: string;
+    street2: string | null;
+    city: string;
+    state: string;
+    zip: string;
+    country: string;
+  } | null;
+  errors: string[];
+}
+
+/**
+ * Verify a shipping address via EasyPost.
+ * Returns the verified/corrected address or validation errors.
+ */
+export async function verifyAddress(
+  workspaceId: string,
+  address: {
+    name?: string;
+    street1: string;
+    street2?: string;
+    city: string;
+    state: string;
+    zip: string;
+    country: string;
+    phone?: string;
+  },
+): Promise<AddressVerificationResult> {
+  const client = await getEasyPostClient(workspaceId);
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const verified = await (client.Address as any).createAndVerify({
+      street1: address.street1,
+      street2: address.street2 || undefined,
+      city: address.city,
+      state: address.state,
+      zip: address.zip,
+      country: address.country,
+      name: address.name || undefined,
+      phone: address.phone || undefined,
+    });
+
+    return {
+      valid: true,
+      address: {
+        street1: verified.street1 || address.street1,
+        street2: verified.street2 || null,
+        city: verified.city || address.city,
+        state: verified.state || address.state,
+        zip: verified.zip || address.zip,
+        country: verified.country || address.country,
+        phone: verified.phone || address.phone || null,
+      },
+      suggestedAddress: null,
+      errors: [],
+    };
+  } catch (err: unknown) {
+    // EasyPost returns errors with suggested corrections
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const easypostErr = err as any;
+    const errors: string[] = [];
+
+    if (easypostErr?.errors) {
+      for (const e of easypostErr.errors) {
+        errors.push(e.message || String(e));
+      }
+    } else if (easypostErr?.message) {
+      errors.push(easypostErr.message);
+    }
+
+    // Check if there's a suggested address in the error
+    const suggested = easypostErr?.address;
+    return {
+      valid: false,
+      address: {
+        street1: address.street1,
+        street2: address.street2 || null,
+        city: address.city,
+        state: address.state,
+        zip: address.zip,
+        country: address.country,
+        phone: address.phone || null,
+      },
+      suggestedAddress: suggested ? {
+        street1: suggested.street1 || address.street1,
+        street2: suggested.street2 || null,
+        city: suggested.city || address.city,
+        state: suggested.state || address.state,
+        zip: suggested.zip || address.zip,
+        country: suggested.country || address.country,
+      } : null,
+      errors,
+    };
+  }
+}
+
 /**
  * Look up tracking by tracking number + carrier via EasyPost Tracker API.
  * This costs money per lookup — only call when Shopify data is insufficient.

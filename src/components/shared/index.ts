@@ -8,3 +8,5 @@ export type { ReturnItem } from "./ReturnsList";
 export type { OrderRow, OrderLineItem, OrderFulfillment } from "./OrdersTable";
 export type { SubscriptionData, SubscriptionItemData } from "./SubscriptionsList";
 export type { LoyaltyMemberData, LoyaltyTierData } from "./LoyaltyCard";
+export { ReplacementsList } from "./ReplacementsList";
+export type { ReplacementItem } from "./ReplacementsList";

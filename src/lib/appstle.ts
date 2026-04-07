@@ -141,6 +141,33 @@ export async function appstleUpdateBillingInterval(
   }
 }
 
+export async function appstleUpdateNextBillingDate(
+  workspaceId: string,
+  contractId: string,
+  nextBillingDate: string, // YYYY-MM-DD
+): Promise<{ success: boolean; error?: string }> {
+  const creds = await getAppstleCredentials(workspaceId);
+  if (!creds) return { success: false, error: "Appstle not configured" };
+
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-next-billing-date?contractId=${contractId}&nextBillingDate=${nextBillingDate}&api_key=${creds.apiKey}`,
+      { method: "PUT", headers: { "X-API-Key": creds.apiKey } },
+    );
+
+    if (!res.ok && res.status !== 204) {
+      const text = await res.text();
+      console.error(`Appstle next billing date update error for contract ${contractId}:`, text);
+      return { success: false, error: `Appstle API error: ${res.status}` };
+    }
+
+    return { success: true };
+  } catch (err) {
+    console.error("Appstle next billing date update failed:", err);
+    return { success: false, error: String(err) };
+  }
+}
+
 // ── Dunning endpoints ──
 
 export async function appstleGetUpcomingOrders(
