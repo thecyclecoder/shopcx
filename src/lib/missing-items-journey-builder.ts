@@ -1,17 +1,12 @@
 /**
  * Missing Items Journey Builder
  *
- * Builds a per-item accounting form so the customer declares the status
- * of each item: Received OK, Damaged, or Missing.
+ * Two-step flow:
+ *   Step 1 (checklist): Select which items had issues (unselected = received fine)
+ *   Step 2 (item_accounting): For each selected item, how many were damaged/missing?
  *
- * For items with quantity > 1, options account for partial receipt.
- * The system fact-checks against the order — if everything is received,
- * it closes gracefully. Only damaged/missing items get replaced, with
- * exact quantities (not the full line item).
- *
- * Steps:
- *   1. item_accounting — per-item status (received/damaged/missing)
- *      Response format: "item_0:received,item_1:1_missing,item_2:damaged"
+ * If customer selects nothing in step 1, all items received = no replacement.
+ * Step 2 only shows items from step 1, with simple quantity options.
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -24,50 +19,6 @@ export interface OrderLineItem {
   quantity: number;
   sku?: string;
   variant_id?: string;
-}
-
-/**
- * Build options for a single line item based on its quantity.
- * qty=1: Received OK / Damaged / Missing
- * qty=2: Received 2 / 1 Received + 1 Missing / 1 Received + 1 Damaged / Both Missing / Both Damaged
- * qty=3+: similar pattern
- */
-function buildItemOptions(item: OrderLineItem, idx: number): { value: string; label: string }[] {
-  const prefix = `item_${idx}`;
-  const qty = item.quantity;
-
-  if (qty === 1) {
-    return [
-      { value: `${prefix}:received`, label: "Received OK" },
-      { value: `${prefix}:damaged`, label: "Damaged" },
-      { value: `${prefix}:missing`, label: "Missing" },
-    ];
-  }
-
-  // qty >= 2: build combinations
-  const options: { value: string; label: string }[] = [];
-
-  // All received
-  options.push({ value: `${prefix}:received`, label: `Received all ${qty}` });
-
-  // Partial missing/damaged for each possible count
-  for (let bad = 1; bad < qty; bad++) {
-    const good = qty - bad;
-    options.push({
-      value: `${prefix}:${bad}_missing`,
-      label: `Received ${good}, ${bad} missing`,
-    });
-    options.push({
-      value: `${prefix}:${bad}_damaged`,
-      label: `Received ${good}, ${bad} damaged`,
-    });
-  }
-
-  // All missing / all damaged
-  options.push({ value: `${prefix}:${qty}_missing`, label: `All ${qty} missing` });
-  options.push({ value: `${prefix}:${qty}_damaged`, label: `All ${qty} damaged` });
-
-  return options;
 }
 
 /** Resolve variant titles from products table */
@@ -103,7 +54,7 @@ export async function buildMissingItemsSteps(
   customerId: string,
   ticketId: string,
 ): Promise<BuiltJourneyConfig> {
-  // Find the replacement record to get the original order
+  // Find the order from replacement record or playbook context
   const { data: replacement } = await admin
     .from("replacements")
     .select("id, original_order_id, original_order_number")
@@ -114,7 +65,6 @@ export async function buildMissingItemsSteps(
 
   let orderId = replacement?.original_order_id;
 
-  // If no replacement record, check playbook context for identified order
   if (!orderId) {
     const { data: ticket } = await admin
       .from("tickets")
@@ -125,7 +75,6 @@ export async function buildMissingItemsSteps(
     orderId = ctx.identified_order_id as string | undefined;
   }
 
-  // Fallback: most recent delivered order
   if (!orderId) {
     const { data: recentOrder } = await admin
       .from("orders")
@@ -141,18 +90,11 @@ export async function buildMissingItemsSteps(
 
   if (!orderId) {
     return {
-      codeDriven: true,
-      multiStep: false,
-      steps: [{
-        key: "no_order",
-        type: "info",
-        question: "We couldn't find a recent delivered order to check. Please contact us with your order details.",
-        isTerminal: true,
-      }],
+      codeDriven: true, multiStep: false,
+      steps: [{ key: "no_order", type: "info", question: "We couldn't find a recent delivered order to check. Please contact us with your order details.", isTerminal: true }],
     };
   }
 
-  // Get order line items
   const { data: order } = await admin
     .from("orders")
     .select("id, order_number, line_items")
@@ -161,56 +103,64 @@ export async function buildMissingItemsSteps(
 
   if (!order?.line_items) {
     return {
-      codeDriven: true,
-      multiStep: false,
-      steps: [{
-        key: "no_items",
-        type: "info",
-        question: "We couldn't find items for this order. Please contact us for assistance.",
-        isTerminal: true,
-      }],
+      codeDriven: true, multiStep: false,
+      steps: [{ key: "no_items", type: "info", question: "We couldn't find items for this order. Please contact us for assistance.", isTerminal: true }],
     };
   }
 
-  const lineItems: OrderLineItem[] = (order.line_items as OrderLineItem[])
+  const rawItems: OrderLineItem[] = (order.line_items as OrderLineItem[])
     .filter(item => {
-      const titleLower = item.title.toLowerCase();
-      return !titleLower.includes("shipping protection") && !titleLower.includes("insure");
+      const t = item.title.toLowerCase();
+      return !t.includes("shipping protection") && !t.includes("insure");
     });
 
-  if (lineItems.length === 0) {
+  if (rawItems.length === 0) {
     return {
-      codeDriven: true,
-      multiStep: false,
-      steps: [{
-        key: "no_items",
-        type: "info",
-        question: "No replaceable items found for this order.",
-        isTerminal: true,
-      }],
+      codeDriven: true, multiStep: false,
+      steps: [{ key: "no_items", type: "info", question: "No replaceable items found for this order.", isTerminal: true }],
     };
   }
 
-  // Enrich with variant titles (e.g. "Amazing Coffee" → "Amazing Coffee — Hazelnut")
-  const enrichedItems = await enrichVariantTitles(admin, workspaceId, lineItems);
-
-  // Build per-item accounting step
-  // Each item gets a group of radio options
-  const itemGroups = enrichedItems.map((item, idx) => ({
-    key: `item_${idx}`,
-    title: `${item.title}${item.quantity > 1 ? ` (x${item.quantity})` : ""}`,
-    options: buildItemOptions(item, idx),
-  }));
+  const lineItems = await enrichVariantTitles(admin, workspaceId, rawItems);
 
   const steps: JourneyStep[] = [];
+
+  // Step 1: Checklist — which items had issues?
+  steps.push({
+    key: "select_items",
+    type: "checklist",
+    question: "Which items had an issue?",
+    subtitle: "Select all items that were missing or damaged. Items you don't select will be marked as received.",
+    options: lineItems.map((item, idx) => ({
+      value: String(idx),
+      label: `${item.title}${item.quantity > 1 ? ` (x${item.quantity})` : ""}`,
+    })),
+  });
+
+  // Step 2: item_accounting — for selected items, how many?
+  // Options are built per-item: "1 damaged/missing", "2 damaged/missing", etc.
+  const itemGroups = lineItems.map((item, idx) => {
+    const options: { value: string; label: string }[] = [];
+    for (let n = 1; n <= item.quantity; n++) {
+      options.push({
+        value: `item_${idx}:${n}`,
+        label: n === item.quantity && item.quantity > 1
+          ? `All ${n} damaged/missing`
+          : `${n} damaged/missing`,
+      });
+    }
+    return { key: `item_${idx}`, title: item.title, quantity: item.quantity, options };
+  });
+
+  // Flat options for the step (renderer will group by prefix)
+  const allOptions = itemGroups.flatMap(g => g.options);
 
   steps.push({
     key: "item_accounting",
     type: "item_accounting",
-    question: "Help us understand what happened with each item",
-    subtitle: "Select the status for each item in your order.",
-    options: itemGroups.flatMap(g => g.options), // Flat list for compatibility
-    // The item_accounting type renderer will group by prefix
+    question: "How many of each item were damaged or missing?",
+    subtitle: "Select the quantity for each affected item.",
+    options: allOptions,
   });
 
   return {
@@ -220,69 +170,59 @@ export async function buildMissingItemsSteps(
     metadata: {
       orderId: order.id,
       orderNumber: order.order_number,
-      lineItems: enrichedItems, // With variant titles for display AND completion parsing
-      itemGroups, // Used by the mini-site to render grouped radios
+      lineItems,
+      itemGroups,
       replacementId: replacement?.id || null,
     },
   };
 }
 
 /**
- * Parse item_accounting response and determine what needs replacing.
- * Returns: { allReceived, replacementItems, summary }
+ * Parse the two-step journey response into replacement items.
+ * Step 1 response: "0,2,4" (selected item indices)
+ * Step 2 response: "item_0:1,item_2:2,item_4:1" (quantities)
  */
 export function parseItemAccounting(
-  response: string,
+  selectResponse: string,
+  accountingResponse: string,
   lineItems: OrderLineItem[],
 ): {
   allReceived: boolean;
-  replacementItems: { title: string; quantity: number; type: "missing" | "damaged"; sku?: string; variantId?: string }[];
+  replacementItems: { title: string; quantity: number; type: "damaged_or_missing"; sku?: string; variantId?: string }[];
   summary: string;
 } {
-  // Response format: "item_0:received,item_1:1_missing,item_2:damaged"
-  const parts = response.split(",").map(s => s.trim());
-  const replacementItems: { title: string; quantity: number; type: "missing" | "damaged"; sku?: string; variantId?: string }[] = [];
+  const selectedIndices = selectResponse.split(",").map(s => parseInt(s.trim())).filter(n => !isNaN(n));
 
-  for (const part of parts) {
-    const [key, status] = part.split(":");
-    if (!key || !status) continue;
-
-    const idx = parseInt(key.replace("item_", ""));
-    const item = lineItems[idx];
-    if (!item) continue;
-
-    if (status === "received") continue;
-
-    if (status === "damaged" || status === "missing") {
-      // qty=1 items
-      replacementItems.push({
-        title: item.title,
-        quantity: 1,
-        type: status as "missing" | "damaged",
-        sku: item.sku,
-        variantId: item.variant_id,
-      });
-    } else {
-      // Parse "N_missing" or "N_damaged"
-      const match = status.match(/^(\d+)_(missing|damaged)$/);
-      if (match) {
-        const qty = parseInt(match[1]);
-        const type = match[2] as "missing" | "damaged";
-        replacementItems.push({
-          title: item.title,
-          quantity: qty,
-          type,
-          sku: item.sku,
-          variantId: item.variant_id,
-        });
-      }
-    }
+  if (selectedIndices.length === 0) {
+    return { allReceived: true, replacementItems: [], summary: "All items received OK" };
   }
 
-  const allReceived = replacementItems.length === 0;
-  const summary = allReceived
-    ? "All items received OK"
-    : replacementItems.map(i => `${i.quantity}x ${i.title} (${i.type})`).join(", ");
+  const replacementItems: { title: string; quantity: number; type: "damaged_or_missing"; sku?: string; variantId?: string }[] = [];
 
-  return { allReceived, replacementItems, summary };
+  // Parse accounting response
+  const parts = accountingResponse.split(",").map(s => s.trim());
+  for (const part of parts) {
+    const [key, qtyStr] = part.split(":");
+    if (!key || !qtyStr) continue;
+    const idx = parseInt(key.replace("item_", ""));
+    const qty = parseInt(qtyStr);
+    const item = lineItems[idx];
+    if (!item || isNaN(qty) || qty <= 0) continue;
+
+    replacementItems.push({
+      title: item.title,
+      quantity: qty,
+      type: "damaged_or_missing",
+      sku: item.sku,
+      variantId: item.variant_id,
+    });
+  }
+
+  return {
+    allReceived: replacementItems.length === 0,
+    replacementItems,
+    summary: replacementItems.length === 0
+      ? "All items received OK"
+      : replacementItems.map(i => `${i.quantity}x ${i.title}`).join(", "),
+  };
 }

@@ -233,12 +233,13 @@ export async function POST(
 
     // ── Missing Items Journey ──
     if (journeyType === "missing_items") {
-      const accountingResponse = responses?.item_accounting?.value;
+      const selectResponse = responses?.select_items?.value || "";
+      const accountingResponse = responses?.item_accounting?.value || "";
       const lineItems = (metadata.lineItems as { title: string; quantity: number; sku?: string; variant_id?: string }[]) || [];
 
-      if (accountingResponse && session.ticket_id) {
+      if (session.ticket_id) {
         const { parseItemAccounting } = await import("@/lib/missing-items-journey-builder");
-        const result = parseItemAccounting(accountingResponse, lineItems);
+        const result = parseItemAccounting(selectResponse, accountingResponse, lineItems);
 
         if (result.allReceived) {
           // Everything received OK — no replacement needed
@@ -271,11 +272,9 @@ export async function POST(
           // Update replacement record if exists
           const replacementId = metadata.replacementId as string | null;
           if (replacementId) {
-            const hasOnlyDamaged = replacementItems.every(i => i.type === "damaged");
-            const hasOnlyMissing = replacementItems.every(i => i.type === "missing");
             await admin.from("replacements").update({
               items: replacementItems,
-              reason: hasOnlyDamaged ? "damaged_items" : hasOnlyMissing ? "missing_items" : "missing_items",
+              reason: "missing_items",
               updated_at: new Date().toISOString(),
             }).eq("id", replacementId);
           }

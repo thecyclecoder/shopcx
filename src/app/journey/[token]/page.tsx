@@ -1107,6 +1107,7 @@ function CodeDrivenJourney({
               setItemSelections={setItemSelections}
               submitting={submitting}
               submitStep={async (value, label) => handleSubmit(value, label)}
+              selectedItemIndices={responses.select_items?.value?.split(",").map(s => parseInt(s.trim())).filter(n => !isNaN(n))}
             />
           )}
         </div>
@@ -1326,7 +1327,7 @@ function JourneyShell({ children, workspaceName, primaryColor }: { children: Rea
 // ── Item Accounting Form Component ──
 
 function ItemAccountingForm({
-  step, config, primaryColor, itemSelections, setItemSelections, submitting, submitStep,
+  step, config, primaryColor, itemSelections, setItemSelections, submitting, submitStep, selectedItemIndices,
 }: {
   step: JourneyStep;
   config: JourneyConfig | null;
@@ -1335,8 +1336,9 @@ function ItemAccountingForm({
   setItemSelections: Dispatch<SetStateAction<Record<string, string>>>;
   submitting: boolean;
   submitStep: (value: string, label: string) => Promise<void>;
+  selectedItemIndices?: number[];
 }) {
-  // Derive groups from flat options using a plain object instead of Map
+  // Derive groups from flat options
   const groupedObj: Record<string, { value: string; label: string }[]> = {};
   for (const opt of step.options || []) {
     const prefix = opt.value.split(":")[0];
@@ -1351,12 +1353,18 @@ function ItemAccountingForm({
   const titleObj: Record<string, string> = {};
   for (const g of metaGroups) titleObj[g.key] = g.title;
 
+  // Filter to only selected items from step 1
+  const selectedSet = selectedItemIndices ? new Set(selectedItemIndices) : null;
+
   const groupKeys = Object.keys(groupedObj);
-  const groups = groupKeys.map((key, idx) => ({
-    key,
-    title: titleObj[key] || (lineItems[idx] ? `${lineItems[idx].title}${lineItems[idx].quantity > 1 ? ` (x${lineItems[idx].quantity})` : ""}` : `Item ${idx + 1}`),
-    options: groupedObj[key],
-  }));
+  const groups = groupKeys
+    .map((key, idx) => ({
+      key,
+      idx,
+      title: titleObj[key] || (lineItems[idx] ? `${lineItems[idx].title}` : `Item ${idx + 1}`),
+      options: groupedObj[key],
+    }))
+    .filter(g => !selectedSet || selectedSet.has(g.idx));
 
   const allSelected = groups.every(g => itemSelections[g.key]);
 
