@@ -115,7 +115,7 @@ export async function buildMissingItemsSteps(
   // Step 2: For each item, ask if missing or damaged
   steps.push({
     key: "item_condition",
-    type: "select",
+    type: "single_choice",
     question: "Were these items missing or damaged?",
     subtitle: "This helps us process your replacement correctly.",
     options: [
