@@ -100,6 +100,154 @@ export async function POST(
       config.cancelJourney = true;
     }
 
+    // ── Shipping Address Journey ──
+    if (journeyType === "shipping_address" || journeyType === "address_change") {
+      const confirmResponse = responses?.confirm_address;
+
+      if (confirmResponse?.value === "yes") {
+        // Customer confirmed existing address — write it to playbook context
+        const currentAddress = metadata.currentAddress as Record<string, string> | null;
+        if (currentAddress && session.ticket_id) {
+          // Merge validated_address into playbook_context
+          const { data: ticket } = await admin.from("tickets")
+            .select("playbook_context").eq("id", session.ticket_id).single();
+          const ctx = (ticket?.playbook_context || {}) as Record<string, unknown>;
+          ctx.validated_address = {
+            street1: currentAddress.address1 || currentAddress.street1 || "",
+            street2: currentAddress.address2 || currentAddress.street2 || null,
+            city: currentAddress.city || "",
+            state: currentAddress.provinceCode || currentAddress.state || "",
+            zip: currentAddress.zip || "",
+            country: currentAddress.countryCode || currentAddress.country || "US",
+          };
+          await admin.from("tickets").update({ playbook_context: ctx }).eq("id", session.ticket_id);
+          actionLog.push("Confirmed existing shipping address");
+        }
+      } else {
+        // Customer entered new address — validate + save
+        const street1 = responses?.street1?.value;
+        const city = responses?.city?.value;
+        const state = responses?.state?.value;
+        const zip = responses?.zip?.value;
+
+        if (street1 && city && state && zip && session.ticket_id) {
+          const newAddr = {
+            street1,
+            street2: responses?.street2?.value || undefined,
+            city,
+            state,
+            zip,
+            country: "US",
+          };
+
+          // Try EasyPost verification
+          try {
+            const { verifyAddress } = await import("@/lib/easypost");
+            const result = await verifyAddress(wsId, newAddr);
+            if (result.valid) {
+              Object.assign(newAddr, result.address);
+              actionLog.push("Address verified via EasyPost");
+            } else {
+              actionLog.push(`Address verification warning: ${result.errors.join(", ")}`);
+            }
+          } catch {
+            // Non-fatal — proceed with unverified address
+          }
+
+          // Write to playbook context
+          const { data: ticket } = await admin.from("tickets")
+            .select("playbook_context").eq("id", session.ticket_id).single();
+          const ctx = (ticket?.playbook_context || {}) as Record<string, unknown>;
+          ctx.validated_address = newAddr;
+          await admin.from("tickets").update({ playbook_context: ctx }).eq("id", session.ticket_id);
+
+          // Update replacement record if exists
+          const replacementId = metadata.replacementId as string | null;
+          if (replacementId) {
+            await admin.from("replacements").update({
+              validated_address: newAddr,
+              address_validated: true,
+              status: "address_confirmed",
+              updated_at: new Date().toISOString(),
+            }).eq("id", replacementId);
+          }
+
+          actionLog.push("Shipping address updated");
+        }
+      }
+
+      // Re-trigger the playbook to continue
+      if (session.ticket_id) {
+        await inngest.send({
+          name: "ticket/inbound-message",
+          data: {
+            workspace_id: wsId,
+            ticket_id: session.ticket_id,
+            message_body: "address_confirmed",
+            channel: "system",
+            is_new_ticket: false,
+          },
+        });
+      }
+    }
+
+    // ── Missing Items Journey ──
+    if (journeyType === "missing_items") {
+      const selectedItems = responses?.select_items?.value;
+      const condition = responses?.item_condition?.value || "missing";
+
+      if (selectedItems && session.ticket_id) {
+        const lineItems = (metadata.lineItems as { title: string; quantity: number; sku?: string; variant_id?: string }[]) || [];
+        const selectedIndices = selectedItems.split(",").map((v: string) => parseInt(v.trim())).filter((n: number) => !isNaN(n));
+
+        const replacementItems = selectedIndices.map((idx: number) => {
+          const item = lineItems[idx];
+          if (!item) return null;
+          return {
+            title: item.title,
+            quantity: item.quantity,
+            variantId: item.variant_id || "",
+            sku: item.sku || "",
+            type: condition === "both" ? "missing" : condition,
+          };
+        }).filter(Boolean);
+
+        // Write to playbook context
+        const { data: ticket } = await admin.from("tickets")
+          .select("playbook_context").eq("id", session.ticket_id).single();
+        const ctx = (ticket?.playbook_context || {}) as Record<string, unknown>;
+        ctx.replacement_items = replacementItems;
+        ctx.awaiting_item_selection = false;
+        await admin.from("tickets").update({ playbook_context: ctx }).eq("id", session.ticket_id);
+
+        // Update replacement record if exists
+        const replacementId = metadata.replacementId as string | null;
+        if (replacementId) {
+          await admin.from("replacements").update({
+            items: replacementItems,
+            reason: condition === "damaged" ? "damaged_items" : "missing_items",
+            updated_at: new Date().toISOString(),
+          }).eq("id", replacementId);
+        }
+
+        actionLog.push(`Selected ${replacementItems.length} items for replacement (${condition})`);
+      }
+
+      // Re-trigger the playbook to continue
+      if (session.ticket_id) {
+        await inngest.send({
+          name: "ticket/inbound-message",
+          data: {
+            workspace_id: wsId,
+            ticket_id: session.ticket_id,
+            message_body: "items_selected",
+            channel: "system",
+            is_new_ticket: false,
+          },
+        });
+      }
+    }
+
     if (journeyType === "discount_signup" || journeyType === "marketing_signup") {
       const consentResponse = responses?.consent;
       if (consentResponse?.value === "yes") {

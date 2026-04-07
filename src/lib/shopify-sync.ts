@@ -242,7 +242,7 @@ export async function startBulkOperationWithQuery(
     customer { id }
     shippingAddress { address1 address2 city province provinceCode country countryCodeV2 zip firstName lastName }
     lineItems(first: 20) {
-      edges { node { title quantity sku originalUnitPriceSet { shopMoney { amount } } } }
+      edges { node { title quantity sku variant { id } originalUnitPriceSet { shopMoney { amount } } } }
     }
     fulfillments {
       trackingInfo { number url company }
@@ -372,11 +372,13 @@ export async function upsertOrderChunk(
     if (obj.__parentId) {
       const parentId = obj.__parentId as string;
       if (!lineItemsMap.has(parentId)) lineItemsMap.set(parentId, []);
+      const variantGid = obj.variant?.id as string | undefined;
       lineItemsMap.get(parentId)!.push({
         title: obj.title,
         quantity: obj.quantity,
         price_cents: dollarsToCents(obj.originalUnitPriceSet?.shopMoney?.amount),
         sku: obj.sku || null,
+        variant_id: variantGid ? extractShopifyId(variantGid) : null,
       });
     } else if (obj.id?.includes("Order")) {
       orderLines.push(line);
@@ -552,11 +554,13 @@ export async function downloadAndUpsertOrders(workspaceId: string): Promise<numb
     if (obj.__parentId) {
       const parentId = obj.__parentId as string;
       if (!lineItemsMap.has(parentId)) lineItemsMap.set(parentId, []);
+      const variantGid2 = obj.variant?.id as string | undefined;
       lineItemsMap.get(parentId)!.push({
         title: obj.title,
         quantity: obj.quantity,
         price_cents: dollarsToCents(obj.originalUnitPriceSet?.shopMoney?.amount),
         sku: obj.sku || null,
+        variant_id: variantGid2 ? extractShopifyId(variantGid2) : null,
       });
     } else if (obj.id?.includes("Order")) {
       orderLines.push(obj);
@@ -907,6 +911,7 @@ export async function syncOrderPages(
         quantity: li.quantity,
         price_cents: dollarsToCents(li.price as string),
         sku: li.sku || null,
+        variant_id: li.variant_id ? String(li.variant_id) : null,
       }));
 
       const shippingAddr = o.shipping_address as Record<string, unknown> | null;
@@ -1126,7 +1131,7 @@ export async function syncOrderBatch(
             customer { id }
             shippingAddress { address1 address2 city province provinceCode country countryCodeV2 zip firstName lastName }
             lineItems(first: 20) {
-              edges { node { title quantity sku originalUnitPriceSet { shopMoney { amount } } } }
+              edges { node { title quantity sku variant { id } originalUnitPriceSet { shopMoney { amount } } } }
             }
             fulfillments {
               trackingInfo { number url company }
@@ -1207,14 +1212,18 @@ export async function syncOrderBatch(
     if (!customerId && orderEmail) customerId = customerByEmail[orderEmail] || null;
 
     const lineItemEdges = (o.lineItems as { edges: { node: Record<string, unknown> }[] })?.edges || [];
-    const lineItems = lineItemEdges.map((li) => ({
-      title: li.node.title,
-      quantity: li.node.quantity,
-      price_cents: dollarsToCents(
-        (li.node.originalUnitPriceSet as { shopMoney?: { amount?: string } })?.shopMoney?.amount
-      ),
-      sku: li.node.sku || null,
-    }));
+    const lineItems = lineItemEdges.map((li) => {
+      const varGid = (li.node.variant as { id?: string })?.id;
+      return {
+        title: li.node.title,
+        quantity: li.node.quantity,
+        price_cents: dollarsToCents(
+          (li.node.originalUnitPriceSet as { shopMoney?: { amount?: string } })?.shopMoney?.amount
+        ),
+        sku: li.node.sku || null,
+        variant_id: varGid ? extractShopifyId(varGid) : null,
+      };
+    });
 
     const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
     const shippingAddr = o.shippingAddress as Record<string, unknown> | null;
@@ -1398,7 +1407,7 @@ export async function syncOrderMonth(
             customer { id }
             shippingAddress { address1 address2 city province provinceCode country countryCodeV2 zip firstName lastName }
             lineItems(first: 20) {
-              edges { node { title quantity sku originalUnitPriceSet { shopMoney { amount } } } }
+              edges { node { title quantity sku variant { id } originalUnitPriceSet { shopMoney { amount } } } }
             }
             fulfillments {
               trackingInfo { number url company }
@@ -1432,14 +1441,18 @@ export async function syncOrderMonth(
       if (!customerId && orderEmail) customerId = customerByEmail.get(orderEmail) || null;
 
       const lineItemEdges = (o.lineItems as { edges: { node: Record<string, unknown> }[] })?.edges || [];
-      const lineItems = lineItemEdges.map((li) => ({
-        title: li.node.title,
-        quantity: li.node.quantity,
-        price_cents: dollarsToCents(
-          (li.node.originalUnitPriceSet as { shopMoney?: { amount?: string } })?.shopMoney?.amount
-        ),
-        sku: li.node.sku || null,
-      }));
+      const lineItems = lineItemEdges.map((li) => {
+        const vGid = (li.node.variant as { id?: string })?.id;
+        return {
+          title: li.node.title,
+          quantity: li.node.quantity,
+          price_cents: dollarsToCents(
+            (li.node.originalUnitPriceSet as { shopMoney?: { amount?: string } })?.shopMoney?.amount
+          ),
+          sku: li.node.sku || null,
+          variant_id: vGid ? extractShopifyId(vGid) : null,
+        };
+      });
 
       const priceSet = o.totalPriceSet as { shopMoney?: { amount?: string; currencyCode?: string } };
       const shippingAddr = o.shippingAddress as Record<string, unknown> | null;

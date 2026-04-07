@@ -419,6 +419,7 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
     quantity: li.quantity,
     price_cents: dollarsToCents(li.price as string),
     sku: li.sku || null,
+    variant_id: li.variant_id ? String(li.variant_id) : null,
   }));
 
   // Check if order already exists (to distinguish create vs update)

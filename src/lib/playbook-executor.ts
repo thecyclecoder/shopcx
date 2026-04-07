@@ -1819,6 +1819,43 @@ export async function startPlaybook(
 }
 
 // ══════════════════════════════════════════════════════════════════
+// ── Replacement Helpers ──
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * Resolve variant IDs from the products table for line items that don't have them.
+ * Matches by SKU against product variants.
+ */
+async function resolveVariantIds(
+  admin: Admin, wsId: string,
+  items: { title: string; quantity: number; sku?: string; variant_id?: string }[],
+): Promise<{ title: string; quantity: number; sku?: string; variant_id: string }[]> {
+  // Collect SKUs that need resolving
+  const needsResolving = items.filter(i => !i.variant_id && i.sku);
+  if (needsResolving.length === 0) {
+    return items.map(i => ({ ...i, variant_id: i.variant_id || "" }));
+  }
+
+  // Load all products with variants for this workspace
+  const { data: products } = await admin.from("products")
+    .select("variants")
+    .eq("workspace_id", wsId);
+
+  // Build SKU → variant_id map
+  const skuMap = new Map<string, string>();
+  for (const p of products || []) {
+    for (const v of (p.variants as { id: string; sku: string }[]) || []) {
+      if (v.sku) skuMap.set(v.sku, String(v.id));
+    }
+  }
+
+  return items.map(item => ({
+    ...item,
+    variant_id: item.variant_id || (item.sku ? skuMap.get(item.sku) || "" : ""),
+  }));
+}
+
+// ══════════════════════════════════════════════════════════════════
 // ── Replacement Playbook Step Handlers ──
 // ══════════════════════════════════════════════════════════════════
 
@@ -1985,11 +2022,15 @@ async function handleSelectMissingItems(
     const orderId = ctx.identified_order_id as string | undefined;
     const order = orderId ? orders.find(o => o.id === orderId) : orders[0];
     if (order) {
-      const lineItems = ((order.line_items || []) as { title: string; quantity: number; sku?: string }[])
+      const lineItems = ((order.line_items || []) as { title: string; quantity: number; sku?: string; variant_id?: string }[])
         .filter(item => !item.title.toLowerCase().includes("shipping protection") && !item.title.toLowerCase().includes("insure"));
-      ctx.replacement_items = lineItems.map(item => ({
+
+      // Resolve variant IDs from products table if missing
+      const resolvedItems = await resolveVariantIds(admin, wsId, lineItems);
+      ctx.replacement_items = resolvedItems.map(item => ({
         title: item.title,
         quantity: item.quantity,
+        variantId: item.variant_id || "",
         type: "all",
       }));
     }
@@ -2002,9 +2043,29 @@ async function handleSelectMissingItems(
   }
 
   // Launch missing items journey
-  // For now, respond and wait for journey completion to populate ctx.replacement_items
-  const response = "I'd like to find out exactly which items were affected. I'm sending you a quick form where you can select the items that were missing or damaged.";
-  return { action: "respond", response, context: { ...ctx, awaiting_item_selection: true } };
+  try {
+    const { data: journeyDef } = await admin.from("journey_definitions")
+      .select("id, name")
+      .eq("workspace_id", wsId)
+      .eq("trigger_intent", "missing_items")
+      .eq("is_active", true)
+      .limit(1).single();
+
+    if (journeyDef) {
+      const { data: ticket } = await admin.from("tickets")
+        .select("channel, customer_id").eq("id", tid).single();
+      const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
+      await launchJourneyForTicket({
+        workspaceId: wsId, ticketId: tid, customerId: ticket?.customer_id || "",
+        journeyId: journeyDef.id, journeyName: journeyDef.name,
+        triggerIntent: "missing_items", channel: ticket?.channel || "email",
+        leadIn: "I'd like to find out exactly which items were affected.",
+        ctaText: "Select Missing Items",
+      });
+    }
+  } catch { /* non-fatal */ }
+
+  return { action: "respond", response: "I'd like to find out exactly which items were affected. I'm sending you a quick form where you can select the items that were missing or damaged.", context: { ...ctx, awaiting_item_selection: true } };
 }
 
 /**
@@ -2027,6 +2088,28 @@ async function handleConfirmShippingAddress(
   if (ctx.replacement_reason === "delivery_error" || ctx.replacement_reason === "wrong_address" || ctx.customer_error) {
     if (!ctx.address_question_asked) {
       ctx.address_question_asked = true;
+
+      // Launch address journey
+      try {
+        const { data: journeyDef } = await admin.from("journey_definitions")
+          .select("id, name")
+          .eq("workspace_id", wsId)
+          .eq("trigger_intent", "shipping_address")
+          .eq("is_active", true)
+          .limit(1).single();
+
+        if (journeyDef) {
+          const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
+          await launchJourneyForTicket({
+            workspaceId: wsId, ticketId: tid, customerId: customer.id,
+            journeyId: journeyDef.id, journeyName: journeyDef.name,
+            triggerIntent: "shipping_address", channel: ctx._channel as string || "email",
+            leadIn: "Before we can send a replacement, we need to confirm your shipping address.",
+            ctaText: "Confirm Address",
+          });
+        }
+      } catch { /* non-fatal */ }
+
       return {
         action: "respond", context: ctx,
         response: "Before we can send a replacement, we need to confirm your shipping address. I'm sending you a quick form to verify your address.",
@@ -2132,6 +2215,18 @@ async function handleCreateReplacement(
   }
 
   ctx.replacement_id = replacement.id;
+
+  // Resolve any missing variant IDs before creating draft order
+  if (items.some(i => !i.variantId)) {
+    const resolved = await resolveVariantIds(admin, wsId, items.map(i => ({
+      title: i.title, quantity: i.quantity, sku: (i as unknown as { sku?: string }).sku, variant_id: i.variantId,
+    })));
+    for (let idx = 0; idx < items.length; idx++) {
+      if (!items[idx].variantId && resolved[idx].variant_id) {
+        items[idx].variantId = resolved[idx].variant_id;
+      }
+    }
+  }
 
   // Try to create the draft order if we have address + variant IDs
   if (address && items.every(i => i.variantId)) {

@@ -540,13 +540,37 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
     await addTicketTag(ctx.ticketId, "return-to-sender");
     await addTicketTag(ctx.ticketId, `rts:${tagSlug}`);
 
-    // Set ticket to open so playbook/agent picks it up
-    await admin.from("tickets").update({
+    // Assign replacement playbook if available
+    const { data: replacementPlaybook } = await admin.from("playbooks")
+      .select("id")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("name", "Replacement Order")
+      .eq("is_active", true)
+      .limit(1).single();
+
+    const playbookUpdates: Record<string, unknown> = {
       status: "open",
-      playbook_id: config.replacement_playbook_id as string || null,
-      playbook_step: config.replacement_playbook_id ? "identify_order" : null,
       updated_at: new Date().toISOString(),
-    }).eq("id", ctx.ticketId);
+    };
+
+    if (replacementPlaybook) {
+      playbookUpdates.active_playbook_id = replacementPlaybook.id;
+      playbookUpdates.playbook_step = 0;
+      playbookUpdates.playbook_context = {
+        easypost_status: ctx.fulfillment?.easypost_status,
+        easypost_detail: detail,
+        easypost_location: ctx.fulfillment?.easypost_location,
+        replacement_reason: "delivery_error",
+        customer_error: tagSlug.includes("address"),
+        identified_order_id: ctx.order?.id,
+        identified_order: ctx.order?.order_number,
+        tracking_number: ctx.fulfillment?.tracking_number,
+        carrier: ctx.fulfillment?.carrier,
+      };
+      playbookUpdates.handled_by = "Playbook: Replacement Order";
+    }
+
+    await admin.from("tickets").update(playbookUpdates).eq("id", ctx.ticketId);
 
     await sendReply(admin, ctx, (config.reply_return_to_sender as string) || "It looks like there was a delivery issue with your order {{order.order_number}} — the carrier was unable to complete delivery. We're going to get a replacement out to you. Let us confirm a few details.", config.reply_return_to_sender_status as string || "open");
     return;
