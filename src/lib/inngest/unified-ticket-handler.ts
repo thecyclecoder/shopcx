@@ -418,7 +418,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
 
       if (ep.type === "journey" && st.hasCust) {
         const delay = await step.run("ep-delay", () => responseDelay(admin, wsId, st.ch));
-        if (delay > 0) await step.sleep("ep-wait", `${delay}s`);
+        // delay handled by sendWithDelay
         await step.run("ep-journey", async () => {
           if (await newerActivity(admin, tid, t0)) return;
           const { leadIn, ctaText } = await generateJourneyLeadIn(msg, ep.name, st.ch, pers);
@@ -443,14 +443,14 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
         });
         // Execute first step
         const delay = await step.run("ep-pb-delay", () => responseDelay(admin, wsId, st.ch));
-        if (delay > 0) await step.sleep("ep-pb-wait", `${delay}s`);
+        // delay handled by sendWithDelay
         const pbResult = await step.run("ep-exec-pb", async () => {
           if (await newerActivity(admin, tid, t0)) return { action: "cancelled" as const };
           return executePlaybookStep(wsId, tid, msg, pers);
         });
         if (pbResult.action !== "cancelled") {
           if (pbResult.systemNote) await step.run("ep-pb-note", () => sysNote(admin, tid, pbResult.systemNote!));
-          if (pbResult.response) await step.run("ep-pb-send", () => send(admin, wsId, tid, st.ch, pbResult.response!, cfg.sandbox));
+          if (pbResult.response) await step.run("ep-pb-send", () => sendWithDelay(admin, wsId, tid, st.ch, pbResult.response!, cfg.sandbox));
           await step.run("ep-pb-status", () => setStatus(admin, tid, cfg.auto_resolve));
         }
         return { status: "early_pattern_playbook", playbook: ep.name };
@@ -521,7 +521,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
 
       if (pbActive) {
         const delay = await step.run("playbook-delay", () => responseDelay(admin, wsId, st.ch));
-        if (delay > 0) await step.sleep("playbook-wait", `${delay}s`);
+        // delay handled by sendWithDelay
 
         const pbResult = await step.run("exec-playbook-step", async () => {
           if (await newerActivity(admin, tid, t0)) return { action: "cancelled" as const };
@@ -535,7 +535,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
 
         // Send response if one was generated
         if (pbResult.response) {
-          await step.run("pb-send", () => send(admin, wsId, tid, st.ch, pbResult.response!, cfg.sandbox));
+          await step.run("pb-send", () => sendWithDelay(admin, wsId, tid, st.ch, pbResult.response!, cfg.sandbox));
         }
 
         // Handle API failure escalation
@@ -604,7 +604,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
           if (r.action === "cancelled") break;
           const pr = r as PlaybookExecResult;
           if (pr.systemNote) await step.run(`pb-adv-note-${advCount}`, () => sysNote(admin, tid, pr.systemNote!));
-          if (pr.response) await step.run(`pb-adv-send-${advCount}`, () => send(admin, wsId, tid, st.ch, pr.response!, cfg.sandbox));
+          if (pr.response) await step.run(`pb-adv-send-${advCount}`, () => sendWithDelay(admin, wsId, tid, st.ch, pr.response!, cfg.sandbox));
         }
 
         // Handle the final result after auto-advancing
@@ -633,12 +633,12 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
 
       if (isClose) {
         const delay = await step.run("close-delay", () => responseDelay(admin, wsId, st.ch));
-        if (delay > 0) await step.sleep("close-wait", `${delay}s`);
+        // delay handled by sendWithDelay
         await step.run("send-close", async () => {
           if (await newerActivity(admin, tid, t0)) return;
           const { data: ws } = await admin.from("workspaces").select("auto_close_reply").eq("id", wsId).single();
           const closing = await generatePositiveClose(msg, st.ch, pers, ws?.auto_close_reply || null);
-          await send(admin, wsId, tid, st.ch, closing, cfg.sandbox);
+          await sendWithDelay(admin, wsId, tid, st.ch, closing, cfg.sandbox);
           await setStatus(admin, tid, true);
           await sysNote(admin, tid, `[System] Positive close. Ticket closed.`);
         });
@@ -699,7 +699,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
         const delay = await responseDelay(admin, wsId, st.ch);
         if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
         if (await newerActivity(admin, tid, t0)) return { status: "bailed", reason: "newer_msg" };
-        await send(admin, wsId, tid, st.ch, q, cfg.sandbox);
+        await sendWithDelay(admin, wsId, tid, st.ch, q, cfg.sandbox);
         await setStatus(admin, tid, cfg.auto_resolve);
         return { status: "clarify_sent", turn: next };
       });
@@ -783,7 +783,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
         const delay = await responseDelay(admin, wsId, st.ch);
         if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
         if (await newerActivity(admin, tid, t0)) return;
-        await send(admin, wsId, tid, st.ch, "I'd be happy to help! Could you share the email address or order number associated with your account so I can pull up your details?", cfg.sandbox);
+        await sendWithDelay(admin, wsId, tid, st.ch, "I'd be happy to help! Could you share the email address or order number associated with your account so I can pull up your details?", cfg.sandbox);
         await setStatus(admin, tid, cfg.auto_resolve);
       });
       return { status: "asking_customer" };
@@ -798,7 +798,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
         const delay = await responseDelay(admin, wsId, st.ch);
         if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
         if (await newerActivity(admin, tid, t0)) return;
-        await send(admin, wsId, tid, st.ch, q, cfg.sandbox);
+        await sendWithDelay(admin, wsId, tid, st.ch, q, cfg.sandbox);
         await setStatus(admin, tid, cfg.auto_resolve);
       });
       return { status: "clarify_started", confidence: ai.confidence };
@@ -866,7 +866,7 @@ async function routeExec(
       if (await newerActivity(admin, tid, t0)) return;
       const result = await executePlaybookStep(wsId, tid, msg, pers);
       if (result.systemNote) await sysNote(admin, tid, result.systemNote);
-      if (result.response) await send(admin, wsId, tid, ch, result.response, cfg.sandbox);
+      if (result.response) await sendWithDelay(admin, wsId, tid, ch, result.response, cfg.sandbox);
       // Always honor auto-resolve setting
       await setStatus(admin, tid, cfg.auto_resolve);
       return;
