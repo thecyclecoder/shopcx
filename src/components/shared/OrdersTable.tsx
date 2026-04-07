@@ -25,12 +25,26 @@ export interface OrderRow {
   currency: string;
   financial_status: string | null;
   fulfillment_status: string | null;
+  delivery_status?: string | null;
   source_name: string | null;
   order_type: string | null;
   tags?: string | null;
   line_items: OrderLineItem[] | null;
   fulfillments: OrderFulfillment[] | null;
   created_at: string;
+}
+
+/** Compute a human-friendly shipping status from fulfillment + delivery status */
+function getShippingStatus(o: OrderRow): string {
+  const fs = (o.fulfillment_status || "").toUpperCase();
+  const ds = o.delivery_status || "";
+
+  if (!fs || fs === "UNFULFILLED" || fs === "NULL") return "unfulfilled";
+  if (ds === "delivered") return "delivered";
+  if (ds === "returned") return "returned";
+  if (fs === "FULFILLED" && ds === "not_delivered") return "in_transit";
+  if (fs === "FULFILLED") return "in_transit"; // fulfilled but no delivery_status yet
+  return fs.toLowerCase();
 }
 
 interface OrdersTableProps {
@@ -113,7 +127,7 @@ export default function OrdersTable({
                       <StatusBadge status={o.financial_status} size={detailTextSize} />
                     </td>
                     <td className={`whitespace-nowrap px-4 ${detailTextSize === "xs" ? "py-2.5" : "py-3"} text-sm`}>
-                      <StatusBadge status={o.fulfillment_status} size={detailTextSize} />
+                      <StatusBadge status={getShippingStatus(o)} size={detailTextSize} />
                     </td>
                   </tr>
 
