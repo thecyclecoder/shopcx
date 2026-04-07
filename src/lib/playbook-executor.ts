@@ -64,6 +64,7 @@ interface OrderData {
   line_items: unknown[];
   fulfillments: unknown[];
   source_name: string | null;
+  subscription_id: string | null;
 }
 
 interface SubscriptionData {
@@ -418,6 +419,24 @@ async function executeStep(
     case "stand_firm":
       return handleStandFirm(ctx, step, playbook.stand_firm_max, msg, dataContext, pers, policyRules);
 
+    case "check_tracking":
+      return handleCheckTracking(admin, wsId, tid, orders, ctx, step, pers);
+
+    case "classify_issue":
+      return handleClassifyIssue(msg, ctx, step, pers);
+
+    case "select_missing_items":
+      return handleSelectMissingItems(admin, wsId, tid, orders, ctx, step, pers);
+
+    case "confirm_shipping_address":
+      return handleConfirmShippingAddress(admin, wsId, tid, customer, ctx, step, pers);
+
+    case "create_replacement":
+      return handleCreateReplacement(admin, wsId, tid, customer, orders, ctx, step, pers);
+
+    case "adjust_subscription":
+      return handleAdjustSubscription(admin, wsId, subs, ctx, step, pers);
+
     case "explain":
     case "custom":
       return handleGenericStep(step, dataContext, msg, pers, policyRules);
@@ -467,7 +486,7 @@ async function fetchOrders(admin: Admin, wsId: string, custId: string, config: R
   }
 
   const { data } = await admin.from("orders")
-    .select("id, order_number, shopify_order_id, created_at, total_cents, financial_status, fulfillment_status, line_items, fulfillments, source_name")
+    .select("id, order_number, shopify_order_id, created_at, total_cents, financial_status, fulfillment_status, line_items, fulfillments, source_name, subscription_id")
     .eq("workspace_id", wsId)
     .in("customer_id", linkedIds)
     .gte("created_at", since)
@@ -1797,4 +1816,442 @@ export async function startPlaybook(
     playbook_context: {},
     playbook_exceptions_used: 0,
   }).eq("id", ticketId);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Replacement Playbook Step Handlers ──
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * check_tracking — Look up EasyPost tracking for the identified order.
+ * If context already has tracking data (from workflow/cron), auto-advance.
+ */
+async function handleCheckTracking(
+  admin: Admin, wsId: string, tid: string,
+  orders: OrderData[], ctx: Record<string, unknown>,
+  step: PlaybookStep,
+  pers: { name?: string; tone?: string; sign_off?: string | null } | null,
+): Promise<PlaybookExecResult> {
+  // If pre-populated from tracking workflow/cron, skip the lookup
+  if (ctx.easypost_status && ctx.replacement_reason) {
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
+  // Find the order — either from context or most recent
+  const orderId = ctx.identified_order_id as string | undefined;
+  const order = orderId
+    ? orders.find(o => o.id === orderId)
+    : orders[0];
+
+  if (!order) {
+    return { action: "respond", response: "I wasn't able to find a recent order to check tracking on. Could you provide your order number?" };
+  }
+
+  // Get tracking number from fulfillments
+  const fulfillments = (order.fulfillments || []) as { trackingInfo?: { number: string; company?: string }[] }[];
+  const tracking = fulfillments[0]?.trackingInfo?.[0];
+
+  if (!tracking?.number) {
+    ctx.easypost_status = "no_tracking";
+    ctx.replacement_reason = "delivery_error";
+    return {
+      action: "advance", newStep: step.step_order + 1,
+      context: { ...ctx, easypost_status: "no_tracking", replacement_reason: "delivery_error" },
+      systemNote: `Order ${order.order_number}: no tracking number available.`,
+    };
+  }
+
+  // EasyPost lookup
+  try {
+    const { lookupTracking } = await import("@/lib/easypost");
+    const result = await lookupTracking(wsId, tracking.number, tracking.company || undefined);
+
+    const reasonEvent = result.status === "return_to_sender"
+      ? result.events.find(e => e.status === "return_to_sender")
+      : null;
+    const lastEvent = result.events[result.events.length - 1];
+
+    ctx.easypost_status = result.status;
+    ctx.easypost_detail = reasonEvent?.message || lastEvent?.message || "";
+    ctx.easypost_location = [
+      (reasonEvent || lastEvent)?.city,
+      (reasonEvent || lastEvent)?.state,
+    ].filter(Boolean).join(", ");
+    ctx.tracking_number = tracking.number;
+    ctx.carrier = tracking.company || "USPS";
+
+    // Auto-classify based on tracking
+    if (result.status === "delivered") {
+      // Package delivered — need to ask customer what's wrong
+      ctx.replacement_reason = null; // Will be classified in next step
+    } else if (result.status === "return_to_sender") {
+      const isRefused = (reasonEvent?.message || "").toLowerCase().includes("refused");
+      ctx.replacement_reason = isRefused ? "refused" : "delivery_error";
+      ctx.customer_error = !isRefused && (reasonEvent?.message || "").toLowerCase().includes("address");
+    } else if (result.status === "failure" || result.status === "error") {
+      ctx.replacement_reason = "carrier_lost";
+    } else if (result.status === "in_transit") {
+      // Still moving — tell customer to wait
+      const response = `I checked the tracking on your order and it's currently in transit. The last update was ${ctx.easypost_location ? `in ${ctx.easypost_location}` : "recently"}. Deliveries can sometimes take a few extra days. If it doesn't arrive within the next few days, please let us know and we'll get it sorted out for you.`;
+      return { action: "respond", response, context: ctx };
+    }
+
+    await admin.from("ticket_messages").insert({
+      ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "system",
+      body: `EasyPost tracking: ${result.status} — "${ctx.easypost_detail}" at ${ctx.easypost_location || "unknown"}. Carrier: ${ctx.carrier}. Tracking: ${tracking.number}.`,
+    });
+
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  } catch (err) {
+    // EasyPost failed — proceed without tracking data
+    ctx.easypost_status = "unknown";
+    return {
+      action: "advance", newStep: step.step_order + 1, context: ctx,
+      systemNote: `EasyPost lookup failed: ${err instanceof Error ? err.message : "unknown error"}`,
+    };
+  }
+}
+
+/**
+ * classify_issue — Determine what happened.
+ * If pre-classified (from tracking/cron), auto-advance.
+ * If delivered, ask customer what happened.
+ */
+async function handleClassifyIssue(
+  msg: string, ctx: Record<string, unknown>,
+  step: PlaybookStep,
+  pers: { name?: string; tone?: string; sign_off?: string | null } | null,
+): Promise<PlaybookExecResult> {
+  // Already classified from tracking check
+  if (ctx.replacement_reason && ctx.replacement_reason !== null) {
+    // Refused — escalate, never replace
+    if (ctx.replacement_reason === "refused") {
+      return {
+        action: "complete",
+        response: "I can see from the tracking that this order was refused at delivery. I've flagged this for our team to review. Someone will be in touch with you.",
+        systemNote: "Refused order — escalated to admin, no replacement.",
+      };
+    }
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
+  // Package was delivered — ask what happened
+  if (!ctx.issue_question_asked) {
+    ctx.issue_question_asked = true;
+    return {
+      action: "respond", context: ctx,
+      response: "I can see your order was delivered. Could you let me know what happened? For example, were items missing from the package, or was something damaged?",
+    };
+  }
+
+  // Parse customer's response
+  const lower = msg.toLowerCase();
+  if (lower.includes("missing") || lower.includes("not in") || lower.includes("wasn't there") || lower.includes("didn't receive") || lower.includes("empty")) {
+    ctx.replacement_reason = "missing_items";
+    ctx.needs_item_selection = true;
+  } else if (lower.includes("damaged") || lower.includes("broken") || lower.includes("crushed") || lower.includes("leak")) {
+    ctx.replacement_reason = "damaged_items";
+    ctx.needs_item_selection = true;
+  } else if (lower.includes("wrong") || lower.includes("not what i ordered") || lower.includes("different")) {
+    ctx.replacement_reason = "missing_items";
+    ctx.needs_item_selection = true;
+  } else if (lower.includes("never") || lower.includes("didn't get") || lower.includes("not received") || lower.includes("didn't arrive")) {
+    ctx.replacement_reason = "not_received";
+    ctx.customer_error = false;
+  } else {
+    // Couldn't classify — ask again
+    return {
+      action: "respond",
+      response: "I want to make sure I help you correctly. Were any items missing from the package, or was something damaged? Or did you not receive the package at all?",
+    };
+  }
+
+  return { action: "advance", newStep: step.step_order + 1, context: ctx };
+}
+
+/**
+ * select_missing_items — Only fires when needs_item_selection is true.
+ * Launches the missing items journey. If not needed (delivery error), auto-advance
+ * and set items to ALL items from the order.
+ */
+async function handleSelectMissingItems(
+  admin: Admin, wsId: string, tid: string,
+  orders: OrderData[], ctx: Record<string, unknown>,
+  step: PlaybookStep,
+  pers: { name?: string; tone?: string; sign_off?: string | null } | null,
+): Promise<PlaybookExecResult> {
+  // Delivery error / carrier lost / not received — replace ALL items, skip selection
+  if (!ctx.needs_item_selection) {
+    const orderId = ctx.identified_order_id as string | undefined;
+    const order = orderId ? orders.find(o => o.id === orderId) : orders[0];
+    if (order) {
+      const lineItems = ((order.line_items || []) as { title: string; quantity: number; sku?: string }[])
+        .filter(item => !item.title.toLowerCase().includes("shipping protection") && !item.title.toLowerCase().includes("insure"));
+      ctx.replacement_items = lineItems.map(item => ({
+        title: item.title,
+        quantity: item.quantity,
+        type: "all",
+      }));
+    }
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
+  // Items already selected (from journey completion)
+  if (ctx.replacement_items) {
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
+  // Launch missing items journey
+  // For now, respond and wait for journey completion to populate ctx.replacement_items
+  const response = "I'd like to find out exactly which items were affected. I'm sending you a quick form where you can select the items that were missing or damaged.";
+  return { action: "respond", response, context: { ...ctx, awaiting_item_selection: true } };
+}
+
+/**
+ * confirm_shipping_address — Launch address confirmation journey.
+ * If address already validated (from journey), auto-advance.
+ */
+async function handleConfirmShippingAddress(
+  admin: Admin, wsId: string, tid: string,
+  customer: CustomerData, ctx: Record<string, unknown>,
+  step: PlaybookStep,
+  pers: { name?: string; tone?: string; sign_off?: string | null } | null,
+): Promise<PlaybookExecResult> {
+  // Address already confirmed
+  if (ctx.validated_address) {
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
+  // For delivery errors (wrong address, RTS), always ask for address
+  // For delivered+missing, use existing address
+  if (ctx.replacement_reason === "delivery_error" || ctx.replacement_reason === "wrong_address" || ctx.customer_error) {
+    if (!ctx.address_question_asked) {
+      ctx.address_question_asked = true;
+      return {
+        action: "respond", context: ctx,
+        response: "Before we can send a replacement, we need to confirm your shipping address. I'm sending you a quick form to verify your address.",
+      };
+    }
+    // Waiting for journey to complete and populate ctx.validated_address
+    return { action: "respond", response: "Please complete the address form so we can get your replacement shipped out." };
+  }
+
+  // Missing/damaged items on a delivered order — use the same address
+  // Pull from most recent order
+  const orderId = ctx.identified_order_id as string | undefined;
+  if (orderId) {
+    const { data: order } = await admin.from("orders")
+      .select("shipping_address")
+      .eq("id", orderId).single();
+
+    if (order?.shipping_address) {
+      const addr = order.shipping_address as Record<string, string>;
+      ctx.validated_address = {
+        street1: addr.address1 || addr.street1 || "",
+        street2: addr.address2 || addr.street2 || null,
+        city: addr.city || "",
+        state: addr.provinceCode || addr.state || "",
+        zip: addr.zip || "",
+        country: addr.countryCode || addr.country || "US",
+      };
+      return { action: "advance", newStep: step.step_order + 1, context: ctx };
+    }
+  }
+
+  // Fallback — ask for address
+  if (!ctx.address_question_asked) {
+    ctx.address_question_asked = true;
+    return {
+      action: "respond", context: ctx,
+      response: "We need to confirm where to send the replacement. I'm sending you a quick form to verify your shipping address.",
+    };
+  }
+  return { action: "respond", response: "Please complete the address form so we can get your replacement shipped out." };
+}
+
+/**
+ * create_replacement — Create the $0 draft order in Shopify and record in replacements table.
+ * Auto-advances (no customer interaction needed).
+ */
+async function handleCreateReplacement(
+  admin: Admin, wsId: string, tid: string,
+  customer: CustomerData, orders: OrderData[],
+  ctx: Record<string, unknown>,
+  step: PlaybookStep,
+  pers: { name?: string; tone?: string; sign_off?: string | null } | null,
+): Promise<PlaybookExecResult> {
+  const orderId = ctx.identified_order_id as string | undefined;
+  const order = orderId ? orders.find(o => o.id === orderId) : orders[0];
+  const items = ctx.replacement_items as { title: string; quantity: number; variantId?: string; type?: string }[] | undefined;
+
+  if (!items?.length) {
+    return { action: "advance", newStep: step.step_order + 1, systemNote: "No items to replace." };
+  }
+
+  // Check replacement limit for customer errors
+  const isCustomerError = !!ctx.customer_error;
+  if (isCustomerError) {
+    const { count } = await admin.from("replacements")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", wsId)
+      .eq("customer_id", customer.id)
+      .eq("customer_error", true)
+      .neq("status", "denied");
+
+    if ((count || 0) >= 1) {
+      return {
+        action: "complete",
+        response: "I'm sorry, but we're unable to issue another replacement for this type of issue. I've escalated this to our team for further review.",
+        systemNote: "Customer error replacement limit reached (1 per customer).",
+      };
+    }
+  }
+
+  const reason = (ctx.replacement_reason as string) || "delivery_error";
+  const address = ctx.validated_address as { street1: string; street2?: string; city: string; state: string; zip: string; country: string; phone?: string } | undefined;
+
+  // Create replacement record
+  const { data: replacement } = await admin.from("replacements").insert({
+    workspace_id: wsId,
+    customer_id: customer.id,
+    original_order_id: order?.id || null,
+    original_order_number: order?.order_number || null,
+    reason,
+    reason_detail: ctx.easypost_detail as string || null,
+    items,
+    status: address ? "address_confirmed" : "pending",
+    customer_error: isCustomerError,
+    ticket_id: tid,
+    subscription_id: order?.subscription_id || null,
+    address_validated: !!address,
+    validated_address: address || null,
+  }).select("id").single();
+
+  if (!replacement) {
+    return { action: "respond", response: "We encountered an issue creating your replacement. Our team has been notified and will follow up with you.", systemNote: "Failed to create replacement record." };
+  }
+
+  ctx.replacement_id = replacement.id;
+
+  // Try to create the draft order if we have address + variant IDs
+  if (address && items.every(i => i.variantId)) {
+    try {
+      const { createAndCompleteReplacement } = await import("@/lib/shopify-draft-orders");
+      const result = await createAndCompleteReplacement(wsId, {
+        lineItems: items.map(i => ({ variantId: i.variantId!, title: i.title, quantity: i.quantity })),
+        shippingAddress: {
+          firstName: customer.first_name || "",
+          lastName: customer.last_name || "",
+          address1: address.street1,
+          address2: address.street2,
+          city: address.city,
+          province: address.state,
+          zip: address.zip,
+          country: address.country,
+          phone: address.phone,
+        },
+        customerEmail: customer.email || "",
+        originalOrderNumber: order?.order_number || "",
+        reason,
+      });
+
+      await admin.from("replacements").update({
+        shopify_draft_order_id: result.draftOrderId,
+        shopify_replacement_order_id: result.shopifyOrderId,
+        shopify_replacement_order_name: result.orderName,
+        status: "created",
+        updated_at: new Date().toISOString(),
+      }).eq("id", replacement.id);
+
+      ctx.replacement_order_name = result.orderName;
+      ctx.replacement_created = true;
+    } catch (err) {
+      // Draft order failed — record is still created, agent can complete manually
+      await admin.from("ticket_messages").insert({
+        ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "system",
+        body: `Replacement draft order creation failed: ${err instanceof Error ? err.message : "unknown error"}. Manual creation needed.`,
+      });
+    }
+  }
+
+  return { action: "advance", newStep: step.step_order + 1, context: ctx };
+}
+
+/**
+ * adjust_subscription — Move next billing date relative to today.
+ * Auto-advances after adjustment.
+ */
+async function handleAdjustSubscription(
+  admin: Admin, wsId: string,
+  subs: SubscriptionData[], ctx: Record<string, unknown>,
+  step: PlaybookStep,
+  pers: { name?: string; tone?: string; sign_off?: string | null } | null,
+): Promise<PlaybookExecResult> {
+  // Find the subscription linked to this order
+  const orderId = ctx.identified_order_id as string;
+  let sub = subs.find(s => s.status === "active");
+
+  // If we have a specific subscription from context, use that
+  if (ctx.identified_subscription) {
+    sub = subs.find(s => s.shopify_contract_id === ctx.identified_subscription) || sub;
+  }
+
+  if (!sub || sub.status !== "active") {
+    // No active sub — just send the confirmation message and complete
+    const orderName = ctx.replacement_order_name || "your replacement";
+    const response = `Your replacement order ${typeof ctx.replacement_order_name === "string" ? ctx.replacement_order_name + " " : ""}has been created and will ship within 2-3 business days.`;
+    return { action: "complete", response, context: ctx };
+  }
+
+  // Calculate new date
+  const interval = sub.billing_interval_count || 4;
+  const intervalType = (sub.billing_interval || "WEEK").toUpperCase();
+  const now = new Date();
+  let newDate: Date;
+
+  if (intervalType === "MONTH") {
+    newDate = new Date(now); newDate.setMonth(newDate.getMonth() + interval);
+  } else if (intervalType === "DAY") {
+    newDate = new Date(now.getTime() + interval * 24 * 60 * 60 * 1000);
+  } else {
+    newDate = new Date(now.getTime() + interval * 7 * 24 * 60 * 60 * 1000);
+  }
+
+  const newDateStr = newDate.toISOString().split("T")[0];
+  const newDateFormatted = newDate.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+
+  try {
+    const { appstleUpdateNextBillingDate } = await import("@/lib/appstle");
+    await appstleUpdateNextBillingDate(wsId, sub.shopify_contract_id, newDateStr);
+
+    // Update local
+    await admin.from("subscriptions").update({
+      next_billing_date: newDate.toISOString(),
+      updated_at: new Date().toISOString(),
+    }).eq("workspace_id", wsId).eq("shopify_contract_id", sub.shopify_contract_id);
+
+    // Update replacement record
+    if (ctx.replacement_id) {
+      await admin.from("replacements").update({
+        subscription_adjusted: true,
+        new_next_billing_date: newDate.toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq("id", ctx.replacement_id as string);
+    }
+
+    ctx.subscription_adjusted = true;
+    ctx.new_next_billing_date = newDateFormatted;
+  } catch (err) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: "", direction: "outbound", visibility: "internal", author_type: "system",
+      body: `Subscription date adjustment failed: ${err instanceof Error ? err.message : "unknown"}. Manual adjustment needed.`,
+    });
+  }
+
+  // Final confirmation
+  const replacementName = ctx.replacement_order_name ? `${ctx.replacement_order_name} ` : "";
+  const subNote = ctx.subscription_adjusted ? ` Your next subscription shipment has been adjusted to ${ctx.new_next_billing_date}.` : "";
+  const response = `Your replacement order ${replacementName}has been created and will ship within 2-3 business days.${subNote}`;
+
+  return { action: "complete", response, context: ctx };
 }
