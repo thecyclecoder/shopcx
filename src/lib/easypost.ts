@@ -304,7 +304,7 @@ export async function purchaseReturnLabel(
 }
 
 /**
- * Get tracking status for a shipment from EasyPost.
+ * Get tracking status for a shipment from EasyPost (by shipment ID).
  */
 export async function getTrackingStatus(
   workspaceId: string,
@@ -321,6 +321,39 @@ export async function getTrackingStatus(
 
   return {
     status: tracker.status,
+    estimatedDelivery: tracker.est_delivery_date || null,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    events: (tracker.tracking_details || []).map((detail: any) => ({
+      status: detail.status as string,
+      message: detail.message as string,
+      datetime: detail.datetime as string,
+      city: (detail.tracking_location?.city as string) || undefined,
+      state: (detail.tracking_location?.state as string) || undefined,
+      zip: (detail.tracking_location?.zip as string) || undefined,
+    })),
+  };
+}
+
+/**
+ * Look up tracking by tracking number + carrier via EasyPost Tracker API.
+ * This costs money per lookup — only call when Shopify data is insufficient.
+ * Returns normalized status + full event history with locations.
+ */
+export async function lookupTracking(
+  workspaceId: string,
+  trackingNumber: string,
+  carrier?: string,
+): Promise<TrackingStatus> {
+  const client = await getEasyPostClient(workspaceId);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const params: any = { tracking_code: trackingNumber };
+  if (carrier) params.carrier = carrier;
+
+  const tracker = await client.Tracker.create(params);
+
+  return {
+    status: tracker.status || "unknown",
     estimatedDelivery: tracker.est_delivery_date || null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     events: (tracker.tracking_details || []).map((detail: any) => ({

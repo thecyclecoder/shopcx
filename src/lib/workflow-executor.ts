@@ -24,6 +24,10 @@ export interface WorkflowContext {
     in_transit_at: string | null;
     latest_location: string | null;
     shipping_address: string | null;
+    // EasyPost enhanced tracking (only populated when Shopify data insufficient)
+    easypost_status: string | null; // pre_transit, in_transit, out_for_delivery, delivered, return_to_sender, failure, unknown
+    easypost_detail: string | null; // last event message e.g. "Refused", "Delivered to Front Door"
+    easypost_location: string | null; // city, state of last event
   } | null;
   subscription: Record<string, unknown> | null;
   workflowSandbox?: boolean;
@@ -129,6 +133,9 @@ export async function buildContext(admin: Admin, workspaceId: string, ticketId: 
         in_transit_at: null,
         latest_location: null,
         shipping_address: null,
+        easypost_status: null,
+        easypost_detail: null,
+        easypost_location: null,
       };
 
       // Try to get real-time Shopify fulfillment status with carrier events
@@ -283,6 +290,9 @@ export function resolveTemplate(template: string, context: WorkflowContext): str
     "fulfillment.latest_location": context.fulfillment?.latest_location || "",
     "fulfillment.days_since": context.fulfillment ? String(context.fulfillment.days_since) : "",
     "fulfillment.delivery_address": deliveryAddress,
+    "fulfillment.easypost_status": context.fulfillment?.easypost_status || "",
+    "fulfillment.easypost_detail": context.fulfillment?.easypost_detail || "",
+    "fulfillment.easypost_location": context.fulfillment?.easypost_location || "",
     // Subscription
     "subscription.next_billing_date": context.subscription?.next_billing_date ? new Date(context.subscription.next_billing_date as string).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "",
     "subscription.status": (context.subscription?.status as string) || "",
@@ -389,6 +399,7 @@ async function addNote(admin: Admin, context: WorkflowContext, body: string): Pr
 
 async function executeOrderTracking(admin: Admin, config: Record<string, unknown>, ctx: WorkflowContext): Promise<void> {
   const threshold = (config.delay_threshold_days as number) || 10;
+  const easypostThreshold = (config.easypost_lookup_days as number) || 7;
 
   if (!ctx.order) {
     await sendReply(admin, ctx, (config.reply_no_order as string) || "Hi {{customer.first_name}}, we couldn't find a recent order on your account. Could you provide your order number so we can look into this?", config.reply_no_order_status as string);
@@ -409,10 +420,128 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
     return;
   }
 
-  // Check Shopify fulfillment status
-  const status = (ctx.fulfillment.shopify_status || "").toUpperCase();
+  // ── Tier 1: Shopify data ──
+  const shopifyStatus = (ctx.fulfillment.shopify_status || "").toUpperCase();
 
-  if (status === "DELIVERED") {
+  // Shopify says delivered AND customer isn't asking "where's my order" — trust it
+  // (If this workflow fired, customer IS asking — so we may need to verify with EasyPost)
+  const customerIsAsking = true; // This workflow only fires when customer asks about tracking
+
+  // ── Tier 2: EasyPost lookup when Shopify data is insufficient ──
+  // Conditions: (a) in transit >= X days, OR (b) Shopify says delivered but customer is asking
+  const needsEasyPost = ctx.fulfillment.tracking_number && (
+    (shopifyStatus !== "DELIVERED" && ctx.fulfillment.days_since >= easypostThreshold) ||
+    (shopifyStatus === "DELIVERED" && customerIsAsking)
+  );
+
+  if (needsEasyPost) {
+    try {
+      const { lookupTracking } = await import("@/lib/easypost");
+      const tracking = await lookupTracking(
+        ctx.workspaceId,
+        ctx.fulfillment.tracking_number,
+        ctx.fulfillment.carrier || undefined,
+      );
+      ctx.fulfillment.easypost_status = tracking.status;
+      // For return_to_sender, grab the first event with that status (the reason: "Refused", "Unclaimed", etc.)
+      // For other statuses, grab the last event (most recent update)
+      const reasonEvent = tracking.status === "return_to_sender"
+        ? tracking.events.find(e => e.status === "return_to_sender")
+        : null;
+      const lastEvent = tracking.events[tracking.events.length - 1];
+      const detailEvent = reasonEvent || lastEvent;
+      if (detailEvent) {
+        ctx.fulfillment.easypost_detail = detailEvent.message;
+        ctx.fulfillment.easypost_location = [detailEvent.city, detailEvent.state].filter(Boolean).join(", ");
+      }
+
+      // Add internal note with EasyPost findings
+      await addNote(admin, ctx, `EasyPost tracking lookup: status "${tracking.status}"${lastEvent ? ` — "${lastEvent.message}" at ${ctx.fulfillment.easypost_location || "unknown location"}` : ""}. Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`);
+    } catch (err) {
+      // EasyPost lookup failed (no funds, config issue) — fall back to Shopify data
+      console.error("[workflow] EasyPost lookup failed, falling back to Shopify:", err);
+    }
+  }
+
+  // ── Route based on best available status ──
+  const effectiveStatus = ctx.fulfillment.easypost_status || shopifyStatus.toLowerCase();
+
+  // Return to sender — split on reason
+  if (effectiveStatus === "return_to_sender") {
+    const reason = (ctx.fulfillment.easypost_detail || "").toLowerCase();
+    const isRefused = reason.includes("refused");
+
+    if (isRefused) {
+      // ── Refused: cancel linked subscription + notify customer ──
+      let cancelledSub = false;
+      if (ctx.order.subscription_id) {
+        try {
+          const { data: sub } = await admin
+            .from("subscriptions")
+            .select("shopify_contract_id, status")
+            .eq("id", ctx.order.subscription_id as string)
+            .single();
+
+          if (sub && sub.status === "active" && sub.shopify_contract_id) {
+            const { appstleSubscriptionAction } = await import("@/lib/appstle");
+            const result = await appstleSubscriptionAction(
+              ctx.workspaceId,
+              sub.shopify_contract_id,
+              "cancel",
+              "Shipment Refused - Auto Cancel",
+              "Tracking Workflow",
+            );
+            cancelledSub = result.success;
+            await addNote(admin, ctx, `Subscription ${sub.shopify_contract_id} ${cancelledSub ? "cancelled" : "cancel failed"} — order was refused at delivery.`);
+          }
+        } catch (err) {
+          console.error("[workflow] Failed to cancel subscription for refused order:", err);
+        }
+      }
+
+      const replyText = cancelledSub
+        ? "We see from the tracking that your order {{order.order_number}} was refused at delivery. We have cancelled your active subscription — no future orders will be shipped."
+        : "We see from the tracking that your order {{order.order_number}} was refused at delivery.";
+      await sendReply(admin, ctx, (config.reply_refused as string) || replyText, config.reply_refused_status as string || "closed");
+      return;
+    }
+
+    // ── Other return-to-sender (wrong address, unclaimed, etc.) → order replacement playbook ──
+    const detail = ctx.fulfillment.easypost_detail || "undeliverable";
+    await addNote(admin, ctx, `Order ${ctx.order.order_number} returned to sender: "${detail}" at ${ctx.fulfillment.easypost_location || "unknown"}. Starting order replacement flow.`);
+
+    // Tag for playbook pickup
+    const { addTicketTag } = await import("@/lib/ticket-tags");
+    await addTicketTag(ctx.ticketId, "return-to-sender");
+    await addTicketTag(ctx.ticketId, `rts:${detail.toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 30)}`);
+
+    // Set ticket to open so playbook/agent picks it up
+    await admin.from("tickets").update({
+      status: "open",
+      playbook_id: config.replacement_playbook_id as string || null,
+      playbook_step: config.replacement_playbook_id ? "identify_order" : null,
+      updated_at: new Date().toISOString(),
+    }).eq("id", ctx.ticketId);
+
+    await sendReply(admin, ctx, (config.reply_return_to_sender as string) || "It looks like there was a delivery issue with your order {{order.order_number}} — the carrier was unable to complete delivery. We're going to get a replacement out to you. Let us confirm a few details.", config.reply_return_to_sender_status as string || "open");
+    return;
+  }
+
+  // Failure — carrier reported issue
+  if (effectiveStatus === "failure" || effectiveStatus === "error") {
+    const detail = ctx.fulfillment.easypost_detail ? ` (${ctx.fulfillment.easypost_detail})` : "";
+    await escalate(
+      admin, ctx,
+      "delivery-failure",
+      (config.escalate_to as string) || null,
+      `Order ${ctx.order.order_number} has a delivery failure${detail}. Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`,
+    );
+    await sendReply(admin, ctx, (config.reply_delivery_failure as string) || "We've identified an issue with the delivery of your order {{order.order_number}} and our team is looking into it. We'll follow up with you shortly.", config.reply_delivery_failure_status as string || "open");
+    return;
+  }
+
+  // Delivered (confirmed by EasyPost or Shopify)
+  if (effectiveStatus === "delivered" || shopifyStatus === "DELIVERED") {
     await sendReply(admin, ctx, (config.reply_delivered as string) || "Our records show your order {{order.order_number}} was delivered on {{fulfillment.delivered_at}}. If you haven't received it, please reply and we'll investigate.", config.reply_delivered_status as string);
     return;
   }
@@ -420,25 +549,21 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
   // In transit — check delay → escalate
   if (ctx.fulfillment.days_since >= threshold) {
     if (config.escalate_delayed !== false) {
-      // Send reply to customer if configured
       const escalateReply = config.reply_escalated as string;
       if (escalateReply) {
         await sendReply(admin, ctx, escalateReply, config.reply_escalated_status as string);
       }
 
-      // Escalate to the configured person
+      const locationInfo = ctx.fulfillment.easypost_location || ctx.fulfillment.latest_location || "";
       await escalate(
         admin, ctx,
         (config.escalate_tag as string) || "delayed-shipment",
         (config.escalate_to as string) || null,
-        `Order ${ctx.order.order_number} shipped ${ctx.fulfillment.days_since} days ago (threshold: ${threshold}). Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`
+        `Order ${ctx.order.order_number} shipped ${ctx.fulfillment.days_since} days ago (threshold: ${threshold}).${locationInfo ? ` Last seen: ${locationInfo}.` : ""} Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`,
       );
 
-      // Internal note with details
-      const location = ctx.fulfillment.latest_location ? ` Last seen: ${ctx.fulfillment.latest_location}.` : "";
-      await addNote(admin, ctx, `Workflow escalated: order ${ctx.order.order_number} shipped ${ctx.fulfillment.days_since} days ago (threshold: ${threshold} days). Status: ${status}. Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.${location}`);
+      await addNote(admin, ctx, `Workflow escalated: order ${ctx.order.order_number} shipped ${ctx.fulfillment.days_since} days ago. Status: ${effectiveStatus}.${locationInfo ? ` Last seen: ${locationInfo}.` : ""} Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`);
 
-      // Set ticket status if not already set by reply
       if (!escalateReply) {
         const escalateStatus = (config.escalate_status as string) || "open";
         const statusUpdates: Record<string, unknown> = { status: escalateStatus, updated_at: new Date().toISOString() };
@@ -450,13 +575,17 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
   }
 
   // Out for delivery
-  if (status === "OUT_FOR_DELIVERY") {
-    await sendReply(admin, ctx, (config.reply_out_for_delivery as string) || "Great news! Your order {{order.order_number}} is out for delivery in {{fulfillment.latest_location}}. It should arrive today!", config.reply_out_for_delivery_status as string);
+  if (effectiveStatus === "out_for_delivery" || shopifyStatus === "OUT_FOR_DELIVERY") {
+    const loc = ctx.fulfillment.easypost_location || ctx.fulfillment.latest_location;
+    const locStr = loc ? ` in ${loc}` : "";
+    await sendReply(admin, ctx, (config.reply_out_for_delivery as string) || `Great news! Your order {{order.order_number}} is out for delivery${locStr}. It should arrive today!`, config.reply_out_for_delivery_status as string);
     return;
   }
 
   // In transit, within threshold
-  const locationInfo = ctx.fulfillment.latest_location ? ` It was last seen in {{fulfillment.latest_location}}.` : "";
+  const locationInfo = (ctx.fulfillment.easypost_location || ctx.fulfillment.latest_location)
+    ? ` It was last seen in ${ctx.fulfillment.easypost_location || ctx.fulfillment.latest_location}.`
+    : "";
   const estimateInfo = ctx.fulfillment.estimated_delivery ? ` Estimated delivery: {{fulfillment.estimated_delivery}}.` : "";
   await sendReply(admin, ctx, (config.reply_in_transit as string) || `Your order {{order.order_number}} shipped on {{fulfillment.date}} via {{fulfillment.carrier}}.${locationInfo}${estimateInfo} Track it here: {{fulfillment.url}}`, config.reply_in_transit_status as string);
 }
