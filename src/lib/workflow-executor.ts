@@ -499,6 +499,18 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
         }
       }
 
+      // Update order status + tag in Shopify
+      await admin.from("orders").update({
+        delivery_status: "returned",
+        sync_resolved_at: new Date().toISOString(),
+        sync_resolved_note: "Refused",
+      }).eq("id", ctx.order.id);
+
+      if (ctx.order.shopify_order_id) {
+        const { addOrderTags } = await import("@/lib/shopify-order-tags");
+        await addOrderTags(ctx.workspaceId, ctx.order.shopify_order_id as string, ["delivery:refused"]);
+      }
+
       const replyText = cancelledSub
         ? "We see from the tracking that your order {{order.order_number}} was refused at delivery. We have cancelled your active subscription — no future orders will be shipped."
         : "We see from the tracking that your order {{order.order_number}} was refused at delivery.";
@@ -510,10 +522,23 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
     const detail = ctx.fulfillment.easypost_detail || "undeliverable";
     await addNote(admin, ctx, `Order ${ctx.order.order_number} returned to sender: "${detail}" at ${ctx.fulfillment.easypost_location || "unknown"}. Starting order replacement flow.`);
 
-    // Tag for playbook pickup
+    // Update order status + tag in Shopify
+    const tagSlug = detail.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30);
+    await admin.from("orders").update({
+      delivery_status: "returned",
+      sync_resolved_at: new Date().toISOString(),
+      sync_resolved_note: detail,
+    }).eq("id", ctx.order.id);
+
+    if (ctx.order.shopify_order_id) {
+      const { addOrderTags } = await import("@/lib/shopify-order-tags");
+      await addOrderTags(ctx.workspaceId, ctx.order.shopify_order_id as string, [`delivery:${tagSlug}`]);
+    }
+
+    // Tag ticket for playbook pickup
     const { addTicketTag } = await import("@/lib/ticket-tags");
     await addTicketTag(ctx.ticketId, "return-to-sender");
-    await addTicketTag(ctx.ticketId, `rts:${detail.toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 30)}`);
+    await addTicketTag(ctx.ticketId, `rts:${tagSlug}`);
 
     // Set ticket to open so playbook/agent picks it up
     await admin.from("tickets").update({
