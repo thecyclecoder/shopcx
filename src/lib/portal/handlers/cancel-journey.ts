@@ -4,6 +4,8 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
+import { addTicketTag } from "@/lib/ticket-tags";
+import { markFirstTouch } from "@/lib/first-touch";
 
 async function createChatTicket(
   admin: ReturnType<typeof createAdminClient>,
@@ -23,6 +25,11 @@ async function createChatTicket(
 
   if (error) {
     console.error("Failed to create cancel chat ticket:", error.message, { workspaceId, customerId, contractId });
+  }
+
+  if (ticket?.id) {
+    await addTicketTag(ticket.id, "touched");
+    await markFirstTouch(ticket.id, "ai");
   }
 
   return ticket?.id || null;

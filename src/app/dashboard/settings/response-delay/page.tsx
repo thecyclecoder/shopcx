@@ -5,7 +5,7 @@ import { useWorkspace } from "@/lib/workspace-context";
 
 export default function ResponseDelayPage() {
   const workspace = useWorkspace();
-  const [delays, setDelays] = useState<Record<string, number>>({ email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5, social_comments: 10 });
+  const [delays, setDelays] = useState<Record<string, number>>({ email: 60, chat: 5, sms: 10, meta_dm: 10, social_comments: 10 });
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -32,7 +32,6 @@ export default function ResponseDelayPage() {
     { key: "chat", label: "Live Chat" },
     { key: "sms", label: "SMS" },
     { key: "meta_dm", label: "Social DMs" },
-    { key: "help_center", label: "Help Center" },
     { key: "social_comments", label: "Social Comments" },
   ];
 

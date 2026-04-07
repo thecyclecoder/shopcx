@@ -29,7 +29,7 @@ interface Member {
 }
 
 const STATUS_OPTIONS = ["all", "open", "pending", "closed", "archived"] as const;
-const CHANNEL_OPTIONS = ["all", "email", "chat", "help_center", "social_comments", "meta_dm", "sms"] as const;
+const CHANNEL_OPTIONS = ["all", "email", "chat", "portal", "social_comments", "meta_dm", "sms"] as const;
 
 const STATUS_COLORS: Record<string, string> = {
   open: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
@@ -460,7 +460,7 @@ export default function TicketsPage() {
             className="mt-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
           >
             {CHANNEL_OPTIONS.map((c) => (
-              <option key={c} value={c}>{c === "all" ? "All Channels" : { email: "Email", chat: "Live Chat", help_center: "Help Center", social_comments: "Social Comments", meta_dm: "Social DMs", sms: "SMS" }[c] || c}</option>
+              <option key={c} value={c}>{c === "all" ? "All Channels" : { email: "Email", chat: "Live Chat", portal: "Portal", social_comments: "Social Comments", meta_dm: "Social DMs", sms: "SMS" }[c] || c}</option>
             ))}
           </select>
         </div>
