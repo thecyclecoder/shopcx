@@ -1066,9 +1066,9 @@ function CodeDrivenJourney({
                 className="flex-1 rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-60" style={{ backgroundColor: primaryColor }}>
                 Yes
               </button>
-              <button onClick={() => handleSubmit("No", "No thanks")} disabled={submitting}
+              <button onClick={() => handleSubmit("No", "No")} disabled={submitting}
                 className="flex-1 rounded-xl border-2 border-zinc-200 px-4 py-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-60">
-                No thanks
+                No
               </button>
             </div>
           )}
