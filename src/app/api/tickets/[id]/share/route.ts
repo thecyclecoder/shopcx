@@ -43,14 +43,14 @@ export async function GET(
   if (slackConnected) {
     try {
       const token = decrypt(ws!.slack_bot_token_encrypted!);
-      const res = await fetch("https://slack.com/api/conversations.list?types=public_channel,private_channel&exclude_archived=true&limit=100", {
+      const res = await fetch("https://slack.com/api/conversations.list?types=public_channel&exclude_archived=true&limit=200", {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
       if (data.ok) {
         slackChannels = (data.channels || [])
-          .filter((c: { is_member: boolean }) => c.is_member)
-          .map((c: { id: string; name: string }) => ({ id: c.id, name: c.name }));
+          .map((c: { id: string; name: string }) => ({ id: c.id, name: c.name }))
+          .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name));
       }
     } catch { /* non-fatal */ }
   }
