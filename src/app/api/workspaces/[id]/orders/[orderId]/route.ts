@@ -21,7 +21,7 @@ export async function GET(
     .from("orders")
     .select(`
       id, order_number, email, total_cents, currency, financial_status,
-      fulfillment_status, line_items, created_at, tags, source_name,
+      fulfillment_status, delivery_status, delivered_at, line_items, created_at, tags, source_name,
       shopify_order_id, shopify_customer_id, subscription_id,
       shipping_address, discount_codes, order_type,
       amplifier_order_id, amplifier_received_at, amplifier_shipped_at,
@@ -91,6 +91,21 @@ export async function GET(
         detail: tracking ? `${tracking.company || ""} ${tracking.number || ""}`.trim() : undefined,
       });
     }
+  }
+
+  // Delivery status events
+  if (order.delivered_at) {
+    timeline.push({
+      timestamp: order.delivered_at,
+      event: "Delivered",
+      detail: order.delivery_status === "returned" ? "Returned to sender" : undefined,
+    });
+  } else if (order.delivery_status === "returned" && order.sync_resolved_at) {
+    timeline.push({
+      timestamp: order.sync_resolved_at,
+      event: "Returned to sender",
+      detail: order.sync_resolved_note || undefined,
+    });
   }
 
   if (order.financial_status === "refunded" || order.financial_status === "partially_refunded") {

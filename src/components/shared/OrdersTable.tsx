@@ -37,13 +37,14 @@ export interface OrderRow {
 /** Compute a human-friendly shipping status from fulfillment + delivery status */
 function getShippingStatus(o: OrderRow): string {
   const fs = (o.fulfillment_status || "").toUpperCase();
-  const ds = o.delivery_status || "";
+  const ds = (o.delivery_status || "").toLowerCase();
 
   if (!fs || fs === "UNFULFILLED" || fs === "NULL") return "unfulfilled";
   if (ds === "delivered") return "delivered";
   if (ds === "returned") return "returned";
-  if (fs === "FULFILLED" && ds === "not_delivered") return "in_transit";
-  if (fs === "FULFILLED") return "in_transit"; // fulfilled but no delivery_status yet
+  if (ds === "out_for_delivery") return "in_transit";
+  // Any fulfilled order that isn't delivered/returned is in transit
+  if (fs === "FULFILLED") return "in_transit";
   return fs.toLowerCase();
 }
 
