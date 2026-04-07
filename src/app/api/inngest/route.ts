@@ -41,6 +41,7 @@ import { tagCancelRelevanceBulk, tagCancelRelevanceCron } from "@/lib/inngest/re
 import { amplifierWebhookProcess } from "@/lib/inngest/amplifier-webhooks";
 import { returnsProcessDelivery, returnsIssueRefund } from "@/lib/inngest/returns";
 import { macroAuditFunction } from "@/lib/inngest/macro-audit";
+import { deliveryNightlyAudit } from "@/lib/inngest/delivery-audit";
 
 export const maxDuration = 300;
 
@@ -84,5 +85,6 @@ export const { GET, POST, PUT } = serve({
     returnsProcessDelivery,
     returnsIssueRefund,
     macroAuditFunction,
+    deliveryNightlyAudit,
   ],
 });

@@ -6,6 +6,8 @@ import { useWorkspace } from "@/lib/workspace-context";
 import Link from "next/link";
 import StoreCreditModal from "@/components/store-credit-modal";
 import ReturnsList from "@/components/shared/ReturnsList";
+import { ReplacementsList } from "@/components/shared/ReplacementsList";
+import type { ReplacementItem } from "@/components/shared/ReplacementsList";
 import OrdersTable from "@/components/shared/OrdersTable";
 import { formatCents, formatDate } from "@/components/shared/format-utils";
 import type { OrderRow } from "@/components/shared/OrdersTable";
@@ -197,6 +199,7 @@ export default function SubscriptionDetailPage() {
   const [storeCreditBalance, setStoreCreditBalance] = useState<number | null>(null);
   const [showStoreCreditModal, setShowStoreCreditModal] = useState(false);
   const [subReturns, setSubReturns] = useState<{ id: string; order_number: string; status: string; resolution_type: string; net_refund_cents: number; created_at: string }[]>([]);
+  const [subReplacements, setSubReplacements] = useState<ReplacementItem[]>([]);
 
   const loadSub = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}`);
@@ -222,6 +225,12 @@ export default function SubscriptionDetailPage() {
           const matched = (d.returns || []).filter((r: { order_number: string }) => orderNums.has(r.order_number));
           setSubReturns(matched);
         })
+        .catch(() => {});
+
+      // Fetch replacements for this subscription
+      fetch(`/api/workspaces/${workspace.id}/replacements?subscription_id=${subId}&limit=50`)
+        .then(r => r.json())
+        .then(d => setSubReplacements(d.replacements || []))
         .catch(() => {});
     }
   }, [workspace.id, subId, router]);
@@ -645,6 +654,14 @@ export default function SubscriptionDetailPage() {
             <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
               <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Returns ({subReturns.length})</h3>
               <ReturnsList returns={subReturns} variant="bare" />
+            </div>
+          )}
+
+          {/* Replacements */}
+          {subReplacements.length > 0 && (
+            <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+              <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Replacements ({subReplacements.length})</h3>
+              <ReplacementsList replacements={subReplacements} compact />
             </div>
           )}
 

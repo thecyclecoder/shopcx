@@ -172,6 +172,46 @@ export async function POST(
             }).eq("id", replacementId);
           }
 
+          // Update Appstle subscription address if linked
+          const addrReplacementId = metadata.replacementId as string | null;
+          if (addrReplacementId) {
+            const { data: rep } = await admin.from("replacements")
+              .select("subscription_id").eq("id", addrReplacementId).single();
+            if (rep?.subscription_id) {
+              const { data: sub } = await admin.from("subscriptions")
+                .select("shopify_contract_id").eq("id", rep.subscription_id).single();
+              if (sub?.shopify_contract_id) {
+                try {
+                  // Update Appstle subscription shipping address
+                  const { data: wsCreds } = await admin.from("workspaces")
+                    .select("appstle_api_key_encrypted").eq("id", wsId).single();
+                  if (wsCreds?.appstle_api_key_encrypted) {
+                    const { decrypt } = await import("@/lib/crypto");
+                    const appstleKey = decrypt(wsCreds.appstle_api_key_encrypted);
+                    await fetch(
+                      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-shipping-address?contractId=${sub.shopify_contract_id}`,
+                      {
+                        method: "PUT",
+                        headers: { "X-API-Key": appstleKey, "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          address1: newAddr.street1,
+                          address2: newAddr.street2 || "",
+                          city: newAddr.city,
+                          province: newAddr.state,
+                          zip: newAddr.zip,
+                          country: newAddr.country,
+                        }),
+                      },
+                    );
+                    actionLog.push("Appstle subscription address updated");
+                  }
+                } catch {
+                  // Non-fatal
+                }
+              }
+            }
+          }
+
           actionLog.push("Shipping address updated");
         }
       }
