@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_api_key_encrypted, return_address, default_return_parcel"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel"
     )
     .eq("id", workspaceId)
     .single();
@@ -108,10 +108,14 @@ export async function GET(
       : null,
 
     // EasyPost / Returns
-    easypost_connected: !!workspace.easypost_api_key_encrypted,
-    easypost_api_key_hint: workspace.easypost_api_key_encrypted
-      ? `EZ...${decrypt(workspace.easypost_api_key_encrypted).slice(-4)}`
+    easypost_connected: !!(workspace.easypost_test_api_key_encrypted || workspace.easypost_live_api_key_encrypted),
+    easypost_test_api_key_hint: workspace.easypost_test_api_key_encrypted
+      ? `EZTK...${decrypt(workspace.easypost_test_api_key_encrypted).slice(-4)}`
       : null,
+    easypost_live_api_key_hint: workspace.easypost_live_api_key_encrypted
+      ? `EZAK...${decrypt(workspace.easypost_live_api_key_encrypted).slice(-4)}`
+      : null,
+    easypost_test_mode: workspace.easypost_test_mode ?? true,
     return_address: workspace.return_address || null,
     default_return_parcel: workspace.default_return_parcel || { length: 12, width: 10, height: 6, weight: 16 },
 
@@ -305,12 +309,24 @@ export async function PATCH(
     }
 
     // EasyPost / Returns
-    if ("easypost_api_key" in body) {
-      if (body.easypost_api_key) {
-        updates.easypost_api_key_encrypted = encrypt(body.easypost_api_key);
+    if ("easypost_test_api_key" in body) {
+      if (body.easypost_test_api_key) {
+        updates.easypost_test_api_key_encrypted = encrypt(body.easypost_test_api_key);
       } else {
-        updates.easypost_api_key_encrypted = null;
+        updates.easypost_test_api_key_encrypted = null;
       }
+    }
+
+    if ("easypost_live_api_key" in body) {
+      if (body.easypost_live_api_key) {
+        updates.easypost_live_api_key_encrypted = encrypt(body.easypost_live_api_key);
+      } else {
+        updates.easypost_live_api_key_encrypted = null;
+      }
+    }
+
+    if ("easypost_test_mode" in body) {
+      updates.easypost_test_mode = !!body.easypost_test_mode;
     }
 
     if ("return_address" in body) {

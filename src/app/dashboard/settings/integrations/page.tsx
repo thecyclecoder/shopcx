@@ -96,9 +96,12 @@ export default function IntegrationsPage() {
   const [slackSyncing, setSlackSyncing] = useState(false);
 
   // EasyPost / Returns
-  const [easypostApiKey, setEasypostApiKey] = useState("");
+  const [easypostTestApiKey, setEasypostTestApiKey] = useState("");
+  const [easypostLiveApiKey, setEasypostLiveApiKey] = useState("");
   const [easypostConnected, setEasypostConnected] = useState(false);
-  const [easypostApiKeyHint, setEasypostApiKeyHint] = useState<string | null>(null);
+  const [easypostTestApiKeyHint, setEasypostTestApiKeyHint] = useState<string | null>(null);
+  const [easypostLiveApiKeyHint, setEasypostLiveApiKeyHint] = useState<string | null>(null);
+  const [easypostTestMode, setEasypostTestMode] = useState(true);
   const [returnAddress, setReturnAddress] = useState<{
     name: string; street1: string; street2: string; city: string; state: string; zip: string; country: string; phone: string;
   }>({ name: "", street1: "", street2: "", city: "", state: "", zip: "", country: "US", phone: "" });
@@ -170,7 +173,9 @@ export default function IntegrationsPage() {
             .catch(() => {});
         }
         setEasypostConnected(!!data.easypost_connected);
-        setEasypostApiKeyHint(data.easypost_api_key_hint || null);
+        setEasypostTestApiKeyHint(data.easypost_test_api_key_hint || null);
+        setEasypostLiveApiKeyHint(data.easypost_live_api_key_hint || null);
+        setEasypostTestMode(data.easypost_test_mode ?? true);
         if (data.return_address) setReturnAddress({ name: "", street1: "", street2: "", city: "", state: "", zip: "", country: "US", phone: "", ...data.return_address });
         if (data.default_return_parcel) setDefaultParcel(data.default_return_parcel);
         setSlackConnected(!!data.slack_connected);
@@ -360,23 +365,32 @@ export default function IntegrationsPage() {
   const handleSaveEasypost = async (e: React.FormEvent) => {
     e.preventDefault();
     const body: Record<string, unknown> = {};
-    if (easypostApiKey) body.easypost_api_key = easypostApiKey;
+    if (easypostTestApiKey) body.easypost_test_api_key = easypostTestApiKey;
+    if (easypostLiveApiKey) body.easypost_live_api_key = easypostLiveApiKey;
+    body.easypost_test_mode = easypostTestMode;
     if (returnAddress.street1) body.return_address = returnAddress;
     body.default_return_parcel = defaultParcel;
     if (await patchIntegrations(body)) {
       setMessage("Returns / EasyPost configuration saved");
-      if (easypostApiKey) {
+      if (easypostTestApiKey) {
+        setEasypostTestApiKeyHint(`EZTK...${easypostTestApiKey.slice(-4)}`);
+        setEasypostTestApiKey("");
+      }
+      if (easypostLiveApiKey) {
+        setEasypostLiveApiKeyHint(`EZAK...${easypostLiveApiKey.slice(-4)}`);
+        setEasypostLiveApiKey("");
+      }
+      if (easypostTestApiKey || easypostLiveApiKey) {
         setEasypostConnected(true);
-        setEasypostApiKeyHint(`EZ...${easypostApiKey.slice(-4)}`);
-        setEasypostApiKey("");
       }
     }
   };
 
   const handleDisconnectEasypost = async () => {
-    if (await patchIntegrations({ easypost_api_key: null, return_address: null })) {
+    if (await patchIntegrations({ easypost_test_api_key: null, easypost_live_api_key: null, return_address: null })) {
       setEasypostConnected(false);
-      setEasypostApiKeyHint(null);
+      setEasypostTestApiKeyHint(null);
+      setEasypostLiveApiKeyHint(null);
       setMessage("EasyPost disconnected");
     }
   };
@@ -387,8 +401,13 @@ export default function IntegrationsPage() {
     try {
       const res = await fetch(`/api/workspaces/${workspace.id}/returns/test-connection`, { method: "POST" });
       const data = await res.json();
-      if (res.ok) {
-        setEasypostTestResult("Connection successful");
+      if (res.ok && data.ok) {
+        const parts: string[] = [];
+        if (data.results?.test?.startsWith("connected")) parts.push("Test key OK");
+        if (data.results?.live?.startsWith("connected")) parts.push("Live key OK");
+        if (data.results?.test?.startsWith("error")) parts.push(`Test: ${data.results.test.replace("error: ", "")}`);
+        if (data.results?.live?.startsWith("error")) parts.push(`Live: ${data.results.live.replace("error: ", "")}`);
+        setEasypostTestResult(parts.length ? parts.join(" | ") : "Connection successful");
       } else {
         setEasypostTestResult(data.error || "Connection failed");
       }
@@ -396,6 +415,13 @@ export default function IntegrationsPage() {
       setEasypostTestResult("Connection failed");
     }
     setEasypostTesting(false);
+  };
+
+  const handleToggleEasypostMode = async () => {
+    const newMode = !easypostTestMode;
+    setEasypostTestMode(newMode);
+    await patchIntegrations({ easypost_test_mode: newMode });
+    setMessage(`EasyPost switched to ${newMode ? "Test" : "Live"} mode`);
   };
 
   // Amplifier handlers
@@ -1349,18 +1375,57 @@ export default function IntegrationsPage() {
         </div>
         {canEdit && (
           <form onSubmit={handleSaveEasypost} className="mt-5 space-y-4">
-            {/* API Key */}
-            <div>
-              <label className="mb-1 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                EasyPost API Key {easypostApiKeyHint && <span className="font-mono text-zinc-400">({easypostApiKeyHint})</span>}
-              </label>
-              <input
-                type="password"
-                value={easypostApiKey}
-                onChange={(e) => setEasypostApiKey(e.target.value)}
-                placeholder={easypostConnected ? "Enter new key to update" : "EasyPost API key"}
-                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
-              />
+            {/* Mode Toggle */}
+            {easypostConnected && (
+              <div className="flex items-center justify-between rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3 dark:border-zinc-700 dark:bg-zinc-800/50">
+                <div>
+                  <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                    Mode: <span className={easypostTestMode ? "text-amber-600 dark:text-amber-400" : "text-green-600 dark:text-green-400"}>{easypostTestMode ? "Test" : "Live"}</span>
+                  </p>
+                  <p className="text-xs text-zinc-500">{easypostTestMode ? "Using test API key — only test tracking numbers work" : "Using live API key — real shipments and tracking"}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleToggleEasypostMode}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                    !easypostTestMode ? "bg-green-600" : "bg-zinc-300 dark:bg-zinc-600"
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                      !easypostTestMode ? "translate-x-5" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+            )}
+
+            {/* API Keys */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                  Test API Key {easypostTestApiKeyHint && <span className="font-mono text-zinc-400">({easypostTestApiKeyHint})</span>}
+                </label>
+                <input
+                  type="password"
+                  value={easypostTestApiKey}
+                  onChange={(e) => setEasypostTestApiKey(e.target.value)}
+                  placeholder={easypostTestApiKeyHint ? "Enter new key to update" : "EZTK..."}
+                  className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                  Live API Key {easypostLiveApiKeyHint && <span className="font-mono text-zinc-400">({easypostLiveApiKeyHint})</span>}
+                </label>
+                <input
+                  type="password"
+                  value={easypostLiveApiKey}
+                  onChange={(e) => setEasypostLiveApiKey(e.target.value)}
+                  placeholder={easypostLiveApiKeyHint ? "Enter new key to update" : "EZAK..."}
+                  className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
             </div>
 
             {/* Return Address */}
@@ -1498,7 +1563,7 @@ export default function IntegrationsPage() {
               )}
             </div>
             {easypostTestResult && (
-              <p className={`text-sm ${easypostTestResult.includes("successful") ? "text-green-600" : "text-red-600"}`}>
+              <p className={`text-sm ${easypostTestResult.includes("OK") || easypostTestResult.includes("successful") ? "text-green-600" : "text-red-600"}`}>
                 {easypostTestResult}
               </p>
             )}

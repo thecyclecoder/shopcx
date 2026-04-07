@@ -77,40 +77,45 @@ function toOunces(weight: number, unit: string): number {
 // ── Core Functions ──
 
 /**
- * Get an EasyPost client for a workspace by decrypting their API key.
+ * Get an EasyPost client for a workspace.
+ * Checks easypost_test_mode toggle and uses the corresponding key.
+ * Pass `mode` to override the toggle (e.g. when testing a specific key).
  */
 export async function getEasyPostClient(
   workspaceId: string,
+  mode?: "test" | "live",
 ): Promise<InstanceType<typeof EasyPostClient>> {
   const admin = createAdminClient();
   const { data: ws } = await admin
     .from("workspaces")
-    .select("easypost_api_key_encrypted")
+    .select("easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode")
     .eq("id", workspaceId)
     .single();
 
-  if (!ws?.easypost_api_key_encrypted) {
-    throw new Error("EasyPost API key not configured for this workspace");
+  const useTest = mode ? mode === "test" : (ws?.easypost_test_mode ?? true);
+  const encryptedKey = useTest
+    ? ws?.easypost_test_api_key_encrypted
+    : ws?.easypost_live_api_key_encrypted;
+
+  if (!encryptedKey) {
+    throw new Error(`EasyPost ${useTest ? "test" : "live"} API key not configured for this workspace`);
   }
 
-  const apiKey = decrypt(ws.easypost_api_key_encrypted);
+  const apiKey = decrypt(encryptedKey);
   return new EasyPostClient(apiKey);
 }
 
 /**
- * Check if workspace is using a test EasyPost API key.
- * Test keys start with "EZTK", production keys start with "EZAK".
+ * Check if workspace is in EasyPost test mode.
  */
 export async function isTestMode(workspaceId: string): Promise<boolean> {
   const admin = createAdminClient();
   const { data: ws } = await admin
     .from("workspaces")
-    .select("easypost_api_key_encrypted")
+    .select("easypost_test_mode")
     .eq("id", workspaceId)
     .single();
-  if (!ws?.easypost_api_key_encrypted) return true;
-  const apiKey = decrypt(ws.easypost_api_key_encrypted);
-  return apiKey.startsWith("EZTK");
+  return ws?.easypost_test_mode ?? true;
 }
 
 /**
