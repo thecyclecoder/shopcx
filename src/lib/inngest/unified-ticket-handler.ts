@@ -937,8 +937,35 @@ async function routeExec(
     }
   }
 
-  // 4. KB fallback
+  // 4. KB + Macro embedding fallback
   const rag = await retrieveContext(wsId, msg, 3);
+
+  // 4a. Macro via embedding match (higher priority than KB chunks)
+  if (rag.macros?.length && rag.macros[0].similarity > 0.65) {
+    const bestMacro = rag.macros[0];
+    await sysNote(admin, tid, `[System] → Macro (embedding): "${bestMacro.name}" (${(bestMacro.similarity * 100).toFixed(0)}%)`);
+    const { data: macroFull } = await admin.from("macros").select("id, name, body_html, body_text").eq("id", bestMacro.id).single();
+    if (macroFull) {
+      const text = await personalizeMacroText(macroFull.body_html || macroFull.body_text, custCtx, msg, ch, pers);
+      if (await newerActivity(admin, tid, t0)) return;
+      await sendWithDelay(admin, wsId, tid, ch, text, cfg.sandbox);
+      await markFirstTouch(tid, "ai");
+      await admin.from("tickets").update({ handled_by: "AI Agent" }).eq("id", tid);
+      await setStatus(admin, tid, cfg.auto_resolve);
+      if (pendingAccountLink && custId) {
+        await launchJourneyForTicket({
+          workspaceId: wsId, ticketId: tid, customerId: custId,
+          journeyId: pendingAccountLink.journeyId, journeyName: pendingAccountLink.journeyName,
+          triggerIntent: "account_linking", channel: ch,
+          leadIn: "By the way, I noticed you may have another account with us. When you get a chance, linking them helps us serve you better.",
+          ctaText: "Link My Accounts",
+        });
+      }
+      return;
+    }
+  }
+
+  // 4b. KB article fallback
   if (rag.chunks?.length && rag.chunks[0].similarity > 0.7) {
     const c = rag.chunks[0];
     await sysNote(admin, tid, `[System] → KB: "${c.kb_title}" (${conf}%). Missing macro — notified.`);
