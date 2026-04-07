@@ -28,23 +28,44 @@ export async function buildShippingAddressSteps(
     .eq("id", customerId)
     .single();
 
-  // Get most recent order with a shipping address
+  // Get shipping address from the identified order (from playbook context)
   let currentAddress: Record<string, string> | null = null;
-  const { data: recentOrder } = await admin
-    .from("orders")
-    .select("shipping_address, normalized_shipping_address")
-    .eq("customer_id", customerId)
-    .eq("workspace_id", workspaceId)
-    .not("shipping_address", "is", null)
-    .order("created_at", { ascending: false })
-    .limit(1)
+  const { data: ticket } = await admin
+    .from("tickets")
+    .select("playbook_context")
+    .eq("id", ticketId)
     .single();
+  const ctx = (ticket?.playbook_context || {}) as Record<string, unknown>;
+  const identifiedOrderId = ctx.identified_order_id as string | undefined;
 
-  if (recentOrder?.shipping_address) {
-    currentAddress = recentOrder.shipping_address as Record<string, string>;
+  if (identifiedOrderId) {
+    const { data: identifiedOrder } = await admin
+      .from("orders")
+      .select("shipping_address")
+      .eq("id", identifiedOrderId)
+      .single();
+    if (identifiedOrder?.shipping_address) {
+      currentAddress = identifiedOrder.shipping_address as Record<string, string>;
+    }
   }
 
-  // Also check if there's a replacement record with a pending address
+  // Fallback: most recent order with a shipping address
+  if (!currentAddress) {
+    const { data: recentOrder } = await admin
+      .from("orders")
+      .select("shipping_address")
+      .eq("customer_id", customerId)
+      .eq("workspace_id", workspaceId)
+      .not("shipping_address", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+    if (recentOrder?.shipping_address) {
+      currentAddress = recentOrder.shipping_address as Record<string, string>;
+    }
+  }
+
+  // Check if there's a replacement record
   const { data: replacement } = await admin
     .from("replacements")
     .select("id, original_order_number")
