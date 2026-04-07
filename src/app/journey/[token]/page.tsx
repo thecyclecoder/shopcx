@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, type Dispatch, type SetStateAction } from "react";
 import { useParams } from "next/navigation";
 
 interface JourneyOption {
@@ -394,82 +394,15 @@ export default function JourneyPage() {
         )}
 
         {/* Item accounting — per-item radio groups */}
-        {step.type === "item_accounting" && (() => {
-          // Always derive groups from flat options (guaranteed to exist)
-          // Then overlay titles from metadata.itemGroups if available
-          const grouped = new Map<string, { value: string; label: string }[]>();
-          for (const opt of step.options || []) {
-            const prefix = opt.value.split(":")[0];
-            if (!grouped.has(prefix)) grouped.set(prefix, []);
-            grouped.get(prefix)!.push(opt);
-          }
-
-          // Get titles from metadata
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const meta = (config as any)?.metadata as Record<string, unknown> | undefined;
-          const metaGroups = (meta?.itemGroups as { key: string; title: string }[]) || [];
-          const lineItems = (meta?.lineItems as { title: string; quantity: number }[]) || [];
-          const titleMap = new Map<string, string>();
-          for (const g of metaGroups) titleMap.set(g.key, g.title);
-
-          const groups = Array.from(grouped.entries()).map(([key, options], idx) => ({
-            key,
-            title: titleMap.get(key) || (lineItems[idx] ? `${lineItems[idx].title}${lineItems[idx].quantity > 1 ? ` (x${lineItems[idx].quantity})` : ""}` : `Item ${idx + 1}`),
-            options,
-          }));
-
-          const allSelected = groups.every(g => itemSelections[g.key]);
-
-          return (
-            <div className="mt-5 space-y-5">
-              {groups.map((group) => (
-                <div key={group.key} className="rounded-xl border-2 border-zinc-200 p-4">
-                  <p className="mb-3 text-sm font-semibold text-zinc-800">{group.title}</p>
-                  <div className="space-y-2">
-                    {group.options.map((opt) => {
-                      const isSelected = itemSelections[group.key] === opt.value;
-                      return (
-                        <button
-                          key={opt.value}
-                          onClick={() => setItemSelections(prev => ({ ...prev, [group.key]: opt.value }))}
-                          disabled={submitting}
-                          className={`flex w-full items-center gap-3 rounded-lg border-2 px-3 py-3 text-left text-sm transition-all ${
-                            isSelected
-                              ? "border-transparent text-white shadow-sm"
-                              : "border-zinc-100 text-zinc-700 hover:border-zinc-200 hover:bg-zinc-50"
-                          } disabled:opacity-60`}
-                          style={isSelected ? { backgroundColor: primaryColor } : undefined}
-                        >
-                          <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 ${
-                            isSelected ? "border-white/40 bg-white/20" : "border-zinc-300"
-                          }`}>
-                            {isSelected && <span className="h-2 w-2 rounded-full bg-white" />}
-                          </span>
-                          <span>{opt.label}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-              <button
-                onClick={() => {
-                  const response = groups.map(g => itemSelections[g.key]).filter(Boolean).join(",");
-                  const label = groups.map(g => {
-                    const opt = g.options.find(o => o.value === itemSelections[g.key]);
-                    return `${g.title}: ${opt?.label || "?"}`;
-                  }).join("; ");
-                  submitStep(response, label);
-                }}
-                disabled={!allSelected || submitting}
-                className="w-full rounded-xl px-4 py-3 text-sm font-semibold text-white transition-opacity disabled:opacity-40"
-                style={{ backgroundColor: primaryColor }}
-              >
-                {submitting ? "Submitting..." : "Continue"}
-              </button>
-            </div>
-          );
-        })()}
+        {step.type === "item_accounting" && <ItemAccountingForm
+          step={step}
+          config={config}
+          primaryColor={primaryColor}
+          itemSelections={itemSelections}
+          setItemSelections={setItemSelections}
+          submitting={submitting}
+          submitStep={submitStep}
+        />}
 
         {/* Text input */}
         {step.type === "text_input" && (
@@ -1374,5 +1307,93 @@ function JourneyShell({ children, workspaceName, primaryColor }: { children: Rea
         </div>
       </div>
     </>
+  );
+}
+
+// ── Item Accounting Form Component ──
+
+function ItemAccountingForm({
+  step, config, primaryColor, itemSelections, setItemSelections, submitting, submitStep,
+}: {
+  step: JourneyStep;
+  config: JourneyConfig | null;
+  primaryColor: string;
+  itemSelections: Record<string, string>;
+  setItemSelections: Dispatch<SetStateAction<Record<string, string>>>;
+  submitting: boolean;
+  submitStep: (value: string, label: string) => Promise<void>;
+}) {
+  // Derive groups from flat options
+  const grouped = new Map<string, { value: string; label: string }[]>();
+  for (const opt of step.options || []) {
+    const prefix = opt.value.split(":")[0];
+    if (!grouped.has(prefix)) grouped.set(prefix, []);
+    grouped.get(prefix)!.push(opt);
+  }
+
+  // Get titles from metadata
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const meta = (config as any)?.metadata as Record<string, unknown> | undefined;
+  const metaGroups = (meta?.itemGroups as { key: string; title: string }[]) || [];
+  const lineItems = (meta?.lineItems as { title: string; quantity: number }[]) || [];
+  const titleMap = new Map<string, string>();
+  for (const g of metaGroups) titleMap.set(g.key, g.title);
+
+  const groups = Array.from(grouped.entries()).map(([key, options], idx) => ({
+    key,
+    title: titleMap.get(key) || (lineItems[idx] ? `${lineItems[idx].title}${lineItems[idx].quantity > 1 ? ` (x${lineItems[idx].quantity})` : ""}` : `Item ${idx + 1}`),
+    options,
+  }));
+
+  const allSelected = groups.every(g => itemSelections[g.key]);
+
+  return (
+    <div className="mt-5 space-y-5">
+      {groups.map((group) => (
+        <div key={group.key} className="rounded-xl border-2 border-zinc-200 p-4">
+          <p className="mb-3 text-sm font-semibold text-zinc-800">{group.title}</p>
+          <div className="space-y-2">
+            {group.options.map((opt) => {
+              const isSelected = itemSelections[group.key] === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  onClick={() => setItemSelections(prev => ({ ...prev, [group.key]: opt.value }))}
+                  disabled={submitting}
+                  className={`flex w-full items-center gap-3 rounded-lg border-2 px-3 py-3 text-left text-sm transition-all ${
+                    isSelected
+                      ? "border-transparent text-white shadow-sm"
+                      : "border-zinc-100 text-zinc-700 hover:border-zinc-200 hover:bg-zinc-50"
+                  } disabled:opacity-60`}
+                  style={isSelected ? { backgroundColor: primaryColor } : undefined}
+                >
+                  <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 ${
+                    isSelected ? "border-white/40 bg-white/20" : "border-zinc-300"
+                  }`}>
+                    {isSelected && <span className="h-2 w-2 rounded-full bg-white" />}
+                  </span>
+                  <span>{opt.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      <button
+        onClick={() => {
+          const response = groups.map(g => itemSelections[g.key]).filter(Boolean).join(",");
+          const label = groups.map(g => {
+            const opt = g.options.find(o => o.value === itemSelections[g.key]);
+            return `${g.title}: ${opt?.label || "?"}`;
+          }).join("; ");
+          submitStep(response, label);
+        }}
+        disabled={!allSelected || submitting}
+        className="w-full rounded-xl px-4 py-3 text-sm font-semibold text-white transition-opacity disabled:opacity-40"
+        style={{ backgroundColor: primaryColor }}
+      >
+        {submitting ? "Submitting..." : "Continue"}
+      </button>
+    </div>
   );
 }
