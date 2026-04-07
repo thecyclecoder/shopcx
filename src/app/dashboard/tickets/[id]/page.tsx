@@ -1073,7 +1073,7 @@ export default function TicketDetailPage() {
               if (isInternal) {
                 bgClass = "bg-amber-50 border border-amber-200 dark:bg-amber-900/20 dark:border-amber-800";
                 textClass = "text-zinc-900 dark:text-zinc-100";
-                align = "mr-auto";
+                align = "ml-auto";
               } else if (isInbound) {
                 bgClass = "bg-zinc-100 dark:bg-zinc-800";
                 textClass = "text-zinc-900 dark:text-zinc-100";
