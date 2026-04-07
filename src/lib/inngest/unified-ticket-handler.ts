@@ -395,6 +395,11 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
           if (intentMatch || patternMatch) return { hit: true, type: "playbook" as const, id: p.id, name: p.name, intent: intents[0], patternName: m.name, confidence: m.confidence };
         }
       }
+      // Pattern matched at high confidence but no journey/playbook — pass through for macro lookup
+      if (m && m.confidence >= 0.7) {
+        return { hit: true, type: "pattern_only" as const, id: "", name: m.name || "", intent: m.category || "unknown", patternName: m.name, confidence: m.confidence };
+      }
+
       // Also check direct journey pattern match (bypass smart patterns)
       const { data: journeys } = await admin.from("journey_definitions").select("id, name, trigger_intent, match_patterns")
         .eq("workspace_id", wsId).eq("is_active", true);
@@ -454,6 +459,16 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
           await step.run("ep-pb-status", () => setStatus(admin, tid, cfg.auto_resolve));
         }
         return { status: "early_pattern_playbook", playbook: ep.name };
+      }
+
+      // Pattern matched but no journey/playbook — go straight to routeExec for macro lookup
+      if (ep.type === "pattern_only") {
+        await step.run("pattern-route", async () => {
+          const ctx = await assembleTicketContext(wsId, tid);
+          const custCtx = ctx.systemPrompt.split("CUSTOMER CONTEXT:")[1]?.split("CHANNEL")[0]?.trim() || "";
+          await routeExec(admin, wsId, tid, st.ch, ep.intent, Math.round(ep.confidence * 100), msg, custCtx, st.hasCust, cfg, pers, t0, st.custId || null, pendingAccountLink);
+        });
+        return { status: "early_pattern_macro", intent: ep.intent };
       }
     }
 
