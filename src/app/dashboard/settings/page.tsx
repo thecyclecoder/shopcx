@@ -48,7 +48,6 @@ export default function SettingsPage() {
         <SettingsSection title="Ticketing & AI">
           <SettingsCard href="/dashboard/settings/rules" title="Rules" desc="Automate ticket tagging, assignment, and replies" />
           <SettingsCard href="/dashboard/settings/ai" title="AI Agent" desc="Personalities, channel config, confidence thresholds" />
-          <SettingsCard href="/dashboard/settings/macros" title="Macros" desc="Saved responses for common inquiries" />
           <SettingsCard href="/dashboard/settings/workflows" title="Workflows" desc="Automated multi-step responses" />
           <SettingsCard href="/dashboard/settings/playbooks" title="Playbooks" desc="Decision trees for complex issues (returns, disputes)" />
           <SettingsCard href="/dashboard/settings/patterns" title="Smart Patterns" desc="Auto-tag tickets based on content" />
