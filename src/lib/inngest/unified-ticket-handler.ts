@@ -911,12 +911,12 @@ async function routeExec(
   // 3. Macro (via pattern matcher)
   const pmatch = await matchPatterns(wsId, null, msg);
   if (pmatch && pmatch.confidence >= 0.6) {
-    const { data: macros } = await admin.from("macros").select("id, name, content").eq("workspace_id", wsId);
+    const { data: macros } = await admin.from("macros").select("id, name, body_html, body_text").eq("workspace_id", wsId);
     const macro = (macros || []).find(m => m.name.toLowerCase() === pmatch.name.toLowerCase())
       || (macros || []).find(m => m.name.toLowerCase().includes(pmatch.name.toLowerCase()));
     if (macro) {
       await sysNote(admin, tid, `[System] → Macro: ${macro.name} (${conf}%)`);
-      const text = await personalizeMacroText(macro.content, custCtx, msg, ch, pers);
+      const text = await personalizeMacroText(macro.body_html || macro.body_text, custCtx, msg, ch, pers);
       if (await newerActivity(admin, tid, t0)) return;
       await sendWithDelay(admin, wsId, tid, ch, text, cfg.sandbox);
       await markFirstTouch(tid, "ai");
