@@ -294,6 +294,22 @@ export default function OrderDetailPage() {
             </div>
           </div>
 
+          {/* Shipping Address */}
+          {addr && (
+            <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
+                <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Shipping Address</h2>
+              </div>
+              <div className="px-4 py-3 text-sm text-zinc-600 dark:text-zinc-400">
+                {addr.first_name || addr.last_name ? <p>{[addr.first_name, addr.last_name].filter(Boolean).join(" ")}</p> : null}
+                {addr.address1 && <p>{addr.address1}</p>}
+                {addr.address2 && <p>{addr.address2}</p>}
+                <p>{[addr.city, addr.province, addr.zip].filter(Boolean).join(", ")}</p>
+                {addr.country && addr.country !== "US" && <p>{addr.country}</p>}
+              </div>
+            </div>
+          )}
+
           {/* Resolve Sync Error */}
           {!order.amplifier_order_id && !(order.fulfillment_status || "").toLowerCase().includes("fulfilled") && (
             <div className="rounded-lg border-2 border-red-300 bg-white dark:border-red-800 dark:bg-zinc-900">
