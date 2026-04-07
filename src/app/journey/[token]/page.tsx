@@ -33,6 +33,7 @@ interface JourneyConfig {
   steps?: JourneyStep[];
   branding?: { primaryColor?: string; accentColor?: string; logoUrl?: string };
   messages?: { intro?: string; completedSave?: string; completedCancel?: string; completedDefault?: string };
+  metadata?: Record<string, unknown>;
   // Code-driven journey fields
   codeDriven?: boolean;
   ticketId?: string;
@@ -50,6 +51,7 @@ export default function JourneyPage() {
   const [selectedValue, setSelectedValue] = useState<string | null>(null);
   const [checkedValues, setCheckedValues] = useState<Set<string>>(new Set());
   const [textValue, setTextValue] = useState("");
+  const [itemSelections, setItemSelections] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [completedMessage, setCompletedMessage] = useState("");
   const [customerName, setCustomerName] = useState("");
@@ -127,6 +129,7 @@ export default function JourneyPage() {
       setCurrentStepIndex((i) => i + 1);
       setSelectedValue(null);
       setCheckedValues(new Set());
+      setItemSelections({});
       setTextValue("");
       setSubmitting(false);
       setSlideDirection("in");
@@ -389,6 +392,82 @@ export default function JourneyPage() {
             </button>
           </div>
         )}
+
+        {/* Item accounting — per-item radio groups */}
+        {step.type === "item_accounting" && (() => {
+          // Group options by item prefix (item_0, item_1, etc.)
+          const itemGroups: { key: string; title: string; options: { value: string; label: string }[] }[] =
+            (config?.metadata as Record<string, unknown>)?.itemGroups as typeof itemGroups || [];
+
+          // If no itemGroups in metadata, derive from options
+          const groups = itemGroups.length > 0
+            ? itemGroups
+            : (() => {
+                const grouped = new Map<string, { value: string; label: string }[]>();
+                for (const opt of step.options || []) {
+                  const prefix = opt.value.split(":")[0];
+                  if (!grouped.has(prefix)) grouped.set(prefix, []);
+                  grouped.get(prefix)!.push(opt);
+                }
+                return Array.from(grouped.entries()).map(([key, options]) => ({
+                  key,
+                  title: key.replace("item_", "Item "),
+                  options,
+                }));
+              })();
+
+          const allSelected = groups.every(g => itemSelections[g.key]);
+
+          return (
+            <div className="mt-5 space-y-5">
+              {groups.map((group) => (
+                <div key={group.key} className="rounded-xl border-2 border-zinc-200 p-4">
+                  <p className="mb-3 text-sm font-semibold text-zinc-800">{group.title}</p>
+                  <div className="space-y-2">
+                    {group.options.map((opt) => {
+                      const isSelected = itemSelections[group.key] === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          onClick={() => setItemSelections(prev => ({ ...prev, [group.key]: opt.value }))}
+                          disabled={submitting}
+                          className={`flex w-full items-center gap-3 rounded-lg border-2 px-3 py-3 text-left text-sm transition-all ${
+                            isSelected
+                              ? "border-transparent text-white shadow-sm"
+                              : "border-zinc-100 text-zinc-700 hover:border-zinc-200 hover:bg-zinc-50"
+                          } disabled:opacity-60`}
+                          style={isSelected ? { backgroundColor: primaryColor } : undefined}
+                        >
+                          <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 ${
+                            isSelected ? "border-white/40 bg-white/20" : "border-zinc-300"
+                          }`}>
+                            {isSelected && <span className="h-2 w-2 rounded-full bg-white" />}
+                          </span>
+                          <span>{opt.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+              <button
+                onClick={() => {
+                  const response = groups.map(g => itemSelections[g.key]).filter(Boolean).join(",");
+                  const label = groups.map(g => {
+                    const opt = g.options.find(o => o.value === itemSelections[g.key]);
+                    return `${g.title}: ${opt?.label || "?"}`;
+                  }).join("; ");
+                  submitStep(response, label);
+                }}
+                disabled={!allSelected || submitting}
+                className="w-full rounded-xl px-4 py-3 text-sm font-semibold text-white transition-opacity disabled:opacity-40"
+                style={{ backgroundColor: primaryColor }}
+              >
+                {submitting ? "Submitting..." : "Continue"}
+              </button>
+            </div>
+          );
+        })()}
 
         {/* Text input */}
         {step.type === "text_input" && (

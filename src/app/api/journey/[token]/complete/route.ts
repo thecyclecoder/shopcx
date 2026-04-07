@@ -233,44 +233,55 @@ export async function POST(
 
     // ── Missing Items Journey ──
     if (journeyType === "missing_items") {
-      const selectedItems = responses?.select_items?.value;
-      const condition = responses?.item_condition?.value || "missing";
+      const accountingResponse = responses?.item_accounting?.value;
+      const lineItems = (metadata.lineItems as { title: string; quantity: number; sku?: string; variant_id?: string }[]) || [];
 
-      if (selectedItems && session.ticket_id) {
-        const lineItems = (metadata.lineItems as { title: string; quantity: number; sku?: string; variant_id?: string }[]) || [];
-        const selectedIndices = selectedItems.split(",").map((v: string) => parseInt(v.trim())).filter((n: number) => !isNaN(n));
+      if (accountingResponse && session.ticket_id) {
+        const { parseItemAccounting } = await import("@/lib/missing-items-journey-builder");
+        const result = parseItemAccounting(accountingResponse, lineItems);
 
-        const replacementItems = selectedIndices.map((idx: number) => {
-          const item = lineItems[idx];
-          if (!item) return null;
-          return {
-            title: item.title,
-            quantity: item.quantity,
-            variantId: item.variant_id || "",
-            sku: item.sku || "",
-            type: condition === "both" ? "missing" : condition,
-          };
-        }).filter(Boolean);
+        if (result.allReceived) {
+          // Everything received OK — no replacement needed
+          actionLog.push("All items received OK — no replacement needed");
 
-        // Write to playbook context
-        const { data: ticket } = await admin.from("tickets")
-          .select("playbook_context").eq("id", session.ticket_id).single();
-        const ctx = (ticket?.playbook_context || {}) as Record<string, unknown>;
-        ctx.replacement_items = replacementItems;
-        ctx.awaiting_item_selection = false;
-        await admin.from("tickets").update({ playbook_context: ctx }).eq("id", session.ticket_id);
+          const { data: ticket } = await admin.from("tickets")
+            .select("playbook_context").eq("id", session.ticket_id).single();
+          const ctx = (ticket?.playbook_context || {}) as Record<string, unknown>;
+          ctx.replacement_items = [];
+          ctx.all_items_received = true;
+          ctx.awaiting_item_selection = false;
+          await admin.from("tickets").update({ playbook_context: ctx }).eq("id", session.ticket_id);
+        } else {
+          // Items need replacing — write exact quantities
+          const replacementItems = result.replacementItems.map(i => ({
+            title: i.title,
+            quantity: i.quantity,
+            variantId: i.variantId || "",
+            sku: i.sku || "",
+            type: i.type,
+          }));
 
-        // Update replacement record if exists
-        const replacementId = metadata.replacementId as string | null;
-        if (replacementId) {
-          await admin.from("replacements").update({
-            items: replacementItems,
-            reason: condition === "damaged" ? "damaged_items" : "missing_items",
-            updated_at: new Date().toISOString(),
-          }).eq("id", replacementId);
+          const { data: ticket } = await admin.from("tickets")
+            .select("playbook_context").eq("id", session.ticket_id).single();
+          const ctx = (ticket?.playbook_context || {}) as Record<string, unknown>;
+          ctx.replacement_items = replacementItems;
+          ctx.awaiting_item_selection = false;
+          await admin.from("tickets").update({ playbook_context: ctx }).eq("id", session.ticket_id);
+
+          // Update replacement record if exists
+          const replacementId = metadata.replacementId as string | null;
+          if (replacementId) {
+            const hasOnlyDamaged = replacementItems.every(i => i.type === "damaged");
+            const hasOnlyMissing = replacementItems.every(i => i.type === "missing");
+            await admin.from("replacements").update({
+              items: replacementItems,
+              reason: hasOnlyDamaged ? "damaged_items" : hasOnlyMissing ? "missing_items" : "missing_items",
+              updated_at: new Date().toISOString(),
+            }).eq("id", replacementId);
+          }
+
+          actionLog.push(`Replacement needed: ${result.summary}`);
         }
-
-        actionLog.push(`Selected ${replacementItems.length} items for replacement (${condition})`);
       }
 
       // Re-trigger the playbook to continue

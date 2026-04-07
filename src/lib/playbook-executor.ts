@@ -786,10 +786,27 @@ async function handleIdentifyOrder(
   const channel = (ctx._channel as string) || "email";
   const useHtml = ["email", "chat", "help_center"].includes(channel);
 
+  // We need admin + wsId to enrich variant titles, but they're not passed to this function
+  // Use a simple fallback: load variant map inline if we can detect workspace from orders
+  const admin2 = createAdminClient();
+  let variantTitleMap: Map<string, string> | null = null;
+  if (orders[0]?.id) {
+    const { data: o } = await admin2.from("orders").select("workspace_id").eq("id", orders[0].id).limit(1).single();
+    if (o) {
+      const { idToTitle } = await loadVariantMap(admin2, o.workspace_id);
+      variantTitleMap = idToTitle;
+    }
+  }
+
   const orderListFormatted = orders.slice(0, 5).map(o => {
     const date = new Date(o.created_at);
     const monthDay = date.toLocaleDateString("en-US", { month: "long", day: "numeric" });
-    const items = (o.line_items as { title?: string }[] || []).map(i => i.title || "item");
+    const rawItems = (o.line_items as { title?: string; variant_id?: string }[] || []);
+    const items = rawItems.map(i => {
+      const base = i.title || "item";
+      const vTitle = i.variant_id && variantTitleMap ? variantTitleMap.get(i.variant_id) : null;
+      return vTitle ? `${base} — ${vTitle}` : base;
+    });
     if (useHtml) {
       return `<p><b>${monthDay}</b> - $${(o.total_cents / 100).toFixed(2)}</p><ul>${items.map(i => `<li>${i}</li>`).join("")}</ul>`;
     }
@@ -1840,6 +1857,23 @@ export async function startPlaybook(
 // ── Replacement Helpers ──
 // ══════════════════════════════════════════════════════════════════
 
+/** Load variant data (id + title) from products table, keyed by SKU and variant ID */
+async function loadVariantMap(admin: Admin, wsId: string): Promise<{ skuToId: Map<string, string>; idToTitle: Map<string, string> }> {
+  const { data: products } = await admin.from("products")
+    .select("variants")
+    .eq("workspace_id", wsId);
+
+  const skuToId = new Map<string, string>();
+  const idToTitle = new Map<string, string>();
+  for (const p of products || []) {
+    for (const v of (p.variants as { id: string; sku: string; title: string }[]) || []) {
+      if (v.sku) skuToId.set(v.sku, String(v.id));
+      if (v.title && v.title !== "Default Title") idToTitle.set(String(v.id), v.title);
+    }
+  }
+  return { skuToId, idToTitle };
+}
+
 /**
  * Resolve variant IDs from the products table for line items that don't have them.
  * Matches by SKU against product variants.
@@ -1848,29 +1882,25 @@ async function resolveVariantIds(
   admin: Admin, wsId: string,
   items: { title: string; quantity: number; sku?: string; variant_id?: string }[],
 ): Promise<{ title: string; quantity: number; sku?: string; variant_id: string }[]> {
-  // Collect SKUs that need resolving
-  const needsResolving = items.filter(i => !i.variant_id && i.sku);
-  if (needsResolving.length === 0) {
-    return items.map(i => ({ ...i, variant_id: i.variant_id || "" }));
-  }
-
-  // Load all products with variants for this workspace
-  const { data: products } = await admin.from("products")
-    .select("variants")
-    .eq("workspace_id", wsId);
-
-  // Build SKU → variant_id map
-  const skuMap = new Map<string, string>();
-  for (const p of products || []) {
-    for (const v of (p.variants as { id: string; sku: string }[]) || []) {
-      if (v.sku) skuMap.set(v.sku, String(v.id));
-    }
-  }
+  const { skuToId } = await loadVariantMap(admin, wsId);
 
   return items.map(item => ({
     ...item,
-    variant_id: item.variant_id || (item.sku ? skuMap.get(item.sku) || "" : ""),
+    variant_id: item.variant_id || (item.sku ? skuToId.get(item.sku) || "" : ""),
   }));
+}
+
+/** Enrich line item titles with variant names (e.g. "Amazing Coffee" → "Amazing Coffee — Hazelnut") */
+async function enrichItemTitles(
+  admin: Admin, wsId: string,
+  items: { title?: string; variant_id?: string }[],
+): Promise<string[]> {
+  const { idToTitle } = await loadVariantMap(admin, wsId);
+  return items.map(i => {
+    const variantTitle = i.variant_id ? idToTitle.get(i.variant_id) : null;
+    const base = i.title || "item";
+    return variantTitle ? `${base} — ${variantTitle}` : base;
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════
