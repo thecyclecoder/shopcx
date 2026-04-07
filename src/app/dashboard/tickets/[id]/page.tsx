@@ -1855,6 +1855,9 @@ export default function TicketDetailPage() {
           )}
         </div>
 
+        {/* Share ticket */}
+        <ShareTicketButton ticketId={id as string} workspaceId={workspace.id} />
+
         {/* Delete ticket — owner/admin only */}
         {["owner", "admin"].includes(workspace.role) && (
           <div className="mb-4">
@@ -2827,6 +2830,220 @@ function JourneySuggestionCard({
         >
           {sending ? "Sending..." : `Send "${journeyName}" Journey`}
         </button>
+      )}
+    </div>
+  );
+}
+
+// ── Share Ticket Button + Modal ──
+
+function ShareTicketButton({ ticketId, workspaceId }: { ticketId: string; workspaceId: string }) {
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<"link" | "slack">("link");
+  const [copied, setCopied] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [slackData, setSlackData] = useState<{
+    slackConnected: boolean;
+    members: { userId: string; name: string; slackUserId: string }[];
+    channels: { id: string; name: string }[];
+  } | null>(null);
+  const [target, setTarget] = useState("");
+  const [targetType, setTargetType] = useState<"member" | "channel">("member");
+  const [message, setMessage] = useState("");
+  const [mentionIds, setMentionIds] = useState<Set<string>>(new Set());
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState("");
+
+  const ticketUrl = `${typeof window !== "undefined" ? window.location.origin : ""}/dashboard/tickets/${ticketId}`;
+
+  const handleOpen = async () => {
+    setOpen(true);
+    if (!slackData) {
+      setLoading(true);
+      try {
+        const res = await fetch(`/api/tickets/${ticketId}/share`);
+        if (res.ok) setSlackData(await res.json());
+      } catch { /* */ }
+      setLoading(false);
+    }
+  };
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(ticketUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleSend = async () => {
+    if (!target) return;
+    setSending(true);
+    setResult("");
+    try {
+      const res = await fetch(`/api/tickets/${ticketId}/share`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target,
+          message: message || undefined,
+          mentionUserIds: targetType === "channel" ? Array.from(mentionIds) : undefined,
+        }),
+      });
+      if (res.ok) {
+        setResult("Shared!");
+        setTimeout(() => { setOpen(false); setResult(""); setMessage(""); setTarget(""); setMentionIds(new Set()); }, 1500);
+      } else {
+        const data = await res.json();
+        setResult(data.error || "Failed to share");
+      }
+    } catch {
+      setResult("Failed to share");
+    }
+    setSending(false);
+  };
+
+  return (
+    <div className="mb-4">
+      <button
+        onClick={handleOpen}
+        className="w-full rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+      >
+        Share Ticket
+      </button>
+
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setOpen(false)}>
+          <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-2xl dark:bg-zinc-900" onClick={e => e.stopPropagation()}>
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Share Ticket</h3>
+              <button onClick={() => setOpen(false)} className="text-zinc-400 hover:text-zinc-600">&times;</button>
+            </div>
+
+            {/* Tabs */}
+            <div className="mb-4 flex gap-1 rounded-lg bg-zinc-100 p-1 dark:bg-zinc-800">
+              <button
+                onClick={() => setTab("link")}
+                className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${tab === "link" ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100" : "text-zinc-500"}`}
+              >
+                Copy Link
+              </button>
+              <button
+                onClick={() => setTab("slack")}
+                className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${tab === "slack" ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100" : "text-zinc-500"}`}
+              >
+                Slack
+              </button>
+            </div>
+
+            {/* Copy Link Tab */}
+            {tab === "link" && (
+              <div>
+                <div className="flex gap-2">
+                  <input
+                    readOnly
+                    value={ticketUrl}
+                    className="flex-1 truncate rounded-md border border-zinc-300 bg-zinc-50 px-3 py-2 text-xs font-mono text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
+                  />
+                  <button
+                    onClick={handleCopy}
+                    className="shrink-0 rounded-md bg-indigo-600 px-4 py-2 text-xs font-medium text-white hover:bg-indigo-500"
+                  >
+                    {copied ? "Copied!" : "Copy"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Slack Tab */}
+            {tab === "slack" && (
+              <div className="space-y-3">
+                {loading ? (
+                  <p className="text-sm text-zinc-400">Loading Slack data...</p>
+                ) : !slackData?.slackConnected ? (
+                  <p className="text-sm text-zinc-400">Slack is not connected. Connect it in Settings &rarr; Integrations.</p>
+                ) : (
+                  <>
+                    {/* Member vs Channel toggle */}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => { setTargetType("member"); setTarget(""); setMentionIds(new Set()); }}
+                        className={`rounded-md px-3 py-1 text-xs font-medium ${targetType === "member" ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400" : "text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"}`}
+                      >
+                        Person
+                      </button>
+                      <button
+                        onClick={() => { setTargetType("channel"); setTarget(""); }}
+                        className={`rounded-md px-3 py-1 text-xs font-medium ${targetType === "channel" ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400" : "text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"}`}
+                      >
+                        Channel
+                      </button>
+                    </div>
+
+                    {/* Target selector */}
+                    <select
+                      value={target}
+                      onChange={e => setTarget(e.target.value)}
+                      className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                    >
+                      <option value="">Select {targetType === "member" ? "person" : "channel"}...</option>
+                      {targetType === "member"
+                        ? slackData.members.map(m => <option key={m.slackUserId} value={m.slackUserId}>{m.name}</option>)
+                        : slackData.channels.map(c => <option key={c.id} value={c.id}>#{c.name}</option>)
+                      }
+                    </select>
+
+                    {/* Mention selector for channels */}
+                    {targetType === "channel" && slackData.members.length > 0 && (
+                      <div>
+                        <label className="mb-1 block text-xs text-zinc-500">Tag people (optional)</label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {slackData.members.map(m => (
+                            <button
+                              key={m.slackUserId}
+                              onClick={() => setMentionIds(prev => {
+                                const next = new Set(prev);
+                                next.has(m.slackUserId) ? next.delete(m.slackUserId) : next.add(m.slackUserId);
+                                return next;
+                              })}
+                              className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                                mentionIds.has(m.slackUserId)
+                                  ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400"
+                                  : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700"
+                              }`}
+                            >
+                              {m.name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Message */}
+                    <textarea
+                      value={message}
+                      onChange={e => setMessage(e.target.value)}
+                      placeholder="Add a message (optional)"
+                      rows={2}
+                      className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm placeholder-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    />
+
+                    {/* Send */}
+                    <button
+                      onClick={handleSend}
+                      disabled={!target || sending}
+                      className="w-full rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {sending ? "Sending..." : "Share via Slack"}
+                    </button>
+
+                    {result && (
+                      <p className={`text-sm ${result === "Shared!" ? "text-green-600" : "text-red-600"}`}>{result}</p>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
