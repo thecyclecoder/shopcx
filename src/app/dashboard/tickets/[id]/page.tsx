@@ -48,6 +48,7 @@ interface RecentOrder {
   order_type: string | null;
   line_items: OrderLineItem[];
   fulfillments: OrderFulfillment[];
+  shipping_address?: { address1?: string; address2?: string; city?: string; province?: string; provinceCode?: string; zip?: string; country?: string } | null;
   created_at: string;
 }
 
@@ -2441,6 +2442,13 @@ export default function TicketDetailPage() {
                               ))}
                             </div>
                           ))}
+                        </div>
+                      )}
+                      {/* Shipping address */}
+                      {o.shipping_address?.address1 && (
+                        <div className="mt-1.5 text-xs text-zinc-400">
+                          <span className="font-medium text-zinc-500">Ship to: </span>
+                          {[o.shipping_address.address1, o.shipping_address.city, o.shipping_address.provinceCode || o.shipping_address.province, o.shipping_address.zip].filter(Boolean).join(", ")}
                         </div>
                       )}
                       {/* Line items */}
