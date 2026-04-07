@@ -1960,6 +1960,11 @@ async function handleCheckTracking(
     return { action: "advance", newStep: step.step_order + 1, context: ctx };
   }
 
+  // Customer received the order — no tracking lookup needed, skip to item selection
+  if (ctx.received_order === true) {
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
   // Find the order — either from context or most recent
   const orderId = ctx.identified_order_id as string | undefined;
   const order = orderId
@@ -2056,6 +2061,11 @@ async function handleClassifyIssue(
   step: PlaybookStep,
   pers: { name?: string; tone?: string; sign_off?: string | null } | null,
 ): Promise<PlaybookExecResult> {
+  // Customer received the order + needs item selection — skip classify, go to item selection
+  if (ctx.received_order === true && ctx.needs_item_selection) {
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
   // Already classified from tracking check
   if (ctx.replacement_reason && ctx.replacement_reason !== null) {
     // Refused — escalate, never replace
