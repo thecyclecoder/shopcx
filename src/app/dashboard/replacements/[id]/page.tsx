@@ -129,9 +129,16 @@ export default function ReplacementDetailPage() {
           </h1>
           <p className="mt-1 text-sm text-zinc-500">Created {formatDate(r.created_at)}</p>
         </div>
-        <span className={`inline-flex rounded-full px-3 py-1 text-sm font-medium ${STATUS_COLORS[r.status] || STATUS_COLORS.pending}`}>
-          {r.status.replace("_", " ")}
-        </span>
+        <div className="flex items-center gap-2">
+          {r.items?.every(i => (i as { type?: string }).type === "all") ? (
+            <span className="rounded-full bg-indigo-100 px-2.5 py-0.5 text-xs font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400">Full</span>
+          ) : (
+            <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">Partial</span>
+          )}
+          <span className={`inline-flex rounded-full px-3 py-1 text-sm font-medium ${STATUS_COLORS[r.status] || STATUS_COLORS.pending}`}>
+            {r.status.replace("_", " ")}
+          </span>
+        </div>
       </div>
 
       {message && (
@@ -217,7 +224,9 @@ export default function ReplacementDetailPage() {
           )}
 
           {/* Subscription Adjustment */}
-          {r.subscription_id && (
+          {r.subscription_id && (() => {
+            const isFullReplacement = r.items?.every(i => (i as { type?: string }).type === "all") ?? false;
+            return (
             <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Subscription</h2>
@@ -225,9 +234,13 @@ export default function ReplacementDetailPage() {
                   <span className="rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/20 dark:text-green-400">
                     Adjusted
                   </span>
-                ) : (
+                ) : isFullReplacement ? (
                   <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/20 dark:text-amber-400">
                     Needs adjustment
+                  </span>
+                ) : (
+                  <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                    No adjustment needed
                   </span>
                 )}
               </div>
@@ -236,7 +249,7 @@ export default function ReplacementDetailPage() {
                   Next billing date moved to: <span className="font-medium">{formatDate(r.new_next_billing_date)}</span>
                 </p>
               )}
-              {!r.subscription_adjusted && r.status === "created" && (
+              {!r.subscription_adjusted && r.status === "created" && isFullReplacement && (
                 <button
                   onClick={() => handleAction("adjust-subscription")}
                   disabled={!!actionLoading}
@@ -246,7 +259,8 @@ export default function ReplacementDetailPage() {
                 </button>
               )}
             </div>
-          )}
+            );
+          })()}
         </div>
 
         {/* Sidebar */}

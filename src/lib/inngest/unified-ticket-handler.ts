@@ -589,10 +589,9 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
     }
 
     // ── 4. Positive close ──
-    if (!isNew && st.handledBy) {
+    // Check on all follow-up messages (not just active handlers) — covers post-playbook "thanks"
+    if (!isNew) {
       const isClose = await step.run("check-positive-close", async () => {
-        const auto = st.handledBy === "AI Agent" || st.handledBy.startsWith("Workflow:") || st.handledBy.startsWith("Journey:");
-        if (!auto) return false;
         return isPositive(msg);
       });
 

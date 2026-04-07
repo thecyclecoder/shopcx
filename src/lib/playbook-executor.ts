@@ -1979,6 +1979,7 @@ Respond with EXACTLY one word:
   if (result.includes("received")) {
     ctx.received_order = true;
     ctx.needs_item_selection = true;
+    ctx.replacement_reason = "missing_items";
     return { action: "advance", newStep: step.step_order + 1, context: ctx };
   }
 
