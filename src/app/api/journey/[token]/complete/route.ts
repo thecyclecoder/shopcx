@@ -220,8 +220,17 @@ export async function POST(
         }
       }
 
-      // Re-trigger the playbook to continue
+      // Clear journey handler + mark completed so playbook can resume
       if (session.ticket_id) {
+        // Mark journey completed in history
+        const { data: td } = await admin.from("tickets").select("journey_history").eq("id", session.ticket_id).single();
+        const history = (td?.journey_history as { journey_id: string; completed: boolean; nudged_at: string | null }[]) || [];
+        const updated = history.map(h => h.journey_id === session.journey_id ? { ...h, completed: true } : h);
+        await admin.from("tickets").update({
+          journey_history: updated,
+          handled_by: "Playbook: Replacement Order",
+        }).eq("id", session.ticket_id);
+
         await inngest.send({
           name: "ticket/inbound-message",
           data: {
@@ -287,8 +296,16 @@ export async function POST(
         }
       }
 
-      // Re-trigger the playbook to continue
+      // Clear journey handler + mark completed so playbook can resume
       if (session.ticket_id) {
+        const { data: td2 } = await admin.from("tickets").select("journey_history").eq("id", session.ticket_id).single();
+        const history2 = (td2?.journey_history as { journey_id: string; completed: boolean; nudged_at: string | null }[]) || [];
+        const updated2 = history2.map(h => h.journey_id === session.journey_id ? { ...h, completed: true } : h);
+        await admin.from("tickets").update({
+          journey_history: updated2,
+          handled_by: "Playbook: Replacement Order",
+        }).eq("id", session.ticket_id);
+
         await inngest.send({
           name: "ticket/inbound-message",
           data: {
