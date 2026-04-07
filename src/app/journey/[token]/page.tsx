@@ -1098,6 +1098,15 @@ function CodeDrivenJourney({
             />
           )}
 
+          {form.type === "address_form" && (
+            <AddressForm
+              config={config}
+              primaryColor={primaryColor}
+              submitting={submitting}
+              onSubmit={(value, label) => handleSubmit(value, label)}
+            />
+          )}
+
           {form.type === "item_accounting" && (
             <ItemAccountingForm
               step={form as unknown as JourneyStep}
@@ -1416,5 +1425,109 @@ function ItemAccountingForm({
         {submitting ? "Submitting..." : "Continue"}
       </button>
     </div>
+  );
+}
+
+// ── Address Form Component ──
+
+function AddressForm({
+  config, primaryColor, submitting, onSubmit,
+}: {
+  config: JourneyConfig;
+  primaryColor: string;
+  submitting: boolean;
+  onSubmit: (value: string, label: string) => void;
+}) {
+  // Pre-fill from current address in metadata
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const meta = (config as any)?.metadata as Record<string, unknown> | undefined;
+  const current = (meta?.currentAddress as Record<string, string>) || {};
+
+  const [street1, setStreet1] = useState(current.address1 || current.street1 || "");
+  const [street2, setStreet2] = useState(current.address2 || current.street2 || "");
+  const [city, setCity] = useState(current.city || "");
+  const [state, setState] = useState(current.provinceCode || current.state || "");
+  const [zip, setZip] = useState(current.zip || "");
+
+  const isValid = street1.trim() && city.trim() && state.trim() && zip.trim();
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isValid) return;
+    const value = JSON.stringify({ street1, street2, city, state, zip, country: "US" });
+    const label = [street1, street2, city, state, zip].filter(Boolean).join(", ");
+    onSubmit(value, label);
+  };
+
+  const inputCls = "w-full rounded-lg border-2 border-zinc-200 bg-white px-3 py-2.5 text-sm text-zinc-900 outline-none transition-colors focus:border-indigo-400 placeholder-zinc-400";
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-3" autoComplete="on">
+      <div>
+        <label className="mb-1 block text-xs font-medium text-zinc-500">Street address</label>
+        <input
+          type="text"
+          value={street1}
+          onChange={e => setStreet1(e.target.value)}
+          placeholder="123 Main St"
+          autoComplete="address-line1"
+          className={inputCls}
+        />
+      </div>
+      <div>
+        <label className="mb-1 block text-xs font-medium text-zinc-500">Apt, suite, unit (optional)</label>
+        <input
+          type="text"
+          value={street2}
+          onChange={e => setStreet2(e.target.value)}
+          placeholder="Apt 4B"
+          autoComplete="address-line2"
+          className={inputCls}
+        />
+      </div>
+      <div className="grid grid-cols-5 gap-2">
+        <div className="col-span-2">
+          <label className="mb-1 block text-xs font-medium text-zinc-500">City</label>
+          <input
+            type="text"
+            value={city}
+            onChange={e => setCity(e.target.value)}
+            placeholder="City"
+            autoComplete="address-level2"
+            className={inputCls}
+          />
+        </div>
+        <div className="col-span-1">
+          <label className="mb-1 block text-xs font-medium text-zinc-500">State</label>
+          <input
+            type="text"
+            value={state}
+            onChange={e => setState(e.target.value)}
+            placeholder="TX"
+            autoComplete="address-level1"
+            className={inputCls}
+          />
+        </div>
+        <div className="col-span-2">
+          <label className="mb-1 block text-xs font-medium text-zinc-500">ZIP code</label>
+          <input
+            type="text"
+            value={zip}
+            onChange={e => setZip(e.target.value)}
+            placeholder="75001"
+            autoComplete="postal-code"
+            className={inputCls}
+          />
+        </div>
+      </div>
+      <button
+        type="submit"
+        disabled={!isValid || submitting}
+        className="mt-2 w-full rounded-xl px-4 py-3 text-sm font-semibold text-white transition-opacity disabled:opacity-40"
+        style={{ backgroundColor: primaryColor }}
+      >
+        {submitting ? "Verifying..." : "Confirm Address"}
+      </button>
+    </form>
   );
 }

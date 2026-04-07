@@ -124,20 +124,24 @@ export async function POST(
           actionLog.push("Confirmed existing shipping address");
         }
       } else {
-        // Customer entered new address — validate + save
-        const street1 = responses?.street1?.value;
-        const city = responses?.city?.value;
-        const state = responses?.state?.value;
-        const zip = responses?.zip?.value;
+        // Customer entered new address via address_form — parse JSON value
+        const addrFormValue = responses?.address_form?.value;
+        let parsedAddr: { street1?: string; street2?: string; city?: string; state?: string; zip?: string; country?: string } = {};
+        try { parsedAddr = addrFormValue ? JSON.parse(addrFormValue) : {}; } catch { /* ignore */ }
+
+        const street1 = parsedAddr.street1;
+        const city = parsedAddr.city;
+        const state = parsedAddr.state;
+        const zip = parsedAddr.zip;
 
         if (street1 && city && state && zip && session.ticket_id) {
           const newAddr = {
             street1,
-            street2: responses?.street2?.value || undefined,
+            street2: parsedAddr.street2 || undefined,
             city,
             state,
             zip,
-            country: "US",
+            country: parsedAddr.country || "US",
           };
 
           // Try EasyPost verification

@@ -12,7 +12,7 @@ type Admin = ReturnType<typeof createAdminClient>;
 
 export interface JourneyStep {
   key: string;
-  type: "checklist" | "confirm" | "text" | "select" | "single_choice" | "phone" | "info" | "item_accounting";
+  type: "checklist" | "confirm" | "text" | "select" | "single_choice" | "phone" | "info" | "item_accounting" | "address_form";
   question: string;
   subtitle?: string;
   options?: { value: string; label: string }[];

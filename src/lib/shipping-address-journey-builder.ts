@@ -95,40 +95,12 @@ export async function buildShippingAddressSteps(
     });
   }
 
-  // Address form — always included (shown if no address or customer says "no")
+  // Single address form step — all fields combined
   steps.push({
-    key: "street1",
-    type: "text",
-    question: "Street address",
-    placeholder: "123 Main St",
-  });
-
-  steps.push({
-    key: "street2",
-    type: "text",
-    question: "Apartment, suite, unit (optional)",
-    placeholder: "Apt 4B",
-  });
-
-  steps.push({
-    key: "city",
-    type: "text",
-    question: "City",
-    placeholder: "City",
-  });
-
-  steps.push({
-    key: "state",
-    type: "text",
-    question: "State",
-    placeholder: "TX",
-  });
-
-  steps.push({
-    key: "zip",
-    type: "text",
-    question: "ZIP code",
-    placeholder: "75001",
+    key: "address_form",
+    type: "address_form",
+    question: "Enter your shipping address",
+    subtitle: "We'll verify your address before shipping.",
   });
 
   return {
