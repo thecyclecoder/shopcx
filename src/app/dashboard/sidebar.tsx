@@ -258,7 +258,7 @@ export default function Sidebar({
                         <Link
                           key={item.href + item.label}
                           href={item.comingSoon ? "#" : item.href}
-                          className={`flex items-center gap-2.5 rounded px-2 py-1 text-sm transition-colors ${
+                          className={`flex items-center gap-2.5 rounded-md px-2.5 py-2.5 md:py-1.5 text-[15px] md:text-sm transition-colors ${
                             item.comingSoon
                               ? "cursor-default text-zinc-300 dark:text-zinc-600"
                               : isActive
