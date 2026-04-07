@@ -966,6 +966,16 @@ async function handleApplyPolicy(
   }
 
   // ── In-policy orders: offer return directly (no exception needed) ──
+  // BUT check if in-policy return is blocked (e.g. chargeback on this specific order)
+  if (inPolicy.length > 0 && outOfPolicy.length === 0 && ctx.in_policy_blocked) {
+    response += `\n\nWe are unable to process a return for this order at this time.`;
+    return {
+      action: "respond", response,
+      context: { in_policy: inPolicy, out_of_policy: outOfPolicy, policy_applied: policy.name, in_policy_blocked: true },
+      systemNote: `[Playbook] In-policy return blocked: ${ctx.in_policy_block_reason}. Not offering return.`,
+    };
+  }
+
   if (inPolicy.length > 0 && outOfPolicy.length === 0) {
     // All identified orders qualify — offer return with rate quote
     const order = orderObjs.find(o => inPolicy.includes(o.order_number));
@@ -1061,12 +1071,21 @@ async function handleOfferException(
   }
 
   // ── Check disqualifiers (silent or explicit) ──
+  // Disqualifiers have a "blocks" field:
+  //   "exceptions_only" — blocks exception tiers but allows in-policy returns
+  //   "in_policy_return" — blocks in-policy return for the specific order (e.g. chargeback on that order)
   if (!ctx.disqualifier_checked) {
-    const disqualifiers = playbook.exception_disqualifiers || [];
-    let disqualified = false;
-    let disqualifyReason = "";
+    const disqualifiers = (playbook.exception_disqualifiers || []) as { type: string; source?: string; blocks?: string }[];
+    let exceptionsBlocked = false;
+    let exceptionsBlockReason = "";
+    let inPolicyBlocked = false;
+    let inPolicyBlockReason = "";
+
+    const identifiedOrders = (ctx.identified_orders as string[]) || [];
 
     for (const dq of disqualifiers) {
+      const blocksTarget = dq.blocks || "exceptions_only";
+
       if (dq.type === "previous_exception") {
         const { count } = await admin.from("returns")
           .select("id", { count: "exact", head: true })
@@ -1075,40 +1094,72 @@ async function handleOfferException(
           .eq("source", dq.source || "playbook")
           .not("status", "eq", "cancelled");
         if ((count || 0) > 0) {
-          disqualified = true;
-          disqualifyReason = "Customer has a previous playbook exception on record.";
-          break;
+          if (blocksTarget === "in_policy_return") {
+            inPolicyBlocked = true;
+            inPolicyBlockReason = "Customer has a previous playbook exception.";
+          } else {
+            exceptionsBlocked = true;
+            exceptionsBlockReason = "Customer has a previous playbook exception on record.";
+          }
         }
       }
+
       if (dq.type === "has_chargeback") {
         const { count } = await admin.from("chargeback_events")
           .select("id", { count: "exact", head: true })
           .eq("workspace_id", wsId)
           .eq("customer_id", customer.id);
         if ((count || 0) > 0) {
-          disqualified = true;
-          disqualifyReason = "Customer has filed a chargeback.";
-          break;
+          if (blocksTarget === "in_policy_return") {
+            inPolicyBlocked = true;
+            inPolicyBlockReason = "Customer has filed a chargeback.";
+          } else {
+            exceptionsBlocked = true;
+            exceptionsBlockReason = "Customer has filed a chargeback.";
+          }
+        }
+      }
+
+      if (dq.type === "has_chargeback_on_order" && identifiedOrders.length > 0) {
+        // Check if any of the identified orders have a chargeback
+        for (const orderNum of identifiedOrders) {
+          const { data: order } = await admin.from("orders")
+            .select("shopify_order_id")
+            .eq("order_number", orderNum)
+            .eq("workspace_id", wsId).single();
+          if (order) {
+            const { count } = await admin.from("chargeback_events")
+              .select("id", { count: "exact", head: true })
+              .eq("workspace_id", wsId)
+              .eq("shopify_order_id", order.shopify_order_id);
+            if ((count || 0) > 0) {
+              inPolicyBlocked = true;
+              inPolicyBlockReason = `Chargeback filed on order ${orderNum}.`;
+              break;
+            }
+          }
         }
       }
     }
 
-    if (disqualified) {
-      return {
-        action: "advance", newStep: step.step_order + 1,
-        context: { disqualifier_checked: true, disqualified: true, disqualify_reason: disqualifyReason, exception_exhausted: true },
-        systemNote: `[Playbook] Customer disqualified from exceptions: ${disqualifyReason} Behavior: ${playbook.disqualifier_behavior}. Moving to stand firm.`,
-      };
-    }
     ctx.disqualifier_checked = true;
+    ctx.exceptions_blocked = exceptionsBlocked;
+    ctx.exceptions_block_reason = exceptionsBlockReason;
+    ctx.in_policy_blocked = inPolicyBlocked;
+    ctx.in_policy_block_reason = inPolicyBlockReason;
+
+    if (exceptionsBlocked) {
+      ctx.disqualified = true;
+      ctx.exception_exhausted = true;
+    }
   }
 
-  // If already disqualified (checked on a previous round), skip to stand firm
-  if (ctx.disqualified) {
+  // If exceptions are blocked, skip to stand firm (but in-policy returns may still work via handleApplyPolicy)
+  if (ctx.disqualified && !ctx.in_policy_offer_made) {
     return {
       action: "advance", newStep: step.step_order + 1,
       context: { exception_exhausted: true },
-      systemNote: "[Playbook] Customer previously disqualified. Stand firm.",
+      systemNote: `[Playbook] Customer disqualified from exceptions: ${ctx.exceptions_block_reason}. In-policy returns ${ctx.in_policy_blocked ? "also blocked" : "still allowed"}. Stand firm.`,
     };
   }
 
