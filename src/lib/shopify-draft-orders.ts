@@ -113,7 +113,7 @@ export async function createReplacementDraftOrder(
         city: input.shippingAddress.city,
         provinceCode: input.shippingAddress.province,
         zip: input.shippingAddress.zip,
-        countryCode: input.shippingAddress.country,
+        countryCode: ["PR", "GU", "VI", "AS", "MP"].includes(input.shippingAddress.country) ? "US" : input.shippingAddress.country,
         phone: input.shippingAddress.phone || undefined,
       },
       email: input.customerEmail,

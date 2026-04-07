@@ -2468,11 +2468,25 @@ async function handleCreateReplacement(
         }
       }
     } catch (err) {
-      // Draft order failed — record is still created, agent can complete manually
+      // Draft order failed — escalate to agent, don't tell customer it succeeded
       await admin.from("ticket_messages").insert({
         ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "system",
         body: `Replacement draft order creation failed: ${err instanceof Error ? err.message : "unknown error"}. Manual creation needed.`,
       });
+
+      await admin.from("tickets").update({
+        status: "open",
+        active_playbook_id: null,
+        playbook_step: 0,
+        escalation_reason: "replacement_creation_failed",
+        updated_at: new Date().toISOString(),
+      }).eq("id", tid);
+
+      return {
+        action: "respond",
+        response: "We're processing your replacement and our team will follow up with the details shortly.",
+        systemNote: "Replacement draft order creation failed. Escalated to agent.",
+      };
     }
   }
 
@@ -2555,9 +2569,9 @@ async function handleAdjustSubscription(
   }
 
   // Final confirmation
-  const replacementName = ctx.replacement_order_name ? `${ctx.replacement_order_name} ` : "";
+  const orderRef = ctx.replacement_order_name ? ` ${ctx.replacement_order_name}` : "";
   const subNote = ctx.subscription_adjusted ? ` Your next subscription shipment has been adjusted to ${ctx.new_next_billing_date}.` : "";
-  const response = `Your replacement order ${replacementName}has been created and will ship within 2-3 business days.${subNote}`;
+  const response = `Your replacement order${orderRef} has been created and will ship within 2-3 business days.${subNote}`;
 
   return { action: "complete", response, context: ctx };
 }
