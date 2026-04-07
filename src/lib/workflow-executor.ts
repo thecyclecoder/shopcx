@@ -455,6 +455,17 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
         ctx.fulfillment.easypost_location = [detailEvent.city, detailEvent.state].filter(Boolean).join(", ");
       }
 
+      // Sync EasyPost data back to order + post note on Shopify order
+      if (ctx.order?.id) {
+        const { syncEasyPostToOrder } = await import("@/lib/easypost-order-sync");
+        await syncEasyPostToOrder({
+          workspaceId: ctx.workspaceId,
+          orderId: ctx.order.id as string,
+          shopifyOrderId: ctx.order.shopify_order_id as string | null,
+          trackingResult: tracking,
+        });
+      }
+
       // Add internal note with EasyPost findings
       await addNote(admin, ctx, `EasyPost tracking lookup: status "${tracking.status}"${lastEvent ? ` — "${lastEvent.message}" at ${ctx.fulfillment.easypost_location || "unknown location"}` : ""}. Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`);
     } catch (err) {

@@ -29,6 +29,10 @@ interface OrderDetail {
   discount_codes: string[] | null;
   sync_resolved_at: string | null;
   sync_resolved_note: string | null;
+  easypost_status: string | null;
+  easypost_detail: string | null;
+  easypost_location: string | null;
+  easypost_checked_at: string | null;
   amplifier_order_id: string | null;
   amplifier_received_at: string | null;
   amplifier_shipped_at: string | null;
@@ -102,6 +106,8 @@ export default function OrderDetailPage() {
   const [subscription, setSubscription] = useState<{ id: string; shopify_contract_id: string; status: string } | null>(null);
   const [shopifyDomain, setShopifyDomain] = useState("");
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
+  const [replacementOrder, setReplacementOrder] = useState<{ id: string; order_name: string; status: string } | null>(null);
+  const [isReplacementFor, setIsReplacementFor] = useState<{ id: string; original_order: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [resolveNote, setResolveNote] = useState("");
   const [resolving, setResolving] = useState(false);
@@ -114,6 +120,8 @@ export default function OrderDetailPage() {
         setSubscription(data.subscription || null);
         setShopifyDomain(data.shopify_domain || "");
         setTimeline(data.timeline || []);
+        setReplacementOrder(data.replacement_order || null);
+        setIsReplacementFor(data.is_replacement_for || null);
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -167,6 +175,22 @@ export default function OrderDetailPage() {
           )}
         </div>
         <p className="mt-1 text-sm text-zinc-500">{formatDateTime(order.created_at)}</p>
+        {/* Replacement links */}
+        {replacementOrder && (
+          <div className="mt-2 rounded-md border border-orange-200 bg-orange-50 px-3 py-2 dark:border-orange-800 dark:bg-orange-950">
+            <span className="text-sm text-orange-700 dark:text-orange-400">
+              Replacement order created: <button onClick={() => router.push(`/dashboard/orders?search=${replacementOrder.order_name}`)} className="font-medium underline">{replacementOrder.order_name}</button>
+              <span className="ml-2 rounded bg-orange-100 px-1.5 py-0.5 text-xs dark:bg-orange-900/30">{replacementOrder.status}</span>
+            </span>
+          </div>
+        )}
+        {isReplacementFor && (
+          <div className="mt-2 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 dark:border-indigo-800 dark:bg-indigo-950">
+            <span className="text-sm text-indigo-700 dark:text-indigo-400">
+              This is a replacement for: <button onClick={() => router.push(`/dashboard/orders?search=${isReplacementFor.original_order}`)} className="font-medium underline">{isReplacementFor.original_order}</button>
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -361,6 +385,31 @@ export default function OrderDetailPage() {
                       )}
                     </div>
                   ))
+                )}
+                {/* EasyPost enhanced tracking */}
+                {order.easypost_status && (
+                  <div className="mt-2 rounded border border-zinc-100 bg-zinc-50 p-2 dark:border-zinc-700 dark:bg-zinc-800/50">
+                    <p className="text-xs font-medium text-zinc-500">EasyPost</p>
+                    <p className={`text-sm font-medium ${
+                      order.easypost_status === "delivered" ? "text-emerald-600 dark:text-emerald-400"
+                      : order.easypost_status === "return_to_sender" ? "text-red-600 dark:text-red-400"
+                      : order.easypost_status === "failure" ? "text-red-600 dark:text-red-400"
+                      : "text-blue-600 dark:text-blue-400"
+                    }`}>
+                      {order.easypost_status.replace(/_/g, " ")}
+                    </p>
+                    {order.easypost_detail && (
+                      <p className="text-xs text-zinc-500">{order.easypost_detail}</p>
+                    )}
+                    {order.easypost_location && (
+                      <p className="text-xs text-zinc-400">{order.easypost_location}</p>
+                    )}
+                    {order.easypost_checked_at && (
+                      <p className="text-[10px] text-zinc-400 mt-1">
+                        Checked {new Date(order.easypost_checked_at).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
             </div>

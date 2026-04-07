@@ -5,6 +5,7 @@ import {
   handleCustomerUpdate,
   handleOrderEvent,
   handleDisputeEvent,
+  handleFulfillmentUpdate,
 } from "@/lib/shopify-webhooks";
 import { handlePaymentMethodEvent } from "@/lib/dunning-webhook";
 
@@ -51,6 +52,10 @@ export async function POST(request: Request) {
       case "orders/create":
       case "orders/updated":
         await handleOrderEvent(workspace.id, payload);
+        break;
+
+      case "fulfillments/update":
+        await handleFulfillmentUpdate(workspace.id, payload);
         break;
 
       case "disputes/create":

@@ -1933,6 +1933,17 @@ async function handleCheckTracking(
       return { action: "respond", response, context: ctx };
     }
 
+    // Sync EasyPost data to order + post note on Shopify
+    if (order) {
+      const { syncEasyPostToOrder } = await import("@/lib/easypost-order-sync");
+      await syncEasyPostToOrder({
+        workspaceId: wsId,
+        orderId: order.id,
+        shopifyOrderId: order.shopify_order_id,
+        trackingResult: result,
+      });
+    }
+
     await admin.from("ticket_messages").insert({
       ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "system",
       body: `EasyPost tracking: ${result.status} — "${ctx.easypost_detail}" at ${ctx.easypost_location || "unknown"}. Carrier: ${ctx.carrier}. Tracking: ${tracking.number}.`,
@@ -2260,6 +2271,33 @@ async function handleCreateReplacement(
 
       ctx.replacement_order_name = result.orderName;
       ctx.replacement_created = true;
+
+      // Mark original order with replacement reference
+      if (order) {
+        await admin.from("orders").update({
+          sync_resolved_note: `Replacement order ${result.orderName} created (${reason})`,
+          sync_resolved_at: new Date().toISOString(),
+        }).eq("id", order.id);
+
+        // Tag + note on Shopify order
+        if (order.shopify_order_id) {
+          const { addOrderTags } = await import("@/lib/shopify-order-tags");
+          await addOrderTags(wsId, order.shopify_order_id, ["replacement:created", `replacement:${result.orderName}`]);
+
+          try {
+            const { getShopifyCredentials } = await import("@/lib/shopify-sync");
+            const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
+            const { shop, accessToken } = await getShopifyCredentials(wsId);
+            await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+              method: "POST",
+              headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+              body: JSON.stringify({
+                query: `mutation { orderUpdate(input: { id: "gid://shopify/Order/${order.shopify_order_id}", note: "Replacement order ${result.orderName} created — ${reason}" }) { userErrors { message } } }`,
+              }),
+            });
+          } catch { /* non-fatal */ }
+        }
+      }
     } catch (err) {
       // Draft order failed — record is still created, agent can complete manually
       await admin.from("ticket_messages").insert({
@@ -2291,10 +2329,14 @@ async function handleAdjustSubscription(
     sub = subs.find(s => s.shopify_contract_id === ctx.identified_subscription) || sub;
   }
 
-  if (!sub || sub.status !== "active") {
-    // No active sub — just send the confirmation message and complete
-    const orderName = ctx.replacement_order_name || "your replacement";
-    const response = `Your replacement order ${typeof ctx.replacement_order_name === "string" ? ctx.replacement_order_name + " " : ""}has been created and will ship within 2-3 business days.`;
+  // Only adjust subscription date if replacing ALL items (full order replacement)
+  // Partial replacements (missing/damaged specific items) don't change the subscription
+  const isFullReplacement = (ctx.replacement_items as { type?: string }[] | undefined)
+    ?.every(i => i.type === "all") ?? false;
+
+  if (!sub || sub.status !== "active" || !isFullReplacement) {
+    const replacementName = ctx.replacement_order_name ? `${ctx.replacement_order_name} ` : "";
+    const response = `Your replacement order ${replacementName}has been created and will ship within 2-3 business days.`;
     return { action: "complete", response, context: ctx };
   }
 

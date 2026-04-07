@@ -759,3 +759,59 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
     }
   }
 }
+
+// ── Fulfillments/update handler ──
+
+export async function handleFulfillmentUpdate(workspaceId: string, payload: Record<string, unknown>) {
+  const admin = createAdminClient();
+
+  // The fulfillment webhook payload has order_id and shipment_status
+  const shopifyOrderId = payload.order_id ? String(payload.order_id) : null;
+  const shipmentStatus = ((payload.shipment_status as string) || "").toLowerCase();
+  const trackingNumber = (payload.tracking_number as string) || (payload.tracking_numbers as string[])?.[0] || null;
+  const trackingCompany = (payload.tracking_company as string) || null;
+  const updatedAt = (payload.updated_at as string) || new Date().toISOString();
+
+  if (!shopifyOrderId) return;
+
+  // Map shipment_status to our delivery_status
+  const statusMap: Record<string, string> = {
+    confirmed: "not_delivered",
+    label_printed: "not_delivered",
+    label_purchased: "not_delivered",
+    in_transit: "not_delivered",
+    out_for_delivery: "not_delivered",
+    delivered: "delivered",
+    attempted_delivery: "not_delivered",
+    ready_for_pickup: "not_delivered",
+    failure: "not_delivered",
+  };
+
+  const deliveryStatus = statusMap[shipmentStatus] || null;
+  if (!deliveryStatus) return;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const updates: Record<string, any> = {};
+
+  if (deliveryStatus === "delivered") {
+    updates.delivery_status = "delivered";
+    updates.delivered_at = updatedAt;
+  } else {
+    // Only update if current status is less advanced
+    const { data: order } = await admin.from("orders")
+      .select("delivery_status")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_order_id", shopifyOrderId)
+      .single();
+
+    // Don't overwrite delivered/returned with a lesser status
+    if (order?.delivery_status === "delivered" || order?.delivery_status === "returned") return;
+  }
+
+  if (Object.keys(updates).length > 0) {
+    await admin.from("orders")
+      .update(updates)
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_order_id", shopifyOrderId);
+  }
+}

@@ -5,6 +5,7 @@ const WEBHOOK_TOPICS = [
   "customers/update",
   "orders/create",
   "orders/updated",
+  "fulfillments/update",
   "disputes/create",
   "disputes/update",
 ];

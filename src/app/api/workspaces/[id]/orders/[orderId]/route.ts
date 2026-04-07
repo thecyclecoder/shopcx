@@ -119,11 +119,24 @@ export async function GET(
   // Sort timeline chronologically
   timeline.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
+  // Check for replacement links
+  const { data: replacementForThis } = await admin.from("replacements")
+    .select("id, shopify_replacement_order_name, status")
+    .eq("original_order_id", orderId)
+    .limit(1).single();
+
+  const { data: replacementOfOriginal } = await admin.from("replacements")
+    .select("id, original_order_number, status")
+    .eq("shopify_replacement_order_id", order.shopify_order_id)
+    .limit(1).single();
+
   return NextResponse.json({
     order,
     subscription,
     shopify_domain: workspace?.shopify_myshopify_domain || "",
     timeline,
+    replacement_order: replacementForThis ? { id: replacementForThis.id, order_name: replacementForThis.shopify_replacement_order_name, status: replacementForThis.status } : null,
+    is_replacement_for: replacementOfOriginal ? { id: replacementOfOriginal.id, original_order: replacementOfOriginal.original_order_number } : null,
   });
 }
 
