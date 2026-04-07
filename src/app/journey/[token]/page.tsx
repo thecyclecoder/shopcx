@@ -395,26 +395,28 @@ export default function JourneyPage() {
 
         {/* Item accounting — per-item radio groups */}
         {step.type === "item_accounting" && (() => {
-          // Group options by item prefix (item_0, item_1, etc.)
-          const itemGroups: { key: string; title: string; options: { value: string; label: string }[] }[] =
-            (config?.metadata as Record<string, unknown>)?.itemGroups as typeof itemGroups || [];
+          // Always derive groups from flat options (guaranteed to exist)
+          // Then overlay titles from metadata.itemGroups if available
+          const grouped = new Map<string, { value: string; label: string }[]>();
+          for (const opt of step.options || []) {
+            const prefix = opt.value.split(":")[0];
+            if (!grouped.has(prefix)) grouped.set(prefix, []);
+            grouped.get(prefix)!.push(opt);
+          }
 
-          // If no itemGroups in metadata, derive from options
-          const groups = itemGroups.length > 0
-            ? itemGroups
-            : (() => {
-                const grouped = new Map<string, { value: string; label: string }[]>();
-                for (const opt of step.options || []) {
-                  const prefix = opt.value.split(":")[0];
-                  if (!grouped.has(prefix)) grouped.set(prefix, []);
-                  grouped.get(prefix)!.push(opt);
-                }
-                return Array.from(grouped.entries()).map(([key, options]) => ({
-                  key,
-                  title: key.replace("item_", "Item "),
-                  options,
-                }));
-              })();
+          // Get titles from metadata
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const meta = (config as any)?.metadata as Record<string, unknown> | undefined;
+          const metaGroups = (meta?.itemGroups as { key: string; title: string }[]) || [];
+          const lineItems = (meta?.lineItems as { title: string; quantity: number }[]) || [];
+          const titleMap = new Map<string, string>();
+          for (const g of metaGroups) titleMap.set(g.key, g.title);
+
+          const groups = Array.from(grouped.entries()).map(([key, options], idx) => ({
+            key,
+            title: titleMap.get(key) || (lineItems[idx] ? `${lineItems[idx].title}${lineItems[idx].quantity > 1 ? ` (x${lineItems[idx].quantity})` : ""}` : `Item ${idx + 1}`),
+            options,
+          }));
 
           const allSelected = groups.every(g => itemSelections[g.key]);
 
