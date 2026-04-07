@@ -43,11 +43,23 @@ interface RecentOrder {
   currency: string;
   financial_status: string | null;
   fulfillment_status: string | null;
+  delivery_status?: string | null;
   source_name: string | null;
   order_type: string | null;
   line_items: OrderLineItem[];
   fulfillments: OrderFulfillment[];
   created_at: string;
+}
+
+function getOrderShippingStatus(o: RecentOrder): { label: string; classes: string } {
+  const fs = (o.fulfillment_status || "").toUpperCase();
+  const ds = o.delivery_status || "";
+  if (ds === "delivered") return { label: "Delivered", classes: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400" };
+  if (ds === "returned") return { label: "Returned", classes: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" };
+  if (fs === "FULFILLED" && ds === "not_delivered") return { label: "In Transit", classes: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" };
+  if (fs === "FULFILLED") return { label: "In Transit", classes: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" };
+  if (!fs || fs === "UNFULFILLED" || fs === "NULL") return { label: "Unfulfilled", classes: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400" };
+  return { label: fs.toLowerCase(), classes: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400" };
 }
 
 /* SubscriptionItem / CustomerSubscription types use SubscriptionData from shared component */
@@ -2384,9 +2396,10 @@ export default function TicketDetailPage() {
                         {o.financial_status && (
                           <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-sm font-medium capitalize text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.financial_status}</span>
                         )}
-                        {o.fulfillment_status && (
-                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-sm font-medium capitalize text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{o.fulfillment_status}</span>
-                        )}
+                        {(() => {
+                          const ss = getOrderShippingStatus(o);
+                          return <span className={`rounded px-1.5 py-0.5 text-sm font-medium ${ss.classes}`}>{ss.label}</span>;
+                        })()}
                       </div>
                       <p className="mt-1 text-sm text-zinc-400">{formatDate(o.created_at)}</p>
                       {/* Fulfillments */}
