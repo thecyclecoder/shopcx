@@ -444,7 +444,7 @@ async function executeStep(
       return handleClassifyIssue(admin, tid, msg, ctx, step, pers);
 
     case "select_missing_items":
-      return handleSelectMissingItems(admin, wsId, tid, orders, ctx, step, pers);
+      return handleSelectMissingItems(admin, wsId, tid, orders, ctx, step, pers, msg);
 
     case "confirm_shipping_address":
       return handleConfirmShippingAddress(admin, wsId, tid, customer, ctx, step, pers);
@@ -2167,6 +2167,7 @@ async function handleSelectMissingItems(
   orders: OrderData[], ctx: Record<string, unknown>,
   step: PlaybookStep,
   pers: { name?: string; tone?: string; sign_off?: string | null } | null,
+  msg: string = "",
 ): Promise<PlaybookExecResult> {
   // Delivery error / carrier lost / not received — replace ALL items, skip selection
   if (!ctx.needs_item_selection) {
@@ -2189,8 +2190,37 @@ async function handleSelectMissingItems(
   }
 
   // Items already selected (from journey completion)
-  if (ctx.replacement_items) {
+  if (ctx.replacement_items && !ctx.all_items_received) {
     return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
+  // Customer marked everything as received — confirm with them
+  if (ctx.all_items_received) {
+    if (!ctx.all_received_confirm_asked) {
+      ctx.all_received_confirm_asked = true;
+      return {
+        action: "respond", context: ctx,
+        response: "You indicated that you received everything in your order and nothing was damaged. In that case, it seems like there is nothing for us to fix. Was that correct?",
+      };
+    }
+
+    // Parse their response
+    const lower = msg.toLowerCase().replace(/<[^>]*>/g, " ");
+    const saysCorrect = /\b(yes|correct|right|that's right|yep|yeah)\b/i.test(lower);
+
+    if (saysCorrect) {
+      return {
+        action: "complete",
+        response: "Got it! If anything comes up in the future, don't hesitate to reach out.",
+      };
+    }
+
+    // They said no — relaunch the journey
+    ctx.all_items_received = false;
+    ctx.all_received_confirm_asked = false;
+    ctx.replacement_items = undefined;
+    ctx.awaiting_item_selection = true;
+    // Fall through to journey launch below
   }
 
   // Launch missing items journey
