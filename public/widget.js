@@ -84,7 +84,19 @@
     if (isMobile && isOpen) {
       // Move bubble to top-right as a close button over fullscreen iframe
       bubble.style.cssText = "position:fixed;top:12px;right:12px;z-index:2147483648;width:40px;height:40px;border-radius:50%;border:none;background:rgba(0,0,0,0.5);color:white;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:none;";
+      // Freeze background scroll
+      document.body.style.overflow = "hidden";
+      document.body.style.position = "fixed";
+      document.body.style.width = "100%";
+      document.body.style.top = "-" + window.scrollY + "px";
     } else if (isMobile && !isOpen) {
+      // Unfreeze background scroll
+      var scrollY = Math.abs(parseInt(document.body.style.top || "0", 10));
+      document.body.style.overflow = "";
+      document.body.style.position = "";
+      document.body.style.width = "";
+      document.body.style.top = "";
+      window.scrollTo(0, scrollY);
       // Restore to bottom-right bubble with fetched color
       bubble.style.cssText = "width:56px;height:56px;border-radius:50%;border:none;background:" + bubbleColor + ";color:white;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,0.15);transition:transform 0.2s;";
     }
