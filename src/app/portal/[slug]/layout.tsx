@@ -25,23 +25,18 @@ export default async function PortalLayout({
   const primaryColor = (minisite.primary_color as string) || workspace.help_primary_color || "#111827";
 
   return (
-    <html lang="en">
-      <head>
-        <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Manage Subscriptions — {workspace.name}</title>
-        <style>{`
-          :root { --portal-primary: ${primaryColor}; }
-          body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f9fafb; color: #111827; }
-          .portal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 24px; background: #fff; border-bottom: 1px solid #e5e7eb; }
-          .portal-logo { height: 32px; }
-          .portal-nav { display: flex; gap: 16px; align-items: center; }
-          .portal-nav a { font-size: 14px; font-weight: 500; color: #6b7280; text-decoration: none; }
-          .portal-nav a:hover { color: #111827; }
-          .portal-body { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
-        `}</style>
-      </head>
-      <body>
+    <>
+      <style>{`
+        :root { --portal-primary: ${primaryColor}; }
+        .portal-wrapper { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f9fafb; color: #111827; min-height: 100vh; }
+        .portal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 24px; background: #fff; border-bottom: 1px solid #e5e7eb; }
+        .portal-logo { height: 32px; }
+        .portal-nav { display: flex; gap: 16px; align-items: center; }
+        .portal-nav a { font-size: 14px; font-weight: 500; color: #6b7280; text-decoration: none; }
+        .portal-nav a:hover { color: #111827; }
+        .portal-body { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
+      `}</style>
+      <div className="portal-wrapper">
         <header className="portal-header">
           <div>
             {logoUrl ? <img src={logoUrl} alt={workspace.name} className="portal-logo" /> : <strong>{workspace.name}</strong>}
@@ -54,7 +49,7 @@ export default async function PortalLayout({
         <main className="portal-body">
           {children}
         </main>
-      </body>
-    </html>
+      </div>
+    </>
   );
 }

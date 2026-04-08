@@ -976,7 +976,7 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
         )}
 
         {/* ── Shopify Multipass ── */}
-        {show("multipass") && shopifyConnected && canEdit && (
+        {false && show("multipass") && shopifyConnected && canEdit && (
           <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
             <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Shopify Multipass</h3>
             <p className="mt-1 text-sm text-zinc-500">Required for customer portal authentication. Find in Shopify admin &gt; Settings &gt; Customer accounts &gt; Multipass.</p>
