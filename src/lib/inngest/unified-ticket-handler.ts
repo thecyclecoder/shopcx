@@ -500,8 +500,15 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
           const patternMatch = patterns.some(pt => msg.toLowerCase().includes(pt.toLowerCase()));
           if (intentMatch || patternMatch) return { hit: true, type: "playbook" as const, id: p.id, name: p.name, intent: intents[0], patternName: m.name, confidence: m.confidence };
         }
+        // Check workflows (e.g. account_login re-trigger on "link expired")
+        const autoTag = m.autoTag;
+        if (autoTag) {
+          const { data: wf } = await admin.from("workflows").select("id, name, trigger_tag")
+            .eq("workspace_id", wsId).eq("enabled", true).eq("trigger_tag", autoTag);
+          if (wf?.length) return { hit: true, type: "workflow" as const, id: wf[0].id, name: wf[0].name, intent: m.category || "unknown", patternName: m.name, confidence: m.confidence, tag: autoTag };
+        }
       }
-      // Pattern matched at high confidence but no journey/playbook — pass through for macro lookup
+      // Pattern matched at high confidence but no journey/playbook/workflow — pass through for macro lookup
       if (m && m.confidence >= 0.7) {
         return { hit: true, type: "pattern_only" as const, id: "", name: m.name || "", intent: m.category || "unknown", patternName: m.name, confidence: m.confidence };
       }
@@ -567,7 +574,24 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
         return { status: "early_pattern_playbook", playbook: ep.name };
       }
 
-      // Pattern matched but no journey/playbook — go straight to routeExec for macro lookup
+      if (ep.type === "workflow" && st.hasCust) {
+        const wfTag = (ep as { tag?: string }).tag;
+        if (wfTag) {
+          const delay = await step.run("ep-wf-delay", () => responseDelay(admin, wsId, st.ch));
+          if (delay > 0) await step.sleep("ep-wf-sleep", `${delay}s`);
+          await step.run("ep-exec-workflow", async () => {
+            if (await newerActivity(admin, tid, t0)) return;
+            const { executeWorkflow } = await import("@/lib/workflow-executor");
+            await executeWorkflow(wsId, tid, wfTag);
+            await addTicketTag(tid, `w:${ep.name.toLowerCase().replace(/\s+/g, "_")}`);
+            await admin.from("tickets").update({ handled_by: `Workflow: ${ep.name}`, ai_clarification_turn: 0 }).eq("id", tid);
+            await setStatus(admin, tid, cfg.auto_resolve);
+          });
+          return { status: "early_pattern_workflow", workflow: ep.name };
+        }
+      }
+
+      // Pattern matched but no journey/playbook/workflow — go straight to routeExec for macro lookup
       if (ep.type === "pattern_only") {
         await step.run("pattern-route", async () => {
           const ctx = await assembleTicketContext(wsId, tid);
