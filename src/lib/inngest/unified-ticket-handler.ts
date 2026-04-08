@@ -860,6 +860,49 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
       return { hit: false, tag: null, cat: null, name: null };
     });
 
+    // Also check journey match_patterns directly (no smart pattern needed)
+    const journeyDirect = !pmatch.hit && st.hasCust && st.ch !== "social_comments"
+      ? await step.run("journey-direct-match", async () => {
+          const { data: jds } = await admin.from("journey_definitions").select("id, name, trigger_intent, match_patterns")
+            .eq("workspace_id", wsId).eq("is_active", true);
+          const msgLower = msg.toLowerCase().replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/[\u2018\u2019'`]/g, "").replace(/\s+/g, " ").trim();
+          const subjectLower = (st.subject || "").toLowerCase().replace(/[\u2018\u2019'`]/g, "").replace(/\s+/g, " ").trim();
+          for (const jd of jds || []) {
+            const patterns = (jd.match_patterns as string[] || []);
+            const matched = patterns.some(p => {
+              const pLower = p.toLowerCase().replace(/[''`]/g, "");
+              return msgLower.includes(pLower) || subjectLower.includes(pLower);
+            });
+            if (matched) {
+              await sysNote(admin, tid, `[System] Direct journey match → ${jd.name}`);
+              return { hit: true, type: "journey" as const, id: jd.id, name: jd.name, intent: jd.trigger_intent || "" };
+            }
+          }
+          return { hit: false } as { hit: false };
+        })
+      : { hit: false } as { hit: false };
+
+    if (journeyDirect.hit) {
+      const jd = journeyDirect as { hit: true; type: "journey"; id: string; name: string; intent: string };
+      const pDelay = await step.run("jdirect-delay", () => responseDelay(admin, wsId, st.ch));
+      if (pDelay > 0) await step.sleep("jdirect-sleep", `${pDelay}s`);
+      await step.run("exec-jdirect", async () => {
+        if (await newerActivity(admin, tid, t0)) return;
+        const { data: t } = await admin.from("tickets").select("customer_id").eq("id", tid).single();
+        const { leadIn, ctaText } = await generateJourneyLeadIn(msg, jd.name, st.ch, pers);
+        await launchJourneyForTicket({
+          workspaceId: wsId, ticketId: tid, customerId: t?.customer_id || "",
+          journeyId: jd.id, journeyName: jd.name,
+          triggerIntent: jd.intent, channel: st.ch, leadIn, ctaText,
+        });
+        await admin.from("tickets").update({ handled_by: `Journey: ${jd.name}` }).eq("id", tid);
+        await addTicketTag(tid, `j:${jd.intent || jd.name.toLowerCase().replace(/\s+/g, "_")}`);
+        await markFirstTouch(tid, "journey");
+        await setStatus(admin, tid, cfg.auto_resolve);
+      });
+      return { status: "journey_direct_match", journey: jd.name };
+    }
+
     if (pmatch.hit && pmatch.tag && st.hasCust && st.ch !== "social_comments") {
       const patternRouted = await step.run("route-pattern", async () => {
         // Journey?
