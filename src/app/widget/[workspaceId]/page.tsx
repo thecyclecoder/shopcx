@@ -593,6 +593,13 @@ export default function ChatWidgetPage() {
                         className="prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:text-inherit [&_a]:underline"
                         dangerouslySetInnerHTML={{ __html: bodyWithoutForm }}
                         onClick={(e) => {
+                          // Open links in new window (not inside iframe)
+                          const link = (e.target as HTMLElement).closest("a");
+                          if (link && link.href) {
+                            e.preventDefault();
+                            window.open(link.href, "_blank", "noopener,noreferrer");
+                            return;
+                          }
                           const el = (e.target as HTMLElement).closest("[data-coupon]");
                           if (el) {
                             const code = el.getAttribute("data-coupon");
