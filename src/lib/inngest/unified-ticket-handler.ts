@@ -222,11 +222,46 @@ async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: st
   });
 
   if (ch === "email") {
-    const { data: t } = await admin.from("tickets").select("subject, email_message_id, customers(email)").eq("id", tid).single();
-    const email = (t?.customers as unknown as { email: string })?.email;
-    if (email) {
-      const { data: ws } = await admin.from("workspaces").select("name").eq("id", wsId).single();
-      await sendTicketReply({ workspaceId: wsId, toEmail: email, subject: `Re: ${t?.subject || "Your request"}`, body: html, inReplyTo: t?.email_message_id || null, agentName: "Support", workspaceName: ws?.name || "" });
+    const { data: t } = await admin.from("tickets").select("subject, email_message_id, customer_id").eq("id", tid).single();
+    if (t?.customer_id) {
+      const { data: cust } = await admin.from("customers").select("email").eq("id", t.customer_id).single();
+      if (cust?.email) {
+        const { data: ws } = await admin.from("workspaces").select("name").eq("id", wsId).single();
+        await sendTicketReply({ workspaceId: wsId, toEmail: cust.email, subject: `Re: ${t?.subject || "Your request"}`, body: html, inReplyTo: t?.email_message_id || null, agentName: "Support", workspaceName: ws?.name || "" });
+      }
+    }
+  }
+
+  // Chat→email fallback: if chat customer hasn't been active for 5 min, also send email
+  if (ch === "chat") {
+    const { data: t } = await admin.from("tickets").select("customer_id, subject").eq("id", tid).single();
+    if (t?.customer_id) {
+      // Check last customer message time
+      const { data: lastInbound } = await admin.from("ticket_messages")
+        .select("created_at")
+        .eq("ticket_id", tid)
+        .eq("direction", "inbound")
+        .eq("author_type", "customer")
+        .order("created_at", { ascending: false })
+        .limit(1).single();
+
+      const lastActivity = lastInbound ? new Date(lastInbound.created_at).getTime() : 0;
+      const fiveMinAgo = Date.now() - 5 * 60 * 1000;
+
+      if (lastActivity < fiveMinAgo) {
+        // Customer likely left — send email fallback
+        const { data: cust } = await admin.from("customers").select("email").eq("id", t.customer_id).single();
+        if (cust?.email) {
+          const { data: ws } = await admin.from("workspaces").select("name").eq("id", wsId).single();
+          await sendTicketReply({
+            workspaceId: wsId, toEmail: cust.email,
+            subject: `Re: ${t.subject || "Your chat with us"}`,
+            body: html,
+            inReplyTo: null, agentName: "Support", workspaceName: ws?.name || "",
+          });
+          await sysNote(admin, tid, `[System] Chat customer inactive >5min. Reply also sent via email to ${cust.email}.`);
+        }
+      }
     }
   }
 }
@@ -247,7 +282,11 @@ async function handlerNames(admin: Admin, wsId: string, hasCust: boolean, ch: st
   const parts: string[] = [];
   if (hasCust && !social) {
     const { data: j } = await admin.from("journey_definitions").select("name, trigger_intent").eq("workspace_id", wsId).eq("is_active", true);
-    for (const x of j || []) parts.push(`Journey: ${x.name} (intent: ${x.trigger_intent || "n/a"})`);
+    const internalIntents = new Set(["account_linking"]); // Internal-only, never from customer messages
+    for (const x of j || []) {
+      if (x.trigger_intent && internalIntents.has(x.trigger_intent)) continue;
+      parts.push(`Journey: ${x.name} (intent: ${x.trigger_intent || "n/a"})`);
+    }
     const { data: pb } = await admin.from("playbooks").select("name, trigger_intents").eq("workspace_id", wsId).eq("is_active", true);
     for (const x of pb || []) parts.push(`Playbook: ${x.name} (intents: ${(x.trigger_intents as string[]).join(", ") || "n/a"})`);
     const { data: w } = await admin.from("workflows").select("name, trigger_tag").eq("workspace_id", wsId).eq("enabled", true);
@@ -265,7 +304,15 @@ async function escalate(admin: Admin, wsId: string, tid: string, ch: string, int
     ? `AI suggests: "${intent}" (${conf}%). Check journeys/workflows for this intent.`
     : `Unable to determine customer intent after clarification.`;
   await sysNote(admin, tid, `[System] Escalating. ${suggestion}`);
-  const { data: t } = await admin.from("tickets").select("customer_id").eq("id", tid).single();
+  const { data: t } = await admin.from("tickets").select("customer_id, subject, email_message_id").eq("id", tid).single();
+
+  // Get customer email from profile
+  let customerEmail: string | null = null;
+  if (t?.customer_id) {
+    const { data: cust } = await admin.from("customers").select("email").eq("id", t.customer_id).single();
+    customerEmail = cust?.email || null;
+  }
+
   await admin.from("escalation_gaps").insert({
     workspace_id: wsId, ticket_id: tid, customer_id: t?.customer_id || null,
     channel: ch, detected_intent: intent, confidence: conf,
@@ -277,6 +324,30 @@ async function escalate(admin: Admin, wsId: string, tid: string, ch: string, int
     metadata: { ticket_id: tid, intent, confidence: conf },
   });
   await admin.from("tickets").update({ status: "open", ai_clarification_turn: 0 }).eq("id", tid);
+
+  // Always send a customer-facing message on escalation
+  let escalationMsg = "I need to look into this a bit more. I'll get back to you shortly.";
+  if (ch === "chat" && customerEmail) {
+    escalationMsg += ` If you leave this chat, I'll send you an email at ${customerEmail}.`;
+  }
+
+  // Insert immediately — no delay on escalation messages
+  await admin.from("ticket_messages").insert({
+    ticket_id: tid, direction: "outbound", visibility: "external",
+    author_type: "ai", body: toHtml(escalationMsg), sent_at: new Date().toISOString(),
+  });
+
+  // Send email for email channel
+  if (ch === "email" && customerEmail) {
+    const { data: ws } = await admin.from("workspaces").select("name").eq("id", wsId).single();
+    await sendTicketReply({
+      workspaceId: wsId, toEmail: customerEmail,
+      subject: `Re: ${t?.subject || "Your request"}`,
+      body: toHtml(escalationMsg),
+      inReplyTo: t?.email_message_id || null,
+      agentName: "Support", workspaceName: ws?.name || "",
+    });
+  }
 }
 
 // ══════════════════════════════════════════════════
