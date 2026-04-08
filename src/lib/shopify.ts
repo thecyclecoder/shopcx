@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from "crypto";
 
-export const SHOPIFY_API_VERSION = "2025-01";
+export const SHOPIFY_API_VERSION = "2025-07";
 export const SHOPIFY_SCOPES =
   "read_all_orders,read_customers,write_customers,read_discounts,write_discounts,write_draft_orders,read_inventory,read_merchant_managed_fulfillment_orders,read_orders,write_orders,read_product_listings,read_products,read_publications,read_shopify_payments_disputes,read_themes,write_themes,read_channels,read_store_credit_accounts,read_store_credit_account_transactions,write_store_credit_account_transactions";
 

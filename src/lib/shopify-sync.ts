@@ -127,8 +127,8 @@ function mapSubscriptionStatus(
 export async function getShopifyCounts(workspaceId: string): Promise<{ customers: number; orders: number }> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const data = await shopifyGraphQL(shop, accessToken, `{
-    customersCount { count }
-    ordersCount { count }
+    customersCount(limit: null) { count }
+    ordersCount(limit: null) { count }
   }`);
   return {
     customers: (data.customersCount as { count: number })?.count ?? 0,
