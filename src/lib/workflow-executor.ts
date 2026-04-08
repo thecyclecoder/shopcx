@@ -70,6 +70,9 @@ export async function executeWorkflow(
       case "subscription_inquiry":
         await executeSubscriptionInquiry(admin, workflow.config as Record<string, unknown>, context);
         break;
+      case "account_login":
+        await executeAccountLogin(admin, workflow.config as Record<string, unknown>, context);
+        break;
     }
     // Mark ticket as handled by workflow
     await admin.from("tickets").update({ handled_by: `Workflow: ${workflow.name}` }).eq("id", ticketId);
@@ -681,4 +684,36 @@ async function executeSubscriptionInquiry(admin: Admin, config: Record<string, u
   }
 
   await sendReply(admin, ctx, (config.reply_next_date as string) || "Hi {{customer.first_name}}, your next shipment is scheduled for {{subscription.next_billing_date}}. Your subscription includes: {{subscription.items}}.", config.reply_next_date_status as string);
+}
+
+// ── Account Login Workflow ──
+
+async function executeAccountLogin(admin: Admin, config: Record<string, unknown>, ctx: WorkflowContext): Promise<void> {
+  if (!ctx.customer) {
+    await sendReply(admin, ctx, (config.reply_no_customer as string) || "I'd be happy to help you access your account! Could you share the email address associated with your account?", config.reply_no_customer_status as string || "open");
+    return;
+  }
+
+  const email = ctx.customer.email as string;
+  const customerId = ctx.customer.id as string;
+  const shopifyCustomerId = (ctx.customer.shopify_customer_id as string) || "";
+
+  // Generate magic link
+  const { generateMagicLinkURL } = await import("@/lib/magic-link");
+  const magicUrl = await generateMagicLinkURL(customerId, shopifyCustomerId, email, ctx.workspaceId);
+
+  // Build response with the magic link
+  const channel = (ctx.ticket?.channel as string) || "email";
+  const useHtml = ["email", "chat", "help_center"].includes(channel);
+
+  let reply: string;
+  if (useHtml) {
+    reply = `<p>Here's your personal login link to access your account:</p><p><a href="${magicUrl}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:white;text-decoration:none;border-radius:8px;font-weight:600;">Log In to My Account</a></p><p>This link is valid for 24 hours and is unique to you — no password needed.</p>`;
+  } else {
+    reply = `Here's your personal login link to access your account:\n\n${magicUrl}\n\nThis link is valid for 24 hours and is unique to you — no password needed.`;
+  }
+
+  await sendReply(admin, ctx, (config.reply_login_link as string) || reply, config.reply_login_link_status as string || "closed");
+
+  await addNote(admin, ctx, `Magic login link sent to ${email}.`);
 }
