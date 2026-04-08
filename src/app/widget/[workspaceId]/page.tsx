@@ -590,7 +590,7 @@ export default function ChatWidgetPage() {
                   >
                     {bodyWithoutForm && (
                       <div
-                        className="prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:text-inherit [&_a]:underline"
+                        className={`prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:underline ${isCustomer ? "[&_*]:!text-zinc-900 [&_a]:!text-zinc-900" : "[&_*]:!text-white [&_a]:!text-white"}`}
                         dangerouslySetInnerHTML={{ __html: bodyWithoutForm }}
                         onClick={(e) => {
                           // Open links in new window (not inside iframe)
