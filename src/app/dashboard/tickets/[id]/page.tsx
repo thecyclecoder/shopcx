@@ -221,6 +221,8 @@ export default function TicketDetailPage() {
   const [runningWorkflow, setRunningWorkflow] = useState(false);
   const [availablePlaybooks, setAvailablePlaybooks] = useState<{ id: string; name: string }[]>([]);
   const [applyingPlaybook, setApplyingPlaybook] = useState(false);
+  const [availableJourneys, setAvailableJourneys] = useState<{ id: string; name: string; trigger_intent: string }[]>([]);
+  const [sendingJourney, setSendingJourney] = useState(false);
   const [playbookContext, setPlaybookContext] = useState("");
   const [suggestCategory, setSuggestCategory] = useState("");
   const [patternCategories, setPatternCategories] = useState<{ category: string; name: string }[]>([]);
@@ -453,6 +455,10 @@ export default function TicketDetailPage() {
     fetch(`/api/workspaces/${workspace.id}/playbooks`)
       .then((res) => res.json())
       .then((data) => { if (data?.playbooks) setAvailablePlaybooks(data.playbooks.filter((p: { enabled: boolean }) => p.enabled).map((p: { id: string; name: string }) => ({ id: p.id, name: p.name }))); })
+      .catch(() => {});
+    fetch(`/api/workspaces/${workspace.id}/journeys`)
+      .then((res) => res.json())
+      .then((data) => { if (Array.isArray(data)) setAvailableJourneys(data.filter((j: { is_active: boolean }) => j.is_active).map((j: { id: string; name: string; trigger_intent: string }) => ({ id: j.id, name: j.name, trigger_intent: j.trigger_intent }))); })
       .catch(() => {});
     fetch(`/api/workspaces/${workspace.id}/patterns`)
       .then((res) => res.json())
@@ -1558,7 +1564,7 @@ export default function TicketDetailPage() {
       <div className={`w-full shrink-0 overflow-y-auto border-t border-zinc-200 bg-zinc-50 p-6 md:w-80 md:border-l md:border-t-0 dark:border-zinc-800 dark:bg-zinc-950 ${mobileSection === "conversation" ? "hidden md:block" : ""}`}>
         {/* Actions card (hidden for archived) */}
         <div className={`${mobileSection !== "actions" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
-        {ticket.status !== "archived" && (availableWorkflows.length > 0 || availablePlaybooks.length > 0 || (!(ticket.tags || []).some(t => t.startsWith("smart:")) && !patternSuggestion)) && (
+        {ticket.status !== "archived" && (availableWorkflows.length > 0 || availablePlaybooks.length > 0 || availableJourneys.length > 0 || (!(ticket.tags || []).some(t => t.startsWith("smart:")) && !patternSuggestion)) && (
           <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 p-4 dark:border-indigo-800 dark:bg-indigo-950">
             <h3 className="text-xs font-medium uppercase tracking-wider text-indigo-600 dark:text-indigo-400">Actions</h3>
             <div className="mt-3 space-y-3">
@@ -1605,6 +1611,54 @@ export default function TicketDetailPage() {
                       className="shrink-0 rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
                     >
                       {runningWorkflow ? "..." : "Run"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Send journey */}
+              {availableJourneys.length > 0 && (
+                <div>
+                  <label className="block text-xs text-indigo-500">Send Journey</label>
+                  <div className="mt-1 flex items-center gap-2">
+                    <select
+                      id="journey-select"
+                      defaultValue=""
+                      className="min-w-0 flex-1 truncate rounded border border-indigo-300 bg-white px-2 py-1 text-xs dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    >
+                      <option value="" disabled>Select journey...</option>
+                      {availableJourneys.map(j => (
+                        <option key={j.id} value={j.id}>{j.name}</option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={async () => {
+                        const select = document.getElementById("journey-select") as HTMLSelectElement;
+                        const journeyId = select?.value;
+                        if (!journeyId) return;
+                        setSendingJourney(true);
+                        try {
+                          const res = await fetch(`/api/tickets/${id}/send-journey`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ journeyId }),
+                          });
+                          if (res.ok) {
+                            const ticketRes = await fetch(`/api/tickets/${id}`);
+                            if (ticketRes.ok) {
+                              const data = await ticketRes.json();
+                              setTicket(data.ticket);
+                              setMessages(data.messages);
+                            }
+                          }
+                        } finally {
+                          setSendingJourney(false);
+                        }
+                      }}
+                      disabled={sendingJourney}
+                      className="shrink-0 rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {sendingJourney ? "..." : "Send"}
                     </button>
                   </div>
                 </div>
