@@ -2,8 +2,8 @@ import { updateSession } from "@/lib/supabase/middleware";
 import { type NextRequest, NextResponse } from "next/server";
 
 export async function middleware(request: NextRequest) {
-  // Widget routes — bypass auth entirely (public, cross-origin from customer sites)
-  if (request.nextUrl.pathname.startsWith("/api/widget/") || request.nextUrl.pathname.startsWith("/widget/") || request.nextUrl.pathname.startsWith("/portal/") || request.nextUrl.pathname.startsWith("/api/portal/")) {
+  // Widget/API routes — bypass auth + CORS (no subdomain rewrite needed)
+  if (request.nextUrl.pathname.startsWith("/api/widget/") || request.nextUrl.pathname.startsWith("/widget/") || request.nextUrl.pathname.startsWith("/api/portal/")) {
     if (request.method === "OPTIONS") {
       const res = new NextResponse(null, { status: 204 });
       res.headers.set("Access-Control-Allow-Origin", "*");
@@ -19,6 +19,7 @@ export async function middleware(request: NextRequest) {
     return response;
   }
 
+  // Portal pages need subdomain rewrite but no auth — updateSession handles both
   return await updateSession(request);
 }
 
