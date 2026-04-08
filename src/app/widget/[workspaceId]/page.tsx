@@ -583,10 +583,10 @@ export default function ChatWidgetPage() {
                   <div
                     className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${
                       isCustomer
-                        ? "rounded-tr-sm text-white"
-                        : "rounded-tl-sm bg-zinc-100 text-zinc-900"
+                        ? "rounded-tr-sm bg-zinc-200 text-zinc-900"
+                        : "rounded-tl-sm text-white"
                     }`}
-                    style={isCustomer ? { backgroundColor: primaryColor } : undefined}
+                    style={isCustomer ? undefined : { backgroundColor: primaryColor }}
                   >
                     {bodyWithoutForm && (
                       <div
@@ -652,7 +652,7 @@ export default function ChatWidgetPage() {
                       <p className="mt-1 text-xs text-zinc-500 italic">Completed</p>
                     )}
 
-                    <p className={`mt-0.5 text-[10px] ${isCustomer ? "text-white/60" : "text-zinc-400"}`}>
+                    <p className={`mt-0.5 text-[10px] ${isCustomer ? "text-zinc-400" : "text-white/60"}`}>
                       {new Date(msg.created_at).toLocaleTimeString([], {
                         hour: "numeric",
                         minute: "2-digit",
