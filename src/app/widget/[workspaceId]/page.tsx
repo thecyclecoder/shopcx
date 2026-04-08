@@ -68,6 +68,7 @@ export default function ChatWidgetPage() {
   const [formSubmitted, setFormSubmitted] = useState<Set<string>>(new Set());
   const [chatList, setChatList] = useState<{ id: string; ticket_id: string; subject: string; status: string; last_message: string; updated_at: string }[]>([]);
   const [showChatList, setShowChatList] = useState(true);
+  const [emailPrefilled, setEmailPrefilled] = useState(false);
 
   // Load config + auto-fill customer data from URL params (Shopify logged-in customer)
   useEffect(() => {
@@ -76,6 +77,7 @@ export default function ChatWidgetPage() {
     const paramName = urlParams.get("name") || "";
     if (paramEmail) {
       setEmail(paramEmail);
+      setEmailPrefilled(true);
       if (paramName) setName(paramName);
     }
 
@@ -377,7 +379,7 @@ export default function ChatWidgetPage() {
             value={articleSearch}
             onChange={(e) => setArticleSearch(e.target.value)}
             placeholder="Search help articles..."
-            className="mb-3 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 outline-none focus:border-indigo-500"
+            className="mb-3 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-base text-zinc-900 placeholder-zinc-400 outline-none focus:border-indigo-500"
           />
           {articles.length === 0 && !articleSearch && (
             <p className="py-4 text-center text-xs text-zinc-400">No articles available</p>
@@ -518,19 +520,17 @@ export default function ChatWidgetPage() {
 
         {!started ? (
           <form onSubmit={handleStart} className="mt-4 space-y-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
-            {email ? (
+            {emailPrefilled ? (
               <p className="text-sm text-zinc-500">Chatting as <span className="font-medium text-zinc-700">{name || email}</span></p>
             ) : (
-              <p className="text-sm font-medium text-zinc-700">Enter your details to start chatting</p>
-            )}
-            {!email && (
               <>
+                <p className="text-sm font-medium text-zinc-700">Enter your details to start chatting</p>
                 <input
                   type="text"
                   placeholder="Your name (optional)"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-base text-zinc-900 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
                 />
                 <input
                   type="email"
@@ -538,7 +538,7 @@ export default function ChatWidgetPage() {
                   value={email}
                   onChange={(e) => { setEmail(e.target.value); setEmailError(""); }}
                   required
-                  className={`w-full rounded-lg border bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:ring-1 ${emailError ? "border-red-300 focus:border-red-400 focus:ring-red-400" : "border-zinc-200 focus:border-indigo-400 focus:ring-indigo-400"}`}
+                  className={`w-full rounded-lg border bg-white px-3 py-2 text-base text-zinc-900 outline-none focus:ring-1 ${emailError ? "border-red-300 focus:border-red-400 focus:ring-red-400" : "border-zinc-200 focus:border-indigo-400 focus:ring-indigo-400"}`}
                 />
                 {emailError && <p className="text-xs text-red-500">{emailError}</p>}
               </>
@@ -693,7 +693,7 @@ export default function ChatWidgetPage() {
             placeholder="Type a message..."
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            className="flex-1 rounded-full border border-zinc-200 bg-zinc-50 px-4 py-2 text-sm text-zinc-900 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
+            className="flex-1 rounded-full border border-zinc-200 bg-zinc-50 px-4 py-2 text-base text-zinc-900 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
             autoFocus
           />
           <button
