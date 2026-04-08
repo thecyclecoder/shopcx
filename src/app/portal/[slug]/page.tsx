@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import PortalClient from "./portal-client";
 
 export default async function PortalHome({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
@@ -59,23 +60,6 @@ export default async function PortalHome({ params }: { params: Promise<{ slug: s
   const shopDomain = workspace.shopify_myshopify_domain || "";
 
   return (
-    <div>
-      <h1 style={{ fontSize: "24px", fontWeight: 900, marginBottom: "16px" }}>Manage your subscriptions</h1>
-      <div id="subscription-portal-root" />
-      <link rel="stylesheet" href="/portal-assets/portal.min.css" />
-      <script
-        dangerouslySetInnerHTML={{
-          __html: `
-            window.__PORTAL_CONFIG__ = {
-              endpoint: "/api/portal",
-              shop: "${shopDomain}",
-              logged_in_customer_id: "${shopifyCustomerId}",
-              minisite: true
-            };
-          `,
-        }}
-      />
-      <script src="/portal-assets/subscription-portal.js" defer />
-    </div>
+    <PortalClient shopDomain={shopDomain} shopifyCustomerId={shopifyCustomerId} />
   );
 }
