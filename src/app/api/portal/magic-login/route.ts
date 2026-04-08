@@ -30,20 +30,16 @@ export async function POST(request: Request) {
 
     // Set portal session cookie (24hr, same as token expiry)
     const cookieStore = await cookies();
-    cookieStore.set("portal_customer_id", customer.id, {
+    const cookieOpts = {
       httpOnly: true,
       secure: true,
-      sameSite: "lax",
+      sameSite: "lax" as const,
       maxAge: 24 * 60 * 60,
       path: "/",
-    });
-    cookieStore.set("portal_workspace_id", payload.workspaceId, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "lax",
-      maxAge: 24 * 60 * 60,
-      path: "/",
-    });
+      domain: ".shopcx.ai",
+    };
+    cookieStore.set("portal_customer_id", customer.id, cookieOpts);
+    cookieStore.set("portal_workspace_id", payload.workspaceId, cookieOpts);
 
     return NextResponse.json({ success: true, redirectUrl: "/portal" });
   }
