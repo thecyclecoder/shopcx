@@ -25,7 +25,11 @@ export async function GET(
     .or(`user_id.is.null,user_id.eq.${user.id}`);
 
   if (typeFilter) query = query.eq("type", typeFilter);
+  const metadataType = url.searchParams.get("metadata_type");
+  if (metadataType) query = query.eq("metadata->>type", metadataType);
   query = query.eq("dismissed", dismissedParam === "true");
+  const limitParam = url.searchParams.get("limit");
+  if (limitParam) query = query.limit(parseInt(limitParam));
 
   const { data: notifications } = await query
     .order("read", { ascending: true })

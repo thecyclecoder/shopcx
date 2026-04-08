@@ -516,6 +516,7 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
 
       <div className="max-w-xl space-y-6">
         {/* ── Sandbox Mode ── */}
+        {show("shopify") && (
         <div className={`rounded-lg border p-4 ${sandboxMode ? "border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950" : "border-emerald-300 bg-emerald-50 dark:border-emerald-700 dark:bg-emerald-950"}`}>
           <div className="flex items-center justify-between">
             <div>
@@ -547,8 +548,10 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
             </button>
           </div>
         </div>
+        )}
 
         {/* ── Shopify ── */}
+        {show("shopify") && (
         <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -726,8 +729,10 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
             <p className="mt-4 text-sm text-zinc-400">Only owners and admins can manage integrations.</p>
           )}
         </div>
+        )}
 
         {/* ── Resend ── */}
+        {show("resend") && (
         <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -1001,9 +1006,10 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
             <p className="mt-4 text-sm text-zinc-400">Only owners and admins can manage integrations.</p>
           )}
         </div>
+        )}
 
         {/* ── Shopify Multipass ── */}
-        {shopifyConnected && canEdit && (
+        {show("multipass") && shopifyConnected && canEdit && (
           <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
             <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Shopify Multipass</h3>
             <p className="mt-1 text-sm text-zinc-500">Required for customer portal authentication. Find in Shopify admin &gt; Settings &gt; Customer accounts &gt; Multipass.</p>
@@ -1044,6 +1050,7 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
         )}
 
         {/* ── Appstle (Subscriptions) ── */}
+        {show("appstle") && (
         <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -1150,8 +1157,10 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
             </div>
           )}
         </div>
+        )}
 
         {/* ── Meta (Facebook + Instagram) ── */}
+        {show("meta") && (
         <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 dark:bg-blue-900/30">
@@ -1238,7 +1247,9 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
             </div>
           )}
         </div>
+        )}
         {/* ── Klaviyo ── */}
+        {show("klaviyo") && (
         <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -1352,8 +1363,10 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
             </div>
           )}
         </div>
+        )}
       </div>
       {/* ── Returns / EasyPost ── */}
+      {show("easypost") && (
       <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -1574,7 +1587,9 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
           </form>
         )}
       </div>
+      )}
       {/* ── Amplifier ── */}
+      {show("amplifier") && (
         <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -1736,7 +1751,9 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
             </div>
           )}
         </div>
+      )}
       {/* ── Slack ── */}
+      {show("slack") && (
       <div className="rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="flex items-center justify-between">
           <div>
@@ -1810,6 +1827,7 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

@@ -476,18 +476,28 @@ export default function Sidebar({
                   </div>
                 );
               })()}
-              {/* View All link — always visible when tickets expanded */}
+              {/* View All + AI Analysis links — always visible when tickets expanded */}
               {isTickets && ticketsExpanded && (
                 <div className="ml-6 border-l border-zinc-200 pl-2 dark:border-zinc-800">
                   <Link
                     href="/dashboard/tickets"
-                    className={`flex items-center px-2 py-1 text-sm transition-colors ${
+                    className={`flex items-center px-2.5 py-2.5 md:py-1.5 text-[15px] md:text-sm transition-colors ${
                       pathname === "/dashboard/tickets" && !new URLSearchParams(typeof window !== "undefined" ? window.location.search : "").get("view") && !new URLSearchParams(typeof window !== "undefined" ? window.location.search : "").get("escalation_mine")
                         ? "font-medium text-indigo-600 dark:text-indigo-400"
                         : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
                     }`}
                   >
                     View All
+                  </Link>
+                  <Link
+                    href="/dashboard/ai-analysis"
+                    className={`flex items-center px-2.5 py-2.5 md:py-1.5 text-[15px] md:text-sm transition-colors ${
+                      pathname.startsWith("/dashboard/ai-analysis")
+                        ? "font-medium text-indigo-600 dark:text-indigo-400"
+                        : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+                    }`}
+                  >
+                    AI Analysis
                   </Link>
                 </div>
               )}
