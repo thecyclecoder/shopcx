@@ -6,23 +6,37 @@ import { decrypt } from "@/lib/crypto";
 export default async function PortalHome({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
 
-  // Check for portal session
+  // Check for portal session — support both magic link cookies and legacy portal_session
   const cookieStore = await cookies();
-  const sessionCookie = cookieStore.get("portal_session")?.value;
+  const magicCustomerId = cookieStore.get("portal_customer_id")?.value;
+  const magicWorkspaceId = cookieStore.get("portal_workspace_id")?.value;
+  const legacySession = cookieStore.get("portal_session")?.value;
 
-  if (!sessionCookie) {
-    return redirect(`/portal/${slug}/login`);
+  let customerId: string | null = null;
+  let workspaceId: string | null = null;
+
+  if (magicCustomerId && magicWorkspaceId) {
+    customerId = magicCustomerId;
+    workspaceId = magicWorkspaceId;
+  } else if (legacySession) {
+    try {
+      const session = JSON.parse(decrypt(legacySession));
+      if (session && Date.now() <= session.exp) {
+        // Look up customer by shopify_customer_id
+        const admin2 = createAdminClient();
+        const { data: cust } = await admin2.from("customers")
+          .select("id, workspace_id")
+          .eq("shopify_customer_id", session.shopify_customer_id)
+          .limit(1).single();
+        if (cust) {
+          customerId = cust.id;
+          workspaceId = cust.workspace_id;
+        }
+      }
+    } catch { /* invalid session */ }
   }
 
-  // Decrypt session
-  let session: { shopify_customer_id: string; email: string; workspace_id: string; exp: number } | null = null;
-  try {
-    session = JSON.parse(decrypt(sessionCookie));
-  } catch {
-    return redirect(`/portal/${slug}/login`);
-  }
-
-  if (!session || Date.now() > session.exp) {
+  if (!customerId || !workspaceId) {
     return redirect(`/portal/${slug}/login`);
   }
 
@@ -31,11 +45,17 @@ export default async function PortalHome({ params }: { params: Promise<{ slug: s
   const { data: workspace } = await admin
     .from("workspaces")
     .select("id, shopify_myshopify_domain, portal_config")
-    .eq("id", session.workspace_id)
+    .eq("id", workspaceId)
     .single();
 
   if (!workspace) return redirect(`/portal/${slug}/login`);
 
+  // Get shopify_customer_id for the portal JS
+  const { data: custData } = await admin.from("customers")
+    .select("shopify_customer_id")
+    .eq("id", customerId)
+    .single();
+  const shopifyCustomerId = custData?.shopify_customer_id || "";
   const shopDomain = workspace.shopify_myshopify_domain || "";
 
   return (
@@ -49,7 +69,7 @@ export default async function PortalHome({ params }: { params: Promise<{ slug: s
             window.__PORTAL_CONFIG__ = {
               endpoint: "/api/portal",
               shop: "${shopDomain}",
-              logged_in_customer_id: "${session.shopify_customer_id}",
+              logged_in_customer_id: "${shopifyCustomerId}",
               minisite: true
             };
           `,
