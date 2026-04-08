@@ -7,6 +7,7 @@ import Link from "next/link";
 export default function ChatWidgetSettingsPage() {
   const workspace = useWorkspace();
   const [enabled, setEnabled] = useState(false);
+  const [chatTicketCreation, setChatTicketCreation] = useState(true);
   const [color, setColor] = useState("#4f46e5");
   const [greeting, setGreeting] = useState("Hi! How can we help you today?");
   const [position, setPosition] = useState("bottom-right");
@@ -22,6 +23,7 @@ export default function ChatWidgetSettingsPage() {
       .then((r) => r.json())
       .then((data) => {
         if (data.widget_enabled != null) setEnabled(data.widget_enabled);
+        if (data.chat_ticket_creation != null) setChatTicketCreation(data.chat_ticket_creation);
         if (data.widget_color) setColor(data.widget_color);
         if (data.widget_greeting) setGreeting(data.widget_greeting);
         if (data.widget_position) setPosition(data.widget_position);
@@ -37,6 +39,7 @@ export default function ChatWidgetSettingsPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         widget_enabled: enabled,
+        chat_ticket_creation: chatTicketCreation,
         widget_color: color,
         widget_greeting: greeting,
         widget_position: position,
@@ -83,6 +86,20 @@ export default function ChatWidgetSettingsPage() {
             className={`relative h-6 w-11 rounded-full transition-colors ${enabled ? "bg-indigo-600" : "bg-zinc-300 dark:bg-zinc-600"}`}
           >
             <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${enabled ? "translate-x-5.5 left-[22px]" : "left-0.5"}`} />
+          </button>
+        </div>
+
+        {/* Live chat toggle */}
+        <div className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+          <div>
+            <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Live Chat (Ticket Creation)</p>
+            <p className="text-sm text-zinc-500">When off, widget shows KB articles only — no message input</p>
+          </div>
+          <button
+            onClick={() => setChatTicketCreation(!chatTicketCreation)}
+            className={`relative h-6 w-11 rounded-full transition-colors ${chatTicketCreation ? "bg-green-600" : "bg-zinc-300 dark:bg-zinc-600"}`}
+          >
+            <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${chatTicketCreation ? "translate-x-5.5 left-[22px]" : "left-0.5"}`} />
           </button>
         </div>
 

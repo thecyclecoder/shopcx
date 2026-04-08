@@ -18,7 +18,7 @@ export async function GET(
   const admin = createAdminClient();
   const { data } = await admin
     .from("workspaces")
-    .select("widget_enabled, widget_color, widget_greeting, widget_position")
+    .select("widget_enabled, widget_color, widget_greeting, widget_position, chat_ticket_creation")
     .eq("id", workspaceId)
     .single();
 
@@ -38,17 +38,20 @@ export async function PATCH(
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();
-  const { widget_enabled, widget_color, widget_greeting, widget_position } = body;
+  const { widget_enabled, widget_color, widget_greeting, widget_position, chat_ticket_creation } = body;
 
   const admin = createAdminClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const updates: Record<string, any> = {};
+  if (widget_enabled !== undefined) updates.widget_enabled = widget_enabled;
+  if (widget_color !== undefined) updates.widget_color = widget_color;
+  if (widget_greeting !== undefined) updates.widget_greeting = widget_greeting;
+  if (widget_position !== undefined) updates.widget_position = widget_position;
+  if (chat_ticket_creation !== undefined) updates.chat_ticket_creation = chat_ticket_creation;
+
   const { error } = await admin
     .from("workspaces")
-    .update({
-      widget_enabled,
-      widget_color,
-      widget_greeting,
-      widget_position,
-    })
+    .update(updates)
     .eq("id", workspaceId);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

@@ -10,7 +10,7 @@ export async function GET(
 
   const { data: ws } = await admin
     .from("workspaces")
-    .select("name, widget_enabled, widget_color, widget_greeting, widget_position")
+    .select("name, widget_enabled, widget_color, widget_greeting, widget_position, chat_ticket_creation")
     .eq("id", workspaceId)
     .single();
 
@@ -23,5 +23,6 @@ export async function GET(
     color: ws.widget_color || "#4f46e5",
     greeting: ws.widget_greeting || "Hi! How can we help you today?",
     position: ws.widget_position || "bottom-right",
+    chatEnabled: ws.chat_ticket_creation ?? true,
   });
 }

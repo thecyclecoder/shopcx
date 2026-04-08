@@ -24,7 +24,7 @@ export async function POST(
   // Verify workspace exists and widget is enabled
   const { data: ws } = await admin
     .from("workspaces")
-    .select("id, widget_enabled")
+    .select("id, widget_enabled, chat_ticket_creation")
     .eq("id", workspaceId)
     .single();
 
@@ -33,6 +33,9 @@ export async function POST(
   }
   if (!ws.widget_enabled) {
     return NextResponse.json({ error: "Chat widget is not enabled" }, { status: 403 });
+  }
+  if (!ws.chat_ticket_creation) {
+    return NextResponse.json({ error: "Live chat is temporarily unavailable. Please browse our help articles or email us.", code: "CHAT_DISABLED" }, { status: 403 });
   }
 
   // Find or create customer
