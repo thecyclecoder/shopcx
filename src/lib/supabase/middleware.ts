@@ -15,8 +15,8 @@ export async function updateSession(request: NextRequest) {
     const isPrimaryDomain = PRIMARY_DOMAINS.some(d => hostname === d || hostname.endsWith(`.${d}`));
     const pathname = request.nextUrl.pathname;
 
-    // Skip internal paths
-    if (!pathname.startsWith("/help/") && !pathname.startsWith("/portal/") && !pathname.startsWith("/api/") && !pathname.startsWith("/_next")) {
+    // Skip fully internal paths (already rewritten or system routes)
+    if (!pathname.startsWith("/help/") && !pathname.startsWith("/api/") && !pathname.startsWith("/_next")) {
 
       // Resolve slug from hostname
       let slug: string | null = null;
