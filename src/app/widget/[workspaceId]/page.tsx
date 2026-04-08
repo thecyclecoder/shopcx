@@ -202,10 +202,31 @@ export default function ChatWidgetPage() {
       .catch(() => {});
   }, [sessionId, workspaceId]);
 
-  // Subscribe to realtime messages
+  // Subscribe to realtime messages — use realtime as notification, fetch full message from API
   useEffect(() => {
-    if (!ticketId) return;
+    if (!ticketId || !sessionId) return;
     const supabase = createClient();
+
+    const fetchMessages = async () => {
+      try {
+        const res = await fetch(`/api/widget/${workspaceId}/messages?session_id=${sessionId}`);
+        const data = await res.json();
+        if (data.messages) {
+          setMessages((prev) => {
+            const apiMsgs = data.messages as Message[];
+            const apiIds = new Set(apiMsgs.map((m: Message) => m.id));
+            // Keep optimistic temp messages that haven't been replaced yet
+            const temps = prev.filter((m) => m.id.startsWith("temp-") && !apiMsgs.some((am: Message) => am.body === m.body));
+            const merged = [...apiMsgs, ...temps];
+            merged.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+            // Only update if something changed
+            if (merged.length === prev.length && merged.every((m, i) => m.id === prev[i]?.id)) return prev;
+            return merged;
+          });
+        }
+      } catch {}
+    };
+
     const channel = supabase
       .channel(`widget-ticket:${ticketId}`)
       .on(
@@ -217,13 +238,10 @@ export default function ChatWidgetPage() {
           filter: `ticket_id=eq.${ticketId}`,
         },
         (payload) => {
-          const newMsg = payload.new as Message;
-          // Only add outbound messages from Realtime — inbound already added optimistically
+          const newMsg = payload.new as { visibility?: string; direction?: string };
           if (newMsg.visibility === "external" && newMsg.direction === "outbound") {
-            setMessages((prev) => {
-              if (prev.some((m) => m.id === newMsg.id)) return prev;
-              return [...prev, newMsg];
-            });
+            // Fetch full messages from API — realtime payloads can truncate large bodies
+            fetchMessages();
             setWaitingForReply(false);
             clearTimeout((window as unknown as Record<string, unknown>).__shopcxTypingTimer as number);
           }
@@ -232,7 +250,7 @@ export default function ChatWidgetPage() {
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [ticketId]);
+  }, [ticketId, sessionId, workspaceId]);
 
 
   // Auto-scroll on new messages or typing indicator
