@@ -46,5 +46,8 @@ export async function POST(
   // Execute the workflow
   await executeWorkflow(workspaceId, ticketId, workflow.trigger_tag);
 
+  // Close ticket after manual workflow application
+  await admin.from("tickets").update({ status: "closed" }).eq("id", ticketId);
+
   return NextResponse.json({ executed: true, workflow: workflow.name });
 }

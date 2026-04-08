@@ -72,7 +72,7 @@ export async function POST(
       ? { agent_context: context.trim(), applied_by: agentName }
       : { applied_by: agentName },
     playbook_exceptions_used: 0,
-    status: ticket.status === "closed" ? "open" : ticket.status,
+    status: "closed",
     handled_by: `Playbook: ${playbook.name}`,
     updated_at: new Date().toISOString(),
   }).eq("id", ticketId);

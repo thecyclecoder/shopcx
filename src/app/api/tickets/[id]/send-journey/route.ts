@@ -71,5 +71,8 @@ export async function POST(
     ctaText: `${journey.name} →`,
   });
 
+  // Close ticket after manual journey send
+  await admin.from("tickets").update({ status: "closed" }).eq("id", ticketId);
+
   return NextResponse.json({ sent: launched, journey: journey.name });
 }
