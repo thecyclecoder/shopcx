@@ -717,7 +717,7 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
                 </button>
               </div>
               <a
-                href="/dashboard/settings/integrations/shopify"
+                href="/dashboard/settings/order-sources"
                 className="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
               >
                 Order Source Mapping
