@@ -19,6 +19,12 @@ export async function POST(
     return NextResponse.json({ error: "email and message required" }, { status: 400 });
   }
 
+  // Validate email format
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return NextResponse.json({ error: "Please enter a valid email address" }, { status: 400 });
+  }
+
   const admin = createAdminClient();
 
   // Verify workspace exists and widget is enabled

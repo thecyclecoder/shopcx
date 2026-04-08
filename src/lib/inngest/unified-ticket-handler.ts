@@ -318,12 +318,45 @@ async function escalate(admin: Admin, wsId: string, tid: string, ch: string, int
     channel: ch, detected_intent: intent, confidence: conf,
     original_message: msg.slice(0, 2000), customer_context_summary: ctx.slice(0, 1000),
   });
+
+  // Assign to an admin/owner via round-robin (fewest open tickets)
+  let assignedTo: string | null = null;
+  let assignedName: string | null = null;
+  const { data: adminMembers } = await admin.from("workspace_members")
+    .select("user_id, display_name")
+    .eq("workspace_id", wsId)
+    .in("role", ["owner", "admin"])
+    .order("user_id");
+
+  if (adminMembers?.length) {
+    const counts = await Promise.all(adminMembers.map(async (a) => {
+      const { count } = await admin.from("tickets")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", wsId)
+        .eq("assigned_to", a.user_id)
+        .eq("status", "open");
+      return { ...a, count: count || 0 };
+    }));
+    counts.sort((a, b) => a.count - b.count);
+    assignedTo = counts[0].user_id;
+    assignedName = counts[0].display_name;
+  }
+
   await admin.from("dashboard_notifications").insert({
     workspace_id: wsId, type: "escalation_gap",
     title: `AI escalated: ${intent || "unknown"}`, body: `"${msg.slice(0, 100)}..."`,
-    metadata: { ticket_id: tid, intent, confidence: conf },
+    metadata: { ticket_id: tid, intent, confidence: conf, assigned_to: assignedName },
   });
-  await admin.from("tickets").update({ status: "open", ai_clarification_turn: 0 }).eq("id", tid);
+  await admin.from("tickets").update({
+    status: "open",
+    ai_clarification_turn: 0,
+    assigned_to: assignedTo,
+    escalation_reason: intent || "unknown",
+  }).eq("id", tid);
+
+  if (assignedName) {
+    await sysNote(admin, tid, `[System] Escalated to ${assignedName}.`);
+  }
 
   // Always send a customer-facing message on escalation
   let escalationMsg = "I need to look into this a bit more. I'll get back to you shortly.";

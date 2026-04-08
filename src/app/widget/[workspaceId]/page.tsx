@@ -240,6 +240,12 @@ export default function ChatWidgetPage() {
   const handleStart = (e: React.FormEvent) => {
     e.preventDefault();
     if (!email.trim()) return;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      setError("Please enter a valid email address");
+      return;
+    }
+    setError("");
     setStarted(true);
     localStorage.setItem(
       `${STORAGE_KEY_PREFIX}${workspaceId}`,
