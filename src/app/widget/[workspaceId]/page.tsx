@@ -505,19 +505,23 @@ export default function ChatWidgetPage() {
         </div>
       )}
 
+      {/* Greeting — pinned above scrollable area so it stays visible when iOS keyboard opens */}
+      {view === "chat" && !showChatList && (
+        <div className="flex-shrink-0 px-4 pt-3 pb-1">
+          <div className="flex gap-2">
+            <div
+              className="max-w-[80%] rounded-2xl rounded-tl-sm px-3 py-2 text-sm text-white"
+              style={{ backgroundColor: primaryColor }}
+            >
+              {config?.greeting}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Chat view - Messages area */}
       {view === "chat" && !showChatList && (
       <div className="flex-1 overflow-y-auto px-4 py-3">
-        {/* Greeting */}
-        <div className="mb-3 flex gap-2">
-          <div
-            className="max-w-[80%] rounded-2xl rounded-tl-sm px-3 py-2 text-sm text-white"
-            style={{ backgroundColor: primaryColor }}
-          >
-            {config?.greeting}
-          </div>
-        </div>
-
         {!started ? (
           <form onSubmit={handleStart} className="mt-4 space-y-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
             {emailPrefilled ? (
