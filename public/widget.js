@@ -43,12 +43,14 @@
   // Create container
   var container = document.createElement("div");
   container.id = "shopcx-chat-widget";
+  container.className = "shopcx-widget shopcx-widget-container";
   container.style.cssText =
     "position:fixed;bottom:20px;right:20px;z-index:999999;font-family:system-ui,-apple-system,sans-serif;";
 
   // Chat bubble button
   var bubble = document.createElement("button");
   bubble.id = "shopcx-chat-bubble";
+  bubble.className = "shopcx-widget shopcx-bubble";
   bubble.innerHTML =
     '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
   bubble.style.cssText =
@@ -64,6 +66,7 @@
   var iframe = document.createElement("iframe");
   iframe.src = IFRAME_URL;
   iframe.id = "shopcx-chat-iframe";
+  iframe.className = "shopcx-widget shopcx-iframe";
   var isMobile = window.innerWidth <= 480;
   iframe.style.cssText = isMobile
     ? "display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;border:none;border-radius:0;box-shadow:none;background:white;z-index:2147483647;"
