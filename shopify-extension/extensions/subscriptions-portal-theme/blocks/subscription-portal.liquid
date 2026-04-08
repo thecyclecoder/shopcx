@@ -27,7 +27,7 @@
   {% if block.settings.redirect_to_login %}
     <meta
       http-equiv="refresh"
-      content="0; url={{ routes.account_login_url }}?return_url={{ return_to | url_encode }}"
+      content="0; url={{ routes.storefront_login_url }}?return_url={{ return_to | url_encode }}"
     >
     <script>
       (function () {
@@ -66,14 +66,14 @@
         <div class="sp-loggedout__actions">
           <a
             class="sp-btn sp-btn-primary sp-loggedout__btn"
-            href="{{ routes.account_login_url }}?return_url={{ return_to | url_encode }}"
+            href="{{ routes.storefront_login_url }}?return_url={{ return_to | url_encode }}"
           >
             Log in to manage my subscriptions
           </a>
 
           <div class="sp-loggedout__help sp-muted">
             Having trouble logging in?
-            <a class="sp-loggedout__link" href="{{ routes.account_login_url }}">
+            <a class="sp-loggedout__link" href="{{ routes.storefront_login_url }}">
               Try again
             </a>
             or
