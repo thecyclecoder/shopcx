@@ -1,11 +1,40 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
 
 export default function PortalLogin() {
+  const searchParams = useSearchParams();
+  const token = searchParams.get("token");
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [autoLogging, setAutoLogging] = useState(false);
+
+  // Auto-login via magic link token
+  useEffect(() => {
+    if (!token) return;
+    setAutoLogging(true);
+
+    fetch("/api/portal/magic-login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.success && data.redirectUrl) {
+          window.location.href = data.redirectUrl;
+        } else {
+          setError(data.error || "Invalid or expired link. Please enter your email below.");
+          setAutoLogging(false);
+        }
+      })
+      .catch(() => {
+        setError("Something went wrong. Please enter your email below.");
+        setAutoLogging(false);
+      });
+  }, [token]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -32,6 +61,22 @@ export default function PortalLogin() {
       setError("Something went wrong. Please try again.");
       setLoading(false);
     }
+  }
+
+  if (autoLogging) {
+    return (
+      <div style={{ maxWidth: 420, margin: "80px auto", textAlign: "center" }}>
+        <div style={{ marginBottom: 16 }}>
+          <div style={{
+            width: 32, height: 32, margin: "0 auto", border: "3px solid #e5e7eb",
+            borderTopColor: "#4f46e5", borderRadius: "50%",
+            animation: "spin 0.8s linear infinite",
+          }} />
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+        <p style={{ color: "#6b7280", fontSize: 15 }}>Signing you in...</p>
+      </div>
+    );
   }
 
   return (

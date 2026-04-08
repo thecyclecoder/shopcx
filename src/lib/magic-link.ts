@@ -64,14 +64,32 @@ export function verifyMagicToken(token: string): MagicLinkPayload | null {
 
 /**
  * Generate a full magic link URL for a customer.
+ * Uses the workspace subdomain if available (e.g. superfoods.shopcx.ai).
  */
-export function generateMagicLinkURL(
+export async function generateMagicLinkURL(
   customerId: string,
   shopifyCustomerId: string,
   email: string,
   workspaceId: string,
-): string {
+): Promise<string> {
   const token = generateMagicToken(customerId, shopifyCustomerId, email, workspaceId);
+
+  // Try to get workspace slug for subdomain URL
+  try {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const admin = createAdminClient();
+    const { data: ws } = await admin.from("workspaces")
+      .select("help_slug, help_custom_domain")
+      .eq("id", workspaceId).single();
+
+    if (ws?.help_custom_domain) {
+      return `https://${ws.help_custom_domain}/portal/login?token=${token}`;
+    }
+    if (ws?.help_slug) {
+      return `https://${ws.help_slug}.shopcx.ai/portal/login?token=${token}`;
+    }
+  } catch { /* fallback */ }
+
   const base = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
   return `${base}/portal/login?token=${token}`;
 }
