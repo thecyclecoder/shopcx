@@ -55,6 +55,7 @@ export default function ChatWidgetPage() {
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [emailError, setEmailError] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [articles, setArticles] = useState<KBArticle[]>([]);
   const [articleSearch, setArticleSearch] = useState("");
@@ -242,10 +243,10 @@ export default function ChatWidgetPage() {
     if (!email.trim()) return;
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email.trim())) {
-      setError("Please enter a valid email address");
+      setEmailError("Please enter a valid email address");
       return;
     }
-    setError("");
+    setEmailError("");
     setStarted(true);
     localStorage.setItem(
       `${STORAGE_KEY_PREFIX}${workspaceId}`,
@@ -535,10 +536,11 @@ export default function ChatWidgetPage() {
                   type="email"
                   placeholder="Your email"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) => { setEmail(e.target.value); setEmailError(""); }}
                   required
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
+                  className={`w-full rounded-lg border bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:ring-1 ${emailError ? "border-red-300 focus:border-red-400 focus:ring-red-400" : "border-zinc-200 focus:border-indigo-400 focus:ring-indigo-400"}`}
                 />
+                {emailError && <p className="text-xs text-red-500">{emailError}</p>}
               </>
             )}
             <button
