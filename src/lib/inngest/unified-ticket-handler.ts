@@ -146,7 +146,7 @@ ${hasLinks ? "IMPORTANT: Preserve ALL <a href> HTML links exactly as they appear
 Original: ${content}
 Customer question: "${msg}"
 ${ctx ? `Context: ${ctx.slice(0, 300)}` : ""}
-Only the personalized response, nothing else.`, "haiku", 400)) || content;
+Only the personalized response, nothing else.`, "haiku", 800)) || content;
 }
 
 async function kbResponse(article: string, title: string, msg: string, ch: string, p: { tone?: string } | null) {
@@ -154,7 +154,7 @@ async function kbResponse(article: string, title: string, msg: string, ch: strin
   return (await claude(`Answer using ONLY this KB article. Extract relevant answer. ${short ? "Max 2 sentences." : "Max 3-4 sentences."} No markdown. ${p?.tone ? `Tone: ${p.tone}.` : ""}
 Question: "${msg}"
 KB "${title}": ${article.slice(0, 1500)}
-Only your response.`, "haiku", 200)) || article.slice(0, 500);
+Only your response.`, "haiku", 500)) || article.slice(0, 500);
 }
 
 async function generateJourneyLeadIn(msg: string, journeyName: string, ch: string, p: { name?: string; tone?: string } | null): Promise<{ leadIn: string; ctaText: string }> {
