@@ -454,7 +454,7 @@ export default function TicketDetailPage() {
       .catch(() => {});
     fetch(`/api/workspaces/${workspace.id}/playbooks`)
       .then((res) => res.json())
-      .then((data) => { if (data?.playbooks) setAvailablePlaybooks(data.playbooks.filter((p: { enabled: boolean }) => p.enabled).map((p: { id: string; name: string }) => ({ id: p.id, name: p.name }))); })
+      .then((data) => { if (data?.playbooks) setAvailablePlaybooks(data.playbooks.filter((p: { is_active: boolean }) => p.is_active).map((p: { id: string; name: string }) => ({ id: p.id, name: p.name }))); })
       .catch(() => {});
     fetch(`/api/workspaces/${workspace.id}/journeys`)
       .then((res) => res.json())
