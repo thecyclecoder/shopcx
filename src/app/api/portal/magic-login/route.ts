@@ -45,18 +45,7 @@ export async function POST(request: Request) {
       path: "/",
     });
 
-    // Get workspace slug for redirect
-    const { data: ws } = await admin
-      .from("workspaces")
-      .select("help_slug")
-      .eq("id", payload.workspaceId)
-      .single();
-
-    const portalUrl = ws?.help_slug
-      ? `https://${ws.help_slug}.shopcx.ai/portal`
-      : "/portal";
-
-    return NextResponse.json({ success: true, redirectUrl: portalUrl });
+    return NextResponse.json({ success: true, redirectUrl: "/portal" });
   }
 
   // ── Email login → send magic link ──
