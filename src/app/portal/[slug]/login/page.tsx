@@ -17,6 +17,7 @@ function PortalLogin() {
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [emailSent, setEmailSent] = useState(false);
   const [autoLogging, setAutoLogging] = useState(false);
 
   // Auto-login via magic link token
@@ -51,7 +52,7 @@ function PortalLogin() {
     setError("");
 
     try {
-      const res = await fetch("/api/portal/multipass-login", {
+      const res = await fetch("/api/portal/magic-login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: email.trim() }),
@@ -59,10 +60,12 @@ function PortalLogin() {
 
       const data = await res.json();
 
-      if (data.redirect_url) {
-        window.location.href = data.redirect_url;
+      if (data.success) {
+        setError("");
+        setLoading(false);
+        setEmailSent(true);
       } else {
-        setError(data.error || "Could not log in. Please try again.");
+        setError(data.error || "Could not send login link. Please try again.");
         setLoading(false);
       }
     } catch {
@@ -87,11 +90,29 @@ function PortalLogin() {
     );
   }
 
+  if (emailSent) {
+    return (
+      <div style={{ maxWidth: 420, margin: "80px auto", textAlign: "center" }}>
+        <div style={{ fontSize: 48, marginBottom: 16 }}>📧</div>
+        <h1 style={{ fontSize: 24, fontWeight: 900, marginBottom: 8 }}>Check your email</h1>
+        <p style={{ color: "#6b7280", marginBottom: 24, fontSize: 15 }}>
+          We sent a login link to your email. Click the link to access your account.
+        </p>
+        <button
+          onClick={() => { setEmailSent(false); setEmail(""); }}
+          style={{ color: "#4f46e5", fontSize: 14, background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
+        >
+          Try a different email
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div style={{ maxWidth: 420, margin: "80px auto", textAlign: "center" }}>
       <h1 style={{ fontSize: 24, fontWeight: 900, marginBottom: 8 }}>Manage your subscriptions</h1>
       <p style={{ color: "#6b7280", marginBottom: 32, fontSize: 15 }}>
-        Enter your email to access your account.
+        Enter your email and we'll send you a login link.
       </p>
       <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <input
