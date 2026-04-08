@@ -1,9 +1,17 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 
-export default function PortalLogin() {
+export default function PortalLoginPage() {
+  return (
+    <Suspense fallback={<div style={{ maxWidth: 420, margin: "80px auto", textAlign: "center" }}><p style={{ color: "#6b7280" }}>Loading...</p></div>}>
+      <PortalLogin />
+    </Suspense>
+  );
+}
+
+function PortalLogin() {
   const searchParams = useSearchParams();
   const token = searchParams.get("token");
   const [email, setEmail] = useState("");
