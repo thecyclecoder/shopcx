@@ -48,7 +48,7 @@ export default function PortalClient({ shopDomain, shopifyCustomerId }: { shopDo
   return (
     <div>
       <h1 style={{ fontSize: "24px", fontWeight: 900, marginBottom: "16px" }}>Manage your subscriptions</h1>
-      <div id="subscription-portal-root" ref={rootRef} />
+      <div id="subscriptions-portal-root" ref={rootRef} />
     </div>
   );
 }
