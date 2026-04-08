@@ -715,5 +715,20 @@ async function executeAccountLogin(admin: Admin, config: Record<string, unknown>
 
   await sendReply(admin, ctx, (config.reply_login_link as string) || reply, config.reply_login_link_status as string || "closed");
 
+  // Always send the magic link via email, even if ticket is chat/sms
+  const ticketChannel = (ctx.ticket?.channel as string) || "email";
+  if (ticketChannel !== "email") {
+    const { data: ws } = await admin.from("workspaces").select("name").eq("id", ctx.workspaceId).single();
+    await sendTicketReply({
+      workspaceId: ctx.workspaceId,
+      toEmail: email,
+      subject: `Your login link — ${ws?.name || "Portal"}`,
+      body: `<p>Here's your personal login link to access your account:</p><p><a href="${magicUrl}" style="display:inline-block;padding:12px 24px;background:#4f46e5;color:white;text-decoration:none;border-radius:8px;font-weight:600;">Log In to My Account</a></p><p>This link is valid for 24 hours and is unique to you — no password needed.</p>`,
+      inReplyTo: null,
+      agentName: ws?.name || "Support",
+      workspaceName: ws?.name || "",
+    });
+  }
+
   await addNote(admin, ctx, `Magic login link sent to ${email}.`);
 }
