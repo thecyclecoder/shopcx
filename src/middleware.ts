@@ -2,8 +2,8 @@ import { updateSession } from "@/lib/supabase/middleware";
 import { type NextRequest, NextResponse } from "next/server";
 
 export async function middleware(request: NextRequest) {
-  // CORS for widget API endpoints (cross-origin from customer sites) — bypass auth
-  if (request.nextUrl.pathname.startsWith("/api/widget/")) {
+  // Widget routes — bypass auth entirely (public, cross-origin from customer sites)
+  if (request.nextUrl.pathname.startsWith("/api/widget/") || request.nextUrl.pathname.startsWith("/widget/")) {
     if (request.method === "OPTIONS") {
       const res = new NextResponse(null, { status: 204 });
       res.headers.set("Access-Control-Allow-Origin", "*");
