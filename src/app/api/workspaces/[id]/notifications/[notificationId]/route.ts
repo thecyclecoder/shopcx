@@ -2,6 +2,30 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
+// GET: Single notification detail
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ id: string; notificationId: string }> }
+) {
+  const { id: workspaceId, notificationId } = await params;
+  void request;
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("dashboard_notifications")
+    .select("*")
+    .eq("id", notificationId)
+    .eq("workspace_id", workspaceId)
+    .single();
+
+  if (!data) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  return NextResponse.json(data);
+}
+
 // PATCH: Mark single notification as read or dismissed
 export async function PATCH(
   request: Request,

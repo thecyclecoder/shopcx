@@ -489,16 +489,18 @@ export default function Sidebar({
                   >
                     View All
                   </Link>
-                  <Link
-                    href="/dashboard/ai-analysis"
-                    className={`flex items-center px-2.5 py-2.5 md:py-1.5 text-[15px] md:text-sm transition-colors ${
-                      pathname.startsWith("/dashboard/ai-analysis")
-                        ? "font-medium text-indigo-600 dark:text-indigo-400"
-                        : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
-                    }`}
-                  >
-                    AI Analysis
-                  </Link>
+                  {["owner", "admin"].includes(workspace.role) && (
+                    <Link
+                      href="/dashboard/ai-analysis"
+                      className={`flex items-center px-2.5 py-2.5 md:py-1.5 text-[15px] md:text-sm transition-colors ${
+                        pathname.startsWith("/dashboard/ai-analysis")
+                          ? "font-medium text-indigo-600 dark:text-indigo-400"
+                          : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+                      }`}
+                    >
+                      AI Analysis
+                    </Link>
+                  )}
                 </div>
               )}
             </div>

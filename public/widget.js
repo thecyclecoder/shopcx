@@ -85,8 +85,8 @@
       // Move bubble to top-right as a close button over fullscreen iframe
       bubble.style.cssText = "position:fixed;top:12px;right:12px;z-index:2147483648;width:40px;height:40px;border-radius:50%;border:none;background:rgba(0,0,0,0.5);color:white;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:none;";
     } else if (isMobile && !isOpen) {
-      // Restore to bottom-right bubble
-      bubble.style.cssText = "width:56px;height:56px;border-radius:50%;border:none;background:#4f46e5;color:white;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,0.15);transition:transform 0.2s;";
+      // Restore to bottom-right bubble with fetched color
+      bubble.style.cssText = "width:56px;height:56px;border-radius:50%;border:none;background:" + bubbleColor + ";color:white;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,0.15);transition:transform 0.2s;";
     }
   }
 
@@ -100,6 +100,8 @@
     isOpen: function () { return isOpen; },
   };
 
+  var bubbleColor = "#4f46e5";
+
   // Fetch config for color and position
   fetch(BASE + "/api/widget/" + workspaceId + "/config")
     .then(function (r) {
@@ -107,6 +109,7 @@
     })
     .then(function (cfg) {
       if (cfg.color) {
+        bubbleColor = cfg.color;
         bubble.style.background = cfg.color;
       }
       if (cfg.position === "bottom-left") {

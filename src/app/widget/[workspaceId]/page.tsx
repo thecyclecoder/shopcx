@@ -99,9 +99,11 @@ export default function ChatWidgetPage() {
     const urlParams = new URLSearchParams(window.location.search);
     const pid = urlParams.get("pid") || "";
     const handle = urlParams.get("handle") || "";
+    const pagePath = urlParams.get("path") || "";
     const params = new URLSearchParams();
     if (pid) params.set("pid", pid);
     if (handle) params.set("handle", handle);
+    if (pagePath) params.set("path", pagePath);
     if (articleSearch) params.set("search", articleSearch);
 
     fetch(`/api/widget/${workspaceId}/articles?${params}`)
