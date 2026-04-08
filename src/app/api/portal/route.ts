@@ -21,6 +21,27 @@ async function resolveAuth(req: NextRequest): Promise<PortalAuthResult> {
 
   // Fall back to cookie session (mini-site portal)
   const cookieStore = await cookies();
+
+  // Magic link cookies (new)
+  const magicCustomerId = cookieStore.get("portal_customer_id")?.value;
+  const magicWorkspaceId = cookieStore.get("portal_workspace_id")?.value;
+
+  if (magicCustomerId && magicWorkspaceId) {
+    // Look up shopify_customer_id from our DB
+    const admin = (await import("@/lib/supabase/admin")).createAdminClient();
+    const { data: cust } = await admin.from("customers")
+      .select("shopify_customer_id")
+      .eq("id", magicCustomerId)
+      .single();
+
+    return {
+      shop: "",
+      loggedInCustomerId: cust?.shopify_customer_id || "",
+      workspaceId: magicWorkspaceId,
+    };
+  }
+
+  // Legacy encrypted session cookie
   const sessionCookie = cookieStore.get("portal_session")?.value;
   if (!sessionCookie) throw new Error("No portal session");
 
