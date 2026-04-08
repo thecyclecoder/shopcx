@@ -2,7 +2,7 @@ import { updateSession } from "@/lib/supabase/middleware";
 import { type NextRequest, NextResponse } from "next/server";
 
 export async function middleware(request: NextRequest) {
-  // CORS for widget API endpoints (cross-origin from customer sites)
+  // CORS for widget API endpoints (cross-origin from customer sites) — bypass auth
   if (request.nextUrl.pathname.startsWith("/api/widget/")) {
     if (request.method === "OPTIONS") {
       const res = new NextResponse(null, { status: 204 });
@@ -12,7 +12,7 @@ export async function middleware(request: NextRequest) {
       return res;
     }
 
-    const response = await updateSession(request);
+    const response = NextResponse.next();
     response.headers.set("Access-Control-Allow-Origin", "*");
     response.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     response.headers.set("Access-Control-Allow-Headers", "Content-Type");
