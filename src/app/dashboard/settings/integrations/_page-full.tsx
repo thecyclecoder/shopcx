@@ -515,40 +515,7 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
       )}
 
       <div className="max-w-xl space-y-6">
-        {/* ── Sandbox Mode ── */}
-        {show("shopify") && (
-        <div className={`rounded-lg border p-4 ${sandboxMode ? "border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950" : "border-emerald-300 bg-emerald-50 dark:border-emerald-700 dark:bg-emerald-950"}`}>
-          <div className="flex items-center justify-between">
-            <div>
-              <p className={`text-sm font-medium ${sandboxMode ? "text-amber-700 dark:text-amber-400" : "text-emerald-700 dark:text-emerald-400"}`}>
-                {sandboxMode ? "Sandbox Mode" : "Live Mode"}
-              </p>
-              <p className={`mt-0.5 text-sm ${sandboxMode ? "text-amber-600 dark:text-amber-500" : "text-emerald-600 dark:text-emerald-500"}`}>
-                {sandboxMode
-                  ? "Replies to forwarded support email tickets will not be sent to customers. Only direct inbound@ tickets get real replies."
-                  : "All ticket replies will be sent to customers."}
-              </p>
-            </div>
-            <button
-              onClick={async () => {
-                const newValue = !sandboxMode;
-                const res = await patchIntegrations({ sandbox_mode: newValue });
-                if (res) {
-                  setSandboxMode(newValue);
-                  setMessage(newValue ? "Sandbox mode enabled" : "Live mode enabled — replies will be sent to customers");
-                }
-              }}
-              className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
-                sandboxMode
-                  ? "bg-emerald-600 text-white hover:bg-emerald-500"
-                  : "bg-amber-600 text-white hover:bg-amber-500"
-              }`}
-            >
-              {sandboxMode ? "Go Live" : "Enable Sandbox"}
-            </button>
-          </div>
-        </div>
-        )}
+        {/* Sandbox Mode moved to Settings > Sandbox */}
 
         {/* ── Shopify ── */}
         {show("shopify") && (

@@ -77,6 +77,10 @@ export default function SettingsPage() {
           <SettingsCard href="/dashboard/settings/chat-widget" title="Live Chat" desc="Embeddable chat widget" />
         </SettingsSection>
 
+        <SettingsSection title="System">
+          <SettingsCard href="/dashboard/settings/sandbox" title="Sandbox Mode" desc="Toggle between sandbox (drafts only) and live mode" />
+        </SettingsSection>
+
         <SettingsSection title="Notifications">
           <SettingsCard href="/dashboard/settings/slack" title="Slack Notifications" desc="Escalations, chargebacks, fraud alerts, and more" />
         </SettingsSection>
