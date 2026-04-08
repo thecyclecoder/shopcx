@@ -11,6 +11,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { sendJourneyCTA } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { markFirstTouch } from "@/lib/first-touch";
+import { getDeliveryChannel } from "@/lib/delivery-channel";
 import crypto from "crypto";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -112,8 +113,11 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
   const journeyUrl = `${siteUrl}/journey/${token}`;
 
   // ── Channel-specific delivery ──
+  // For chat: switch to email if customer has been idle
+  const effectiveChannel = await getDeliveryChannel(ticketId, channel);
+  const channelSwitched = effectiveChannel !== channel;
 
-  if (channel === "email" || channel === "help_center") {
+  if (effectiveChannel === "email" || effectiveChannel === "help_center") {
     // HTML CTA email
     if (!customer?.email) return false;
     await sendJourneyCTA({
@@ -129,13 +133,14 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
       inReplyTo,
     });
 
-    // Post internal note + external message record
+    // Post external message record (visible in ticket conversation)
+    const emailLabel = channelSwitched ? `<p style="font-size:12px;color:#6b7280;">📧 Sent via email (customer left chat)</p>` : "";
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId, direction: "outbound", visibility: "external",
-      author_type: "system", body: `<p>${leadIn}</p>`,
+      author_type: "system", body: `${emailLabel}<p>${leadIn}</p>`,
     });
 
-  } else if (channel === "chat") {
+  } else if (effectiveChannel === "chat") {
     // Embedded inline form — send as a system message with journey metadata
     // The chat widget detects journey_token and renders the embedded form
     await admin.from("ticket_messages").insert({
@@ -150,7 +155,7 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
       },
     });
 
-  } else if (channel === "sms") {
+  } else if (effectiveChannel === "sms") {
     // Plain text + URL
     const smsText = `${leadIn}\n\n${journeyUrl}`;
     await admin.from("ticket_messages").insert({
@@ -160,7 +165,7 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
     // TODO: actually send via Twilio SMS
     // await sendSms(workspaceId, customer.phone, smsText);
 
-  } else if (channel === "meta_dm") {
+  } else if (effectiveChannel === "meta_dm") {
     // Plain text + URL for DMs
     const dmText = `${leadIn}\n\n${journeyUrl}`;
     await admin.from("ticket_messages").insert({
@@ -172,9 +177,12 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
 
   // ── Common post-delivery ──
 
+  const deliveryNote = channelSwitched
+    ? `[System] Journey "${journeyName}" delivered via email (chat customer idle). Token: ${token.slice(0, 8)}...`
+    : `[System] Journey "${journeyName}" delivered via ${effectiveChannel}. Token: ${token.slice(0, 8)}...`;
   await admin.from("ticket_messages").insert({
     ticket_id: ticketId, direction: "outbound", visibility: "internal",
-    author_type: "system", body: `[System] Journey "${journeyName}" delivered via ${channel}. Token: ${token.slice(0, 8)}...`,
+    author_type: "system", body: deliveryNote,
   });
 
   await addTicketTag(ticketId, `j:${journeyName.toLowerCase().replace(/\s+/g, "_")}`);
@@ -272,8 +280,10 @@ export async function nudgeJourney(
   const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
   const journeyUrl = `${siteUrl}/journey/${token}`;
 
-  // Deliver based on channel
-  if (channel === "email" || channel === "help_center") {
+  // Deliver based on channel (switch to email if chat customer idle)
+  const nudgeChannel = await getDeliveryChannel(ticketId, channel);
+
+  if (nudgeChannel === "email" || nudgeChannel === "help_center") {
     const { data: customer } = await admin.from("customers")
       .select("email, first_name").eq("id",
         (await admin.from("tickets").select("customer_id").eq("id", ticketId).single()).data?.customer_id || "").single();
@@ -287,8 +297,14 @@ export async function nudgeJourney(
         primaryColor: ws?.help_primary_color || undefined, subject: `Re: ${ticket?.subject || "Your request"}`,
         buttonLabel: `Complete ${journeyEntry.journey_name} →`, inReplyTo: ticketId,
       });
+      if (nudgeChannel !== channel) {
+        await admin.from("ticket_messages").insert({
+          ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system",
+          body: `[System] Re-nudge sent via email (chat customer idle).`,
+        });
+      }
     }
-  } else if (channel === "chat") {
+  } else if (nudgeChannel === "chat") {
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId, direction: "outbound", visibility: "external", author_type: "system",
       body: nudgeText, metadata: { journey_token: token, journey_id: journeyEntry.journey_id, embedded_form: true },

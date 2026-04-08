@@ -232,24 +232,13 @@ async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: st
     }
   }
 
-  // Chat→email fallback: if chat customer hasn't been active for 5 min, also send email
+  // Chat→email fallback: if chat customer has been idle, also send via email
   if (ch === "chat") {
-    const { data: t } = await admin.from("tickets").select("customer_id, subject").eq("id", tid).single();
-    if (t?.customer_id) {
-      // Check last customer message time
-      const { data: lastInbound } = await admin.from("ticket_messages")
-        .select("created_at")
-        .eq("ticket_id", tid)
-        .eq("direction", "inbound")
-        .eq("author_type", "customer")
-        .order("created_at", { ascending: false })
-        .limit(1).single();
-
-      const lastActivity = lastInbound ? new Date(lastInbound.created_at).getTime() : 0;
-      const fiveMinAgo = Date.now() - 5 * 60 * 1000;
-
-      if (lastActivity < fiveMinAgo) {
-        // Customer likely left — send email fallback
+    const { getDeliveryChannel } = await import("@/lib/delivery-channel");
+    const effectiveCh = await getDeliveryChannel(tid, ch);
+    if (effectiveCh === "email") {
+      const { data: t } = await admin.from("tickets").select("customer_id, subject").eq("id", tid).single();
+      if (t?.customer_id) {
         const { data: cust } = await admin.from("customers").select("email").eq("id", t.customer_id).single();
         if (cust?.email) {
           const { data: ws } = await admin.from("workspaces").select("name").eq("id", wsId).single();
@@ -259,7 +248,7 @@ async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: st
             body: html,
             inReplyTo: null, agentName: "Support", workspaceName: ws?.name || "",
           });
-          await sysNote(admin, tid, `[System] Chat customer inactive >5min. Reply also sent via email to ${cust.email}.`);
+          await sysNote(admin, tid, `[System] Chat customer idle. Reply also sent via email to ${cust.email}.`);
         }
       }
     }
