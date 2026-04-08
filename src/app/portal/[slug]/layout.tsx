@@ -22,7 +22,7 @@ export default async function PortalLayout({
   const portalConfig = (workspace.portal_config || {}) as Record<string, unknown>;
   const minisite = (portalConfig.minisite || {}) as Record<string, unknown>;
   const logoUrl = (minisite.logo_url as string) || workspace.help_logo_url || "";
-  const primaryColor = (minisite.primary_color as string) || workspace.help_primary_color || "#111827";
+  const primaryColor = (minisite.primary_color as string) || workspace.help_primary_color || "#4f46e5";
 
   return (
     <>
