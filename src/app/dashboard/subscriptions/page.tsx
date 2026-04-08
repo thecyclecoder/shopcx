@@ -186,7 +186,7 @@ export default function SubscriptionsPage() {
             <span className="ml-1 text-[10px]">{productDropdownOpen ? "\u25B2" : "\u25BC"}</span>
           </button>
           {productDropdownOpen && (
-            <div className="absolute left-0 top-full z-50 mt-1 max-h-64 w-64 overflow-y-auto rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="absolute left-0 top-full z-50 mt-1 max-h-64 w-full sm:w-64 overflow-y-auto rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
               {selectedProducts.length > 0 && (
                 <button
                   type="button"
@@ -217,10 +217,10 @@ export default function SubscriptionsPage() {
           )}
         </div>
 
-        <form onSubmit={e => { e.preventDefault(); setAppliedSearch(search); setOffset(0); }} className="flex gap-1">
+        <form onSubmit={e => { e.preventDefault(); setAppliedSearch(search); setOffset(0); }} className="flex w-full gap-1 sm:w-auto">
           <input type="text" value={search} onChange={e => setSearch(e.target.value)}
             placeholder="Search customer..."
-            className="w-48 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300" />
+            className="w-full sm:w-48 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300" />
           <button type="submit" className="rounded-md bg-zinc-100 px-3 py-1.5 text-sm dark:bg-zinc-700">Go</button>
         </form>
       </div>
@@ -296,7 +296,7 @@ export default function SubscriptionsPage() {
 
         {/* Pagination */}
         {total > PAGE_SIZE && (
-          <div className="flex items-center justify-between border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+          <div className="flex flex-col items-center gap-2 border-t border-zinc-100 px-4 py-3 sm:flex-row sm:justify-between dark:border-zinc-800">
             <p className="text-xs text-zinc-500">{offset + 1}–{Math.min(offset + PAGE_SIZE, total)} of {total}</p>
             <div className="flex gap-2">
               <button onClick={() => setOffset(o => Math.max(0, o - PAGE_SIZE))} disabled={offset === 0}

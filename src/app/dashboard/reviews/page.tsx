@@ -164,8 +164,8 @@ export default function ReviewsPage() {
   };
 
   return (
-    <div className="p-8">
-      <div className="mb-6 flex items-center justify-between">
+    <div className="px-4 py-6 sm:p-8">
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Reviews</h1>
           <p className="mt-1 text-sm text-zinc-500">Manage product and site reviews synced from Klaviyo.</p>
@@ -188,7 +188,7 @@ export default function ReviewsPage() {
       )}
 
       {/* Stats */}
-      <div className="mb-6 grid grid-cols-3 gap-3 sm:grid-cols-6">
+      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-6">
         {[
           { label: "Total", value: stats.total, color: "text-zinc-900 dark:text-zinc-100" },
           { label: "Published", value: stats.published, color: "text-green-600" },
