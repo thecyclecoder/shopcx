@@ -934,6 +934,38 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
       return { status: "asking_customer" };
     }
 
+    // Bypass confidence gate if intent matches a journey or workflow — they have their own confirmation flows
+    if (ai.confidence < cfg.threshold && ai.confidence >= 60 && st.hasCust) {
+      const intentBypass = await step.run("check-intent-handler", async () => {
+        // Check journeys
+        const { data: jds } = await admin.from("journey_definitions").select("id, name, trigger_intent")
+          .eq("workspace_id", wsId).eq("is_active", true);
+        for (const j of jds || []) {
+          if (j.trigger_intent && ai.intent.toLowerCase().includes(j.trigger_intent.toLowerCase())) {
+            return { bypass: true, handler: `Journey: ${j.name}` };
+          }
+        }
+        // Check workflows
+        const { data: wfs } = await admin.from("workflows").select("id, name, trigger_tag")
+          .eq("workspace_id", wsId).eq("enabled", true);
+        for (const w of wfs || []) {
+          const tag = w.trigger_tag?.replace("smart:", "") || "";
+          if (tag && ai.intent.toLowerCase().includes(tag.toLowerCase())) {
+            return { bypass: true, handler: `Workflow: ${w.name}` };
+          }
+        }
+        return { bypass: false, handler: "" };
+      });
+      if (intentBypass.bypass) {
+        await step.run("intent-bypass-note", () =>
+          sysNote(admin, tid, `[System] Confidence ${ai.confidence}% < ${cfg.threshold}%, but intent matches ${intentBypass.handler}. Routing directly.`));
+        await step.run("route-bypass", async () => {
+          await routeExec(admin, wsId, tid, st.ch, ai.intent, ai.confidence, msg, ai.custCtx, st.hasCust, cfg, pers, t0, st.custId || null, pendingAccountLink);
+        });
+        return { status: "intent_bypass_routed", intent: ai.intent, confidence: ai.confidence };
+      }
+    }
+
     // Confidence gate
     if (ai.confidence < cfg.threshold) {
       await step.run("start-clarify", async () => {
