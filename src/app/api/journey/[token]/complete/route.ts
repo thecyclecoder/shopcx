@@ -427,9 +427,17 @@ export async function POST(
           .select("shopify_contract_id").eq("id", subscriptionId).single();
 
         if (sub?.shopify_contract_id) {
-          // Remove affected item and add new product
+          // Remove current item (may be the default swap, not the original affected item)
           const { subSwapVariant } = await import("@/lib/subscription-items");
-          const currentVariant = affectedVariantId;
+          // Check what's actually on the sub — could be original, default swap, or a Tier 1 pick
+          const { data: currentSub } = await admin.from("subscriptions")
+            .select("items").eq("id", subscriptionId).single();
+          const currentItems = (currentSub?.items as { variant_id?: string }[]) || [];
+          const defaultSwapId = metadata.defaultSwapVariantId as string;
+          // Find the variant to remove: default swap > tier1 swap > original affected
+          const currentVariant = currentItems.find(i => i.variant_id === defaultSwapId)?.variant_id
+            || currentItems.find(i => i.variant_id === affectedVariantId)?.variant_id
+            || defaultSwapId || affectedVariantId;
           await subSwapVariant(wsId, sub.shopify_contract_id, currentVariant, swapVariantId, qty);
           actionLog.push(`Product swapped to ${swapVariantId} x${qty}`);
 
@@ -495,12 +503,17 @@ export async function POST(
         }).eq("id", actionId);
         actionLog.push("Tier 3: Subscription paused (auto-resume on resolve)");
       } else if (tier3Choice === "remove") {
-        // Remove the affected item from subscription
+        // Remove current item (may be default swap, not original)
         const { data: sub } = await admin.from("subscriptions")
-          .select("shopify_contract_id").eq("id", subscriptionId).single();
+          .select("shopify_contract_id, items").eq("id", subscriptionId).single();
         if (sub?.shopify_contract_id) {
           const { subRemoveItem } = await import("@/lib/subscription-items");
-          await subRemoveItem(wsId, sub.shopify_contract_id, affectedVariantId);
+          const subItems = (sub.items as { variant_id?: string }[]) || [];
+          const defaultSwapId = metadata.defaultSwapVariantId as string;
+          const removeVariant = subItems.find(i => i.variant_id === defaultSwapId)?.variant_id
+            || subItems.find(i => i.variant_id === affectedVariantId)?.variant_id
+            || defaultSwapId || affectedVariantId;
+          await subRemoveItem(wsId, sub.shopify_contract_id, removeVariant);
         }
         await admin.from("crisis_customer_actions").update({
           tier3_response: "accepted_remove",
