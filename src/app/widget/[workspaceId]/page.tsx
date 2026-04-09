@@ -626,7 +626,7 @@ export default function ChatWidgetPage() {
                   >
                     {bodyWithoutForm && (
                       <div
-                        className={`prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:underline ${isCustomer ? "!text-white [&_*]:!text-white [&_a]:!text-white" : "!text-zinc-900 [&_*]:!text-zinc-900 [&_a]:!text-indigo-600"}`}
+                        className={`prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:underline ${isCustomer ? "!text-white [&_*]:!text-white [&_a]:!text-white" : "!text-zinc-900 [&_*]:!text-zinc-900 [&_a]:!text-indigo-600 [&_a[style]]:!text-white"}`}
                         dangerouslySetInnerHTML={{ __html: bodyWithoutForm }}
                         onClick={(e) => {
                           // Open links in new window (not inside iframe)
