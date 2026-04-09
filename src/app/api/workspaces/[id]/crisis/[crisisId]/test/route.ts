@@ -5,6 +5,58 @@ import { sendTicketReply } from "@/lib/email";
 import crypto from "crypto";
 
 /**
+ * GET — Find subscriptions with the affected item for the current user.
+ */
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ id: string; crisisId: string }> },
+) {
+  const { id: workspaceId, crisisId } = await params;
+  void request;
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const admin = createAdminClient();
+
+  // Get crisis to know affected item
+  const { data: crisis } = await admin.from("crisis_events")
+    .select("affected_variant_id, affected_sku")
+    .eq("id", crisisId)
+    .eq("workspace_id", workspaceId)
+    .single();
+  if (!crisis) return NextResponse.json({ error: "Crisis not found" }, { status: 404 });
+
+  // Find the user's customer profile(s) by email
+  const { data: customers } = await admin.from("customers")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("email", user.email);
+
+  const customerIds = (customers || []).map(c => c.id);
+  if (customerIds.length === 0) return NextResponse.json({ subscriptions: [] });
+
+  // Get their active subs
+  const { data: subs } = await admin.from("subscriptions")
+    .select("id, shopify_contract_id, items, status, next_billing_date")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", customerIds)
+    .in("status", ["active", "paused"]);
+
+  // Filter to ones with the affected item
+  const matching = (subs || []).filter(s => {
+    const items = (s.items as { sku?: string; variant_id?: string }[]) || [];
+    return items.some(i =>
+      (i.sku && crisis.affected_sku && i.sku.toUpperCase() === crisis.affected_sku.toUpperCase()) ||
+      (i.variant_id && i.variant_id === crisis.affected_variant_id),
+    );
+  });
+
+  return NextResponse.json({ subscriptions: matching });
+}
+
+/**
  * POST — Test the crisis campaign on a single subscription.
  * Only works in draft mode. Runs the full Tier 1 flow (auto-swap + email + journey).
  */

@@ -351,24 +351,17 @@ export default function CrisisDetailPage() {
               onClick={async () => {
                 setTestLoading(true);
                 // Fetch current user's subscriptions with the affected item
-                const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions?status=active&limit=100`);
+                const res = await fetch(`/api/workspaces/${workspace.id}/crisis/${crisisId}/test`);
                 if (res.ok) {
                   const data = await res.json();
-                  const subs = (data.subscriptions || data || []) as { id: string; shopify_contract_id: string; items: { title: string; sku?: string; variant_id?: string }[]; status: string; next_billing_date: string }[];
-                  const matching = subs.filter(s => {
-                    const items = s.items || [];
-                    return items.some(i =>
-                      (i.sku && crisis.affected_sku && i.sku.toUpperCase() === crisis.affected_sku.toUpperCase()) ||
-                      (i.variant_id && i.variant_id === crisis.affected_variant_id)
-                    );
-                  }).map(s => ({
+                  const subs = (data.subscriptions || []) as { id: string; shopify_contract_id: string; items: { title: string; sku?: string; variant_id?: string }[]; status: string; next_billing_date: string }[];
+                  setTestSubs(subs.map(s => ({
                     id: s.id,
                     contractId: s.shopify_contract_id,
                     items: (s.items || []).filter(i => !i.title?.toLowerCase().includes("shipping protection")).map(i => i.title).join(", "),
                     status: s.status,
                     nextDate: s.next_billing_date ? new Date(s.next_billing_date).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "—",
-                  }));
-                  setTestSubs(matching);
+                  })));
                   setTestSubsLoaded(true);
                 }
                 setTestLoading(false);
