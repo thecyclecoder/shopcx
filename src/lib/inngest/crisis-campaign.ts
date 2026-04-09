@@ -370,13 +370,8 @@ export const crisisAdvanceTier = inngest.createFunction(
 <p>We'd love to help you try something new — and to sweeten the deal, we'll give you <b>${couponPct}% off</b> your next order when you pick a new product.</p>
 <p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Swap for One of Our Best-Sellers →</a></p>`;
 
-          await admin.from("ticket_messages").insert({
-            ticket_id,
-            direction: "outbound", visibility: "external", author_type: "system",
-            body: emailBody, sent_at: new Date().toISOString(),
-          });
           const threading = await getTicketThreading(admin, ticket_id);
-          await sendTicketReply({
+          const tier2Result = await sendTicketReply({
             workspaceId: workspace_id,
             toEmail: customer.email,
             subject: threading.subject ? `Re: ${threading.subject}` : `${couponPct}% off — try something new while ${crisis.affected_product_title || "your item"} is restocking`,
@@ -384,6 +379,13 @@ export const crisisAdvanceTier = inngest.createFunction(
             inReplyTo: threading.inReplyTo,
             agentName: "Customer Care",
             workspaceName: ws?.name || "",
+          });
+          const tier2MsgId = tier2Result.messageId ? `<${tier2Result.messageId}@resend.dev>` : null;
+          await admin.from("ticket_messages").insert({
+            ticket_id,
+            direction: "outbound", visibility: "external", author_type: "system",
+            body: emailBody, sent_at: new Date().toISOString(),
+            email_message_id: tier2MsgId,
           });
         }
 
@@ -450,13 +452,8 @@ export const crisisAdvanceTier = inngest.createFunction(
 <p>We can remove ${crisis.affected_product_title || "the out-of-stock item"} from your subscription and keep shipping your other items as usual. We'll automatically add it back when it's in stock (expected <b>${restockDate}</b>).</p>
 <p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose What Works for You →</a></p>`;
 
-          await admin.from("ticket_messages").insert({
-            ticket_id,
-            direction: "outbound", visibility: "external", author_type: "system",
-            body: emailBody, sent_at: new Date().toISOString(),
-          });
           const threading3 = await getTicketThreading(admin, ticket_id);
-          await sendTicketReply({
+          const tier3Result = await sendTicketReply({
             workspaceId: workspace_id,
             toEmail: customer.email,
             subject: threading3.subject ? `Re: ${threading3.subject}` : `About your ${crisis.affected_product_title || "subscription"} — let us know what you'd prefer`,
@@ -464,6 +461,13 @@ export const crisisAdvanceTier = inngest.createFunction(
             inReplyTo: threading3.inReplyTo,
             agentName: "Customer Care",
             workspaceName: ws?.name || "",
+          });
+          const tier3MsgId = tier3Result.messageId ? `<${tier3Result.messageId}@resend.dev>` : null;
+          await admin.from("ticket_messages").insert({
+            ticket_id,
+            direction: "outbound", visibility: "external", author_type: "system",
+            body: emailBody, sent_at: new Date().toISOString(),
+            email_message_id: tier3MsgId,
           });
         }
 
