@@ -145,6 +145,9 @@ export const crisisDailyCampaign = inngest.createFunction(
             original_item: affectedItem,
             current_tier: 1,
             tier1_sent_at: new Date().toISOString(),
+            tier1_swapped_to: crisis.default_swap_variant_id
+              ? { variantId: crisis.default_swap_variant_id, title: crisis.default_swap_title || "default swap" }
+              : null,
             ticket_id: ticket?.id || null,
           }).select("id").single();
 
