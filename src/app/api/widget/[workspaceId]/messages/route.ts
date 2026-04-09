@@ -8,9 +8,11 @@ export async function POST(
 ) {
   const { workspaceId } = await params;
   const body = await req.json();
-  const { email, name, message, session_id } = body as {
+  const { email, name, first_name, last_name, message, session_id } = body as {
     email: string;
     name?: string;
+    first_name?: string;
+    last_name?: string;
     message: string;
     session_id?: string;
   };
@@ -59,7 +61,8 @@ export async function POST(
       .insert({
         workspace_id: workspaceId,
         email: normalizedEmail,
-        first_name: name || null,
+        first_name: first_name || name || null,
+        last_name: last_name || null,
       })
       .select("id")
       .single();

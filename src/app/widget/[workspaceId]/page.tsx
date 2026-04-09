@@ -48,7 +48,8 @@ export default function ChatWidgetPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [email, setEmail] = useState("");
-  const [name, setName] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [ticketId, setTicketId] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
@@ -78,7 +79,11 @@ export default function ChatWidgetPage() {
     if (paramEmail) {
       setEmail(paramEmail);
       setEmailPrefilled(true);
-      if (paramName) setName(paramName);
+      if (paramName) {
+        const parts = paramName.trim().split(/\s+/);
+        setFirstName(parts[0] || "");
+        setLastName(parts.slice(1).join(" ") || "");
+      }
     }
 
     fetch(`/api/widget/${workspaceId}/config`)
@@ -171,7 +176,7 @@ export default function ChatWidgetPage() {
     const data = await res.json();
     if (data.messages) setMessages(data.messages);
     // Save to localStorage
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}${workspaceId}`, JSON.stringify({ sessionId: chatSessionId, email, name, ticketId: chatTicketId }));
+    localStorage.setItem(`${STORAGE_KEY_PREFIX}${workspaceId}`, JSON.stringify({ sessionId: chatSessionId, email, firstName, lastName, ticketId: chatTicketId }));
   };
 
   // Restore session from localStorage
@@ -183,7 +188,8 @@ export default function ChatWidgetPage() {
         if (data.sessionId) {
           setSessionId(data.sessionId);
           setEmail(data.email || "");
-          setName(data.name || "");
+          setFirstName(data.firstName || data.name || "");
+          setLastName(data.lastName || "");
           setStarted(true);
         }
       } catch {}
@@ -260,7 +266,7 @@ export default function ChatWidgetPage() {
 
   const handleStart = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.trim()) return;
+    if (!email.trim() || !firstName.trim() || !lastName.trim()) return;
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email.trim())) {
       setEmailError("Please enter a valid email address");
@@ -270,7 +276,7 @@ export default function ChatWidgetPage() {
     setStarted(true);
     localStorage.setItem(
       `${STORAGE_KEY_PREFIX}${workspaceId}`,
-      JSON.stringify({ email: email.trim(), name: name.trim() })
+      JSON.stringify({ email: email.trim(), firstName: firstName.trim(), lastName: lastName.trim() })
     );
   };
 
@@ -298,7 +304,9 @@ export default function ChatWidgetPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: email.trim(),
-          name: name.trim() || undefined,
+          name: `${firstName.trim()} ${lastName.trim()}`.trim() || undefined,
+          first_name: firstName.trim() || undefined,
+          last_name: lastName.trim() || undefined,
           message: msg,
           session_id: sessionId || undefined,
         }),
@@ -312,7 +320,8 @@ export default function ChatWidgetPage() {
           JSON.stringify({
             sessionId: data.session_id,
             email: email.trim(),
-            name: name.trim(),
+            firstName: firstName.trim(),
+            lastName: lastName.trim(),
           })
         );
       }
@@ -543,17 +552,28 @@ export default function ChatWidgetPage() {
         {!started ? (
           <form onSubmit={handleStart} className="mt-4 space-y-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
             {emailPrefilled ? (
-              <p className="text-sm text-zinc-500">Chatting as <span className="font-medium text-zinc-700">{name || email}</span></p>
+              <p className="text-sm text-zinc-500">Chatting as <span className="font-medium text-zinc-700">{firstName || email}</span></p>
             ) : (
               <>
                 <p className="text-sm font-medium text-zinc-700">Enter your details to start chatting</p>
-                <input
-                  type="text"
-                  placeholder="Your name (optional)"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-base text-zinc-900 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="First name"
+                    value={firstName}
+                    onChange={(e) => setFirstName(e.target.value)}
+                    required
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-base text-zinc-900 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Last name"
+                    value={lastName}
+                    onChange={(e) => setLastName(e.target.value)}
+                    required
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-base text-zinc-900 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
+                  />
+                </div>
                 <input
                   type="email"
                   placeholder="Your email"
