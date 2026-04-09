@@ -49,7 +49,8 @@ interface Stats {
   tier2: { sent: number; accepted: number; rejected: number; pending: number };
   tier3: { sent: number; accepted: number; rejected: number; pending: number };
   paused: number;
-  removed: number;
+  removed_auto_readd: number;
+  removed_permanent: number;
   cancelled: number;
 }
 
@@ -276,8 +277,9 @@ export default function CrisisDetailPage() {
   const inputClass = "w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100";
   const labelClass = "block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1";
 
-  const savedPct = impact && impact.affected_subscriptions > 0
-    ? Math.round((impact.saved_count / impact.affected_subscriptions) * 100)
+  const processedCount = (impact as { processed_count?: number })?.processed_count || 0;
+  const savedPct = processedCount > 0
+    ? Math.round((impact!.saved_count / processedCount) * 100)
     : 0;
 
   return (
@@ -502,7 +504,7 @@ export default function CrisisDetailPage() {
             title="Pause or Remove Item"
             description="If they reject the product swap too, we offer to pause their subscription (single-item subs) or remove the affected item (multi-item subs) with automatic restart when the product is back in stock."
             timing="Next day after Tier 2 rejection"
-            status={stats ? `${stats.tier3.sent} sent, ${stats.paused} paused, ${stats.removed} removed, ${stats.cancelled} cancelled` : undefined}
+            status={stats ? `${stats.tier3.sent} sent, ${stats.paused} paused, ${stats.removed_auto_readd + stats.removed_permanent} removed, ${stats.cancelled} cancelled` : undefined}
           />
           <StepOutline
             number={4}
@@ -524,7 +526,8 @@ export default function CrisisDetailPage() {
             <StatCard label="Tier 2 Sent" value={stats.tier2.sent} sub={`${stats.tier2.accepted} accepted`} color="blue" />
             <StatCard label="Tier 2 Rejected" value={stats.tier2.rejected} color="red" />
             <StatCard label="Paused" value={stats.paused} color="amber" />
-            <StatCard label="Removed" value={stats.removed} color="zinc" />
+            <StatCard label="Removed (will re-add)" value={stats.removed_auto_readd} color="blue" />
+            <StatCard label="Removed (permanent)" value={stats.removed_permanent} color="zinc" />
             <StatCard label="Cancelled" value={stats.cancelled} color="red" />
           </div>
         </div>

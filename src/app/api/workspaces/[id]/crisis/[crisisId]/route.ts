@@ -75,7 +75,8 @@ export async function GET(
       pending: allActions.filter(a => a.tier3_sent_at && !a.tier3_response).length,
     },
     paused: allActions.filter(a => a.paused_at).length,
-    removed: allActions.filter(a => a.removed_item_at).length,
+    removed_auto_readd: allActions.filter(a => a.removed_item_at && a.auto_readd).length,
+    removed_permanent: allActions.filter(a => a.removed_item_at && !a.auto_readd).length,
     cancelled: allActions.filter(a => a.cancelled).length,
   };
 
@@ -128,12 +129,18 @@ export async function GET(
     monthsAtRisk = Math.max(1, Math.ceil((restockDate.getTime() - now.getTime()) / (30 * 24 * 60 * 60 * 1000)));
   }
 
+  // Affected = subs still with the item + subs already processed (swapped away)
+  const processedSubIds = new Set(allActions.map(a => a.subscription_id).filter(Boolean));
+  const stillAffected = matchingSubs.filter(s => !processedSubIds.has(s.id)).length;
+  const totalAffected = stillAffected + processedSubIds.size;
+
   const financialImpact = {
-    affected_subscriptions: matchingSubs.length,
+    affected_subscriptions: totalAffected,
     monthly_revenue_at_risk: Math.round(monthlyRevenueCents) / 100,
     months_at_risk: monthsAtRisk,
     total_revenue_at_risk: Math.round(monthlyRevenueCents * monthsAtRisk) / 100,
     annual_revenue_at_risk: Math.round(monthlyRevenueCents * 12) / 100,
+    processed_count: allActions.length,
     saved_count: allActions.filter(a =>
       a.tier1_response === "accepted_swap" || a.tier2_response === "accepted_swap" ||
       a.tier3_response === "accepted_pause" || a.tier3_response === "accepted_remove"
