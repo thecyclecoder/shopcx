@@ -27,6 +27,10 @@ async function getTicketThreading(admin: ReturnType<typeof createAdminClient>, t
       .limit(1).maybeSingle();
     inReplyTo = lastMsg?.email_message_id || null;
   }
+  // Resend IDs are bare UUIDs — wrap in angle brackets for proper threading
+  if (inReplyTo && !inReplyTo.startsWith("<")) {
+    inReplyTo = `<${inReplyTo}@resend.dev>`;
+  }
   return { inReplyTo, subject: ticket?.subject || null };
 }
 
@@ -224,18 +228,8 @@ export const crisisDailyCampaign = inngest.createFunction(
 <p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose a Different Flavor →</a></p>
 <p style="color:#6b7280;font-size:13px;">If you're happy with ${defaultSwap}, no action needed — your next shipment will include it automatically.</p>`;
 
-          // Insert ticket message
-          await admin.from("ticket_messages").insert({
-            ticket_id: ticket?.id,
-            direction: "outbound",
-            visibility: "external",
-            author_type: "system",
-            body: emailBody,
-            sent_at: new Date().toISOString(),
-          });
-
-          // Send email
-          await sendTicketReply({
+          // Send email first to get message ID for threading
+          const emailResult = await sendTicketReply({
             workspaceId: crisis.workspace_id,
             toEmail: customer.email,
             subject: `Update about your ${crisis.affected_product_title || "subscription"}`,
@@ -243,6 +237,18 @@ export const crisisDailyCampaign = inngest.createFunction(
             inReplyTo: null,
             agentName: "Customer Care",
             workspaceName: ws?.name || "",
+          });
+
+          // Insert ticket message with email_message_id for threading
+          const emailMsgId = emailResult.messageId ? `<${emailResult.messageId}@resend.dev>` : null;
+          await admin.from("ticket_messages").insert({
+            ticket_id: ticket?.id,
+            direction: "outbound",
+            visibility: "external",
+            author_type: "system",
+            body: emailBody,
+            sent_at: new Date().toISOString(),
+            email_message_id: emailMsgId,
           });
 
           totalNew++;

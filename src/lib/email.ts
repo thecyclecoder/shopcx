@@ -136,7 +136,7 @@ export async function sendTicketReply({
     from: `${agentName} via ${workspaceName} <support@${client.domain}>`,
     replyTo,
     to: toEmail,
-    subject: subject.startsWith("Re:") ? subject : `Re: ${subject}`,
+    subject: subject.startsWith("Re:") ? subject : inReplyTo ? `Re: ${subject}` : subject,
     html: `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; text-align: left;">
         ${body}

@@ -990,6 +990,10 @@ async function sendCrisisConfirmation(
         .limit(1).maybeSingle();
       inReplyTo = lastMsg?.email_message_id || null;
     }
+    // Resend IDs are bare UUIDs — wrap in angle brackets for proper threading
+    if (inReplyTo && !inReplyTo.startsWith("<")) {
+      inReplyTo = `<${inReplyTo}@resend.dev>`;
+    }
 
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId,
