@@ -344,7 +344,7 @@ export const crisisAdvanceTier = inngest.createFunction(
           const emailBody = `<p>Hi ${firstName},</p>
 <p>We understand ${crisis.affected_product_title || "your item"} was your go-to, and we're sorry it's still unavailable.</p>
 <p>We'd love to help you try something new — and to sweeten the deal, we'll give you <b>${couponPct}% off</b> your next order when you pick a new product.</p>
-<p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Browse New Products →</a></p>`;
+<p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Swap for One of Our Best-Sellers →</a></p>`;
 
           await admin.from("ticket_messages").insert({
             ticket_id,
