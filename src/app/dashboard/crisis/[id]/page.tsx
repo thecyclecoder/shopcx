@@ -332,8 +332,8 @@ export default function CrisisDetailPage() {
         </div>
       )}
 
-      {/* ── Financial Impact — admin/owner only ── */}
-      {isAdmin && impact && (
+      {/* ── Financial Impact — owner only ── */}
+      {workspace.role === "owner" && impact && (
         <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
           <h2 className="mb-4 text-lg font-semibold text-zinc-900 dark:text-zinc-100">Financial Impact</h2>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
