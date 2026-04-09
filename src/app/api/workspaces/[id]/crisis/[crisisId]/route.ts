@@ -84,10 +84,20 @@ export async function GET(
   const affectedSku = crisis.affected_sku;
   const affectedVariantId = crisis.affected_variant_id;
 
-  const { data: affectedSubs } = await admin.from("subscriptions")
-    .select("id, items, billing_interval, billing_interval_count, next_billing_date, status")
-    .eq("workspace_id", workspaceId)
-    .in("status", ["active", "paused"]);
+  // Paginate through all active/paused subs (default limit is 1000)
+  const affectedSubs: { id: string; items: unknown; billing_interval: string | null; billing_interval_count: number | null; next_billing_date: string | null; status: string }[] = [];
+  let subOffset = 0;
+  while (true) {
+    const { data: batch } = await admin.from("subscriptions")
+      .select("id, items, billing_interval, billing_interval_count, next_billing_date, status")
+      .eq("workspace_id", workspaceId)
+      .in("status", ["active", "paused"])
+      .range(subOffset, subOffset + 999);
+    if (!batch || batch.length === 0) break;
+    affectedSubs.push(...batch);
+    subOffset += batch.length;
+    if (batch.length < 1000) break;
+  }
 
   const matchingSubs = (affectedSubs || []).filter(s => {
     const items = (s.items as { sku?: string; variant_id?: string; price_cents?: number }[]) || [];
