@@ -769,7 +769,7 @@ async function executeAccountLogin(admin: Admin, config: Record<string, unknown>
 
   let reply: string;
   if (useHtml) {
-    reply = `<p>Here's your personal login link to access your account:</p><p><a href="${magicUrl}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:white;text-decoration:none;border-radius:8px;font-weight:600;">Log In to My Account</a></p><p>This link is valid for 24 hours and is unique to you — no password needed.</p>`;
+    reply = `<p>Here's your personal login link to access your account:</p><p><a href="${magicUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:#4f46e5;color:white;text-decoration:none;border-radius:8px;font-weight:600;">Log In to My Account</a></p><p>This link is valid for 24 hours and is unique to you — no password needed.</p>`;
   } else {
     reply = `Here's your personal login link to access your account:\n\n${magicUrl}\n\nThis link is valid for 24 hours and is unique to you — no password needed.`;
   }
