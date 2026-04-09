@@ -12,6 +12,24 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { sendTicketReply } from "@/lib/email";
 import crypto from "crypto";
 
+/** Get inReplyTo message ID for email threading on a ticket */
+async function getTicketThreading(admin: ReturnType<typeof createAdminClient>, ticketId: string | null): Promise<{ inReplyTo: string | null; subject: string | null }> {
+  if (!ticketId) return { inReplyTo: null, subject: null };
+  const { data: ticket } = await admin.from("tickets")
+    .select("subject, email_message_id").eq("id", ticketId).single();
+  let inReplyTo = ticket?.email_message_id || null;
+  if (!inReplyTo) {
+    const { data: lastMsg } = await admin.from("ticket_messages")
+      .select("email_message_id")
+      .eq("ticket_id", ticketId)
+      .not("email_message_id", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1).maybeSingle();
+    inReplyTo = lastMsg?.email_message_id || null;
+  }
+  return { inReplyTo, subject: ticket?.subject || null };
+}
+
 /** Look up a crisis journey definition ID by trigger intent */
 async function getCrisisJourneyId(
   admin: ReturnType<typeof createAdminClient>,
@@ -351,12 +369,13 @@ export const crisisAdvanceTier = inngest.createFunction(
             direction: "outbound", visibility: "external", author_type: "system",
             body: emailBody, sent_at: new Date().toISOString(),
           });
+          const threading = await getTicketThreading(admin, ticket_id);
           await sendTicketReply({
             workspaceId: workspace_id,
             toEmail: customer.email,
-            subject: `${couponPct}% off — try something new while ${crisis.affected_product_title || "your item"} is restocking`,
+            subject: threading.subject ? `Re: ${threading.subject}` : `${couponPct}% off — try something new while ${crisis.affected_product_title || "your item"} is restocking`,
             body: emailBody,
-            inReplyTo: null,
+            inReplyTo: threading.inReplyTo,
             agentName: ws?.name || "Support",
             workspaceName: ws?.name || "",
           });
@@ -430,12 +449,13 @@ export const crisisAdvanceTier = inngest.createFunction(
             direction: "outbound", visibility: "external", author_type: "system",
             body: emailBody, sent_at: new Date().toISOString(),
           });
+          const threading3 = await getTicketThreading(admin, ticket_id);
           await sendTicketReply({
             workspaceId: workspace_id,
             toEmail: customer.email,
-            subject: `About your ${crisis.affected_product_title || "subscription"} — let us know what you'd prefer`,
+            subject: threading3.subject ? `Re: ${threading3.subject}` : `About your ${crisis.affected_product_title || "subscription"} — let us know what you'd prefer`,
             body: emailBody,
-            inReplyTo: null,
+            inReplyTo: threading3.inReplyTo,
             agentName: ws?.name || "Support",
             workspaceName: ws?.name || "",
           });

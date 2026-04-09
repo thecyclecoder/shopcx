@@ -65,10 +65,16 @@ export async function buildCrisisTier2Steps(
     .select("*").eq("id", action.crisis_id).single();
   if (!crisis) return emptyConfig();
 
-  const productSwaps = (crisis.available_product_swaps as { variantId: string; title: string; productTitle: string }[]) || [];
+  const productSwaps = (crisis.available_product_swaps as { productId?: string; productTitle: string; variantId?: string; title?: string; variants?: { variantId: string; title: string }[] }[]) || [];
   if (productSwaps.length === 0) return emptyConfig();
 
   const couponPct = crisis.tier2_coupon_percent || 20;
+
+  // Build options — show product name only (not variant), use productId as value
+  const options = productSwaps.map(p => ({
+    value: p.productId || p.variantId || p.productTitle,
+    label: p.productTitle,
+  }));
 
   return {
     codeDriven: true,
@@ -80,7 +86,7 @@ export async function buildCrisisTier2Steps(
         question: `We'd love to help you try something new — and we'll give you ${couponPct}% off your next order!`,
         subtitle: "Pick a product you'd like to try instead.",
         options: [
-          ...productSwaps.map(p => ({ value: p.variantId, label: `${p.productTitle} — ${p.title}` })),
+          ...options,
           { value: "reject", label: "I don't want to change products" },
         ],
       },
