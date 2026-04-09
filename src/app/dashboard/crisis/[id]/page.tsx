@@ -133,6 +133,9 @@ export default function CrisisDetailPage() {
   const [editCouponPercent, setEditCouponPercent] = useState(20);
 
   // Coupon lookup
+  const isAdmin = workspace.role === "owner" || workspace.role === "admin";
+
+  // Coupon lookup
   const [couponInput, setCouponInput] = useState("");
   const [couponLooking, setCouponLooking] = useState(false);
   const [couponDetails, setCouponDetails] = useState<CouponDetails | null>(null);
@@ -289,17 +292,19 @@ export default function CrisisDetailPage() {
               {crisis.status}
             </span>
           </div>
-          <div className="flex items-center gap-2">
-            {crisis.status !== "resolved" && (
-              <button
-                onClick={handleResolve}
-                disabled={resolving}
-                className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
-              >
-                {resolving ? "Resolving..." : "Resolve Crisis"}
-              </button>
-            )}
-          </div>
+          {isAdmin && (
+            <div className="flex items-center gap-2">
+              {crisis.status !== "resolved" && (
+                <button
+                  onClick={handleResolve}
+                  disabled={resolving}
+                  className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                >
+                  {resolving ? "Resolving..." : "Resolve Crisis"}
+                </button>
+              )}
+            </div>
+          )}
         </div>
         {crisis.affected_product_title && (
           <p className="mt-1 text-sm text-zinc-500">Affected: {crisis.affected_product_title}</p>
@@ -312,8 +317,8 @@ export default function CrisisDetailPage() {
         </div>
       )}
 
-      {/* Status toggle */}
-      {crisis.status !== "resolved" && (
+      {/* Status toggle — admin/owner only */}
+      {isAdmin && crisis.status !== "resolved" && (
         <div className="mb-6 flex items-center gap-2">
           <span className="text-sm text-zinc-500">Status:</span>
           {STATUSES.filter(s => s !== "resolved").map(s => (
@@ -332,8 +337,8 @@ export default function CrisisDetailPage() {
         </div>
       )}
 
-      {/* ── Financial Impact ── */}
-      {impact && (
+      {/* ── Financial Impact — admin/owner only ── */}
+      {isAdmin && impact && (
         <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
           <h2 className="mb-4 text-lg font-semibold text-zinc-900 dark:text-zinc-100">Financial Impact</h2>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
@@ -423,8 +428,8 @@ export default function CrisisDetailPage() {
         </div>
       )}
 
-      {/* ── Coupon Lookup ── */}
-      <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+      {/* ── Coupon Lookup — admin/owner only ── */}
+      {isAdmin && <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
         <h2 className="mb-4 text-lg font-semibold text-zinc-900 dark:text-zinc-100">Tier 2 Coupon</h2>
         {crisis.tier2_coupon_code ? (
           <div className="mb-4 flex items-center gap-3 rounded-md bg-emerald-50 px-4 py-3 dark:bg-emerald-900/20">
@@ -510,13 +515,13 @@ export default function CrisisDetailPage() {
             </button>
           </div>
         )}
-      </div>
+      </div>}
 
       {/* ── Settings ── */}
       <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Settings</h2>
-          {!editing ? (
+          {isAdmin && !editing ? (
             <button onClick={() => setEditing(true)} className="text-sm text-indigo-600 hover:text-indigo-700 dark:text-indigo-400">
               Edit
             </button>

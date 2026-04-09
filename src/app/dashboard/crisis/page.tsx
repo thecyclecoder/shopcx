@@ -37,6 +37,7 @@ export default function CrisisListPage() {
   const router = useRouter();
   const [crises, setCrises] = useState<CrisisEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  const isAdmin = workspace.role === "owner" || workspace.role === "admin";
 
   const fetchCrises = useCallback(async () => {
     setLoading(true);
@@ -59,12 +60,14 @@ export default function CrisisListPage() {
             Proactive retention campaigns for out-of-stock situations
           </p>
         </div>
-        <button
-          onClick={() => router.push("/dashboard/crisis/new")}
-          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors"
-        >
-          New Crisis
-        </button>
+        {isAdmin && (
+          <button
+            onClick={() => router.push("/dashboard/crisis/new")}
+            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors"
+          >
+            New Crisis
+          </button>
+        )}
       </div>
 
       <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">

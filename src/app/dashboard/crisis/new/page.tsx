@@ -8,6 +8,7 @@ import Link from "next/link";
 export default function NewCrisisPage() {
   const workspace = useWorkspace();
   const router = useRouter();
+  const isAdmin = workspace.role === "owner" || workspace.role === "admin";
 
   const [name, setName] = useState("");
   const [affectedVariantId, setAffectedVariantId] = useState("");
@@ -24,6 +25,17 @@ export default function NewCrisisPage() {
   const [tierWaitDays, setTierWaitDays] = useState(3);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+
+  if (!isAdmin) {
+    return (
+      <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6">
+        <p className="text-zinc-400">Only admins and owners can create crisis events.</p>
+        <Link href="/dashboard/crisis" className="mt-2 inline-block text-sm text-indigo-600 hover:text-indigo-700 dark:text-indigo-400">
+          &larr; Back to Crisis Management
+        </Link>
+      </div>
+    );
+  }
 
   const handleSave = async () => {
     if (!name.trim() || !affectedVariantId.trim()) {
