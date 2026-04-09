@@ -132,14 +132,11 @@ export async function sendTicketReply({
 
   const replyTo = client.supportEmail || `support@${client.domain}`;
 
-  const finalSubject = subject.startsWith("Re:") ? subject : inReplyTo ? `Re: ${subject}` : subject;
-  console.log("[sendTicketReply]", { subject, inReplyTo: inReplyTo ?? "NULL", finalSubject });
-
   const { data, error } = await client.resend.emails.send({
     from: `${agentName} via ${workspaceName} <support@${client.domain}>`,
     replyTo,
     to: toEmail,
-    subject: finalSubject,
+    subject: subject.startsWith("Re:") ? subject : inReplyTo ? `Re: ${subject}` : subject,
     html: `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; text-align: left;">
         ${body}
