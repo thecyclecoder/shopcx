@@ -976,10 +976,13 @@ function CodeDrivenJourney({
   const [responses, setResponses] = useState<Record<string, { value: string; label: string }>>({});
   const [itemSelections, setItemSelections] = useState<Record<string, string>>({});
 
-  const isMultiStep = !!(config as { multiStep?: boolean }).multiStep;
   const multiSteps = ((config as { steps?: JourneyForm[] }).steps || []) as JourneyForm[];
-  const form = isMultiStep ? multiSteps[currentStepIdx] || null : config.currentForm;
-  const totalSteps = isMultiStep ? multiSteps.length : 1;
+  // Treat any journey with a steps array as multi-step (uses /complete endpoint)
+  const isMultiStep = !!(config as { multiStep?: boolean }).multiStep || multiSteps.length > 0;
+  const form = multiSteps.length > 0
+    ? multiSteps[currentStepIdx] || null
+    : config.currentForm;
+  const totalSteps = multiSteps.length > 0 ? multiSteps.length : 1;
 
   const handleSubmit = async (value: string, label?: string) => {
     if (!form) return;
@@ -1021,7 +1024,7 @@ function CodeDrivenJourney({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          stepKey: form.id,
+          stepKey: form.id || (form as { key?: string }).key || "unknown",
           responseValue: value,
           responseLabel: label || value,
           codeDriven: true,
