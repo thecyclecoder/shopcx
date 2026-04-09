@@ -1076,17 +1076,32 @@ function CodeDrivenJourney({
             </div>
           )}
 
-          {(form.type === "radio" || form.type === "single_choice") && form.options && (
-            <div className="space-y-3">
-              {form.options.map((opt) => (
-                <button key={opt.value} onClick={() => handleSubmit(opt.value, opt.label)} disabled={submitting}
-                  className="flex w-full items-center gap-3 rounded-xl border-2 border-zinc-200 px-4 py-4 text-left text-sm font-medium text-zinc-800 transition-all hover:border-zinc-300 hover:bg-zinc-50 disabled:opacity-60">
-                  <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-zinc-300" />
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-          )}
+          {(form.type === "radio" || form.type === "single_choice") && form.options && (() => {
+            // Filter options by parentProduct if present (e.g., variant picker filtered by chosen product)
+            const opts = (form.options as { value: string; label: string; parentProduct?: string }[]).filter((opt) => {
+              if (!opt.parentProduct) return true;
+              // Find the previous step's response that this depends on
+              const prevKeys = Object.keys(responses);
+              const lastResponse = prevKeys.length > 0 ? responses[prevKeys[prevKeys.length - 1]]?.value : null;
+              return opt.parentProduct === lastResponse;
+            });
+            // If only 1 option after filtering, auto-submit it
+            if (opts.length === 1 && !submitting) {
+              setTimeout(() => handleSubmit(opts[0].value, opts[0].label), 100);
+              return <p className="text-sm text-zinc-500">Loading...</p>;
+            }
+            return (
+              <div className="space-y-3">
+                {opts.map((opt) => (
+                  <button key={opt.value} onClick={() => handleSubmit(opt.value, opt.label)} disabled={submitting}
+                    className="flex w-full items-center gap-3 rounded-xl border-2 border-zinc-200 px-4 py-4 text-left text-sm font-medium text-zinc-800 transition-all hover:border-zinc-300 hover:bg-zinc-50 disabled:opacity-60">
+                    <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-zinc-300" />
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
 
           {form.type === "checklist" && form.options && (
             <ChecklistForm options={form.options} primaryColor={primaryColor} submitting={submitting}

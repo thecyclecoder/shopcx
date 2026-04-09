@@ -70,11 +70,34 @@ export async function buildCrisisTier2Steps(
 
   const couponPct = crisis.tier2_coupon_percent || 20;
 
-  // Build options — show product name only (not variant), use productId as value
-  const options = productSwaps.map(p => ({
+  // Build product options
+  const productOptions = productSwaps.map(p => ({
     value: p.productId || p.variantId || p.productTitle,
     label: p.productTitle,
   }));
+
+  // Build variant options with parentProduct for filtering
+  const variantOptions: { value: string; label: string; parentProduct: string }[] = [];
+  for (const p of productSwaps) {
+    const pid = p.productId || p.variantId || p.productTitle;
+    const variants = p.variants || [];
+    if (variants.length > 0) {
+      for (const v of variants) {
+        variantOptions.push({
+          value: v.variantId,
+          label: v.title === "Default Title" ? p.productTitle : v.title,
+          parentProduct: pid,
+        });
+      }
+    } else if (p.variantId) {
+      // Legacy format — single variant
+      variantOptions.push({
+        value: p.variantId,
+        label: p.title || p.productTitle,
+        parentProduct: pid,
+      });
+    }
+  }
 
   return {
     codeDriven: true,
@@ -86,9 +109,16 @@ export async function buildCrisisTier2Steps(
         question: `Swap for one of our best-selling products — and we'll give you ${couponPct}% off!`,
         subtitle: "Pick a product you'd like to try instead.",
         options: [
-          ...options,
+          ...productOptions,
           { value: "reject", label: "I don't want to change products" },
         ],
+      },
+      {
+        key: "variant_choice",
+        type: "single_choice",
+        question: "Which flavor would you like?",
+        options: variantOptions,
+        // parentProduct field on each option allows client-side filtering
       },
       {
         key: "product_quantity",
@@ -98,7 +128,6 @@ export async function buildCrisisTier2Steps(
           { value: "1", label: "1" },
           { value: "2", label: "2" },
           { value: "3", label: "3" },
-          { value: "4", label: "4" },
         ],
       },
     ],

@@ -390,6 +390,7 @@ export async function POST(
     // ── Crisis Tier 2 — Product Swap + Coupon ──
     if (journeyType === "crisis_tier2") {
       const productChoice = responses?.product_choice?.value;
+      const variantChoice = responses?.variant_choice?.value;
       const quantityChoice = responses?.product_quantity?.value;
       const actionId = metadata.actionId as string;
       const subscriptionId = metadata.subscriptionId as string;
@@ -419,7 +420,8 @@ export async function POST(
         });
 
         actionLog.push("Tier 2 rejected — will advance to Tier 3");
-      } else if (productChoice) {
+      } else if (productChoice && productChoice !== "reject") {
+        const swapVariantId = variantChoice || productChoice; // variant_choice has the actual variant ID
         const qty = parseInt(quantityChoice || "1", 10) || 1;
         const { data: sub } = await admin.from("subscriptions")
           .select("shopify_contract_id").eq("id", subscriptionId).single();
@@ -428,10 +430,10 @@ export async function POST(
           // Remove affected item and add new product
           const { subSwapVariant } = await import("@/lib/subscription-items");
           const currentVariant = affectedVariantId;
-          await subSwapVariant(wsId, sub.shopify_contract_id, currentVariant, productChoice, qty);
-          actionLog.push(`Product swapped to ${productChoice} x${qty}`);
+          await subSwapVariant(wsId, sub.shopify_contract_id, currentVariant, swapVariantId, qty);
+          actionLog.push(`Product swapped to ${swapVariantId} x${qty}`);
 
-          // Apply coupon if configured
+          // Apply coupon if configured — removes existing coupons first
           const couponCode = metadata.tier2CouponCode as string;
           if (couponCode) {
             try {
@@ -440,20 +442,22 @@ export async function POST(
                 .select("appstle_api_key_encrypted").eq("id", wsId).single();
               if (wsCreds?.appstle_api_key_encrypted) {
                 const appstleKey = decrypt(wsCreds.appstle_api_key_encrypted);
-                await fetch(
-                  `https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details/apply-discount?contractId=${sub.shopify_contract_id}&discountCode=${couponCode}`,
-                  { method: "POST", headers: { "X-API-Key": appstleKey } },
-                );
-                actionLog.push(`Coupon ${couponCode} applied`);
+                const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
+                const result = await applyDiscountWithReplace(appstleKey, sub.shopify_contract_id, couponCode);
+                if (result.removed.length > 0) actionLog.push(`Removed ${result.removed.length} existing coupon(s)`);
+                if (result.success) actionLog.push(`Coupon ${couponCode} applied`);
+                else actionLog.push(`Coupon ${couponCode} failed: ${result.error}`);
               }
             } catch { /* non-fatal */ }
           }
         }
 
-        const chosenLabel = responses?.product_choice?.label || productChoice;
+        const productLabel = responses?.product_choice?.label || productChoice;
+        const variantLabel = responses?.variant_choice?.label || "";
+        const chosenLabel = variantLabel ? `${productLabel} — ${variantLabel}` : productLabel;
         await admin.from("crisis_customer_actions").update({
           tier2_response: "accepted_swap",
-          tier2_swapped_to: { variantId: productChoice, title: chosenLabel, quantity: qty },
+          tier2_swapped_to: { variantId: swapVariantId, title: chosenLabel, quantity: qty },
           tier2_coupon_applied: !!(metadata.tier2CouponCode),
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
