@@ -83,7 +83,7 @@ export async function buildCrisisTier2Steps(
       {
         key: "product_choice",
         type: "single_choice",
-        question: `We'd love to help you try something new — and we'll give you ${couponPct}% off your next order!`,
+        question: `Swap for one of our best-selling products — and we'll give you ${couponPct}% off!`,
         subtitle: "Pick a product you'd like to try instead.",
         options: [
           ...options,
