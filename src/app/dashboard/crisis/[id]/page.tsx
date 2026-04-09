@@ -140,6 +140,13 @@ export default function CrisisDetailPage() {
   const [couponDetails, setCouponDetails] = useState<CouponDetails | null>(null);
   const [couponError, setCouponError] = useState("");
 
+  // Test campaign
+  const [testSubs, setTestSubs] = useState<{ id: string; contractId: string; items: string; status: string; nextDate: string }[]>([]);
+  const [testSubId, setTestSubId] = useState("");
+  const [testLoading, setTestLoading] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; customer_email?: string; journey_url?: string; segment?: string; error?: string } | null>(null);
+  const [testSubsLoaded, setTestSubsLoaded] = useState(false);
+
   const fetchDetail = useCallback(async () => {
     setLoading(true);
     const res = await fetch(`/api/workspaces/${workspace.id}/crisis/${crisisId}`);
@@ -329,6 +336,113 @@ export default function CrisisDetailPage() {
               {s}
             </button>
           ))}
+        </div>
+      )}
+
+      {/* ── Test Campaign (draft only, admin/owner) ── */}
+      {isAdmin && crisis.status === "draft" && (
+        <div className="mb-6 rounded-lg border border-amber-200 bg-amber-50 p-6 dark:border-amber-800 dark:bg-amber-900/20">
+          <h2 className="mb-2 text-lg font-semibold text-amber-800 dark:text-amber-300">Test Campaign</h2>
+          <p className="mb-4 text-sm text-amber-700 dark:text-amber-400">
+            Run the full Tier 1 flow on a single subscription while in draft mode. This will auto-swap the item, send the email, and create the journey — exactly like the real campaign.
+          </p>
+          {!testSubsLoaded ? (
+            <button
+              onClick={async () => {
+                setTestLoading(true);
+                // Fetch current user's subscriptions with the affected item
+                const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions?status=active&limit=100`);
+                if (res.ok) {
+                  const data = await res.json();
+                  const subs = (data.subscriptions || data || []) as { id: string; shopify_contract_id: string; items: { title: string; sku?: string; variant_id?: string }[]; status: string; next_billing_date: string }[];
+                  const matching = subs.filter(s => {
+                    const items = s.items || [];
+                    return items.some(i =>
+                      (i.sku && crisis.affected_sku && i.sku.toUpperCase() === crisis.affected_sku.toUpperCase()) ||
+                      (i.variant_id && i.variant_id === crisis.affected_variant_id)
+                    );
+                  }).map(s => ({
+                    id: s.id,
+                    contractId: s.shopify_contract_id,
+                    items: (s.items || []).filter(i => !i.title?.toLowerCase().includes("shipping protection")).map(i => i.title).join(", "),
+                    status: s.status,
+                    nextDate: s.next_billing_date ? new Date(s.next_billing_date).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "—",
+                  }));
+                  setTestSubs(matching);
+                  setTestSubsLoaded(true);
+                }
+                setTestLoading(false);
+              }}
+              disabled={testLoading}
+              className="rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50 transition-colors"
+            >
+              {testLoading ? "Loading subscriptions..." : "Find Test Subscriptions"}
+            </button>
+          ) : testSubs.length === 0 ? (
+            <p className="text-sm text-amber-600 dark:text-amber-400">No active subscriptions found with the affected item.</p>
+          ) : (
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-amber-700 dark:text-amber-400 mb-1">
+                  Select a subscription to test ({testSubs.length} found with affected item)
+                </label>
+                <select
+                  value={testSubId}
+                  onChange={e => { setTestSubId(e.target.value); setTestResult(null); }}
+                  className="w-full rounded-md border border-amber-300 bg-white px-3 py-2 text-sm text-zinc-900 dark:border-amber-700 dark:bg-zinc-800 dark:text-zinc-100"
+                >
+                  <option value="">Select subscription...</option>
+                  {testSubs.map(s => (
+                    <option key={s.id} value={s.id}>
+                      {s.items} — {s.status} (next: {s.nextDate})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button
+                onClick={async () => {
+                  if (!testSubId) return;
+                  setTestLoading(true);
+                  setTestResult(null);
+                  const res = await fetch(`/api/workspaces/${workspace.id}/crisis/${crisisId}/test`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ subscription_id: testSubId }),
+                  });
+                  const data = await res.json();
+                  setTestResult(res.ok ? data : { success: false, error: data.error || "Test failed" });
+                  setTestLoading(false);
+                  if (res.ok) fetchDetail(); // Refresh stats
+                }}
+                disabled={testLoading || !testSubId}
+                className="rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50 transition-colors"
+              >
+                {testLoading ? "Running test..." : "Run Test"}
+              </button>
+              {testResult && (
+                <div className={`rounded-md p-3 text-sm ${testResult.success
+                  ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400"
+                  : "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400"
+                }`}>
+                  {testResult.success ? (
+                    <div>
+                      <p className="font-medium">Test sent successfully!</p>
+                      <p>Email sent to: {testResult.customer_email}</p>
+                      <p>Segment: {testResult.segment === "berry_only" ? "Single item (berry only)" : "Multi item (berry + others)"}</p>
+                      <p>
+                        Journey:{" "}
+                        <a href={testResult.journey_url} target="_blank" rel="noopener noreferrer" className="underline">
+                          Open journey →
+                        </a>
+                      </p>
+                    </div>
+                  ) : (
+                    <p>{testResult.error}</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
