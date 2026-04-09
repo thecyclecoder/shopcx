@@ -141,18 +141,12 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
     });
 
   } else if (effectiveChannel === "chat") {
-    // Embedded inline form — send as a system message with journey metadata
-    // The chat widget detects journey_token and renders the embedded form
+    // Send lead-in with CTA link to the journey mini-site
+    const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:white;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId, direction: "outbound", visibility: "external",
       author_type: "system",
-      body: leadIn,
-      metadata: {
-        journey_token: token,
-        journey_id: journeyId,
-        journey_name: journeyName,
-        embedded_form: true,
-      },
+      body: ctaHtml,
     });
 
   } else if (effectiveChannel === "sms") {
@@ -305,9 +299,13 @@ export async function nudgeJourney(
       }
     }
   } else if (nudgeChannel === "chat") {
+    const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
+    const nudgeJourneyUrl = `${siteUrl}/journey/${token}`;
+    const { data: wsNudge } = await admin.from("workspaces").select("help_primary_color").eq("id", workspaceId).single();
+    const nudgeCtaHtml = `<p>${nudgeText}</p><p><a href="${nudgeJourneyUrl}" style="display:inline-block;padding:10px 20px;background:${wsNudge?.help_primary_color || "#4f46e5"};color:white;text-decoration:none;border-radius:8px;font-weight:600;">Complete ${journeyEntry.journey_name} →</a></p>`;
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId, direction: "outbound", visibility: "external", author_type: "system",
-      body: nudgeText, metadata: { journey_token: token, journey_id: journeyEntry.journey_id, embedded_form: true },
+      body: nudgeCtaHtml,
     });
   } else {
     // SMS / Meta DM
