@@ -621,14 +621,14 @@ export default function ChatWidgetPage() {
                   <div
                     className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${
                       isCustomer
-                        ? "rounded-tr-sm bg-zinc-200 text-zinc-900"
-                        : "rounded-tl-sm text-white"
+                        ? "rounded-tr-sm bg-zinc-200 !text-zinc-900"
+                        : "rounded-tl-sm !text-white"
                     }`}
                     style={isCustomer ? undefined : { backgroundColor: primaryColor }}
                   >
                     {bodyWithoutForm && (
                       <div
-                        className={`prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:underline ${isCustomer ? "[&_*]:!text-zinc-900 [&_a]:!text-zinc-900" : "[&_*]:!text-white [&_a]:!text-white"}`}
+                        className={`prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:underline ${isCustomer ? "!text-zinc-900 [&_*]:!text-zinc-900 [&_a]:!text-zinc-900" : "!text-white [&_*]:!text-white [&_a]:!text-white"}`}
                         dangerouslySetInnerHTML={{ __html: isCustomer ? bodyWithoutForm : bodyWithoutForm.replace(/\bstyle="[^"]*?color:[^"]*?"/gi, (m) => m.replace(/color:\s*[^;"}]+;?/gi, "")) }}
                         onClick={(e) => {
                           // Open links in new window (not inside iframe)

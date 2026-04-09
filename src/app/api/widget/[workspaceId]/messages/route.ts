@@ -67,6 +67,16 @@ export async function POST(
       .select("id")
       .single();
     customer = created;
+  } else if (first_name || last_name) {
+    // Backfill name on existing customer if missing
+    const { data: existing } = await admin.from("customers")
+      .select("first_name, last_name").eq("id", customer.id).single();
+    const updates: Record<string, string> = {};
+    if (first_name && !existing?.first_name) updates.first_name = first_name;
+    if (last_name && !existing?.last_name) updates.last_name = last_name;
+    if (Object.keys(updates).length) {
+      await admin.from("customers").update(updates).eq("id", customer.id);
+    }
   }
 
   const customerId = customer?.id || null;
