@@ -1076,7 +1076,7 @@ function CodeDrivenJourney({
             </div>
           )}
 
-          {form.type === "radio" && form.options && (
+          {(form.type === "radio" || form.type === "single_choice") && form.options && (
             <div className="space-y-3">
               {form.options.map((opt) => (
                 <button key={opt.value} onClick={() => handleSubmit(opt.value, opt.label)} disabled={submitting}
