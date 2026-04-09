@@ -500,7 +500,7 @@ export async function POST(
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
         actionLog.push("Tier 3: Subscription paused (auto-resume on resolve)");
-      } else if (tier3Choice === "remove") {
+      } else if (tier3Choice === "remove_auto" || tier3Choice === "remove_permanent" || tier3Choice === "remove") {
         // Remove current item — use action record to know what's actually there
         const { data: sub } = await admin.from("subscriptions")
           .select("shopify_contract_id").eq("id", subscriptionId).single();
@@ -514,13 +514,22 @@ export async function POST(
             || affectedVariantId;
           await subRemoveItem(wsId, sub.shopify_contract_id, removeVariant);
         }
+        const autoReadd = tier3Choice === "remove_auto" || tier3Choice === "remove";
         await admin.from("crisis_customer_actions").update({
           tier3_response: "accepted_remove",
           removed_item_at: new Date().toISOString(),
-          auto_readd: true,
+          auto_readd: autoReadd,
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
-        actionLog.push("Tier 3: Item removed (auto-readd on resolve)");
+        actionLog.push(autoReadd
+          ? "Tier 3: Item removed (auto-readd when back in stock)"
+          : "Tier 3: Item removed permanently");
+
+        // Send confirmation
+        const removeMsg = autoReadd
+          ? `we've removed ${(metadata.affectedProductTitle as string) || "the item"} from your subscription. We'll add it back automatically when it's back in stock`
+          : `we've removed ${(metadata.affectedProductTitle as string) || "the item"} from your subscription`;
+        await sendCrisisConfirmation(admin, wsId, session.customer_id, session.ticket_id, metadata, removeMsg);
       } else if (tier3Choice === "cancel") {
         // Launch cancel journey instead of direct cancel
         await admin.from("crisis_customer_actions").update({

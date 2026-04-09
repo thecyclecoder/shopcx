@@ -180,7 +180,8 @@ export async function buildCrisisTier3Steps(
             { value: "cancel", label: "Cancel subscription" },
           ]
         : [
-            { value: "remove", label: "Remove it and add it back when it's back in stock" },
+            { value: "remove_auto", label: "Remove it until it's back in stock" },
+            { value: "remove_permanent", label: "Remove it" },
           ],
     }],
     metadata: {
