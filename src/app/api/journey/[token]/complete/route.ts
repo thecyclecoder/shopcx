@@ -526,9 +526,10 @@ export async function POST(
           : "Tier 3: Item removed permanently");
 
         // Send confirmation
+        const itemName = (metadata.affectedProductTitle as string) || "the item";
         const removeMsg = autoReadd
-          ? `we've removed ${(metadata.affectedProductTitle as string) || "the item"} from your subscription. We'll add it back automatically when it's back in stock`
-          : `we've removed ${(metadata.affectedProductTitle as string) || "the item"} from your subscription`;
+          ? `we've removed ${itemName} from your subscription, but as soon as it's back in stock, we'll add it back to your subscription`
+          : `we've removed ${itemName} from your subscription`;
         await sendCrisisConfirmation(admin, wsId, session.customer_id, session.ticket_id, metadata, removeMsg);
       } else if (tier3Choice === "cancel") {
         // Launch cancel journey instead of direct cancel
