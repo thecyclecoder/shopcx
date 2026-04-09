@@ -829,9 +829,15 @@ async function executeSubscriptionInquirySingle(
   let totalSub = 0;
   for (const item of enrichedItems) { totalMsrp += item.msrpCents * item.quantity; totalSub += item.priceCents * item.quantity; }
   const subscribeSavings = totalMsrp - totalSub;
+  // Discounts stack multiplicatively — each applies to the running total, not the original
   let totalAfterDiscounts = totalSub;
+  const discountBreakdown: { discount: typeof autoDiscounts[0]; savedCents: number }[] = [];
   for (const d of [...autoDiscounts, ...codeDiscounts]) {
-    if (d.valueType === "PERCENTAGE") totalAfterDiscounts -= Math.round(totalSub * d.value / 100);
+    if (d.valueType === "PERCENTAGE") {
+      const saved = Math.round(totalAfterDiscounts * d.value / 100);
+      discountBreakdown.push({ discount: d, savedCents: saved });
+      totalAfterDiscounts -= saved;
+    }
   }
   const totalSavings = totalMsrp - totalAfterDiscounts;
 
@@ -852,16 +858,12 @@ async function executeSubscriptionInquirySingle(
     reply += `<p><b>Your Savings</b></p><p>`;
     reply += `Retail: ${fmt(totalMsrp)}<br>`;
     reply += `Subscribe &amp; Save: <b>-${fmt(subscribeSavings)}</b> (every order)<br>`;
-    for (const d of autoDiscounts) {
-      if (d.valueType === "PERCENTAGE") {
-        const saved = Math.round(totalSub * d.value / 100);
-        reply += `${d.title} (${d.value}% off): <b>-${fmt(saved)}</b> (every order)<br>`;
-      }
-    }
-    for (const d of codeDiscounts) {
-      if (d.valueType === "PERCENTAGE") {
-        const saved = Math.round(totalSub * d.value / 100);
-        reply += `Coupon "${d.title}" (${d.value}% off): <b>-${fmt(saved)}</b> (this order only)<br>`;
+    for (const { discount: d, savedCents } of discountBreakdown) {
+      const isCode = d.type === "CODE_DISCOUNT";
+      if (isCode) {
+        reply += `Coupon "${d.title}" (${d.value}% off): <b>-${fmt(savedCents)}</b> (this order only)<br>`;
+      } else {
+        reply += `${d.title} (${d.value}% off): <b>-${fmt(savedCents)}</b> (every order)<br>`;
       }
     }
     reply += `<b>You pay: ${fmt(totalAfterDiscounts)}</b></p>`;
@@ -878,16 +880,12 @@ async function executeSubscriptionInquirySingle(
     reply += `\nYour Savings\n`;
     reply += `Retail: ${fmt(totalMsrp)}\n`;
     reply += `Subscribe & Save: -${fmt(subscribeSavings)} (every order)\n`;
-    for (const d of autoDiscounts) {
-      if (d.valueType === "PERCENTAGE") {
-        const saved = Math.round(totalSub * d.value / 100);
-        reply += `${d.title} (${d.value}% off): -${fmt(saved)} (every order)\n`;
-      }
-    }
-    for (const d of codeDiscounts) {
-      if (d.valueType === "PERCENTAGE") {
-        const saved = Math.round(totalSub * d.value / 100);
-        reply += `Coupon "${d.title}" (${d.value}% off): -${fmt(saved)} (this order only)\n`;
+    for (const { discount: d, savedCents } of discountBreakdown) {
+      const isCode = d.type === "CODE_DISCOUNT";
+      if (isCode) {
+        reply += `Coupon "${d.title}" (${d.value}% off): -${fmt(savedCents)} (this order only)\n`;
+      } else {
+        reply += `${d.title} (${d.value}% off): -${fmt(savedCents)} (every order)\n`;
       }
     }
     reply += `You pay: ${fmt(totalAfterDiscounts)}\n`;
