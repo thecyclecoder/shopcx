@@ -40,6 +40,20 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
     return handleAppstleError(e);
   }
 
+  // Update local DB: status + next billing date
+  {
+    const adminDb = createAdminClient();
+    await adminDb.from("subscriptions")
+      .update({
+        status: "active",
+        next_billing_date: nextBillingDate,
+        pause_resume_at: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("workspace_id", auth.workspaceId)
+      .eq("shopify_contract_id", String(contractId));
+  }
+
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
   if (customer) {
     await logPortalAction({

@@ -43,6 +43,25 @@ function asQtyMap(v: unknown): Record<string, number> | null {
   return Object.keys(out).length ? out : null;
 }
 
+/** Parse Appstle contract response into our DB items format */
+function parseAppstleLineItems(contract: Record<string, unknown>): Record<string, unknown>[] {
+  const lines = contract.lines as Record<string, unknown> | undefined;
+  if (!lines) return [];
+  const rawNodes = (lines.nodes ?? lines.edges ?? lines) as unknown;
+  if (!Array.isArray(rawNodes)) return [];
+  return rawNodes.map((n: unknown) => {
+    const node = ((n as Record<string, unknown>).node ?? n) as Record<string, unknown>;
+    return {
+      variantId: node.variantId ?? node.id,
+      title: node.title ?? "",
+      quantity: node.quantity ?? 1,
+      price: (node.currentPrice as Record<string, unknown> | undefined)?.amount ?? node.price ?? (node.lineDiscountedPrice as Record<string, unknown> | undefined)?.amount ?? "0",
+      variantTitle: node.variantTitle ?? "",
+      productId: node.productId ?? "",
+    };
+  });
+}
+
 export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
 
@@ -124,6 +143,15 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
       patch.lines = Array.isArray(nodes) ? nodes : lines;
     }
     if ((updated as Record<string, unknown>).deliveryPrice) patch.deliveryPrice = (updated as Record<string, unknown>).deliveryPrice;
+
+    // Update local DB items array from the Appstle response
+    const dbItems = parseAppstleLineItems(updated);
+    if (dbItems.length > 0) {
+      const adminDb = createAdminClient();
+      await adminDb.from("subscriptions")
+        .update({ items: dbItems, updated_at: new Date().toISOString() })
+        .eq("shopify_contract_id", String(contractId));
+    }
   }
 
   return jsonOk({ ok: true, route, contractId, patch });

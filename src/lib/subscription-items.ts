@@ -35,6 +35,32 @@ async function callReplaceVariants(
   }
 }
 
+/**
+ * After a successful replaceVariants call, update the local items array in the DB.
+ * Uses a simple read-modify approach since the Appstle replaceVariants-v3 call
+ * doesn't return useful line item data consistently.
+ */
+async function syncItemsAfterMutation(
+  workspaceId: string,
+  contractId: string,
+  mutate: (items: Record<string, unknown>[]) => Record<string, unknown>[],
+): Promise<void> {
+  try {
+    const admin = createAdminClient();
+    const { data: sub } = await admin.from("subscriptions")
+      .select("items")
+      .eq("shopify_contract_id", contractId)
+      .single();
+    const currentItems = (sub?.items as Record<string, unknown>[] | null) || [];
+    const updatedItems = mutate(currentItems);
+    await admin.from("subscriptions")
+      .update({ items: updatedItems, updated_at: new Date().toISOString() })
+      .eq("shopify_contract_id", contractId);
+  } catch (err) {
+    console.error("Failed to sync subscription items after mutation:", err);
+  }
+}
+
 /** Add a product variant to a subscription */
 export async function subAddItem(
   workspaceId: string,
@@ -45,13 +71,22 @@ export async function subAddItem(
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
-  return callReplaceVariants(config.apiKey, {
+  const result = await callReplaceVariants(config.apiKey, {
     shop: config.shop,
     contractId: Number(contractId),
     eventSource: "CUSTOMER_PORTAL",
     newVariants: { [variantId]: quantity },
     stopSwapEmails: true,
   });
+
+  if (result.success) {
+    await syncItemsAfterMutation(workspaceId, contractId, (items) => [
+      ...items,
+      { variantId, quantity, title: "", variantTitle: "", price: "0", productId: "" },
+    ]);
+  }
+
+  return result;
 }
 
 /** Remove a product variant from a subscription */
@@ -63,7 +98,7 @@ export async function subRemoveItem(
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
-  return callReplaceVariants(config.apiKey, {
+  const result = await callReplaceVariants(config.apiKey, {
     shop: config.shop,
     contractId: Number(contractId),
     eventSource: "CUSTOMER_PORTAL",
@@ -71,6 +106,14 @@ export async function subRemoveItem(
     allowRemoveWithoutAdd: true,
     stopSwapEmails: true,
   });
+
+  if (result.success) {
+    await syncItemsAfterMutation(workspaceId, contractId, (items) =>
+      items.filter((item) => String(item.variantId) !== variantId),
+    );
+  }
+
+  return result;
 }
 
 /** Change quantity of a variant on a subscription (remove + re-add with new qty) */
@@ -83,7 +126,7 @@ export async function subChangeQuantity(
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
-  return callReplaceVariants(config.apiKey, {
+  const result = await callReplaceVariants(config.apiKey, {
     shop: config.shop,
     contractId: Number(contractId),
     eventSource: "CUSTOMER_PORTAL",
@@ -92,6 +135,16 @@ export async function subChangeQuantity(
     carryForwardDiscount: "EXISTING_PLAN",
     stopSwapEmails: true,
   });
+
+  if (result.success) {
+    await syncItemsAfterMutation(workspaceId, contractId, (items) =>
+      items.map((item) =>
+        String(item.variantId) === variantId ? { ...item, quantity } : item,
+      ),
+    );
+  }
+
+  return result;
 }
 
 /** Swap one variant for another (e.g., change flavor or swap product) */
@@ -105,7 +158,7 @@ export async function subSwapVariant(
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
-  return callReplaceVariants(config.apiKey, {
+  const result = await callReplaceVariants(config.apiKey, {
     shop: config.shop,
     contractId: Number(contractId),
     eventSource: "CUSTOMER_PORTAL",
@@ -114,4 +167,16 @@ export async function subSwapVariant(
     carryForwardDiscount: "EXISTING_PLAN",
     stopSwapEmails: true,
   });
+
+  if (result.success) {
+    await syncItemsAfterMutation(workspaceId, contractId, (items) =>
+      items.map((item) =>
+        String(item.variantId) === oldVariantId
+          ? { ...item, variantId: newVariantId, quantity }
+          : item,
+      ),
+    );
+  }
+
+  return result;
 }
