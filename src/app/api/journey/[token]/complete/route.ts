@@ -990,7 +990,12 @@ async function sendCrisisConfirmation(
     : "soon";
   const affectedItem = crisis?.affected_product_title || "your item";
 
-  const emailBody = `<p>Hi ${firstName},</p>
+  const isRemoval = actionSummary.startsWith("we've removed");
+  const emailBody = isRemoval
+    ? `<p>Hi ${firstName},</p>
+<p>All set — ${actionSummary}.</p>
+<p>Thanks for sticking with us!</p>`
+    : `<p>Hi ${firstName},</p>
 <p>All set — ${actionSummary}. Your next shipment will include the updated item.</p>
 <p>We'll let you know when ${affectedItem} is back in stock (expected ${restockDate}) in case you'd like to switch back.</p>
 <p>Thanks for sticking with us!</p>`;
