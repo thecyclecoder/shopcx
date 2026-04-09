@@ -696,7 +696,68 @@ async function executeAccountLogin(admin: Admin, config: Record<string, unknown>
 
   const email = ctx.customer.email as string;
   const customerId = ctx.customer.id as string;
-  const shopifyCustomerId = (ctx.customer.shopify_customer_id as string) || "";
+  let shopifyCustomerId = (ctx.customer.shopify_customer_id as string) || "";
+
+  // If no shopify_customer_id, check linked accounts
+  if (!shopifyCustomerId) {
+    const { data: link } = await admin.from("customer_links")
+      .select("group_id").eq("customer_id", customerId).maybeSingle();
+    if (link) {
+      const { data: linked } = await admin.from("customer_links")
+        .select("customer_id").eq("group_id", link.group_id).neq("customer_id", customerId);
+      for (const l of linked || []) {
+        const { data: lCust } = await admin.from("customers")
+          .select("shopify_customer_id").eq("id", l.customer_id).single();
+        if (lCust?.shopify_customer_id) {
+          shopifyCustomerId = lCust.shopify_customer_id;
+          break;
+        }
+      }
+    }
+  }
+
+  // If still no shopify_customer_id, check for potential unlinked accounts
+  if (!shopifyCustomerId) {
+    const { findUnlinkedMatches } = await import("@/lib/account-matching");
+    const matches = await findUnlinkedMatches(ctx.workspaceId, customerId, admin);
+    // Check if any match has a shopify_customer_id (i.e. subscriptions)
+    const matchesWithShopify: { id: string; email: string }[] = [];
+    for (const m of matches) {
+      const { data: mCust } = await admin.from("customers")
+        .select("shopify_customer_id").eq("id", m.id).single();
+      if (mCust?.shopify_customer_id) matchesWithShopify.push(m);
+    }
+
+    if (matchesWithShopify.length > 0) {
+      // Potential linked accounts with subscriptions — send account linking journey first
+      const { data: linkingJourney } = await admin.from("journey_definitions")
+        .select("id, name").eq("workspace_id", ctx.workspaceId)
+        .eq("trigger_intent", "account_linking").eq("is_active", true).maybeSingle();
+      if (linkingJourney) {
+        const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
+        const channel = (ctx.ticket?.channel as string) || "email";
+        await launchJourneyForTicket({
+          workspaceId: ctx.workspaceId, ticketId: ctx.ticketId, customerId,
+          journeyId: linkingJourney.id, journeyName: linkingJourney.name,
+          triggerIntent: "account_linking", channel,
+          leadIn: "It looks like you may have more than one account with us. Let's link them so we can get you logged in.",
+          ctaText: "Link My Accounts",
+        });
+        // Stash intent so post-linking re-trigger sends the magic link
+        await admin.from("tickets").update({
+          handled_by: `Journey: ${linkingJourney.name}`,
+          ai_detected_intent: "account_login",
+        }).eq("id", ctx.ticketId);
+        await addNote(admin, ctx, `No Shopify account found for ${email}. Found potential linked accounts (${matchesWithShopify.map(m => m.email).join(", ")}). Sent account linking journey — magic link will follow after linking.`);
+        return;
+      }
+    }
+
+    // No linked accounts, no potential matches with subscriptions
+    await sendReply(admin, ctx, "I'm sorry, we don't have any subscriptions under that email address. If you have another email you may have used, please let us know and we'll look it up!", "closed");
+    await addNote(admin, ctx, `No Shopify account or potential linked accounts found for ${email}. Replied with no-subscriptions message.`);
+    return;
+  }
 
   // Generate magic link
   const { generateMagicLinkURL } = await import("@/lib/magic-link");

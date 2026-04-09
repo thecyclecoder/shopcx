@@ -51,12 +51,29 @@ export default async function PortalHome({ params }: { params: Promise<{ slug: s
 
   if (!workspace) return redirect(`/portal/${slug}/login`);
 
-  // Get shopify_customer_id for the portal JS
+  // Get shopify_customer_id for the portal JS — check linked accounts as fallback
   const { data: custData } = await admin.from("customers")
     .select("shopify_customer_id")
     .eq("id", customerId)
     .single();
-  const shopifyCustomerId = custData?.shopify_customer_id || "";
+  let shopifyCustomerId = custData?.shopify_customer_id || "";
+
+  if (!shopifyCustomerId) {
+    const { data: link } = await admin.from("customer_links")
+      .select("group_id").eq("customer_id", customerId).maybeSingle();
+    if (link) {
+      const { data: linked } = await admin.from("customer_links")
+        .select("customer_id").eq("group_id", link.group_id).neq("customer_id", customerId);
+      for (const l of linked || []) {
+        const { data: lCust } = await admin.from("customers")
+          .select("shopify_customer_id").eq("id", l.customer_id).single();
+        if (lCust?.shopify_customer_id) {
+          shopifyCustomerId = lCust.shopify_customer_id;
+          break;
+        }
+      }
+    }
+  }
   const shopDomain = workspace.shopify_myshopify_domain || "";
 
   return (

@@ -34,9 +34,29 @@ async function resolveAuth(req: NextRequest): Promise<PortalAuthResult> {
       .eq("id", magicCustomerId)
       .single();
 
+    let shopifyId = cust?.shopify_customer_id || "";
+
+    // If no shopify_customer_id, check linked accounts
+    if (!shopifyId) {
+      const { data: link } = await admin.from("customer_links")
+        .select("group_id").eq("customer_id", magicCustomerId).maybeSingle();
+      if (link) {
+        const { data: linked } = await admin.from("customer_links")
+          .select("customer_id").eq("group_id", link.group_id).neq("customer_id", magicCustomerId);
+        for (const l of linked || []) {
+          const { data: lCust } = await admin.from("customers")
+            .select("shopify_customer_id").eq("id", l.customer_id).single();
+          if (lCust?.shopify_customer_id) {
+            shopifyId = lCust.shopify_customer_id;
+            break;
+          }
+        }
+      }
+    }
+
     return {
       shop: "",
-      loggedInCustomerId: cust?.shopify_customer_id || "",
+      loggedInCustomerId: shopifyId,
       workspaceId: magicWorkspaceId,
     };
   }
