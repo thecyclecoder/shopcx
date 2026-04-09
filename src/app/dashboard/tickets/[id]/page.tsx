@@ -224,6 +224,8 @@ export default function TicketDetailPage() {
   const [applyingPlaybook, setApplyingPlaybook] = useState(false);
   const [availableJourneys, setAvailableJourneys] = useState<{ id: string; name: string; trigger_intent: string }[]>([]);
   const [sendingJourney, setSendingJourney] = useState(false);
+  const [sendingCrisisJourney, setSendingCrisisJourney] = useState(false);
+  const [selectedCrisisTier, setSelectedCrisisTier] = useState("1");
   const [playbookContext, setPlaybookContext] = useState("");
   const [suggestCategory, setSuggestCategory] = useState("");
   const [patternCategories, setPatternCategories] = useState<{ category: string; name: string }[]>([]);
@@ -1565,7 +1567,7 @@ export default function TicketDetailPage() {
       <div className={`w-full shrink-0 overflow-y-auto border-t border-zinc-200 bg-zinc-50 p-6 md:w-80 md:border-l md:border-t-0 dark:border-zinc-800 dark:bg-zinc-950 ${mobileSection === "conversation" ? "hidden md:block" : ""}`}>
         {/* Actions card (hidden for archived) */}
         <div className={`${mobileSection !== "actions" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
-        {ticket.status !== "archived" && (availableWorkflows.length > 0 || availablePlaybooks.length > 0 || availableJourneys.length > 0 || (!(ticket.tags || []).some(t => t.startsWith("smart:")) && !patternSuggestion)) && (
+        {ticket.status !== "archived" && (availableWorkflows.length > 0 || availablePlaybooks.length > 0 || availableJourneys.length > 0 || (ticket.tags || []).some(t => t.startsWith("crisis")) || (!(ticket.tags || []).some(t => t.startsWith("smart:")) && !patternSuggestion)) && (
           <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 p-4 dark:border-indigo-800 dark:bg-indigo-950">
             <h3 className="text-xs font-medium uppercase tracking-wider text-indigo-600 dark:text-indigo-400">Actions</h3>
             <div className="mt-3 space-y-3">
@@ -1697,6 +1699,50 @@ export default function TicketDetailPage() {
                       className="shrink-0 rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
                     >
                       {sendingJourney ? "..." : "Send"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Send crisis journey */}
+              {(ticket.tags || []).some(t => t.startsWith("crisis")) && (
+                <div>
+                  <label className="block text-xs text-indigo-500">Send Crisis Journey</label>
+                  <div className="mt-1 flex items-center gap-2">
+                    <select
+                      value={selectedCrisisTier}
+                      onChange={(e) => setSelectedCrisisTier(e.target.value)}
+                      className="min-w-0 flex-1 truncate rounded border border-indigo-300 bg-white px-2 py-1 text-xs dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    >
+                      <option value="1">Tier 1 — Flavor Swap</option>
+                      <option value="2">Tier 2 — Product Swap</option>
+                      <option value="3">Tier 3 — Pause/Remove</option>
+                    </select>
+                    <button
+                      onClick={async () => {
+                        setSendingCrisisJourney(true);
+                        try {
+                          const res = await fetch(`/api/tickets/${id}/send-crisis-journey`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ tier: Number(selectedCrisisTier) }),
+                          });
+                          if (res.ok) {
+                            const ticketRes = await fetch(`/api/tickets/${id}`);
+                            if (ticketRes.ok) {
+                              const data = await ticketRes.json();
+                              setTicket(data.ticket);
+                              setMessages(data.messages);
+                            }
+                          }
+                        } finally {
+                          setSendingCrisisJourney(false);
+                        }
+                      }}
+                      disabled={sendingCrisisJourney}
+                      className="shrink-0 rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {sendingCrisisJourney ? "..." : "Send"}
                     </button>
                   </div>
                 </div>
