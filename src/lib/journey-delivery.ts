@@ -141,13 +141,26 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
     });
 
   } else if (effectiveChannel === "chat") {
-    // Send lead-in with CTA link to the journey mini-site
-    const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:white;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
-    await admin.from("ticket_messages").insert({
-      ticket_id: ticketId, direction: "outbound", visibility: "external",
-      author_type: "system",
-      body: ctaHtml,
-    });
+    // Build inline form steps for the chat widget
+    const { buildJourneySteps } = await import("@/lib/journey-step-builder");
+    const built = await buildJourneySteps(workspaceId, triggerIntent, customerId, ticketId);
+
+    if (built.steps.length > 0) {
+      // Embed journey form as hidden comment — widget parses and renders InlineJourneyForm
+      const journeyPayload = JSON.stringify({ token, steps: built.steps });
+      const body = `${leadIn}<!--JOURNEY:${journeyPayload}-->`;
+      await admin.from("ticket_messages").insert({
+        ticket_id: ticketId, direction: "outbound", visibility: "external",
+        author_type: "system", body,
+      });
+    } else {
+      // No steps (e.g. no unlinked accounts found) — fall back to CTA link
+      const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:white;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
+      await admin.from("ticket_messages").insert({
+        ticket_id: ticketId, direction: "outbound", visibility: "external",
+        author_type: "system", body: ctaHtml,
+      });
+    }
 
   } else if (effectiveChannel === "sms") {
     // Plain text + URL
