@@ -135,12 +135,18 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     };
   }
 
-  // Read applied discount from local DB (synced via Appstle webhook)
-  const discounts = (sub.applied_discounts as { id: string; title: string; value: number; valueType: string }[]) || [];
-  const firstDiscount = discounts[0];
-  const appliedDiscount = firstDiscount
-    ? { code: firstDiscount.title, title: firstDiscount.title, value: firstDiscount.value, valueType: firstDiscount.valueType }
-    : null;
+  // Read applied discounts from local DB (synced via Appstle webhook)
+  const discounts = (sub.applied_discounts as { id: string; title: string; type: string; value: number; valueType: string }[]) || [];
+  const appliedDiscounts = discounts.map(d => ({
+    id: d.id,
+    code: d.title,
+    title: d.title,
+    type: d.type, // "MANUAL" or "CODE_DISCOUNT"
+    value: d.value,
+    valueType: d.valueType,
+  }));
+  // Keep backward compat: appliedDiscount = first discount
+  const appliedDiscount = appliedDiscounts[0] || null;
 
   return jsonOk({
     ok: true,
@@ -150,6 +156,7 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     contract: {
       ...contract,
       appliedDiscount,
+      appliedDiscounts,
       portalState: {
         bucket: sub.status === "cancelled" ? "cancelled" : sub.status === "paused" ? "paused" : "active",
         needsAttention: sub.last_payment_status === "failed",

@@ -35,7 +35,7 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
   const discountCode = s(payload?.discountCode);
   const discountId = s(payload?.discountId);
   if (mode === "apply" && !discountCode) return jsonErr({ error: "missing_discountCode" }, 400);
-  if (mode === "remove" && !discountId) return jsonErr({ error: "missing_discountId" }, 400);
+  if (mode === "remove" && !discountId && !discountCode) return jsonErr({ error: "missing_discountId_or_discountCode" }, 400);
 
   try {
     const admin = createAdminClient();
@@ -55,8 +55,21 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
         throw new Error(result.error || "Appstle API error");
       }
     } else {
+      // Resolve discountId — accept either discountId directly or look up from discountCode
+      let resolvedDiscountId = discountId;
+      if (!resolvedDiscountId && discountCode) {
+        const { data: sub } = await admin.from("subscriptions")
+          .select("applied_discounts")
+          .eq("shopify_contract_id", String(contractId))
+          .single();
+        const discounts = (sub?.applied_discounts as { id: string; title: string }[]) || [];
+        const match = discounts.find(d => d.title === discountCode || d.id === discountCode);
+        if (match) resolvedDiscountId = match.id;
+        else return jsonOk({ ok: false, route, contractId, mode, error: "discount_not_found" });
+      }
+
       const res = await fetch(
-        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}&discountId=${encodeURIComponent(discountId)}`,
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}&discountId=${encodeURIComponent(resolvedDiscountId)}`,
         { method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store" },
       );
       if (!res.ok) {
@@ -64,6 +77,16 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
         if (isExpected) return jsonOk({ ok: false, route, contractId, mode, error: mapCouponError(mode, res.status) });
         throw new Error(`Appstle API error: ${res.status}`);
       }
+
+      // Update local DB to remove that specific discount
+      const { data: subAfter } = await admin.from("subscriptions")
+        .select("applied_discounts")
+        .eq("shopify_contract_id", String(contractId))
+        .single();
+      const remaining = ((subAfter?.applied_discounts as { id: string }[]) || []).filter(d => d.id !== resolvedDiscountId);
+      await admin.from("subscriptions")
+        .update({ applied_discounts: remaining, updated_at: new Date().toISOString() })
+        .eq("shopify_contract_id", String(contractId));
     }
   } catch (e) {
     if ((e as Error).message?.startsWith("Appstle")) return handleAppstleError(e);

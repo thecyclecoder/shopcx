@@ -399,18 +399,18 @@ function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
   const [busy, setBusy] = useState(false);
   const [loyalty, setLoyalty] = useState(null);
   const [loyaltyBusy, setLoyaltyBusy] = useState(null);
-  const [localApplied, setLocalApplied] = useState(null); // { code, value } for optimistic display
+  const [localApplied, setLocalApplied] = useState(null); // { id, code, value, type } for optimistic display
 
-  // Read applied coupon from contract OR local optimistic state
+  // Build full list of all discounts (MANUAL + CODE_DISCOUNT)
+  const allDiscounts = localApplied
+    ? [localApplied, ...(contract?.appliedDiscounts || []).filter(d => d.id !== localApplied.id)]
+    : (contract?.appliedDiscounts || []);
+  const hasManualDiscount = allDiscounts.some(d => d.type === 'MANUAL');
+  const hasAnyCoupon = allDiscounts.length > 0;
+
+  // Backward compat: single coupon values for loyalty check
   const appliedCoupon = localApplied || contract?.appliedDiscount || contract?.discount || null;
   const couponCode = localApplied ? localApplied.code : (appliedCoupon?.code || appliedCoupon?.title || '');
-  const couponValue = localApplied
-    ? '$' + Number(localApplied.value).toFixed(2) + ' off'
-    : appliedCoupon?.value
-      ? (appliedCoupon.valueType === 'PERCENTAGE' || appliedCoupon.type === 'percentage'
-          ? appliedCoupon.value + '% off'
-          : '$' + Number(appliedCoupon.value).toFixed(2) + ' off')
-      : '';
   const isLoyaltyCoupon = couponCode.startsWith('LOYALTY-');
 
   // Load loyalty data when no coupon is applied
@@ -432,11 +432,11 @@ function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
     setBusy(false);
   }
 
-  async function remove() {
+  async function removeDiscount(discount) {
     setBusy(true);
     try {
-      await postJson('coupon', { contractId: contract.id, discountCode: couponCode, mode: 'remove' });
-      showToast('Coupon removed.', 'success');
+      await postJson('coupon', { contractId: contract.id, discountId: discount.id, mode: 'remove' });
+      showToast('Discount removed.', 'success');
       setLocalApplied(null);
       if (onCouponStateChange) onCouponStateChange(false);
       // Refresh loyalty data
@@ -444,7 +444,7 @@ function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
         .then(resp => { if (resp?.ok && resp?.enabled) setLoyalty(resp); })
         .catch(err => console.error('[SubscriptionDetail] loyalty refresh error:', err?.message));
       clearCaches(); onUpdate();
-    } catch { showToast('Could not remove coupon.', 'error'); }
+    } catch { showToast('Could not remove discount.', 'error'); }
     setBusy(false);
   }
 
@@ -482,22 +482,37 @@ function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
 
   const activeCoupons = loyalty?.unused_coupons?.filter(c => c.status === 'active') || [];
   const affordableTiers = loyalty?.tiers?.filter(t => t.affordable) || [];
-  const showLoyalty = !couponCode && !isLoyaltyCoupon && loyalty && (activeCoupons.length > 0 || affordableTiers.length > 0);
+  const showLoyalty = !hasAnyCoupon && !isLoyaltyCoupon && loyalty && (activeCoupons.length > 0 || affordableTiers.length > 0);
+
+  function formatDiscountValue(d) {
+    if (!d?.value) return '';
+    return d.valueType === 'PERCENTAGE' || d.type === 'percentage'
+      ? d.value + '% off'
+      : '$' + Number(d.value).toFixed(2) + ' off';
+  }
 
   return (
     <div class="sp-card sp-detail__card">
       <div class="sp-detail__sectionhead"><div class="sp-title2">Coupon</div></div>
-      {couponCode ? (
-        <div class="sp-detail__coupon-applied">
+      {/* Show all applied discounts */}
+      {allDiscounts.length > 0 && allDiscounts.map((d, i) => (
+        <div key={d.id || i} class="sp-detail__coupon-applied" style={i > 0 ? { marginTop: '8px' } : undefined}>
           <div class="sp-detail__coupon-info">
-            <span class="sp-detail__coupon-code" title={couponCode}>{couponCode}</span>
-            {couponValue && <span class="sp-detail__coupon-value">{couponValue}</span>}
+            <span class="sp-detail__coupon-code" title={d.code || d.title}>{d.code || d.title}</span>
+            {d.type === 'MANUAL' && <span class="sp-badge sp-badge--muted" style={{ marginLeft: '6px', fontSize: '11px' }}>Auto discount</span>}
+            {formatDiscountValue(d) && <span class="sp-detail__coupon-value">{formatDiscountValue(d)}</span>}
           </div>
-          <button class="sp-btn sp-btn--ghost sp-btn--sm" disabled={busy} onClick={remove}>Remove</button>
+          <button class="sp-btn sp-btn--ghost sp-btn--sm" disabled={busy} onClick={() => removeDiscount(d)}>Remove</button>
+        </div>
+      ))}
+      {/* Coupon input: blocked when manual discount exists */}
+      {hasManualDiscount ? (
+        <div class="sp-muted" style={{ marginTop: allDiscounts.length > 0 ? '12px' : '0', fontSize: '13px' }}>
+          Remove your existing discount to apply a coupon code
         </div>
       ) : (
         <>
-          <div class="sp-detail__coupon-row">
+          <div class="sp-detail__coupon-row" style={allDiscounts.length > 0 ? { marginTop: '12px' } : undefined}>
             <input class="sp-input" placeholder="Discount code" value={code}
               onInput={(e) => setCode(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') apply(); }} />
             <button class="sp-btn sp-btn-primary" disabled={busy || !code.trim()} onClick={apply}>Apply</button>
