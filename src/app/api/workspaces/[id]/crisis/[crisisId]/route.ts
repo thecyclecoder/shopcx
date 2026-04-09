@@ -79,7 +79,59 @@ export async function GET(
     cancelled: allActions.filter(a => a.cancelled).length,
   };
 
-  return NextResponse.json({ crisis, actions: allActions, stats });
+  // ── Financial impact ──
+  // Count affected subscriptions and estimate revenue at risk
+  const affectedSku = crisis.affected_sku;
+  const affectedVariantId = crisis.affected_variant_id;
+
+  const { data: affectedSubs } = await admin.from("subscriptions")
+    .select("id, items, billing_interval, billing_interval_count, next_billing_date, status")
+    .eq("workspace_id", workspaceId)
+    .in("status", ["active", "paused"]);
+
+  const matchingSubs = (affectedSubs || []).filter(s => {
+    const items = (s.items as { sku?: string; variant_id?: string; price_cents?: number }[]) || [];
+    return items.some(i =>
+      (i.sku && affectedSku && i.sku.toUpperCase() === affectedSku.toUpperCase()) ||
+      (i.variant_id && i.variant_id === affectedVariantId)
+    );
+  });
+
+  // Calculate monthly revenue from affected subs
+  let monthlyRevenueCents = 0;
+  for (const sub of matchingSubs) {
+    const items = (sub.items as { price_cents?: number; quantity?: number }[]) || [];
+    const subTotal = items.reduce((sum, i) => sum + ((i.price_cents || 0) * (i.quantity || 1)), 0);
+    const interval = (sub.billing_interval || "MONTH").toUpperCase();
+    const count = sub.billing_interval_count || 1;
+    // Normalize to monthly
+    if (interval === "WEEK") monthlyRevenueCents += subTotal * (4.33 / count);
+    else if (interval === "DAY") monthlyRevenueCents += subTotal * (30 / count);
+    else monthlyRevenueCents += subTotal / count; // MONTH
+  }
+
+  // Estimate months at risk
+  let monthsAtRisk = 3; // default
+  if (crisis.expected_restock_date) {
+    const restockDate = new Date(crisis.expected_restock_date);
+    const now = new Date();
+    monthsAtRisk = Math.max(1, Math.ceil((restockDate.getTime() - now.getTime()) / (30 * 24 * 60 * 60 * 1000)));
+  }
+
+  const financialImpact = {
+    affected_subscriptions: matchingSubs.length,
+    monthly_revenue_at_risk: Math.round(monthlyRevenueCents) / 100,
+    months_at_risk: monthsAtRisk,
+    total_revenue_at_risk: Math.round(monthlyRevenueCents * monthsAtRisk) / 100,
+    annual_revenue_at_risk: Math.round(monthlyRevenueCents * 12) / 100,
+    saved_count: allActions.filter(a =>
+      a.tier1_response === "accepted_swap" || a.tier2_response === "accepted_swap" ||
+      a.tier3_response === "accepted_pause" || a.tier3_response === "accepted_remove"
+    ).length,
+    lost_count: allActions.filter(a => a.cancelled).length,
+  };
+
+  return NextResponse.json({ crisis, actions: allActions, stats, financialImpact });
 }
 
 // PATCH — update crisis settings + status

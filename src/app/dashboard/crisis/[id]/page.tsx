@@ -53,6 +53,32 @@ interface Stats {
   cancelled: number;
 }
 
+interface FinancialImpact {
+  affected_subscriptions: number;
+  monthly_revenue_at_risk: number;
+  months_at_risk: number;
+  total_revenue_at_risk: number;
+  annual_revenue_at_risk: number;
+  saved_count: number;
+  lost_count: number;
+}
+
+interface CouponDetails {
+  found: boolean;
+  code: string;
+  title: string;
+  status: string;
+  type: string;
+  percentage: number | null;
+  fixed_amount: string | null;
+  currency_code: string | null;
+  summary: string;
+  starts_at: string | null;
+  ends_at: string | null;
+  usage_limit: number | null;
+  usage_count: number | null;
+}
+
 const STATUS_COLORS: Record<string, string> = {
   draft: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
   active: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
@@ -64,6 +90,10 @@ const STATUSES = ["draft", "active", "paused", "resolved"] as const;
 
 function formatDate(d: string): string {
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function formatMoney(n: number): string {
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 }
 
 function getActionResponse(a: CrisisAction): string {
@@ -87,6 +117,7 @@ export default function CrisisDetailPage() {
   const [crisis, setCrisis] = useState<CrisisEvent | null>(null);
   const [actions, setActions] = useState<CrisisAction[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [impact, setImpact] = useState<FinancialImpact | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -101,6 +132,12 @@ export default function CrisisDetailPage() {
   const [editCouponCode, setEditCouponCode] = useState("");
   const [editCouponPercent, setEditCouponPercent] = useState(20);
 
+  // Coupon lookup
+  const [couponInput, setCouponInput] = useState("");
+  const [couponLooking, setCouponLooking] = useState(false);
+  const [couponDetails, setCouponDetails] = useState<CouponDetails | null>(null);
+  const [couponError, setCouponError] = useState("");
+
   const fetchDetail = useCallback(async () => {
     setLoading(true);
     const res = await fetch(`/api/workspaces/${workspace.id}/crisis/${crisisId}`);
@@ -109,13 +146,13 @@ export default function CrisisDetailPage() {
       setCrisis(data.crisis);
       setActions(data.actions || []);
       setStats(data.stats);
+      setImpact(data.financialImpact || null);
     }
     setLoading(false);
   }, [workspace.id, crisisId]);
 
   useEffect(() => { fetchDetail(); }, [fetchDetail]);
 
-  // Populate edit fields when crisis loads
   useEffect(() => {
     if (crisis) {
       setEditName(crisis.name);
@@ -166,7 +203,7 @@ export default function CrisisDetailPage() {
   };
 
   const handleResolve = async () => {
-    if (!confirm("Resolve this crisis? (Mass resume/re-add actions will be implemented separately.)")) return;
+    if (!confirm("Resolve this crisis? This will auto-resume paused subs and re-add removed items.")) return;
     setResolving(true);
     const res = await fetch(`/api/workspaces/${workspace.id}/crisis/${crisisId}`, {
       method: "POST",
@@ -180,24 +217,63 @@ export default function CrisisDetailPage() {
     setResolving(false);
   };
 
+  const lookupCoupon = async () => {
+    if (!couponInput.trim()) return;
+    setCouponLooking(true);
+    setCouponError("");
+    setCouponDetails(null);
+    const res = await fetch(`/api/workspaces/${workspace.id}/crisis/${crisisId}/coupon-lookup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: couponInput.trim() }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setCouponDetails(data);
+      // Auto-populate coupon fields
+      setEditCouponCode(data.code);
+      if (data.percentage) setEditCouponPercent(data.percentage);
+    } else {
+      const data = await res.json();
+      setCouponError(data.error || "Code not found");
+    }
+    setCouponLooking(false);
+  };
+
+  const applyCoupon = async () => {
+    if (!couponDetails) return;
+    setSaving(true);
+    const res = await fetch(`/api/workspaces/${workspace.id}/crisis/${crisisId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tier2_coupon_code: couponDetails.code,
+        tier2_coupon_percent: couponDetails.percentage || editCouponPercent,
+      }),
+    });
+    if (res.ok) {
+      const updated = await res.json();
+      setCrisis(updated);
+      setCouponDetails(null);
+      setCouponInput("");
+    }
+    setSaving(false);
+  };
+
   if (loading) {
-    return (
-      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
-        <p className="text-zinc-400">Loading...</p>
-      </div>
-    );
+    return <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6"><p className="text-zinc-400">Loading...</p></div>;
   }
 
   if (!crisis) {
-    return (
-      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
-        <p className="text-zinc-400">Crisis event not found.</p>
-      </div>
-    );
+    return <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6"><p className="text-zinc-400">Crisis event not found.</p></div>;
   }
 
   const inputClass = "w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100";
   const labelClass = "block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1";
+
+  const savedPct = impact && impact.affected_subscriptions > 0
+    ? Math.round((impact.saved_count / impact.affected_subscriptions) * 100)
+    : 0;
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
@@ -256,21 +332,187 @@ export default function CrisisDetailPage() {
         </div>
       )}
 
-      {/* Stats cards */}
-      {stats && (
-        <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
-          <StatCard label="Total Affected" value={stats.total} />
-          <StatCard label="Tier 1 Sent" value={stats.tier1.sent} sub={`${stats.tier1.accepted} accepted`} color="emerald" />
-          <StatCard label="Tier 1 Rejected" value={stats.tier1.rejected} color="red" />
-          <StatCard label="Tier 2 Sent" value={stats.tier2.sent} sub={`${stats.tier2.accepted} accepted`} color="blue" />
-          <StatCard label="Tier 2 Rejected" value={stats.tier2.rejected} color="red" />
-          <StatCard label="Paused" value={stats.paused} color="amber" />
-          <StatCard label="Removed" value={stats.removed} color="zinc" />
-          <StatCard label="Cancelled" value={stats.cancelled} color="red" />
+      {/* ── Financial Impact ── */}
+      {impact && (
+        <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+          <h2 className="mb-4 text-lg font-semibold text-zinc-900 dark:text-zinc-100">Financial Impact</h2>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+            <ImpactCard
+              label="Affected Subscriptions"
+              value={impact.affected_subscriptions.toLocaleString()}
+              color="zinc"
+            />
+            <ImpactCard
+              label="Monthly Revenue at Risk"
+              value={formatMoney(impact.monthly_revenue_at_risk)}
+              color="amber"
+            />
+            <ImpactCard
+              label={`${impact.months_at_risk} Month${impact.months_at_risk !== 1 ? "s" : ""} Revenue at Risk`}
+              value={formatMoney(impact.total_revenue_at_risk)}
+              color="red"
+            />
+            <ImpactCard
+              label="Annual Revenue at Risk"
+              value={formatMoney(impact.annual_revenue_at_risk)}
+              color="red"
+            />
+            <ImpactCard
+              label="Save Rate"
+              value={stats && stats.total > 0 ? `${savedPct}%` : "---"}
+              sub={impact.saved_count > 0 ? `${impact.saved_count} saved, ${impact.lost_count} lost` : undefined}
+              color={savedPct >= 70 ? "emerald" : savedPct >= 40 ? "amber" : "red"}
+            />
+          </div>
+          {crisis.expected_restock_date && (
+            <p className="mt-3 text-xs text-zinc-400">
+              Based on expected restock date of {formatDate(crisis.expected_restock_date)}. Revenue calculated from current subscription billing amounts.
+            </p>
+          )}
         </div>
       )}
 
-      {/* Settings section */}
+      {/* ── How It Works (Steps Outline) ── */}
+      <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-4 text-lg font-semibold text-zinc-900 dark:text-zinc-100">How the Campaign Works</h2>
+        <div className="space-y-4">
+          <StepOutline
+            number={1}
+            title="Automatic Flavor Swap + Notification"
+            description={`When a customer's next billing date is within ${crisis.lead_time_days} days, we automatically swap ${crisis.affected_product_title || "the affected item"} to ${crisis.default_swap_title || "the default swap"} and email them. They can pick a different flavor if they prefer.`}
+            timing={`${crisis.lead_time_days} days before billing`}
+            status={stats ? `${stats.tier1.sent} sent, ${stats.tier1.accepted} accepted, ${stats.tier1.rejected} rejected, ${stats.tier1.pending} pending` : undefined}
+          />
+          <StepOutline
+            number={2}
+            title={`Product Swap Offer + ${crisis.tier2_coupon_percent}% Off`}
+            description={`If they reject the flavor swap, we wait ${crisis.tier_wait_days} days then offer them a completely different product with ${crisis.tier2_coupon_percent}% off their next order.${crisis.tier2_coupon_code ? ` Code: ${crisis.tier2_coupon_code}` : ""}`}
+            timing={`${crisis.tier_wait_days} days after Tier 1 rejection`}
+            status={stats ? `${stats.tier2.sent} sent, ${stats.tier2.accepted} accepted, ${stats.tier2.rejected} rejected, ${stats.tier2.pending} pending` : undefined}
+          />
+          <StepOutline
+            number={3}
+            title="Pause or Remove Item"
+            description="If they reject the product swap too, we offer to pause their subscription (single-item subs) or remove the affected item (multi-item subs) with automatic restart when the product is back in stock."
+            timing={`${crisis.tier_wait_days} days after Tier 2 rejection`}
+            status={stats ? `${stats.tier3.sent} sent, ${stats.paused} paused, ${stats.removed} removed, ${stats.cancelled} cancelled` : undefined}
+          />
+          <StepOutline
+            number={4}
+            title="Resolution"
+            description="When the product is back in stock, click 'Resolve Crisis' to automatically resume paused subscriptions and re-add removed items. Customers who swapped flavors/products can be offered a chance to swap back."
+            timing="When you click Resolve"
+          />
+        </div>
+      </div>
+
+      {/* ── Stats Cards ── */}
+      {stats && stats.total > 0 && (
+        <div className="mb-6">
+          <h2 className="mb-3 text-lg font-semibold text-zinc-900 dark:text-zinc-100">Campaign Progress</h2>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
+            <StatCard label="Total Affected" value={stats.total} />
+            <StatCard label="Tier 1 Sent" value={stats.tier1.sent} sub={`${stats.tier1.accepted} accepted`} color="emerald" />
+            <StatCard label="Tier 1 Rejected" value={stats.tier1.rejected} color="red" />
+            <StatCard label="Tier 2 Sent" value={stats.tier2.sent} sub={`${stats.tier2.accepted} accepted`} color="blue" />
+            <StatCard label="Tier 2 Rejected" value={stats.tier2.rejected} color="red" />
+            <StatCard label="Paused" value={stats.paused} color="amber" />
+            <StatCard label="Removed" value={stats.removed} color="zinc" />
+            <StatCard label="Cancelled" value={stats.cancelled} color="red" />
+          </div>
+        </div>
+      )}
+
+      {/* ── Coupon Lookup ── */}
+      <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-4 text-lg font-semibold text-zinc-900 dark:text-zinc-100">Tier 2 Coupon</h2>
+        {crisis.tier2_coupon_code ? (
+          <div className="mb-4 flex items-center gap-3 rounded-md bg-emerald-50 px-4 py-3 dark:bg-emerald-900/20">
+            <span className="text-sm font-medium text-emerald-700 dark:text-emerald-400">
+              Active: <code className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-bold dark:bg-emerald-900/40">{crisis.tier2_coupon_code}</code> — {crisis.tier2_coupon_percent}% off
+            </span>
+          </div>
+        ) : (
+          <p className="mb-3 text-sm text-zinc-500">No coupon configured yet. Look up a Shopify discount code to attach it.</p>
+        )}
+        <div className="flex items-end gap-3">
+          <div className="flex-1">
+            <label className={labelClass}>Shopify Discount Code</label>
+            <input
+              type="text"
+              value={couponInput}
+              onChange={e => setCouponInput(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && lookupCoupon()}
+              placeholder="e.g. CRISIS20"
+              className={inputClass}
+            />
+          </div>
+          <button
+            onClick={lookupCoupon}
+            disabled={couponLooking || !couponInput.trim()}
+            className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50 transition-colors dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+          >
+            {couponLooking ? "Looking up..." : "Look Up"}
+          </button>
+        </div>
+        {couponError && (
+          <p className="mt-2 text-sm text-red-600 dark:text-red-400">{couponError}</p>
+        )}
+        {couponDetails && (
+          <div className="mt-4 rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{couponDetails.title}</p>
+                <p className="text-xs text-zinc-500">{couponDetails.summary}</p>
+              </div>
+              <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                couponDetails.status === "ACTIVE"
+                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                  : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+              }`}>
+                {couponDetails.status}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+              <div>
+                <p className="text-xs text-zinc-400">Type</p>
+                <p className="font-medium text-zinc-700 dark:text-zinc-300">
+                  {couponDetails.type === "percentage" ? `${couponDetails.percentage}% off` :
+                   couponDetails.type === "fixed_amount" ? `$${couponDetails.fixed_amount} off` :
+                   couponDetails.type}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-zinc-400">Code</p>
+                <p className="font-medium text-zinc-700 dark:text-zinc-300">{couponDetails.code}</p>
+              </div>
+              {couponDetails.usage_limit && (
+                <div>
+                  <p className="text-xs text-zinc-400">Usage</p>
+                  <p className="font-medium text-zinc-700 dark:text-zinc-300">
+                    {couponDetails.usage_count ?? 0} / {couponDetails.usage_limit}
+                  </p>
+                </div>
+              )}
+              {couponDetails.ends_at && (
+                <div>
+                  <p className="text-xs text-zinc-400">Expires</p>
+                  <p className="font-medium text-zinc-700 dark:text-zinc-300">{formatDate(couponDetails.ends_at)}</p>
+                </div>
+              )}
+            </div>
+            <button
+              onClick={applyCoupon}
+              disabled={saving}
+              className="mt-4 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+            >
+              {saving ? "Applying..." : `Use ${couponDetails.code} for This Crisis`}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* ── Settings ── */}
       <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Settings</h2>
@@ -334,7 +576,7 @@ export default function CrisisDetailPage() {
         )}
       </div>
 
-      {/* Customer actions table */}
+      {/* ── Customer Actions Table ── */}
       <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
         <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
           <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
@@ -401,6 +643,44 @@ export default function CrisisDetailPage() {
             </tbody>
           </table>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function ImpactCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
+  const colorClass = color === "emerald" ? "text-emerald-600 dark:text-emerald-400"
+    : color === "red" ? "text-red-600 dark:text-red-400"
+    : color === "amber" ? "text-amber-600 dark:text-amber-400"
+    : color === "blue" ? "text-blue-600 dark:text-blue-400"
+    : "text-zinc-900 dark:text-zinc-100";
+
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-800/50">
+      <p className="text-xs text-zinc-500">{label}</p>
+      <p className={`mt-1 text-xl font-bold tabular-nums ${colorClass}`}>{value}</p>
+      {sub && <p className="text-xs text-zinc-400">{sub}</p>}
+    </div>
+  );
+}
+
+function StepOutline({ number, title, description, timing, status }: {
+  number: number; title: string; description: string; timing: string; status?: string;
+}) {
+  return (
+    <div className="flex gap-4">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-sm font-bold text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400">
+        {number}
+      </div>
+      <div className="flex-1">
+        <div className="flex items-baseline gap-2">
+          <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{title}</h3>
+          <span className="text-xs text-zinc-400">{timing}</span>
+        </div>
+        <p className="mt-0.5 text-sm text-zinc-600 dark:text-zinc-400">{description}</p>
+        {status && (
+          <p className="mt-1 text-xs font-medium text-indigo-600 dark:text-indigo-400">{status}</p>
+        )}
       </div>
     </div>
   );
