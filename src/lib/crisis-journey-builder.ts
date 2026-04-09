@@ -176,12 +176,11 @@ export async function buildCrisisTier3Steps(
         : "Your other items will ship as usual.",
       options: isBerryOnly
         ? [
-            { value: "pause", label: "Pause until it's back" },
-            { value: "cancel", label: "I'd rather cancel" },
+            { value: "pause", label: "Pause until it's back in stock" },
+            { value: "cancel", label: "Cancel subscription" },
           ]
         : [
-            { value: "remove", label: "Remove it for now" },
-            { value: "cancel", label: "I'd rather cancel the whole subscription" },
+            { value: "remove", label: "Remove it and add it back when it's back in stock" },
           ],
     }],
     metadata: {
