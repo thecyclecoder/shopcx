@@ -319,6 +319,151 @@ export async function POST(
       }
     }
 
+    // ── Crisis Tier 1 — Flavor Swap ──
+    if (journeyType === "crisis_tier1") {
+      const flavorChoice = responses?.flavor_choice?.value;
+      const actionId = metadata.actionId as string;
+      const subscriptionId = metadata.subscriptionId as string;
+      const affectedVariantId = metadata.affectedVariantId as string;
+
+      if (flavorChoice === "reject") {
+        await admin.from("crisis_customer_actions").update({
+          tier1_response: "rejected",
+          updated_at: new Date().toISOString(),
+        }).eq("id", actionId);
+        actionLog.push("Tier 1 rejected — will advance to Tier 2");
+      } else if (flavorChoice === "keep_current") {
+        await admin.from("crisis_customer_actions").update({
+          tier1_response: "accepted_swap",
+          tier1_swapped_to: { variantId: metadata.defaultSwapVariantId, title: "Kept default swap" },
+          updated_at: new Date().toISOString(),
+        }).eq("id", actionId);
+        actionLog.push("Tier 1 accepted — keeping default swap");
+      } else if (flavorChoice) {
+        // Swap to chosen flavor via Appstle
+        const { data: sub } = await admin.from("subscriptions")
+          .select("shopify_contract_id").eq("id", subscriptionId).single();
+        if (sub?.shopify_contract_id) {
+          const { subSwapVariant } = await import("@/lib/subscription-items");
+          const defaultSwapId = (metadata.defaultSwapVariantId as string) || affectedVariantId;
+          await subSwapVariant(wsId, sub.shopify_contract_id, defaultSwapId, flavorChoice);
+          actionLog.push(`Swapped to variant ${flavorChoice} via Appstle`);
+        }
+        const chosenLabel = responses?.flavor_choice?.label || flavorChoice;
+        await admin.from("crisis_customer_actions").update({
+          tier1_response: "accepted_swap",
+          tier1_swapped_to: { variantId: flavorChoice, title: chosenLabel },
+          updated_at: new Date().toISOString(),
+        }).eq("id", actionId);
+        actionLog.push(`Tier 1 accepted — swapped to ${chosenLabel}`);
+      }
+    }
+
+    // ── Crisis Tier 2 — Product Swap + Coupon ──
+    if (journeyType === "crisis_tier2") {
+      const productChoice = responses?.product_choice?.value;
+      const quantityChoice = responses?.product_quantity?.value;
+      const actionId = metadata.actionId as string;
+      const subscriptionId = metadata.subscriptionId as string;
+      const affectedVariantId = metadata.affectedVariantId as string;
+
+      if (productChoice === "reject") {
+        await admin.from("crisis_customer_actions").update({
+          tier2_response: "rejected",
+          updated_at: new Date().toISOString(),
+        }).eq("id", actionId);
+        actionLog.push("Tier 2 rejected — will advance to Tier 3");
+      } else if (productChoice) {
+        const qty = parseInt(quantityChoice || "1", 10) || 1;
+        const { data: sub } = await admin.from("subscriptions")
+          .select("shopify_contract_id").eq("id", subscriptionId).single();
+
+        if (sub?.shopify_contract_id) {
+          // Remove affected item and add new product
+          const { subSwapVariant } = await import("@/lib/subscription-items");
+          const currentVariant = affectedVariantId;
+          await subSwapVariant(wsId, sub.shopify_contract_id, currentVariant, productChoice, qty);
+          actionLog.push(`Product swapped to ${productChoice} x${qty}`);
+
+          // Apply coupon if configured
+          const couponCode = metadata.tier2CouponCode as string;
+          if (couponCode) {
+            try {
+              const { decrypt } = await import("@/lib/crypto");
+              const { data: wsCreds } = await admin.from("workspaces")
+                .select("appstle_api_key_encrypted").eq("id", wsId).single();
+              if (wsCreds?.appstle_api_key_encrypted) {
+                const appstleKey = decrypt(wsCreds.appstle_api_key_encrypted);
+                await fetch(
+                  `https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details/apply-discount?contractId=${sub.shopify_contract_id}&discountCode=${couponCode}`,
+                  { method: "POST", headers: { "X-API-Key": appstleKey } },
+                );
+                actionLog.push(`Coupon ${couponCode} applied`);
+              }
+            } catch { /* non-fatal */ }
+          }
+        }
+
+        const chosenLabel = responses?.product_choice?.label || productChoice;
+        await admin.from("crisis_customer_actions").update({
+          tier2_response: "accepted_swap",
+          tier2_swapped_to: { variantId: productChoice, title: chosenLabel, quantity: qty },
+          tier2_coupon_applied: !!(metadata.tier2CouponCode),
+          updated_at: new Date().toISOString(),
+        }).eq("id", actionId);
+        actionLog.push(`Tier 2 accepted — ${chosenLabel} x${qty}`);
+      }
+    }
+
+    // ── Crisis Tier 3 — Pause/Remove ──
+    if (journeyType === "crisis_tier3") {
+      const tier3Choice = responses?.tier3_choice?.value;
+      const actionId = metadata.actionId as string;
+      const subscriptionId = metadata.subscriptionId as string;
+      const segment = metadata.segment as string;
+      const affectedVariantId = metadata.affectedVariantId as string;
+
+      if (tier3Choice === "pause") {
+        // Pause subscription via Appstle
+        const { data: sub } = await admin.from("subscriptions")
+          .select("shopify_contract_id").eq("id", subscriptionId).single();
+        if (sub?.shopify_contract_id) {
+          const { appstleSubscriptionAction } = await import("@/lib/appstle");
+          await appstleSubscriptionAction(wsId, sub.shopify_contract_id, "pause", "Crisis — out of stock pause");
+        }
+        await admin.from("crisis_customer_actions").update({
+          tier3_response: "accepted_pause",
+          paused_at: new Date().toISOString(),
+          auto_resume: true,
+          updated_at: new Date().toISOString(),
+        }).eq("id", actionId);
+        actionLog.push("Tier 3: Subscription paused (auto-resume on resolve)");
+      } else if (tier3Choice === "remove") {
+        // Remove the affected item from subscription
+        const { data: sub } = await admin.from("subscriptions")
+          .select("shopify_contract_id").eq("id", subscriptionId).single();
+        if (sub?.shopify_contract_id) {
+          const { subRemoveItem } = await import("@/lib/subscription-items");
+          await subRemoveItem(wsId, sub.shopify_contract_id, affectedVariantId);
+        }
+        await admin.from("crisis_customer_actions").update({
+          tier3_response: "accepted_remove",
+          removed_item_at: new Date().toISOString(),
+          auto_readd: true,
+          updated_at: new Date().toISOString(),
+        }).eq("id", actionId);
+        actionLog.push("Tier 3: Item removed (auto-readd on resolve)");
+      } else if (tier3Choice === "cancel") {
+        // Launch cancel journey instead of direct cancel
+        await admin.from("crisis_customer_actions").update({
+          tier3_response: "rejected",
+          updated_at: new Date().toISOString(),
+        }).eq("id", actionId);
+        actionLog.push(`Tier 3 rejected — customer wants to cancel (${segment})`);
+        // TODO: launch cancel journey for this customer
+      }
+    }
+
     if (journeyType === "discount_signup" || journeyType === "marketing_signup") {
       const consentResponse = responses?.consent;
       if (consentResponse?.value === "yes") {

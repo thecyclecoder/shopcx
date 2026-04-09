@@ -62,6 +62,18 @@ export async function buildJourneySteps(
       const { buildSelectSubscriptionSteps } = await import("@/lib/select-subscription-journey-builder");
       return buildSelectSubscriptionSteps(admin, workspaceId, customerId, ticketId);
     }
+    case "crisis_tier1": {
+      const { buildCrisisTier1Steps } = await import("@/lib/crisis-journey-builder");
+      return buildCrisisTier1Steps(admin, workspaceId, customerId, ticketId);
+    }
+    case "crisis_tier2": {
+      const { buildCrisisTier2Steps } = await import("@/lib/crisis-journey-builder");
+      return buildCrisisTier2Steps(admin, workspaceId, customerId, ticketId);
+    }
+    case "crisis_tier3": {
+      const { buildCrisisTier3Steps } = await import("@/lib/crisis-journey-builder");
+      return buildCrisisTier3Steps(admin, workspaceId, customerId, ticketId);
+    }
     default:
       return { codeDriven: true, multiStep: false, steps: [] };
   }
