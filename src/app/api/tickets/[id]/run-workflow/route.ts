@@ -20,7 +20,7 @@ export async function POST(
   if (!workspaceId) return NextResponse.json({ error: "No workspace" }, { status: 400 });
 
   const body = await request.json();
-  const { workflow_id } = body;
+  const { workflow_id, subscription_id } = body;
   if (!workflow_id) return NextResponse.json({ error: "workflow_id required" }, { status: 400 });
 
   const admin = createAdminClient();
@@ -43,8 +43,8 @@ export async function POST(
     await admin.from("tickets").update({ tags: [...new Set(tags)] }).eq("id", ticketId);
   }
 
-  // Execute the workflow
-  await executeWorkflow(workspaceId, ticketId, workflow.trigger_tag);
+  // Execute the workflow (pass subscription_id override for subscription_inquiry)
+  await executeWorkflow(workspaceId, ticketId, workflow.trigger_tag, subscription_id ? { subscriptionId: subscription_id } : undefined);
 
   // Close ticket after manual workflow application
   await admin.from("tickets").update({ status: "closed" }).eq("id", ticketId);

@@ -32,7 +32,6 @@ export const crisisDailyCampaign = inngest.createFunction(
     if (crises.length === 0) return { status: "no_active_crises" };
 
     let totalNew = 0;
-    let totalAdvanced = 0;
 
     for (const crisis of crises) {
       // ── Step 1: Find new eligible subscriptions ──
@@ -212,177 +211,231 @@ export const crisisDailyCampaign = inngest.createFunction(
         await step.sleep("rate-limit", "200ms");
       }
 
-      // ── Step 3: Advance existing records through tiers ──
-      const advanced = await step.run(`advance-tiers-${crisis.id.slice(0, 8)}`, async () => {
-        const waitMs = (crisis.tier_wait_days || 3) * 24 * 60 * 60 * 1000;
-        const now = Date.now();
-        let count = 0;
-        const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
+    }
 
+    return { new_tier1: totalNew, crises_processed: crises.length };
+  },
+);
+
+/**
+ * Crisis Advance Tier — Event-driven tier advancement after rejection.
+ *
+ * Fired immediately when a customer rejects a crisis tier in a journey.
+ * Waits only the workspace response delay, then sends the next tier.
+ */
+export const crisisAdvanceTier = inngest.createFunction(
+  {
+    id: "crisis-advance-tier",
+    concurrency: [{ limit: 5 }],
+    triggers: [{ event: "crisis/tier-rejected" }],
+  },
+  async ({ event, step }) => {
+    const {
+      crisis_id,
+      action_id,
+      workspace_id,
+      customer_id,
+      ticket_id,
+      rejected_tier,
+      subscription_id,
+      segment,
+    } = event.data as {
+      crisis_id: string;
+      action_id: string;
+      workspace_id: string;
+      customer_id: string;
+      ticket_id: string | null;
+      rejected_tier: number;
+      subscription_id: string;
+      segment: string;
+    };
+
+    const admin = createAdminClient();
+
+    // Look up workspace response delay for email channel
+    const delaySeconds = await step.run("get-response-delay", async () => {
+      const { data: ws } = await admin.from("workspaces")
+        .select("response_delays")
+        .eq("id", workspace_id)
+        .single();
+      const delays = (ws?.response_delays as Record<string, number> | null) || {};
+      return delays.email || 300; // default 5 minutes
+    });
+
+    await step.sleep("response-delay", `${delaySeconds}s`);
+
+    // Get crisis details
+    const crisis = await step.run("get-crisis", async () => {
+      const { data } = await admin.from("crisis_events")
+        .select("*")
+        .eq("id", crisis_id)
+        .single();
+      return data;
+    });
+
+    if (!crisis) return { status: "crisis_not_found" };
+
+    if (rejected_tier === 1) {
+      // ── Send Tier 2: Product swap + coupon ──
+      await step.run("send-tier2", async () => {
+        const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
         const { data: ws } = await admin.from("workspaces")
-          .select("name, help_primary_color").eq("id", crisis.workspace_id).single();
+          .select("name, help_primary_color").eq("id", workspace_id).single();
         const primaryColor = ws?.help_primary_color || "#4f46e5";
         const couponPct = crisis.tier2_coupon_percent || 20;
 
-        // Tier 1 → Tier 2 (rejected + wait period passed)
-        const { data: tier1Rejected } = await admin.from("crisis_customer_actions")
-          .select("id, customer_id, subscription_id, segment, ticket_id, tier1_sent_at")
-          .eq("crisis_id", crisis.id)
-          .eq("current_tier", 1)
-          .eq("tier1_response", "rejected");
-
-        for (const record of tier1Rejected || []) {
-          if (!record.tier1_sent_at) continue;
-          if (now - new Date(record.tier1_sent_at).getTime() < waitMs) continue;
-
-          // Create Tier 2 journey session
-          const token = crypto.randomBytes(24).toString("hex");
-          await admin.from("journey_sessions").insert({
-            workspace_id: crisis.workspace_id,
-            customer_id: record.customer_id,
-            ticket_id: record.ticket_id,
-            token,
-            token_expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-            status: "pending",
-            config_snapshot: {
-              codeDriven: true,
-              journeyType: "crisis_tier2",
-              metadata: {
-                crisisId: crisis.id,
-                actionId: record.id,
-                subscriptionId: record.subscription_id,
-                customerId: record.customer_id,
-                workspaceId: crisis.workspace_id,
-                ticketId: record.ticket_id,
-                affectedVariantId: crisis.affected_variant_id,
-                tier2CouponCode: crisis.tier2_coupon_code,
-                tier2CouponPercent: couponPct,
-              },
+        // Create Tier 2 journey session
+        const token = crypto.randomBytes(24).toString("hex");
+        await admin.from("journey_sessions").insert({
+          workspace_id,
+          customer_id,
+          ticket_id,
+          token,
+          token_expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          status: "pending",
+          config_snapshot: {
+            codeDriven: true,
+            journeyType: "crisis_tier2",
+            metadata: {
+              crisisId: crisis_id,
+              actionId: action_id,
+              subscriptionId: subscription_id,
+              customerId: customer_id,
+              workspaceId: workspace_id,
+              ticketId: ticket_id,
+              affectedVariantId: crisis.affected_variant_id,
+              tier2CouponCode: crisis.tier2_coupon_code,
+              tier2CouponPercent: couponPct,
             },
-          });
+          },
+        });
 
-          // Send Tier 2 email
-          const { data: customer } = await admin.from("customers")
-            .select("email, first_name").eq("id", record.customer_id).single();
-          if (customer?.email) {
-            const firstName = customer.first_name || "there";
-            const journeyUrl = `${siteUrl}/journey/${token}`;
-            const emailBody = `<p>Hi ${firstName},</p>
+        // Send Tier 2 email
+        const { data: customer } = await admin.from("customers")
+          .select("email, first_name").eq("id", customer_id).single();
+        if (customer?.email) {
+          const firstName = customer.first_name || "there";
+          const journeyUrl = `${siteUrl}/journey/${token}`;
+          const emailBody = `<p>Hi ${firstName},</p>
 <p>We understand ${crisis.affected_product_title || "your item"} was your go-to, and we're sorry it's still unavailable.</p>
 <p>We'd love to help you try something new — and to sweeten the deal, we'll give you <b>${couponPct}% off</b> your next order when you pick a new product.</p>
 <p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Browse New Products →</a></p>`;
 
-            await admin.from("ticket_messages").insert({
-              ticket_id: record.ticket_id,
-              direction: "outbound", visibility: "external", author_type: "system",
-              body: emailBody, sent_at: new Date().toISOString(),
-            });
-            await sendTicketReply({
-              workspaceId: crisis.workspace_id,
-              toEmail: customer.email,
-              subject: `${couponPct}% off — try something new while ${crisis.affected_product_title || "your item"} is restocking`,
-              body: emailBody,
-              inReplyTo: null,
-              agentName: ws?.name || "Support",
-              workspaceName: ws?.name || "",
-            });
-          }
-
-          await admin.from("crisis_customer_actions").update({
-            current_tier: 2,
-            tier2_sent_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          }).eq("id", record.id);
-
-          count++;
+          await admin.from("ticket_messages").insert({
+            ticket_id,
+            direction: "outbound", visibility: "external", author_type: "system",
+            body: emailBody, sent_at: new Date().toISOString(),
+          });
+          await sendTicketReply({
+            workspaceId: workspace_id,
+            toEmail: customer.email,
+            subject: `${couponPct}% off — try something new while ${crisis.affected_product_title || "your item"} is restocking`,
+            body: emailBody,
+            inReplyTo: null,
+            agentName: ws?.name || "Support",
+            workspaceName: ws?.name || "",
+          });
         }
 
-        // Tier 2 → Tier 3
-        const { data: tier2Rejected } = await admin.from("crisis_customer_actions")
-          .select("id, customer_id, subscription_id, segment, ticket_id, tier2_sent_at")
-          .eq("crisis_id", crisis.id)
-          .eq("current_tier", 2)
-          .eq("tier2_response", "rejected");
+        await admin.from("crisis_customer_actions").update({
+          current_tier: 2,
+          tier2_sent_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq("id", action_id);
+      });
 
-        for (const record of tier2Rejected || []) {
-          if (!record.tier2_sent_at) continue;
-          if (now - new Date(record.tier2_sent_at).getTime() < waitMs) continue;
+      return { status: "tier2_sent", crisis_id, customer_id };
 
-          // Create Tier 3 journey session
-          const token = crypto.randomBytes(24).toString("hex");
-          await admin.from("journey_sessions").insert({
-            workspace_id: crisis.workspace_id,
-            customer_id: record.customer_id,
-            ticket_id: record.ticket_id,
-            token,
-            token_expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-            status: "pending",
-            config_snapshot: {
-              codeDriven: true,
-              journeyType: "crisis_tier3",
-              metadata: {
-                crisisId: crisis.id,
-                actionId: record.id,
-                subscriptionId: record.subscription_id,
-                customerId: record.customer_id,
-                workspaceId: crisis.workspace_id,
-                ticketId: record.ticket_id,
-                segment: record.segment,
-                affectedVariantId: crisis.affected_variant_id,
-              },
+    } else if (rejected_tier === 2) {
+      // ── Send Tier 3: Pause/remove ──
+      await step.run("send-tier3", async () => {
+        const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
+        const { data: ws } = await admin.from("workspaces")
+          .select("name, help_primary_color").eq("id", workspace_id).single();
+        const primaryColor = ws?.help_primary_color || "#4f46e5";
+
+        // Create Tier 3 journey session
+        const token = crypto.randomBytes(24).toString("hex");
+        await admin.from("journey_sessions").insert({
+          workspace_id,
+          customer_id,
+          ticket_id,
+          token,
+          token_expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          status: "pending",
+          config_snapshot: {
+            codeDriven: true,
+            journeyType: "crisis_tier3",
+            metadata: {
+              crisisId: crisis_id,
+              actionId: action_id,
+              subscriptionId: subscription_id,
+              customerId: customer_id,
+              workspaceId: workspace_id,
+              ticketId: ticket_id,
+              segment,
+              affectedVariantId: crisis.affected_variant_id,
             },
-          });
+          },
+        });
 
-          const isBerryOnly = record.segment === "berry_only";
-          const restockDate = crisis.expected_restock_date
-            ? new Date(crisis.expected_restock_date).toLocaleDateString("en-US", { month: "long", year: "numeric" })
-            : "a few months";
+        const isBerryOnly = segment === "berry_only";
+        const restockDate = crisis.expected_restock_date
+          ? new Date(crisis.expected_restock_date).toLocaleDateString("en-US", { month: "long", year: "numeric" })
+          : "a few months";
 
-          const { data: customer } = await admin.from("customers")
-            .select("email, first_name").eq("id", record.customer_id).single();
-          if (customer?.email) {
-            const firstName = customer.first_name || "there";
-            const journeyUrl = `${siteUrl}/journey/${token}`;
-            const emailBody = isBerryOnly
-              ? `<p>Hi ${firstName},</p>
+        const { data: customer } = await admin.from("customers")
+          .select("email, first_name").eq("id", customer_id).single();
+        if (customer?.email) {
+          const firstName = customer.first_name || "there";
+          const journeyUrl = `${siteUrl}/journey/${token}`;
+          const emailBody = isBerryOnly
+            ? `<p>Hi ${firstName},</p>
 <p>We don't want you to go without your supplements. Since ${crisis.affected_product_title || "your item"} won't be back until <b>${restockDate}</b>, we can pause your subscription and automatically restart it the moment it's available.</p>
 <p>You won't be charged while paused.</p>
 <p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose What Works for You →</a></p>`
-              : `<p>Hi ${firstName},</p>
+            : `<p>Hi ${firstName},</p>
 <p>We can remove ${crisis.affected_product_title || "the out-of-stock item"} from your subscription and keep shipping your other items as usual. We'll automatically add it back when it's in stock (expected <b>${restockDate}</b>).</p>
 <p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose What Works for You →</a></p>`;
 
-            await admin.from("ticket_messages").insert({
-              ticket_id: record.ticket_id,
-              direction: "outbound", visibility: "external", author_type: "system",
-              body: emailBody, sent_at: new Date().toISOString(),
-            });
-            await sendTicketReply({
-              workspaceId: crisis.workspace_id,
-              toEmail: customer.email,
-              subject: `About your ${crisis.affected_product_title || "subscription"} — let us know what you'd prefer`,
-              body: emailBody,
-              inReplyTo: null,
-              agentName: ws?.name || "Support",
-              workspaceName: ws?.name || "",
-            });
-          }
-
-          await admin.from("crisis_customer_actions").update({
-            current_tier: 3,
-            tier3_sent_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          }).eq("id", record.id);
-
-          count++;
+          await admin.from("ticket_messages").insert({
+            ticket_id,
+            direction: "outbound", visibility: "external", author_type: "system",
+            body: emailBody, sent_at: new Date().toISOString(),
+          });
+          await sendTicketReply({
+            workspaceId: workspace_id,
+            toEmail: customer.email,
+            subject: `About your ${crisis.affected_product_title || "subscription"} — let us know what you'd prefer`,
+            body: emailBody,
+            inReplyTo: null,
+            agentName: ws?.name || "Support",
+            workspaceName: ws?.name || "",
+          });
         }
 
-        return count;
+        await admin.from("crisis_customer_actions").update({
+          current_tier: 3,
+          tier3_sent_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq("id", action_id);
       });
 
-      totalAdvanced += advanced;
+      return { status: "tier3_sent", crisis_id, customer_id };
+
+    } else if (rejected_tier === 3) {
+      // ── Exhausted — mark and TODO: launch cancel journey ──
+      await step.run("mark-exhausted", async () => {
+        await admin.from("crisis_customer_actions").update({
+          current_tier: 4,
+          exhausted_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq("id", action_id);
+      });
+
+      return { status: "exhausted", crisis_id, customer_id };
     }
 
-    return { new_tier1: totalNew, advanced: totalAdvanced, crises_processed: crises.length };
+    return { status: "unknown_tier", rejected_tier };
   },
 );

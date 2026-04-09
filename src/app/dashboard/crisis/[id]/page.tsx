@@ -130,7 +130,6 @@ export default function CrisisDetailPage() {
   const [editLeadTime, setEditLeadTime] = useState(7);
   const [editTierWait, setEditTierWait] = useState(3);
   const [editCouponCode, setEditCouponCode] = useState("");
-  const [editCouponPercent, setEditCouponPercent] = useState(20);
 
   // Coupon lookup
   const isAdmin = workspace.role === "owner" || workspace.role === "admin";
@@ -163,7 +162,6 @@ export default function CrisisDetailPage() {
       setEditLeadTime(crisis.lead_time_days);
       setEditTierWait(crisis.tier_wait_days);
       setEditCouponCode(crisis.tier2_coupon_code || "");
-      setEditCouponPercent(crisis.tier2_coupon_percent);
     }
   }, [crisis]);
 
@@ -189,9 +187,7 @@ export default function CrisisDetailPage() {
         name: editName,
         expected_restock_date: editRestockDate || null,
         lead_time_days: editLeadTime,
-        tier_wait_days: editTierWait,
         tier2_coupon_code: editCouponCode || null,
-        tier2_coupon_percent: editCouponPercent,
       }),
     });
     if (res.ok) {
@@ -233,9 +229,8 @@ export default function CrisisDetailPage() {
     if (res.ok) {
       const data = await res.json();
       setCouponDetails(data);
-      // Auto-populate coupon fields
+      // Auto-populate coupon code
       setEditCouponCode(data.code);
-      if (data.percentage) setEditCouponPercent(data.percentage);
     } else {
       const data = await res.json();
       setCouponError(data.error || "Code not found");
@@ -251,7 +246,7 @@ export default function CrisisDetailPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         tier2_coupon_code: couponDetails.code,
-        tier2_coupon_percent: couponDetails.percentage || editCouponPercent,
+        tier2_coupon_percent: couponDetails.percentage || 0,
       }),
     });
     if (res.ok) {
@@ -390,16 +385,16 @@ export default function CrisisDetailPage() {
           />
           <StepOutline
             number={2}
-            title={`Product Swap Offer + ${crisis.tier2_coupon_percent}% Off`}
-            description={`If they reject the flavor swap, we wait ${crisis.tier_wait_days} days then offer them a completely different product with ${crisis.tier2_coupon_percent}% off their next order.${crisis.tier2_coupon_code ? ` Code: ${crisis.tier2_coupon_code}` : ""}`}
-            timing={`${crisis.tier_wait_days} days after Tier 1 rejection`}
+            title={`Product Swap Offer${crisis.tier2_coupon_percent ? ` + ${crisis.tier2_coupon_percent}% Off` : ""}`}
+            description={`If they reject the flavor swap, we offer them a completely different product${crisis.tier2_coupon_percent ? ` with ${crisis.tier2_coupon_percent}% off their next order` : ""} on the next campaign run.${crisis.tier2_coupon_code ? ` Code: ${crisis.tier2_coupon_code}` : ""}`}
+            timing="Next day after Tier 1 rejection"
             status={stats ? `${stats.tier2.sent} sent, ${stats.tier2.accepted} accepted, ${stats.tier2.rejected} rejected, ${stats.tier2.pending} pending` : undefined}
           />
           <StepOutline
             number={3}
             title="Pause or Remove Item"
             description="If they reject the product swap too, we offer to pause their subscription (single-item subs) or remove the affected item (multi-item subs) with automatic restart when the product is back in stock."
-            timing={`${crisis.tier_wait_days} days after Tier 2 rejection`}
+            timing="Next day after Tier 2 rejection"
             status={stats ? `${stats.tier3.sent} sent, ${stats.paused} paused, ${stats.removed} removed, ${stats.cancelled} cancelled` : undefined}
           />
           <StepOutline
@@ -560,10 +555,12 @@ export default function CrisisDetailPage() {
                 <label className={labelClass}>Tier 2 Coupon Code</label>
                 <input type="text" value={editCouponCode} onChange={e => setEditCouponCode(e.target.value)} className={inputClass} />
               </div>
-              <div>
-                <label className={labelClass}>Tier 2 Coupon %</label>
-                <input type="number" value={editCouponPercent} onChange={e => setEditCouponPercent(Number(e.target.value))} min={0} max={100} className={inputClass} />
-              </div>
+              {crisis.tier2_coupon_percent > 0 && (
+                <div>
+                  <label className={labelClass}>Coupon Discount</label>
+                  <p className="mt-1 text-sm font-medium text-zinc-700 dark:text-zinc-300">{crisis.tier2_coupon_percent}% off (from Shopify)</p>
+                </div>
+              )}
             </div>
           </div>
         ) : (

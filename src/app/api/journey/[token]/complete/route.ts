@@ -331,6 +331,24 @@ export async function POST(
           tier1_response: "rejected",
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
+
+        // Fire event to advance to Tier 2 after response delay
+        const { data: actionRecord } = await admin.from("crisis_customer_actions")
+          .select("segment").eq("id", actionId).single();
+        await inngest.send({
+          name: "crisis/tier-rejected",
+          data: {
+            crisis_id: metadata.crisisId as string,
+            action_id: actionId,
+            workspace_id: wsId,
+            customer_id: metadata.customerId as string,
+            ticket_id: metadata.ticketId as string | null,
+            rejected_tier: 1,
+            subscription_id: subscriptionId,
+            segment: actionRecord?.segment || "berry_plus",
+          },
+        });
+
         actionLog.push("Tier 1 rejected — will advance to Tier 2");
       } else if (flavorChoice === "keep_current") {
         await admin.from("crisis_customer_actions").update({
@@ -372,6 +390,24 @@ export async function POST(
           tier2_response: "rejected",
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
+
+        // Fire event to advance to Tier 3 after response delay
+        const { data: actionRecord2 } = await admin.from("crisis_customer_actions")
+          .select("segment").eq("id", actionId).single();
+        await inngest.send({
+          name: "crisis/tier-rejected",
+          data: {
+            crisis_id: metadata.crisisId as string,
+            action_id: actionId,
+            workspace_id: wsId,
+            customer_id: metadata.customerId as string,
+            ticket_id: metadata.ticketId as string | null,
+            rejected_tier: 2,
+            subscription_id: subscriptionId,
+            segment: actionRecord2?.segment || "berry_plus",
+          },
+        });
+
         actionLog.push("Tier 2 rejected — will advance to Tier 3");
       } else if (productChoice) {
         const qty = parseInt(quantityChoice || "1", 10) || 1;
@@ -459,6 +495,22 @@ export async function POST(
           tier3_response: "rejected",
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
+
+        // Fire event to mark as exhausted after response delay
+        await inngest.send({
+          name: "crisis/tier-rejected",
+          data: {
+            crisis_id: metadata.crisisId as string,
+            action_id: actionId,
+            workspace_id: wsId,
+            customer_id: metadata.customerId as string,
+            ticket_id: metadata.ticketId as string | null,
+            rejected_tier: 3,
+            subscription_id: subscriptionId,
+            segment: segment || "berry_plus",
+          },
+        });
+
         actionLog.push(`Tier 3 rejected — customer wants to cancel (${segment})`);
         // TODO: launch cancel journey for this customer
       }

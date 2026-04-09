@@ -43,7 +43,7 @@ import { returnsProcessDelivery, returnsIssueRefund } from "@/lib/inngest/return
 import { macroAuditFunction } from "@/lib/inngest/macro-audit";
 import { deliveryNightlyAudit } from "@/lib/inngest/delivery-audit";
 import { deliverPendingSends } from "@/lib/inngest/deliver-pending-send";
-import { crisisDailyCampaign } from "@/lib/inngest/crisis-campaign";
+import { crisisDailyCampaign, crisisAdvanceTier } from "@/lib/inngest/crisis-campaign";
 
 export const maxDuration = 300;
 
@@ -90,5 +90,6 @@ export const { GET, POST, PUT } = serve({
     deliveryNightlyAudit,
     deliverPendingSends,
     crisisDailyCampaign,
+    crisisAdvanceTier,
   ],
 });

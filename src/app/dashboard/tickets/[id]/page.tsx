@@ -219,6 +219,7 @@ export default function TicketDetailPage() {
   const [suggestingPattern, setSuggestingPattern] = useState(false);
   const [availableWorkflows, setAvailableWorkflows] = useState<{ id: string; name: string; template: string; trigger_tag: string }[]>([]);
   const [runningWorkflow, setRunningWorkflow] = useState(false);
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState("");
   const [availablePlaybooks, setAvailablePlaybooks] = useState<{ id: string; name: string }[]>([]);
   const [applyingPlaybook, setApplyingPlaybook] = useState(false);
   const [availableJourneys, setAvailableJourneys] = useState<{ id: string; name: string; trigger_intent: string }[]>([]);
@@ -1575,7 +1576,8 @@ export default function TicketDetailPage() {
                   <div className="mt-1 flex items-center gap-2">
                     <select
                       id="workflow-select"
-                      defaultValue=""
+                      value={selectedWorkflowId}
+                      onChange={(e) => setSelectedWorkflowId(e.target.value)}
                       className="min-w-0 flex-1 truncate rounded border border-indigo-300 bg-white px-2 py-1 text-xs dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
                     >
                       <option value="" disabled>Select workflow...</option>
@@ -1585,15 +1587,18 @@ export default function TicketDetailPage() {
                     </select>
                     <button
                       onClick={async () => {
-                        const select = document.getElementById("workflow-select") as HTMLSelectElement;
-                        const wfId = select?.value;
+                        const wfId = selectedWorkflowId;
                         if (!wfId) return;
+                        // For subscription_inquiry, require a subscription selection if customer has multiple
+                        const selectedWf = availableWorkflows.find(w => w.id === wfId);
+                        const subSelect = document.getElementById("workflow-subscription-select") as HTMLSelectElement | null;
+                        const subscriptionId = selectedWf?.template === "subscription_inquiry" && subSelect?.value ? subSelect.value : undefined;
                         setRunningWorkflow(true);
                         try {
                           const res = await fetch(`/api/tickets/${id}/run-workflow`, {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ workflow_id: wfId }),
+                            body: JSON.stringify({ workflow_id: wfId, ...(subscriptionId ? { subscription_id: subscriptionId } : {}) }),
                           });
                           if (res.ok) {
                             const ticketRes = await fetch(`/api/tickets/${id}`);
@@ -1613,6 +1618,39 @@ export default function TicketDetailPage() {
                       {runningWorkflow ? "..." : "Run"}
                     </button>
                   </div>
+                  {/* Subscription selector for subscription_inquiry workflows */}
+                  {(() => {
+                    const selectedWf = availableWorkflows.find(w => w.id === selectedWorkflowId);
+                    if (selectedWf?.template !== "subscription_inquiry") return null;
+                    const subs = customer?.subscriptions || [];
+                    if (subs.length === 0) return null;
+                    return (
+                      <div className="mt-2">
+                        <label className="block text-xs text-indigo-400">Select subscription</label>
+                        <select
+                          id="workflow-subscription-select"
+                          defaultValue=""
+                          className="mt-1 w-full truncate rounded border border-indigo-300 bg-white px-2 py-1 text-xs dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
+                        >
+                          <option value="">Auto-detect</option>
+                          {subs.map((sub) => {
+                            const title = sub.items
+                              ?.filter(i => i.title && !i.title.toLowerCase().includes("shipping protection"))
+                              .map(i => i.title)
+                              .join(", ") || "Subscription";
+                            const nextDate = sub.next_billing_date
+                              ? new Date(sub.next_billing_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+                              : "—";
+                            return (
+                              <option key={sub.id} value={sub.id}>
+                                {title} — {sub.status} ({nextDate})
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 

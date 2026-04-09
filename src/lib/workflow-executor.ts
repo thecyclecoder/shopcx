@@ -35,10 +35,16 @@ export interface WorkflowContext {
 
 // ── Main entry point ──
 
+export interface ExecuteWorkflowOptions {
+  /** Override subscription ID for subscription_inquiry workflows */
+  subscriptionId?: string;
+}
+
 export async function executeWorkflow(
   workspaceId: string,
   ticketId: string,
   triggerTag: string,
+  options?: ExecuteWorkflowOptions,
 ): Promise<void> {
   const admin = createAdminClient();
 
@@ -68,7 +74,7 @@ export async function executeWorkflow(
         await executeCancelRequest(admin, workflow.config as Record<string, unknown>, context);
         break;
       case "subscription_inquiry":
-        await executeSubscriptionInquiry(admin, workflow.config as Record<string, unknown>, context);
+        await executeSubscriptionInquiry(admin, workflow.config as Record<string, unknown>, context, options?.subscriptionId);
         break;
       case "account_login":
         await executeAccountLogin(admin, workflow.config as Record<string, unknown>, context);
@@ -677,7 +683,7 @@ async function executeCancelRequest(admin: Admin, config: Record<string, unknown
   }
 }
 
-async function executeSubscriptionInquiry(admin: Admin, config: Record<string, unknown>, ctx: WorkflowContext): Promise<void> {
+async function executeSubscriptionInquiry(admin: Admin, config: Record<string, unknown>, ctx: WorkflowContext, subscriptionIdOverride?: string): Promise<void> {
   const customerId = ctx.customer?.id as string | undefined;
   if (!customerId) {
     await sendReply(admin, ctx, "I'd be happy to help with your subscription! Could you share the email on your account?", "open");
@@ -697,6 +703,16 @@ async function executeSubscriptionInquiry(admin: Admin, config: Record<string, u
     .eq("workspace_id", ctx.workspaceId)
     .in("customer_id", linkedIds)
     .order("created_at", { ascending: false });
+
+  // If a specific subscription was selected, use it directly (skip multi-subscription logic)
+  if (subscriptionIdOverride) {
+    const overrideSub = (allSubs || []).find(s => s.id === subscriptionIdOverride);
+    if (overrideSub) {
+      // Jump straight to single-subscription details with the selected sub
+      return executeSubscriptionInquirySingle(admin, config, ctx, overrideSub);
+    }
+    // Subscription not found among linked accounts — fall through to normal logic
+  }
 
   const active = (allSubs || []).filter(s => s.status === "active");
   const paused = (allSubs || []).filter(s => s.status === "paused");
@@ -771,7 +787,14 @@ async function executeSubscriptionInquiry(admin: Admin, config: Record<string, u
   }
 
   // ── Single active subscription → full details + AI answer ──
-  const sub = active[0];
+  return executeSubscriptionInquirySingle(admin, config, ctx, active[0]);
+}
+
+/** Render full details for a single subscription (extracted for reuse with subscription_id override) */
+async function executeSubscriptionInquirySingle(
+  admin: Admin, config: Record<string, unknown>, ctx: WorkflowContext,
+  sub: Record<string, unknown>,
+): Promise<void> {
   const rawItems = ((sub.items as { title: string; quantity: number; price_cents: number; variant_id?: string }[]) || [])
     .filter(i => !i.title.toLowerCase().includes("shipping protection"));
 
@@ -794,8 +817,8 @@ async function executeSubscriptionInquiry(admin: Admin, config: Record<string, u
 
   const discounts = (sub.applied_discounts as { id: string; type: string; title: string; value: number; valueType: string }[] | null) || [];
   const addr = sub.shipping_address as { address1?: string; city?: string; provinceCode?: string; state?: string; zip?: string } | null;
-  const nextDate = sub.next_billing_date ? new Date(sub.next_billing_date).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "not scheduled";
-  const interval = `${sub.billing_interval_count || 4} ${(sub.billing_interval || "week").toLowerCase()}${(sub.billing_interval_count || 4) > 1 ? "s" : ""}`;
+  const nextDate = sub.next_billing_date ? new Date(sub.next_billing_date as string).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "not scheduled";
+  const interval = `${(sub.billing_interval_count as number) || 4} ${((sub.billing_interval as string) || "week").toLowerCase()}${((sub.billing_interval_count as number) || 4) > 1 ? "s" : ""}`;
 
   // Categorize discounts: MANUAL/automatic = every order, CODE_DISCOUNT = one-time
   const autoDiscounts = discounts.filter(d => d.type === "MANUAL" || d.type === "AUTOMATIC");
