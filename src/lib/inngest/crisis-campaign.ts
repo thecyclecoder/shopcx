@@ -150,7 +150,7 @@ export const crisisDailyCampaign = inngest.createFunction(
           const { data: ticket } = await admin.from("tickets").insert({
             workspace_id: crisis.workspace_id,
             customer_id: sub.customerId,
-            subject: `${crisis.name} — subscription update`,
+            subject: `Update about your ${crisis.affected_product_title || "subscription"}`,
             status: "closed",
             channel: "email",
             tags: ["crisis", `crisis:${crisis.id.slice(0, 8)}`, "touched", "ft:journey"],

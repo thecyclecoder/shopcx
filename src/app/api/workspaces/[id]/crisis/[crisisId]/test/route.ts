@@ -139,7 +139,7 @@ export async function POST(
   const { data: ticket } = await admin.from("tickets").insert({
     workspace_id: workspaceId,
     customer_id: sub.customer_id,
-    subject: `[TEST] ${crisis.name} — subscription update`,
+    subject: `[TEST] Update about your ${crisis.affected_product_title || "subscription"}`,
     status: "closed",
     channel: "email",
     tags: ["crisis", `crisis:${crisis.id.slice(0, 8)}`, "crisis:test", "touched", "ft:journey"],
