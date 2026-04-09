@@ -89,7 +89,7 @@ export async function subChangeQuantity(
     eventSource: "CUSTOMER_PORTAL",
     oldVariants: [Number(variantId)],
     newVariants: { [variantId]: quantity },
-    carryForwardDiscount: "true",
+    carryForwardDiscount: "EXISTING_PLAN",
     stopSwapEmails: true,
   });
 }
@@ -111,7 +111,7 @@ export async function subSwapVariant(
     eventSource: "CUSTOMER_PORTAL",
     oldVariants: [Number(oldVariantId)],
     newVariants: { [newVariantId]: quantity },
-    carryForwardDiscount: "true",
+    carryForwardDiscount: "EXISTING_PLAN",
     stopSwapEmails: true,
   });
 }
