@@ -58,6 +58,10 @@ export async function buildJourneySteps(
       const { buildMissingItemsSteps } = await import("@/lib/missing-items-journey-builder");
       return buildMissingItemsSteps(admin, workspaceId, customerId, ticketId);
     }
+    case "select_subscription": {
+      const { buildSelectSubscriptionSteps } = await import("@/lib/select-subscription-journey-builder");
+      return buildSelectSubscriptionSteps(admin, workspaceId, customerId, ticketId);
+    }
     default:
       return { codeDriven: true, multiStep: false, steps: [] };
   }

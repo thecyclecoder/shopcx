@@ -678,12 +678,203 @@ async function executeCancelRequest(admin: Admin, config: Record<string, unknown
 }
 
 async function executeSubscriptionInquiry(admin: Admin, config: Record<string, unknown>, ctx: WorkflowContext): Promise<void> {
-  if (!ctx.subscription) {
-    await sendReply(admin, ctx, (config.reply_no_subscription as string) || "Hi {{customer.first_name}}, we couldn't find an active subscription for your account. Can you provide more details?", config.reply_no_subscription_status as string);
+  const customerId = ctx.customer?.id as string | undefined;
+  if (!customerId) {
+    await sendReply(admin, ctx, "I'd be happy to help with your subscription! Could you share the email on your account?", "open");
     return;
   }
 
-  await sendReply(admin, ctx, (config.reply_next_date as string) || "Hi {{customer.first_name}}, your next shipment is scheduled for {{subscription.next_billing_date}}. Your subscription includes: {{subscription.items}}.", config.reply_next_date_status as string);
+  // Get ALL subscriptions across linked accounts
+  const linkedIds = [customerId];
+  const { data: lnk } = await admin.from("customer_links").select("group_id").eq("customer_id", customerId).maybeSingle();
+  if (lnk) {
+    const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", lnk.group_id);
+    for (const g of grp || []) if (!linkedIds.includes(g.customer_id)) linkedIds.push(g.customer_id);
+  }
+
+  const { data: allSubs } = await admin.from("subscriptions")
+    .select("id, shopify_contract_id, status, items, next_billing_date, billing_interval, billing_interval_count, shipping_address, applied_discounts, delivery_price_cents")
+    .eq("workspace_id", ctx.workspaceId)
+    .in("customer_id", linkedIds)
+    .order("created_at", { ascending: false });
+
+  const active = (allSubs || []).filter(s => s.status === "active");
+  const paused = (allSubs || []).filter(s => s.status === "paused");
+  const cancelled = (allSubs || []).filter(s => s.status === "cancelled");
+
+  // ── No active subscriptions ──
+  if (active.length === 0) {
+    const channel = (ctx.ticket?.channel as string) || "email";
+    const useHtml = ["email", "chat", "help_center"].includes(channel);
+    let reply = "You don't currently have any active subscriptions.";
+
+    const showPaused = paused.slice(0, 2);
+    const showCancelled = cancelled.slice(0, 2);
+
+    if (showPaused.length > 0) {
+      reply += useHtml ? "<p><b>Paused subscriptions:</b></p><ul>" : "\n\nPaused subscriptions:";
+      for (const s of showPaused) {
+        const items = ((s.items as { title: string; quantity: number }[]) || [])
+          .filter(i => !i.title.toLowerCase().includes("shipping protection"))
+          .map(i => `${i.quantity}x ${i.title}`).join(", ");
+        reply += useHtml ? `<li>${items}</li>` : `\n• ${items}`;
+      }
+      if (useHtml) reply += "</ul>";
+      reply += useHtml ? "<p>Would you like to unpause one of these?</p>" : "\n\nWould you like to unpause one of these?";
+    }
+
+    if (showCancelled.length > 0) {
+      const prefix = showPaused.length > 0 ? "You also have c" : "C";
+      reply += useHtml ? `<p><b>${prefix}ancelled subscriptions:</b></p><ul>` : `\n\n${prefix}ancelled subscriptions:`;
+      for (const s of showCancelled) {
+        const items = ((s.items as { title: string; quantity: number }[]) || [])
+          .filter(i => !i.title.toLowerCase().includes("shipping protection"))
+          .map(i => `${i.quantity}x ${i.title}`).join(", ");
+        reply += useHtml ? `<li>${items}</li>` : `\n• ${items}`;
+      }
+      if (useHtml) reply += "</ul>";
+      reply += useHtml ? "<p>Would you like to reactivate one of these?</p>" : "\n\nWould you like to reactivate one of these?";
+    }
+
+    await sendReply(admin, ctx, reply, "open");
+    return;
+  }
+
+  // ── Multiple active → select subscription journey ──
+  if (active.length > 1) {
+    try {
+      const { data: jd } = await admin.from("journey_definitions")
+        .select("id, name").eq("workspace_id", ctx.workspaceId)
+        .eq("slug", "select-subscription").eq("is_active", true).limit(1).single();
+      if (jd) {
+        const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
+        await launchJourneyForTicket({
+          workspaceId: ctx.workspaceId, ticketId: ctx.ticketId, customerId,
+          journeyId: jd.id, journeyName: jd.name,
+          triggerIntent: "select_subscription", channel: (ctx.ticket?.channel as string) || "email",
+          leadIn: "I see you have multiple subscriptions. Which one are you asking about?",
+          ctaText: "Select Subscription",
+        });
+        return;
+      }
+    } catch { /* fall through to text list */ }
+
+    let reply = "I see you have multiple active subscriptions. Which one are you asking about?\n";
+    for (const s of active) {
+      const items = ((s.items as { title: string; quantity: number }[]) || [])
+        .filter(i => !i.title.toLowerCase().includes("shipping protection"))
+        .map(i => `${i.quantity}x ${i.title}`).join(", ");
+      reply += `\n• ${items}`;
+    }
+    await sendReply(admin, ctx, reply, "open");
+    return;
+  }
+
+  // ── Single active subscription → full details + AI answer ──
+  const sub = active[0];
+  const rawItems = ((sub.items as { title: string; quantity: number; price_cents: number; variant_id?: string }[]) || [])
+    .filter(i => !i.title.toLowerCase().includes("shipping protection"));
+
+  // Enrich with variant titles + MSRP from products
+  const { data: products } = await admin.from("products").select("title, variants").eq("workspace_id", ctx.workspaceId);
+  const variantMap = new Map<string, { title: string; msrpCents: number }>();
+  for (const p of products || []) {
+    for (const v of (p.variants as { id: string; title: string; price_cents: number }[]) || []) {
+      variantMap.set(String(v.id), {
+        title: v.title && v.title !== "Default Title" ? `${p.title} — ${v.title}` : p.title,
+        msrpCents: v.price_cents || 0,
+      });
+    }
+  }
+
+  const enrichedItems = rawItems.map(i => {
+    const v = i.variant_id ? variantMap.get(i.variant_id) : null;
+    return { title: v?.title || i.title, quantity: i.quantity, priceCents: i.price_cents, msrpCents: v?.msrpCents || i.price_cents };
+  });
+
+  const discounts = (sub.applied_discounts as { id: string; type: string; title: string; value: number; valueType: string }[] | null) || [];
+  const addr = sub.shipping_address as { address1?: string; city?: string; provinceCode?: string; state?: string; zip?: string } | null;
+  const nextDate = sub.next_billing_date ? new Date(sub.next_billing_date).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "not scheduled";
+  const interval = `${sub.billing_interval_count || 4} ${(sub.billing_interval || "week").toLowerCase()}${(sub.billing_interval_count || 4) > 1 ? "s" : ""}`;
+
+  // Categorize discounts: MANUAL/automatic = every order, CODE_DISCOUNT = one-time
+  const autoDiscounts = discounts.filter(d => d.type === "MANUAL" || d.type === "AUTOMATIC");
+  const codeDiscounts = discounts.filter(d => d.type === "CODE_DISCOUNT");
+
+  // Price breakdown
+  let totalMsrp = 0;
+  let totalSub = 0;
+  for (const item of enrichedItems) { totalMsrp += item.msrpCents * item.quantity; totalSub += item.priceCents * item.quantity; }
+  const subscribeSavings = totalMsrp - totalSub;
+  let totalAfterDiscounts = totalSub;
+  for (const d of [...autoDiscounts, ...codeDiscounts]) {
+    if (d.valueType === "PERCENTAGE") totalAfterDiscounts -= Math.round(totalSub * d.value / 100);
+  }
+  const totalSavings = totalMsrp - totalAfterDiscounts;
+
+  const channel = (ctx.ticket?.channel as string) || "email";
+  const useHtml = ["email", "chat", "help_center"].includes(channel);
+  const fmt = (cents: number) => `$${(cents / 100).toFixed(2)}`;
+
+  // Build canned subscription details card
+  let reply: string;
+
+  if (useHtml) {
+    reply = `<p><b>Your Subscription</b></p>`;
+    reply += `<p>${enrichedItems.map(i => `${i.quantity}x ${i.title}`).join("<br>")}</p>`;
+    reply += `<p>Next order: <b>${nextDate}</b> (every ${interval})</p>`;
+    if (addr?.address1) {
+      reply += `<p>Ships to: ${[addr.address1, addr.city, addr.provinceCode || addr.state, addr.zip].filter(Boolean).join(", ")}</p>`;
+    }
+    reply += `<p><b>Your Savings</b></p><p>`;
+    reply += `Retail: ${fmt(totalMsrp)}<br>`;
+    reply += `Subscribe &amp; Save: <b>-${fmt(subscribeSavings)}</b> (every order)<br>`;
+    for (const d of autoDiscounts) {
+      if (d.valueType === "PERCENTAGE") {
+        const saved = Math.round(totalSub * d.value / 100);
+        reply += `${d.title} (${d.value}% off): <b>-${fmt(saved)}</b> (every order)<br>`;
+      }
+    }
+    for (const d of codeDiscounts) {
+      if (d.valueType === "PERCENTAGE") {
+        const saved = Math.round(totalSub * d.value / 100);
+        reply += `Coupon "${d.title}" (${d.value}% off): <b>-${fmt(saved)}</b> (this order only)<br>`;
+      }
+    }
+    reply += `<b>You pay: ${fmt(totalAfterDiscounts)}</b></p>`;
+    if (totalSavings > 0) {
+      reply += `<p>That's <b>${fmt(totalSavings)} in savings</b> on this order!</p>`;
+    }
+  } else {
+    reply = `Your Subscription\n`;
+    reply += enrichedItems.map(i => `${i.quantity}x ${i.title}`).join("\n") + "\n\n";
+    reply += `Next order: ${nextDate} (every ${interval})\n`;
+    if (addr?.address1) {
+      reply += `Ships to: ${[addr.address1, addr.city, addr.provinceCode || addr.state, addr.zip].filter(Boolean).join(", ")}\n`;
+    }
+    reply += `\nYour Savings\n`;
+    reply += `Retail: ${fmt(totalMsrp)}\n`;
+    reply += `Subscribe & Save: -${fmt(subscribeSavings)} (every order)\n`;
+    for (const d of autoDiscounts) {
+      if (d.valueType === "PERCENTAGE") {
+        const saved = Math.round(totalSub * d.value / 100);
+        reply += `${d.title} (${d.value}% off): -${fmt(saved)} (every order)\n`;
+      }
+    }
+    for (const d of codeDiscounts) {
+      if (d.valueType === "PERCENTAGE") {
+        const saved = Math.round(totalSub * d.value / 100);
+        reply += `Coupon "${d.title}" (${d.value}% off): -${fmt(saved)} (this order only)\n`;
+      }
+    }
+    reply += `You pay: ${fmt(totalAfterDiscounts)}\n`;
+    if (totalSavings > 0) {
+      reply += `\nThat's ${fmt(totalSavings)} in savings on this order!`;
+    }
+  }
+
+  await addNote(admin, ctx, `[Workflow] Subscription details: ${enrichedItems.length} items, ${autoDiscounts.length} auto discounts, ${codeDiscounts.length} coupon codes, saves ${fmt(totalSavings)}`);
+  await sendReply(admin, ctx, reply, config.reply_status as string || "closed");
 }
 
 // ── Account Login Workflow ──
