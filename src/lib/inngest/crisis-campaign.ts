@@ -241,7 +241,7 @@ export const crisisDailyCampaign = inngest.createFunction(
             subject: `Update about your ${crisis.affected_product_title || "subscription"}`,
             body: emailBody,
             inReplyTo: null,
-            agentName: ws?.name || "Support",
+            agentName: "Customer Care",
             workspaceName: ws?.name || "",
           });
 
@@ -376,7 +376,7 @@ export const crisisAdvanceTier = inngest.createFunction(
             subject: threading.subject ? `Re: ${threading.subject}` : `${couponPct}% off — try something new while ${crisis.affected_product_title || "your item"} is restocking`,
             body: emailBody,
             inReplyTo: threading.inReplyTo,
-            agentName: ws?.name || "Support",
+            agentName: "Customer Care",
             workspaceName: ws?.name || "",
           });
         }
@@ -456,7 +456,7 @@ export const crisisAdvanceTier = inngest.createFunction(
             subject: threading3.subject ? `Re: ${threading3.subject}` : `About your ${crisis.affected_product_title || "subscription"} — let us know what you'd prefer`,
             body: emailBody,
             inReplyTo: threading3.inReplyTo,
-            agentName: ws?.name || "Support",
+            agentName: "Customer Care",
             workspaceName: ws?.name || "",
           });
         }

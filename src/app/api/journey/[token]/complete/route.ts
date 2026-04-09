@@ -1009,7 +1009,7 @@ async function sendCrisisConfirmation(
     subject: `Re: ${ticketSubject}`,
     body: emailBody,
     inReplyTo,
-    agentName: ws?.name || "Support",
+    agentName: "Customer Care",
     workspaceName: ws?.name || "",
   });
 }
