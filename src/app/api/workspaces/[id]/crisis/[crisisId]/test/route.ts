@@ -173,8 +173,18 @@ export async function POST(
 
   // Create journey session
   const token = crypto.randomBytes(24).toString("hex");
+  // Look up crisis tier 1 journey definition
+  const { data: journeyDef } = await admin.from("journey_definitions")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("trigger_intent", "crisis_tier1")
+    .eq("is_active", true)
+    .limit(1)
+    .maybeSingle();
+
   await admin.from("journey_sessions").insert({
     workspace_id: workspaceId,
+    journey_id: journeyDef?.id || null,
     customer_id: sub.customer_id,
     ticket_id: ticket?.id || null,
     token,

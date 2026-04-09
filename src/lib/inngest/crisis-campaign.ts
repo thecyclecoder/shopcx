@@ -12,6 +12,22 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { sendTicketReply } from "@/lib/email";
 import crypto from "crypto";
 
+/** Look up a crisis journey definition ID by trigger intent */
+async function getCrisisJourneyId(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  triggerIntent: string,
+): Promise<string | null> {
+  const { data } = await admin.from("journey_definitions")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("trigger_intent", triggerIntent)
+    .eq("is_active", true)
+    .limit(1)
+    .maybeSingle();
+  return data?.id || null;
+}
+
 export const crisisDailyCampaign = inngest.createFunction(
   {
     id: "crisis-daily-campaign",
@@ -135,8 +151,10 @@ export const crisisDailyCampaign = inngest.createFunction(
           // Create a journey session for Tier 1 flavor swap
           const token = crypto.randomBytes(24).toString("hex");
           const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 day expiry for crisis
+          const tier1JourneyId = await getCrisisJourneyId(admin, crisis.workspace_id, "crisis_tier1");
           await admin.from("journey_sessions").insert({
             workspace_id: crisis.workspace_id,
+            journey_id: tier1JourneyId,
             customer_id: sub.customerId,
             ticket_id: ticket?.id || null,
             token,
@@ -286,8 +304,10 @@ export const crisisAdvanceTier = inngest.createFunction(
 
         // Create Tier 2 journey session
         const token = crypto.randomBytes(24).toString("hex");
+        const tier2JourneyId = await getCrisisJourneyId(admin, workspace_id, "crisis_tier2");
         await admin.from("journey_sessions").insert({
           workspace_id,
+          journey_id: tier2JourneyId,
           customer_id,
           ticket_id,
           token,
@@ -356,7 +376,9 @@ export const crisisAdvanceTier = inngest.createFunction(
 
         // Create Tier 3 journey session
         const token = crypto.randomBytes(24).toString("hex");
+        const tier3JourneyId = await getCrisisJourneyId(admin, workspace_id, "crisis_tier3");
         await admin.from("journey_sessions").insert({
+          journey_id: tier3JourneyId,
           workspace_id,
           customer_id,
           ticket_id,
