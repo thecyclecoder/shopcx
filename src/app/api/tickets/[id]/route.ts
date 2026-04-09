@@ -87,7 +87,7 @@ export async function GET(
 
       const { data: subscriptions } = await admin
         .from("subscriptions")
-        .select("id, status, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items")
+        .select("id, status, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items, applied_discounts")
         .in("customer_id", linkedCustomerIds)
         .order("created_at", { ascending: false });
 

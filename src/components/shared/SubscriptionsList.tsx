@@ -22,6 +22,7 @@ export interface SubscriptionData {
   last_payment_status: string | null;
   items: SubscriptionItemData[];
   delivery_price_cents?: number;
+  applied_discounts?: { id: string; type: string; title: string; value: number; valueType: string }[];
   created_at?: string;
   updated_at?: string;
 }
@@ -144,6 +145,15 @@ export default function SubscriptionsList({
                     <span className="text-zinc-400">{formatCents(item.price_cents * item.quantity)}</span>
                   )}
                 </div>
+              ))}
+            </div>
+          )}
+          {sub.applied_discounts && sub.applied_discounts.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {sub.applied_discounts.map((d, i) => (
+                <span key={i} className="inline-flex items-center rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400">
+                  {d.title} {d.value}{d.valueType === "PERCENTAGE" ? "%" : ""} off
+                </span>
               ))}
             </div>
           )}

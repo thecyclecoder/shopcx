@@ -88,7 +88,7 @@ export async function GET(
 
   const { data: subscriptions } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items, delivery_price_cents, created_at, updated_at")
+    .select("id, shopify_contract_id, status, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items, delivery_price_cents, applied_discounts, created_at, updated_at")
     .eq("workspace_id", workspaceId)
     .in("customer_id", linkedCustomerIds)
     .order("created_at", { ascending: false });

@@ -54,6 +54,7 @@ interface SubDetail {
   next_billing_date: string | null;
   last_payment_status: string | null;
   delivery_price_cents: number | null;
+  applied_discounts: { id: string; type: string; title: string; value: number; valueType: string }[] | null;
   created_at: string;
   recovery_status: string | null;
   customer_id: string;
@@ -639,6 +640,43 @@ export default function SubscriptionDetailPage() {
               )}
             </div>
           )}
+
+          {/* Applied Discounts */}
+          {(() => {
+            const discounts = (sub.applied_discounts as { id: string; type: string; title: string; value: number; valueType: string }[] | null) || [];
+            return discounts.length > 0 ? (
+              <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+                <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Applied Discounts ({discounts.length})</h3>
+                <div className="space-y-2">
+                  {discounts.map((d) => (
+                    <div key={d.id} className="flex items-center justify-between rounded-md border border-zinc-100 px-3 py-2 dark:border-zinc-800">
+                      <div>
+                        <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{d.title}</span>
+                        <span className="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                          {d.value}{d.valueType === "PERCENTAGE" ? "%" : ""} off
+                        </span>
+                        <span className="ml-2 text-xs text-zinc-400">{d.type === "CODE_DISCOUNT" ? "Code" : d.type === "MANUAL" ? "Manual" : d.type}</span>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          if (!confirm(`Remove discount "${d.title}"?`)) return;
+                          const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/coupon`, {
+                            method: "DELETE",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ discountId: d.id }),
+                          });
+                          if (res.ok) loadSub();
+                        }}
+                        className="rounded bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/40"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null;
+          })()}
 
           {/* Order History */}
           <OrdersTable
