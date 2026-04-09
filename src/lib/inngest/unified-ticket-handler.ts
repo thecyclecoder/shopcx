@@ -712,6 +712,124 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
       }
     }
 
+    // ── 2d. Crisis follow-up detection ──
+    // If this ticket was handled by a crisis and the customer replies, detect intent and re-launch journey
+    if (!isNew && st.hasCust) {
+      const crisisFollowup = await step.run("check-crisis-followup", async () => {
+        const { data: ticket } = await admin.from("tickets")
+          .select("tags, handled_by").eq("id", tid).single();
+        const tags = (ticket?.tags as string[]) || [];
+        const isCrisisTicket = tags.some(t => t.startsWith("crisis"));
+        if (!isCrisisTicket) return null;
+
+        // Find the crisis action for this customer
+        const { data: action } = await admin.from("crisis_customer_actions")
+          .select("id, crisis_id, subscription_id, segment, current_tier, tier1_response, tier2_response")
+          .eq("ticket_id", tid)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (!action) return null;
+
+        // Get crisis details for context
+        const { data: crisis } = await admin.from("crisis_events")
+          .select("id, name, affected_product_title, default_swap_title, status")
+          .eq("id", action.crisis_id)
+          .single();
+        if (!crisis || crisis.status === "resolved") return null;
+
+        // Use Haiku to classify the customer's intent
+        const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
+        const intentCheck = await claude(
+          `A customer is replying to a crisis outreach about "${crisis.affected_product_title}" being out of stock.
+Their subscription was auto-swapped to "${crisis.default_swap_title}".
+Current status: ${action.tier1_response === "accepted_swap" ? "They already accepted a flavor swap" : "Pending response"}.
+
+Classify their message into one of these intents:
+- "change_flavor" — wants to switch to a different flavor of the same product
+- "change_product" — wants a completely different product instead
+- "cancel" — wants to cancel their subscription
+- "question" — asking a question about the crisis or their subscription
+- "other" — something unrelated
+
+Customer message: "${cleanMsg}"
+
+Respond with EXACTLY one word.`, "haiku", 20);
+        const intent = (intentCheck || "other").toLowerCase().trim();
+
+        return { intent, actionId: action.id, crisisId: action.crisis_id, subscriptionId: action.subscription_id, segment: action.segment, currentTier: action.current_tier, tier1Response: action.tier1_response };
+      });
+
+      if (crisisFollowup && crisisFollowup.intent === "change_flavor") {
+        // Re-launch Tier 1 flavor swap journey
+        const delay = await step.run("crisis-fl-delay", () => responseDelay(admin, wsId, st.ch));
+        if (delay > 0) await step.sleep("crisis-fl-wait", `${delay}s`);
+        await step.run("crisis-relaunch-tier1", async () => {
+          if (await newerActivity(admin, tid, t0)) return;
+          const { data: jd } = await admin.from("journey_definitions")
+            .select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "crisis_tier1").eq("is_active", true).limit(1).single();
+          if (!jd) return;
+          const leadIn = "Of course! Here are the available flavors — pick whichever you'd like:";
+          await launchJourneyForTicket({
+            workspaceId: wsId, ticketId: tid, customerId: st.custId!,
+            journeyId: jd.id, journeyName: jd.name, triggerIntent: "crisis_tier1",
+            channel: st.ch, leadIn, ctaText: "Choose a Flavor",
+          });
+          await admin.from("tickets").update({ handled_by: `Crisis: ${jd.name}` }).eq("id", tid);
+          await setStatus(admin, tid, cfg.auto_resolve);
+        });
+        return { status: "crisis_relaunch_tier1" };
+      }
+
+      if (crisisFollowup && crisisFollowup.intent === "change_product") {
+        // Launch Tier 2 product swap journey
+        const delay = await step.run("crisis-pr-delay", () => responseDelay(admin, wsId, st.ch));
+        if (delay > 0) await step.sleep("crisis-pr-wait", `${delay}s`);
+        await step.run("crisis-launch-tier2", async () => {
+          if (await newerActivity(admin, tid, t0)) return;
+          const { data: jd } = await admin.from("journey_definitions")
+            .select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "crisis_tier2").eq("is_active", true).limit(1).single();
+          if (!jd) return;
+          const leadIn = "No problem! Here are some other products you might enjoy:";
+          await launchJourneyForTicket({
+            workspaceId: wsId, ticketId: tid, customerId: st.custId!,
+            journeyId: jd.id, journeyName: jd.name, triggerIntent: "crisis_tier2",
+            channel: st.ch, leadIn, ctaText: "Browse Products",
+          });
+          await admin.from("tickets").update({ handled_by: `Crisis: ${jd.name}` }).eq("id", tid);
+          await setStatus(admin, tid, cfg.auto_resolve);
+        });
+        return { status: "crisis_launch_tier2" };
+      }
+
+      if (crisisFollowup && crisisFollowup.intent === "cancel") {
+        // Route to cancel journey
+        const delay = await step.run("crisis-cx-delay", () => responseDelay(admin, wsId, st.ch));
+        if (delay > 0) await step.sleep("crisis-cx-wait", `${delay}s`);
+        await step.run("crisis-launch-cancel", async () => {
+          if (await newerActivity(admin, tid, t0)) return;
+          const { data: jd } = await admin.from("journey_definitions")
+            .select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "cancel").eq("is_active", true).limit(1).single();
+          if (!jd) return;
+          const leadIn = "I understand. Let me pull up your options:";
+          await launchJourneyForTicket({
+            workspaceId: wsId, ticketId: tid, customerId: st.custId!,
+            journeyId: jd.id, journeyName: jd.name, triggerIntent: "cancel",
+            channel: st.ch, leadIn, ctaText: "Review Options",
+          });
+          await admin.from("tickets").update({ handled_by: `Journey: ${jd.name}` }).eq("id", tid);
+          await setStatus(admin, tid, cfg.auto_resolve);
+        });
+        return { status: "crisis_launch_cancel" };
+      }
+
+      if (crisisFollowup && crisisFollowup.intent === "question") {
+        // Let it fall through to AI — but add crisis context to the prompt
+        await sysNote(admin, tid, `[System] Crisis follow-up question detected. Routing to AI with crisis context.`);
+        // Fall through to normal AI pipeline
+      }
+    }
+
     // ── 3. Journey/playbook re-nudge with conversation drift detection ──
     if (!isNew && st.handledBy?.startsWith("Journey:")) {
       const nudged = await step.run("check-journey-nudge", async () => {
