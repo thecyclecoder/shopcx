@@ -629,7 +629,7 @@ export default function ChatWidgetPage() {
                     {bodyWithoutForm && (
                       <div
                         className={`prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:underline ${isCustomer ? "[&_*]:!text-zinc-900 [&_a]:!text-zinc-900" : "[&_*]:!text-white [&_a]:!text-white"}`}
-                        dangerouslySetInnerHTML={{ __html: bodyWithoutForm }}
+                        dangerouslySetInnerHTML={{ __html: isCustomer ? bodyWithoutForm : bodyWithoutForm.replace(/\bstyle="[^"]*?color:[^"]*?"/gi, (m) => m.replace(/color:\s*[^;"}]+;?/gi, "")) }}
                         onClick={(e) => {
                           // Open links in new window (not inside iframe)
                           const link = (e.target as HTMLElement).closest("a");
@@ -677,7 +677,7 @@ export default function ChatWidgetPage() {
                       />
                     )}
                     {formData && formSubmitted.has(formData.id) && (
-                      <p className="mt-1 text-xs text-zinc-500 italic">Response submitted</p>
+                      <p className={`mt-1 text-xs italic ${isCustomer ? "text-zinc-500" : "text-white/60"}`}>Response submitted</p>
                     )}
 
                     {/* Inline multi-step journey form */}
@@ -694,7 +694,7 @@ export default function ChatWidgetPage() {
                       />
                     )}
                     {journeyData && formSubmitted.has(journeyData.token) && (
-                      <p className="mt-1 text-xs text-zinc-500 italic">Completed</p>
+                      <p className={`mt-1 text-xs italic ${isCustomer ? "text-zinc-500" : "text-white/60"}`}>Completed</p>
                     )}
 
                     <p className={`mt-0.5 text-[10px] ${isCustomer ? "text-zinc-400" : "text-white/60"}`}>
