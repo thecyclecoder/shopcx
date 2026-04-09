@@ -1006,6 +1006,19 @@ function CodeDrivenJourney({
         return;
       }
 
+      // "reject" on any step — submit immediately as completed (server handles rejection logic)
+      if (value === "reject") {
+        await fetch(`/api/journey/${token}/complete`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ outcome: "completed", responses: stepResponses }),
+        });
+        setSubmitted(true);
+        setSubmitting(false);
+        setTimeout(() => onComplete("Thanks for letting us know."), 500);
+        return;
+      }
+
       // Advance to next step (client-side)
       setCurrentStepIdx(i => i + 1);
       setSubmitting(false);
