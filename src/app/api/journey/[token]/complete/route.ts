@@ -357,6 +357,11 @@ export async function POST(
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
         actionLog.push("Tier 1 accepted — keeping default swap");
+
+        // Send confirmation email
+        await sendCrisisConfirmation(admin, wsId, session.customer_id, session.ticket_id, metadata,
+          `your ${metadata.affectedProductTitle || "item"} has been switched to ${metadata.defaultSwapTitle || "the default flavor"}`,
+        );
       } else if (flavorChoice) {
         // Swap to chosen flavor via Appstle
         const { data: sub } = await admin.from("subscriptions")
@@ -374,6 +379,11 @@ export async function POST(
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
         actionLog.push(`Tier 1 accepted — swapped to ${chosenLabel}`);
+
+        // Send confirmation email
+        await sendCrisisConfirmation(admin, wsId, session.customer_id, session.ticket_id, metadata,
+          `we've swapped you to ${chosenLabel}`,
+        );
       }
     }
 
@@ -447,6 +457,12 @@ export async function POST(
           tier2_coupon_applied: !!(metadata.tier2CouponCode),
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
+
+        // Send confirmation email
+        const couponMsg = metadata.tier2CouponCode ? ` We've also applied a ${metadata.tier2CouponPercent || 20}% discount to your next order.` : "";
+        await sendCrisisConfirmation(admin, wsId, session.customer_id, session.ticket_id, metadata,
+          `we've switched you to ${chosenLabel}${qty > 1 ? ` (x${qty})` : ""}.${couponMsg}`,
+        );
         actionLog.push(`Tier 2 accepted — ${chosenLabel} x${qty}`);
       }
     }
@@ -919,4 +935,77 @@ export async function POST(
   }
 
   return NextResponse.json({ success: true, message });
+}
+
+/** Send a crisis confirmation email + ticket message after a successful swap */
+async function sendCrisisConfirmation(
+  admin: ReturnType<typeof createAdminClient>,
+  wsId: string,
+  customerId: string | null,
+  ticketId: string | null,
+  metadata: Record<string, unknown>,
+  actionSummary: string,
+) {
+  if (!customerId) return;
+  const { data: customer } = await admin.from("customers")
+    .select("email, first_name").eq("id", customerId).single();
+  if (!customer?.email) return;
+
+  const { data: ws } = await admin.from("workspaces")
+    .select("name").eq("id", wsId).single();
+
+  const { data: crisis } = await admin.from("crisis_events")
+    .select("affected_product_title, expected_restock_date")
+    .eq("id", metadata.crisisId as string).single();
+
+  const firstName = customer.first_name || "there";
+  const restockDate = crisis?.expected_restock_date
+    ? new Date(crisis.expected_restock_date).toLocaleDateString("en-US", { month: "long", year: "numeric" })
+    : "soon";
+  const affectedItem = crisis?.affected_product_title || "your item";
+
+  const emailBody = `<p>Hi ${firstName},</p>
+<p>All set — ${actionSummary}. Your next shipment will include the updated item.</p>
+<p>We'll let you know when ${affectedItem} is back in stock (expected ${restockDate}) in case you'd like to switch back.</p>
+<p>Thanks for sticking with us!</p>`;
+
+  // Get ticket subject + inReplyTo for email threading
+  let ticketSubject = "Your subscription update";
+  let inReplyTo: string | null = null;
+  if (ticketId) {
+    const { data: ticket } = await admin.from("tickets")
+      .select("subject, email_message_id").eq("id", ticketId).single();
+    if (ticket?.subject) ticketSubject = ticket.subject;
+    inReplyTo = ticket?.email_message_id || null;
+    if (!inReplyTo) {
+      const { data: lastMsg } = await admin.from("ticket_messages")
+        .select("email_message_id")
+        .eq("ticket_id", ticketId)
+        .not("email_message_id", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(1).maybeSingle();
+      inReplyTo = lastMsg?.email_message_id || null;
+    }
+
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "external",
+      author_type: "system",
+      body: emailBody,
+      sent_at: new Date().toISOString(),
+    });
+  }
+
+  // Send threaded email
+  const { sendTicketReply } = await import("@/lib/email");
+  await sendTicketReply({
+    workspaceId: wsId,
+    toEmail: customer.email,
+    subject: `Re: ${ticketSubject}`,
+    body: emailBody,
+    inReplyTo,
+    agentName: ws?.name || "Support",
+    workspaceName: ws?.name || "",
+  });
 }

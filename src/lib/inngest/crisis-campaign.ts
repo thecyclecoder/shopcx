@@ -174,7 +174,9 @@ export const crisisDailyCampaign = inngest.createFunction(
                 workspaceId: crisis.workspace_id,
                 ticketId: ticket?.id,
                 affectedVariantId: crisis.affected_variant_id,
+                affectedProductTitle: crisis.affected_product_title,
                 defaultSwapVariantId: crisis.default_swap_variant_id,
+                defaultSwapTitle: crisis.default_swap_title,
               },
             },
           });
