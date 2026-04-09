@@ -626,8 +626,11 @@ export default function ChatWidgetPage() {
                   >
                     {bodyWithoutForm && (
                       <div
-                        className={`prose prose-sm max-w-none break-words [overflow-wrap:anywhere] ${isCustomer ? "!text-white [&_*]:!text-white" : "!text-zinc-900 [&_p]:!text-zinc-900 [&_li]:!text-zinc-900 [&_span]:!text-zinc-900 [&_strong]:!text-zinc-900 [&_em]:!text-zinc-900 [&_a]:!text-indigo-600 [&_a]:underline [&_a[style]]:!text-white"}`}
-                        dangerouslySetInnerHTML={{ __html: bodyWithoutForm }}
+                        className="max-w-none break-words text-inherit [overflow-wrap:anywhere]"
+                        dangerouslySetInnerHTML={{ __html: isCustomer
+                          ? bodyWithoutForm
+                          : bodyWithoutForm.replace(/<a\b(?![^>]*\bstyle\b)/gi, '<a style="color:#4f46e5;text-decoration:underline"')
+                        }}
                         onClick={(e) => {
                           // Open links in new window (not inside iframe)
                           const link = (e.target as HTMLElement).closest("a");
