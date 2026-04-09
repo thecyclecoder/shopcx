@@ -537,8 +537,7 @@ export default function ChatWidgetPage() {
         <div className="flex-shrink-0 px-4 pt-3 pb-1">
           <div className="flex gap-2">
             <div
-              className="max-w-[80%] rounded-2xl rounded-tl-sm px-3 py-2 text-sm text-white"
-              style={{ backgroundColor: primaryColor }}
+              className="max-w-[80%] rounded-2xl rounded-tl-sm bg-zinc-100 px-3 py-2 text-sm text-zinc-900"
             >
               {config?.greeting}
             </div>
@@ -621,15 +620,14 @@ export default function ChatWidgetPage() {
                   <div
                     className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${
                       isCustomer
-                        ? "rounded-tr-sm bg-zinc-200 !text-zinc-900"
-                        : "rounded-tl-sm !text-white"
+                        ? "rounded-tr-sm bg-[#007AFF] text-white"
+                        : "rounded-tl-sm bg-zinc-100 text-zinc-900"
                     }`}
-                    style={isCustomer ? undefined : { backgroundColor: primaryColor }}
                   >
                     {bodyWithoutForm && (
                       <div
-                        className={`prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:underline ${isCustomer ? "!text-zinc-900 [&_*]:!text-zinc-900 [&_a]:!text-zinc-900" : "!text-white [&_*]:!text-white [&_a]:!text-white"}`}
-                        dangerouslySetInnerHTML={{ __html: isCustomer ? bodyWithoutForm : bodyWithoutForm.replace(/\bstyle="[^"]*?color:[^"]*?"/gi, (m) => m.replace(/color:\s*[^;"}]+;?/gi, "")) }}
+                        className={`prose prose-sm max-w-none break-words [overflow-wrap:anywhere] [&_a]:underline ${isCustomer ? "!text-white [&_*]:!text-white [&_a]:!text-white" : "!text-zinc-900 [&_*]:!text-zinc-900 [&_a]:!text-indigo-600"}`}
+                        dangerouslySetInnerHTML={{ __html: bodyWithoutForm }}
                         onClick={(e) => {
                           // Open links in new window (not inside iframe)
                           const link = (e.target as HTMLElement).closest("a");
@@ -677,7 +675,7 @@ export default function ChatWidgetPage() {
                       />
                     )}
                     {formData && formSubmitted.has(formData.id) && (
-                      <p className={`mt-1 text-xs italic ${isCustomer ? "text-zinc-500" : "text-white/60"}`}>Response submitted</p>
+                      <p className={`mt-1 text-xs italic ${isCustomer ? "text-white/60" : "text-zinc-500"}`}>Response submitted</p>
                     )}
 
                     {/* Inline multi-step journey form */}
@@ -694,10 +692,10 @@ export default function ChatWidgetPage() {
                       />
                     )}
                     {journeyData && formSubmitted.has(journeyData.token) && (
-                      <p className={`mt-1 text-xs italic ${isCustomer ? "text-zinc-500" : "text-white/60"}`}>Completed</p>
+                      <p className={`mt-1 text-xs italic ${isCustomer ? "text-white/60" : "text-zinc-500"}`}>Completed</p>
                     )}
 
-                    <p className={`mt-0.5 text-[10px] ${isCustomer ? "text-zinc-400" : "text-white/60"}`}>
+                    <p className={`mt-0.5 text-[10px] ${isCustomer ? "text-white/60" : "text-zinc-400"}`}>
                       {new Date(msg.created_at).toLocaleTimeString([], {
                         hour: "numeric",
                         minute: "2-digit",
