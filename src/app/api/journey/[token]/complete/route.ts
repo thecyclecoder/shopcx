@@ -325,21 +325,31 @@ export async function POST(
         const { data: customer } = await admin.from("customers")
           .select("shopify_customer_id, phone").eq("id", session.customer_id).single();
 
-        if (customer?.shopify_customer_id) {
-          await subscribeToEmailMarketing(wsId, customer.shopify_customer_id);
-          await admin.from("customers").update({ email_marketing_status: "subscribed" }).eq("id", session.customer_id);
-          actionLog.push("Email marketing: subscribed");
+        // Always save consent to our DB
+        await admin.from("customers").update({ email_marketing_status: "subscribed" }).eq("id", session.customer_id);
+        actionLog.push("Email marketing: subscribed (DB)");
 
-          const phoneInput = responses?.phone?.value?.trim().replace(/[\s\-\(\)\.]/g, "") || "";
-          const phone = phoneInput ? (phoneInput.startsWith("+") ? phoneInput : `+1${phoneInput.replace(/^1/, "")}`) : customer.phone;
-          if (phone) {
-            if (phoneInput && !customer.phone) {
-              await admin.from("customers").update({ phone }).eq("id", session.customer_id);
-            }
-            await subscribeToSmsMarketing(wsId, customer.shopify_customer_id, phone);
-            await admin.from("customers").update({ sms_marketing_status: "subscribed" }).eq("id", session.customer_id);
-            actionLog.push(`SMS marketing: subscribed (${phone})`);
+        const phoneInput = responses?.phone?.value?.trim().replace(/[\s\-\(\)\.]/g, "") || "";
+        const phone = phoneInput ? (phoneInput.startsWith("+") ? phoneInput : `+1${phoneInput.replace(/^1/, "")}`) : customer?.phone;
+        if (phone) {
+          if (phoneInput && !customer?.phone) {
+            await admin.from("customers").update({ phone }).eq("id", session.customer_id);
           }
+          await admin.from("customers").update({ sms_marketing_status: "subscribed" }).eq("id", session.customer_id);
+          actionLog.push(`SMS marketing: subscribed (DB, ${phone})`);
+        }
+
+        // Push to Shopify if customer has a shopify_customer_id
+        if (customer?.shopify_customer_id) {
+          try {
+            await subscribeToEmailMarketing(wsId, customer.shopify_customer_id);
+            if (phone) await subscribeToSmsMarketing(wsId, customer.shopify_customer_id, phone);
+            actionLog.push("Marketing consent pushed to Shopify");
+          } catch {
+            actionLog.push("Marketing consent saved locally (Shopify push failed — will sync on next order)");
+          }
+        } else {
+          actionLog.push("No Shopify customer — consent saved locally, will push when customer places first order");
         }
       } else {
         actionLog.push("Customer declined marketing signup");

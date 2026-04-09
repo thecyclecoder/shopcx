@@ -305,11 +305,41 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
   if (enrichment.productSubscriberStatus) {
     record.subscription_status = mapSubscriptionStatus(enrichment.productSubscriberStatus);
   }
-  if (enrichment.emailMarketingState) {
-    record.email_marketing_status = enrichment.emailMarketingState.toLowerCase();
-  }
-  if (enrichment.smsMarketingState) {
-    record.sms_marketing_status = enrichment.smsMarketingState.toLowerCase();
+  // Marketing consent: use most permissive state (don't overwrite our "subscribed" with Shopify's null)
+  // Check if we already have consent in our DB before overwriting
+  if (email) {
+    const { data: existingCust } = await admin.from("customers")
+      .select("email_marketing_status, sms_marketing_status")
+      .eq("workspace_id", workspaceId).eq("email", email).maybeSingle();
+
+    const ourEmail = existingCust?.email_marketing_status;
+    const ourSms = existingCust?.sms_marketing_status;
+    const shopifyEmail = enrichment.emailMarketingState?.toLowerCase();
+    const shopifySms = enrichment.smsMarketingState?.toLowerCase();
+
+    // Take the most permissive: if either side says "subscribed", keep "subscribed"
+    record.email_marketing_status = (ourEmail === "subscribed" || shopifyEmail === "subscribed") ? "subscribed" : (shopifyEmail || ourEmail || null);
+    record.sms_marketing_status = (ourSms === "subscribed" || shopifySms === "subscribed") ? "subscribed" : (shopifySms || ourSms || null);
+
+    // If we had consent that Shopify doesn't, push it to Shopify
+    if (ourEmail === "subscribed" && shopifyEmail !== "subscribed") {
+      try {
+        const { subscribeToEmailMarketing } = await import("@/lib/shopify-marketing");
+        await subscribeToEmailMarketing(workspaceId, shopifyCustomerId);
+      } catch { /* non-fatal */ }
+    }
+    if (ourSms === "subscribed" && shopifySms !== "subscribed") {
+      const phone = (payload.phone as string) || existingCust?.sms_marketing_status;
+      if (phone) {
+        try {
+          const { subscribeToSmsMarketing } = await import("@/lib/shopify-marketing");
+          await subscribeToSmsMarketing(workspaceId, shopifyCustomerId, phone as string);
+        } catch { /* non-fatal */ }
+      }
+    }
+  } else {
+    if (enrichment.emailMarketingState) record.email_marketing_status = enrichment.emailMarketingState.toLowerCase();
+    if (enrichment.smsMarketingState) record.sms_marketing_status = enrichment.smsMarketingState.toLowerCase();
   }
 
   // Merge logic: if an email-only customer exists (created from a ticket/inbound email),

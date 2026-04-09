@@ -391,15 +391,29 @@ export const unifiedTicketHandler = inngest.createFunction(
         .select("customer_id, channel, ai_clarification_turn, handled_by, agent_intervened, subject")
         .eq("id", tid).single();
       if (!ticket) throw new Error("Ticket not found");
-      let cust: { id: string; email: string; first_name: string | null; phone: string | null } | null = null;
+      let cust: { id: string; email: string; first_name: string | null; phone: string | null; shopify_customer_id: string | null } | null = null;
       if (ticket.customer_id) {
-        const { data } = await admin.from("customers").select("id, email, first_name, phone").eq("id", ticket.customer_id).single();
+        const { data } = await admin.from("customers").select("id, email, first_name, phone, shopify_customer_id").eq("id", ticket.customer_id).single();
         cust = data;
       }
       if (cust && isNew) await sysNote(admin, tid, `[System] Customer: ${cust.first_name || ""} (${cust.email})`);
       else if (!cust && isNew) await sysNote(admin, tid, `[System] No customer match`);
+
+      // Check if any linked account has a shopify_customer_id
+      let hasShopifyCustomer = !!cust?.shopify_customer_id;
+      if (cust && !hasShopifyCustomer) {
+        const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", cust.id).maybeSingle();
+        if (link) {
+          const { data: linked } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id).neq("customer_id", cust.id);
+          for (const l of linked || []) {
+            const { data: lc } = await admin.from("customers").select("shopify_customer_id").eq("id", l.customer_id).single();
+            if (lc?.shopify_customer_id) { hasShopifyCustomer = true; break; }
+          }
+        }
+      }
+
       return {
-        hasCust: !!cust, custId: cust?.id || null,
+        hasCust: !!cust, custId: cust?.id || null, hasShopifyCustomer,
         ch: ticket.channel || ch, turn: ticket.ai_clarification_turn || 0,
         intervened: !!ticket.agent_intervened, handledBy: ticket.handled_by || "",
         subject: ticket.subject || "",
@@ -412,64 +426,167 @@ export const unifiedTicketHandler = inngest.createFunction(
     if (!cfg.enabled) return { status: "skipped", reason: "ai_disabled" };
     const pers = await step.run("personality", () => loadPersonality(admin, cfg.personality_id));
 
-    // ── 2. Account linking check ──
-    // For account-related requests (refunds, cancels, orders, subscriptions): link first, then process.
-    // For non-account requests (product questions, general): answer first, mention linking casually.
-    let pendingAccountLink: { journeyId: string; journeyName: string } | null = null;
+    // ── 1b. General vs Account classification (Haiku) ──
+    const msgType = await step.run("classify-general-account", async () => {
+      const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
+      // Check if this is a system re-trigger (from journey completion, playbook resume, etc.)
+      if (["address_confirmed", "items_selected", "playbook-apply"].includes(cleanMsg)) return "account";
 
-    if (st.hasCust && isNew) {
-      const linkResult = await step.run("check-linking", async () => {
-        const { findUnlinkedMatches } = await import("@/lib/account-matching");
-        const unlinked = await findUnlinkedMatches(wsId, st.custId!, admin);
-        if (!unlinked.length) return { hasUnlinked: false, isAccountRelated: false };
-
-        const { data: jd } = await admin.from("journey_definitions").select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "account_linking").eq("is_active", true).limit(1).single();
-        if (!jd) return { hasUnlinked: false, isAccountRelated: false };
-
-        // Quick classify: is this message account-related?
-        const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
-        const check = await claude(
-          `Classify this customer message as either "account" or "general".
-- "account" = needs customer account data to answer: refund, cancel, order status, subscription, billing, shipping, missing order, exchange, return, address change, payment issues
-- "general" = can be answered without account data: product questions, ingredients, how to use, pricing, availability, store hours, general company info
+      const check = await claude(
+        `Classify this customer message as either "account" or "general".
+- "account" = needs customer account data: refund, cancel, order status, subscription, billing, shipping, missing order, exchange, return, address change, payment issues, login, account access, coupon check, delivery status
+- "general" = can be answered without account data: product questions, ingredients, how to use, pricing, availability, store hours, general company info, do you have discounts/coupons
 
 Customer message: "${cleanMsg}"
 
 Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
+      return (check || "").toLowerCase().trim().includes("general") ? "general" : "account";
+    });
 
-        const isAccountRelated = !(check || "").toLowerCase().trim().includes("general");
+    if (isNew) await sysNote(admin, tid, `[System] Classification: ${msgType}`);
 
-        if (isAccountRelated) {
-          // Block: link accounts first, then process
-          await sysNote(admin, tid, `[System] Potential unlinked accounts (account-related request). Launching account linking first.`);
-          const linkLeadIn = "I've got your request. It looks like you may have more than one profile in our system. Please click the button below to link your accounts so I can pull up your full customer information and help you right away.";
-          const linkCta = "Link My Accounts";
-          await launchJourneyForTicket({
-            workspaceId: wsId, ticketId: tid, customerId: st.custId!,
-            journeyId: jd.id, journeyName: jd.name, triggerIntent: "account_linking",
-            channel: st.ch, leadIn: linkLeadIn, ctaText: linkCta,
-          });
-          await setStatus(admin, tid, cfg.auto_resolve);
-          return { hasUnlinked: true, isAccountRelated: true, journeyId: jd.id, journeyName: jd.name };
-        }
+    let pendingAccountLink: { journeyId: string; journeyName: string } | null = null;
 
-        // Non-blocking: stash for later, let the question get answered first
-        await sysNote(admin, tid, `[System] Unlinked accounts found, but message is general — answering first, linking after.`);
-        return { hasUnlinked: true, isAccountRelated: false, journeyId: jd.id, journeyName: jd.name };
+    // ── 2. Account path: linking + Shopify customer check ──
+    if (msgType === "account" && st.hasCust && isNew) {
+      // 2a. Always check for unlinked accounts (need full context for account work)
+      const linkResult = await step.run("check-linking", async () => {
+        const { findUnlinkedMatches } = await import("@/lib/account-matching");
+        const unlinked = await findUnlinkedMatches(wsId, st.custId!, admin);
+        if (!unlinked.length) return { hasUnlinked: false, launched: false };
+
+        const { data: jd } = await admin.from("journey_definitions").select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "account_linking").eq("is_active", true).limit(1).single();
+        if (!jd) return { hasUnlinked: true, launched: false };
+
+        await sysNote(admin, tid, `[System] Unlinked accounts found. Launching account linking for full context.`);
+        const linkLeadIn = "I've got your request. It looks like you may have more than one profile in our system. Please link your accounts so I can pull up your full information and help you right away.";
+        await launchJourneyForTicket({
+          workspaceId: wsId, ticketId: tid, customerId: st.custId!,
+          journeyId: jd.id, journeyName: jd.name, triggerIntent: "account_linking",
+          channel: st.ch, leadIn: linkLeadIn, ctaText: "Link My Accounts",
+        });
+        await setStatus(admin, tid, cfg.auto_resolve);
+        return { hasUnlinked: true, launched: true };
       });
 
-      if (linkResult.isAccountRelated) return { status: "account_linking" };
-      if (linkResult.hasUnlinked && !linkResult.isAccountRelated && "journeyId" in linkResult) {
-        pendingAccountLink = { journeyId: linkResult.journeyId as string, journeyName: linkResult.journeyName as string };
+      if (linkResult.launched) return { status: "account_linking" };
+
+      // 2b. No Shopify customer → conversational inline flow
+      if (!st.hasShopifyCustomer) {
+        // Check if we're in the inline linking conversation
+        const { data: ticketData } = await admin.from("tickets")
+          .select("playbook_context").eq("id", tid).single();
+        const ctx = (ticketData?.playbook_context || {}) as Record<string, unknown>;
+
+        if (ctx.awaiting_email_confirm) {
+          // Customer replied to "is [email] yours?" — check for yes/no
+          const lower = msg.toLowerCase().replace(/<[^>]*>/g, " ").trim();
+          const isYes = /\b(yes|yeah|yep|correct|that's me|thats me|right|confirm)\b/i.test(lower);
+
+          if (isYes) {
+            const altEmail = ctx.alternate_email as string;
+            const altCustomerId = ctx.alternate_customer_id as string;
+
+            // Auto-link the accounts
+            const { randomUUID } = await import("crypto");
+            const { data: existingLink } = await admin.from("customer_links").select("group_id").eq("customer_id", st.custId!).maybeSingle();
+            const groupId = existingLink?.group_id || randomUUID();
+
+            if (!existingLink) {
+              await admin.from("customer_links").upsert({ customer_id: st.custId!, workspace_id: wsId, group_id: groupId, is_primary: false }, { onConflict: "customer_id" });
+            }
+            await admin.from("customer_links").upsert({ customer_id: altCustomerId, workspace_id: wsId, group_id: groupId, is_primary: true }, { onConflict: "customer_id" });
+
+            await sysNote(admin, tid, `[System] Accounts linked: ${altEmail} ↔ current customer. Re-processing with full context.`);
+            await admin.from("tickets").update({ playbook_context: {} }).eq("id", tid);
+
+            // Re-trigger with the original message
+            const origMsg = (ctx.original_message as string) || msg;
+            await inngest.send({
+              name: "ticket/inbound-message",
+              data: { workspace_id: wsId, ticket_id: tid, message_body: origMsg, channel: st.ch, is_new_ticket: false },
+            });
+            return { status: "inline_linked", email: altEmail };
+          } else {
+            // They said no or something unclear — ask again or give up
+            await admin.from("tickets").update({ playbook_context: {} }).eq("id", tid);
+            await sendWithDelay(admin, wsId, tid, st.ch, "No problem! Could you share the email address you used when placing your order? I'll look it up for you.", cfg.sandbox);
+            await admin.from("tickets").update({
+              playbook_context: { awaiting_alternate_email: true, original_message: ctx.original_message || msg },
+            }).eq("id", tid);
+            return { status: "awaiting_alternate_email" };
+          }
+        }
+
+        if (ctx.awaiting_alternate_email) {
+          // Customer provided an alternate email — extract it
+          const emailMatch = msg.match(/[^\s@]+@[^\s@]+\.[^\s@]+/);
+          if (emailMatch) {
+            const altEmail = emailMatch[0].toLowerCase();
+            const { data: altCust } = await admin.from("customers")
+              .select("id, shopify_customer_id, first_name, email")
+              .eq("workspace_id", wsId).eq("email", altEmail).single();
+
+            if (altCust?.shopify_customer_id) {
+              // Found a Shopify customer — confirm
+              const firstName = altCust.first_name || altEmail;
+              await sendWithDelay(admin, wsId, tid, st.ch,
+                `Just to confirm, ${altEmail} belongs to you? I can see this account has orders in our system.`, cfg.sandbox);
+              await admin.from("tickets").update({
+                playbook_context: {
+                  awaiting_email_confirm: true,
+                  alternate_email: altEmail,
+                  alternate_customer_id: altCust.id,
+                  original_message: ctx.original_message || msg,
+                },
+              }).eq("id", tid);
+              return { status: "awaiting_email_confirm" };
+            } else {
+              // Email found but no Shopify customer
+              await sendWithDelay(admin, wsId, tid, st.ch,
+                "I found that email but don't see any orders associated with it. Could you try the email you used when placing your order?", cfg.sandbox);
+              return { status: "awaiting_alternate_email" };
+            }
+          } else {
+            // No email found in message
+            await sendWithDelay(admin, wsId, tid, st.ch,
+              "I didn't catch an email address. Could you share the email you used when placing your order?", cfg.sandbox);
+            return { status: "awaiting_alternate_email" };
+          }
+        }
+
+        // First time hitting no-Shopify-customer — start the conversational flow
+        await sysNote(admin, tid, `[System] No Shopify customer found. Starting inline email lookup.`);
+        await sendWithDelay(admin, wsId, tid, st.ch,
+          "I'd love to help with that! I don't see an order history with the email on file. Did you place your order with a different email address?", cfg.sandbox);
+        await admin.from("tickets").update({
+          playbook_context: { awaiting_alternate_email: true, original_message: msg },
+        }).eq("id", tid);
+        return { status: "no_shopify_customer" };
       }
     }
 
-    // ── 2b. Early pattern match — runs before re-nudge/playbook checks ──
-    // If the customer's message clearly matches a journey/playbook pattern,
-    // skip re-nudge and route fresh (e.g. "cancel the other one" after a completed cancel journey)
+    // ── 2c. General path with unlinked accounts → mention casually after answering
+    if (msgType === "general" && st.hasCust && isNew) {
+      const casualLink = await step.run("check-casual-linking", async () => {
+        const { findUnlinkedMatches } = await import("@/lib/account-matching");
+        const unlinked = await findUnlinkedMatches(wsId, st.custId!, admin);
+        if (!unlinked.length) return null;
+        const { data: jd } = await admin.from("journey_definitions").select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "account_linking").eq("is_active", true).limit(1).single();
+        if (!jd) return null;
+        return { journeyId: jd.id, journeyName: jd.name };
+      });
+      if (casualLink) pendingAccountLink = casualLink;
+    }
+
+    // ── 3. Early pattern match — runs before re-nudge/playbook checks ──
+    // For account messages: check journeys/playbooks/workflows
+    // For general messages: only check for macros (pattern_only)
     const earlyPattern = await step.run("early-pattern-match", async () => {
       const m = await matchPatterns(wsId, null, msg);
       if (m && m.confidence >= 0.7) {
+        // Only check journeys/playbooks for account messages with a Shopify customer
+        if (msgType !== "general" && st.hasShopifyCustomer) {
         // Check if this pattern maps to a journey
         const { data: j } = await admin.from("journey_definitions").select("id, name, trigger_intent, match_patterns")
           .eq("workspace_id", wsId).eq("is_active", true);
@@ -497,12 +614,15 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
           if (wf?.length) return { hit: true, type: "workflow" as const, id: wf[0].id, name: wf[0].name, intent: m.category || "unknown", patternName: m.name, confidence: m.confidence, tag: autoTag };
         }
       }
+      } // end if (msgType !== "general" && st.hasShopifyCustomer)
+
       // Pattern matched at high confidence but no journey/playbook/workflow — pass through for macro lookup
       if (m && m.confidence >= 0.7) {
         return { hit: true, type: "pattern_only" as const, id: "", name: m.name || "", intent: m.category || "unknown", patternName: m.name, confidence: m.confidence };
       }
 
-      // Also check direct journey pattern match (bypass smart patterns)
+      // Also check direct journey pattern match (bypass smart patterns) — account path only
+      if (msgType !== "general" && st.hasShopifyCustomer) {
       const { data: journeys } = await admin.from("journey_definitions").select("id, name, trigger_intent, match_patterns")
         .eq("workspace_id", wsId).eq("is_active", true);
       const msgLower = msg.toLowerCase().replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/[\u2018\u2019'`]/g, "").replace(/\s+/g, " ").trim();
@@ -511,6 +631,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
         const matched = patterns.some(p => msgLower.includes(p.toLowerCase().replace(/[''`]/g, "")));
         if (matched) return { hit: true, type: "journey" as const, id: jd.id, name: jd.name, intent: jd.trigger_intent, patternName: "direct pattern", confidence: 1 };
       }
+      } // end direct journey check
       return { hit: false } as { hit: false };
     });
 
