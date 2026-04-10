@@ -652,7 +652,7 @@ async function handleJourney(
     triggerIntent: journey.trigger_intent,
     channel: ctx.channel,
     leadIn: decision.response_message || "",
-    ctaText: "Get Started",
+    ctaText: `${journey.name} →`,
   });
 
   if (launched) {
