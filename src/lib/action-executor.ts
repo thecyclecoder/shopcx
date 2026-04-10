@@ -371,6 +371,11 @@ const directActionHandlers: Record<
   reactivate: async (ctx, p) => {
     const { appstleSubscriptionAction } = await import("@/lib/appstle");
     const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
+    if (r.success) {
+      const { addTicketTag } = await import("@/lib/ticket-tags");
+      await addTicketTag(ctx.ticketId, "wb");
+      await addTicketTag(ctx.ticketId, "wb:success");
+    }
     return { ...r, summary: "Reactivated subscription" };
   },
 
