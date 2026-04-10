@@ -282,6 +282,86 @@ export async function POST(request: Request) {
       customerId = created?.id || null;
     }
 
+    // Crisis auto-merge: if customer has an active crisis action and subject matches, redirect to crisis ticket
+    if (customerId && subject) {
+      const cleanSubjectForCrisis = subject.replace(/^(Re:|Fwd?:|Fw:)\s*/gi, "").trim().toLowerCase();
+      const { data: crisisAction } = await admin
+        .from("crisis_customer_actions")
+        .select("ticket_id, crisis_id")
+        .eq("customer_id", customerId)
+        .is("exhausted_at", null)
+        .gt("current_tier", 0)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (crisisAction?.ticket_id && crisisAction.crisis_id) {
+        // Verify crisis is still active and subject matches affected product
+        const { data: crisis } = await admin
+          .from("crisis_events")
+          .select("affected_product_title, status")
+          .eq("id", crisisAction.crisis_id)
+          .single();
+
+        if (crisis?.status === "active" && crisis.affected_product_title &&
+            cleanSubjectForCrisis.includes(crisis.affected_product_title.toLowerCase())) {
+          // Verify crisis ticket exists and isn't archived
+          const { data: crisisTicket } = await admin
+            .from("tickets")
+            .select("id, status, workspace_id")
+            .eq("id", crisisAction.ticket_id)
+            .single();
+
+          if (crisisTicket && crisisTicket.status !== "archived") {
+            // Merge: insert message on crisis ticket instead of creating new one
+            const cleanBody = stripQuotedReply(messageBody) || messageBody;
+            const bodyClean = cleanEmailBody(cleanBody, fromEmail);
+
+            await admin.from("ticket_messages").insert({
+              ticket_id: crisisTicket.id,
+              direction: "inbound", visibility: "external", author_type: "customer",
+              body: cleanBody, body_clean: bodyClean, email_message_id: messageId,
+            });
+
+            // Reopen if closed/pending
+            if (crisisTicket.status === "closed" || crisisTicket.status === "pending") {
+              await admin.from("tickets").update({
+                status: "open", closed_at: null,
+                last_customer_reply_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              }).eq("id", crisisTicket.id);
+            } else {
+              await admin.from("tickets").update({
+                last_customer_reply_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              }).eq("id", crisisTicket.id);
+            }
+
+            // System note
+            await admin.from("ticket_messages").insert({
+              ticket_id: crisisTicket.id,
+              direction: "outbound", visibility: "internal", author_type: "system",
+              body: `[System] Auto-merged inbound email (would have created new ticket). Subject: "${subject}"`,
+            });
+
+            // Dispatch to unified handler with crisis context
+            await inngest.send({
+              name: "ticket/inbound-message",
+              data: {
+                workspace_id: workspaceId,
+                ticket_id: crisisTicket.id,
+                message_body: bodyClean || messageBody || subject || "",
+                channel: "email",
+                is_new_ticket: false,
+              },
+            });
+
+            return NextResponse.json({ ok: true });
+          }
+        }
+      }
+    }
+
     // Create ticket
     const { data: ticket } = await admin
       .from("tickets")
