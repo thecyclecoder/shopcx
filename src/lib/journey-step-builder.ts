@@ -262,15 +262,27 @@ async function buildCancelSteps(
 
   const enabledReasons = reasons.filter(r => r.enabled !== false);
 
+  // If no reasons configured in settings, use defaults (same as cancel-journey-builder.ts)
+  const DEFAULT_CANCEL_REASONS = [
+    { value: "too_expensive", label: "Too expensive" },
+    { value: "too_much_product", label: "I have too much product" },
+    { value: "not_seeing_results", label: "I'm not seeing results" },
+    { value: "reached_goals", label: "I've already reached my goals" },
+    { value: "taste_texture", label: "I don't like the taste or texture" },
+    { value: "health_change", label: "My health needs have changed" },
+    { value: "just_pausing", label: "I just need a break" },
+    { value: "something_else", label: "Something else" },
+  ];
+  const finalReasons = enabledReasons.length > 0
+    ? enabledReasons.map(r => ({ value: r.slug, label: r.label }))
+    : DEFAULT_CANCEL_REASONS;
+
   // Build the cancel_reason step with options from the cancel flow settings
   const cancelReasonStep: JourneyStep = {
     key: "cancel_reason",
-    type: "select",
+    type: "single_choice",
     question: "Why are you looking to cancel?",
-    options: enabledReasons.map(r => ({
-      value: r.slug,
-      label: r.label,
-    })),
+    options: finalReasons,
   };
 
   return {
