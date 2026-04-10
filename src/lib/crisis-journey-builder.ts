@@ -68,7 +68,7 @@ export async function buildCrisisTier2Steps(
   const productSwaps = (crisis.available_product_swaps as { productId?: string; productTitle: string; variantId?: string; title?: string; variants?: { variantId: string; title: string }[] }[]) || [];
   if (productSwaps.length === 0) return emptyConfig();
 
-  const couponPct = crisis.tier2_coupon_percent || 20;
+  const couponPct = crisis.tier2_coupon_percent || 0; // Must be set on crisis event, no hardcoded default
 
   // Build product options
   const productOptions = productSwaps.map(p => ({
