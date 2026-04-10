@@ -426,8 +426,10 @@ export const unifiedTicketHandler = inngest.createFunction(
     if (!cfg.enabled) return { status: "skipped", reason: "ai_disabled" };
     const pers = await step.run("personality", () => loadPersonality(admin, cfg.personality_id));
 
-    // ── 1b. General vs Account classification (Haiku) ──
-    const msgType = await step.run("classify-general-account", async () => {
+    // ── 1b. General vs Account classification — skipped, Sonnet handles routing ──
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    const msgType = "account" as string; /* Sonnet orchestrator replaces Haiku classification */
+    if (false) await step.run("classify-general-account", async () => {
       const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
       // Check if this is a system re-trigger (from journey completion, playbook resume, etc.)
       if (["address_confirmed", "items_selected", "playbook-apply"].includes(cleanMsg)) return "account";
@@ -591,11 +593,9 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
       isCrisisTicket = crisisTags;
     }
 
-    // ── 3. Early pattern match — runs before re-nudge/playbook checks ──
-    // For account messages: check journeys/playbooks/workflows
-    // SKIP for crisis tickets — those are handled by the crisis follow-up block
-    // For general messages: only check for macros (pattern_only)
-    if (!isCrisisTicket) {
+    // ── 3. Early pattern match — DISABLED, Sonnet orchestrator handles all routing ──
+    // Kept for crisis tickets only (crisis handler runs before Sonnet)
+    if (isCrisisTicket) {
     const earlyPattern = await step.run("early-pattern-match", async () => {
       const m = await matchPatterns(wsId, null, msg);
       if (m && m.confidence >= 0.7) {
