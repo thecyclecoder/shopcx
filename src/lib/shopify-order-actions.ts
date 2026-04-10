@@ -161,21 +161,18 @@ export async function partialRefundByAmount(
   const amountDecimal = (amountCents / 100).toFixed(2);
 
   try {
-    // Step 1: Calculate refund to get parent transaction ID
-    const calcRes = await fetch(
-      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}/refunds/calculate.json`,
-      {
-        method: "POST",
-        headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
-        body: JSON.stringify({ refund: { currency: "USD", shipping: { amount: 0 } } }),
-      },
+    // Step 1: Get order transactions to find the gateway
+    const txRes = await fetch(
+      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}/transactions.json`,
+      { headers: { "X-Shopify-Access-Token": accessToken } },
     );
-    const calcData = await calcRes.json();
-    const transactions = (calcData?.refund?.transactions || []) as { parent_id: number; kind: string }[];
-    const parentTx = transactions.find(t => t.kind === "suggested_refund");
-    if (!parentTx) return { success: false, error: "No refundable transaction found" };
+    const txData = await txRes.json();
+    const saleTx = (txData?.transactions || []).find((t: { kind: string; status: string }) =>
+      t.kind === "sale" && t.status === "success"
+    ) || (txData?.transactions || [])[0];
+    if (!saleTx) return { success: false, error: "No transaction found on order" };
 
-    // Step 2: Issue the partial refund
+    // Step 2: Issue the partial refund with gateway from original transaction
     const refundRes = await fetch(
       `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}/refunds.json`,
       {
@@ -186,7 +183,12 @@ export async function partialRefundByAmount(
             currency: "USD",
             notify: false,
             note: reason || "Price adjustment",
-            transactions: [{ parent_id: parentTx.parent_id, amount: amountDecimal, kind: "refund" }],
+            transactions: [{
+              parent_id: saleTx.id,
+              amount: amountDecimal,
+              kind: "refund",
+              gateway: saleTx.gateway,
+            }],
           },
         }),
       },

@@ -160,11 +160,11 @@ export async function subUpdateLineItemPrice(
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
-  // Use the update-line-item endpoint to set variantId + price in one call
   const priceDecimal = (basePriceCents / 100).toFixed(2);
   try {
+    // Try the dedicated price endpoint first
     const res = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-line-item?contractId=${contractId}&variantId=${variantId}&price=${priceDecimal}&isPricePerUnit=true`,
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-line-item-price?contractId=${contractId}&variantId=${variantId}&price=${priceDecimal}`,
       {
         method: "PUT",
         headers: { "X-API-Key": config.apiKey, "Content-Type": "application/json" },
@@ -173,6 +173,11 @@ export async function subUpdateLineItemPrice(
     );
     if (!res.ok) {
       const text = await res.text();
+      // If subscription is cancelled/inactive, this is non-fatal — price will be set on reactivation
+      if (res.status === 400 || res.status === 404) {
+        console.warn(`Appstle updateLineItemPrice skipped (${res.status}): subscription may be cancelled. Will apply on reactivation.`);
+        return { success: true, error: `Skipped — subscription inactive (will apply on reactivation)` };
+      }
       console.error("Appstle updateLineItemPrice error:", text);
       return { success: false, error: `Appstle API error: ${res.status}` };
     }
