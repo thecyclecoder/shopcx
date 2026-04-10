@@ -95,7 +95,7 @@ async function newerActivity(admin: Admin, tid: string, since: string): Promise<
 async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max = 200): Promise<string> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return "";
-  const mid = model === "sonnet" ? "claude-sonnet-4-5-20250514" : "claude-haiku-4-5-20251001";
+  const mid = model === "sonnet" ? "claude-sonnet-4-20250514" : "claude-haiku-4-5-20251001";
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST", headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
     body: JSON.stringify({ model: mid, max_tokens: max, messages: [{ role: "user", content: prompt }] }),
