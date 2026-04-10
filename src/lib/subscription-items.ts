@@ -4,7 +4,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 
-async function getAppstleConfig(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
+export async function getAppstleConfig(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
   const admin = createAdminClient();
   const { data: ws } = await admin.from("workspaces")
     .select("appstle_api_key_encrypted, shopify_myshopify_domain")

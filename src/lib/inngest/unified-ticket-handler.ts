@@ -748,7 +748,9 @@ Current status: ${action.tier1_response === "accepted_swap" ? "They already acce
 Classify their message into one of these intents:
 - "change_flavor" — wants to switch to a different flavor of the same product
 - "change_product" — wants a completely different product instead
-- "cancel" — wants to cancel their subscription
+- "pause" — wants to pause their subscription until the product is back
+- "remove_item" — wants to remove the affected item but keep the rest of their subscription
+- "cancel" — wants to cancel their subscription entirely
 - "question" — asking a question about the crisis or their subscription
 - "other" — something unrelated
 
@@ -760,72 +762,213 @@ Respond with EXACTLY one word.`, "haiku", 20);
         return { intent, actionId: action.id, crisisId: action.crisis_id, subscriptionId: action.subscription_id, segment: action.segment, currentTier: action.current_tier, tier1Response: action.tier1_response };
       });
 
-      if (crisisFollowup && crisisFollowup.intent === "change_flavor") {
-        // Re-launch Tier 1 flavor swap journey
-        const delay = await step.run("crisis-fl-delay", () => responseDelay(admin, wsId, st.ch));
-        if (delay > 0) await step.sleep("crisis-fl-wait", `${delay}s`);
-        await step.run("crisis-relaunch-tier1", async () => {
-          if (await newerActivity(admin, tid, t0)) return;
-          const { data: jd } = await admin.from("journey_definitions")
-            .select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "crisis_tier1").eq("is_active", true).limit(1).single();
-          if (!jd) return;
-          const leadIn = "Of course! Here are the available flavors — pick whichever you'd like:";
-          await launchJourneyForTicket({
-            workspaceId: wsId, ticketId: tid, customerId: st.custId!,
-            journeyId: jd.id, journeyName: jd.name, triggerIntent: "crisis_tier1",
-            channel: st.ch, leadIn, ctaText: "Choose a Flavor",
-          });
-          await admin.from("tickets").update({ handled_by: `Crisis: ${jd.name}` }).eq("id", tid);
+      if (crisisFollowup && crisisFollowup.intent !== "question" && crisisFollowup.intent !== "other") {
+        // Direct action execution — parse full request with Sonnet and execute
+        const delay = await step.run("crisis-direct-delay", () => responseDelay(admin, wsId, st.ch));
+        if (delay > 0) await step.sleep("crisis-direct-wait", `${delay}s`);
+
+        const crisisResult = await step.run("crisis-direct-action", async () => {
+          if (await newerActivity(admin, tid, t0)) return { status: "bailed" as const };
+
+          // Load full crisis context
+          const { data: crisis } = await admin.from("crisis_events")
+            .select("id, affected_product_title, affected_variant_id, default_swap_variant_id, default_swap_title, available_flavor_swaps, available_product_swaps, tier2_coupon_code, tier2_coupon_percent")
+            .eq("id", crisisFollowup.crisisId).single();
+          if (!crisis) return { status: "no_crisis" as const };
+
+          // Load subscription details
+          const { data: sub } = await admin.from("subscriptions")
+            .select("shopify_contract_id, items, status")
+            .eq("id", crisisFollowup.subscriptionId).single();
+          if (!sub?.shopify_contract_id) return { status: "no_sub" as const };
+          const contractId = sub.shopify_contract_id;
+
+          // Build available options for Sonnet
+          const flavorOptions = [
+            { variantId: crisis.default_swap_variant_id, title: crisis.default_swap_title },
+            ...((crisis.available_flavor_swaps as { variantId: string; title: string }[]) || []),
+          ];
+          const productOptions = ((crisis.available_product_swaps as { productTitle: string; variants: { variantId: string; title: string }[] }[]) || []);
+
+          // Determine what's currently on the subscription (may have been auto-swapped)
+          const { data: action } = await admin.from("crisis_customer_actions")
+            .select("tier1_swapped_to, tier2_swapped_to, original_item")
+            .eq("id", crisisFollowup.actionId).single();
+          const currentVariant = (action?.tier2_swapped_to as { variantId?: string })?.variantId
+            || (action?.tier1_swapped_to as { variantId?: string })?.variantId
+            || crisis.default_swap_variant_id
+            || crisis.affected_variant_id;
+
+          const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
+
+          // Sonnet action planner
+          const planPrompt = `You are a subscription support agent. A customer replied to a crisis outreach about "${crisis.affected_product_title}" being out of stock.
+
+CURRENT STATE:
+- Their subscription currently has variant "${(action?.tier1_swapped_to as { title?: string })?.title || crisis.default_swap_title}" (auto-swapped from "${crisis.affected_product_title}")
+- Subscription items: ${JSON.stringify(sub.items)}
+- Segment: ${crisisFollowup.segment} (${crisisFollowup.segment === "berry_only" ? "only has the affected item" : "has other items too"})
+
+AVAILABLE FLAVOR SWAPS (same product, different flavor):
+${flavorOptions.map(f => `- "${f.title}" (variantId: ${f.variantId})`).join("\n")}
+
+AVAILABLE PRODUCT SWAPS (different product entirely):
+${productOptions.map(p => `- ${p.productTitle}: ${p.variants.map(v => `"${v.title}" (variantId: ${v.variantId})`).join(", ")}`).join("\n")}
+
+COUPON: ${crisis.tier2_coupon_code ? `${crisis.tier2_coupon_percent}% off with code ${crisis.tier2_coupon_code}` : "None available"}
+
+CUSTOMER MESSAGE: "${cleanMsg}"
+
+Based on what the customer wants, return a JSON action plan. Available action types:
+- "swap_variant": swap current variant to a new one. Requires from_variant_id, to_variant_id, to_title, and optionally quantity (default 1)
+- "pause": pause the subscription until the product is back in stock
+- "remove_item": remove the affected item (keep other subscription items)
+- "cancel": customer wants to cancel entirely
+- "apply_coupon": apply the crisis coupon code
+
+If you can't determine exactly what the customer wants, set needs_clarification to true and write a short, friendly clarification question.
+
+Return ONLY valid JSON:
+{
+  "actions": [{ "type": "...", "from_variant_id": "...", "to_variant_id": "...", "to_title": "...", "quantity": 1 }],
+  "pause": false,
+  "remove_item": false,
+  "cancel": false,
+  "needs_clarification": false,
+  "clarification_question": null,
+  "confirmation_summary": "short description of what was done"
+}`;
+
+          const planResult = await claude(planPrompt, "sonnet", 500);
+          let plan: {
+            actions: { type: string; from_variant_id?: string; to_variant_id?: string; to_title?: string; quantity?: number }[];
+            pause: boolean; remove_item: boolean; cancel: boolean;
+            needs_clarification: boolean; clarification_question: string | null;
+            confirmation_summary: string;
+          };
+          try {
+            const jsonMatch = planResult.match(/\{[\s\S]*\}/);
+            plan = JSON.parse(jsonMatch?.[0] || "{}");
+          } catch {
+            plan = { actions: [], pause: false, remove_item: false, cancel: false, needs_clarification: true, clarification_question: "I want to help! Could you let me know exactly what you'd like us to do with your subscription?", confirmation_summary: "" };
+          }
+
+          await sysNote(admin, tid, `[System] Crisis action plan: ${JSON.stringify(plan)}`);
+
+          // Check sandbox mode
+          const { data: wsData } = await admin.from("workspaces").select("sandbox_mode").eq("id", wsId).single();
+          const isSandbox = wsData?.sandbox_mode === true;
+
+          if (plan.needs_clarification) {
+            await sendWithDelay(admin, wsId, tid, st.ch, plan.clarification_question || "Could you clarify what you'd like us to do?", isSandbox);
+            return { status: "clarification_sent" as const };
+          }
+
+          // Execute actions
+          const executed: string[] = [];
+          const errors: string[] = [];
+
+          if (isSandbox) {
+            // Dry run — log what we would do
+            if (plan.actions.length) executed.push(`[DRY RUN] Would execute: ${plan.actions.map(a => `${a.type}${a.to_title ? ` → ${a.to_title}` : ""}${a.quantity && a.quantity > 1 ? ` (qty: ${a.quantity})` : ""}`).join(", ")}`);
+            if (plan.pause) executed.push("[DRY RUN] Would pause subscription, auto_resume: true");
+            if (plan.remove_item) executed.push("[DRY RUN] Would remove affected item, auto_readd: true");
+            if (plan.cancel) executed.push("[DRY RUN] Would cancel subscription");
+            await sysNote(admin, tid, `[Crisis Dry Run] ${executed.join(". ")}`);
+            await sendWithDelay(admin, wsId, tid, st.ch, `[Crisis Draft] Would: ${plan.confirmation_summary}`, true);
+            return { status: "sandbox_dry_run" as const };
+          }
+
+          // Live execution
+          const { subSwapVariant, subRemoveItem } = await import("@/lib/subscription-items");
+          const { appstleSubscriptionAction } = await import("@/lib/appstle");
+
+          for (const action of plan.actions || []) {
+            if (action.type === "swap_variant" && action.to_variant_id) {
+              const fromId = action.from_variant_id || currentVariant;
+              const result = await subSwapVariant(wsId, contractId, fromId, action.to_variant_id, action.quantity || 1);
+              if (result.success) {
+                executed.push(`Swapped to ${action.to_title || action.to_variant_id}${action.quantity && action.quantity > 1 ? ` (qty: ${action.quantity})` : ""}`);
+                await admin.from("crisis_customer_actions").update({
+                  tier1_response: "accepted_swap",
+                  tier1_swapped_to: { variantId: action.to_variant_id, title: action.to_title, quantity: action.quantity || 1 },
+                  updated_at: new Date().toISOString(),
+                }).eq("id", crisisFollowup.actionId);
+              } else {
+                errors.push(`Swap failed: ${result.error}`);
+              }
+            }
+            if (action.type === "apply_coupon" && crisis.tier2_coupon_code) {
+              try {
+                const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
+                const { getAppstleConfig } = await import("@/lib/subscription-items");
+                const appstleConfig = await getAppstleConfig(wsId);
+                if (appstleConfig) {
+                  await applyDiscountWithReplace(appstleConfig.apiKey, contractId, crisis.tier2_coupon_code);
+                  executed.push(`Applied ${crisis.tier2_coupon_percent}% coupon`);
+                  await admin.from("crisis_customer_actions").update({ tier2_coupon_applied: true }).eq("id", crisisFollowup.actionId);
+                }
+              } catch (e) { errors.push(`Coupon failed: ${e instanceof Error ? e.message : "unknown"}`); }
+            }
+          }
+
+          if (plan.pause) {
+            const result = await appstleSubscriptionAction(wsId, contractId, "pause", "Crisis — customer requested pause until restock");
+            if (result.success) {
+              executed.push("Paused subscription (will auto-resume when back in stock)");
+              await admin.from("crisis_customer_actions").update({
+                tier3_response: "accepted_pause", paused_at: new Date().toISOString(), auto_resume: true, updated_at: new Date().toISOString(),
+              }).eq("id", crisisFollowup.actionId);
+            } else { errors.push(`Pause failed: ${result.error}`); }
+          }
+
+          if (plan.remove_item) {
+            const removeVariant = crisis.affected_variant_id || currentVariant;
+            const result = await subRemoveItem(wsId, contractId, removeVariant);
+            if (result.success) {
+              executed.push("Removed affected item (will auto-add when back in stock)");
+              await admin.from("crisis_customer_actions").update({
+                tier3_response: "accepted_remove", removed_item_at: new Date().toISOString(), auto_readd: true, updated_at: new Date().toISOString(),
+              }).eq("id", crisisFollowup.actionId);
+            } else { errors.push(`Remove failed: ${result.error}`); }
+          }
+
+          if (plan.cancel) {
+            const result = await appstleSubscriptionAction(wsId, contractId, "cancel", "Crisis — customer requested cancellation");
+            if (result.success) {
+              executed.push("Cancelled subscription");
+              await admin.from("crisis_customer_actions").update({
+                cancelled: true, cancel_date: new Date().toISOString(), updated_at: new Date().toISOString(),
+              }).eq("id", crisisFollowup.actionId);
+            } else { errors.push(`Cancel failed: ${result.error}`); }
+          }
+
+          if (errors.length) {
+            await sysNote(admin, tid, `[System] Crisis action errors: ${errors.join("; ")}`);
+            // Escalate on failure
+            await sendWithDelay(admin, wsId, tid, st.ch,
+              "I ran into an issue processing your request. I've flagged this for our team and someone will follow up with you shortly.", false);
+            await admin.from("tickets").update({ assigned_to: null, handled_by: null }).eq("id", tid);
+            return { status: "crisis_action_error" as const };
+          }
+
+          // Send confirmation
+          const confirmMsg = plan.confirmation_summary || executed.join(". ");
+          await sysNote(admin, tid, `[System] Crisis actions executed: ${executed.join("; ")}`);
+          await sendWithDelay(admin, wsId, tid, st.ch,
+            `All done! Here's what we've updated for you:\n\n${executed.map(e => `• ${e}`).join("\n")}\n\nIf you have any other questions, just reply to this email.`, false);
           await setStatus(admin, tid, cfg.auto_resolve);
+          return { status: "crisis_actions_executed" as const };
         });
-        return { status: "crisis_relaunch_tier1" };
+
+        if (crisisResult.status !== "bailed") {
+          return { status: `crisis_direct_${crisisResult.status}` };
+        }
       }
 
-      if (crisisFollowup && crisisFollowup.intent === "change_product") {
-        // Launch Tier 2 product swap journey
-        const delay = await step.run("crisis-pr-delay", () => responseDelay(admin, wsId, st.ch));
-        if (delay > 0) await step.sleep("crisis-pr-wait", `${delay}s`);
-        await step.run("crisis-launch-tier2", async () => {
-          if (await newerActivity(admin, tid, t0)) return;
-          const { data: jd } = await admin.from("journey_definitions")
-            .select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "crisis_tier2").eq("is_active", true).limit(1).single();
-          if (!jd) return;
-          const leadIn = "No problem! Here are some other products you might enjoy:";
-          await launchJourneyForTicket({
-            workspaceId: wsId, ticketId: tid, customerId: st.custId!,
-            journeyId: jd.id, journeyName: jd.name, triggerIntent: "crisis_tier2",
-            channel: st.ch, leadIn, ctaText: "Browse Products",
-          });
-          await admin.from("tickets").update({ handled_by: `Crisis: ${jd.name}` }).eq("id", tid);
-          await setStatus(admin, tid, cfg.auto_resolve);
-        });
-        return { status: "crisis_launch_tier2" };
-      }
-
-      if (crisisFollowup && crisisFollowup.intent === "cancel") {
-        // Route to cancel journey
-        const delay = await step.run("crisis-cx-delay", () => responseDelay(admin, wsId, st.ch));
-        if (delay > 0) await step.sleep("crisis-cx-wait", `${delay}s`);
-        await step.run("crisis-launch-cancel", async () => {
-          if (await newerActivity(admin, tid, t0)) return;
-          const { data: jd } = await admin.from("journey_definitions")
-            .select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "cancel").eq("is_active", true).limit(1).single();
-          if (!jd) return;
-          const leadIn = "I understand. Let me pull up your options:";
-          await launchJourneyForTicket({
-            workspaceId: wsId, ticketId: tid, customerId: st.custId!,
-            journeyId: jd.id, journeyName: jd.name, triggerIntent: "cancel",
-            channel: st.ch, leadIn, ctaText: "Review Options",
-          });
-          await admin.from("tickets").update({ handled_by: `Journey: ${jd.name}` }).eq("id", tid);
-          await setStatus(admin, tid, cfg.auto_resolve);
-        });
-        return { status: "crisis_launch_cancel" };
-      }
-
-      if (crisisFollowup && crisisFollowup.intent === "question") {
+      if (crisisFollowup && (crisisFollowup.intent === "question" || crisisFollowup.intent === "other")) {
         // Let it fall through to AI — but add crisis context to the prompt
-        await sysNote(admin, tid, `[System] Crisis follow-up question detected. Routing to AI with crisis context.`);
+        await sysNote(admin, tid, `[System] Crisis follow-up (${crisisFollowup.intent}). Routing to AI with crisis context.`);
         // Fall through to normal AI pipeline
       }
     }
