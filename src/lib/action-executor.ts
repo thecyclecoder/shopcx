@@ -352,15 +352,44 @@ const directActionHandlers: Record<
 
   update_line_item_price: async (ctx, p) => {
     const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
-    // Resolve variant — if Sonnet passed a bad variant or none, use the first item on the subscription
-    let variantId = p.variant_id;
-    if (!variantId || !(await ctx.admin.from("subscriptions").select("items").eq("shopify_contract_id", p.contract_id!).single()).data?.items?.some((i: { variant_id?: string }) => String(i.variant_id) === String(variantId))) {
+
+    // Resolve which variant is currently on the subscription from crisis context.
+    // Priority: tier2 swap → tier1 swap → default swap from crisis event
+    let variantId: string | undefined;
+
+    const { data: crisisAction } = await ctx.admin.from("crisis_customer_actions")
+      .select("tier1_swapped_to, tier2_swapped_to, crisis_id")
+      .eq("customer_id", ctx.customerId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (crisisAction) {
+      const t2 = crisisAction.tier2_swapped_to as { variantId?: string } | null;
+      const t1 = crisisAction.tier1_swapped_to as { variantId?: string } | null;
+      if (t2?.variantId) {
+        variantId = t2.variantId;
+      } else if (t1?.variantId) {
+        variantId = t1.variantId;
+      } else if (crisisAction.crisis_id) {
+        // No tier response yet — use default swap from crisis event
+        const { data: crisis } = await ctx.admin.from("crisis_events")
+          .select("default_swap_variant_id").eq("id", crisisAction.crisis_id).single();
+        if (crisis?.default_swap_variant_id) variantId = crisis.default_swap_variant_id;
+      }
+    }
+
+    // Final fallback: first real item on the subscription
+    if (!variantId) {
       const { data: sub } = await ctx.admin.from("subscriptions").select("items").eq("shopify_contract_id", p.contract_id!).single();
       const items = (sub?.items as { variant_id?: string; title?: string }[]) || [];
       const realItems = items.filter(i => !(i.title || "").toLowerCase().includes("shipping protection"));
-      variantId = realItems[0]?.variant_id || variantId;
+      variantId = realItems[0]?.variant_id;
     }
-    const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id!, variantId!, p.base_price_cents!);
+
+    if (!variantId) return { success: false, error: "Could not determine which line item to update" };
+
+    const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id!, variantId, p.base_price_cents!);
     return { ...r, summary: `Updated base price to $${((p.base_price_cents || 0) / 100).toFixed(2)}` };
   },
 
