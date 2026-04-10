@@ -370,11 +370,7 @@ async function escalate(admin: Admin, wsId: string, tid: string, ch: string, int
     escalationMsg += ` If you leave this chat, I'll send you an email at ${customerEmail}.`;
   }
 
-  // Insert immediately — no delay on escalation messages
-  await admin.from("ticket_messages").insert({
-    ticket_id: tid, direction: "outbound", visibility: "external",
-    author_type: "ai", body: toHtml(escalationMsg), sent_at: new Date().toISOString(),
-  });
+  await sendWithDelay(admin, wsId, tid, ch, escalationMsg, false);
 
   // Send email for email channel
   if (ch === "email" && customerEmail) {
