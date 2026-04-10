@@ -839,6 +839,7 @@ Analyze the FULL conversation and determine what the customer needs. Available a
 
 If the customer has duplicate subscriptions and wants one cancelled, identify which one to cancel based on their message.
 If you can't determine what they want, set needs_clarification to true with a friendly question.
+If the customer's message is NOT related to the crisis at all (e.g. they're asking about a completely different product, thanking you for something already done, or making a non-crisis request), set not_crisis_related to true — this will pass them to the general support handler.
 
 Return ONLY valid JSON:
 {
@@ -847,6 +848,7 @@ Return ONLY valid JSON:
   "remove_item": false,
   "cancel": false,
   "escalate": false,
+  "not_crisis_related": false,
   "needs_clarification": false,
   "clarification_question": null,
   "confirmation_summary": "short description of what was done"
@@ -856,14 +858,14 @@ Return ONLY valid JSON:
           let plan: {
             actions: { type: string; subscription_id?: string; from_variant_id?: string; to_variant_id?: string; to_title?: string; variant_id?: string; quantity?: number }[];
             pause: boolean; remove_item: boolean; cancel: boolean; escalate: boolean;
-            needs_clarification: boolean; clarification_question: string | null;
+            not_crisis_related: boolean; needs_clarification: boolean; clarification_question: string | null;
             confirmation_summary: string;
           };
           try {
             const jsonMatch = planResult.match(/\{[\s\S]*\}/);
             plan = JSON.parse(jsonMatch?.[0] || "{}");
           } catch {
-            plan = { actions: [], pause: false, remove_item: false, cancel: false, escalate: false, needs_clarification: true, clarification_question: "I want to help! Could you let me know exactly what you'd like us to do with your subscription?", confirmation_summary: "" };
+            plan = { actions: [], pause: false, remove_item: false, cancel: false, escalate: false, not_crisis_related: false, needs_clarification: true, clarification_question: "I want to help! Could you let me know exactly what you'd like us to do with your subscription?", confirmation_summary: "" };
           }
 
           await sysNote(admin, tid, `[System] Sonnet raw: ${planResult.slice(0, 300)}`);
@@ -872,6 +874,12 @@ Return ONLY valid JSON:
           // Check sandbox mode
           const { data: wsData } = await admin.from("workspaces").select("sandbox_mode").eq("id", wsId).single();
           const isSandbox = wsData?.sandbox_mode === true;
+
+          // Not crisis-related — bail out and let regular Sonnet handle it
+          if (plan.not_crisis_related) {
+            await sysNote(admin, tid, `[System] Crisis handler: message not crisis-related, passing to Sonnet orchestrator.`);
+            return { status: "not_crisis" as const };
+          }
 
           // Escalate if requested
           if (plan.escalate) {
@@ -1008,7 +1016,7 @@ Return ONLY valid JSON:
           return { status: "crisis_actions_executed" as const };
         });
 
-        if (crisisResult.status !== "bailed") {
+        if (crisisResult.status !== "bailed" && crisisResult.status !== "not_crisis") {
           return { status: `crisis_direct_${crisisResult.status}` };
         }
       }
