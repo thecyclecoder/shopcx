@@ -173,10 +173,13 @@ export async function subUpdateLineItemPrice(
     const items = (sub?.items as { variant_id?: string; line_id?: string }[]) || [];
     const match = items.find(i => String(i.variant_id) === String(variantId));
     if (match?.line_id) {
-      lineId = match.line_id;
+      // DB stores UUID — Appstle API needs full GID
+      lineId = match.line_id.startsWith("gid://")
+        ? match.line_id
+        : `gid://shopify/SubscriptionLine/${match.line_id}`;
     }
 
-    // Fall back to Appstle contract-external API
+    // Fall back to Appstle contract-external API (returns full GIDs)
     if (!lineId) {
       const detailRes = await fetch(
         `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
@@ -189,7 +192,7 @@ export async function subUpdateLineItemPrice(
           const vid = l.variantId?.split("/").pop() || l.variantId;
           return String(vid) === String(variantId);
         });
-        if (lineMatch?.id) lineId = lineMatch.id.split("/").pop() || lineMatch.id;
+        if (lineMatch?.id) lineId = lineMatch.id; // Keep full GID
       }
     }
 
@@ -198,7 +201,7 @@ export async function subUpdateLineItemPrice(
     }
 
     const res = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-line-item-price?contractId=${contractId}&lineId=${lineId}&basePrice=${priceDecimal}`,
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-line-item-price?contractId=${contractId}&lineId=${encodeURIComponent(lineId)}&basePrice=${priceDecimal}`,
       {
         method: "PUT",
         headers: { "X-API-Key": config.apiKey, "Content-Type": "application/json" },
