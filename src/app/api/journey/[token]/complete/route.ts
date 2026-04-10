@@ -354,6 +354,7 @@ export async function POST(
         await admin.from("crisis_customer_actions").update({
           tier1_response: "accepted_swap",
           tier1_swapped_to: { variantId: metadata.defaultSwapVariantId, title: "Kept default swap" },
+          exhausted_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
         actionLog.push("Tier 1 accepted — keeping default swap");
@@ -376,6 +377,7 @@ export async function POST(
         await admin.from("crisis_customer_actions").update({
           tier1_response: "accepted_swap",
           tier1_swapped_to: { variantId: flavorChoice, title: chosenLabel },
+          exhausted_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
         actionLog.push(`Tier 1 accepted — swapped to ${chosenLabel}`);
@@ -465,6 +467,7 @@ export async function POST(
           tier2_response: "accepted_swap",
           tier2_swapped_to: { variantId: swapVariantId, title: chosenLabel, quantity: qty },
           tier2_coupon_applied: !!(metadata.tier2CouponCode),
+          exhausted_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
 
@@ -497,6 +500,7 @@ export async function POST(
           tier3_response: "accepted_pause",
           paused_at: new Date().toISOString(),
           auto_resume: true,
+          exhausted_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
         actionLog.push("Tier 3: Subscription paused (auto-resume on resolve)");
@@ -519,6 +523,7 @@ export async function POST(
           tier3_response: "accepted_remove",
           removed_item_at: new Date().toISOString(),
           auto_readd: autoReadd,
+          exhausted_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
         actionLog.push(autoReadd
