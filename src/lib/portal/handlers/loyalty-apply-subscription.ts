@@ -84,7 +84,7 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     const lastInitial = customer?.last_name ? customer.last_name[0] : "";
     code = generateCode(tier.discount_value);
     discountValue = tier.discount_value;
-    const title = `Loyalty $${tier.discount_value} - ${firstName} ${lastInitial}`.trim();
+    const title = `Loyalty $${tier.discount_value} - ${firstName} ${lastInitial} (${code})`.trim();
 
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + settings.coupon_expiry_days);

@@ -101,7 +101,7 @@ export async function POST(request: Request) {
   const firstName = customer?.first_name || "Customer";
   const lastInitial = customer?.last_name ? customer.last_name[0] : "";
   const code = generateCode(tier.discount_value);
-  const title = `Loyalty $${tier.discount_value} - ${firstName} ${lastInitial}`.trim();
+  const title = `Loyalty $${tier.discount_value} - ${firstName} ${lastInitial} (${code})`.trim();
 
   // Compute expiry date
   const expiresAt = new Date();

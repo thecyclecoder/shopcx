@@ -189,7 +189,7 @@ const directActionHandlers: Record<
         }`,
         variables: {
           basicCodeDiscount: {
-            title: `Loyalty $${tier.discount_value}`,
+            title: `Loyalty $${tier.discount_value} (${code})`,
             code,
             startsAt: new Date().toISOString(),
             endsAt: expiresAt.toISOString(),
@@ -294,7 +294,7 @@ const directActionHandlers: Record<
         body: JSON.stringify({
           query: `mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) { discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) { codeDiscountNode { id } userErrors { field message } } }`,
           variables: { basicCodeDiscount: {
-            title: `Loyalty $${orig.discount_value} - Regenerated`, code: newCode,
+            title: `Loyalty $${orig.discount_value} (${newCode})`, code: newCode,
             startsAt: new Date().toISOString(), endsAt: expiresAt.toISOString(),
             usageLimit: 1, appliesOncePerCustomer: true,
             customerSelection: { customers: { add: [`gid://shopify/Customer/${member.shopify_customer_id}`] } },
