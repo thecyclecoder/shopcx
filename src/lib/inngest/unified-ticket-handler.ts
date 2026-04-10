@@ -579,8 +579,8 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
     }
 
     // ── 3. Early pattern match — DISABLED, Sonnet orchestrator handles all routing ──
-    // Kept for crisis tickets only (crisis handler runs before Sonnet)
-    if (isCrisisTicket) {
+    // Kept for NEW crisis tickets only (replies go through crisis follow-up handler + Sonnet)
+    if (isCrisisTicket && isNew) {
     const earlyPattern = await step.run("early-pattern-match", async () => {
       const m = await matchPatterns(wsId, null, msg);
       if (m && m.confidence >= 0.7) {
