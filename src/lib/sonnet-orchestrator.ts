@@ -371,7 +371,8 @@ ${convoBlock || `Customer: ${message.slice(0, 300)}`}
 ${completedActions.length > 0 ? `\nACTIONS ALREADY COMPLETED ON THIS TICKET:\n${completedActions.map(a => `- ${a}`).join("\n")}` : ""}
 
 AVAILABLE HANDLERS (use these when customer interaction is needed):
-Journeys:
+You do NOT build these — you just SELECT the right one and write a personalized lead-in message. The system builds the forms and handles the actions automatically.
+Journeys (interactive forms — on chat: lead-in text + embedded form in same message. On email: lead-in text + CTA button to mini-site. You write the lead-in text, the system builds the form automatically):
 ${journeyLines || "None"}
 Playbooks:
 ${playbookLines || "None"}
