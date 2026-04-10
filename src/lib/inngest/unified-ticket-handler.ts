@@ -753,38 +753,10 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
           .single();
         if (!crisis || crisis.status === "resolved") return null;
 
-        // Build available options for Haiku context
-        const flavorNames = [crisis.default_swap_title, ...((crisis.available_flavor_swaps as { title: string }[]) || []).map(f => f.title)].filter(Boolean);
-        const productNames = ((crisis.available_product_swaps as { productTitle: string }[]) || []).map(p => p.productTitle);
-
-        // Use Haiku to classify the customer's intent
-        const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
-        const intentCheck = await claude(
-          `A customer is replying to a crisis outreach about "${crisis.affected_product_title}" being out of stock.
-Their subscription was auto-swapped to "${crisis.default_swap_title}".
-Available flavor swaps: ${flavorNames.join(", ")}.
-Available product swaps: ${productNames.join(", ")}.
-Current status: ${action.tier1_response === "accepted_swap" ? "They already accepted a flavor swap" : "Pending response"}.
-If the customer mentions ANY product or action related to their subscription (even products from the swap list), classify it as crisis-related.
-
-Classify their message into one of these intents:
-- "change_flavor" — wants to switch to a different flavor of the same product
-- "change_product" — wants a completely different product instead
-- "pause" — wants to pause their subscription until the product is back
-- "remove_item" — wants to remove the affected item but keep the rest of their subscription
-- "cancel" — wants to cancel their subscription entirely
-- "question" — asking a question about the crisis or their subscription
-- "other" — something unrelated
-
-Customer message: "${cleanMsg}"
-
-Respond with EXACTLY one word.`, "haiku", 20);
-        const intent = (intentCheck || "other").toLowerCase().trim();
-
-        return { intent, actionId: action.id, crisisId: action.crisis_id, subscriptionId: action.subscription_id, segment: action.segment, currentTier: action.current_tier, tier1Response: action.tier1_response };
+        return { actionId: action.id, crisisId: action.crisis_id, subscriptionId: action.subscription_id, segment: action.segment, currentTier: action.current_tier, tier1Response: action.tier1_response };
       });
 
-      if (crisisFollowup && crisisFollowup.intent !== "question" && crisisFollowup.intent !== "other") {
+      if (crisisFollowup) {
         // Direct action execution — parse full request with Sonnet and execute
         const delay = await step.run("crisis-direct-delay", () => responseDelay(admin, wsId, st.ch));
         if (delay > 0) await step.sleep("crisis-direct-wait", `${delay}s`);
@@ -798,12 +770,25 @@ Respond with EXACTLY one word.`, "haiku", 20);
             .eq("id", crisisFollowup.crisisId).single();
           if (!crisis) return { status: "no_crisis" as const };
 
-          // Load subscription details
+          // Load crisis subscription details
           const { data: sub } = await admin.from("subscriptions")
             .select("shopify_contract_id, items, status")
             .eq("id", crisisFollowup.subscriptionId).single();
-          if (!sub?.shopify_contract_id) return { status: "no_sub" as const };
-          const contractId = sub.shopify_contract_id;
+          const contractId = sub?.shopify_contract_id || "";
+
+          // Load ALL customer subscriptions for full context
+          const { data: allSubs } = await admin.from("subscriptions")
+            .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count")
+            .eq("customer_id", st.custId!)
+            .eq("workspace_id", wsId)
+            .in("status", ["active", "paused"]);
+          const subsContext = (allSubs || []).map(s => ({
+            id: s.id,
+            contractId: s.shopify_contract_id,
+            status: s.status,
+            items: (s.items as { title: string; variant_id: string; quantity: number }[])?.map(i => `${i.title} (qty: ${i.quantity}, variant: ${i.variant_id})`).join(", ") || "unknown",
+            interval: `${s.billing_interval_count} ${s.billing_interval}`,
+          }));
 
           // Build available options for Sonnet
           const flavorOptions = [
@@ -821,15 +806,29 @@ Respond with EXACTLY one word.`, "haiku", 20);
             || crisis.default_swap_variant_id
             || crisis.affected_variant_id;
 
+          // Load recent conversation for multi-message context
+          const { data: recentMsgs } = await admin.from("ticket_messages")
+            .select("direction, author_type, body_clean, body")
+            .eq("ticket_id", tid).eq("visibility", "external")
+            .order("created_at", { ascending: false }).limit(6);
+          const convoContext = (recentMsgs || []).reverse().map(m => {
+            const who = m.direction === "inbound" ? "Customer" : "Agent";
+            const text = (m.body_clean || m.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+            return `${who}: ${text}`;
+          }).join("\n");
+
           const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
 
-          // Sonnet action planner
+          // Sonnet action planner — full context, no Haiku triage
           const planPrompt = `You are a subscription support agent. A customer replied to a crisis outreach about "${crisis.affected_product_title}" being out of stock.
 
-CURRENT STATE:
-- Their subscription currently has variant "${(action?.tier1_swapped_to as { title?: string })?.title || crisis.default_swap_title}" (auto-swapped from "${crisis.affected_product_title}")
-- Subscription items: ${JSON.stringify(sub.items)}
-- Segment: ${crisisFollowup.segment} (${crisisFollowup.segment === "berry_only" ? "only has the affected item" : "has other items too"})
+CRISIS CONTEXT:
+- Affected product: ${crisis.affected_product_title} (variant: ${crisis.affected_variant_id})
+- Auto-swapped to: ${crisis.default_swap_title} (variant: ${crisis.default_swap_variant_id})
+- Current swap: ${(action?.tier1_swapped_to as { title?: string })?.title || crisis.default_swap_title}
+
+ALL CUSTOMER SUBSCRIPTIONS:
+${subsContext.map(s => `- ID: ${s.id} | Contract: ${s.contractId} | Status: ${s.status} | Items: ${s.items} | Billing: every ${s.interval}`).join("\n")}
 
 AVAILABLE FLAVOR SWAPS (same product, different flavor):
 ${flavorOptions.map(f => `- "${f.title}" (variantId: ${f.variantId})`).join("\n")}
@@ -839,32 +838,40 @@ ${productOptions.map(p => `- ${p.productTitle}: ${p.variants.map(v => `"${v.titl
 
 COUPON: ${crisis.tier2_coupon_code ? `${crisis.tier2_coupon_percent}% off with code ${crisis.tier2_coupon_code}` : "None available"}
 
-CUSTOMER MESSAGE: "${cleanMsg}"
+RECENT CONVERSATION:
+${convoContext}
 
-Based on what the customer wants, return a JSON action plan. Available action types:
-- "swap_variant": swap current variant to a new one. Requires from_variant_id, to_variant_id, to_title, and optionally quantity (default 1)
-- "pause": pause the subscription until the product is back in stock
-- "remove_item": remove the affected item (keep other subscription items)
-- "cancel": customer wants to cancel entirely
-- "apply_coupon": apply the crisis coupon code
+LATEST CUSTOMER MESSAGE: "${cleanMsg}"
 
-If you can't determine exactly what the customer wants, set needs_clarification to true and write a short, friendly clarification question.
+Analyze the FULL conversation and determine what the customer needs. Available action types:
+- "swap_variant": swap a variant on a subscription. Requires subscription_id, from_variant_id, to_variant_id, to_title, and optionally quantity
+- "change_quantity": change quantity of an item. Requires subscription_id, variant_id, quantity
+- "cancel_subscription": cancel a specific subscription. Requires subscription_id
+- "pause": pause the crisis subscription until the product is back in stock
+- "remove_item": remove the affected item from subscription (keep other items)
+- "apply_coupon": apply the crisis coupon code. Requires subscription_id
+- "escalate": customer explicitly requested a human agent or the request is too complex for automation
+
+If the customer has duplicate subscriptions and wants one cancelled, identify which one to cancel based on their message.
+If you can't determine what they want, set needs_clarification to true with a friendly question.
+If the customer explicitly asks for a human/person/agent, set escalate to true.
 
 Return ONLY valid JSON:
 {
-  "actions": [{ "type": "...", "from_variant_id": "...", "to_variant_id": "...", "to_title": "...", "quantity": 1 }],
+  "actions": [{ "type": "...", "subscription_id": "...", "from_variant_id": "...", "to_variant_id": "...", "to_title": "...", "quantity": 1 }],
   "pause": false,
   "remove_item": false,
   "cancel": false,
+  "escalate": false,
   "needs_clarification": false,
   "clarification_question": null,
   "confirmation_summary": "short description of what was done"
 }`;
 
-          const planResult = await claude(planPrompt, "sonnet", 500);
+          const planResult = await claude(planPrompt, "sonnet", 600);
           let plan: {
-            actions: { type: string; from_variant_id?: string; to_variant_id?: string; to_title?: string; quantity?: number }[];
-            pause: boolean; remove_item: boolean; cancel: boolean;
+            actions: { type: string; subscription_id?: string; from_variant_id?: string; to_variant_id?: string; to_title?: string; variant_id?: string; quantity?: number }[];
+            pause: boolean; remove_item: boolean; cancel: boolean; escalate: boolean;
             needs_clarification: boolean; clarification_question: string | null;
             confirmation_summary: string;
           };
@@ -872,7 +879,7 @@ Return ONLY valid JSON:
             const jsonMatch = planResult.match(/\{[\s\S]*\}/);
             plan = JSON.parse(jsonMatch?.[0] || "{}");
           } catch {
-            plan = { actions: [], pause: false, remove_item: false, cancel: false, needs_clarification: true, clarification_question: "I want to help! Could you let me know exactly what you'd like us to do with your subscription?", confirmation_summary: "" };
+            plan = { actions: [], pause: false, remove_item: false, cancel: false, escalate: false, needs_clarification: true, clarification_question: "I want to help! Could you let me know exactly what you'd like us to do with your subscription?", confirmation_summary: "" };
           }
 
           await sysNote(admin, tid, `[System] Sonnet raw: ${planResult.slice(0, 300)}`);
@@ -881,6 +888,14 @@ Return ONLY valid JSON:
           // Check sandbox mode
           const { data: wsData } = await admin.from("workspaces").select("sandbox_mode").eq("id", wsId).single();
           const isSandbox = wsData?.sandbox_mode === true;
+
+          // Escalate if requested
+          if (plan.escalate) {
+            await sysNote(admin, tid, `[System] Crisis handler: customer requested human agent. Escalating.`);
+            await sendWithDelay(admin, wsId, tid, st.ch, "I completely understand. Let me connect you with a member of our team who can help. Someone will follow up with you shortly.", isSandbox);
+            await admin.from("tickets").update({ handled_by: null, assigned_to: null }).eq("id", tid);
+            return { status: "escalated" as const };
+          }
 
           // Treat empty/invalid plans as needing clarification
           const hasAnyAction = (plan.actions?.length > 0) || plan.pause || plan.remove_item || plan.cancel;
@@ -909,9 +924,14 @@ Return ONLY valid JSON:
           const { appstleSubscriptionAction } = await import("@/lib/appstle");
 
           for (const action of plan.actions || []) {
+            // Resolve which subscription/contract to operate on
+            const actionContractId = action.subscription_id
+              ? (allSubs || []).find(s => s.id === action.subscription_id)?.shopify_contract_id || contractId
+              : contractId;
+
             if (action.type === "swap_variant" && action.to_variant_id) {
               const fromId = action.from_variant_id || currentVariant;
-              const result = await subSwapVariant(wsId, contractId, fromId, action.to_variant_id, action.quantity || 1);
+              const result = await subSwapVariant(wsId, actionContractId, fromId, action.to_variant_id, action.quantity || 1);
               if (result.success) {
                 executed.push(`Swapped to ${action.to_title || action.to_variant_id}${action.quantity && action.quantity > 1 ? ` (qty: ${action.quantity})` : ""}`);
                 await admin.from("crisis_customer_actions").update({
@@ -921,6 +941,24 @@ Return ONLY valid JSON:
                 }).eq("id", crisisFollowup.actionId);
               } else {
                 errors.push(`Swap failed: ${result.error}`);
+              }
+            }
+            if (action.type === "cancel_subscription" && action.subscription_id) {
+              const result = await appstleSubscriptionAction(wsId, actionContractId, "cancel", "Crisis — customer requested cancellation of duplicate subscription");
+              if (result.success) {
+                executed.push(`Cancelled duplicate subscription`);
+                await admin.from("subscriptions").update({ status: "cancelled" }).eq("id", action.subscription_id);
+              } else {
+                errors.push(`Cancel subscription failed: ${result.error}`);
+              }
+            }
+            if (action.type === "change_quantity" && action.variant_id && action.quantity) {
+              // Change quantity by swapping variant to itself with new quantity
+              const result = await subSwapVariant(wsId, actionContractId, action.variant_id, action.variant_id, action.quantity);
+              if (result.success) {
+                executed.push(`Changed quantity to ${action.quantity}`);
+              } else {
+                errors.push(`Quantity change failed: ${result.error}`);
               }
             }
             if (action.type === "apply_coupon" && crisis.tier2_coupon_code) {
@@ -991,11 +1029,7 @@ Return ONLY valid JSON:
         }
       }
 
-      if (crisisFollowup && (crisisFollowup.intent === "question" || crisisFollowup.intent === "other")) {
-        // Let it fall through to AI — but add crisis context to the prompt
-        await sysNote(admin, tid, `[System] Crisis follow-up (${crisisFollowup.intent}). Routing to AI with crisis context.`);
-        // Fall through to normal AI pipeline
-      }
+      // Crisis tickets are fully handled by Sonnet — no fall-through to AI pipeline
     }
 
     // ── 3. Journey/playbook re-nudge with conversation drift detection ──
