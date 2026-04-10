@@ -101,11 +101,10 @@ export async function buildSonnetContext(
     Promise.resolve({ data: null as { discount_code: string; discount_value: number; expires_at: string }[] | null }),
     admin
       .from("ticket_messages")
-      .select("direction, body_clean, body")
+      .select("direction, body_clean, body, visibility, author_type")
       .eq("ticket_id", ticketId)
-      .eq("visibility", "external")
       .order("created_at", { ascending: false })
-      .limit(4),
+      .limit(12),
     admin
       .from("journey_definitions")
       .select("name, trigger_intent, description")
@@ -195,13 +194,33 @@ export async function buildSonnetContext(
   }
 
   // Conversation history (reverse to chronological order)
+  // Include system notes about completed actions so Sonnet knows what's been done
   let convoBlock = "";
+  const completedActions: string[] = [];
   if (messages?.length) {
     const ordered = [...messages].reverse();
     convoBlock = ordered
+      .filter((m: any) => {
+        // Include external messages + system notes about actions taken
+        if (m.visibility === "external") return true;
+        if (m.visibility === "internal" && m.author_type === "system") {
+          const body = (m.body || "") as string;
+          // Include action completion notes
+          if (body.includes("Action completed:") || body.includes("Applied") || body.includes("Added") ||
+              body.includes("Redeemed") || body.includes("Removed") || body.includes("Swapped") ||
+              body.includes("Skipped") || body.includes("Resumed") || body.includes("Changed") ||
+              body.includes("All done") || body.includes("Here's what we")) {
+            completedActions.push(body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200));
+            return true;
+          }
+        }
+        return false;
+      })
       .map((m: any) => {
-        const text = (m.body_clean || m.body || "").slice(0, 150).replace(/\n/g, " ");
-        const who = m.direction === "inbound" ? "Customer" : "Agent";
+        const text = (m.body_clean || m.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+        const who = m.direction === "inbound" ? "Customer"
+          : m.author_type === "system" ? "[System Action]"
+          : "Agent";
         return `${who}: ${text}`;
       })
       .join("\n");
@@ -259,6 +278,7 @@ LOYALTY: ${loyaltyLine}${crisisLine}
 ${unlinkedMatches.length > 0 ? `POTENTIAL LINKED ACCOUNTS (not yet linked): ${unlinkedMatches.map((m: { email: string }) => m.email).join(", ")}` : ""}
 CONVERSATION:
 ${convoBlock || `Customer: ${message.slice(0, 300)}`}
+${completedActions.length > 0 ? `\nACTIONS ALREADY COMPLETED ON THIS TICKET:\n${completedActions.map(a => `- ${a}`).join("\n")}` : ""}
 
 AVAILABLE HANDLERS (use these when customer interaction is needed):
 Journeys:
@@ -296,7 +316,8 @@ RULES:
 - For product/policy questions → use matching macro or KB article, or generate ai_response
 - NEVER cancel a subscription directly — always use the cancel journey
 - NEVER issue refunds directly — always use the appropriate playbook
-- If unclear what customer wants → set needs_clarification with a friendly question
+- IMPORTANT: Before treating a customer message as a new request, check ACTIONS ALREADY COMPLETED and the conversation history. If the customer is restating, confirming, or thanking you for something already done → respond with a warm "You're all set!" confirmation. Reference what was done with genuine enthusiasm (e.g. "You're all set! I can't wait to hear how you like the Creatine Prime+"). Do NOT ask for clarification or re-execute actions that are already completed.
+- If unclear what customer wants AND no matching completed actions → set needs_clarification with a friendly question
 - If truly impossible to handle → escalate
 - Do NOT escalate just because a customer asks for a "human" — resolve if you can
 
