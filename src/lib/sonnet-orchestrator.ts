@@ -92,18 +92,12 @@ export async function buildSonnetContext(
       .in("status", ["active", "paused"]),
     admin
       .from("loyalty_members")
-      .select("points_balance")
+      .select("id, points_balance")
       .eq("workspace_id", workspaceId)
       .eq("customer_id", customerId)
       .maybeSingle(),
-    admin
-      .from("loyalty_redemptions")
-      .select("discount_code, discount_value, expires_at")
-      .eq("workspace_id", workspaceId)
-      .eq("customer_id", customerId)
-      .eq("status", "active")
-      .not("used_at", "is", null)
-      .is("used_at", null),
+    // Redemptions query — needs member_id, resolved after parallel queries
+    Promise.resolve({ data: null as { discount_code: string; discount_value: number; expires_at: string }[] | null }),
     admin
       .from("ticket_messages")
       .select("direction, body_clean, body")
@@ -168,9 +162,21 @@ export async function buildSonnetContext(
 
   // Loyalty
   let loyaltyLine = "No loyalty data";
+  // Fetch unused loyalty coupons (needs member_id from loyalty query)
+  let actualRedemptions = redemptions;
+  if (loyaltyMember?.id) {
+    const { data: memberRedemptions } = await admin
+      .from("loyalty_redemptions")
+      .select("discount_code, discount_value, expires_at")
+      .eq("member_id", loyaltyMember.id)
+      .eq("status", "active")
+      .is("used_at", null);
+    actualRedemptions = memberRedemptions;
+  }
+
   if (loyaltyMember) {
     const pts = loyaltyMember.points_balance || 0;
-    const coupons = (redemptions || [])
+    const coupons = (actualRedemptions || [])
       .map((r: any) => {
         const exp = r.expires_at
           ? new Date(r.expires_at).toLocaleDateString("en-US", {
