@@ -64,12 +64,36 @@ export const deliverPendingSends = inngest.createFunction(
           .eq("id", msg.ticket_id)
           .single();
 
-        if (!ticket || ticket.channel !== "email") {
-          // Non-email channel — just mark as sent
-          await admin.from("ticket_messages").update({
-            sent_at: new Date().toISOString(),
-            pending_send_at: null,
-          }).eq("id", msg.id);
+        if (!ticket) {
+          await admin.from("ticket_messages").update({ sent_at: new Date().toISOString(), pending_send_at: null }).eq("id", msg.id);
+          return;
+        }
+
+        // Chat channel — check if customer is idle, send via email if so
+        if (ticket.channel === "chat") {
+          await admin.from("ticket_messages").update({ sent_at: new Date().toISOString(), pending_send_at: null }).eq("id", msg.id);
+          delivered++;
+
+          const { getDeliveryChannel } = await import("@/lib/delivery-channel");
+          const effectiveCh = await getDeliveryChannel(msg.ticket_id, "chat");
+          if (effectiveCh === "email") {
+            const email = (ticket.customers as unknown as { email: string })?.email;
+            if (email) {
+              const { data: ws } = await admin.from("workspaces").select("name").eq("id", ticket.workspace_id).single();
+              await sendTicketReply({
+                workspaceId: ticket.workspace_id, toEmail: email,
+                subject: `Re: ${ticket.subject || "Your chat with us"}`,
+                body: msg.body, inReplyTo: null,
+                agentName: "Support", workspaceName: ws?.name || "",
+              });
+            }
+          }
+          return;
+        }
+
+        if (ticket.channel !== "email") {
+          // Other non-email channels — just mark as sent
+          await admin.from("ticket_messages").update({ sent_at: new Date().toISOString(), pending_send_at: null }).eq("id", msg.id);
           delivered++;
           return;
         }
