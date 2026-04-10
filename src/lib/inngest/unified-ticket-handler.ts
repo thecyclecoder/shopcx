@@ -1220,6 +1220,40 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
       }
     }
 
+    // ── 4. SONNET ORCHESTRATOR ──
+    // Sonnet analyzes the full request and decides the best action. Replaces pattern matching,
+    // AI classification, confidence gate, and routeExec cascading lookup.
+    {
+      const { buildSonnetContext, callSonnetOrchestrator } = await import("@/lib/sonnet-orchestrator");
+      const { executeSonnetDecision } = await import("@/lib/action-executor");
+
+      const sonnetDecision = await step.run("sonnet-orchestrate", async () => {
+        const prompt = await buildSonnetContext(wsId, tid, st.custId || "", msg, st.ch, pers);
+        const decision = await callSonnetOrchestrator(prompt);
+        await sysNote(admin, tid, `[System] Sonnet: ${decision.action_type} — ${decision.reasoning}`);
+        return decision;
+      });
+
+      const delay = await step.run("sonnet-delay", () => responseDelay(admin, wsId, st.ch));
+      if (delay > 0) await step.sleep("sonnet-wait", `${delay}s`);
+
+      await step.run("sonnet-execute", async () => {
+        if (await newerActivity(admin, tid, t0)) return;
+        const isSandbox = cfg.sandbox === true;
+        await executeSonnetDecision(
+          { admin, workspaceId: wsId, ticketId: tid, customerId: st.custId || "", channel: st.ch, sandbox: isSandbox },
+          sonnetDecision,
+          pers,
+          async (m, sb) => sendWithDelay(admin, wsId, tid, st.ch, m, sb),
+          async (m) => { await sysNote(admin, tid, m); },
+        );
+        await setStatus(admin, tid, cfg.auto_resolve);
+      });
+
+      return { status: `sonnet_${sonnetDecision.action_type}`, reasoning: sonnetDecision.reasoning };
+    }
+
+    /* ── OLD PIPELINE (disabled — replaced by Sonnet orchestrator above) ──
     // ── 4. Clarification mode ──
     if (st.turn > 0 && st.turn < MAX_CLARIFY) {
       return await step.run("clarify", async () => {
@@ -1458,6 +1492,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
       await routeExec(admin, wsId, tid, st.ch, ai.intent, ai.confidence, msg, ai.custCtx, st.hasCust, cfg, pers, t0, st.custId || null, pendingAccountLink);
     });
     return { status: "routed", intent: ai.intent, confidence: ai.confidence };
+    ── END OLD PIPELINE ── */
   },
 );
 
