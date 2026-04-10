@@ -11,6 +11,7 @@ const EVENT_TYPES = [
   { key: "dunning_failed", label: "Dunning Failed", description: "When dunning exhausts all payment methods" },
   { key: "csat_negative", label: "Negative CSAT", description: "When a customer gives a negative CSAT score" },
   { key: "cancel_completed", label: "Cancellation", description: "When a customer completes a subscription cancellation" },
+  { key: "partial_refund", label: "Partial Refund", description: "When AI issues a partial refund to a customer" },
 ];
 
 interface Rule {

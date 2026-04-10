@@ -11,6 +11,7 @@ import {
   buildCsatMessage,
   buildCancelMessage,
   buildNewTicketMessage,
+  buildPartialRefundMessage,
 } from "@/lib/slack";
 
 type EventType =
@@ -20,7 +21,8 @@ type EventType =
   | "fraud_case"
   | "dunning_failed"
   | "csat_negative"
-  | "cancel_completed";
+  | "cancel_completed"
+  | "partial_refund";
 
 const MESSAGE_BUILDERS: Record<EventType, (data: Record<string, unknown>) => { blocks: unknown[]; text: string }> = {
   escalation: (d) => buildEscalationMessage(d as Parameters<typeof buildEscalationMessage>[0]),
@@ -30,6 +32,7 @@ const MESSAGE_BUILDERS: Record<EventType, (data: Record<string, unknown>) => { b
   csat_negative: (d) => buildCsatMessage(d as Parameters<typeof buildCsatMessage>[0]),
   cancel_completed: (d) => buildCancelMessage(d as Parameters<typeof buildCancelMessage>[0]),
   new_ticket: (d) => buildNewTicketMessage(d as Parameters<typeof buildNewTicketMessage>[0]),
+  partial_refund: (d) => buildPartialRefundMessage(d as Parameters<typeof buildPartialRefundMessage>[0]),
 };
 
 export async function dispatchSlackNotification(

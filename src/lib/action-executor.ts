@@ -370,17 +370,15 @@ const directActionHandlers: Record<
 
 async function notifySlack(ctx: ActionContext, p: ActionParams, amountDecimal: string): Promise<void> {
   try {
-    const { data: ws } = await ctx.admin.from("workspaces").select("slack_webhook_url").eq("id", ctx.workspaceId).single();
-    if (ws?.slack_webhook_url) {
-      const { data: cust } = await ctx.admin.from("customers").select("email, first_name").eq("id", ctx.customerId).single();
-      await fetch(ws.slack_webhook_url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: `💰 *Partial Refund Issued by AI*\nAmount: $${amountDecimal}\nReason: ${p.reason || "price adjustment"}\nCustomer: ${cust?.first_name || ""} (${cust?.email || ""})\nOrder: #${p.shopify_order_id}\nTicket: https://shopcx.ai/dashboard/tickets/${ctx.ticketId}`,
-        }),
-      });
-    }
+    const { dispatchSlackNotification } = await import("@/lib/slack-notify");
+    const { data: cust } = await ctx.admin.from("customers").select("email, first_name, name").eq("id", ctx.customerId).single();
+    await dispatchSlackNotification(ctx.workspaceId, "partial_refund", {
+      ticketId: ctx.ticketId,
+      customer: { name: cust?.name || cust?.first_name || "", email: cust?.email || "" },
+      amount: amountDecimal,
+      reason: p.reason || "price adjustment",
+      orderNumber: p.shopify_order_id || "",
+    });
   } catch { /* non-fatal */ }
 }
 

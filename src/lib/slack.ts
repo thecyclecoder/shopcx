@@ -360,6 +360,28 @@ export function buildCancelMessage(data: {
   return { blocks, text };
 }
 
+export function buildPartialRefundMessage(data: {
+  ticketId?: string;
+  customer: { name?: string; email?: string };
+  amount: string;
+  reason?: string;
+  orderNumber?: string;
+}): { blocks: unknown[]; text: string } {
+  const text = `AI issued partial refund of $${data.amount} to ${data.customer.email}`;
+  const blocks = [
+    headerBlock("💰", "Partial Refund Issued by AI"),
+    sectionBlock(
+      `*Customer:* ${customerLine(data.customer)}\n` +
+      `*Amount:* $${data.amount}\n` +
+      (data.orderNumber ? `*Order:* #${data.orderNumber}\n` : "") +
+      (data.reason ? `*Reason:* ${data.reason}` : "")
+    ),
+    dividerBlock(),
+    ...(data.ticketId ? [actionsBlock(data.ticketId)] : []),
+  ];
+  return { blocks, text };
+}
+
 export function buildNewTicketMessage(data: {
   ticketId: string;
   ticketNumber?: string;
