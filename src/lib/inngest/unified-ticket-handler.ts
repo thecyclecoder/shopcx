@@ -924,8 +924,13 @@ Return ONLY valid JSON:
           }
 
           // Live execution
-          const { subSwapVariant, subRemoveItem } = await import("@/lib/subscription-items");
+          const { subSwapVariant, subRemoveItem, subUpdateLineItemPrice } = await import("@/lib/subscription-items");
           const { appstleSubscriptionAction } = await import("@/lib/appstle");
+
+          // Load preserved base price for price-honoring swaps
+          const { data: priceAction } = await admin.from("crisis_customer_actions")
+            .select("preserved_base_price_cents").eq("id", crisisFollowup.actionId).single();
+          const preservedPrice = priceAction?.preserved_base_price_cents;
 
           for (const action of plan.actions || []) {
             // Resolve which subscription/contract to operate on
@@ -938,6 +943,11 @@ Return ONLY valid JSON:
               const result = await subSwapVariant(wsId, actionContractId, fromId, action.to_variant_id, action.quantity || 1);
               if (result.success) {
                 executed.push(`Swapped to ${action.to_title || action.to_variant_id}${action.quantity && action.quantity > 1 ? ` (qty: ${action.quantity})` : ""}`);
+                // Preserve base price on the new variant
+                if (preservedPrice) {
+                  await subUpdateLineItemPrice(wsId, actionContractId, action.to_variant_id, preservedPrice);
+                  executed.push(`Base price preserved at $${(preservedPrice / 100).toFixed(2)}`);
+                }
                 await admin.from("crisis_customer_actions").update({
                   tier1_response: "accepted_swap",
                   tier1_swapped_to: { variantId: action.to_variant_id, title: action.to_title, quantity: action.quantity || 1 },

@@ -147,6 +147,81 @@ export async function subChangeQuantity(
   return result;
 }
 
+/**
+ * Update the base price of a line item on a subscription via Appstle.
+ * Used after crisis swaps to preserve the customer's original pricing.
+ */
+export async function subUpdateLineItemPrice(
+  workspaceId: string,
+  contractId: string,
+  variantId: string,
+  basePriceCents: number,
+): Promise<{ success: boolean; error?: string }> {
+  const config = await getAppstleConfig(workspaceId);
+  if (!config) return { success: false, error: "Appstle not configured" };
+
+  // Use the update-line-item endpoint to set variantId + price in one call
+  const priceDecimal = (basePriceCents / 100).toFixed(2);
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-line-item?contractId=${contractId}&variantId=${variantId}&price=${priceDecimal}&isPricePerUnit=true`,
+      {
+        method: "PUT",
+        headers: { "X-API-Key": config.apiKey, "Content-Type": "application/json" },
+        cache: "no-store",
+      },
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("Appstle updateLineItemPrice error:", text);
+      return { success: false, error: `Appstle API error: ${res.status}` };
+    }
+    return { success: true };
+  } catch (err) {
+    console.error("Appstle updateLineItemPrice failed:", err);
+    return { success: false, error: String(err) };
+  }
+}
+
+/**
+ * Get the price the customer was paying for an item from their most recent order.
+ * Returns price_cents from the matching line item.
+ */
+export async function getLastOrderPrice(
+  workspaceId: string,
+  customerId: string,
+  sku: string | null,
+  variantId: string | null,
+): Promise<number | null> {
+  const admin = createAdminClient();
+  const { data: orders } = await admin.from("orders")
+    .select("line_items")
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", customerId)
+    .order("created_at", { ascending: false })
+    .limit(3);
+
+  for (const order of orders || []) {
+    const items = (order.line_items as { sku?: string; variant_id?: string; price_cents?: number }[]) || [];
+    const match = items.find(i =>
+      (sku && i.sku && i.sku.toUpperCase() === sku.toUpperCase()) ||
+      (variantId && i.variant_id && String(i.variant_id) === String(variantId)),
+    );
+    if (match?.price_cents) return match.price_cents;
+  }
+  return null;
+}
+
+/**
+ * Calculate the base price to set so that after a percentage discount,
+ * the customer pays the target price.
+ * E.g., targetPriceCents=2996, discountPercent=25 → basePriceCents=3995
+ */
+export function calcBasePrice(targetPriceCents: number, discountPercent: number): number {
+  if (discountPercent <= 0 || discountPercent >= 100) return targetPriceCents;
+  return Math.round(targetPriceCents / (1 - discountPercent / 100));
+}
+
 /** Swap one variant for another (e.g., change flavor or swap product) */
 export async function subSwapVariant(
   workspaceId: string,

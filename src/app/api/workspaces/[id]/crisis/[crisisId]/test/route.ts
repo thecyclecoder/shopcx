@@ -121,10 +121,18 @@ export async function POST(
   const nonAffectedItems = realItems.filter(i => i !== affectedItem);
   const segment = nonAffectedItems.length === 0 ? "berry_only" : "berry_plus";
 
-  // Auto-swap via Appstle (skip in test if no default swap configured)
+  // Auto-swap via Appstle + preserve base price
+  let preservedBasePriceCents: number | null = null;
   if (crisis.default_swap_variant_id && sub.shopify_contract_id) {
     try {
-      const { subSwapVariant } = await import("@/lib/subscription-items");
+      const { subSwapVariant, getLastOrderPrice, calcBasePrice, subUpdateLineItemPrice } = await import("@/lib/subscription-items");
+
+      // Get price customer was paying before swap
+      const lastPrice = await getLastOrderPrice(workspaceId, sub.customer_id, affectedItem.sku || null, affectedItem.variant_id || null);
+      if (lastPrice) {
+        preservedBasePriceCents = calcBasePrice(lastPrice, 25);
+      }
+
       await subSwapVariant(
         workspaceId,
         sub.shopify_contract_id,
@@ -132,6 +140,11 @@ export async function POST(
         crisis.default_swap_variant_id,
         affectedItem.quantity || 1,
       );
+
+      // Update price on new variant to preserve customer's pricing
+      if (preservedBasePriceCents) {
+        await subUpdateLineItemPrice(workspaceId, sub.shopify_contract_id, crisis.default_swap_variant_id, preservedBasePriceCents);
+      }
     } catch { /* non-fatal */ }
   }
 
@@ -172,6 +185,7 @@ export async function POST(
       ? { variantId: crisis.default_swap_variant_id, title: crisis.default_swap_title || "default swap" }
       : null,
     ticket_id: ticket?.id || null,
+    preserved_base_price_cents: preservedBasePriceCents,
   }).select("id").single();
 
   // Create journey session

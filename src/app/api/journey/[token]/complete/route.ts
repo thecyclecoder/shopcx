@@ -364,14 +364,22 @@ export async function POST(
           `your ${metadata.affectedProductTitle || "item"} has been switched to ${metadata.defaultSwapTitle || "the default flavor"}`,
         );
       } else if (flavorChoice) {
-        // Swap to chosen flavor via Appstle
+        // Swap to chosen flavor via Appstle + preserve base price
         const { data: sub } = await admin.from("subscriptions")
           .select("shopify_contract_id").eq("id", subscriptionId).single();
         if (sub?.shopify_contract_id) {
-          const { subSwapVariant } = await import("@/lib/subscription-items");
+          const { subSwapVariant, subUpdateLineItemPrice } = await import("@/lib/subscription-items");
           const defaultSwapId = (metadata.defaultSwapVariantId as string) || affectedVariantId;
           await subSwapVariant(wsId, sub.shopify_contract_id, defaultSwapId, flavorChoice);
           actionLog.push(`Swapped to variant ${flavorChoice} via Appstle`);
+
+          // Preserve customer's original base price
+          const { data: action } = await admin.from("crisis_customer_actions")
+            .select("preserved_base_price_cents").eq("id", actionId).single();
+          if (action?.preserved_base_price_cents) {
+            await subUpdateLineItemPrice(wsId, sub.shopify_contract_id, flavorChoice, action.preserved_base_price_cents);
+            actionLog.push(`Base price preserved at $${(action.preserved_base_price_cents / 100).toFixed(2)}`);
+          }
         }
         const chosenLabel = responses?.flavor_choice?.label || flavorChoice;
         await admin.from("crisis_customer_actions").update({
@@ -440,6 +448,15 @@ export async function POST(
             || affectedVariantId;
           await subSwapVariant(wsId, sub.shopify_contract_id, currentVariant, swapVariantId, qty);
           actionLog.push(`Product swapped to ${swapVariantId} x${qty}`);
+
+          // Preserve customer's original base price
+          const { data: priceRec } = await admin.from("crisis_customer_actions")
+            .select("preserved_base_price_cents").eq("id", actionId).single();
+          if (priceRec?.preserved_base_price_cents) {
+            const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
+            await subUpdateLineItemPrice(wsId, sub.shopify_contract_id, swapVariantId, priceRec.preserved_base_price_cents);
+            actionLog.push(`Base price preserved at $${(priceRec.preserved_base_price_cents / 100).toFixed(2)}`);
+          }
 
           // Apply coupon if configured — removes existing coupons first
           const couponCode = metadata.tier2CouponCode as string;

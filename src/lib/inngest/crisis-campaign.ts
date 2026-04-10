@@ -132,10 +132,19 @@ export const crisisDailyCampaign = inngest.createFunction(
           const nonAffectedItems = realItems.filter(i => i !== affectedItem);
           const segment = nonAffectedItems.length === 0 ? "berry_only" : "berry_plus";
 
-          // Auto-swap the item to default flavor via Appstle
+          // Auto-swap the item to default flavor via Appstle + preserve base price
+          let preservedBasePriceCents: number | null = null;
           if (crisis.default_swap_variant_id && sub.contractId) {
             try {
-              const { subSwapVariant } = await import("@/lib/subscription-items");
+              const { subSwapVariant, getLastOrderPrice, calcBasePrice, subUpdateLineItemPrice } = await import("@/lib/subscription-items");
+
+              // Get the price customer was paying before the swap
+              const lastPrice = await getLastOrderPrice(crisis.workspace_id, sub.customerId, affectedItem.sku || null, affectedItem.variant_id || null);
+              if (lastPrice) {
+                // Calculate base price so that after 25% discount, they pay the same
+                preservedBasePriceCents = calcBasePrice(lastPrice, 25);
+              }
+
               await subSwapVariant(
                 crisis.workspace_id,
                 sub.contractId,
@@ -143,6 +152,11 @@ export const crisisDailyCampaign = inngest.createFunction(
                 crisis.default_swap_variant_id,
                 affectedItem.quantity || 1,
               );
+
+              // Update the price on the new variant to preserve customer's pricing
+              if (preservedBasePriceCents) {
+                await subUpdateLineItemPrice(crisis.workspace_id, sub.contractId, crisis.default_swap_variant_id, preservedBasePriceCents);
+              }
             } catch { /* non-fatal */ }
           }
 
@@ -171,6 +185,7 @@ export const crisisDailyCampaign = inngest.createFunction(
               ? { variantId: crisis.default_swap_variant_id, title: crisis.default_swap_title || "default swap" }
               : null,
             ticket_id: ticket?.id || null,
+            preserved_base_price_cents: preservedBasePriceCents,
           }).select("id").single();
 
           // Create a journey session for Tier 1 flavor swap
