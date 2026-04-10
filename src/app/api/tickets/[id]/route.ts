@@ -208,6 +208,13 @@ export async function PATCH(
     return NextResponse.json({ success: true });
   }
 
+  // Edit a pending outbound message
+  if (body.edit_pending_message && body.new_body) {
+    const html = `<p>${(body.new_body as string).replace(/\n/g, "</p><p>")}</p>`;
+    await admin.from("ticket_messages").update({ body: html }).eq("id", body.edit_pending_message).eq("ticket_id", ticketId).is("sent_at", null);
+    return NextResponse.json({ success: true });
+  }
+
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
 
   if ("status" in body) {

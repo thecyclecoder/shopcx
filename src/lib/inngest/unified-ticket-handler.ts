@@ -911,9 +911,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
         return decision;
       });
 
-      const delay = await step.run("sonnet-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
-      if (delay > 0) await step.sleep("sonnet-wait", `${delay}s`);
-
+      // Actions execute immediately — message delay handled by sendWithDelay (pending_send_at)
       await step.run("sonnet-execute", async () => {
         if (await newerActivity(admin, tid, t0)) return;
         const { data: wsForSandbox } = await admin.from("workspaces").select("sandbox_mode").eq("id", wsId).single();

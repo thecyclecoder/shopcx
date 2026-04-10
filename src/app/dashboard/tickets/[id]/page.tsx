@@ -1131,6 +1131,24 @@ export default function TicketDetailPage() {
                         </svg>
                         Sending at {new Date((m as TicketMessage & { pending_send_at: string }).pending_send_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
                         <button
+                          onClick={() => {
+                            const current = (m.body || "").replace(/<[^>]*>/g, "").trim();
+                            const edited = prompt("Edit message before sending:", current);
+                            if (edited !== null && edited !== current) {
+                              fetch(`/api/tickets/${id}`, {
+                                method: "PATCH",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ edit_pending_message: m.id, new_body: edited }),
+                              }).then(() => {
+                                setMessages(prev => prev.map(pm => pm.id === m.id ? { ...pm, body: `<p>${edited.replace(/\n/g, "</p><p>")}</p>` } as typeof pm : pm));
+                              });
+                            }
+                          }}
+                          className="ml-1 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300 hover:bg-amber-500/30"
+                        >
+                          Edit
+                        </button>
+                        <button
                           onClick={async () => {
                             await fetch(`/api/tickets/${id}`, {
                               method: "PATCH",
@@ -1139,7 +1157,7 @@ export default function TicketDetailPage() {
                             });
                             setMessages(prev => prev.map(pm => pm.id === m.id ? { ...pm, send_cancelled: true } as typeof pm : pm));
                           }}
-                          className="ml-1 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300 hover:bg-amber-500/30"
+                          className="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-300 hover:bg-red-500/30"
                         >
                           Cancel
                         </button>
