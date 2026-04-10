@@ -340,6 +340,20 @@ async function handleDirectAction(
     return;
   }
 
+  // Resolve contract IDs — Sonnet might return UUIDs instead of Shopify contract IDs
+  for (const action of actions) {
+    if (action.contract_id && action.contract_id.includes("-")) {
+      // Looks like a UUID — resolve to Shopify contract ID
+      const { data: sub } = await ctx.admin.from("subscriptions")
+        .select("shopify_contract_id")
+        .eq("id", action.contract_id)
+        .maybeSingle();
+      if (sub?.shopify_contract_id) {
+        action.contract_id = sub.shopify_contract_id;
+      }
+    }
+  }
+
   // Execute each action and collect results
   const results: { action: ActionParams; result: ActionResult }[] = [];
 

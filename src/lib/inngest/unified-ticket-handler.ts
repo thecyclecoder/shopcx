@@ -1239,7 +1239,8 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
 
       await step.run("sonnet-execute", async () => {
         if (await newerActivity(admin, tid, t0)) return;
-        const isSandbox = cfg.sandbox === true;
+        const { data: wsForSandbox } = await admin.from("workspaces").select("sandbox_mode").eq("id", wsId).single();
+        const isSandbox = wsForSandbox?.sandbox_mode === true || cfg.sandbox === true;
         await executeSonnetDecision(
           { admin, workspaceId: wsId, ticketId: tid, customerId: st.custId || "", channel: st.ch, sandbox: isSandbox },
           sonnetDecision,
