@@ -778,7 +778,7 @@ export default function TicketDetailPage() {
       </div>
 
       {/* Left column - conversation */}
-      <div className={`flex min-h-0 flex-1 flex-col ${mobileSection !== "conversation" ? "hidden md:flex" : ""}`}>
+      <div className={`flex min-h-0 min-w-0 flex-1 flex-col ${mobileSection !== "conversation" ? "hidden md:flex" : ""}`}>
         <div className="min-h-0 flex-1 overflow-y-auto p-6 pb-0 scrollbar-hidden md:pb-6" style={{ WebkitOverflowScrolling: "touch" }}>
           {/* Back button — desktop only */}
           <button
