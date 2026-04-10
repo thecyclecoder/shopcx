@@ -149,6 +149,58 @@ export async function refundOrder(
   }
 }
 
+// ── Partial Refund by Amount ──
+
+export async function partialRefundByAmount(
+  workspaceId: string,
+  shopifyOrderId: string,
+  amountCents: number,
+  reason?: string,
+): Promise<{ success: boolean; error?: string }> {
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+  const amountDecimal = (amountCents / 100).toFixed(2);
+
+  try {
+    // Step 1: Calculate refund to get parent transaction ID
+    const calcRes = await fetch(
+      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}/refunds/calculate.json`,
+      {
+        method: "POST",
+        headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+        body: JSON.stringify({ refund: { currency: "USD", shipping: { amount: 0 } } }),
+      },
+    );
+    const calcData = await calcRes.json();
+    const transactions = (calcData?.refund?.transactions || []) as { parent_id: number; kind: string }[];
+    const parentTx = transactions.find(t => t.kind === "suggested_refund");
+    if (!parentTx) return { success: false, error: "No refundable transaction found" };
+
+    // Step 2: Issue the partial refund
+    const refundRes = await fetch(
+      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}/refunds.json`,
+      {
+        method: "POST",
+        headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          refund: {
+            currency: "USD",
+            notify: false,
+            note: reason || "Price adjustment",
+            transactions: [{ parent_id: parentTx.parent_id, amount: amountDecimal, kind: "refund" }],
+          },
+        }),
+      },
+    );
+    const refundData = await refundRes.json();
+    if (refundData?.refund?.id) {
+      return { success: true };
+    }
+    return { success: false, error: JSON.stringify(refundData?.errors || "Unknown refund error") };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : "Unknown error" };
+  }
+}
+
 // ── Cancel Order ──
 
 export async function cancelOrder(

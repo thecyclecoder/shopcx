@@ -356,84 +356,15 @@ const directActionHandlers: Record<
   },
 
   partial_refund: async (ctx, p) => {
-    const { getShopifyCredentials } = await import("@/lib/shopify-sync");
-    const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
-    const { shop, accessToken } = await getShopifyCredentials(ctx.workspaceId);
-
+    const { partialRefundByAmount } = await import("@/lib/shopify-order-actions");
     const amountDecimal = ((p.amount_cents || 0) / 100).toFixed(2);
+    const reason = p.reason || "Price adjustment — customer was overcharged";
 
-    // Get the Shopify order GID
-    const orderGid = `gid://shopify/Order/${p.shopify_order_id}`;
-
-    // Issue partial refund via Shopify GraphQL
-    const gqlRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
-      method: "POST",
-      headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: `mutation refundCreate($input: RefundInput!) {
-          refundCreate(input: $input) {
-            refund { id totalRefundedSet { shopMoney { amount } } }
-            userErrors { field message }
-          }
-        }`,
-        variables: {
-          input: {
-            orderId: orderGid,
-            note: p.reason || "Price adjustment — customer was overcharged",
-            shipping: { amount: "0.00", fullRefund: false },
-            transactions: [{
-              parentId: null,
-              amount: amountDecimal,
-              kind: "SUGGESTED_REFUND",
-              gateway: "shopify_payments",
-            }],
-          },
-        },
-      }),
-    });
-
-    const gql = await gqlRes.json();
-
-    // If the full refundCreate doesn't work with suggested, try with orderRefund approach
-    const errors = gql?.data?.refundCreate?.userErrors;
-    if (errors?.length) {
-      // Fallback: use REST API for simpler partial refund
-      const restRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${p.shopify_order_id}/refunds/calculate.json`, {
-        method: "POST",
-        headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
-        body: JSON.stringify({ refund: { currency: "USD", shipping: { amount: 0 } } }),
-      });
-      const calcData = await restRes.json();
-      const transactions = calcData?.refund?.transactions || [];
-      const parentTx = transactions.find((t: { kind: string }) => t.kind === "suggested_refund");
-
-      if (parentTx) {
-        const refundRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${p.shopify_order_id}/refunds.json`, {
-          method: "POST",
-          headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            refund: {
-              currency: "USD",
-              notify: false,
-              note: p.reason || "Price adjustment — customer was overcharged",
-              transactions: [{ parent_id: parentTx.parent_id, amount: amountDecimal, kind: "refund" }],
-            },
-          }),
-        });
-        const refundData = await refundRes.json();
-        if (refundData?.refund?.id) {
-          // Send Slack notification
-          await notifySlack(ctx, p, amountDecimal);
-          return { success: true, summary: `Partial refund of $${amountDecimal} issued (${p.reason || "price adjustment"})` };
-        }
-        return { success: false, error: `REST refund failed: ${JSON.stringify(refundData?.errors || refundData)}` };
-      }
-      return { success: false, error: errors.map((e: { message: string }) => e.message).join(", ") };
+    const r = await partialRefundByAmount(ctx.workspaceId, p.shopify_order_id!, p.amount_cents!, reason);
+    if (r.success) {
+      await notifySlack(ctx, p, amountDecimal);
     }
-
-    // GraphQL succeeded
-    await notifySlack(ctx, p, amountDecimal);
-    return { success: true, summary: `Partial refund of $${amountDecimal} issued (${p.reason || "price adjustment"})` };
+    return { ...r, summary: r.success ? `Partial refund of $${amountDecimal} issued (${reason})` : undefined };
   },
 };
 
