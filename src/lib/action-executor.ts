@@ -352,7 +352,15 @@ const directActionHandlers: Record<
 
   update_line_item_price: async (ctx, p) => {
     const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
-    const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id!, p.variant_id!, p.base_price_cents!);
+    // Resolve variant — if Sonnet passed a bad variant or none, use the first item on the subscription
+    let variantId = p.variant_id;
+    if (!variantId || !(await ctx.admin.from("subscriptions").select("items").eq("shopify_contract_id", p.contract_id!).single()).data?.items?.some((i: { variant_id?: string }) => String(i.variant_id) === String(variantId))) {
+      const { data: sub } = await ctx.admin.from("subscriptions").select("items").eq("shopify_contract_id", p.contract_id!).single();
+      const items = (sub?.items as { variant_id?: string; title?: string }[]) || [];
+      const realItems = items.filter(i => !(i.title || "").toLowerCase().includes("shipping protection"));
+      variantId = realItems[0]?.variant_id || variantId;
+    }
+    const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id!, variantId!, p.base_price_cents!);
     return { ...r, summary: `Updated base price to $${((p.base_price_cents || 0) / 100).toFixed(2)}` };
   },
 
@@ -420,10 +428,11 @@ const directActionHandlers: Record<
 async function notifySlack(ctx: ActionContext, p: ActionParams, amountDecimal: string): Promise<void> {
   try {
     const { dispatchSlackNotification } = await import("@/lib/slack-notify");
-    const { data: cust } = await ctx.admin.from("customers").select("email, first_name, name").eq("id", ctx.customerId).single();
+    const { data: cust } = await ctx.admin.from("customers").select("email, first_name, last_name").eq("id", ctx.customerId).single();
+    const custName = [cust?.first_name, cust?.last_name].filter(Boolean).join(" ");
     await dispatchSlackNotification(ctx.workspaceId, "partial_refund", {
       ticketId: ctx.ticketId,
-      customer: { name: cust?.name || cust?.first_name || "", email: cust?.email || "" },
+      customer: { name: custName, email: cust?.email || "" },
       amount: amountDecimal,
       reason: p.reason || "price adjustment",
       orderNumber: p.shopify_order_id || "",
