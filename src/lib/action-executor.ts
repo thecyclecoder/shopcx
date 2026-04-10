@@ -254,8 +254,80 @@ const directActionHandlers: Record<
     const { getAppstleConfig } = await import("@/lib/subscription-items");
     const config = await getAppstleConfig(ctx.workspaceId);
     if (!config) return { success: false, error: "Appstle not configured" };
+
+    // Try applying the existing coupon first
     const r = await applyDiscountWithReplace(config.apiKey, p.contract_id!, p.code!);
-    return { ...r, summary: `Applied loyalty coupon ${p.code}` };
+    if (r.success) return { ...r, summary: `Applied loyalty coupon ${p.code}` };
+
+    // Coupon failed — may be stale/deleted in Shopify. Generate a fresh one.
+    try {
+      const { getLoyaltySettings, getRedemptionTiers, spendPoints } = await import("@/lib/loyalty");
+      const { getShopifyCredentials } = await import("@/lib/shopify-sync");
+      const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
+
+      // Find the original redemption to get tier info
+      const { data: orig } = await ctx.admin.from("loyalty_redemptions")
+        .select("id, member_id, discount_value, points_spent")
+        .eq("discount_code", p.code!).eq("workspace_id", ctx.workspaceId).single();
+      if (!orig) return { success: false, error: `Original coupon not found and apply failed: ${r.error}` };
+
+      // Get member
+      const { data: member } = await ctx.admin.from("loyalty_members")
+        .select("*").eq("id", orig.member_id).single();
+      if (!member) return { success: false, error: "Loyalty member not found" };
+
+      const settings = await getLoyaltySettings(ctx.workspaceId);
+      const { shop, accessToken } = await getShopifyCredentials(ctx.workspaceId);
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + (settings.coupon_expiry_days || 90));
+
+      // Generate new code
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      let random = "";
+      for (let i = 0; i < 6; i++) random += chars[Math.floor(Math.random() * chars.length)];
+      const newCode = `LOYALTY-${orig.discount_value}-${random}`;
+
+      // Create new Shopify discount
+      const gqlRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+        method: "POST",
+        headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: `mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) { discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) { codeDiscountNode { id } userErrors { field message } } }`,
+          variables: { basicCodeDiscount: {
+            title: `Loyalty $${orig.discount_value} - Regenerated`, code: newCode,
+            startsAt: new Date().toISOString(), endsAt: expiresAt.toISOString(),
+            usageLimit: 1, appliesOncePerCustomer: true,
+            customerSelection: { customers: { add: [`gid://shopify/Customer/${member.shopify_customer_id}`] } },
+            combinesWith: { productDiscounts: settings.coupon_combines_product, shippingDiscounts: settings.coupon_combines_shipping, orderDiscounts: settings.coupon_combines_order },
+            customerGets: { appliesOnOneTimePurchase: false, appliesOnSubscription: true, items: { all: true }, value: { discountAmount: { amount: orig.discount_value, appliesOnEachItem: false } } },
+          }},
+        }),
+      });
+      const gql = await gqlRes.json();
+      const errors = gql?.data?.discountCodeBasicCreate?.userErrors;
+      if (errors?.length) return { success: false, error: `Failed to regenerate coupon: ${errors.map((e: { message: string }) => e.message).join(", ")}` };
+
+      const discountId = gql?.data?.discountCodeBasicCreate?.codeDiscountNode?.id || null;
+
+      // Mark old redemption as expired, create new one
+      await ctx.admin.from("loyalty_redemptions").update({ status: "expired" }).eq("id", orig.id);
+      await ctx.admin.from("loyalty_redemptions").insert({
+        workspace_id: ctx.workspaceId, member_id: member.id,
+        reward_tier: `$${orig.discount_value} Off`, points_spent: 0,
+        discount_code: newCode, shopify_discount_id: discountId,
+        discount_value: orig.discount_value, status: "active",
+        expires_at: expiresAt.toISOString(),
+      });
+
+      // Now apply the fresh coupon
+      const r2 = await applyDiscountWithReplace(config.apiKey, p.contract_id!, newCode);
+      if (r2.success) {
+        return { success: true, summary: `Applied loyalty coupon $${orig.discount_value} off (regenerated: ${newCode})` };
+      }
+      return { success: false, error: `Regenerated coupon also failed: ${r2.error}` };
+    } catch (e) {
+      return { success: false, error: `Coupon regeneration failed: ${e instanceof Error ? e.message : String(e)}` };
+    }
   },
 };
 
