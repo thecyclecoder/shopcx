@@ -309,11 +309,27 @@ const directActionHandlers: Record<
 
       const discountId = gql?.data?.discountCodeBasicCreate?.codeDiscountNode?.id || null;
 
-      // Mark old redemption as expired, create new one
+      // Refund points from old broken redemption, then spend for new one
+      // This way the points ledger is clean — old one refunded, new one properly redeemed
+      await ctx.admin.from("loyalty_members").update({
+        points_balance: member.points_balance + orig.points_spent,
+      }).eq("id", member.id);
+      // Re-read member with updated balance for spendPoints
+      const { data: refreshedMember } = await ctx.admin.from("loyalty_members").select("*").eq("id", member.id).single();
+
       await ctx.admin.from("loyalty_redemptions").update({ status: "expired" }).eq("id", orig.id);
+
+      if (refreshedMember) {
+        const tiers = getRedemptionTiers(settings);
+        const tier = tiers.find(t => t.discount_value === orig.discount_value);
+        if (tier) {
+          await spendPoints(refreshedMember, tier.points_cost, `Redeemed ${tier.label} (regenerated)`, discountId);
+        }
+      }
+
       await ctx.admin.from("loyalty_redemptions").insert({
         workspace_id: ctx.workspaceId, member_id: member.id,
-        reward_tier: `$${orig.discount_value} Off`, points_spent: 0,
+        reward_tier: `$${orig.discount_value} Off`, points_spent: orig.points_spent,
         discount_code: newCode, shopify_discount_id: discountId,
         discount_value: orig.discount_value, status: "active",
         expires_at: expiresAt.toISOString(),
