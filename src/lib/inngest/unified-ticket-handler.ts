@@ -724,7 +724,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
 
         // Find the crisis action for this customer
         const { data: action } = await admin.from("crisis_customer_actions")
-          .select("id, crisis_id, subscription_id, segment, current_tier, tier1_response, tier2_response")
+          .select("id, crisis_id, subscription_id, segment, current_tier, tier1_response, tier2_response, exhausted_at")
           .eq("ticket_id", tid)
           .order("created_at", { ascending: false })
           .limit(1)
@@ -737,6 +737,19 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
           .eq("id", action.crisis_id)
           .single();
         if (!crisis || crisis.status === "resolved") return null;
+
+        // If crisis mode was exited, only re-enter if message mentions the crisis product
+        if (action.exhausted_at) {
+          const msgLower = msg.toLowerCase().replace(/<[^>]*>/g, " ");
+          const productName = (crisis.affected_product_title || "").toLowerCase();
+          const productWords = productName.split(/\s+/).filter((w: string) => w.length > 3);
+          const mentionsCrisis = productWords.some((w: string) => msgLower.includes(w))
+            || msgLower.includes("out of stock") || msgLower.includes("back in stock")
+            || msgLower.includes("restock");
+          if (!mentionsCrisis) return null; // Stay out of crisis mode
+          // Re-entering crisis mode
+          await admin.from("crisis_customer_actions").update({ exhausted_at: null, updated_at: new Date().toISOString() }).eq("id", action.id);
+        }
 
         return { actionId: action.id, crisisId: action.crisis_id, subscriptionId: action.subscription_id, segment: action.segment, currentTier: action.current_tier, tier1Response: action.tier1_response };
       });
@@ -875,9 +888,12 @@ Return ONLY valid JSON:
           const { data: wsData } = await admin.from("workspaces").select("sandbox_mode").eq("id", wsId).single();
           const isSandbox = wsData?.sandbox_mode === true;
 
-          // Not crisis-related — bail out and let regular Sonnet handle it
+          // Not crisis-related — mark crisis resolved and let regular Sonnet handle it
           if (plan.not_crisis_related) {
-            await sysNote(admin, tid, `[System] Crisis handler: message not crisis-related, passing to Sonnet orchestrator.`);
+            await sysNote(admin, tid, `[System] Crisis handler: message not crisis-related, exiting crisis mode.`);
+            await admin.from("crisis_customer_actions").update({
+              exhausted_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            }).eq("id", crisisFollowup.actionId);
             return { status: "not_crisis" as const };
           }
 
@@ -1007,11 +1023,13 @@ Return ONLY valid JSON:
             return { status: "crisis_action_error" as const };
           }
 
-          // Send confirmation
-          const confirmMsg = plan.confirmation_summary || executed.join(". ");
+          // Send confirmation and exit crisis mode
           await sysNote(admin, tid, `[System] Crisis actions executed: ${executed.join("; ")}`);
           await sendWithDelay(admin, wsId, tid, st.ch,
             `All done! Here's what we've updated for you:\n\n${executed.map(e => `• ${e}`).join("\n")}\n\nIf you have any other questions, just reply to this email.`, false);
+          await admin.from("crisis_customer_actions").update({
+            exhausted_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+          }).eq("id", crisisFollowup.actionId);
           await setStatus(admin, tid, cfg.auto_resolve);
           return { status: "crisis_actions_executed" as const };
         });
