@@ -44,6 +44,87 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
     const apiKey = decrypt(ws.appstle_api_key_encrypted);
 
     if (mode === "apply") {
+      // Loyalty coupons (LOYALTY-* or smile-*) always allowed — skip all checks
+      const isLoyalty = discountCode.startsWith("LOYALTY-") || discountCode.startsWith("smile-");
+
+      if (!isLoyalty) {
+        // Check grandfathered pricing floor for sale coupons
+        const { data: sub } = await admin.from("subscriptions")
+          .select("items")
+          .eq("shopify_contract_id", String(contractId))
+          .single();
+
+        const { data: wsSettings } = await admin.from("workspaces")
+          .select("coupon_price_floor_pct, shopify_myshopify_domain, shopify_access_token_encrypted")
+          .eq("id", auth.workspaceId).single();
+
+        const floorPct = wsSettings?.coupon_price_floor_pct ?? 50;
+        const items = (sub?.items as { variant_id?: string; price_cents?: number; product_id?: string; title?: string }[]) || [];
+
+        // Get product standard prices
+        const { data: products } = await admin.from("products")
+          .select("shopify_product_id, variants")
+          .eq("workspace_id", auth.workspaceId);
+        const priceMap = new Map<string, number>();
+        for (const p of products || []) {
+          for (const v of (p.variants as { id?: string; price_cents?: number }[]) || []) {
+            if (v.id && v.price_cents) priceMap.set(String(v.id), v.price_cents);
+          }
+        }
+
+        // Check if any item is grandfathered
+        const hasGrandfathered = items.some(i => {
+          if (!i.price_cents || !i.variant_id) return false;
+          const effectiveBase = Math.round(i.price_cents / 0.75);
+          const standardPrice = priceMap.get(String(i.variant_id));
+          return standardPrice ? effectiveBase < standardPrice : false;
+        });
+
+        if (hasGrandfathered) {
+          // Look up the coupon value from Shopify to calculate impact
+          let couponPct = 0;
+          let couponFixed = 0;
+          if (wsSettings?.shopify_access_token_encrypted && wsSettings?.shopify_myshopify_domain) {
+            const shopToken = decrypt(wsSettings.shopify_access_token_encrypted);
+            const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
+            const gqlRes = await fetch(
+              `https://${wsSettings.shopify_myshopify_domain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+              {
+                method: "POST",
+                headers: { "X-Shopify-Access-Token": shopToken, "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  query: `{ codeDiscountNodeByCode(code: "${discountCode}") { codeDiscount { ... on DiscountCodeBasic { customerGets { value { ... on DiscountPercentage { percentage } ... on DiscountAmount { amount { amount } } } } } } } }`,
+                }),
+              },
+            );
+            const gql = await gqlRes.json();
+            const val = gql?.data?.codeDiscountNodeByCode?.codeDiscount?.customerGets?.value;
+            if (val?.percentage) couponPct = val.percentage * 100;
+            else if (val?.amount?.amount) couponFixed = parseFloat(val.amount.amount) * 100;
+          }
+
+          // Check if applying this coupon would drop any grandfathered item below the floor
+          for (const item of items) {
+            if (!item.price_cents || !item.variant_id) continue;
+            const standardPrice = priceMap.get(String(item.variant_id));
+            if (!standardPrice) continue;
+            const effectiveBase = Math.round(item.price_cents / 0.75);
+            if (effectiveBase >= standardPrice) continue; // Not grandfathered
+
+            const standardDiscounted = standardPrice * 0.75; // What standard customers pay
+            const floorPrice = standardDiscounted * (floorPct / 100);
+
+            let priceAfterCoupon = item.price_cents;
+            if (couponPct > 0) priceAfterCoupon = Math.round(item.price_cents * (1 - couponPct / 100));
+            else if (couponFixed > 0) priceAfterCoupon = item.price_cents - couponFixed;
+
+            if (priceAfterCoupon < floorPrice) {
+              return jsonOk({ ok: false, route, contractId, mode, error: "coupon_not_compatible", message: "This coupon cannot be applied to your subscription." });
+            }
+          }
+        }
+      }
+
       // Remove existing discounts first, then apply new one (only 1 coupon per subscription)
       const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
       const result = await applyDiscountWithReplace(apiKey, String(contractId), discountCode);
