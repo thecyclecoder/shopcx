@@ -381,7 +381,7 @@ RULES:
 - For cancel requests → use cancel_subscription journey (has retention offers)
 - For refund/dispute/unwanted charge → use appropriate playbook
 - For missing/damaged items → use replacement playbook
-- For address changes → use shipping address journey
+- For address changes → use shipping address journey. But if the customer is just asking to CONFIRM or VERIFY their current address (not change it), look it up from their subscription shipping_address or recent order and tell them directly — do NOT launch the journey.
 - For account login issues → use account login workflow
 - For order tracking → use order tracking workflow
 - For simple subscription changes (skip, date, frequency, swap, add, quantity) → execute directly
