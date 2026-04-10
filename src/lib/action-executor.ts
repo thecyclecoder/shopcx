@@ -46,6 +46,7 @@ interface ActionParams {
   shopify_order_id?: string;
   amount_cents?: number;
   base_price_cents?: number;
+  crisis_action_id?: string;
 }
 
 export interface ActionContext {
@@ -365,6 +366,30 @@ const directActionHandlers: Record<
       await notifySlack(ctx, p, amountDecimal);
     }
     return { ...r, summary: r.success ? `Partial refund of $${amountDecimal} issued (${reason})` : undefined };
+  },
+
+  crisis_pause: async (ctx, p) => {
+    const { appstleSubscriptionAction } = await import("@/lib/appstle");
+    const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "pause", "Crisis — customer requested pause until restock");
+    if (r.success && p.crisis_action_id) {
+      await ctx.admin.from("crisis_customer_actions").update({
+        tier3_response: "accepted_pause", paused_at: new Date().toISOString(),
+        auto_resume: true, exhausted_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      }).eq("id", p.crisis_action_id);
+    }
+    return { ...r, summary: "Paused subscription (will auto-resume when back in stock)" };
+  },
+
+  crisis_remove: async (ctx, p) => {
+    const { subRemoveItem } = await import("@/lib/subscription-items");
+    const r = await subRemoveItem(ctx.workspaceId, p.contract_id!, p.variant_id!);
+    if (r.success && p.crisis_action_id) {
+      await ctx.admin.from("crisis_customer_actions").update({
+        tier3_response: "accepted_remove", removed_item_at: new Date().toISOString(),
+        auto_readd: true, exhausted_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      }).eq("id", p.crisis_action_id);
+    }
+    return { ...r, summary: "Removed item (will auto-add when back in stock)" };
   },
 };
 

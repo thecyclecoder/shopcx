@@ -35,6 +35,7 @@ export interface SonnetDecision {
     shopify_order_id?: string;
     amount_cents?: number;
     base_price_cents?: number;
+    crisis_action_id?: string;
   }[];
   handler_name?: string;
   response_message?: string;
@@ -140,9 +141,11 @@ export async function buildSonnetContext(
       .limit(3),
     admin
       .from("crisis_customer_actions")
-      .select("crisis_event_id, crisis_events(affected_product_title, estimated_restock_date)")
+      .select("id, crisis_id, subscription_id, segment, current_tier, tier1_swapped_to, preserved_base_price_cents, exhausted_at, crisis_events(affected_product_title, expected_restock_date, default_swap_title, default_swap_variant_id, available_flavor_swaps, available_product_swaps, tier2_coupon_code, tier2_coupon_percent, status)")
       .eq("customer_id", customerId)
-      .eq("status", "active") as any,
+      .is("exhausted_at", null)
+      .order("created_at", { ascending: false })
+      .limit(1) as any,
     customerId
       ? import("@/lib/account-matching").then(m => m.findUnlinkedMatches(workspaceId, customerId, admin))
       : Promise.resolve([]),
@@ -263,19 +266,32 @@ export async function buildSonnetContext(
     )
     .join("\n- ");
 
-  // Crisis
-  let crisisLine = "";
+  // Crisis context — full details for Sonnet to handle crisis-related actions
+  let crisisBlock = "";
   if (crisisActions?.length) {
-    const first = crisisActions[0] as any;
-    const ce = first.crisis_events;
-    if (ce) {
-      const restockDate = ce.estimated_restock_date
-        ? new Date(ce.estimated_restock_date).toLocaleDateString("en-US", {
-            month: "short",
-            day: "numeric",
-          })
+    const action = crisisActions[0] as any;
+    const ce = action.crisis_events;
+    if (ce && ce.status !== "resolved") {
+      const restockDate = ce.expected_restock_date
+        ? new Date(ce.expected_restock_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })
         : "TBD";
-      crisisLine = `\nCRISIS: affected product "${ce.affected_product_title}" is out of stock until ${restockDate} — if relevant to their message`;
+      const currentSwap = (action.tier1_swapped_to as { title?: string })?.title || ce.default_swap_title || "unknown";
+      const flavorSwaps = (ce.available_flavor_swaps as { variantId: string; title: string }[] || [])
+        .map((f: { title: string; variantId: string }) => `"${f.title}" (variant: ${f.variantId})`).join(", ");
+      const productSwaps = (ce.available_product_swaps as { productTitle: string; variants: { variantId: string; title: string }[] }[] || [])
+        .map((p: { productTitle: string; variants: { variantId: string; title: string }[] }) =>
+          `${p.productTitle}: ${p.variants.map(v => `"${v.title}" (variant: ${v.variantId})`).join(", ")}`).join("; ");
+
+      crisisBlock = `
+CRISIS CONTEXT (this ticket is related to a product out-of-stock crisis):
+- Affected product: ${ce.affected_product_title} (out of stock until ${restockDate})
+- Customer was auto-swapped to: ${currentSwap}
+- Crisis action ID: ${action.id}
+- Subscription ID: ${action.subscription_id}
+- Preserved base price: ${action.preserved_base_price_cents ? `$${(action.preserved_base_price_cents / 100).toFixed(2)}` : "not set"}
+${flavorSwaps ? `- Available flavor swaps: ${flavorSwaps}` : ""}
+${productSwaps ? `- Available product swaps: ${productSwaps}` : ""}
+${ce.tier2_coupon_code ? `- Crisis coupon: ${ce.tier2_coupon_code} (${ce.tier2_coupon_percent}% off)` : ""}`;
     }
   }
 
@@ -301,7 +317,7 @@ SUBSCRIPTIONS:
 ${subsBlock}
 RECENT ORDERS:
 ${ordersBlock}
-LOYALTY: ${loyaltyLine}${crisisLine}
+LOYALTY: ${loyaltyLine}${crisisBlock}
 ${unlinkedMatches.length > 0 ? `POTENTIAL LINKED ACCOUNTS (not yet linked): ${unlinkedMatches.map((m: { email: string }) => m.email).join(", ")}` : ""}
 CONVERSATION:
 ${convoBlock || `Customer: ${message.slice(0, 300)}`}
@@ -318,6 +334,7 @@ ${workflowLines || "None"}
 DIRECT ACTIONS (use when you can resolve without customer interaction):
 Subscription: resume, skip_next_order, change_frequency(interval, count), change_next_date(date), add_item(variant_id, qty), remove_item(variant_id), swap_variant(old_id, new_id, qty), change_quantity(variant_id, qty), update_line_item_price(contract_id, variant_id, base_price_cents)
 Refund: partial_refund(shopify_order_id, amount_cents, reason) — issue a partial refund on a Shopify order. Use when a customer was overcharged (e.g. price increased unexpectedly). Compare recent orders to verify the price difference before refunding.
+Crisis: crisis_pause(contract_id, crisis_action_id) — pause subscription until restock (auto-resume), crisis_remove(contract_id, variant_id, crisis_action_id) — remove affected item (auto-readd on restock)
 Loyalty: redeem_points(tier_index), apply_loyalty_coupon(contract_id, code)
 Discounts: apply_coupon(contract_id, code), remove_coupon(contract_id)
 
@@ -339,7 +356,7 @@ RULES:
 - For account login issues → use account login workflow
 - For order tracking → use order tracking workflow
 - For simple subscription changes (skip, date, frequency, swap, add, quantity) → execute directly
-- For price complaints / overcharges → compare the latest order's line item prices against previous orders. If the per-unit price increased, issue a partial_refund for the difference AND update_line_item_price to restore the original base price. Calculate base_price_cents as the old price divided by 0.75 (to account for 25% subscription discount).
+- For price complaints / overcharges → ALWAYS compare RECENT ORDERS above. Look at the per-item price_cents across orders. If the latest order's item price is higher than the previous order's item price, the customer was overcharged. Calculate the difference (latest_total - previous_total) and issue partial_refund for that amount. Also update_line_item_price with base_price_cents = previous_price / 0.75 (accounts for 25% subscription discount). Do BOTH actions together.
 - For loyalty coupon application → check if customer has unused coupons, apply directly
 - For account linking → ONLY send the account linking journey if having the linked account's data would help resolve this specific request (e.g. customer needs login but their shopify account is under a different email). Do NOT link just because unlinked accounts exist — only when it's necessary for the task at hand
 - For product/policy questions → use matching macro or KB article, or generate ai_response
@@ -383,7 +400,7 @@ export async function callSonnetOrchestrator(
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 600,
+        max_tokens: 1000,
         messages: [{ role: "user", content: prompt }],
       }),
     });
