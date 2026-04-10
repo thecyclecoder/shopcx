@@ -74,6 +74,7 @@ export async function buildSonnetContext(
     { data: workflows },
     { data: macros },
     ragContext,
+    { data: allProducts },
     { data: recentOrders },
     { count: orderCount },
     { data: crisisActions },
@@ -133,6 +134,11 @@ export async function buildSonnetContext(
       .eq("active", true)
       .limit(30),
     retrieveContext(workspaceId, message, 3),
+    admin
+      .from("products")
+      .select("title, variants")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "active"),
     admin
       .from("orders")
       .select("order_number, total_cents, line_items, created_at, financial_status, shopify_order_id")
@@ -317,6 +323,20 @@ ${ce.tier2_coupon_code ? `- Crisis coupon: ${ce.tier2_coupon_code} (${ce.tier2_c
       .join("\n");
   }
 
+  // Out of stock products (inventory < 10)
+  const outOfStockItems: string[] = [];
+  for (const product of allProducts || []) {
+    const variants = (product.variants as { id?: string; title?: string; inventory_quantity?: number }[]) || [];
+    for (const v of variants) {
+      if (v.inventory_quantity !== undefined && v.inventory_quantity !== null && v.inventory_quantity < 10) {
+        outOfStockItems.push(`${product.title}${v.title ? ` — ${v.title}` : ""} (${v.inventory_quantity} in stock)`);
+      }
+    }
+  }
+  const inventoryBlock = outOfStockItems.length > 0
+    ? `\nOUT OF STOCK / LOW INVENTORY (do NOT tell customers these are available):\n${outOfStockItems.map(i => `- ${i}`).join("\n")}`
+    : "";
+
   // Build prompt
   return `You are a customer support routing engine for ${wsName}. Analyze the customer's message and decide the best action.
 
@@ -325,7 +345,7 @@ SUBSCRIPTIONS:
 ${subsBlock}
 RECENT ORDERS:
 ${ordersBlock}
-LOYALTY: ${loyaltyLine}${crisisBlock}
+LOYALTY: ${loyaltyLine}${inventoryBlock}${crisisBlock}
 ${unlinkedMatches.length > 0 ? `POTENTIAL LINKED ACCOUNTS (not yet linked): ${unlinkedMatches.map((m: { email: string }) => m.email).join(", ")}` : ""}
 CONVERSATION:
 ${convoBlock || `Customer: ${message.slice(0, 300)}`}
