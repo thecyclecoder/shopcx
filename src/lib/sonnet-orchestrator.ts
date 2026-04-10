@@ -71,6 +71,7 @@ export async function buildSonnetContext(
     { data: macros },
     ragContext,
     { data: crisisActions },
+    unlinkedMatches,
   ] = await Promise.all([
     admin
       .from("workspaces")
@@ -132,6 +133,9 @@ export async function buildSonnetContext(
       .select("crisis_event_id, crisis_events(affected_product_title, estimated_restock_date)")
       .eq("customer_id", customerId)
       .eq("status", "active") as any,
+    customerId
+      ? import("@/lib/account-matching").then(m => m.findUnlinkedMatches(workspaceId, customerId, admin))
+      : Promise.resolve([]),
   ]);
 
   const wsName = workspace?.name || "our store";
@@ -203,11 +207,9 @@ export async function buildSonnetContext(
       .join("\n");
   }
 
-  // Handlers — filter out crisis journeys and account_linking
+  // Handlers — filter out crisis journeys (handled by crisis-specific Sonnet handler)
   const filteredJourneys = (journeys || []).filter(
-    (j: any) =>
-      !j.trigger_intent?.startsWith("crisis_") &&
-      j.trigger_intent !== "account_linking",
+    (j: any) => !j.trigger_intent?.startsWith("crisis_"),
   );
   const journeyLines = filteredJourneys
     .map((j: any) => `${j.name}: ${j.description || j.trigger_intent}`)
@@ -254,7 +256,7 @@ CUSTOMER: ${cName} (${cEmail})
 SUBSCRIPTIONS:
 ${subsBlock}
 LOYALTY: ${loyaltyLine}${crisisLine}
-
+${unlinkedMatches.length > 0 ? `POTENTIAL LINKED ACCOUNTS (not yet linked): ${unlinkedMatches.map((m: { email: string }) => m.email).join(", ")}` : ""}
 CONVERSATION:
 ${convoBlock || `Customer: ${message.slice(0, 300)}`}
 
@@ -290,6 +292,7 @@ RULES:
 - For order tracking → use order tracking workflow
 - For simple subscription changes (skip, date, frequency, swap, add, quantity) → execute directly
 - For loyalty coupon application → check if customer has unused coupons, apply directly
+- For account linking → ONLY send the account linking journey if having the linked account's data would help resolve this specific request (e.g. customer needs login but their shopify account is under a different email). Do NOT link just because unlinked accounts exist — only when it's necessary for the task at hand
 - For product/policy questions → use matching macro or KB article, or generate ai_response
 - NEVER cancel a subscription directly — always use the cancel journey
 - NEVER issue refunds directly — always use the appropriate playbook

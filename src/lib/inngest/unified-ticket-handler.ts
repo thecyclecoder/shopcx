@@ -449,31 +449,10 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
 
     let pendingAccountLink: { journeyId: string; journeyName: string } | null = null;
 
-    // ── 2. Account path: linking + Shopify customer check ──
-    if (msgType === "account" && st.hasCust && isNew) {
-      // 2a. Always check for unlinked accounts (need full context for account work)
-      const linkResult = await step.run("check-linking", async () => {
-        const { findUnlinkedMatches } = await import("@/lib/account-matching");
-        const unlinked = await findUnlinkedMatches(wsId, st.custId!, admin);
-        if (!unlinked.length) return { hasUnlinked: false, launched: false };
-
-        const { data: jd } = await admin.from("journey_definitions").select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "account_linking").eq("is_active", true).limit(1).single();
-        if (!jd) return { hasUnlinked: true, launched: false };
-
-        await sysNote(admin, tid, `[System] Unlinked accounts found. Launching account linking for full context.`);
-        const linkLeadIn = "I've got your request. It looks like you may have more than one profile in our system. Please link your accounts so I can pull up your full information and help you right away.";
-        await launchJourneyForTicket({
-          workspaceId: wsId, ticketId: tid, customerId: st.custId!,
-          journeyId: jd.id, journeyName: jd.name, triggerIntent: "account_linking",
-          channel: st.ch, leadIn: linkLeadIn, ctaText: "Link My Accounts",
-        });
-        await setStatus(admin, tid, cfg.auto_resolve);
-        return { hasUnlinked: true, launched: true };
-      });
-
-      if (linkResult.launched) return { status: "account_linking" };
-
-      // 2b. No Shopify customer → conversational inline flow
+    // ── 2. Account path: inline email lookup (stateful conversation) ──
+    // Account linking decision moved to Sonnet orchestrator — it decides when linking is needed
+    if (st.hasCust && isNew) {
+      // 2b. No Shopify customer → conversational inline flow (keep — stateful)
       if (!st.hasShopifyCustomer) {
         // Check if we're in the inline linking conversation
         const { data: ticketData } = await admin.from("tickets")
@@ -568,18 +547,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
       }
     }
 
-    // ── 2c. General path with unlinked accounts → mention casually after answering
-    if (msgType === "general" && st.hasCust && isNew) {
-      const casualLink = await step.run("check-casual-linking", async () => {
-        const { findUnlinkedMatches } = await import("@/lib/account-matching");
-        const unlinked = await findUnlinkedMatches(wsId, st.custId!, admin);
-        if (!unlinked.length) return null;
-        const { data: jd } = await admin.from("journey_definitions").select("id, name").eq("workspace_id", wsId).eq("trigger_intent", "account_linking").eq("is_active", true).limit(1).single();
-        if (!jd) return null;
-        return { journeyId: jd.id, journeyName: jd.name };
-      });
-      if (casualLink) pendingAccountLink = casualLink;
-    }
+    // ── 2c. Account linking decision moved to Sonnet orchestrator ──
 
     // ── 2e. Crisis short-circuit — skip pattern match if this is a crisis ticket ──
     // Crisis follow-up detection runs later (step 2d) but we need to prevent the
