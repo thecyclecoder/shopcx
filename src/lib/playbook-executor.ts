@@ -1859,11 +1859,23 @@ export async function matchPlaybook(
 export async function startPlaybook(
   admin: Admin, ticketId: string, playbookId: string,
 ): Promise<void> {
+  const [{ data: ticket }, { data: playbook }] = await Promise.all([
+    admin.from("tickets").select("tags").eq("id", ticketId).single(),
+    admin.from("playbooks").select("name").eq("id", playbookId).single(),
+  ]);
+  const tags = (ticket?.tags as string[]) || [];
+  const slug = (playbook?.name || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+  const pbTag = `pb:${slug}`;
+  const newTags = [...tags];
+  if (!newTags.includes("pb")) newTags.push("pb");
+  if (!newTags.includes(pbTag)) newTags.push(pbTag);
+
   await admin.from("tickets").update({
     active_playbook_id: playbookId,
     playbook_step: 0,
     playbook_context: {},
     playbook_exceptions_used: 0,
+    tags: newTags,
   }).eq("id", ticketId);
 }
 
