@@ -226,9 +226,11 @@ export async function buildSonnetContext(
         if (m.visibility === "internal" && m.author_type === "system") {
           const body = (m.body || "") as string;
           // Include action completion notes
-          if (body.includes("Action completed:") || body.includes("Applied") || body.includes("Added") ||
+          if (body.includes("Action completed:") || body.includes("Action failed:") ||
+              body.includes("Applied") || body.includes("Added") ||
               body.includes("Redeemed") || body.includes("Removed") || body.includes("Swapped") ||
               body.includes("Skipped") || body.includes("Resumed") || body.includes("Changed") ||
+              body.includes("refund") || body.includes("Refund") ||
               body.includes("All done") || body.includes("Here's what we")) {
             completedActions.push(body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200));
             return true;
@@ -369,7 +371,9 @@ RULES:
 - For account linking → ONLY send the account linking journey if having the linked account's data would help resolve this specific request (e.g. customer needs login but their shopify account is under a different email). Do NOT link just because unlinked accounts exist — only when it's necessary for the task at hand
 - For product/policy questions → use matching macro or KB article, or generate ai_response
 - NEVER cancel a subscription directly — always use the cancel journey
-- NEVER issue refunds directly — always use the appropriate playbook
+- For general refund requests (returns, disputes, dissatisfaction) → use the appropriate playbook. Only use partial_refund directly for price discrepancy corrections where you can verify the overcharge from order data.
+- NEVER re-issue a refund that was already completed. Check ACTIONS ALREADY COMPLETED — if a refund was already issued, acknowledge it in your message but do NOT create another partial_refund action.
+- If a previous action failed (e.g. "Action failed: update_line_item_price"), you SHOULD retry that specific action.
 - IMPORTANT: Before treating a customer message as a new request, check ACTIONS ALREADY COMPLETED and the conversation history. If the customer is restating, confirming, or thanking you for something already done → respond with a warm "You're all set!" confirmation. Reference what was done with genuine enthusiasm (e.g. "You're all set! I can't wait to hear how you like the Creatine Prime+"). Do NOT ask for clarification or re-execute actions that are already completed.
 - If unclear what customer wants AND no matching completed actions → set needs_clarification with a friendly question
 - If truly impossible to handle → escalate
