@@ -75,6 +75,7 @@ export async function buildSonnetContext(
     { data: macros },
     ragContext,
     { data: recentOrders },
+    { count: orderCount },
     { data: crisisActions },
     unlinkedMatches,
   ] = await Promise.all([
@@ -95,7 +96,7 @@ export async function buildSonnetContext(
       )
       .eq("workspace_id", workspaceId)
       .eq("customer_id", customerId)
-      .in("status", ["active", "paused"]),
+      .in("status", ["active", "paused", "cancelled"]),
     admin
       .from("loyalty_members")
       .select("id, points_balance")
@@ -139,6 +140,11 @@ export async function buildSonnetContext(
       .eq("customer_id", customerId)
       .order("created_at", { ascending: false })
       .limit(3),
+    admin
+      .from("orders")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", customerId),
     admin
       .from("crisis_customer_actions")
       .select("id, crisis_id, subscription_id, segment, current_tier, tier1_swapped_to, preserved_base_price_cents, exhausted_at, crisis_events(affected_product_title, expected_restock_date, default_swap_title, default_swap_variant_id, available_flavor_swaps, available_product_swaps, tier2_coupon_code, tier2_coupon_percent, status)")
@@ -312,7 +318,7 @@ ${ce.tier2_coupon_code ? `- Crisis coupon: ${ce.tier2_coupon_code} (${ce.tier2_c
   // Build prompt
   return `You are a customer support routing engine for ${wsName}. Analyze the customer's message and decide the best action.
 
-CUSTOMER: ${cName} (${cEmail})
+CUSTOMER: ${cName} (${cEmail})${(orderCount || 0) > 0 ? ` — ${orderCount} orders` : ""}
 SUBSCRIPTIONS:
 ${subsBlock}
 RECENT ORDERS:
@@ -335,6 +341,7 @@ DIRECT ACTIONS (use when you can resolve without customer interaction):
 Subscription: resume, skip_next_order, change_frequency(interval, count), change_next_date(date), add_item(variant_id, qty), remove_item(variant_id), swap_variant(old_id, new_id, qty), change_quantity(variant_id, qty), update_line_item_price(contract_id, variant_id, base_price_cents)
 Refund: partial_refund(shopify_order_id, amount_cents, reason) — issue a partial refund on a Shopify order. Use when a customer was overcharged (e.g. price increased unexpectedly). Compare recent orders to verify the price difference before refunding.
 Crisis: crisis_pause(contract_id, crisis_action_id) — pause subscription until restock (auto-resume), crisis_remove(contract_id, variant_id, crisis_action_id) — remove affected item (auto-readd on restock)
+Subscription recovery: reactivate(contract_id) — reactivate a cancelled subscription
 Loyalty: redeem_points(tier_index), apply_loyalty_coupon(contract_id, code)
 Discounts: apply_coupon(contract_id, code), remove_coupon(contract_id)
 
@@ -357,6 +364,7 @@ RULES:
 - For order tracking → use order tracking workflow
 - For simple subscription changes (skip, date, frequency, swap, add, quantity) → execute directly
 - For price complaints / overcharges → ALWAYS compare RECENT ORDERS above. Look at the per-item price_cents across orders. If the latest order's item price is higher than the previous order's item price, the customer was overcharged. Calculate the difference (latest_total - previous_total) and issue partial_refund for that amount. Also update_line_item_price with base_price_cents = previous_price / 0.75 (accounts for 25% subscription discount). Do BOTH actions together.
+- When fixing an issue that caused a customer to cancel → after resolving the issue, if their subscription status is "cancelled", offer to reactivate it in your response_message. Mention how much you appreciate their loyalty and their order history (use the order count). Don't auto-reactivate — ASK if they'd like you to. If they say yes in a follow-up, use the reactivate action.
 - For loyalty coupon application → check if customer has unused coupons, apply directly
 - For account linking → ONLY send the account linking journey if having the linked account's data would help resolve this specific request (e.g. customer needs login but their shopify account is under a different email). Do NOT link just because unlinked accounts exist — only when it's necessary for the task at hand
 - For product/policy questions → use matching macro or KB article, or generate ai_response

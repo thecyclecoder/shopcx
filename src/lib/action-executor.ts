@@ -368,6 +368,12 @@ const directActionHandlers: Record<
     return { ...r, summary: r.success ? `Partial refund of $${amountDecimal} issued (${reason})` : undefined };
   },
 
+  reactivate: async (ctx, p) => {
+    const { appstleSubscriptionAction } = await import("@/lib/appstle");
+    const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
+    return { ...r, summary: "Reactivated subscription" };
+  },
+
   crisis_pause: async (ctx, p) => {
     const { appstleSubscriptionAction } = await import("@/lib/appstle");
     const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "pause", "Crisis — customer requested pause until restock");
