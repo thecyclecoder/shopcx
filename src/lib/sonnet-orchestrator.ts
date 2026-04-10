@@ -32,6 +32,9 @@ export interface SonnetDecision {
     code?: string;
     reason?: string;
     tier_index?: number;
+    shopify_order_id?: string;
+    amount_cents?: number;
+    base_price_cents?: number;
   }[];
   handler_name?: string;
   response_message?: string;
@@ -70,6 +73,7 @@ export async function buildSonnetContext(
     { data: workflows },
     { data: macros },
     ragContext,
+    { data: recentOrders },
     { data: crisisActions },
     unlinkedMatches,
   ] = await Promise.all([
@@ -127,6 +131,13 @@ export async function buildSonnetContext(
       .eq("active", true)
       .limit(30),
     retrieveContext(workspaceId, message, 3),
+    admin
+      .from("orders")
+      .select("order_number, total_cents, line_items, created_at, financial_status, shopify_order_id")
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", customerId)
+      .order("created_at", { ascending: false })
+      .limit(3),
     admin
       .from("crisis_customer_actions")
       .select("crisis_event_id, crisis_events(affected_product_title, estimated_restock_date)")
@@ -268,12 +279,28 @@ export async function buildSonnetContext(
     }
   }
 
+  // Format recent orders
+  let ordersBlock = "None";
+  if (recentOrders?.length) {
+    ordersBlock = recentOrders
+      .map((o: any) => {
+        const items = (o.line_items || [])
+          .map((i: any) => `${i.title || "item"}${i.variant_title ? ` (${i.variant_title})` : ""} x${i.quantity || 1} @ $${((i.price_cents || 0) / 100).toFixed(2)}`)
+          .join(", ");
+        const date = new Date(o.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        return `- #${o.order_number || "?"} | ${date} | $${((o.total_cents || 0) / 100).toFixed(2)} | ${o.financial_status || "?"} | ${items} | shopify_order_id: ${o.shopify_order_id || "?"}`;
+      })
+      .join("\n");
+  }
+
   // Build prompt
   return `You are a customer support routing engine for ${wsName}. Analyze the customer's message and decide the best action.
 
 CUSTOMER: ${cName} (${cEmail})
 SUBSCRIPTIONS:
 ${subsBlock}
+RECENT ORDERS:
+${ordersBlock}
 LOYALTY: ${loyaltyLine}${crisisLine}
 ${unlinkedMatches.length > 0 ? `POTENTIAL LINKED ACCOUNTS (not yet linked): ${unlinkedMatches.map((m: { email: string }) => m.email).join(", ")}` : ""}
 CONVERSATION:
@@ -289,7 +316,8 @@ Workflows:
 ${workflowLines || "None"}
 
 DIRECT ACTIONS (use when you can resolve without customer interaction):
-Subscription: resume, skip_next_order, change_frequency(interval, count), change_next_date(date), add_item(variant_id, qty), remove_item(variant_id), swap_variant(old_id, new_id, qty), change_quantity(variant_id, qty)
+Subscription: resume, skip_next_order, change_frequency(interval, count), change_next_date(date), add_item(variant_id, qty), remove_item(variant_id), swap_variant(old_id, new_id, qty), change_quantity(variant_id, qty), update_line_item_price(contract_id, variant_id, base_price_cents)
+Refund: partial_refund(shopify_order_id, amount_cents, reason) — issue a partial refund on a Shopify order. Use when a customer was overcharged (e.g. price increased unexpectedly). Compare recent orders to verify the price difference before refunding.
 Loyalty: redeem_points(tier_index), apply_loyalty_coupon(contract_id, code)
 Discounts: apply_coupon(contract_id, code), remove_coupon(contract_id)
 
@@ -311,6 +339,7 @@ RULES:
 - For account login issues → use account login workflow
 - For order tracking → use order tracking workflow
 - For simple subscription changes (skip, date, frequency, swap, add, quantity) → execute directly
+- For price complaints / overcharges → compare the latest order's line item prices against previous orders. If the per-unit price increased, issue a partial_refund for the difference AND update_line_item_price to restore the original base price. Calculate base_price_cents as the old price divided by 0.75 (to account for 25% subscription discount).
 - For loyalty coupon application → check if customer has unused coupons, apply directly
 - For account linking → ONLY send the account linking journey if having the linked account's data would help resolve this specific request (e.g. customer needs login but their shopify account is under a different email). Do NOT link just because unlinked accounts exist — only when it's necessary for the task at hand
 - For product/policy questions → use matching macro or KB article, or generate ai_response
