@@ -27,7 +27,7 @@ export async function POST(
   // Verify ticket exists and get workspace
   const { data: ticket } = await admin
     .from("tickets")
-    .select("id, workspace_id, customer_id, status")
+    .select("id, workspace_id, customer_id, status, channel")
     .eq("id", ticketId)
     .single();
 
@@ -94,12 +94,13 @@ export async function POST(
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${inngestKey}` },
         body: JSON.stringify({
-          name: "ticket/message.received",
+          name: "ticket/inbound-message",
           data: {
-            ticketId,
-            workspaceId: ticket.workspace_id,
-            messageId: "playbook-apply",
-            direction: "inbound",
+            ticket_id: ticketId,
+            workspace_id: ticket.workspace_id,
+            message_body: "playbook-apply",
+            channel: ticket.channel || "email",
+            is_new_ticket: false,
           },
         }),
       });

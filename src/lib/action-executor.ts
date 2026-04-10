@@ -510,7 +510,7 @@ async function handleJourney(
     .select("id, name, trigger_intent")
     .eq("workspace_id", ctx.workspaceId)
     .eq("name", decision.handler_name)
-    .eq("enabled", true)
+    .eq("is_active", true)
     .single();
 
   if (!journey) {
@@ -565,7 +565,7 @@ async function handlePlaybook(
     .select("id, name")
     .eq("workspace_id", ctx.workspaceId)
     .eq("name", decision.handler_name)
-    .eq("enabled", true)
+    .eq("is_active", true)
     .single();
 
   if (!playbook) {

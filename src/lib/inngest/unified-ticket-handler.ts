@@ -78,10 +78,20 @@ async function loadPersonality(admin: Admin, pid: string | null) {
   return data;
 }
 
-async function responseDelay(admin: Admin, wsId: string, ch: string): Promise<number> {
+async function responseDelay(admin: Admin, wsId: string, ch: string, customerEmail?: string | null): Promise<number> {
   const { data } = await admin.from("workspaces").select("response_delays").eq("id", wsId).single();
-  const d = (data?.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5, social_comments: 10 }) as Record<string, number>;
-  return d[ch] || d.email || 60;
+  const d = (data?.response_delays || { email: 60, chat: 5, sms: 10, meta_dm: 10, help_center: 5, social_comments: 10 }) as Record<string, unknown>;
+
+  // Skip delay for workspace members (debug/testing)
+  if (d.skip_delay_for_members && customerEmail) {
+    const { data: members } = await admin.from("workspace_members").select("user_id").eq("workspace_id", wsId);
+    for (const m of members || []) {
+      const { data: u } = await admin.auth.admin.getUserById(m.user_id);
+      if (u?.user?.email?.toLowerCase() === customerEmail.toLowerCase()) return 0;
+    }
+  }
+
+  return (d[ch] as number) || (d.email as number) || 60;
 }
 
 async function newerActivity(admin: Admin, tid: string, since: string): Promise<boolean> {
@@ -257,7 +267,14 @@ async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: st
 
 /** Compute delay and call send() as pending if delay > 0, immediate otherwise */
 async function sendWithDelay(admin: Admin, wsId: string, tid: string, ch: string, msg: string, sandbox: boolean) {
-  const delay = await responseDelay(admin, wsId, ch);
+  // Resolve customer email for skip-delay-for-members check
+  const { data: t } = await admin.from("tickets").select("customer_id").eq("id", tid).single();
+  let custEmail: string | null = null;
+  if (t?.customer_id) {
+    const { data: c } = await admin.from("customers").select("email").eq("id", t.customer_id).single();
+    custEmail = c?.email || null;
+  }
+  const delay = await responseDelay(admin, wsId, ch, custEmail);
   await send(admin, wsId, tid, ch, msg, sandbox, delay > 0, delay);
 }
 
@@ -413,7 +430,7 @@ export const unifiedTicketHandler = inngest.createFunction(
       }
 
       return {
-        hasCust: !!cust, custId: cust?.id || null, hasShopifyCustomer,
+        hasCust: !!cust, custId: cust?.id || null, custEmail: cust?.email || null, hasShopifyCustomer,
         ch: ticket.channel || ch, turn: ticket.ai_clarification_turn || 0,
         intervened: !!ticket.agent_intervened, handledBy: ticket.handled_by || "",
         subject: ticket.subject || "",
@@ -627,7 +644,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
         admin.from("tickets").update({ handled_by: null, ai_clarification_turn: 0 }).eq("id", tid));
 
       if (ep.type === "journey" && st.hasCust) {
-        const delay = await step.run("ep-delay", () => responseDelay(admin, wsId, st.ch));
+        const delay = await step.run("ep-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
         // delay handled by sendWithDelay
         await step.run("ep-journey", async () => {
           if (await newerActivity(admin, tid, t0)) return;
@@ -652,7 +669,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
           await admin.from("tickets").update({ handled_by: `Playbook: ${ep.name}` }).eq("id", tid);
         });
         // Execute first step
-        const delay = await step.run("ep-pb-delay", () => responseDelay(admin, wsId, st.ch));
+        const delay = await step.run("ep-pb-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
         // delay handled by sendWithDelay
         const pbResult = await step.run("ep-exec-pb", async () => {
           if (await newerActivity(admin, tid, t0)) return { action: "cancelled" as const };
@@ -669,7 +686,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
       if (ep.type === "workflow" && st.hasCust) {
         const wfTag = (ep as { tag?: string }).tag;
         if (wfTag) {
-          const delay = await step.run("ep-wf-delay", () => responseDelay(admin, wsId, st.ch));
+          const delay = await step.run("ep-wf-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
           if (delay > 0) await step.sleep("ep-wf-sleep", `${delay}s`);
           await step.run("ep-exec-workflow", async () => {
             if (await newerActivity(admin, tid, t0)) return;
@@ -688,7 +705,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
         await step.run("pattern-route", async () => {
           const ctx = await assembleTicketContext(wsId, tid);
           const custCtx = ctx.systemPrompt.split("CUSTOMER CONTEXT:")[1]?.split("CHANNEL")[0]?.trim() || "";
-          await routeExec(admin, wsId, tid, st.ch, ep.intent, Math.round(ep.confidence * 100), msg, custCtx, st.hasCust, cfg, pers, t0, st.custId || null, pendingAccountLink);
+          await routeExec(admin, wsId, tid, st.ch, ep.intent, Math.round(ep.confidence * 100), msg, custCtx, st.hasCust, cfg, pers, t0, st.custId || null, pendingAccountLink, st.custEmail);
         });
         return { status: "early_pattern_macro", intent: ep.intent };
       }
@@ -726,7 +743,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
 
       if (crisisFollowup) {
         // Direct action execution — parse full request with Sonnet and execute
-        const delay = await step.run("crisis-direct-delay", () => responseDelay(admin, wsId, st.ch));
+        const delay = await step.run("crisis-direct-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
         if (delay > 0) await step.sleep("crisis-direct-wait", `${delay}s`);
 
         const crisisResult = await step.run("crisis-direct-action", async () => {
@@ -1042,7 +1059,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
         await sysNote(admin, tid, `[System] Drift: answering customer question, then will nudge back to "${nudged.entry.journey_name}".`);
         // Don't return — let it fall through to normal AI processing
       } else if (nudged?.action === "nudge") {
-        const delay = await step.run("nudge-delay", () => responseDelay(admin, wsId, st.ch));
+        const delay = await step.run("nudge-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
         if (delay > 0) await step.sleep("nudge-wait", `${delay}s`);
         await step.run("send-nudge", async () => {
           if (await newerActivity(admin, tid, t0)) return;
@@ -1062,7 +1079,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
       });
 
       if (pbActive) {
-        const delay = await step.run("playbook-delay", () => responseDelay(admin, wsId, st.ch));
+        const delay = await step.run("playbook-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
         // delay handled by sendWithDelay
 
         const pbResult = await step.run("exec-playbook-step", async () => {
@@ -1174,7 +1191,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
       });
 
       if (isClose) {
-        const delay = await step.run("close-delay", () => responseDelay(admin, wsId, st.ch));
+        const delay = await step.run("close-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
         // delay handled by sendWithDelay
         await step.run("send-close", async () => {
           if (await newerActivity(admin, tid, t0)) return;
@@ -1202,7 +1219,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
         return decision;
       });
 
-      const delay = await step.run("sonnet-delay", () => responseDelay(admin, wsId, st.ch));
+      const delay = await step.run("sonnet-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
       if (delay > 0) await step.sleep("sonnet-wait", `${delay}s`);
 
       await step.run("sonnet-execute", async () => {
@@ -1247,7 +1264,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
             const intent = (pb.trigger_intents as string[])?.[0] || "unknown";
             await sysNote(admin, tid, `[System] Clarify pattern match: "${intent}" via playbook "${pb.name}"`);
             await admin.from("tickets").update({ ai_detected_intent: intent, ai_intent_confidence: 95, ai_clarification_turn: 0 }).eq("id", tid);
-            await routeExec(admin, wsId, tid, st.ch, intent, 95, msg, "", st.hasCust, cfg, pers, t0);
+            await routeExec(admin, wsId, tid, st.ch, intent, 95, msg, "", st.hasCust, cfg, pers, t0, st.custId, null, st.custEmail);
             return { status: "routed_after_clarify_pattern", intent };
           }
         }
@@ -1263,7 +1280,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
 
         if (intent.confidence >= cfg.threshold) {
           await admin.from("tickets").update({ ai_clarification_turn: 0 }).eq("id", tid);
-          await routeExec(admin, wsId, tid, st.ch, intent.intent, intent.confidence, msg, custCtx, st.hasCust, cfg, pers, t0);
+          await routeExec(admin, wsId, tid, st.ch, intent.intent, intent.confidence, msg, custCtx, st.hasCust, cfg, pers, t0, st.custId, null, st.custEmail);
           return { status: "routed_after_clarify", intent: intent.intent };
         }
         const next = st.turn + 1;
@@ -1273,7 +1290,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
           return { status: "escalated", reason: "max_clarify" };
         }
         const q = await clarifyQ(msg, intent.intent, intent.confidence, st.ch, pers);
-        const delay = await responseDelay(admin, wsId, st.ch);
+        const delay = await responseDelay(admin, wsId, st.ch, st.custEmail);
         if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
         if (await newerActivity(admin, tid, t0)) return { status: "bailed", reason: "newer_msg" };
         await sendWithDelay(admin, wsId, tid, st.ch, q, cfg.sandbox);
@@ -1316,7 +1333,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
 
     if (journeyDirect.hit) {
       const jd = journeyDirect as { hit: true; type: "journey"; id: string; name: string; intent: string };
-      const pDelay = await step.run("jdirect-delay", () => responseDelay(admin, wsId, st.ch));
+      const pDelay = await step.run("jdirect-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
       if (pDelay > 0) await step.sleep("jdirect-sleep", `${pDelay}s`);
       await step.run("exec-jdirect", async () => {
         if (await newerActivity(admin, tid, t0)) return;
@@ -1358,7 +1375,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
       });
 
       if (patternRouted) {
-        const pDelay = await step.run("pattern-delay-calc", () => responseDelay(admin, wsId, st.ch));
+        const pDelay = await step.run("pattern-delay-calc", () => responseDelay(admin, wsId, st.ch, st.custEmail));
         if (pDelay > 0) await step.sleep("pattern-delay", `${pDelay}s`);
         await step.run("exec-pattern", async () => {
           if (await newerActivity(admin, tid, t0)) return;
@@ -1400,7 +1417,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
       await step.run("ask-customer-id", async () => {
         await sysNote(admin, tid, `[System] Account-related but no customer. Asking for email/order number.`);
         await admin.from("tickets").update({ ai_clarification_turn: 1 }).eq("id", tid);
-        const delay = await responseDelay(admin, wsId, st.ch);
+        const delay = await responseDelay(admin, wsId, st.ch, st.custEmail);
         if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
         if (await newerActivity(admin, tid, t0)) return;
         await sendWithDelay(admin, wsId, tid, st.ch, "I'd be happy to help! Could you share the email address or order number associated with your account so I can pull up your details?", cfg.sandbox);
@@ -1435,7 +1452,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
         await step.run("intent-bypass-note", () =>
           sysNote(admin, tid, `[System] Confidence ${ai.confidence}% < ${cfg.threshold}%, but intent matches ${intentBypass.handler}. Routing directly.`));
         await step.run("route-bypass", async () => {
-          await routeExec(admin, wsId, tid, st.ch, ai.intent, ai.confidence, msg, ai.custCtx, st.hasCust, cfg, pers, t0, st.custId || null, pendingAccountLink);
+          await routeExec(admin, wsId, tid, st.ch, ai.intent, ai.confidence, msg, ai.custCtx, st.hasCust, cfg, pers, t0, st.custId || null, pendingAccountLink, st.custEmail);
         });
         return { status: "intent_bypass_routed", intent: ai.intent, confidence: ai.confidence };
       }
@@ -1447,7 +1464,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
         await sysNote(admin, tid, `[System] Confidence ${ai.confidence}% < ${cfg.threshold}%. Clarifying.`);
         await admin.from("tickets").update({ ai_clarification_turn: 1 }).eq("id", tid);
         const q = await clarifyQ(msg, ai.intent, ai.confidence, st.ch, pers);
-        const delay = await responseDelay(admin, wsId, st.ch);
+        const delay = await responseDelay(admin, wsId, st.ch, st.custEmail);
         if (delay > 0) await new Promise(r => setTimeout(r, delay * 1000));
         if (await newerActivity(admin, tid, t0)) return;
         await sendWithDelay(admin, wsId, tid, st.ch, q, cfg.sandbox);
@@ -1458,7 +1475,7 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
 
     // ── 7. Route ──
     await step.run("route", async () => {
-      await routeExec(admin, wsId, tid, st.ch, ai.intent, ai.confidence, msg, ai.custCtx, st.hasCust, cfg, pers, t0, st.custId || null, pendingAccountLink);
+      await routeExec(admin, wsId, tid, st.ch, ai.intent, ai.confidence, msg, ai.custCtx, st.hasCust, cfg, pers, t0, st.custId || null, pendingAccountLink, st.custEmail);
     });
     return { status: "routed", intent: ai.intent, confidence: ai.confidence };
     ── END OLD PIPELINE ── */
@@ -1476,10 +1493,11 @@ async function routeExec(
   pers: { name?: string; tone?: string; sign_off?: string | null } | null, t0: string,
   custId?: string | null,
   pendingAccountLink?: { journeyId: string; journeyName: string } | null,
+  custEmail?: string | null,
 ) {
   const social = ch === "social_comments";
   await admin.from("tickets").update({ ai_clarification_turn: 0 }).eq("id", tid);
-  const delay = await responseDelay(admin, wsId, ch);
+  const delay = await responseDelay(admin, wsId, ch, custEmail);
 
   // 1. Journey
   if (hasCust && !social) {

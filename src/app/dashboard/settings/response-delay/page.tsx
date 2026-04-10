@@ -6,13 +6,19 @@ import { useWorkspace } from "@/lib/workspace-context";
 export default function ResponseDelayPage() {
   const workspace = useWorkspace();
   const [delays, setDelays] = useState<Record<string, number>>({ email: 60, chat: 5, sms: 10, meta_dm: 10, social_comments: 10 });
+  const [skipForMembers, setSkipForMembers] = useState(false);
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     fetch(`/api/workspaces/${workspace.id}/integrations`)
       .then(r => r.json())
-      .then(d => { if (d.response_delays) setDelays(d.response_delays); })
+      .then(d => {
+        if (d.response_delays) {
+          setSkipForMembers(!!d.response_delays.skip_delay_for_members);
+          setDelays(d.response_delays);
+        }
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [workspace.id]);
@@ -21,7 +27,7 @@ export default function ResponseDelayPage() {
     await fetch(`/api/workspaces/${workspace.id}/integrations`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ response_delays: delays }),
+      body: JSON.stringify({ response_delays: { ...delays, skip_delay_for_members: skipForMembers } }),
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
@@ -59,6 +65,21 @@ export default function ResponseDelayPage() {
             </div>
           ))}
         </div>
+        <div className="mt-5 border-t border-zinc-200 pt-4 dark:border-zinc-800">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={skipForMembers}
+              onChange={(e) => setSkipForMembers(e.target.checked)}
+              className="h-4 w-4 rounded border-zinc-300 text-zinc-900 dark:border-zinc-600 dark:bg-zinc-800"
+            />
+            <div>
+              <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Skip delays for workspace members</span>
+              <p className="text-xs text-zinc-400">Send responses instantly when the customer is also a team member. Useful for testing.</p>
+            </div>
+          </label>
+        </div>
+
         <div className="mt-4 flex items-center gap-2">
           <button onClick={handleSave} className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200">Save</button>
           {saved && <span className="text-sm text-emerald-600 font-medium">Saved!</span>}
