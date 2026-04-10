@@ -375,6 +375,19 @@ const directActionHandlers: Record<
       const { addTicketTag } = await import("@/lib/ticket-tags");
       await addTicketTag(ctx.ticketId, "wb");
       await addTicketTag(ctx.ticketId, "wb:success");
+
+      // Apply preserved base price if one exists (from crisis price fix)
+      const { data: crisisAction } = await ctx.admin.from("crisis_customer_actions")
+        .select("preserved_base_price_cents")
+        .eq("subscription_id", p.contract_id!)
+        .not("preserved_base_price_cents", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (crisisAction?.preserved_base_price_cents && p.variant_id) {
+        const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
+        await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id!, p.variant_id, crisisAction.preserved_base_price_cents);
+      }
     }
     return { ...r, summary: "Reactivated subscription" };
   },

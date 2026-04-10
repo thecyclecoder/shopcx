@@ -162,9 +162,43 @@ export async function subUpdateLineItemPrice(
 
   const priceDecimal = (basePriceCents / 100).toFixed(2);
   try {
-    // Try the dedicated price endpoint first
+    // Resolve lineId — check DB first, fall back to Appstle API
+    let lineId: string | null = null;
+
+    const admin = createAdminClient();
+    const { data: sub } = await admin.from("subscriptions")
+      .select("items")
+      .eq("shopify_contract_id", contractId)
+      .single();
+    const items = (sub?.items as { variant_id?: string; line_id?: string }[]) || [];
+    const match = items.find(i => String(i.variant_id) === String(variantId));
+    if (match?.line_id) {
+      lineId = match.line_id;
+    }
+
+    // Fall back to Appstle contract details API
+    if (!lineId) {
+      const detailRes = await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details?contractId=${contractId}`,
+        { headers: { "X-API-Key": config.apiKey }, cache: "no-store" },
+      );
+      if (detailRes.ok) {
+        const detail = await detailRes.json();
+        // Response may be a single contract object or array — normalize
+        const contract = Array.isArray(detail) ? detail[0] : detail;
+        const lines = contract?.subscriptionLines || contract?.lines || [];
+        const lineMatch = (lines as { variantId?: string | number; id?: string | number }[])
+          .find(l => String(l.variantId) === String(variantId));
+        if (lineMatch?.id) lineId = String(lineMatch.id);
+      }
+    }
+
+    if (!lineId) {
+      return { success: false, error: "Could not resolve lineId for variant " + variantId };
+    }
+
     const res = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-line-item-price?contractId=${contractId}&variantId=${variantId}&price=${priceDecimal}`,
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-line-item-price?contractId=${contractId}&lineId=${lineId}&basePrice=${priceDecimal}`,
       {
         method: "PUT",
         headers: { "X-API-Key": config.apiKey, "Content-Type": "application/json" },
@@ -173,13 +207,8 @@ export async function subUpdateLineItemPrice(
     );
     if (!res.ok) {
       const text = await res.text();
-      // If subscription is cancelled/inactive, this is non-fatal — price will be set on reactivation
-      if (res.status === 400 || res.status === 404) {
-        console.warn(`Appstle updateLineItemPrice skipped (${res.status}): subscription may be cancelled. Will apply on reactivation.`);
-        return { success: true, error: `Skipped — subscription inactive (will apply on reactivation)` };
-      }
       console.error("Appstle updateLineItemPrice error:", text);
-      return { success: false, error: `Appstle API error: ${res.status}` };
+      return { success: false, error: `Appstle API error: ${res.status} — ${text.slice(0, 200)}` };
     }
     return { success: true };
   } catch (err) {

@@ -150,6 +150,7 @@ async function handleSubscriptionEvent(
     variant_id: line.variantId ? extractId(line.variantId as string) : null,
     variant_title: line.variantTitle || null,
     selling_plan: line.sellingPlanName || null,
+    line_id: line.id ? extractId(line.id as string) : null,
   }));
 
   const billingPolicy = data.billingPolicy as { interval?: string; intervalCount?: number } | undefined;
