@@ -875,6 +875,7 @@ Return ONLY valid JSON:
             plan = { actions: [], pause: false, remove_item: false, cancel: false, needs_clarification: true, clarification_question: "I want to help! Could you let me know exactly what you'd like us to do with your subscription?", confirmation_summary: "" };
           }
 
+          await sysNote(admin, tid, `[System] Sonnet raw: ${planResult.slice(0, 300)}`);
           await sysNote(admin, tid, `[System] Crisis action plan: ${JSON.stringify(plan)}`);
 
           // Check sandbox mode
