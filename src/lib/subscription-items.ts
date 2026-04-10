@@ -176,20 +176,20 @@ export async function subUpdateLineItemPrice(
       lineId = match.line_id;
     }
 
-    // Fall back to Appstle contract details API
+    // Fall back to Appstle contract-external API
     if (!lineId) {
       const detailRes = await fetch(
-        `https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details?contractId=${contractId}`,
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
         { headers: { "X-API-Key": config.apiKey }, cache: "no-store" },
       );
       if (detailRes.ok) {
         const detail = await detailRes.json();
-        // Response may be a single contract object or array — normalize
-        const contract = Array.isArray(detail) ? detail[0] : detail;
-        const lines = contract?.subscriptionLines || contract?.lines || [];
-        const lineMatch = (lines as { variantId?: string | number; id?: string | number }[])
-          .find(l => String(l.variantId) === String(variantId));
-        if (lineMatch?.id) lineId = String(lineMatch.id);
+        const lines = (detail?.lines?.nodes || []) as { id?: string; variantId?: string }[];
+        const lineMatch = lines.find(l => {
+          const vid = l.variantId?.split("/").pop() || l.variantId;
+          return String(vid) === String(variantId);
+        });
+        if (lineMatch?.id) lineId = lineMatch.id.split("/").pop() || lineMatch.id;
       }
     }
 
