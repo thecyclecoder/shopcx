@@ -579,9 +579,23 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
       if (casualLink) pendingAccountLink = casualLink;
     }
 
+    // ── 2e. Crisis short-circuit — skip pattern match if this is a crisis ticket ──
+    // Crisis follow-up detection runs later (step 2d) but we need to prevent the
+    // early pattern match from stealing the message first
+    let isCrisisTicket = false;
+    if (!isNew && st.hasCust) {
+      const crisisTags = await step.run("crisis-tag-check", async () => {
+        const { data: t } = await admin.from("tickets").select("tags").eq("id", tid).single();
+        return ((t?.tags as string[]) || []).some(tag => tag.startsWith("crisis"));
+      });
+      isCrisisTicket = crisisTags;
+    }
+
     // ── 3. Early pattern match — runs before re-nudge/playbook checks ──
     // For account messages: check journeys/playbooks/workflows
+    // SKIP for crisis tickets — those are handled by the crisis follow-up block
     // For general messages: only check for macros (pattern_only)
+    if (!isCrisisTicket) {
     const earlyPattern = await step.run("early-pattern-match", async () => {
       const m = await matchPatterns(wsId, null, msg);
       if (m && m.confidence >= 0.7) {
@@ -711,6 +725,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
         return { status: "early_pattern_macro", intent: ep.intent };
       }
     }
+    } // end !isCrisisTicket
 
     // ── 2d. Crisis follow-up detection ──
     // If this ticket was handled by a crisis and the customer replies, detect intent and re-launch journey

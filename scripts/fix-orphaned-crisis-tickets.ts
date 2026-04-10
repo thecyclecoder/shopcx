@@ -136,10 +136,10 @@ async function main() {
     // Fire unified handler with the latest customer message
     const latestMsg = messages[messages.length - 1];
     if (latestMsg && INNGEST_EVENT_KEY) {
-      const inngestUrl = process.env.INNGEST_EVENT_URL || "https://inn.gs/e";
+      const inngestUrl = `https://inn.gs/e/${INNGEST_EVENT_KEY}`;
       await fetch(inngestUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${INNGEST_EVENT_KEY}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: "ticket/inbound-message",
           data: {
