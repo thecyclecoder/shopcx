@@ -53,6 +53,7 @@ export default function CouponsPage() {
   const [mappings, setMappings] = useState<CouponMapping[]>([]);
   const [shopifyDiscounts, setShopifyDiscounts] = useState<ShopifyDiscount[]>([]);
   const [vipThreshold, setVipThreshold] = useState(85);
+  const [priceFloor, setPriceFloor] = useState(50);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -66,6 +67,7 @@ export default function CouponsPage() {
     setMappings(data.mappings || []);
     if (data.shopify_discounts?.length) setShopifyDiscounts(data.shopify_discounts);
     setVipThreshold(data.vip_threshold || 85);
+    setPriceFloor(data.coupon_price_floor_pct ?? 50);
     setLoading(false);
   };
 
@@ -133,6 +135,31 @@ export default function CouponsPage() {
           />
           <span className="text-sm text-zinc-500">/ 100 retention score</span>
           <button onClick={handleVipSave} className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500">Save</button>
+        </div>
+      </div>
+
+      {/* Grandfathered Price Floor */}
+      <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Grandfathered Price Floor</h2>
+        <p className="mt-1 text-xs text-zinc-500">
+          Customers with grandfathered (below-standard) pricing can always use loyalty coupons.
+          Sale coupons are blocked if the final price would drop below this percentage of the standard MSRP.
+        </p>
+        <div className="mt-3 flex items-center gap-3">
+          <input
+            type="number" min={0} max={100} value={priceFloor}
+            onChange={(e) => setPriceFloor(parseInt(e.target.value) || 0)}
+            className="w-20 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+          />
+          <span className="text-sm text-zinc-500">% of MSRP minimum</span>
+          <button onClick={async () => {
+            await fetch(`/api/workspaces/${workspace.id}/integrations`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ coupon_price_floor_pct: priceFloor }),
+            });
+            alert("Price floor saved!");
+          }} className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500">Save</button>
         </div>
       </div>
 

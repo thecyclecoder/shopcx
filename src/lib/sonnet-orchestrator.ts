@@ -167,15 +167,34 @@ export async function buildSonnetContext(
   const cName = [customer?.first_name, customer?.last_name].filter(Boolean).join(" ") || "Customer";
   const cEmail = customer?.email || "unknown";
 
-  // Format subscriptions
+  // Build product price lookup for grandfathered detection
+  const productPriceMap = new Map<string, number>(); // variant_id → standard price_cents
+  for (const p of allProducts || []) {
+    for (const v of (p.variants as { id?: string; price_cents?: number }[]) || []) {
+      if (v.id && v.price_cents) productPriceMap.set(String(v.id), v.price_cents);
+    }
+  }
+
+  // Get coupon price floor setting
+  const { data: wsSettings } = await admin.from("workspaces")
+    .select("coupon_price_floor_pct").eq("id", workspaceId).single();
+  const priceFloorPct = wsSettings?.coupon_price_floor_pct ?? 50;
+
+  // Format subscriptions — detect grandfathered pricing
   let subsBlock = "None";
+  let hasGrandfathered = false;
   if (subscriptions?.length) {
     subsBlock = subscriptions
       .map((s: any) => {
         const items = (s.items || [])
           .map(
-            (i: any) =>
-              `${i.title || "item"}${i.variant_title ? ` (${i.variant_title})` : ""} x${i.quantity || 1}`,
+            (i: any) => {
+              const effectiveBase = Math.round((i.price_cents || 0) / 0.75);
+              const standardPrice = productPriceMap.get(String(i.variant_id));
+              const isGrandfathered = standardPrice && effectiveBase < standardPrice;
+              if (isGrandfathered) hasGrandfathered = true;
+              return `${i.title || "item"}${i.variant_title ? ` (${i.variant_title})` : ""} x${i.quantity || 1} @ $${((i.price_cents || 0) / 100).toFixed(2)}${isGrandfathered ? " [GRANDFATHERED - below standard $" + ((standardPrice || 0) * 0.75 / 100).toFixed(2) + "]" : ""}`;
+            },
           )
           .join(", ");
         const next = s.next_billing_date
@@ -387,7 +406,8 @@ RULES:
 - For simple subscription changes (skip, date, frequency, swap, add, quantity) → execute directly
 - For price complaints / overcharges → ALWAYS compare RECENT ORDERS above. Look at the per-item price_cents across orders. If the latest order's item price is higher than the previous order's item price, the customer was overcharged. Calculate the difference (latest_total - previous_total) and issue partial_refund for that amount. Also update_line_item_price with base_price_cents = previous_price / 0.75 (accounts for 25% subscription discount). Do BOTH actions together.
 - When fixing an issue that caused a customer to cancel → after resolving the issue, if their subscription status is "cancelled", offer to reactivate it in your response_message. Mention how much you appreciate their loyalty and their order history (use the order count). Don't auto-reactivate — ASK if they'd like you to. If they say yes in a follow-up, use the reactivate action.
-- For loyalty coupon application → check if customer has unused coupons, apply directly
+- For loyalty coupon application → always allowed, even for grandfathered customers. Check if customer has unused coupons, apply directly.
+- For sale/promotional coupons → if any subscription item is marked [GRANDFATHERED], do NOT apply a sale coupon if it would bring the effective price below ${priceFloorPct}% of the standard MSRP. Loyalty coupons are always OK. If a grandfathered customer asks for a sale coupon, explain they already have special pricing locked in and can use their loyalty points instead.
 - For account linking → ONLY send the account linking journey if having the linked account's data would help resolve this specific request (e.g. customer needs login but their shopify account is under a different email). Do NOT link just because unlinked accounts exist — only when it's necessary for the task at hand
 - For product availability questions → check OUT OF STOCK / LOW INVENTORY above. If the product is listed there, tell the customer it's temporarily unavailable and offer alternatives. Do NOT say it's available if it's out of stock.
 - For product/policy questions → use matching macro or KB article, or generate ai_response

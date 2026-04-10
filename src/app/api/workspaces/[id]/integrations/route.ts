@@ -203,6 +203,10 @@ export async function PATCH(
       updates.response_delays = body.response_delays;
     }
 
+    if ("coupon_price_floor_pct" in body) {
+      updates.coupon_price_floor_pct = parseInt(body.coupon_price_floor_pct) || 50;
+    }
+
     if ("help_slug" in body && body.help_slug) {
       // Check uniqueness
       const { data: existing } = await admin.from("workspaces").select("id").eq("help_slug", body.help_slug).neq("id", workspaceId).single();

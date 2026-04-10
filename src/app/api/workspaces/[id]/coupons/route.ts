@@ -108,7 +108,7 @@ export async function GET(
   // Get VIP threshold
   const { data: ws } = await admin
     .from("workspaces")
-    .select("vip_retention_threshold")
+    .select("vip_retention_threshold, coupon_price_floor_pct")
     .eq("id", workspaceId)
     .single();
 
@@ -116,6 +116,7 @@ export async function GET(
     mappings: mappings || [],
     shopify_discounts: shopifyDiscounts,
     vip_threshold: ws?.vip_retention_threshold || 85,
+    coupon_price_floor_pct: ws?.coupon_price_floor_pct ?? 50,
   });
 }
 
