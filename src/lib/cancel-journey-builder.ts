@@ -32,18 +32,8 @@ export interface CancelJourneyMetadata {
   selectedSubscriptionId?: string;
 }
 
-const DEFAULT_CANCEL_REASONS = [
-  { value: "too_expensive", label: "Too expensive", emoji: "💸" },
-  { value: "too_much_product", label: "I have too much product", emoji: "📦" },
-  { value: "not_seeing_results", label: "I'm not seeing results", emoji: "😕" },
-  { value: "reached_goals", label: "I've already reached my goals", emoji: "🎯" },
-  { value: "taste_texture", label: "I don't like the taste or texture", emoji: "😬" },
-  { value: "health_change", label: "My health needs have changed", emoji: "🏥" },
-  { value: "just_pausing", label: "I just need a break", emoji: "⏸️" },
-  { value: "something_else", label: "Something else", emoji: "💬" },
-];
-
-async function loadCancelReasons(workspaceId: string): Promise<{ value: string; label: string; emoji?: string }[]> {
+// Cancel reasons come from Settings → Cancel Flow (database only, no hardcoded defaults)
+async function loadCancelReasons(workspaceId: string): Promise<{ value: string; label: string }[]> {
   const admin = createAdminClient();
   const { data: ws } = await admin.from("workspaces")
     .select("portal_config")
@@ -53,8 +43,6 @@ async function loadCancelReasons(workspaceId: string): Promise<{ value: string; 
   const portalConfig = (ws?.portal_config || {}) as Record<string, unknown>;
   const cancelConfig = (portalConfig.cancel_flow || {}) as Record<string, unknown>;
   const configuredReasons = Array.isArray(cancelConfig.reasons) ? cancelConfig.reasons : [];
-
-  if (configuredReasons.length === 0) return DEFAULT_CANCEL_REASONS;
 
   return configuredReasons
     .filter((r: { enabled?: boolean }) => r.enabled !== false)

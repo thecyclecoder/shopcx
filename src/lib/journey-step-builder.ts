@@ -195,105 +195,19 @@ async function buildMarketingSignupSteps(
 }
 
 // ── Cancel Journey Steps ──
+// Delegates to cancel-journey-builder.ts — single source of truth
 
 async function buildCancelSteps(
-  admin: Admin, workspaceId: string, customerId: string, ticketId?: string,
+  _admin: Admin, workspaceId: string, customerId: string, ticketId?: string,
 ): Promise<BuiltJourneyConfig & { cancelJourney: boolean }> {
-  // Fetch customer's active subscriptions
-  const { data: subs } = await admin.from("subscriptions")
-    .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count, next_billing_date, created_at")
-    .eq("workspace_id", workspaceId)
-    .eq("customer_id", customerId)
-    .in("status", ["active", "paused"])
-    .order("created_at", { ascending: false });
-
-  // Also check linked customer profiles
-  const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", customerId).single();
-  let allSubs = subs || [];
-  if (link) {
-    const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
-    const linkedIds = (grp || []).map(g => g.customer_id).filter(id => id !== customerId);
-    if (linkedIds.length > 0) {
-      const { data: linkedSubs } = await admin.from("subscriptions")
-        .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count, next_billing_date, created_at")
-        .eq("workspace_id", workspaceId)
-        .in("customer_id", linkedIds)
-        .in("status", ["active", "paused"]);
-      allSubs = [...allSubs, ...(linkedSubs || [])];
-    }
-  }
-
-  // Calculate first-renewal detection
-  const subscriptionData = allSubs.map(s => {
-    const ageDays = Math.floor((Date.now() - new Date(s.created_at).getTime()) / 86400000);
-    const intervalDays = s.billing_interval === "MONTH" ? s.billing_interval_count * 30
-      : s.billing_interval === "WEEK" ? s.billing_interval_count * 7
-      : s.billing_interval_count * 30;
-    const isFirstRenewal = ageDays < intervalDays;
-    const items = (s.items as { title?: string; variant_title?: string; image_url?: string }[] || []).map(i => ({
-      title: i.title || "Product",
-      variant_title: i.variant_title || null,
-      image_url: i.image_url || null,
-    }));
-    return {
-      id: s.id,
-      contractId: s.shopify_contract_id,
-      status: s.status,
-      items,
-      billingInterval: s.billing_interval,
-      billingIntervalCount: s.billing_interval_count,
-      nextBillingDate: s.next_billing_date,
-      isFirstRenewal,
-      subscriptionAgeDays: ageDays,
-    };
-  });
-
-  // Fetch cancel reasons from workspace portal_config
-  const { data: wsConfig } = await admin.from("workspaces")
-    .select("portal_config")
-    .eq("id", workspaceId)
-    .single();
-
-  const portalConfig = (wsConfig?.portal_config || {}) as Record<string, unknown>;
-  const cancelFlowConfig = (portalConfig.cancel_flow || {}) as Record<string, unknown>;
-  const reasons = (Array.isArray(cancelFlowConfig.reasons) ? cancelFlowConfig.reasons : []) as {
-    slug: string; label: string; type: string; enabled: boolean;
-  }[];
-
-  const enabledReasons = reasons.filter(r => r.enabled !== false);
-
-  // If no reasons configured in settings, use defaults (same as cancel-journey-builder.ts)
-  const DEFAULT_CANCEL_REASONS = [
-    { value: "too_expensive", label: "Too expensive" },
-    { value: "too_much_product", label: "I have too much product" },
-    { value: "not_seeing_results", label: "I'm not seeing results" },
-    { value: "reached_goals", label: "I've already reached my goals" },
-    { value: "taste_texture", label: "I don't like the taste or texture" },
-    { value: "health_change", label: "My health needs have changed" },
-    { value: "just_pausing", label: "I just need a break" },
-    { value: "something_else", label: "Something else" },
-  ];
-  const finalReasons = enabledReasons.length > 0
-    ? enabledReasons.map(r => ({ value: r.slug, label: r.label }))
-    : DEFAULT_CANCEL_REASONS;
-
-  // Build the cancel_reason step with options from the cancel flow settings
-  const cancelReasonStep: JourneyStep = {
-    key: "cancel_reason",
-    type: "single_choice",
-    question: "Why are you looking to cancel?",
-    options: finalReasons,
-  };
+  const { buildCancelJourneySteps } = await import("@/lib/cancel-journey-builder");
+  const result = await buildCancelJourneySteps(workspaceId, customerId, ticketId || "");
 
   return {
     codeDriven: true,
     cancelJourney: true,
-    multiStep: false,
-    steps: [cancelReasonStep],
-    metadata: {
-      subscriptions: subscriptionData,
-      selectedSubscriptionId: subscriptionData[0]?.id || null,
-    },
-    ticketId,
+    multiStep: result.steps.length > 1,
+    steps: result.steps as JourneyStep[],
+    metadata: result.metadata as unknown as Record<string, unknown>,
   } as BuiltJourneyConfig & { cancelJourney: boolean };
 }

@@ -5,21 +5,34 @@ Journeys are deterministic, multi-step customer flows that guide customers throu
 - **Live chat**: Inline multi-step form embedded in chat bubble (`<!--JOURNEY:{token,steps}-->`)
 - **Email**: CTA email → branded mini-site at `/journey/{token}` with progress bar
 
+## Channel Delivery
+
+| Channel | Delivery | Notes |
+|---------|----------|-------|
+| **Chat** | Embedded inline form (`<!--JOURNEY:{token,steps}-->`) | Widget renders `InlineJourneyForm` component |
+| **Email** | CTA button → mini-site at `/journey/{token}` | AI-generated lead-in text + branded button |
+| **Help Center** | Same as email | |
+| **SMS** | Plain text + URL link | |
+| **Meta DM** | Plain text + URL link | |
+| **Social Comments** | **NEVER** — journeys cannot be sent on social comments | |
+
+When chat customer is idle >3 min, delivery automatically switches to email (secondary channel system).
+
 ## Architecture
 
 ```
-Customer message → Pattern match → Journey launcher
-                                    │
-                    ┌───────────────┴───────────────┐
-                    │ Chat                          │ Email
-                    │ Build steps + embed inline    │ Build steps + create session
-                    │ via <!--JOURNEY:{}-->         │ + send CTA email
-                    │ Widget renders InlineForm     │ Mini-site renders steps
-                    └───────────────┬───────────────┘
-                                    │
-                                    ▼
-                    POST /api/journey/{token}/complete
-                    (processes all responses at once)
+Customer message → Sonnet orchestrator → Journey launcher
+                                          │
+                          ┌───────────────┴───────────────┐
+                          │ Chat                          │ Email/SMS/DM
+                          │ Build steps + embed inline    │ Build steps + create session
+                          │ via <!--JOURNEY:{}-->         │ + send CTA email/link
+                          │ Widget renders InlineForm     │ Mini-site renders steps
+                          └───────────────┬───────────────┘
+                                          │
+                                          ▼
+                          POST /api/journey/{token}/complete
+                          (processes all responses at once)
 ```
 
 ## Key Principles (learned through testing)
@@ -99,13 +112,16 @@ The outcome tag is applied in `/api/journey/[token]/complete/route.ts` based on 
 
 ## Adding a New Journey
 
-1. Create a `journey_definitions` row with slug, name, journey_type, trigger_intent, match_patterns, channels
-2. For code-driven journeys: add a step builder function (like `buildDiscountJourneySteps`)
-3. Wire it into `journey-launcher.ts` for chat and `email-journey-builder.ts` for email
-4. Add response processing to `/api/journey/[token]/complete/route.ts`
+1. Create builder: `src/lib/{name}-journey-builder.ts` — single source of truth for this journey's steps and metadata
+2. Add case to `src/lib/journey-step-builder.ts` switch — delegate to your builder (never duplicate logic)
+3. Add `journey_definitions` row (migration) with slug, name, journey_type, trigger_intent, channels
+4. Add completion handler to `src/app/api/journey/[token]/complete/route.ts` if actions needed
 5. Add ticket tag: `j:{intent}` via `addTicketTag()`
-6. Add `jo:positive` / `jo:negative` / `jo:neutral` tags based on outcome — **ask the user what these are**
-7. Update CLAUDE.md tag conventions
+6. Add `jo:positive` / `jo:negative` / `jo:neutral` tags — **ask the user what these are**
+7. Update `JOURNEYS.md` with the new journey documentation
+8. Update `CLAUDE.md` to reference any new docs
+9. All options/reasons/data must come from the database, never hardcoded
+10. Remember: chat = embedded form, email = CTA link, social_comments = never
 
 ## Files
 

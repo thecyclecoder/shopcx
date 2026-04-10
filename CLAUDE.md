@@ -1,4 +1,6 @@
 @AGENTS.md
+@JOURNEYS.md
+@CANCEL-FLOW.md
 
 # ShopCX.ai — The Retention Operating System
 
