@@ -522,6 +522,8 @@ async function handleDirectAction(
         .maybeSingle();
       if (sub?.shopify_contract_id) {
         action.contract_id = sub.shopify_contract_id;
+      } else {
+        await sysNote(`Warning: could not resolve subscription UUID ${action.contract_id} to Shopify contract ID`);
       }
     }
   }
