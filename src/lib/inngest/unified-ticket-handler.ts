@@ -881,8 +881,10 @@ Return ONLY valid JSON:
           const { data: wsData } = await admin.from("workspaces").select("sandbox_mode").eq("id", wsId).single();
           const isSandbox = wsData?.sandbox_mode === true;
 
-          if (plan.needs_clarification) {
-            await sendWithDelay(admin, wsId, tid, st.ch, plan.clarification_question || "Could you clarify what you'd like us to do?", isSandbox);
+          // Treat empty/invalid plans as needing clarification
+          const hasAnyAction = (plan.actions?.length > 0) || plan.pause || plan.remove_item || plan.cancel;
+          if (plan.needs_clarification || !hasAnyAction) {
+            await sendWithDelay(admin, wsId, tid, st.ch, plan.clarification_question || "I want to make sure I get this right for you. Could you let me know exactly what you'd like us to do with your subscription?", isSandbox);
             return { status: "clarification_sent" as const };
           }
 
