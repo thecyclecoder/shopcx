@@ -748,17 +748,24 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
 
         // Get crisis details for context
         const { data: crisis } = await admin.from("crisis_events")
-          .select("id, name, affected_product_title, default_swap_title, status")
+          .select("id, name, affected_product_title, default_swap_title, available_flavor_swaps, available_product_swaps, status")
           .eq("id", action.crisis_id)
           .single();
         if (!crisis || crisis.status === "resolved") return null;
+
+        // Build available options for Haiku context
+        const flavorNames = [crisis.default_swap_title, ...((crisis.available_flavor_swaps as { title: string }[]) || []).map(f => f.title)].filter(Boolean);
+        const productNames = ((crisis.available_product_swaps as { productTitle: string }[]) || []).map(p => p.productTitle);
 
         // Use Haiku to classify the customer's intent
         const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
         const intentCheck = await claude(
           `A customer is replying to a crisis outreach about "${crisis.affected_product_title}" being out of stock.
 Their subscription was auto-swapped to "${crisis.default_swap_title}".
+Available flavor swaps: ${flavorNames.join(", ")}.
+Available product swaps: ${productNames.join(", ")}.
 Current status: ${action.tier1_response === "accepted_swap" ? "They already accepted a flavor swap" : "Pending response"}.
+If the customer mentions ANY product or action related to their subscription (even products from the swap list), classify it as crisis-related.
 
 Classify their message into one of these intents:
 - "change_flavor" — wants to switch to a different flavor of the same product
