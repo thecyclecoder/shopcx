@@ -850,11 +850,10 @@ Analyze the FULL conversation and determine what the customer needs. Available a
 - "pause": pause the crisis subscription until the product is back in stock
 - "remove_item": remove the affected item from subscription (keep other items)
 - "apply_coupon": apply the crisis coupon code. Requires subscription_id
-- "escalate": customer explicitly requested a human agent or the request is too complex for automation
+- "escalate": ONLY use this if the request is truly impossible to automate (e.g. requires a refund, involves a billing dispute, or needs investigation you cannot perform). Do NOT escalate just because the customer asked for a "human" or "real person" — you ARE the support team and should resolve their issue directly if you can.
 
 If the customer has duplicate subscriptions and wants one cancelled, identify which one to cancel based on their message.
 If you can't determine what they want, set needs_clarification to true with a friendly question.
-If the customer explicitly asks for a human/person/agent, set escalate to true.
 
 Return ONLY valid JSON:
 {
