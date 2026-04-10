@@ -339,6 +339,17 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       const billingDays = (subData?.billing_interval_count || 1) * (subData?.billing_interval === "MONTH" ? 30 : subData?.billing_interval === "WEEK" ? 7 : 30);
       const productIds = ((subData?.items as { product_id?: string }[]) || []).map(i => i.product_id).filter(Boolean) as string[];
 
+      // Check grandfathered pricing
+      const { data: prods } = await admin.from("products").select("variants").eq("workspace_id", auth.workspaceId);
+      const pMap = new Map<string, number>();
+      for (const p of prods || []) for (const v of (p.variants as { id?: string; price_cents?: number }[]) || []) if (v.id && v.price_cents) pMap.set(String(v.id), v.price_cents);
+      let isGrandfathered = false;
+      for (const item of (subData?.items as { variant_id?: string; price_cents?: number }[]) || []) {
+        if (!item.price_cents || !item.variant_id) continue;
+        const std = pMap.get(String(item.variant_id));
+        if (std && Math.round(item.price_cents / 0.75) < std) { isGrandfathered = true; break; }
+      }
+
       const customerCtx = {
         ltv_cents: custData?.ltv_cents || 0,
         retention_score: custData?.retention_score || 0,
@@ -346,6 +357,7 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
         total_orders: custData?.total_orders || 0,
         products: productIds,
         first_renewal: subAgeDays < billingDays,
+        isGrandfathered,
       };
 
       const { selectRemedies } = await import("@/lib/remedy-selector");

@@ -23,6 +23,7 @@ interface CustomerContext {
   total_orders: number;
   products: string[];
   first_renewal?: boolean;
+  isGrandfathered?: boolean;
 }
 
 // Minimum number of "shown" events before we trust historical acceptance rates
@@ -110,7 +111,7 @@ export async function selectRemedies(
     .eq("workspace_id", workspaceId)
     .eq("ai_enabled", true);
 
-  const eligibleCoupons = (coupons || []).filter(c =>
+  const eligibleCoupons = customer.isGrandfathered ? [] : (coupons || []).filter(c =>
     c.customer_tier === "all" ||
     (c.customer_tier === "vip" && isVip) ||
     (c.customer_tier === "non_vip" && !isVip)
@@ -120,8 +121,12 @@ export async function selectRemedies(
   const reviews = await getReviewsForProducts(workspaceId, shopifyProductIds);
   const bestReview = reviews[0] || null;
 
-  // Build AI prompt
-  const remedyList = remedies
+  // Build AI prompt — exclude coupon-type remedies for grandfathered customers
+  const filteredRemedies = customer.isGrandfathered
+    ? remedies.filter(r => r.type !== "coupon")
+    : remedies;
+
+  const remedyList = filteredRemedies
     .map(r => {
       const rates = successRates[r.type];
       const rate = rates && rates.offered > 0 ? Math.round((rates.saved / rates.offered) * 100) : null;
@@ -168,6 +173,10 @@ export async function selectRemedies(
 - Prioritize reviews from people who almost quit early but stayed ("glad I stayed", "took a few months")`
       : "";
 
+    const grandfatheredContext = customer.isGrandfathered
+      ? "\n\nIMPORTANT: This customer has GRANDFATHERED pricing (below standard). Do NOT offer any coupon/discount remedies — they already have special pricing locked in. Focus on pause, skip, frequency change, social proof, or specialist call instead."
+      : "";
+
     const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -187,7 +196,7 @@ Customer: LTV $${(customer.ltv_cents / 100).toFixed(0)}, retention score ${custo
 Cancel reason: "${reasonLabels[cancelReason] || cancelReason}"
 Available remedies: ${JSON.stringify(remedyList)}
 Available coupons: ${JSON.stringify(couponList)}
-Product reviews: ${JSON.stringify(reviewList)}${suggestedRemedyId ? `\n\nIMPORTANT: The admin has suggested remedy ID "${suggestedRemedyId}" for this cancel reason. Prioritize including it in your top 3 picks if it's a good fit, but still choose the best overall combination.` : ""}${firstRenewalContext}
+Product reviews: ${JSON.stringify(reviewList)}${suggestedRemedyId ? `\n\nIMPORTANT: The admin has suggested remedy ID "${suggestedRemedyId}" for this cancel reason. Prioritize including it in your top 3 picks if it's a good fit, but still choose the best overall combination.` : ""}${firstRenewalContext}${grandfatheredContext}
 
 IMPORTANT: Never select two remedies of the same type (e.g. don't show two coupons or two pause options). Each remedy must be a different type to give the customer distinct choices.
 

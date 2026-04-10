@@ -75,6 +75,20 @@ export async function POST(
 
   const isFirstRenewal = selectedSub?.isFirstRenewal || false;
 
+  // Check grandfathered pricing
+  let isGrandfathered = false;
+  if (subscription_id) {
+    const { data: subItems } = await admin.from("subscriptions").select("items").eq("id", subscription_id).single();
+    const { data: prods } = await admin.from("products").select("variants").eq("workspace_id", session.workspace_id);
+    const pMap = new Map<string, number>();
+    for (const p of prods || []) for (const v of (p.variants as { id?: string; price_cents?: number }[]) || []) if (v.id && v.price_cents) pMap.set(String(v.id), v.price_cents);
+    for (const item of (subItems?.items as { variant_id?: string; price_cents?: number }[]) || []) {
+      if (!item.price_cents || !item.variant_id) continue;
+      const std = pMap.get(String(item.variant_id));
+      if (std && Math.round(item.price_cents / 0.75) < std) { isGrandfathered = true; break; }
+    }
+  }
+
   if (concrete) {
     const { remedies, review } = await selectRemedies(
       session.workspace_id,
@@ -86,6 +100,7 @@ export async function POST(
         total_orders: totalOrders,
         products,
         first_renewal: isFirstRenewal,
+        isGrandfathered,
       },
       matchingProductIds,
     );
