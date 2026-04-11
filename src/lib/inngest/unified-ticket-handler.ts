@@ -937,6 +937,20 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
         }
       });
 
+      // ── v2 Shadow Mode — run in background, log decision, don't execute ──
+      step.run("sonnet-v2-shadow", async () => {
+        try {
+          const { callSonnetOrchestratorV2 } = await import("@/lib/sonnet-orchestrator-v2");
+          const v2Decision = await callSonnetOrchestratorV2(wsId, tid, st.custId || "", msg, st.ch, pers);
+          const v1Type = sonnetDecision.action_type;
+          const v2Type = v2Decision.action_type;
+          const match = v1Type === v2Type ? "✓ match" : "⚠️ DIVERGENCE";
+          await sysNote(admin, tid, `[System] Sonnet v2 (shadow): ${v2Type} — ${v2Decision.reasoning?.slice(0, 150)} | v1: ${v1Type} | ${match}`);
+        } catch (err) {
+          await sysNote(admin, tid, `[System] Sonnet v2 shadow error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }).catch(() => {}); // Fire and forget — don't block v1
+
       return { status: `sonnet_${sonnetDecision.action_type}`, reasoning: sonnetDecision.reasoning };
     }
 
