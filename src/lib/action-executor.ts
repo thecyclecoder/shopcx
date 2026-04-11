@@ -628,14 +628,29 @@ async function handleJourney(
     return;
   }
 
-  // Look up journey by name
-  const { data: journey } = await ctx.admin
+  // Look up journey by name OR trigger_intent (Sonnet may return either)
+  const handlerName = decision.handler_name!;
+  let { data: journey } = await ctx.admin
     .from("journey_definitions")
     .select("id, name, trigger_intent")
     .eq("workspace_id", ctx.workspaceId)
-    .eq("name", decision.handler_name)
     .eq("is_active", true)
+    .or(`name.eq.${handlerName},trigger_intent.eq.${handlerName}`)
+    .limit(1)
     .single();
+
+  // Fallback: case-insensitive name match
+  if (!journey) {
+    const { data: all } = await ctx.admin
+      .from("journey_definitions")
+      .select("id, name, trigger_intent")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("is_active", true);
+    journey = (all || []).find(j =>
+      j.name.toLowerCase() === handlerName.toLowerCase() ||
+      j.trigger_intent?.toLowerCase() === handlerName.toLowerCase()
+    ) || null;
+  }
 
   if (!journey) {
     await sysNote(`Journey not found: ${decision.handler_name}`);
@@ -683,14 +698,16 @@ async function handlePlaybook(
     return;
   }
 
-  // Look up playbook by name
-  const { data: playbook } = await ctx.admin
+  // Look up playbook by name (case-insensitive)
+  const pbName = decision.handler_name!;
+  const { data: allPlaybooks } = await ctx.admin
     .from("playbooks")
     .select("id, name")
     .eq("workspace_id", ctx.workspaceId)
-    .eq("name", decision.handler_name)
-    .eq("is_active", true)
-    .single();
+    .eq("is_active", true);
+  const playbook = (allPlaybooks || []).find(p =>
+    p.name.toLowerCase() === pbName.toLowerCase()
+  ) || null;
 
   if (!playbook) {
     await sysNote(`Playbook not found: ${decision.handler_name}`);
@@ -736,14 +753,17 @@ async function handleWorkflow(
     return;
   }
 
-  // Look up workflow by name to get its trigger_tag
-  const { data: workflow } = await ctx.admin
+  // Look up workflow by name or trigger_tag (case-insensitive)
+  const wfName = decision.handler_name!;
+  const { data: allWorkflows } = await ctx.admin
     .from("workflows")
     .select("id, name, trigger_tag")
     .eq("workspace_id", ctx.workspaceId)
-    .eq("name", decision.handler_name)
-    .eq("enabled", true)
-    .single();
+    .eq("enabled", true);
+  const workflow = (allWorkflows || []).find(w =>
+    w.name.toLowerCase() === wfName.toLowerCase() ||
+    w.trigger_tag?.toLowerCase() === wfName.toLowerCase()
+  ) || null;
 
   if (!workflow) {
     await sysNote(`Workflow not found: ${decision.handler_name}`);
