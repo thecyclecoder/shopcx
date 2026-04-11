@@ -309,26 +309,33 @@ async function executeToolCall(
 // ── Data Fetcher Functions ──
 
 async function getCustomerAccount(admin: Admin, wsId: string, custId: string): Promise<string> {
+  // Resolve all customer IDs (primary + linked)
+  const { data: linkData } = await admin.from("customer_links")
+    .select("group_id").eq("customer_id", custId).maybeSingle();
+  let allCustIds = [custId];
+  if (linkData?.group_id) {
+    const { data: grp } = await admin.from("customer_links")
+      .select("customer_id").eq("group_id", linkData.group_id);
+    allCustIds = (grp || []).map(g => g.customer_id);
+  }
+
   const [
     { data: subs },
     { data: orders },
     { data: loyaltyMember },
-    { data: links },
   ] = await Promise.all([
     admin.from("subscriptions")
       .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count, next_billing_date, created_at")
-      .eq("workspace_id", wsId).eq("customer_id", custId)
+      .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .in("status", ["active", "paused", "cancelled"])
       .order("created_at", { ascending: false }),
     admin.from("orders")
       .select("order_number, total_cents, line_items, created_at, financial_status, shopify_order_id, fulfillments")
-      .eq("workspace_id", wsId).eq("customer_id", custId)
-      .order("created_at", { ascending: false }).limit(3),
+      .eq("workspace_id", wsId).in("customer_id", allCustIds)
+      .order("created_at", { ascending: false }).limit(5),
     admin.from("loyalty_members")
       .select("id, points_balance")
       .eq("workspace_id", wsId).eq("customer_id", custId).maybeSingle(),
-    admin.from("customer_links")
-      .select("group_id").eq("customer_id", custId).maybeSingle(),
   ]);
 
   const parts: string[] = [];
@@ -397,16 +404,12 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
   }
 
   // Linked accounts
-  if (links?.group_id) {
-    const { data: grp } = await admin.from("customer_links")
-      .select("customer_id").eq("group_id", links.group_id).neq("customer_id", custId);
-    if (grp?.length) {
-      const linkedIds = grp.map(g => g.customer_id);
-      const { data: linkedCusts } = await admin.from("customers")
-        .select("email").in("id", linkedIds);
-      if (linkedCusts?.length) {
-        parts.push(`\nLINKED ACCOUNTS: ${linkedCusts.map(c => c.email).join(", ")}`);
-      }
+  if (allCustIds.length > 1) {
+    const linkedIds = allCustIds.filter(id => id !== custId);
+    const { data: linkedCusts } = await admin.from("customers")
+      .select("email").in("id", linkedIds);
+    if (linkedCusts?.length) {
+      parts.push(`\nLINKED ACCOUNTS (data above includes these): ${linkedCusts.map(c => c.email).join(", ")}`);
     }
   }
 
@@ -485,9 +488,17 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
 
 async function getReturns(admin: Admin, wsId: string, custId: string): Promise<string> {
   try {
+    // Include linked profiles
+    const { data: linkData } = await admin.from("customer_links").select("group_id").eq("customer_id", custId).maybeSingle();
+    let custIds = [custId];
+    if (linkData?.group_id) {
+      const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", linkData.group_id);
+      custIds = (grp || []).map(g => g.customer_id);
+    }
+
     const { data: returns } = await admin.from("returns")
       .select("id, status, items, refund_amount_cents, tracking_number, created_at, order_number, reason")
-      .eq("workspace_id", wsId).eq("customer_id", custId)
+      .eq("workspace_id", wsId).in("customer_id", custIds)
       .order("created_at", { ascending: false }).limit(5);
 
     if (!returns?.length) return "No return requests found for this customer.";
