@@ -698,15 +698,16 @@ async function handlePlaybook(
     return;
   }
 
-  // Look up playbook by name (case-insensitive)
+  // Look up playbook by name or trigger_intents (case-insensitive)
   const pbName = decision.handler_name!;
   const { data: allPlaybooks } = await ctx.admin
     .from("playbooks")
-    .select("id, name")
+    .select("id, name, trigger_intents")
     .eq("workspace_id", ctx.workspaceId)
     .eq("is_active", true);
   const playbook = (allPlaybooks || []).find(p =>
-    p.name.toLowerCase() === pbName.toLowerCase()
+    p.name.toLowerCase() === pbName.toLowerCase() ||
+    ((p.trigger_intents as string[]) || []).some(i => i.toLowerCase() === pbName.toLowerCase())
   ) || null;
 
   if (!playbook) {
