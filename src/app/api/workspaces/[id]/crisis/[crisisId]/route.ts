@@ -141,11 +141,15 @@ export async function GET(
     total_revenue_at_risk: Math.round(monthlyRevenueCents * monthsAtRisk) / 100,
     annual_revenue_at_risk: Math.round(monthlyRevenueCents * 12) / 100,
     processed_count: allActions.length,
-    saved_count: allActions.filter(a =>
-      a.tier1_response === "accepted_swap" || a.tier2_response === "accepted_swap" ||
-      a.tier3_response === "accepted_pause" || a.tier3_response === "accepted_remove"
+    // Everyone starts as saved. Only "lost" if they explicitly cancelled or permanently removed (no auto_readd).
+    lost_count: allActions.filter(a =>
+      a.cancelled === true ||
+      (a.removed_item_at && a.auto_readd === false)
     ).length,
-    lost_count: allActions.filter(a => a.cancelled).length,
+    saved_count: allActions.length - allActions.filter(a =>
+      a.cancelled === true ||
+      (a.removed_item_at && a.auto_readd === false)
+    ).length,
   };
 
   return NextResponse.json({ crisis, actions: allActions, stats, financialImpact });
