@@ -13,7 +13,7 @@ import LoyaltyCard from "@/components/shared/LoyaltyCard";
 import { formatCents, formatDate } from "@/components/shared/format-utils";
 import type { OrderRow } from "@/components/shared/OrdersTable";
 import type { SubscriptionData } from "@/components/shared/SubscriptionsList";
-import type { LoyaltyMemberData } from "@/components/shared/LoyaltyCard";
+import type { LoyaltyMemberData, LoyaltyRedemption } from "@/components/shared/LoyaltyCard";
 
 interface Customer {
   id: string;
@@ -154,6 +154,7 @@ export default function CustomerDetailPage() {
   const [showCreditHistory, setShowCreditHistory] = useState(false);
   const [loyaltyMember, setLoyaltyMember] = useState<LoyaltyMemberData | null>(null);
   const [loyaltyTiers, setLoyaltyTiers] = useState<{ label: string; points_cost: number; discount_value: number; affordable: boolean }[]>([]);
+  const [loyaltyRedemptions, setLoyaltyRedemptions] = useState<LoyaltyRedemption[]>([]);
   const [customerReturns, setCustomerReturns] = useState<{ id: string; order_number: string; status: string; resolution_type: string; net_refund_cents: number; created_at: string }[]>([]);
   const [customerReplacements, setCustomerReplacements] = useState<ReplacementItem[]>([]);
 
@@ -220,7 +221,13 @@ export default function CustomerDetailPage() {
       fetch(`/api/loyalty/members?workspace_id=${workspace.id}&customer_id=${id}`)
         .then(r => r.json())
         .then(d => {
-          if (d.members?.[0]) setLoyaltyMember(d.members[0]);
+          if (d.members?.[0]) {
+            setLoyaltyMember(d.members[0]);
+            fetch(`/api/loyalty/redemptions?member_id=${d.members[0].id}`)
+              .then(r => r.json())
+              .then(rd => { if (rd.redemptions) setLoyaltyRedemptions(rd.redemptions); })
+              .catch(() => {});
+          }
         })
         .catch(() => {});
       fetch(`/api/workspaces/${workspace.id}/loyalty`)
@@ -679,9 +686,11 @@ export default function CustomerDetailPage() {
             tiers={loyaltyTiers}
             workspaceId={workspace.id}
             variant="full"
+            redemptions={loyaltyRedemptions}
             onNavigate={() => router.push(`/dashboard/loyalty/${loyaltyMember.id}`)}
-            onRedeem={(newBalance, _code, _value, pointsCost) => {
+            onRedeem={(newBalance, code, value, pointsCost) => {
               setLoyaltyMember(prev => prev ? { ...prev, points_balance: newBalance, points_spent: prev.points_spent + pointsCost } : prev);
+              setLoyaltyRedemptions(prev => [{ id: crypto.randomUUID(), discount_code: code, discount_value: value, points_spent: pointsCost, status: "active", used_at: null, expires_at: null, created_at: new Date().toISOString() }, ...prev]);
             }}
           />
         </div>

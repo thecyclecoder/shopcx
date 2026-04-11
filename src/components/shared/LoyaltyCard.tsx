@@ -226,6 +226,34 @@ export default function LoyaltyCard({
           </button>
         </div>
       )}
+
+      {/* Coupons list — full variant */}
+      {redemptions && redemptions.length > 0 && (
+        <div className="mt-4">
+          <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-2">Coupons</h3>
+          <div className="space-y-1.5">
+            {redemptions.map(r => {
+              const isUsed = !!r.used_at;
+              const isExpired = !isUsed && r.expires_at && new Date(r.expires_at) < new Date();
+              const statusLabel = isUsed ? "Used" : isExpired ? "Expired" : r.status === "active" ? "Unused" : r.status;
+              const statusColor = isUsed ? "text-zinc-400" : isExpired ? "text-red-400" : "text-emerald-500";
+              const date = new Date(r.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+              return (
+                <div key={r.id} className="flex items-center justify-between rounded-md border border-zinc-100 px-3 py-2 dark:border-zinc-800">
+                  <div>
+                    <span className="font-mono text-sm font-medium text-zinc-900 dark:text-zinc-100">{r.discount_code}</span>
+                    <span className="ml-2 text-sm text-zinc-400">${r.discount_value} off</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className={`font-medium ${statusColor}`}>{statusLabel}</span>
+                    <span className="text-zinc-300 dark:text-zinc-600">{date}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
