@@ -403,14 +403,14 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
 }
 
 async function getProductKnowledge(admin: Admin, wsId: string, query: string): Promise<string> {
+  // Always run RAG search — it finds the most relevant macros + KB from 286+ macros
+  const searchQuery = query || "general product information";
   const [
     { data: products },
-    { data: macros },
     ragResults,
   ] = await Promise.all([
     admin.from("products").select("title, description").eq("workspace_id", wsId).eq("status", "active"),
-    admin.from("macros").select("name, category, body_html").eq("workspace_id", wsId).eq("active", true).limit(50),
-    query ? retrieveContext(wsId, query, 5) : Promise.resolve({ chunks: [], macros: [], chunkIds: [], macroIds: [] }),
+    retrieveContext(wsId, searchQuery, 10),
   ]);
 
   const parts: string[] = [];
@@ -421,20 +421,26 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
     parts.push(`- ${p.title}${p.description ? `: ${p.description.slice(0, 150)}` : ""}`);
   }
 
-  // Macros
-  parts.push("\nMACROS (pre-written responses):");
-  for (const m of macros || []) {
-    const body = (m.body_html || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
-    parts.push(`- [${m.category || "general"}] ${m.name}: ${body}`);
+  // Macros from RAG (semantically matched, not brute-force)
+  if (ragResults.macros?.length) {
+    parts.push("\nMATCHING MACROS (pre-written responses, ranked by relevance):");
+    for (const m of ragResults.macros) {
+      const body = (m.body_html || m.body_text || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+      parts.push(`- [${m.category || "general"}] ${m.name}: ${body}`);
+    }
   }
 
   // KB from RAG
   if (ragResults.chunks?.length) {
     parts.push("\nKNOWLEDGE BASE MATCHES:");
     for (const chunk of ragResults.chunks) {
-      const content = (chunk.chunk_text || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+      const content = (chunk.chunk_text || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
       parts.push(`- "${chunk.kb_title || "Article"}": ${content}`);
     }
+  }
+
+  if (!ragResults.macros?.length && !ragResults.chunks?.length) {
+    parts.push("\nNo matching macros or KB articles found for this query.");
   }
 
   return parts.join("\n");
