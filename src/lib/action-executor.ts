@@ -764,12 +764,13 @@ async function handleWorkflow(
   const wfName = decision.handler_name!;
   const { data: allWorkflows } = await ctx.admin
     .from("workflows")
-    .select("id, name, trigger_tag")
+    .select("id, name, trigger_tag, template")
     .eq("workspace_id", ctx.workspaceId)
     .eq("enabled", true);
   const workflow = (allWorkflows || []).find(w =>
     w.name.toLowerCase() === wfName.toLowerCase() ||
-    w.trigger_tag?.toLowerCase() === wfName.toLowerCase()
+    w.trigger_tag?.toLowerCase() === wfName.toLowerCase() ||
+    (w.template as string)?.toLowerCase() === wfName.toLowerCase()
   ) || null;
 
   if (!workflow) {
