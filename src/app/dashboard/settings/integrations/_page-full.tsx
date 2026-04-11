@@ -48,6 +48,7 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
   const [newSupportEmail, setNewSupportEmail] = useState("");
   const [newSupportLabel, setNewSupportLabel] = useState("");
   const [webhookConfigured, setWebhookConfigured] = useState(false);
+  const [trackingConfigured, setTrackingConfigured] = useState(false);
   const [webhookLoading, setWebhookLoading] = useState(false);
 
   // MX check
@@ -131,7 +132,7 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
         if (data.resend_connected) {
           fetch(`/api/workspaces/${workspace.id}/integrations/resend/webhook`)
             .then((r) => r.json())
-            .then((wh) => setWebhookConfigured(wh.configured));
+            .then((wh) => { setWebhookConfigured(wh.configured); setTrackingConfigured(wh.tracking_configured); });
           fetch(`/api/workspaces/${workspace.id}/support-emails`)
             .then((r) => r.json())
             .then((emails) => { if (Array.isArray(emails)) setSupportEmails(emails); });
@@ -840,8 +841,8 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
                   <div className="flex items-center justify-between">
                     <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Inbound Emails</p>
                     <div className="flex items-center gap-2">
-                      {webhookConfigured ? (
-                        <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Webhook Active</span>
+                      {webhookConfigured && trackingConfigured ? (
+                        <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Webhooks Active</span>
                       ) : (
                         <button
                           type="button"
@@ -852,15 +853,16 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
                             const data = await res.json();
                             if (res.ok) {
                               setWebhookConfigured(true);
-                              setMessage("Inbound email webhook created");
+                              setTrackingConfigured(data.tracking_configured);
+                              setMessage(data.message || "Webhooks configured");
                             } else {
-                              setMessage(data.error || "Failed to create webhook");
+                              setMessage(data.error || "Failed to create webhooks");
                             }
                             setWebhookLoading(false);
                           }}
                           className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
                         >
-                          {webhookLoading ? "Setting up..." : "Enable Inbound Emails"}
+                          {webhookLoading ? "Setting up..." : "Enable Email Webhooks"}
                         </button>
                       )}
                     </div>

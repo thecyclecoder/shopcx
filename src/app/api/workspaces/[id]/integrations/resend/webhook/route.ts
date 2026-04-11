@@ -33,38 +33,47 @@ export async function POST(
   }
 
   const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
-  const webhookUrl = `${siteUrl}/api/webhooks/email`;
+  const inboundUrl = `${siteUrl}/api/webhooks/email`;
+  const trackingUrl = `${siteUrl}/api/webhooks/resend-events`;
 
   try {
-    // Check if webhook already exists
+    // Check existing webhooks
     const { data: existingList } = await client.resend.webhooks.list();
     const webhooks = Array.isArray(existingList) ? existingList : (existingList as unknown as { data: { endpoint: string; id: string }[] })?.data || [];
-    const alreadyExists = webhooks.find(
-      (wh: { endpoint: string }) => wh.endpoint === webhookUrl
-    );
+    const inboundExists = webhooks.find((wh: { endpoint: string }) => wh.endpoint === inboundUrl);
+    const trackingExists = webhooks.find((wh: { endpoint: string }) => wh.endpoint === trackingUrl);
 
-    if (alreadyExists) {
-      return NextResponse.json({
-        success: true,
-        message: "Webhook already configured",
-        webhook_id: alreadyExists.id,
+    const results: string[] = [];
+
+    // Create inbound webhook if missing
+    if (!inboundExists) {
+      const { data: wh, error } = await client.resend.webhooks.create({
+        endpoint: inboundUrl,
+        events: ["email.received"],
       });
+      if (error) results.push(`Inbound failed: ${error.message}`);
+      else results.push("Inbound webhook created");
+    } else {
+      results.push("Inbound webhook already active");
     }
 
-    // Create webhook for email.received events
-    const { data: webhook, error } = await client.resend.webhooks.create({
-      endpoint: webhookUrl,
-      events: ["email.received"],
-    });
-
-    if (error) {
-      return NextResponse.json({ error: `Failed to create webhook: ${error.message}` }, { status: 500 });
+    // Create tracking webhook if missing
+    if (!trackingExists) {
+      const { data: wh, error } = await client.resend.webhooks.create({
+        endpoint: trackingUrl,
+        events: ["email.sent", "email.delivered", "email.opened", "email.clicked", "email.bounced", "email.complained"],
+      });
+      if (error) results.push(`Tracking failed: ${error.message}`);
+      else results.push("Email tracking webhook created (open/click/bounce)");
+    } else {
+      results.push("Tracking webhook already active");
     }
 
     return NextResponse.json({
       success: true,
-      message: "Inbound email webhook created",
-      webhook_id: webhook?.id,
+      message: results.join(". "),
+      inbound_configured: !!inboundExists || results[0]?.includes("created"),
+      tracking_configured: !!trackingExists || results[1]?.includes("created"),
     });
   } catch (err) {
     return NextResponse.json(
@@ -93,17 +102,19 @@ export async function GET(
 
   try {
     const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
-    const webhookUrl = `${siteUrl}/api/webhooks/email`;
+    const inboundUrl = `${siteUrl}/api/webhooks/email`;
+    const trackingUrl = `${siteUrl}/api/webhooks/resend-events`;
 
     const { data: whList } = await client.resend.webhooks.list();
     const whArr = Array.isArray(whList) ? whList : (whList as unknown as { data: { endpoint: string; id: string }[] })?.data || [];
-    const found = whArr.find(
-      (wh: { endpoint: string }) => wh.endpoint === webhookUrl
-    );
+    const inbound = whArr.find((wh: { endpoint: string }) => wh.endpoint === inboundUrl);
+    const tracking = whArr.find((wh: { endpoint: string }) => wh.endpoint === trackingUrl);
 
     return NextResponse.json({
-      configured: !!found,
-      webhook_id: found?.id || null,
+      configured: !!inbound,
+      tracking_configured: !!tracking,
+      webhook_id: inbound?.id || null,
+      tracking_webhook_id: tracking?.id || null,
     });
   } catch {
     return NextResponse.json({ configured: false, reason: "Failed to check" });
