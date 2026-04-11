@@ -844,8 +844,10 @@ function InlineJourneyForm({
   const [responses, setResponses] = useState<Record<string, { value: string; label: string }>>({});
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
+  const [allSteps, setAllSteps] = useState(steps);
+  const [loadingRemedies, setLoadingRemedies] = useState(false);
 
-  const step = steps[currentIdx];
+  const step = allSteps[currentIdx];
 
   const handleStepSubmit = async (value: string, label: string) => {
     const updated = { ...responses, [step.key]: { value, label } };
@@ -861,11 +863,60 @@ function InlineJourneyForm({
       });
       setDone(true);
       setSubmitting(false);
-      onComplete(buildHumanResponse(steps, updated));
+      onComplete(buildHumanResponse(allSteps, updated));
       return;
     }
 
-    if (currentIdx < steps.length - 1) {
+    // Cancel journey: after cancel_reason step, fetch AI remedies before completing
+    if (step.key === "cancel_reason" && currentIdx === allSteps.length - 1) {
+      setLoadingRemedies(true);
+      try {
+        const subId = updated.select_subscription?.value;
+        const remedyRes = await fetch(`/api/journey/${token}/remedies`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cancel_reason: value, subscription_id: subId }),
+        });
+        const remedyData = await remedyRes.json();
+        if (remedyData.remedies?.length) {
+          // Add remedy step + cancel anyway option
+          const remedyOptions = [
+            ...remedyData.remedies.map((r: { remedy_id: string; name: string; pitch: string }) => ({
+              value: r.remedy_id,
+              label: `${r.name} — ${r.pitch}`,
+            })),
+            { value: "cancel_anyway", label: "No thanks, please cancel" },
+          ];
+          setAllSteps(prev => [...prev, {
+            key: "remedy_choice",
+            type: "single_choice",
+            question: "Before you go, would any of these help?",
+            options: remedyOptions,
+          }]);
+          setCurrentIdx(i => i + 1);
+          setLoadingRemedies(false);
+          return;
+        }
+      } catch { /* fall through to complete */ }
+      setLoadingRemedies(false);
+    }
+
+    // Remedy choice: if they picked a remedy, complete with "saved". If cancel anyway, complete with "cancelled"
+    if (step.key === "remedy_choice") {
+      setSubmitting(true);
+      const outcome = value === "cancel_anyway" ? "cancelled" : "saved";
+      await fetch(`/api/journey/${token}/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outcome, responses: updated }),
+      });
+      setDone(true);
+      setSubmitting(false);
+      onComplete(buildHumanResponse(allSteps, updated));
+      return;
+    }
+
+    if (currentIdx < allSteps.length - 1) {
       setCurrentIdx(i => i + 1);
       return;
     }
@@ -879,23 +930,29 @@ function InlineJourneyForm({
     });
     setDone(true);
     setSubmitting(false);
-    onComplete(buildHumanResponse(steps, updated));
+    onComplete(buildHumanResponse(allSteps, updated));
   };
 
   if (done) return null;
   if (!step) return null;
+  if (loadingRemedies) return (
+    <div className="mt-2 flex items-center gap-2 py-3">
+      <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-transparent" style={{ borderTopColor: primaryColor }} />
+      <span className="text-xs text-zinc-500">Finding the best options for you...</span>
+    </div>
+  );
 
   const displayQuestion = step.question;
   const displaySubtitle = step.subtitle;
 
   return (
     <div className="mt-2">
-      {steps.length > 1 && (
+      {allSteps.length > 1 && (
         <div className="mb-2 flex items-center gap-2">
           <div className="h-1 flex-1 overflow-hidden rounded-full bg-zinc-200">
-            <div className="h-full rounded-full transition-all" style={{ width: `${((currentIdx + 1) / steps.length) * 100}%`, backgroundColor: primaryColor }} />
+            <div className="h-full rounded-full transition-all" style={{ width: `${((currentIdx + 1) / allSteps.length) * 100}%`, backgroundColor: primaryColor }} />
           </div>
-          <span className="text-[10px] text-zinc-400">{currentIdx + 1}/{steps.length}</span>
+          <span className="text-[10px] text-zinc-400">{currentIdx + 1}/{allSteps.length}</span>
         </div>
       )}
       <p className="mb-1.5 text-xs font-medium text-zinc-700">{displayQuestion}</p>
