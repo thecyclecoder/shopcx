@@ -133,6 +133,13 @@ export async function POST(
           emailError = result.error;
         } else if (result.messageId) {
           message.email_message_id = result.messageId;
+          message.resend_email_id = result.messageId;
+          message.email_status = "sent";
+          // Log email event for tracking
+          try {
+            const { logEmailSent } = await import("@/lib/email-tracking");
+            await logEmailSent({ workspaceId, resendEmailId: result.messageId, recipientEmail: ticket.customers.email, subject: ticket.subject || "Support Request", ticketId, customerId: ticket.customer_id });
+          } catch { /* non-fatal */ }
         }
       }
     }

@@ -237,7 +237,12 @@ async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: st
       const { data: cust } = await admin.from("customers").select("email").eq("id", t.customer_id).single();
       if (cust?.email) {
         const { data: ws } = await admin.from("workspaces").select("name").eq("id", wsId).single();
-        await sendTicketReply({ workspaceId: wsId, toEmail: cust.email, subject: `Re: ${t?.subject || "Your request"}`, body: html, inReplyTo: t?.email_message_id || null, agentName: "Support", workspaceName: ws?.name || "" });
+        const emailResult = await sendTicketReply({ workspaceId: wsId, toEmail: cust.email, subject: `Re: ${t?.subject || "Your request"}`, body: html, inReplyTo: t?.email_message_id || null, agentName: "Support", workspaceName: ws?.name || "" });
+        if (emailResult.messageId) {
+          const { logEmailSent } = await import("@/lib/email-tracking");
+          await admin.from("ticket_messages").update({ resend_email_id: emailResult.messageId, email_status: "sent", email_message_id: `<${emailResult.messageId}@resend.dev>` }).eq("ticket_id", tid).eq("direction", "outbound").is("resend_email_id", null).order("created_at", { ascending: false }).limit(1);
+          await logEmailSent({ workspaceId: wsId, resendEmailId: emailResult.messageId, recipientEmail: cust.email, subject: t?.subject || "Your request", ticketId: tid, customerId: t.customer_id });
+        }
       }
     }
   }

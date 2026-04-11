@@ -1166,6 +1166,19 @@ export default function TicketDetailPage() {
                     {(m as TicketMessage & { send_cancelled?: boolean }).send_cancelled && (
                       <div className="mt-1.5 text-xs text-zinc-400 line-through">Send cancelled</div>
                     )}
+                    {/* Email delivery status */}
+                    {!isInbound && !isInternal && (m as TicketMessage & { email_status?: string }).email_status && (
+                      <div className="mt-1.5 flex items-center gap-1 text-xs">
+                        {(() => {
+                          const status = (m as TicketMessage & { email_status?: string }).email_status;
+                          if (status === "opened" || status === "clicked") return <span className="text-emerald-400">Opened</span>;
+                          if (status === "delivered") return <span className="text-blue-400">Delivered</span>;
+                          if (status === "bounced") return <span className="text-red-400">Bounced</span>;
+                          if (status === "sent") return <span className="text-zinc-400">Sent</span>;
+                          return null;
+                        })()}
+                      </div>
+                    )}
                     {/* Approve & Send for AI sandbox drafts */}
                     {isInternal && m.author_type === "ai" && m.body.includes("[AI Draft") && (
                       <button
@@ -1233,7 +1246,15 @@ export default function TicketDetailPage() {
               ) : (
                 customerEvents.map((ev) => (
                   <div key={ev.id} className="flex items-start gap-3 rounded-lg border border-zinc-200 bg-white px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-900">
-                    <div className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-zinc-300 dark:bg-zinc-600" />
+                    <div className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${
+                      ev.event_type === "email.sent" ? "bg-blue-400" :
+                      ev.event_type === "email.opened" ? "bg-emerald-400" :
+                      ev.event_type === "email.clicked" ? "bg-cyan-400" :
+                      ev.event_type === "email.bounced" ? "bg-red-400" :
+                      ev.event_type?.startsWith("subscription.") ? "bg-violet-400" :
+                      ev.event_type?.startsWith("portal.") ? "bg-amber-400" :
+                      "bg-zinc-300 dark:bg-zinc-600"
+                    }`} />
                     <div className="min-w-0 flex-1">
                       <p className="text-sm text-zinc-700 dark:text-zinc-300">{ev.summary}</p>
                       <div className="mt-0.5 flex items-center gap-2 text-sm text-zinc-400">

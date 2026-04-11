@@ -264,7 +264,15 @@ export const crisisDailyCampaign = inngest.createFunction(
             body: emailBody,
             sent_at: new Date().toISOString(),
             email_message_id: emailMsgId,
+            resend_email_id: emailResult.messageId || null,
+            email_status: emailResult.messageId ? "sent" : null,
           });
+
+          // Log email tracking event
+          if (emailResult.messageId && ticket?.id) {
+            const { logEmailSent } = await import("@/lib/email-tracking");
+            await logEmailSent({ workspaceId: crisis.workspace_id, resendEmailId: emailResult.messageId, recipientEmail: customer.email, subject: `Update about your ${crisis.affected_product_title || "subscription"}`, ticketId: ticket.id, customerId: sub.customerId });
+          }
 
           totalNew++;
         });
