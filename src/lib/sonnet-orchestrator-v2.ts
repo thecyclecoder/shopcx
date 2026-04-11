@@ -104,6 +104,39 @@ function buildToolDefinitions() {
 
 // ── Pre-loaded Context Builder (~300 tokens) ──
 
+function buildPromptSections(prompts: { category: string; title: string; content: string }[]): string {
+  const grouped: Record<string, string[]> = {};
+  for (const p of prompts) {
+    if (!grouped[p.category]) grouped[p.category] = [];
+    grouped[p.category].push(`- ${p.content}`);
+  }
+
+  const sections: string[] = [];
+
+  if (grouped.approach?.length) {
+    sections.push(`APPROACH:\n${grouped.approach.join("\n")}`);
+  }
+
+  if (grouped.rule?.length) {
+    sections.push(`RULES:\n${grouped.rule.join("\n")}`);
+  }
+
+  if (grouped.knowledge?.length) {
+    sections.push(`ADDITIONAL KNOWLEDGE:\n${grouped.knowledge.join("\n")}`);
+  }
+
+  if (grouped.tool_hint?.length) {
+    sections.push(`TOOL HINTS:\n${grouped.tool_hint.join("\n")}`);
+  }
+
+  // Fallback if no prompts configured
+  if (sections.length === 0) {
+    sections.push("APPROACH:\n- Analyze the customer's message, use tools to look up relevant data, then return your decision as JSON.");
+  }
+
+  return sections.join("\n\n");
+}
+
 async function buildPreContext(
   workspaceId: string,
   ticketId: string,
@@ -122,6 +155,7 @@ async function buildPreContext(
     { data: journeys },
     { data: playbooks },
     { data: workflows },
+    { data: dbPrompts },
   ] = await Promise.all([
     admin.from("workspaces").select("name").eq("id", workspaceId).single(),
     customerId
@@ -142,6 +176,10 @@ async function buildPreContext(
     admin.from("workflows")
       .select("name, template, trigger_tag")
       .eq("workspace_id", workspaceId).eq("enabled", true),
+    admin.from("sonnet_prompts")
+      .select("category, title, content")
+      .eq("workspace_id", workspaceId).eq("enabled", true)
+      .order("category").order("sort_order"),
   ]);
 
   const wsName = workspace?.name || "our store";
@@ -219,30 +257,8 @@ ${workflowLines}
 
 PERSONALITY:
 ${persBlock}
-All response_message text MUST match this personality. Max 2 sentences per paragraph, no markdown, mirror the customer's language.
 
-APPROACH:
-1. Read the customer's message and conversation history
-2. If it's about their account (orders, subscriptions, billing, returns, loyalty) → call get_customer_account
-3. If it's a product/policy question → call get_product_knowledge
-4. If ticket has crisis tags or customer mentions out-of-stock → call get_crisis_status
-5. If first lookup doesn't have the answer, try another tool
-6. Once you have enough info, return your decision as JSON
-
-RULES:
-- For cancel requests → route to cancel journey (has retention offers). NEVER cancel directly.
-- For refund/dispute → route to appropriate playbook. Only use direct partial_refund for verified price discrepancies.
-- For address CHANGES → route to shipping address journey
-- For "where is it shipping to" / "what's my address" / "confirm my address" → just show the address from get_customer_account, don't launch a journey
-- For stock/availability questions → check product catalog inventory in get_product_knowledge, give a direct answer
-- For account login issues → route to account login workflow
-- For order tracking → route to order tracking workflow
-- For simple subscription changes (skip, date, frequency, swap, add, quantity) → execute directly via direct_action
-- For loyalty coupon application → check unused coupons via get_customer_account, apply directly
-- Check completed actions in conversation — don't re-execute what's done
-- Do NOT escalate just because customer asks for a human — resolve if you can
-- On chat channel, if escalating include "I'll send you an email at {customer email}" in response
-- If neither data bucket has the answer, that's a genuine gap — escalate
+${buildPromptSections(dbPrompts || [])}
 
 When you have enough data, respond with ONLY valid JSON (no tool calls):
 {

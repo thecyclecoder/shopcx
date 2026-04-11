@@ -905,12 +905,11 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
     // Sonnet analyzes the full request and decides the best action. Replaces pattern matching,
     // AI classification, confidence gate, and routeExec cascading lookup.
     {
-      const { buildSonnetContext, callSonnetOrchestrator } = await import("@/lib/sonnet-orchestrator");
+      const { callSonnetOrchestratorV2 } = await import("@/lib/sonnet-orchestrator-v2");
       const { executeSonnetDecision } = await import("@/lib/action-executor");
 
       const sonnetDecision = await step.run("sonnet-orchestrate", async () => {
-        const prompt = await buildSonnetContext(wsId, tid, st.custId || "", msg, st.ch, pers);
-        const decision = await callSonnetOrchestrator(prompt);
+        const decision = await callSonnetOrchestratorV2(wsId, tid, st.custId || "", msg, st.ch, pers);
         await sysNote(admin, tid, `[System] Sonnet: ${decision.action_type} — ${decision.reasoning}`);
         return decision;
       });
@@ -936,20 +935,6 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
           await sysNote(admin, tid, "[System] No customer message sent — ticket kept open for agent review.");
         }
       });
-
-      // ── v2 Shadow Mode — run in background, log decision, don't execute ──
-      step.run("sonnet-v2-shadow", async () => {
-        try {
-          const { callSonnetOrchestratorV2 } = await import("@/lib/sonnet-orchestrator-v2");
-          const v2Decision = await callSonnetOrchestratorV2(wsId, tid, st.custId || "", msg, st.ch, pers);
-          const v1Type = sonnetDecision.action_type;
-          const v2Type = v2Decision.action_type;
-          const match = v1Type === v2Type ? "✓ match" : "⚠️ DIVERGENCE";
-          await sysNote(admin, tid, `[System] Sonnet v2 (shadow): ${v2Type} — ${v2Decision.reasoning?.slice(0, 150)} | v1: ${v1Type} | ${match}`);
-        } catch (err) {
-          await sysNote(admin, tid, `[System] Sonnet v2 shadow error: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }).catch(() => {}); // Fire and forget — don't block v1
 
       return { status: `sonnet_${sonnetDecision.action_type}`, reasoning: sonnetDecision.reasoning };
     }
