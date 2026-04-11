@@ -136,7 +136,7 @@ export async function buildSonnetContext(
     retrieveContext(workspaceId, message, 3),
     admin
       .from("products")
-      .select("title, variants")
+      .select("title, description, variants")
       .eq("workspace_id", workspaceId)
       .eq("status", "active"),
     admin
@@ -367,7 +367,7 @@ ${ordersBlock}
 LOYALTY: ${loyaltyLine}${inventoryBlock}${crisisBlock}
 ${unlinkedMatches.length > 0 ? `POTENTIAL LINKED ACCOUNTS (not yet linked): ${unlinkedMatches.map((m: { email: string }) => m.email).join(", ")}` : ""}
 OUR PRODUCT CATALOG:
-${(allProducts || []).map((p: { title: string }) => `- ${p.title}`).join("\n") || "No products loaded"}
+${(allProducts || []).map((p: { title: string; description?: string }) => `- ${p.title}${p.description ? `: ${p.description.slice(0, 100)}` : ""}`).join("\n") || "No products loaded"}
 
 CONVERSATION:
 ${convoBlock || `Customer: ${message.slice(0, 300)}`}
