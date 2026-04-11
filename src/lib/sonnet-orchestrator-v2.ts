@@ -232,7 +232,9 @@ APPROACH:
 RULES:
 - For cancel requests → route to cancel journey (has retention offers). NEVER cancel directly.
 - For refund/dispute → route to appropriate playbook. Only use direct partial_refund for verified price discrepancies.
-- For address changes → route to shipping address journey
+- For address CHANGES → route to shipping address journey
+- For "where is it shipping to" / "what's my address" / "confirm my address" → just show the address from get_customer_account, don't launch a journey
+- For stock/availability questions → check product catalog inventory in get_product_knowledge, give a direct answer
 - For account login issues → route to account login workflow
 - For order tracking → route to order tracking workflow
 - For simple subscription changes (skip, date, frequency, swap, add, quantity) → execute directly via direct_action
@@ -392,6 +394,20 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
     }
   }
 
+  // Shipping address from customer default_address or latest order
+  const { data: custAddr } = await admin.from("customers")
+    .select("default_address").eq("id", custId).single();
+  const addr = custAddr?.default_address as { address1?: string; address2?: string; city?: string; province?: string; zip?: string; country?: string } | null;
+  if (addr?.address1) {
+    parts.push(`\nSHIPPING ADDRESS: ${[addr.address1, addr.address2, addr.city, addr.province, addr.zip, addr.country].filter(Boolean).join(", ")}`);
+  } else if (orders?.length) {
+    // Try from latest order fulfillment
+    const fulfillments = (orders[0].fulfillments as { shipping_address?: string }[] || []);
+    if (fulfillments[0]?.shipping_address) {
+      parts.push(`\nSHIPPING ADDRESS (from last order): ${fulfillments[0].shipping_address}`);
+    }
+  }
+
   // Unlinked potential matches
   const { findUnlinkedMatches } = await import("@/lib/account-matching");
   const unlinked = await findUnlinkedMatches(wsId, custId, admin);
@@ -409,16 +425,21 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
     { data: products },
     ragResults,
   ] = await Promise.all([
-    admin.from("products").select("title, description").eq("workspace_id", wsId).eq("status", "active"),
+    admin.from("products").select("title, description, variants").eq("workspace_id", wsId).eq("status", "active"),
     retrieveContext(wsId, searchQuery, 10),
   ]);
 
   const parts: string[] = [];
 
-  // Products
+  // Products with inventory
   parts.push("PRODUCT CATALOG:");
   for (const p of products || []) {
-    parts.push(`- ${p.title}${p.description ? `: ${p.description.slice(0, 150)}` : ""}`);
+    const variants = (p.variants as { title?: string; inventory_quantity?: number }[] || []);
+    const oosVariants = variants.filter(v => v.inventory_quantity != null && v.inventory_quantity <= 0);
+    const stockNote = oosVariants.length > 0
+      ? ` [OUT OF STOCK: ${oosVariants.map(v => v.title || "Default").join(", ")}]`
+      : "";
+    parts.push(`- ${p.title}${p.description ? `: ${p.description.slice(0, 150)}` : ""}${stockNote}`);
   }
 
   // Macros from RAG (semantically matched, not brute-force)
