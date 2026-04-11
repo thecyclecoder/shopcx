@@ -13,7 +13,7 @@ import { ReplacementsList } from "@/components/shared/ReplacementsList";
 import type { ReplacementItem } from "@/components/shared/ReplacementsList";
 import SubscriptionsList from "@/components/shared/SubscriptionsList";
 import LoyaltyCard from "@/components/shared/LoyaltyCard";
-import type { LoyaltyMemberData } from "@/components/shared/LoyaltyCard";
+import type { LoyaltyMemberData, LoyaltyRedemption } from "@/components/shared/LoyaltyCard";
 import type { SubscriptionData as CustomerSubscription } from "@/components/shared/SubscriptionsList";
 import EmailPreviewModal from "@/components/email-preview-modal";
 
@@ -251,6 +251,7 @@ export default function TicketDetailPage() {
 
   // Loyalty state
   const [loyaltyMember, setLoyaltyMember] = useState<LoyaltyMemberData | null>(null);
+  const [loyaltyRedemptions, setLoyaltyRedemptions] = useState<LoyaltyRedemption[]>([]);
   const [loyaltySettings, setLoyaltySettings] = useState<{
     enabled: boolean;
     redemption_tiers: { label: string; points_cost: number; discount_value: number }[];
@@ -372,7 +373,16 @@ export default function TicketDetailPage() {
       if (data.customer) {
         fetch(`/api/loyalty/members?workspace_id=${workspace.id}&customer_id=${data.customer.id}&limit=1`)
           .then((r) => r.json())
-          .then((d) => { if (d.members?.[0]) setLoyaltyMember(d.members[0]); })
+          .then((d) => {
+            if (d.members?.[0]) {
+              setLoyaltyMember(d.members[0]);
+              // Fetch redemptions for this member
+              fetch(`/api/loyalty/redemptions?member_id=${d.members[0].id}`)
+                .then(r => r.json())
+                .then(rd => { if (rd.redemptions) setLoyaltyRedemptions(rd.redemptions); })
+                .catch(() => {});
+            }
+          })
           .catch(() => {});
         fetch(`/api/workspaces/${workspace.id}/loyalty`)
           .then((r) => r.json())
@@ -2927,8 +2937,10 @@ export default function TicketDetailPage() {
                 tiers={loyaltySettings.redemption_tiers}
                 workspaceId={workspace.id}
                 variant="compact"
-                onRedeem={(newBalance) => {
+                redemptions={loyaltyRedemptions}
+                onRedeem={(newBalance, code, value, pointsCost) => {
                   setLoyaltyMember((prev) => prev ? { ...prev, points_balance: newBalance } : prev);
+                  setLoyaltyRedemptions(prev => [{ id: crypto.randomUUID(), discount_code: code, discount_value: value, points_spent: pointsCost, status: "active", used_at: null, expires_at: null, created_at: new Date().toISOString() }, ...prev]);
                 }}
               />
             </div>

@@ -16,6 +16,17 @@ export interface LoyaltyTierData {
   affordable?: boolean;
 }
 
+export interface LoyaltyRedemption {
+  id: string;
+  discount_code: string;
+  discount_value: number;
+  points_spent: number;
+  status: string;
+  used_at: string | null;
+  expires_at: string | null;
+  created_at: string;
+}
+
 interface LoyaltyCardProps {
   member: LoyaltyMemberData;
   tiers: LoyaltyTierData[];
@@ -26,6 +37,8 @@ interface LoyaltyCardProps {
   onRedeem?: (newBalance: number, code: string, value: number, pointsCost: number) => void;
   /** Navigate to loyalty member detail (full variant only) */
   onNavigate?: () => void;
+  /** Existing redemptions/coupons for this customer */
+  redemptions?: LoyaltyRedemption[];
 }
 
 /**
@@ -39,6 +52,7 @@ export default function LoyaltyCard({
   variant = "full",
   onRedeem,
   onNavigate,
+  redemptions,
 }: LoyaltyCardProps) {
   const [redeeming, setRedeeming] = useState(false);
   const [selectedTier, setSelectedTier] = useState<number | string>("");
@@ -121,6 +135,32 @@ export default function LoyaltyCard({
                 {redeemResult.message}
               </p>
             )}
+          </div>
+        )}
+
+        {/* Coupons list */}
+        {redemptions && redemptions.length > 0 && (
+          <div className="space-y-1">
+            <p className="text-xs font-medium text-zinc-500">Coupons</p>
+            {redemptions.slice(0, 5).map(r => {
+              const isUsed = !!r.used_at;
+              const isExpired = !isUsed && r.expires_at && new Date(r.expires_at) < new Date();
+              const statusLabel = isUsed ? "Used" : isExpired ? "Expired" : r.status === "active" ? "Unused" : r.status;
+              const statusColor = isUsed ? "text-zinc-400" : isExpired ? "text-red-400" : "text-emerald-500";
+              const date = new Date(r.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+              return (
+                <div key={r.id} className="flex items-center justify-between rounded bg-zinc-50 px-2 py-1 text-xs dark:bg-zinc-800">
+                  <div className="min-w-0">
+                    <span className="font-mono font-medium text-zinc-700 dark:text-zinc-300">{r.discount_code}</span>
+                    <span className="ml-1.5 text-zinc-400">${r.discount_value}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className={`font-medium ${statusColor}`}>{statusLabel}</span>
+                    <span className="text-zinc-300 dark:text-zinc-600">{date}</span>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
