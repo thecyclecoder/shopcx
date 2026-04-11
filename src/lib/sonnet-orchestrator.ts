@@ -79,6 +79,8 @@ export async function buildSonnetContext(
     { count: orderCount },
     { data: crisisActions },
     unlinkedMatches,
+    { data: emailHistory },
+    { data: customerActivity },
   ] = await Promise.all([
     admin
       .from("workspaces")
@@ -161,6 +163,24 @@ export async function buildSonnetContext(
     customerId
       ? import("@/lib/account-matching").then(m => m.findUnlinkedMatches(workspaceId, customerId, admin))
       : Promise.resolve([]),
+    // Email history — all emails sent to this customer (across tickets)
+    customerId
+      ? admin.from("email_events")
+          .select("event_type, subject, occurred_at, ticket_id, metadata")
+          .eq("workspace_id", workspaceId)
+          .eq("customer_id", customerId)
+          .order("occurred_at", { ascending: false })
+          .limit(10)
+      : Promise.resolve({ data: null }),
+    // Customer activity log
+    customerId
+      ? admin.from("customer_events")
+          .select("event_type, summary, created_at")
+          .eq("workspace_id", workspaceId)
+          .eq("customer_id", customerId)
+          .order("created_at", { ascending: false })
+          .limit(10)
+      : Promise.resolve({ data: null }),
   ]);
 
   const wsName = workspace?.name || "our store";
@@ -356,6 +376,27 @@ ${ce.tier2_coupon_code ? `- Crisis coupon: ${ce.tier2_coupon_code} (${ce.tier2_c
     ? `\nOUT OF STOCK / LOW INVENTORY (do NOT tell customers these are available):\n${outOfStockItems.map(i => `- ${i}`).join("\n")}`
     : "";
 
+  // Email history across all tickets
+  let emailHistoryBlock = "";
+  if (emailHistory?.length) {
+    emailHistoryBlock = `\nEMAIL HISTORY (all emails sent to this customer):\n` +
+      emailHistory.map((e: any) => {
+        const date = new Date(e.occurred_at).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+        const status = e.event_type === "opened" ? " [OPENED]" : e.event_type === "clicked" ? " [CLICKED]" : e.event_type === "bounced" ? " [BOUNCED]" : e.event_type === "delivered" ? " [DELIVERED]" : "";
+        return `- ${date}: ${e.event_type === "sent" ? "Sent" : e.event_type.charAt(0).toUpperCase() + e.event_type.slice(1)}: "${e.subject || "unknown"}"${status}`;
+      }).join("\n");
+  }
+
+  // Customer activity (recent events)
+  let activityBlock = "";
+  if (customerActivity?.length) {
+    activityBlock = `\nCUSTOMER ACTIVITY (recent):\n` +
+      customerActivity.map((e: any) => {
+        const date = new Date(e.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        return `- ${date}: ${e.summary}`;
+      }).join("\n");
+  }
+
   // Build prompt
   return `You are a customer support routing engine for ${wsName}. Analyze the customer's message and decide the best action.
 
@@ -364,7 +405,7 @@ SUBSCRIPTIONS:
 ${subsBlock}
 RECENT ORDERS:
 ${ordersBlock}
-LOYALTY: ${loyaltyLine}${inventoryBlock}${crisisBlock}
+LOYALTY: ${loyaltyLine}${inventoryBlock}${crisisBlock}${emailHistoryBlock}${activityBlock}
 ${unlinkedMatches.length > 0 ? `POTENTIAL LINKED ACCOUNTS (not yet linked): ${unlinkedMatches.map((m: { email: string }) => m.email).join(", ")}` : ""}
 OUR PRODUCT CATALOG:
 ${(allProducts || []).map((p: { title: string; description?: string }) => `- ${p.title}${p.description ? `: ${p.description.slice(0, 100)}` : ""}`).join("\n") || "No products loaded"}
@@ -460,7 +501,7 @@ export async function callSonnetOrchestrator(
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 1000,
+        max_tokens: 2000,
         messages: [{ role: "user", content: prompt }],
       }),
     });

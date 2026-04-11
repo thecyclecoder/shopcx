@@ -80,12 +80,18 @@ export const deliverPendingSends = inngest.createFunction(
             const email = (ticket.customers as unknown as { email: string })?.email;
             if (email) {
               const { data: ws } = await admin.from("workspaces").select("name").eq("id", ticket.workspace_id).single();
-              await sendTicketReply({
+              const chatEmailResult = await sendTicketReply({
                 workspaceId: ticket.workspace_id, toEmail: email,
                 subject: `Re: ${ticket.subject || "Your chat with us"}`,
                 body: msg.body, inReplyTo: null,
                 agentName: "Support", workspaceName: ws?.name || "",
               });
+              if (chatEmailResult.messageId) {
+                await admin.from("ticket_messages").update({ resend_email_id: chatEmailResult.messageId, email_status: "sent" }).eq("id", msg.id);
+                const { logEmailSent } = await import("@/lib/email-tracking");
+                const { data: t } = await admin.from("tickets").select("customer_id").eq("id", msg.ticket_id).single();
+                await logEmailSent({ workspaceId: ticket.workspace_id, resendEmailId: chatEmailResult.messageId, recipientEmail: email, subject: ticket.subject || "Your chat with us", ticketId: msg.ticket_id, customerId: t?.customer_id });
+              }
             }
           }
           return;
@@ -110,7 +116,7 @@ export const deliverPendingSends = inngest.createFunction(
           .single();
 
         try {
-          await sendTicketReply({
+          const emailResult = await sendTicketReply({
             workspaceId: ticket.workspace_id,
             toEmail: email,
             subject: `Re: ${ticket.subject || "Your request"}`,
@@ -120,10 +126,28 @@ export const deliverPendingSends = inngest.createFunction(
             workspaceName: ws?.name || "",
           });
 
+          const resendId = emailResult.messageId || null;
           await admin.from("ticket_messages").update({
             sent_at: new Date().toISOString(),
             pending_send_at: null,
+            resend_email_id: resendId,
+            email_status: resendId ? "sent" : null,
+            email_message_id: resendId ? `<${resendId}@resend.dev>` : undefined,
           }).eq("id", msg.id);
+
+          // Log email event for tracking
+          if (resendId) {
+            const { logEmailSent } = await import("@/lib/email-tracking");
+            const { data: t } = await admin.from("tickets").select("customer_id").eq("id", msg.ticket_id).single();
+            await logEmailSent({
+              workspaceId: ticket.workspace_id,
+              resendEmailId: resendId,
+              recipientEmail: email,
+              subject: ticket.subject || "Your request",
+              ticketId: msg.ticket_id,
+              customerId: t?.customer_id,
+            });
+          }
           delivered++;
         } catch (err) {
           console.error(`[deliver-pending] Failed to send message ${msg.id}:`, err);
