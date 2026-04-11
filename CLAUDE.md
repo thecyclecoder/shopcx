@@ -1,6 +1,7 @@
 @AGENTS.md
 @JOURNEYS.md
 @CANCEL-FLOW.md
+@SONNET-ORCHESTRATOR.md
 
 # ShopCX.ai — The Retention Operating System
 
@@ -394,3 +395,6 @@ Use `addTicketTag()` from `src/lib/ticket-tags.ts` (idempotent). Use `markFirstT
 - Don't push during active Inngest syncs (deployment kills running functions)
 - Use git worktrees for parallel feature development
 - **Portal builds**: After any changes to `shopify-extension/portal-src/`, always run `node scripts/build-all-portals.js` before committing. This builds both the Shopify extension portal and the mini-site portal from the same source files.
+- **Customer-referenced tables**: When creating a new table with a `customer_id` column, add a corresponding data tool in `src/lib/sonnet-orchestrator-v2.ts` so the Sonnet orchestrator can access it. See `SONNET-ORCHESTRATOR.md` for instructions.
+- **Journeys**: Each journey has ONE builder file as source of truth. `journey-step-builder.ts` delegates via async import. All data from database, never hardcoded. See `JOURNEYS.md`.
+- **Cancel flow**: Cancel reasons and remedies come from Settings → Cancel Flow (database only). See `CANCEL-FLOW.md`.
