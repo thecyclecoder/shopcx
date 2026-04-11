@@ -54,8 +54,9 @@ export async function GET(
   // For code-driven journeys, dynamically build steps if not already built
   const configObj = config as Record<string, unknown>;
 
-  // Rebuild cancel journey config if metadata or cancel reasons are missing
-  const hasReasons = ((configObj.steps as unknown[]) || []).length > 0;
+  // Rebuild cancel journey config if metadata or cancel reasons are missing/empty
+  const cancelReasonStep = ((configObj.steps as { key?: string; options?: unknown[] }[]) || []).find(s => s.key === "cancel_reason");
+  const hasReasons = cancelReasonStep && (cancelReasonStep.options?.length ?? 0) > 0;
   if (configObj.codeDriven && configObj.cancelJourney && (!(configObj.metadata as Record<string, unknown>)?.subscriptions || !hasReasons)) {
     const { buildJourneySteps } = await import("@/lib/journey-step-builder");
     const built = await buildJourneySteps(
