@@ -846,6 +846,7 @@ function InlineJourneyForm({
   const [done, setDone] = useState(false);
   const [allSteps, setAllSteps] = useState(steps);
   const [loadingRemedies, setLoadingRemedies] = useState(false);
+  const [remedyMap, setRemedyMap] = useState<Record<string, { type: string; coupon_code?: string; name: string }>>({}); // remedy_id → metadata
 
   const step = allSteps[currentIdx];
 
@@ -879,6 +880,13 @@ function InlineJourneyForm({
         });
         const remedyData = await remedyRes.json();
         if (remedyData.remedies?.length) {
+          // Store remedy metadata for later use in complete payload
+          const rMap: Record<string, { type: string; coupon_code?: string; name: string }> = {};
+          for (const r of remedyData.remedies) {
+            rMap[r.remedy_id] = { type: r.type || "unknown", coupon_code: r.coupon_code, name: r.name };
+          }
+          setRemedyMap(rMap);
+
           // Add remedy step + cancel anyway option
           const remedyOptions = [
             ...remedyData.remedies.map((r: { remedy_id: string; name: string; pitch: string }) => ({
@@ -901,14 +909,97 @@ function InlineJourneyForm({
       setLoadingRemedies(false);
     }
 
-    // Remedy choice: if they picked a remedy, complete with "saved". If cancel anyway, complete with "cancelled"
+    // Remedy choice handling
     if (step.key === "remedy_choice") {
+      if (value === "cancel_anyway") {
+        setSubmitting(true);
+        await fetch(`/api/journey/${token}/complete`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ outcome: "cancelled", responses: updated }),
+        });
+        setDone(true);
+        setSubmitting(false);
+        onComplete(buildHumanResponse(allSteps, updated));
+        return;
+      }
+
+      const remedy = remedyMap[value];
+
+      // Line item modifier: add item selection + action steps
+      if (remedy?.type === "line_item_modifier") {
+        // Fetch subscription items to build selection
+        setLoadingRemedies(true);
+        try {
+          const subId = updated.select_subscription?.value;
+          const stepRes = await fetch(`/api/journey/${token}/step`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ step: "get_items", subscription_id: subId }),
+          });
+          const stepData = await stepRes.json();
+          const items = (stepData.items || []) as { title: string; variant_title?: string; variant_id: string; quantity: number }[];
+          if (items.length > 0) {
+            setAllSteps(prev => [
+              ...prev,
+              {
+                key: "modify_item",
+                type: "single_choice",
+                question: "Which item would you like to modify?",
+                options: items.map(i => ({
+                  value: i.variant_id,
+                  label: `${i.title}${i.variant_title ? ` — ${i.variant_title}` : ""} (x${i.quantity})`,
+                })),
+              },
+              {
+                key: "modify_action",
+                type: "single_choice",
+                question: "What would you like to do with this item?",
+                options: [
+                  { value: "remove", label: "Remove it from my subscription" },
+                  { value: "reduce_qty", label: "Reduce quantity" },
+                ],
+              },
+            ]);
+            setCurrentIdx(i => i + 1);
+            setLoadingRemedies(false);
+            return;
+          }
+        } catch { /* fall through */ }
+        setLoadingRemedies(false);
+      }
+
+      // All other remedy types: complete with correct response keys
       setSubmitting(true);
-      const outcome = value === "cancel_anyway" ? "cancelled" : "saved";
+      const completeResponses = {
+        ...updated,
+        remedy_selection: { value, label: remedy?.name || label },
+        remedy_action: { value: remedy?.type || "unknown", label: remedy?.type || "unknown" },
+        ...(remedy?.coupon_code ? { remedy_coupon: { value: remedy.coupon_code, label: remedy.coupon_code } } : {}),
+      };
       await fetch(`/api/journey/${token}/complete`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ outcome, responses: updated }),
+        body: JSON.stringify({ outcome: "saved", responses: completeResponses }),
+      });
+      setDone(true);
+      setSubmitting(false);
+      onComplete(buildHumanResponse(allSteps, updated));
+      return;
+    }
+
+    // Line item modifier completion
+    if (step.key === "modify_action") {
+      setSubmitting(true);
+      const completeResponses = {
+        ...updated,
+        remedy_selection: { value: updated.remedy_choice?.value || "", label: "line_item_modifier" },
+        remedy_action: { value: "line_item_modifier", label: "line_item_modifier" },
+      };
+      await fetch(`/api/journey/${token}/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outcome: "saved", responses: completeResponses }),
       });
       setDone(true);
       setSubmitting(false);

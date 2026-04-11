@@ -864,19 +864,35 @@ export async function POST(
         ? `<p>Your subscription has been cancelled. You won't be charged again.${otherSubsNote}</p>`
         : "<p>We've updated your subscription. Thank you for staying with us!</p>";
 
-      await admin.from("ticket_messages").insert({
-        ticket_id: session.ticket_id,
-        direction: "outbound",
-        visibility: "external",
-        author_type: "system",
-        body: confirmMsg,
-      });
-
-      // Send email reply for email channel tickets
+      // Get ticket info for channel-aware delivery
       const { data: ticketData } = await admin.from("tickets")
-        .select("subject, email_message_id, channel, customer_id")
+        .select("subject, email_message_id, channel, customer_id, workspace_id")
         .eq("id", session.ticket_id)
         .single();
+
+      // For chat: use response delay so message doesn't race with the form completion message
+      if (ticketData?.channel === "chat") {
+        const { data: wsDelay } = await admin.from("workspaces").select("response_delays").eq("id", wsId).single();
+        const delays = (wsDelay?.response_delays || { chat: 15 }) as Record<string, number>;
+        const delaySec = delays.chat || 15;
+        await admin.from("ticket_messages").insert({
+          ticket_id: session.ticket_id,
+          direction: "outbound",
+          visibility: "external",
+          author_type: "system",
+          body: confirmMsg,
+          pending_send_at: new Date(Date.now() + delaySec * 1000).toISOString(),
+        });
+      } else {
+        await admin.from("ticket_messages").insert({
+          ticket_id: session.ticket_id,
+          direction: "outbound",
+          visibility: "external",
+          author_type: "system",
+          body: confirmMsg,
+          sent_at: new Date().toISOString(),
+        });
+      }
 
       if (ticketData?.channel === "email" && ticketData.customer_id) {
         const { data: cust } = await admin.from("customers").select("email").eq("id", ticketData.customer_id).single();

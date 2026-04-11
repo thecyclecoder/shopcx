@@ -23,11 +23,25 @@ export async function POST(
     return NextResponse.json({ error: "expired" }, { status: 410 });
   }
 
+  const body = await request.json();
+
+  // get_items: return subscription items for line item modifier (works in any session status)
+  if (body.step === "get_items") {
+    const config = (session as { config_snapshot?: { metadata?: Record<string, unknown> } }).config_snapshot || {};
+    const metadata = (config as Record<string, unknown>).metadata as Record<string, unknown> | undefined;
+    const subscriptions = (metadata?.subscriptions as { id: string; contractId: string; items: { title: string; variant_title?: string; variant_id?: string; quantity: number }[] }[]) || [];
+    const subId = body.subscription_id;
+    const sub = subscriptions.find(s => s.id === subId) || subscriptions[0];
+    const items = (sub?.items || []).filter(i => {
+      const t = (i.title || "").toLowerCase();
+      return !t.includes("shipping protection") && !t.includes("insure");
+    });
+    return NextResponse.json({ items });
+  }
+
   if (session.status !== "in_progress") {
     return NextResponse.json({ error: "invalid_status" }, { status: 400 });
   }
-
-  const body = await request.json();
   const { stepKey, responseValue, responseLabel } = body;
 
   if (!stepKey || responseValue === undefined) {
