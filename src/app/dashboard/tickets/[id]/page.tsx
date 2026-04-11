@@ -15,6 +15,7 @@ import SubscriptionsList from "@/components/shared/SubscriptionsList";
 import LoyaltyCard from "@/components/shared/LoyaltyCard";
 import type { LoyaltyMemberData } from "@/components/shared/LoyaltyCard";
 import type { SubscriptionData as CustomerSubscription } from "@/components/shared/SubscriptionsList";
+import EmailPreviewModal from "@/components/email-preview-modal";
 
 interface Member {
   user_id: string;
@@ -266,6 +267,7 @@ export default function TicketDetailPage() {
   const [subscriptionsCardOpen, setSubscriptionsCardOpen] = useState(false);
   const [ordersCardOpen, setOrdersCardOpen] = useState(false);
   const [loyaltyCardOpen, setLoyaltyCardOpen] = useState(false);
+  const [emailPreview, setEmailPreview] = useState<{ html: string; subject: string; to?: string; sentAt?: string } | null>(null);
 
   // Inline subscription actions state
   const [subActionPanel, setSubActionPanel] = useState<{ subId: string; action: string } | null>(null);
@@ -1167,8 +1169,8 @@ export default function TicketDetailPage() {
                       <div className="mt-1.5 text-xs text-zinc-400 line-through">Send cancelled</div>
                     )}
                     {/* Email delivery status */}
-                    {!isInbound && !isInternal && (m as TicketMessage & { email_status?: string }).email_status && (
-                      <div className="mt-1.5 flex items-center gap-1 text-xs">
+                    {!isInbound && !isInternal && (
+                      <div className="mt-1.5 flex items-center gap-1.5 text-xs">
                         {(() => {
                           const status = (m as TicketMessage & { email_status?: string }).email_status;
                           if (status === "opened" || status === "clicked") return <span className="text-emerald-400">Opened</span>;
@@ -1177,6 +1179,19 @@ export default function TicketDetailPage() {
                           if (status === "sent") return <span className="text-zinc-400">Sent</span>;
                           return null;
                         })()}
+                        {(m as TicketMessage & { sent_at?: string }).sent_at && (
+                          <button
+                            onClick={() => setEmailPreview({
+                              html: m.body,
+                              subject: ticket.subject || "Email",
+                              to: customer?.email,
+                              sentAt: (m as TicketMessage & { sent_at?: string }).sent_at || undefined,
+                            })}
+                            className="text-indigo-300 hover:text-indigo-200 hover:underline"
+                          >
+                            Preview
+                          </button>
+                        )}
                       </div>
                     )}
                     {/* Approve & Send for AI sandbox drafts */}
@@ -2979,6 +2994,18 @@ export default function TicketDetailPage() {
           }}
         />
       )}
+
+      {/* Email preview modal */}
+      {emailPreview && (
+        <EmailPreviewModal
+          html={emailPreview.html}
+          subject={emailPreview.subject}
+          to={emailPreview.to}
+          sentAt={emailPreview.sentAt}
+          isOpen={!!emailPreview}
+          onClose={() => setEmailPreview(null)}
+        />
+      )}
     </div>
   );
 }
@@ -3247,6 +3274,7 @@ function ShareTicketButton({ ticketId, workspaceId }: { ticketId: string; worksp
           </div>
         </div>
       )}
+
     </div>
   );
 }
