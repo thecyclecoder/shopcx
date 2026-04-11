@@ -366,6 +366,9 @@ RECENT ORDERS:
 ${ordersBlock}
 LOYALTY: ${loyaltyLine}${inventoryBlock}${crisisBlock}
 ${unlinkedMatches.length > 0 ? `POTENTIAL LINKED ACCOUNTS (not yet linked): ${unlinkedMatches.map((m: { email: string }) => m.email).join(", ")}` : ""}
+OUR PRODUCT CATALOG:
+${(allProducts || []).map((p: { title: string }) => `- ${p.title}`).join("\n") || "No products loaded"}
+
 CONVERSATION:
 ${convoBlock || `Customer: ${message.slice(0, 300)}`}
 ${completedActions.length > 0 ? `\nACTIONS ALREADY COMPLETED ON THIS TICKET:\n${completedActions.map(a => `- ${a}`).join("\n")}` : ""}
