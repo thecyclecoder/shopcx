@@ -915,14 +915,21 @@ Respond with EXACTLY one word: "drift" or "related"`, "haiku", 30);
         if (await newerActivity(admin, tid, t0)) return;
         const { data: wsForSandbox } = await admin.from("workspaces").select("sandbox_mode").eq("id", wsId).single();
         const isSandbox = wsForSandbox?.sandbox_mode === true || cfg.sandbox === true;
-        await executeSonnetDecision(
+        const execResult = await executeSonnetDecision(
           { admin, workspaceId: wsId, ticketId: tid, customerId: st.custId || "", channel: st.ch, sandbox: isSandbox },
           sonnetDecision,
           pers,
           async (m, sb) => sendWithDelay(admin, wsId, tid, st.ch, m, sb),
           async (m) => { await sysNote(admin, tid, m); },
         );
-        await setStatus(admin, tid, cfg.auto_resolve);
+        // Only auto-close if a customer-facing message was sent
+        if (execResult.messageSent) {
+          await setStatus(admin, tid, cfg.auto_resolve);
+        } else {
+          // No message sent — keep ticket open so an agent can handle it
+          await admin.from("tickets").update({ status: "open" }).eq("id", tid);
+          await sysNote(admin, tid, "[System] No customer message sent — ticket kept open for agent review.");
+        }
       });
 
       return { status: `sonnet_${sonnetDecision.action_type}`, reasoning: sonnetDecision.reasoning };

@@ -477,24 +477,28 @@ export async function executeSonnetDecision(
   personality: { name?: string; tone?: string; sign_off?: string | null } | null,
   send: SendFn,
   sysNote: SysNoteFn,
-): Promise<void> {
+): Promise<{ messageSent: boolean }> {
   // Handle clarification first — applies regardless of action_type
   if (decision.needs_clarification && decision.clarification_question) {
     await send(decision.clarification_question, ctx.sandbox);
-    return;
+    return { messageSent: true };
   }
+
+  // Track whether a customer-facing message was sent
+  let messageSent = false;
+  const trackedSend: SendFn = async (m, sb) => { messageSent = true; await send(m, sb); };
 
   switch (decision.action_type) {
     case "direct_action":
-      await handleDirectAction(ctx, decision, send, sysNote);
+      await handleDirectAction(ctx, decision, trackedSend, sysNote);
       break;
 
     case "journey":
-      await handleJourney(ctx, decision, send, sysNote);
+      await handleJourney(ctx, decision, trackedSend, sysNote);
       break;
 
     case "playbook":
-      await handlePlaybook(ctx, decision, personality, send, sysNote);
+      await handlePlaybook(ctx, decision, personality, trackedSend, sysNote);
       break;
 
     case "workflow":
@@ -502,23 +506,25 @@ export async function executeSonnetDecision(
       break;
 
     case "macro":
-      await handleMacro(ctx, decision, send);
+      await handleMacro(ctx, decision, trackedSend);
       break;
 
     case "kb_response":
     case "ai_response":
       if (decision.response_message) {
-        await send(decision.response_message, ctx.sandbox);
+        await trackedSend(decision.response_message, ctx.sandbox);
       }
       break;
 
     case "escalate":
-      await handleEscalate(ctx, decision, send, sysNote);
+      await handleEscalate(ctx, decision, trackedSend, sysNote);
       break;
 
     default:
       await sysNote(`Unknown action_type: ${decision.action_type}`);
   }
+
+  return { messageSent };
 }
 
 // ── Handler: Direct Actions ──
