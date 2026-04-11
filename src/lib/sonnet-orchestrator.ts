@@ -425,6 +425,7 @@ RULES:
 - If unclear what customer wants AND no matching completed actions → set needs_clarification with a friendly question
 - If truly impossible to handle → escalate
 - Do NOT escalate just because a customer asks for a "human" — resolve if you can
+- IMPORTANT: On chat channel, NEVER leave the customer hanging. If you escalate or can't resolve immediately, your response_message MUST include "I'll send you an email at {customer_email}" so they know the conversation continues via email. This also ends the live chat session.
 
 Return ONLY valid JSON:
 {

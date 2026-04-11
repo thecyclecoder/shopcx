@@ -365,10 +365,9 @@ async function escalate(admin: Admin, wsId: string, tid: string, ch: string, int
   }
 
   // Always send a customer-facing message on escalation
-  let escalationMsg = "I need to look into this a bit more. I'll get back to you shortly.";
-  if (ch === "chat" && customerEmail) {
-    escalationMsg += ` If you leave this chat, I'll send you an email at ${customerEmail}.`;
-  }
+  let escalationMsg = ch === "chat" && customerEmail
+    ? `I need to look into this a bit more. I'll send you an email at ${customerEmail} with an update shortly.`
+    : "I need to look into this a bit more. I'll get back to you shortly.";
 
   await sendWithDelay(admin, wsId, tid, ch, escalationMsg, false);
 

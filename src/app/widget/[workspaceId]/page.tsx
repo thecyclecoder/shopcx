@@ -247,7 +247,17 @@ export default function ChatWidgetPage() {
           const newMsg = payload.new as { visibility?: string; direction?: string };
           if (newMsg.visibility === "external" && newMsg.direction === "outbound") {
             // Fetch full messages from API — realtime payloads can truncate large bodies
-            fetchMessages();
+            fetchMessages().then(() => {
+              // Check if the latest message indicates chat handoff to email
+              setMessages(prev => {
+                const last = prev[prev.length - 1];
+                if (last?.direction === "outbound" && (last.body || "").includes("send you an email")) {
+                  setChatEnded(true);
+                  setWaitingForReply(false);
+                }
+                return prev;
+              });
+            });
             setWaitingForReply(false);
             clearTimeout((window as unknown as Record<string, unknown>).__shopcxTypingTimer as number);
           }
