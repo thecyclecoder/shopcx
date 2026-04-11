@@ -155,7 +155,7 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
       });
     } else {
       // No steps (e.g. no unlinked accounts found) — fall back to CTA link
-      const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:white;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
+      const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
       await admin.from("ticket_messages").insert({
         ticket_id: ticketId, direction: "outbound", visibility: "external",
         author_type: "system", body: ctaHtml,
@@ -315,7 +315,7 @@ export async function nudgeJourney(
     const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
     const nudgeJourneyUrl = `${siteUrl}/journey/${token}`;
     const { data: wsNudge } = await admin.from("workspaces").select("help_primary_color").eq("id", workspaceId).single();
-    const nudgeCtaHtml = `<p>${nudgeText}</p><p><a href="${nudgeJourneyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${wsNudge?.help_primary_color || "#4f46e5"};color:white;text-decoration:none;border-radius:8px;font-weight:600;">Complete ${journeyEntry.journey_name} →</a></p>`;
+    const nudgeCtaHtml = `<p>${nudgeText}</p><p><a href="${nudgeJourneyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${wsNudge?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">Complete ${journeyEntry.journey_name} →</a></p>`;
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId, direction: "outbound", visibility: "external", author_type: "system",
       body: nudgeCtaHtml,

@@ -240,7 +240,7 @@ export const crisisDailyCampaign = inngest.createFunction(
 <p>We wanted to let you know that <b>${crisis.affected_product_title || "your item"}</b> is temporarily out of stock. We expect it back by <b>${restockDate}</b>.</p>
 <p>To make sure you don't miss your next shipment, we've switched it to <b>${defaultSwap}</b>. ${segment === "berry_plus" ? "Your other items will ship as usual." : ""}</p>
 <p>If you'd prefer a different flavor, you can change it here:</p>
-<p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose a Different Flavor →</a></p>
+<p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose a Different Flavor →</a></p>
 <p style="color:#6b7280;font-size:13px;">If you're happy with ${defaultSwap}, no action needed — your next shipment will include it automatically.</p>`;
 
           // Send email first to get message ID for threading
@@ -383,7 +383,7 @@ export const crisisAdvanceTier = inngest.createFunction(
           const emailBody = `<p>Hi ${firstName},</p>
 <p>We understand ${crisis.affected_product_title || "your item"} was your go-to, and we're sorry it's still unavailable.</p>
 <p>We'd love to help you try something new — and to sweeten the deal, we'll give you <b>${couponPct}% off</b> your next order when you pick a new product.</p>
-<p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Swap for One of Our Best-Sellers →</a></p>`;
+<p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Swap for One of Our Best-Sellers →</a></p>`;
 
           const threading = await getTicketThreading(admin, ticket_id);
           const tier2Result = await sendTicketReply({
@@ -462,10 +462,10 @@ export const crisisAdvanceTier = inngest.createFunction(
             ? `<p>Hi ${firstName},</p>
 <p>We don't want you to go without your supplements. Since ${crisis.affected_product_title || "your item"} won't be back until <b>${restockDate}</b>, we can pause your subscription and automatically restart it the moment it's available.</p>
 <p>You won't be charged while paused.</p>
-<p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose What Works for You →</a></p>`
+<p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose What Works for You →</a></p>`
             : `<p>Hi ${firstName},</p>
 <p>We can remove ${crisis.affected_product_title || "the out-of-stock item"} from your subscription and keep shipping your other items as usual. We'll automatically add it back when it's in stock (expected <b>${restockDate}</b>).</p>
-<p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose What Works for You →</a></p>`;
+<p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose What Works for You →</a></p>`;
 
           const threading3 = await getTicketThreading(admin, ticket_id);
           const tier3Result = await sendTicketReply({

@@ -90,7 +90,7 @@ export async function sendInviteEmail({
         <p style="color: #71717a; font-size: 14px; line-height: 1.6;">
           ${invitedByName} has invited you to join <strong>${workspaceName}</strong> as a <strong>${role.replace("_", " ")}</strong> on ShopCX.ai.
         </p>
-        <a href="${siteUrl}/login" style="display: inline-block; margin-top: 24px; padding: 12px 24px; background: #6366f1; color: white; text-decoration: none; border-radius: 8px; font-size: 14px; font-weight: 500;">
+        <a href="${siteUrl}/login" style="display: inline-block; margin-top: 24px; padding: 12px 24px; background: #6366f1; color: #ffffff !important; text-decoration: none; border-radius: 8px; font-size: 14px; font-weight: 500;">
           Accept Invite
         </a>
         <p style="color: #a1a1aa; font-size: 12px; margin-top: 32px;">
@@ -243,7 +243,7 @@ export async function sendJourneyCTA({
           ${contextMessage || "We'd love to help you with your request. Please click the button below to continue."}
         </p>
         <div style="margin-top: 24px;">
-          <a href="${journeyUrl}" style="display: inline-block; padding: 14px 32px; background: ${color}; color: white; text-decoration: none; border-radius: 10px; font-size: 15px; font-weight: 600;">
+          <a href="${journeyUrl}" style="display: inline-block; padding: 14px 32px; background: ${color}; color: #ffffff !important; text-decoration: none; border-radius: 10px; font-size: 15px; font-weight: 600;">
             ${btn}
           </a>
         </div>
@@ -289,7 +289,7 @@ export async function sendDunningPaymentUpdateEmail({
           Your recent payment didn't go through. To keep your subscription active and avoid missing your next order, please update your payment method.
         </p>
         <div style="text-align: center; margin-top: 32px;">
-          <a href="${updateUrl}" style="display: inline-block; padding: 14px 32px; background: #6366f1; color: white; text-decoration: none; border-radius: 10px; font-size: 15px; font-weight: 600;">
+          <a href="${updateUrl}" style="display: inline-block; padding: 14px 32px; background: #6366f1; color: #ffffff !important; text-decoration: none; border-radius: 10px; font-size: 15px; font-weight: 600;">
             Update Payment Method
           </a>
         </div>
@@ -370,7 +370,7 @@ export async function sendDunningPausedEmail({
           We weren't able to process your payment after multiple attempts, so your subscription has been paused. Update your payment method below to resume your subscription — we'll get your next order on its way right away.
         </p>
         <div style="text-align: center; margin-top: 32px;">
-          <a href="${updateUrl}" style="display: inline-block; padding: 14px 32px; background: #6366f1; color: white; text-decoration: none; border-radius: 10px; font-size: 15px; font-weight: 600;">
+          <a href="${updateUrl}" style="display: inline-block; padding: 14px 32px; background: #6366f1; color: #ffffff !important; text-decoration: none; border-radius: 10px; font-size: 15px; font-weight: 600;">
             Update Payment Method
           </a>
         </div>
