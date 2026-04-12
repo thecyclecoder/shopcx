@@ -1,6 +1,6 @@
 // App.jsx — Main app shell with router
 import { createContext } from 'preact';
-import { useEffect, useRef } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import { useRouter } from './hooks/useRouter.js';
 import { useToast } from './hooks/useToast.js';
@@ -10,6 +10,7 @@ import SubscriptionDetail from './screens/SubscriptionDetail.jsx';
 import Cancel from './screens/Cancel.jsx';
 import BannedView from './screens/BannedView.jsx';
 import Breadcrumbs from './components/Breadcrumbs.jsx';
+import LinkAccountsModal from './modals/LinkAccountsModal.jsx';
 
 export const PortalContext = createContext(null);
 
@@ -25,6 +26,31 @@ export default function App({ config }) {
       prevScreen.current = router.screen;
     }
   }, [router.screen]);
+
+  // Account linking modal — show when bootstrap returns unlinked matches
+  const [linkMatches, setLinkMatches] = useState(null);
+  const [linkDismissed, setLinkDismissed] = useState(false);
+
+  useEffect(() => {
+    // Check if bootstrap data has unlinked matches
+    const matches = config.unlinkedMatches || config.unlinked_matches;
+    if (matches?.length > 0 && !linkDismissed) {
+      // Check session skip
+      const skipped = sessionStorage.getItem('__sp_link_skipped');
+      if (!skipped) setLinkMatches(matches);
+    }
+  }, [config, linkDismissed]);
+
+  const handleLinkClose = () => {
+    setLinkDismissed(true);
+    setLinkMatches(null);
+    sessionStorage.setItem('__sp_link_skipped', '1');
+  };
+
+  const handleLinked = () => {
+    // Refresh the page to reload with linked account data
+    window.location.reload();
+  };
 
   const ctx = { config, router, showToast };
 
@@ -69,6 +95,10 @@ export default function App({ config }) {
       <Breadcrumbs items={breadcrumbs} />
       {screen}
       {toastEl && createPortal(toastEl, document.body)}
+      {linkMatches && createPortal(
+        <LinkAccountsModal matches={linkMatches} onClose={handleLinkClose} onLinked={handleLinked} />,
+        document.body
+      )}
     </PortalContext.Provider>
   );
 }

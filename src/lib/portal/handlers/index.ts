@@ -27,6 +27,7 @@ export { submitBanRequest } from "./ban-request";
 export { loyaltyBalance } from "./loyalty-balance";
 export { loyaltyRedeem } from "./loyalty-redeem";
 export { loyaltyApplyToSubscription } from "./loyalty-apply-subscription";
+export { linkAccounts } from "./link-accounts";
 
 import type { RouteHandler } from "@/lib/portal/types";
 import { bootstrap } from "./bootstrap";
@@ -50,6 +51,7 @@ import { submitBanRequest } from "./ban-request";
 import { loyaltyBalance } from "./loyalty-balance";
 import { loyaltyRedeem } from "./loyalty-redeem";
 import { loyaltyApplyToSubscription } from "./loyalty-apply-subscription";
+import { linkAccounts } from "./link-accounts";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -94,4 +96,7 @@ export const routeMap: Record<string, RouteHandler> = {
   loyaltyapplytosubscription: loyaltyApplyToSubscription,
   loyaltyApplyToSubscription,
   loyalty_apply_to_subscription: loyaltyApplyToSubscription,
+  linkaccounts: linkAccounts,
+  linkAccounts,
+  link_accounts: linkAccounts,
 };

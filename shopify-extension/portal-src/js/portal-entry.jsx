@@ -49,6 +49,9 @@ async function boot() {
         config.catalog = c.catalog ?? [];
         config.rewardsUrl = c.rewardsUrl ?? '';
       }
+      if (bootstrap.unlinked_matches?.length) {
+        config.unlinked_matches = bootstrap.unlinked_matches;
+      }
     }
   } catch (e) {
     console.warn('[Portal] Bootstrap failed:', e);

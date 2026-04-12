@@ -137,6 +137,32 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
     }
   }
 
+  // Check for unlinked account matches
+  let unlinkMatches: { id: string; email: string; first_name: string | null; last_name: string | null; default_address: unknown }[] = [];
+  if (auth.workspaceId && auth.loggedInCustomerId) {
+    const { data: cust } = await admin.from("customers").select("id").eq("workspace_id", auth.workspaceId).eq("shopify_customer_id", auth.loggedInCustomerId).single();
+    if (cust) {
+      const { findUnlinkedMatches } = await import("@/lib/account-matching");
+      const rawMatches = await findUnlinkedMatches(auth.workspaceId, cust.id, admin);
+      if (rawMatches.length) {
+        // Get full details for each match
+        const matchIds = rawMatches.map(m => m.id).filter(Boolean);
+        if (matchIds.length) {
+          const { data: matchDetails } = await admin.from("customers")
+            .select("id, email, first_name, last_name, default_address")
+            .in("id", matchIds);
+          unlinkMatches = (matchDetails || []).map(m => ({
+            id: m.id,
+            email: m.email,
+            first_name: m.first_name,
+            last_name: m.last_name,
+            default_address: m.default_address,
+          }));
+        }
+      }
+    }
+  }
+
   return jsonOk({
     ok: true,
     shop: auth.shop,
@@ -156,5 +182,6 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
       catalog,
       rewardsUrl: String(general.rewards_url || ""),
     },
+    unlinked_matches: unlinkMatches,
   });
 };
