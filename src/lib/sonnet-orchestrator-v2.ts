@@ -76,7 +76,12 @@ function buildToolDefinitions() {
     },
     {
       name: "get_returns",
-      description: "Get customer's return requests with status, items, and refund details. Use when customer asks about a return, exchange, or refund status.",
+      description: "Get customer's returns AND replacement orders with status, items, tracking, and refund details. Use when customer asks about a return, replacement, exchange, or refund status.",
+      input_schema: { type: "object" as const, properties: {}, required: [] as string[] },
+    },
+    {
+      name: "get_fraud_cases",
+      description: "Get fraud cases and investigations for this customer. Use when customer's account is flagged or there are order holds.",
       input_schema: { type: "object" as const, properties: {}, required: [] as string[] },
     },
     {
@@ -290,6 +295,8 @@ async function executeToolCall(
         return await getProductKnowledge(admin, workspaceId, (input?.query as string) || "");
       case "get_returns":
         return await getReturns(admin, workspaceId, customerId);
+      case "get_fraud_cases":
+        return await getFraudCases(admin, workspaceId, customerId);
       case "get_crisis_status":
         return await getCrisisStatus(admin, workspaceId, customerId);
       case "get_chargebacks":
@@ -487,32 +494,61 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
 }
 
 async function getReturns(admin: Admin, wsId: string, custId: string): Promise<string> {
-  try {
-    // Include linked profiles
-    const { data: linkData } = await admin.from("customer_links").select("group_id").eq("customer_id", custId).maybeSingle();
-    let custIds = [custId];
-    if (linkData?.group_id) {
-      const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", linkData.group_id);
-      custIds = (grp || []).map(g => g.customer_id);
-    }
+  const parts: string[] = [];
 
-    const { data: returns } = await admin.from("returns")
-      .select("id, status, items, refund_amount_cents, tracking_number, created_at, order_number, reason")
-      .eq("workspace_id", wsId).in("customer_id", custIds)
-      .order("created_at", { ascending: false }).limit(5);
+  // Returns
+  const { data: returns } = await admin.from("returns")
+    .select("id, status, order_number, return_line_items, net_refund_cents, tracking_number, carrier, shipped_at, delivered_at, refunded_at, created_at")
+    .eq("workspace_id", wsId).eq("customer_id", custId)
+    .order("created_at", { ascending: false }).limit(5);
 
-    if (!returns?.length) return "No return requests found for this customer.";
-
-    const parts = ["RETURN REQUESTS:"];
+  if (returns?.length) {
+    parts.push("RETURNS:");
     for (const r of returns) {
-      const items = (r.items as { title?: string }[] || []).map(i => i.title || "item").join(", ");
+      const items = (r.return_line_items as { title?: string; quantity?: number }[] || []).map(i => `${i.title || "item"} x${i.quantity || 1}`).join(", ");
       const date = new Date(r.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
-      parts.push(`- ${date} | Status: ${r.status} | Order #${r.order_number || "?"} | Items: ${items} | Refund: $${((r.refund_amount_cents || 0) / 100).toFixed(2)}${r.tracking_number ? ` | Tracking: ${r.tracking_number}` : ""}${r.reason ? ` | Reason: ${r.reason}` : ""}`);
+      const refund = r.net_refund_cents ? `$${(r.net_refund_cents / 100).toFixed(2)}` : "pending";
+      parts.push(`- ${date} | Status: ${r.status} | Order #${r.order_number || "?"} | Items: ${items} | Refund: ${refund}${r.tracking_number ? ` | Tracking: ${r.tracking_number} (${r.carrier || "?"})` : ""}${r.shipped_at ? ` | Shipped: ${new Date(r.shipped_at).toLocaleDateString()}` : ""}${r.delivered_at ? ` | Delivered: ${new Date(r.delivered_at).toLocaleDateString()}` : ""}${r.refunded_at ? ` | Refunded: ${new Date(r.refunded_at).toLocaleDateString()}` : ""}`);
     }
-    return parts.join("\n");
-  } catch {
-    return "Returns data not available (table may not exist).";
+  } else {
+    parts.push("RETURNS: No return requests found for this customer.");
   }
+
+  // Replacements
+  const { data: replacements } = await admin.from("replacements")
+    .select("id, status, original_order_number, items, reason, shopify_replacement_order_name, created_at")
+    .eq("workspace_id", wsId).eq("customer_id", custId)
+    .order("created_at", { ascending: false }).limit(5);
+
+  if (replacements?.length) {
+    parts.push("\nREPLACEMENT ORDERS:");
+    for (const r of replacements) {
+      const items = (r.items as { title?: string; type?: string; quantity?: number }[] || []).map(i => `${i.title || "item"} (${i.type || "replacement"})`).join(", ");
+      const date = new Date(r.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      parts.push(`- ${date} | Status: ${r.status} | Original order: #${r.original_order_number || "?"} | Items: ${items} | Reason: ${r.reason || "?"}${r.shopify_replacement_order_name ? ` | Replacement order: ${r.shopify_replacement_order_name}` : ""}`);
+    }
+  } else {
+    parts.push("\nREPLACEMENT ORDERS: No replacement orders found for this customer.");
+  }
+
+  return parts.join("\n");
+}
+
+async function getFraudCases(admin: Admin, wsId: string, custId: string): Promise<string> {
+  const { data: cases } = await admin.from("fraud_cases")
+    .select("id, severity, status, rules_matched, created_at")
+    .eq("workspace_id", wsId).eq("customer_id", custId)
+    .order("created_at", { ascending: false }).limit(5);
+
+  if (!cases?.length) return "No fraud cases for this customer.";
+
+  const parts = ["FRAUD CASES:"];
+  for (const c of cases) {
+    const date = new Date(c.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    const rules = (c.rules_matched as string[] || []).join(", ");
+    parts.push(`- ${date} | ${c.severity} | ${c.status} | Rules: ${rules || "none"}`);
+  }
+  return parts.join("\n");
 }
 
 async function getCrisisStatus(admin: Admin, _wsId: string, custId: string): Promise<string> {
