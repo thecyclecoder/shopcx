@@ -716,10 +716,10 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
     // Sonnet sees conversation history including pending journeys and decides whether
     // to resend, answer the question, or move on.
 
-    // ── 3b. Active playbook shortcut REMOVED — Sonnet handles all routing including
-    // active playbook continuation. Sonnet sees the active playbook in its context and
-    // decides: is this a playbook response or conversation drift?
-    /* DISABLED — Sonnet handles playbook routing
+    // ── 3b. Active playbook — Sonnet handles routing. When a playbook is active,
+    // Sonnet sees it in context and routes back to it if the message is a playbook response.
+    // The action executor's handlePlaybook() detects active playbook and calls executePlaybookStep().
+    /* DISABLED — Sonnet routes to active playbook via action_type: "playbook"
     if (!isNew) {
       const pbActive = await step.run("check-playbook", async () => {
         const { data: t } = await admin.from("tickets").select("active_playbook_id").eq("id", tid).single();
