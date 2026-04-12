@@ -594,6 +594,9 @@ function buildDataContext(
   const subActivity = ctx._subscription_activity as string | undefined;
   if (subActivity) {
     parts.push(`\nSubscription activity (recent changes):\n${subActivity}`);
+    if (subActivity.includes("Billing interval changed")) {
+      parts.push(`\nIMPORTANT: The billing interval was changed recently. If the charge happened BEFORE the interval change, the charge was correct under the OLD interval. Appstle does not make billing mistakes — check timestamps carefully before concluding a charge was incorrect.`);
+    }
   }
 
   if (timelineChanges) {
