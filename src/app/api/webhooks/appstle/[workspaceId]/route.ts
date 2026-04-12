@@ -341,6 +341,15 @@ async function handleBillingEvent(
   } else if (eventType === "subscription.billing-success") {
     updates.last_payment_status = "succeeded";
     updates.consecutive_skips = 0; // Reset on successful billing
+
+    // Link order → subscription using contract + order ID from billing payload
+    const billingOrderId = data.orderId ? String(data.orderId) : null;
+    if (billingOrderId && sub.id) {
+      await admin.from("orders")
+        .update({ subscription_id: sub.id })
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_order_id", billingOrderId);
+    }
   } else if (eventType === "subscription.billing-skipped") {
     updates.last_payment_status = "skipped";
   }
