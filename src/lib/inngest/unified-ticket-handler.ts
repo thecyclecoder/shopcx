@@ -566,9 +566,11 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
 
     // ── 2c. Account linking decision moved to Sonnet orchestrator ──
 
-    // ── 2e. Crisis short-circuit — skip pattern match if this is a crisis ticket ──
-    // Crisis follow-up detection runs later (step 2d) but we need to prevent the
-    // early pattern match from stealing the message first
+    // ── 2e + 3. Crisis short-circuit + early pattern match — ALL REMOVED ──
+    // Sonnet v2 handles everything including crisis tickets. It sees crisis tags in
+    // pre-context and calls get_crisis_status tool when needed. Crisis-specific actions
+    // (crisis_pause, crisis_remove, swap_variant) handled by action executor.
+    /* DISABLED — Sonnet handles all routing including crisis
     let isCrisisTicket = false;
     if (!isNew && st.hasCust) {
       const crisisTags = await step.run("crisis-tag-check", async () => {
@@ -577,9 +579,6 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
       });
       isCrisisTicket = crisisTags;
     }
-
-    // ── 3. Early pattern match — DISABLED, Sonnet orchestrator handles all routing ──
-    // Kept for NEW crisis tickets only (replies go through crisis follow-up handler + Sonnet)
     if (isCrisisTicket && isNew) {
     const earlyPattern = await step.run("early-pattern-match", async () => {
       const m = await matchPatterns(wsId, null, msg);
@@ -711,6 +710,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
       }
     }
     } // end !isCrisisTicket
+    END DISABLED CRISIS + PATTERN MATCH */
 
     // ── 3. Journey/playbook re-nudge REMOVED — Sonnet orchestrator handles all routing
     // Sonnet sees conversation history including pending journeys and decides whether
