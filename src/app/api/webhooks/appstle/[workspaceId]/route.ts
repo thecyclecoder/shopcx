@@ -324,6 +324,9 @@ async function handleBillingEvent(
     return;
   }
 
+  // Ignore upcoming-order-notification — not actionable
+  if (eventType === "subscription.upcoming-order-notification") return;
+
   // Ignore billing-skipped when Appstle defers to our dunning management
   // These are just Appstle's internal state changes from our retry attempts
   if (eventType === "subscription.billing-skipped" && data.status === "SKIPPED_DUNNING_MGMT") {
