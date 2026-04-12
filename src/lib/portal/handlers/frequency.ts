@@ -35,8 +35,8 @@ export const frequency: RouteHandler = async ({ auth, route, req }) => {
   if (customer) {
     await logPortalAction({
       workspaceId: auth.workspaceId, customerId: customer.id,
-      eventType: "portal.frequency.changed",
-      summary: `Customer changed frequency to every ${intervalCount} ${intervalRaw.toLowerCase()}(s) via portal`,
+      eventType: "portal.subscription.frequency_changed",
+      summary: `Customer changed delivery frequency to every ${intervalCount} ${intervalRaw.toLowerCase()}(s) via portal`,
       properties: { shopify_contract_id: String(contractId), interval: intervalRaw, intervalCount },
       createNote: false,
     });
