@@ -70,6 +70,7 @@ export default function TicketsPage() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [searchQuery, setSearchQuery] = useState(""); // Only updates on Enter
   const [statusFilter, setStatusFilter] = useState("all");
   const [channelFilter, setChannelFilter] = useState("all");
   const [assigneeFilter, setAssigneeFilter] = useState("");
@@ -126,6 +127,7 @@ export default function TicketsPage() {
         setAssigneeFilter("");
         setTagFilter([]);
         setSearch("");
+        setSearchQuery("");
         setOffset(0);
       }
       setActiveViewName(null);
@@ -144,6 +146,7 @@ export default function TicketsPage() {
           setAssigneeFilter(f.assigned_to || "");
           setTagFilter(f.tag ? f.tag.split(",").map((t: string) => t.trim()) : []);
           setSearch(f.search || "");
+          setSearchQuery(f.search || "");
           setOffset(0);
           setActiveViewName(view.name);
           setViewLoaded(viewId);
@@ -179,7 +182,7 @@ export default function TicketsPage() {
       if (assigneeFilter) params.set("assigned_to", assigneeFilter);
       if (tagFilter.length > 0) params.set("tag", tagFilter.join(","));
       if (snoozedFilter) params.set("snoozed", "true");
-      if (search) params.set("search", search);
+      if (searchQuery) params.set("search", searchQuery);
       if (urlEscalationMine) params.set("escalation_mine", "true");
 
       const res = await fetch(`/api/tickets?${params}`);
@@ -191,7 +194,7 @@ export default function TicketsPage() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [statusFilter, channelFilter, assigneeFilter, tagFilter, snoozedFilter, search, offset, urlEscalationMine, viewId, viewLoaded]);
+  }, [statusFilter, channelFilter, assigneeFilter, tagFilter, snoozedFilter, searchQuery, offset, urlEscalationMine, viewId, viewLoaded]);
 
   useEffect(() => {
     fetchTickets();
@@ -229,8 +232,8 @@ export default function TicketsPage() {
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
+    setSearchQuery(search);
     setOffset(0);
-    fetchTickets();
   };
 
   const handleCreateTicket = async (e: React.FormEvent) => {
@@ -525,22 +528,28 @@ export default function TicketsPage() {
             Snoozed
           </button>
         </div>
-        <form onSubmit={handleSearch} className="flex-1">
-          <label className="block text-sm font-medium text-zinc-500">Search</label>
-          <div className="relative mt-1">
-            <svg className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-            </svg>
-            <input
-              type="text"
-              placeholder="Search by subject..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="block w-full rounded-md border border-zinc-300 bg-white py-2 pl-10 pr-3 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-            />
-          </div>
-        </form>
       </div>
+
+      {/* Search bar — full width, searches on Enter */}
+      <form onSubmit={handleSearch} className="mt-3">
+        <div className="relative">
+          <svg className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+          </svg>
+          <input
+            type="text"
+            placeholder="Search by customer name, email, or subject... (press Enter)"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="block w-full rounded-md border border-zinc-300 bg-white py-2.5 pl-10 pr-3 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+          />
+          {searchQuery && (
+            <button type="button" onClick={() => { setSearch(""); setSearchQuery(""); }} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600">
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          )}
+        </div>
+      </form>
 
       {/* Active view name + Save as View */}
       <div className="mt-3 flex items-center gap-3">
