@@ -708,15 +708,13 @@ export default function TicketsPage() {
             <button
               onClick={async () => {
                 const ids = Array.from(selected);
-                const targetId = ids[0]; // First selected = target
-                const sourceIds = ids.slice(1);
-                if (!confirm(`Merge ${sourceIds.length} ticket${sourceIds.length > 1 ? "s" : ""} into the first selected ticket? Source tickets will be archived.`)) return;
+                if (!confirm(`Merge ${ids.length} tickets? Messages will be combined into the oldest ticket chronologically. Newer tickets will be archived.`)) return;
                 setBulkLoading(true);
                 try {
                   const res = await fetch("/api/tickets/merge", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ target_ticket_id: targetId, source_ticket_ids: sourceIds }),
+                    body: JSON.stringify({ ticket_ids: ids }),
                   });
                   const data = await res.json();
                   if (res.ok) {

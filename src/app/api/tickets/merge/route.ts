@@ -13,22 +13,36 @@ export async function POST(request: Request) {
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();
-  const { target_ticket_id, source_ticket_ids } = body as { target_ticket_id: string; source_ticket_ids: string[] };
+  const { ticket_ids } = body as { ticket_ids: string[]; target_ticket_id?: string; source_ticket_ids?: string[] };
 
-  if (!target_ticket_id || !source_ticket_ids?.length) {
-    return NextResponse.json({ error: "target_ticket_id and source_ticket_ids required" }, { status: 400 });
-  }
-
-  if (source_ticket_ids.includes(target_ticket_id)) {
-    return NextResponse.json({ error: "Target ticket cannot be in source list" }, { status: 400 });
-  }
-
+  // Support both formats: { ticket_ids } (auto-sort) or { target_ticket_id, source_ticket_ids } (manual)
   const admin = createAdminClient();
+
+  let targetId: string;
+  let sourceIds: string[];
+
+  if (ticket_ids?.length >= 2) {
+    // Auto-sort: oldest ticket becomes target, newest ones get merged in
+    const { data: allTickets } = await admin.from("tickets")
+      .select("id, created_at")
+      .in("id", ticket_ids)
+      .order("created_at", { ascending: true });
+    if (!allTickets || allTickets.length < 2) {
+      return NextResponse.json({ error: "Need at least 2 valid tickets" }, { status: 400 });
+    }
+    targetId = allTickets[0].id; // Oldest
+    sourceIds = allTickets.slice(1).map(t => t.id); // Newest
+  } else if (body.target_ticket_id && body.source_ticket_ids?.length) {
+    targetId = body.target_ticket_id;
+    sourceIds = body.source_ticket_ids;
+  } else {
+    return NextResponse.json({ error: "ticket_ids (2+) required" }, { status: 400 });
+  }
 
   // Verify target ticket exists
   const { data: target } = await admin.from("tickets")
     .select("id, workspace_id, subject")
-    .eq("id", target_ticket_id).single();
+    .eq("id", targetId).single();
   if (!target) return NextResponse.json({ error: "Target ticket not found" }, { status: 404 });
 
   // Get agent display name
@@ -40,7 +54,7 @@ export async function POST(request: Request) {
 
   let totalMoved = 0;
 
-  for (const sourceId of source_ticket_ids) {
+  for (const sourceId of sourceIds) {
     const { data: source } = await admin.from("tickets")
       .select("id, subject, workspace_id")
       .eq("id", sourceId).single();
@@ -53,14 +67,14 @@ export async function POST(request: Request) {
 
     if (messages?.length) {
       await admin.from("ticket_messages")
-        .update({ ticket_id: target_ticket_id })
+        .update({ ticket_id: targetId })
         .eq("ticket_id", sourceId);
       totalMoved += messages.length;
     }
 
     // Add merge note to target
     await admin.from("ticket_messages").insert({
-      ticket_id: target_ticket_id,
+      ticket_id: targetId,
       direction: "outbound",
       visibility: "internal",
       author_type: "system",
@@ -77,8 +91,8 @@ export async function POST(request: Request) {
 
   return NextResponse.json({
     success: true,
-    target_ticket_id,
-    merged_count: source_ticket_ids.length,
+    target_ticket_id: targetId,
+    merged_count: sourceIds.length,
     messages_moved: totalMoved,
   });
 }
