@@ -714,8 +714,9 @@ export async function callSonnetOrchestratorV2(
       });
 
       if (!res.ok) {
-        console.error(`Sonnet v2 API error: ${res.status}`);
-        return FALLBACK_DECISION;
+        const errBody = await res.text().catch(() => "");
+        console.error(`Sonnet v2 API error: ${res.status}`, errBody.slice(0, 300));
+        return { ...FALLBACK_DECISION, reasoning: `Sonnet API error ${res.status}: ${errBody.slice(0, 100)}` };
       }
 
       const data = await res.json();
@@ -761,7 +762,7 @@ export async function callSonnetOrchestratorV2(
     return FALLBACK_DECISION;
   } catch (err) {
     console.error("Sonnet v2 error:", err);
-    return FALLBACK_DECISION;
+    return { ...FALLBACK_DECISION, reasoning: `Sonnet error: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 
