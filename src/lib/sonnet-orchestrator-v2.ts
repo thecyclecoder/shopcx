@@ -166,7 +166,7 @@ async function buildPreContext(
     customerId
       ? admin.from("customers").select("first_name, last_name, email").eq("id", customerId).single()
       : Promise.resolve({ data: null }),
-    admin.from("tickets").select("tags").eq("id", ticketId).single(),
+    admin.from("tickets").select("tags, active_playbook_id, handled_by").eq("id", ticketId).single(),
     admin.from("ticket_messages")
       .select("direction, body_clean, body, visibility, author_type")
       .eq("ticket_id", ticketId)
@@ -191,6 +191,17 @@ async function buildPreContext(
   const cName = [customer?.first_name, customer?.last_name].filter(Boolean).join(" ") || "Customer";
   const cEmail = customer?.email || "unknown";
   const tags = ((ticket?.tags as string[]) || []).join(", ") || "none";
+  const activePlaybookId = ticket?.active_playbook_id || null;
+  const handledBy = ticket?.handled_by || null;
+
+  // If active playbook, get its name
+  let activePlaybookNote = "";
+  if (activePlaybookId) {
+    const { data: pb } = await admin.from("playbooks").select("name").eq("id", activePlaybookId).single();
+    activePlaybookNote = `\nACTIVE PLAYBOOK: "${pb?.name || "Unknown"}" is in progress on this ticket. If the customer's message is responding to the playbook's question, route to playbook. If they're asking about something else (conversation drift), answer their question instead.`;
+  } else if (handledBy?.startsWith("Journey:")) {
+    activePlaybookNote = `\nACTIVE JOURNEY: ${handledBy} is in progress. If the customer is responding to the journey, route back to the journey. If they're asking about something else, answer their question.`;
+  }
 
   // Conversation history — external messages + action completion notes
   let convoBlock = "";
@@ -247,7 +258,7 @@ async function buildPreContext(
 You have tools to look up data. Use them to gather what you need before making your decision.
 
 CUSTOMER: ${cName} (${cEmail})
-TICKET TAGS: ${tags}
+TICKET TAGS: ${tags}${activePlaybookNote}
 
 CONVERSATION:
 ${convoBlock || `Customer: ${message.slice(0, 300)}`}

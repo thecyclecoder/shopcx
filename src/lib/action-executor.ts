@@ -723,28 +723,37 @@ async function handlePlaybook(
 
   const { startPlaybook, executePlaybookStep } = await import("@/lib/playbook-executor");
 
-  // Start the playbook on this ticket
-  await startPlaybook(ctx.admin, ctx.ticketId, playbook.id);
+  // Check if this playbook is already active on the ticket (continuation vs new)
+  const { data: ticketState } = await ctx.admin.from("tickets")
+    .select("active_playbook_id").eq("id", ctx.ticketId).single();
 
-  // Execute the first step
-  const result = await executePlaybookStep(
-    ctx.workspaceId,
-    ctx.ticketId,
-    "", // no customer message for first step
-    personality,
-  );
+  if (ticketState?.active_playbook_id === playbook.id) {
+    // Continuing active playbook — execute next step with the customer's message
+    const lastMsg = await ctx.admin.from("ticket_messages")
+      .select("body_clean, body")
+      .eq("ticket_id", ctx.ticketId).eq("direction", "inbound").eq("author_type", "customer")
+      .order("created_at", { ascending: false }).limit(1).single();
+    const customerMsg = lastMsg?.data?.body_clean || lastMsg?.data?.body || "";
 
-  // Set handled_by
-  await ctx.admin
-    .from("tickets")
-    .update({ handled_by: `Playbook: ${playbook.name}` })
-    .eq("id", ctx.ticketId);
+    const result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
+    if (result.response) await send(result.response, ctx.sandbox);
+    if (result.systemNote) await sysNote(result.systemNote);
+  } else {
+    // Starting new playbook
+    await startPlaybook(ctx.admin, ctx.ticketId, playbook.id);
 
-  if (result.response) {
-    await send(result.response, ctx.sandbox);
-  }
-  if (result.systemNote) {
-    await sysNote(result.systemNote);
+    const result = await executePlaybookStep(
+      ctx.workspaceId, ctx.ticketId,
+      "", // no customer message for first step
+      personality,
+    );
+
+    await ctx.admin.from("tickets")
+      .update({ handled_by: `Playbook: ${playbook.name}` })
+      .eq("id", ctx.ticketId);
+
+    if (result.response) await send(result.response, ctx.sandbox);
+    if (result.systemNote) await sysNote(result.systemNote);
   }
 }
 
