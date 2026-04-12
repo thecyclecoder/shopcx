@@ -1181,6 +1181,10 @@ export default function TicketDetailPage() {
                     {/* Email delivery status */}
                     {!isInbound && !isInternal && (
                       <div className="mt-1.5 flex items-center gap-1.5 text-xs">
+                        {/* Chat→email fallback badge */}
+                        {ticket.channel === "chat" && (m as TicketMessage & { email_status?: string }).email_status && (
+                          <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">Sent via email</span>
+                        )}
                         {(() => {
                           const status = (m as TicketMessage & { email_status?: string }).email_status;
                           if (status === "opened" || status === "clicked") return <span className="text-emerald-400">Opened</span>;
@@ -1582,9 +1586,9 @@ export default function TicketDetailPage() {
               suppressContentEditableWarning
               onFocus={() => setEditorFocused(true)}
               onBlur={() => presence.onEditorBlur()}
-              onInput={() => { setReplyBody(editorRef.current?.textContent || ""); presence.onEditorInput(); }}
+              onInput={() => { setReplyBody(editorRef.current?.innerHTML || ""); presence.onEditorInput(); }}
               data-placeholder={replyMode === "external" ? "Type your reply..." : "Internal note..."}
-              className={`w-full rounded-md border border-zinc-300 bg-white text-sm text-zinc-900 placeholder-zinc-400 outline-none transition-all focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 ${
+              className={`w-full rounded-md border border-zinc-300 bg-white text-sm text-zinc-900 placeholder-zinc-400 outline-none transition-all focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5 ${
                 editorFocused ? "min-h-[120px] px-3 py-2" : "min-h-[32px] px-2.5 py-1.5"
               } empty:before:pointer-events-none empty:before:text-zinc-400 empty:before:content-[attr(data-placeholder)]`}
             />
