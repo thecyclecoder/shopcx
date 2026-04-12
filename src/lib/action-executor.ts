@@ -735,14 +735,24 @@ async function handlePlaybook(
       .order("created_at", { ascending: false }).limit(1).single();
     const customerMsg = lastMsg?.data?.body_clean || lastMsg?.data?.body || "";
 
-    const result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
-    if (result.response) await send(result.response, ctx.sandbox);
+    let result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
     if (result.systemNote) await sysNote(result.systemNote);
+    if (result.response) { await send(result.response, ctx.sandbox); return; }
+
+    // Auto-advance: keep executing steps until one sends a response or completes
+    let advances = 0;
+    while (result.action === "advance" && advances < 10) {
+      advances++;
+      result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
+      if (result.systemNote) await sysNote(result.systemNote);
+      if (result.response) { await send(result.response, ctx.sandbox); return; }
+      if (result.action === "complete") break;
+    }
   } else {
     // Starting new playbook
     await startPlaybook(ctx.admin, ctx.ticketId, playbook.id);
 
-    const result = await executePlaybookStep(
+    let result = await executePlaybookStep(
       ctx.workspaceId, ctx.ticketId,
       "", // no customer message for first step
       personality,
@@ -752,8 +762,18 @@ async function handlePlaybook(
       .update({ handled_by: `Playbook: ${playbook.name}` })
       .eq("id", ctx.ticketId);
 
-    if (result.response) await send(result.response, ctx.sandbox);
     if (result.systemNote) await sysNote(result.systemNote);
+    if (result.response) { await send(result.response, ctx.sandbox); return; }
+
+    // Auto-advance for initial step too
+    let advances = 0;
+    while (result.action === "advance" && advances < 10) {
+      advances++;
+      result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, "", personality);
+      if (result.systemNote) await sysNote(result.systemNote);
+      if (result.response) { await send(result.response, ctx.sandbox); return; }
+      if (result.action === "complete") break;
+    }
   }
 }
 
