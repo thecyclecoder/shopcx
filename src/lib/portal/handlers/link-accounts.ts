@@ -63,6 +63,7 @@ export const linkAccounts: RouteHandler = async ({ auth, route, req }) => {
     // Ensure current customer is in the group
     if (!existingLink) {
       await admin.from("customer_links").upsert({
+        workspace_id: auth.workspaceId,
         customer_id: customer.id,
         group_id: groupId,
         is_primary: true,
@@ -72,6 +73,7 @@ export const linkAccounts: RouteHandler = async ({ auth, route, req }) => {
     // Add selected accounts to the group
     for (const id of selectedIds) {
       await admin.from("customer_links").upsert({
+        workspace_id: auth.workspaceId,
         customer_id: id,
         group_id: groupId,
         is_primary: false,
