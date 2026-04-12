@@ -72,7 +72,7 @@ export async function GET(
     .select("id, event_type, summary, properties, created_at")
     .eq("workspace_id", workspaceId)
     .eq("customer_id", sub.customer_id)
-    .or(`properties->>shopify_contract_id.eq.${sub.shopify_contract_id},event_type.ilike.subscription%`)
+    .or(`properties->>shopify_contract_id.eq.${sub.shopify_contract_id},properties->>shopify_contract_id.is.null`)
     .order("created_at", { ascending: false })
     .limit(20);
 
