@@ -54,11 +54,19 @@ The cancel flow is a multi-step retention journey that presents customers with A
 - `src/lib/portal/handlers/cancel-journey.ts` — handles portal cancel flow
 - Steps: reason → remedies/chat → remedy action → confirm cancel
 
-### Mini-Site / Email / Chat Path
+### Mini-Site / Email Path
 - `src/lib/journey-delivery.ts` — delivers cancel journey via email CTA or chat embedded form
 - `src/app/journey/[token]/page.tsx` — renders cancel journey mini-site
 - `src/app/api/journey/[token]/remedies/route.ts` — AI remedy selection endpoint
 - `src/app/api/journey/[token]/complete/route.ts` — cancel completion + action execution
+
+### Chat Embedded Form Path
+- `src/app/widget/[workspaceId]/page.tsx` — `InlineJourneyForm` component
+- After cancel_reason step, dynamically fetches remedies from `/api/journey/[token]/remedies`
+- Adds remedy options as a new step + "No thanks, please cancel" option
+- For `line_item_modifier` remedy: fetches items from `/api/journey/[token]/step?step=get_items`, shows item picker + remove/reduce options
+- Sends correct `remedy_selection` + `remedy_action` + `remedy_coupon` keys in complete payload
+- Confirmation message honors response delay (uses `pending_send_at` on chat)
 
 ### Remedy Execution
 Actions executed on remedy acceptance:

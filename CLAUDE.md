@@ -2,6 +2,7 @@
 @JOURNEYS.md
 @CANCEL-FLOW.md
 @SONNET-ORCHESTRATOR.md
+@CRISIS-MANAGEMENT-SPEC.md
 
 # ShopCX.ai — The Retention Operating System
 
@@ -31,8 +32,11 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - **Workspace context**: Cookie-based (`workspace_id`), resolved in middleware, available via `useWorkspace()` hook
 - **Per-workspace credentials**: Shopify, Resend, etc. keys stored encrypted per workspace, not in env vars
 - **Sandbox mode**: Default on. AI drafts appear as internal notes, not sent to customers. Agents can "Approve & Send" sandbox drafts.
-- **Multi-turn AI**: Inngest-powered, per-channel config, Haiku for turns 1-2, Sonnet for 3+
+- **Sonnet Orchestrator v2**: Tool-use architecture. Minimal pre-context + on-demand data tools. DB-driven prompts via `sonnet_prompts` table. See `SONNET-ORCHESTRATOR.md`.
+- **Response delays**: All outbound messages use `pending_send_at` — inserted immediately (visible in UI), delivered by cron after delay. Edit/Cancel buttons during pending window.
+- **Email tracking**: Self-hosted open pixel + click redirect (no Resend domain tracking). Only on tracked emails (crisis, marketing). See `src/lib/email-tracking.ts`.
 - **Ticket channels**: email, chat, help_center, social_comments, meta_dm, sms
+- **Chat end**: Messages containing "send you an email" trigger `chatEnded` in widget — disables input, hides typing bubbles, shows "conversation ended"
 
 ## Completed Phases
 
@@ -249,24 +253,32 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - Journey settings: detail view with flow visualization, editable steps, channels, match patterns, priority, step ticket status
 - Branding: ShopCX.ai (lowercase .ai), notification bell, collapsible tickets menu
 
-## Priority Order (inbound message handling)
-1. **Close/Escalate** — positive closure detection, escalation keywords
-2. **Journey** — match patterns checked first, takes priority over workflows
-3. **Workflow** — smart pattern → workflow (only fires if no journey matched)
-4. **AI Agent** — generates response if nothing else handled it
+## Inbound Message Handling (Sonnet Orchestrator v2)
+All inbound messages go through the unified ticket handler → Sonnet Orchestrator v2:
+1. **Resolve** — find customer, check agent_intervened, load channel config
+2. **Active playbook** — if ticket has active playbook, execute next step (skip Sonnet)
+3. **Sonnet Orchestrator** — analyzes message with tool-use, decides action:
+   - `direct_action` → execute immediately (skip, pause, refund, price update, etc.)
+   - `journey` → launch cancel/address/discount journey
+   - `playbook` → start refund/replacement playbook
+   - `workflow` → run order tracking/account login workflow
+   - `ai_response` / `kb_response` → send generated/macro response
+   - `escalate` → assign to agent with holding message
+4. **Auto-close** — only if a customer message was sent. If action failed silently, ticket stays open.
 
-For new tickets (email webhook): journey check → pattern match → workflow → AI draft
-For replies (ai/reply-received): route → patterns (deferred) → journey → workflow → AI
+Sonnet's behavior is configured via `sonnet_prompts` table (Settings → AI → Prompts).
 
 ## Key Files
+- `src/lib/sonnet-orchestrator-v2.ts` — Sonnet v2 with tool-use (LIVE — handles all routing)
+- `src/lib/action-executor.ts` — Executes SonnetDecision — direct actions, journeys, playbooks, workflows
+- `src/lib/inngest/unified-ticket-handler.ts` — Main pipeline: resolve → playbook → Sonnet → execute
+- `src/lib/email-tracking.ts` — Self-hosted open pixel + click redirect tracking
+- `src/lib/subscription-items.ts` — Appstle line item mutations (swap, add, remove, price update)
+- `src/lib/shopify-order-actions.ts` — Shopify refunds, cancellations, address updates
 - `src/lib/supabase/admin.ts` — Service role client for all DB writes
 - `src/lib/supabase/server.ts` — SSR client for auth checks
 - `src/lib/supabase/middleware.ts` — Auth + workspace + sandbox + subdomain routing
 - `src/lib/crypto.ts` — AES-256-GCM encrypt/decrypt for API keys
-- `src/lib/ai-draft.ts` — AI draft generation (recognition-first: macro → KB → Claude)
-- `src/lib/ai-context.ts` — Multi-turn context assembler (customer profile, conversation history, KB, workflows)
-- `src/lib/turn-router.ts` — Inbound reply routing (escalation, sentiment, closure)
-- `src/lib/escalation.ts` — AI escalation handler (cancellation, billing, human, turn limit)
 - `src/lib/rag.ts` — RAG retrieval (KB chunks + macros via pgvector)
 - `src/lib/shopify-sync.ts` — Bulk ops, paginated sync, rate limit guard
 - `src/lib/shopify-marketing.ts` — Shopify email/SMS marketing consent mutations
@@ -344,7 +356,7 @@ For replies (ai/reply-received): route → patterns (deferred) → journey → w
 - `macros` — Templates with embeddings, usage tracking, AI suggestion counters
 - `macro_usage_log` — Per-use tracking with source/outcome
 - `smart_patterns` — Global + workspace patterns with embedding vectors
-- `workflows` — Template-based (order_tracking, cancel_request, subscription_inquiry)
+- `workflows` — Template-based (order_tracking, cancel_request, subscription_inquiry, account_login, end_chat)
 - `ai_workflows` — AI agent workflows (marketing_signup, etc.)
 - `ai_channel_config` — Per-channel AI settings (personality, confidence threshold, auto_resolve, turn_limit)
 - `ai_personalities` — Named personalities with tone, style, sign-off, emoji settings
@@ -365,6 +377,10 @@ For replies (ai/reply-received): route → patterns (deferred) → journey → w
 - `product_reviews` — Klaviyo-synced reviews with AI summaries for cancel journey social proof
 - `payment_failures` — Per-attempt log: card tried, result, attempt type (initial/card_rotation/payday_retry/new_card_retry)
 - `dunning_cycles` — Per-subscription per-billing-cycle dunning state (active/skipped/paused/recovered/exhausted)
+- `email_events` — Universal email tracking (sent/delivered/opened/clicked/bounced) with resend_email_id join key
+- `sonnet_prompts` — DB-driven prompt rules for Sonnet orchestrator (category: rule/approach/knowledge/tool_hint)
+- `crisis_events` — Crisis campaigns (affected product, swap options, tiers, coupon)
+- `crisis_customer_actions` — Per-customer crisis actions (tier responses, swaps, pause/remove, preserved_base_price_cents, exhausted_at)
 
 ## Ticket Tags (auto-applied for analytics)
 When adding new journeys or workflows, always add the corresponding tag:
@@ -381,7 +397,27 @@ When adding new journeys or workflows, always add the corresponding tag:
 - `dunning:recovered` — payment recovered through dunning
 - `dunning:skipped` — order was skipped due to payment failure
 - `dunning:paused` — subscription paused due to repeated payment failure
+- `pb` — playbook applied
+- `pb:{slug}` — specific playbook (e.g., `pb:unwanted_charge_subscription_dispute`)
+- `wb` / `wb:success` — subscription reactivated (win-back)
+- `crisis` / `crisis:{id}` — crisis campaign ticket
+- `crisis:test` — test crisis ticket
 Use `addTicketTag()` from `src/lib/ticket-tags.ts` (idempotent). Use `markFirstTouch()` from `src/lib/first-touch.ts` for ft:* tags.
+
+## Documentation Library
+| File | Purpose |
+|---|---|
+| `CLAUDE.md` | This file — project overview, architecture, schema, conventions |
+| `SONNET-ORCHESTRATOR.md` | Sonnet v2 tool-use architecture, data tools, action executor |
+| `CANCEL-FLOW.md` | Cancel journey system — reasons, remedies, AI selection, execution |
+| `JOURNEYS.md` | Journey system — builders, channels, delivery, step types |
+| `CRISIS-MANAGEMENT-SPEC.md` | Crisis tool — tiers, swaps, price preservation, campaigns |
+| `AGENTS.md` | Agent/model configuration |
+| `PLAYBOOK-SPEC.md` | Playbook system — steps, policies, exceptions, stand-firm |
+| `PLAYBOOK-PATTERNS.md` | Pattern matching for playbook triggers |
+| `APPSTLE.md` | Appstle API reference — endpoints, auth, common operations |
+| `LOYALTY-SPEC.md` | Loyalty points, redemption tiers, coupon generation |
+| `UNIFIED-HANDLER.md` | Unified ticket handler pipeline documentation |
 
 ## Conventions
 - Always run `npx tsc --noEmit` before committing to catch type errors

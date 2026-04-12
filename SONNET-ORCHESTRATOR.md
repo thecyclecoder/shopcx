@@ -57,15 +57,20 @@ The `action-executor.ts` receives the `SonnetDecision` and dispatches:
 - **kb_response / ai_response** → sends Sonnet's generated response
 - **escalate** → assigns to agent, sends holding message
 
-## Key rules baked into the prompt
-- Cancel requests → always route to cancel journey (retention offers)
-- Refunds → always route to playbook (policy evaluation)
+## Key rules (DB-driven via `sonnet_prompts` table)
+Rules are stored in `sonnet_prompts` and loaded at runtime. Editable at Settings → AI → Prompts. Key rules include:
+- Cancel requests → always route to cancel journey (never cancel directly)
+- Refunds → route to playbook (except price discrepancies — direct partial_refund)
 - Simple subscription changes (skip, date, frequency, swap) → execute directly
-- Loyalty coupon → check unused coupons, apply directly (auto-regenerate if stale)
-- Never cancel a subscription directly
-- Never escalate just because customer asks for a human
-- Check completed actions — don't re-execute
-- On chat, if escalating, tell customer you'll email them
+- Save actions = just do it (don't ask). Cancel = route to journey.
+- Loyalty: check unused coupons first → redeem if needed → give code → ask about applying
+- One coupon per subscription — never stack
+- Grandfathered pricing: no sale coupons below 50% floor, loyalty always OK
+- Crisis: auto-fetch crisis status, berry_only → pause, berry_plus → remove OOS item
+- Phone support: redirect ("not available, but I can help right here")
+- Chat escalation: always include "I'll send you an email at {email}"
+- Never fake confirmations — don't say "cancelled" without actually cancelling
+- Never tell customers an action was done unless Action completed note confirms it
 
 ## Files
 
