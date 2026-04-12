@@ -212,7 +212,7 @@ export default function TicketDetailPage() {
   const [replyMode, setReplyMode] = useState<"external" | "internal">("external");
   const [sending, setSending] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"messages" | "history">("messages");
+  const [activeTab, setActiveTab] = useState<"messages" | "history" | "improve">("messages");
   const [mobileSection, setMobileSection] = useState<"conversation" | "details" | "customer" | "subscriptions" | "orders" | "returns" | "replacements" | "chargebacks" | "fraud" | "loyalty" | "reviews" | "actions">("conversation");
   const [customerEvents, setCustomerEvents] = useState<{ id: string; event_type: string; source: string; summary: string; created_at: string }[]>([]);
   const [closeWithReply, setCloseWithReply] = useState(true);
@@ -221,7 +221,12 @@ export default function TicketDetailPage() {
   const [tagInput, setTagInput] = useState("");
   const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
   const [showTagDropdown, setShowTagDropdown] = useState(false);
-  const [suggestingPattern, setSuggestingPattern] = useState(false);
+  // Improve tab state
+  const [improveMessages, setImproveMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [improveInput, setImproveInput] = useState("");
+  const [improveLoading, setImproveLoading] = useState(false);
+  const [proposedPrompt, setProposedPrompt] = useState<{ title: string; content: string; category: string } | null>(null);
+  const [promptSaved, setPromptSaved] = useState(false);
   const [availableWorkflows, setAvailableWorkflows] = useState<{ id: string; name: string; template: string; trigger_tag: string }[]>([]);
   const [runningWorkflow, setRunningWorkflow] = useState(false);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState("");
@@ -232,11 +237,6 @@ export default function TicketDetailPage() {
   const [sendingCrisisJourney, setSendingCrisisJourney] = useState(false);
   const [selectedCrisisTier, setSelectedCrisisTier] = useState("1");
   const [playbookContext, setPlaybookContext] = useState("");
-  const [suggestCategory, setSuggestCategory] = useState("");
-  const [patternCategories, setPatternCategories] = useState<{ category: string; name: string }[]>([]);
-  const [patternSuggestion, setPatternSuggestion] = useState<{
-    category: string; category_name: string; phrases: string[]; auto_tag: string; reasoning: string;
-  } | null>(null);
   const [removingSmartTag, setRemovingSmartTag] = useState<string | null>(null);
   const [feedbackReason, setFeedbackReason] = useState("");
   const [linkSuggestions, setLinkSuggestions] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; phone: string | null; match_reason: string }[]>([]);
@@ -492,15 +492,6 @@ export default function TicketDetailPage() {
     fetch(`/api/workspaces/${workspace.id}/journeys`)
       .then((res) => res.json())
       .then((data) => { if (Array.isArray(data)) setAvailableJourneys(data.filter((j: { is_active: boolean }) => j.is_active).map((j: { id: string; name: string; trigger_intent: string }) => ({ id: j.id, name: j.name, trigger_intent: j.trigger_intent }))); })
-      .catch(() => {});
-    fetch(`/api/workspaces/${workspace.id}/patterns`)
-      .then((res) => res.json())
-      .then((data) => {
-        if (Array.isArray(data)) {
-          const cats = [...new Map(data.map((p: { category: string; name: string }) => [p.category, { category: p.category, name: p.name }])).values()];
-          setPatternCategories(cats);
-        }
-      })
       .catch(() => {});
   }, [workspace.id]);
 
@@ -1080,6 +1071,18 @@ export default function TicketDetailPage() {
             >
               History
             </button>
+            {["owner", "admin"].includes(workspace.role) && (
+              <button
+                onClick={() => setActiveTab("improve")}
+                className={`pb-2 text-sm font-medium transition-colors ${
+                  activeTab === "improve"
+                    ? "border-b-2 border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400"
+                    : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+                }`}
+              >
+                Improve
+              </button>
+            )}
           </div>
 
           {/* Messages tab */}
@@ -1315,6 +1318,191 @@ export default function TicketDetailPage() {
                   </div>
                 ))
               )}
+            </div>
+          )}
+
+          {/* Improve tab */}
+          {activeTab === "improve" && ["owner", "admin"].includes(workspace.role) && (
+            <div className="mt-4 flex flex-col" style={{ minHeight: 300 }}>
+              {/* Chat messages */}
+              <div className="flex-1 space-y-3 overflow-y-auto" style={{ maxHeight: 400 }}>
+                {improveMessages.length === 0 && (
+                  <p className="py-8 text-center text-sm text-zinc-400">
+                    Tell Sonnet what it should have done differently on this ticket.
+                  </p>
+                )}
+                {improveMessages.map((m, i) => (
+                  <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+                    <div className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
+                      m.role === "user"
+                        ? "bg-indigo-600 text-white"
+                        : "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
+                    }`}>
+                      <p className="whitespace-pre-wrap">{m.content}</p>
+                    </div>
+                  </div>
+                ))}
+                {improveLoading && (
+                  <div className="flex justify-start">
+                    <div className="rounded-lg bg-zinc-100 px-3 py-2 text-sm text-zinc-500 dark:bg-zinc-800">
+                      Thinking...
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Proposed prompt card */}
+              {proposedPrompt && !promptSaved && (
+                <div className="mt-3 rounded-lg border-2 border-indigo-400 bg-white p-3 dark:bg-zinc-900">
+                  <p className="text-xs font-medium uppercase tracking-wider text-indigo-600 dark:text-indigo-400">Proposed Prompt Rule</p>
+                  <input
+                    type="text"
+                    value={proposedPrompt.title}
+                    onChange={(e) => setProposedPrompt({ ...proposedPrompt, title: e.target.value })}
+                    className="mt-2 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    placeholder="Rule title"
+                  />
+                  <textarea
+                    value={proposedPrompt.content}
+                    onChange={(e) => setProposedPrompt({ ...proposedPrompt, content: e.target.value })}
+                    rows={3}
+                    className="mt-2 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    placeholder="Rule content"
+                  />
+                  <div className="mt-2 flex items-center gap-2">
+                    <select
+                      value={proposedPrompt.category}
+                      onChange={(e) => setProposedPrompt({ ...proposedPrompt, category: e.target.value })}
+                      className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    >
+                      <option value="rule">Rule</option>
+                      <option value="approach">Approach</option>
+                      <option value="knowledge">Knowledge</option>
+                      <option value="tool_hint">Tool Hint</option>
+                    </select>
+                    <button
+                      onClick={async () => {
+                        try {
+                          const res = await fetch(`/api/workspaces/${workspace.id}/sonnet-prompts`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              category: proposedPrompt.category,
+                              title: proposedPrompt.title,
+                              content: proposedPrompt.content,
+                            }),
+                          });
+                          if (res.ok) {
+                            setPromptSaved(true);
+                          }
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                      className="rounded bg-indigo-600 px-3 py-1 text-sm font-medium text-white hover:bg-indigo-500"
+                    >
+                      Save to AI Prompts
+                    </button>
+                  </div>
+                </div>
+              )}
+              {promptSaved && (
+                <div className="mt-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                  Prompt rule saved. It will apply to future AI responses.
+                </div>
+              )}
+
+              {/* Input */}
+              <div className="mt-3 flex gap-2">
+                <input
+                  type="text"
+                  value={improveInput}
+                  onChange={(e) => setImproveInput(e.target.value)}
+                  onKeyDown={async (e) => {
+                    if (e.key === "Enter" && !e.shiftKey && improveInput.trim() && !improveLoading) {
+                      e.preventDefault();
+                      const msg = improveInput.trim();
+                      setImproveInput("");
+                      setImproveMessages((prev) => [...prev, { role: "user", content: msg }]);
+                      setImproveLoading(true);
+                      setPromptSaved(false);
+                      try {
+                        const res = await fetch(`/api/tickets/${id}/improve`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            message: msg,
+                            conversationHistory: improveMessages,
+                          }),
+                        });
+                        if (res.ok) {
+                          const data = await res.json();
+                          setImproveMessages((prev) => [...prev, { role: "assistant", content: data.message }]);
+                          if (data.type === "prompt" && data.proposed_rule) {
+                            setProposedPrompt({
+                              title: data.proposed_rule.title,
+                              content: data.proposed_rule.content,
+                              category: data.proposed_rule.category || "rule",
+                            });
+                          } else if (data.type === "architecture" && data.architecture_description) {
+                            setProposedPrompt(null);
+                          } else {
+                            setProposedPrompt(null);
+                          }
+                        }
+                      } catch {
+                        setImproveMessages((prev) => [...prev, { role: "assistant", content: "Something went wrong. Please try again." }]);
+                      } finally {
+                        setImproveLoading(false);
+                      }
+                    }
+                  }}
+                  placeholder="What should the AI have done differently?"
+                  className="flex-1 rounded border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  disabled={improveLoading}
+                />
+                <button
+                  onClick={async () => {
+                    if (!improveInput.trim() || improveLoading) return;
+                    const msg = improveInput.trim();
+                    setImproveInput("");
+                    setImproveMessages((prev) => [...prev, { role: "user", content: msg }]);
+                    setImproveLoading(true);
+                    setPromptSaved(false);
+                    try {
+                      const res = await fetch(`/api/tickets/${id}/improve`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          message: msg,
+                          conversationHistory: improveMessages,
+                        }),
+                      });
+                      if (res.ok) {
+                        const data = await res.json();
+                        setImproveMessages((prev) => [...prev, { role: "assistant", content: data.message }]);
+                        if (data.type === "prompt" && data.proposed_rule) {
+                          setProposedPrompt({
+                            title: data.proposed_rule.title,
+                            content: data.proposed_rule.content,
+                            category: data.proposed_rule.category || "rule",
+                          });
+                        } else {
+                          setProposedPrompt(null);
+                        }
+                      }
+                    } catch {
+                      setImproveMessages((prev) => [...prev, { role: "assistant", content: "Something went wrong. Please try again." }]);
+                    } finally {
+                      setImproveLoading(false);
+                    }
+                  }}
+                  disabled={!improveInput.trim() || improveLoading}
+                  className="shrink-0 rounded bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  Send
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -1656,7 +1844,7 @@ export default function TicketDetailPage() {
       <div className={`w-full shrink-0 overflow-y-auto border-t border-zinc-200 bg-zinc-50 p-6 md:w-80 md:border-l md:border-t-0 dark:border-zinc-800 dark:bg-zinc-950 ${mobileSection === "conversation" ? "hidden md:block" : ""}`}>
         {/* Actions card (hidden for archived) */}
         <div className={`${mobileSection !== "actions" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
-        {ticket.status !== "archived" && (availableWorkflows.length > 0 || availablePlaybooks.length > 0 || availableJourneys.length > 0 || (ticket.tags || []).some(t => t.startsWith("crisis")) || (!(ticket.tags || []).some(t => t.startsWith("smart:")) && !patternSuggestion)) && (
+        {ticket.status !== "archived" && (availableWorkflows.length > 0 || availablePlaybooks.length > 0 || availableJourneys.length > 0 || (ticket.tags || []).some(t => t.startsWith("crisis"))) && (
           <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 p-4 dark:border-indigo-800 dark:bg-indigo-950">
             <h3 className="text-xs font-medium uppercase tracking-wider text-indigo-600 dark:text-indigo-400">Actions</h3>
             <div className="mt-3 space-y-3">
@@ -1893,102 +2081,6 @@ export default function TicketDetailPage() {
                 </div>
               )}
 
-              {/* Suggest pattern */}
-              {!patternSuggestion && !(ticket.tags || []).some(t => t.startsWith("smart:")) && (
-                <div>
-                  <label className="block text-xs text-indigo-500">Suggest Pattern (AI)</label>
-                  <div className="mt-1 flex items-center gap-2">
-                    {patternCategories.length > 0 && (
-                      <select
-                        value={suggestCategory}
-                        onChange={(e) => setSuggestCategory(e.target.value)}
-                        className="min-w-0 flex-1 truncate rounded border border-indigo-300 bg-white px-2 py-1 text-xs dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
-                      >
-                        <option value="">Auto-detect</option>
-                        {patternCategories.map(c => (
-                          <option key={c.category} value={c.category}>{c.name}</option>
-                        ))}
-                      </select>
-                    )}
-                    <button
-                      onClick={async () => {
-                        setSuggestingPattern(true);
-                        try {
-                          const res = await fetch(`/api/tickets/${id}/suggest-pattern`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify(suggestCategory ? { category: suggestCategory } : {}),
-                          });
-                          if (res.ok) {
-                            const data = await res.json();
-                            setPatternSuggestion(data.suggestion);
-                          }
-                        } finally {
-                          setSuggestingPattern(false);
-                        }
-                      }}
-                      disabled={suggestingPattern}
-                      className="shrink-0 rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
-                    >
-                      {suggestingPattern ? "..." : "Analyze"}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Pattern suggestion result */}
-              {patternSuggestion && (
-                <div className="rounded-md border border-indigo-300 bg-white p-2.5 dark:border-indigo-700 dark:bg-zinc-800">
-                  <div className="flex items-center justify-between">
-                    <p className="text-xs font-medium text-indigo-700 dark:text-indigo-300">AI Suggestion</p>
-                    <button onClick={() => setPatternSuggestion(null)} className="text-xs text-indigo-400 hover:text-indigo-600">x</button>
-                  </div>
-                  <p className="mt-1 text-xs text-indigo-600 dark:text-indigo-400">{patternSuggestion.reasoning}</p>
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {patternSuggestion.phrases.map((p, i) => (
-                      <span key={i} className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] dark:bg-zinc-700">&ldquo;{p}&rdquo;</span>
-                    ))}
-                  </div>
-                  <div className="mt-2 flex gap-1.5">
-                    <button
-                      onClick={async () => {
-                        await fetch(`/api/workspaces/${workspace.id}/patterns`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            category: patternSuggestion.category,
-                            name: patternSuggestion.category_name,
-                            phrases: patternSuggestion.phrases,
-                            auto_tag: patternSuggestion.auto_tag,
-                            match_target: "both",
-                            priority: 50,
-                          }),
-                        });
-                        if (patternSuggestion.auto_tag) {
-                          const tags = [...(ticket.tags || []), patternSuggestion.auto_tag];
-                          await handlePatch({ tags: [...new Set(tags)] });
-                        }
-                        setPatternSuggestion(null);
-                      }}
-                      className="rounded bg-indigo-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-indigo-500"
-                    >
-                      Accept
-                    </button>
-                    <button
-                      onClick={async () => {
-                        if (patternSuggestion.auto_tag) {
-                          const tags = [...(ticket.tags || []), patternSuggestion.auto_tag];
-                          await handlePatch({ tags: [...new Set(tags)] });
-                        }
-                        setPatternSuggestion(null);
-                      }}
-                      className="rounded border border-indigo-300 px-2 py-0.5 text-[10px] text-indigo-600 dark:border-indigo-700 dark:text-indigo-400"
-                    >
-                      Just Tag
-                    </button>
-                  </div>
-                </div>
-              )}
             </div>
           </div>
         )}
