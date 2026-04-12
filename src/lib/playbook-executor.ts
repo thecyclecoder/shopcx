@@ -10,6 +10,29 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
+/** Translate raw billing intervals to customer-friendly labels */
+function translateIntervals(text: string): string {
+  return text
+    .replace(/WEEK\s*\/?\s*4/gi, "Monthly")
+    .replace(/WEEK\s*\/?\s*8/gi, "Every 2 Months")
+    .replace(/WEEK\s*\/?\s*12/gi, "Every 3 Months")
+    .replace(/WEEK\s*\/?\s*2/gi, "Every 2 Weeks")
+    .replace(/WEEK\s*\/?\s*1/gi, "Weekly")
+    .replace(/MONTH\s*\/?\s*1/gi, "Monthly")
+    .replace(/MONTH\s*\/?\s*2/gi, "Every 2 Months")
+    .replace(/MONTH\s*\/?\s*3/gi, "Every 3 Months")
+    .replace(/MONTH\s*\/?\s*6/gi, "Every 6 Months")
+    .replace(/every\s+(\d+)\s+weeks?/gi, (_, n) => {
+      const w = parseInt(n);
+      if (w === 4) return "Monthly";
+      if (w === 8) return "Every 2 Months";
+      if (w === 12) return "Every 3 Months";
+      if (w === 2) return "Every 2 Weeks";
+      if (w === 1) return "Weekly";
+      return `Every ${w} Weeks`;
+    });
+}
+
 interface PlaybookStep {
   id: string;
   step_order: number;
@@ -1059,12 +1082,14 @@ async function handleApplyPolicy(
       .select("event_type, summary, created_at")
       .eq("workspace_id", wsId)
       .eq("customer_id", customerId)
-      .or("event_type.ilike.portal.subscription%,event_type.ilike.subscription.billing-interval%,event_type.ilike.subscription.paused,event_type.ilike.subscription.cancelled,event_type.ilike.subscription.activated")
+      .or("event_type.ilike.portal.subscription%,event_type.ilike.portal.frequency%,event_type.ilike.subscription.billing-interval%,event_type.ilike.subscription.paused,event_type.ilike.subscription.cancelled,event_type.ilike.subscription.activated")
       .order("created_at", { ascending: true })
       .limit(15);
 
     for (const ev of events || []) {
-      const summary = ev.summary || ev.event_type.replace("portal.subscription.", "").replace("subscription.", "").replace(/_/g, " ");
+      let summary = ev.summary || ev.event_type.replace("portal.subscription.", "").replace("portal.frequency.", "").replace("subscription.", "").replace(/_/g, " ");
+      // Translate interval notation to human-friendly
+      summary = translateIntervals(summary);
       timelineEvents.push({ date: new Date(ev.created_at), label: summary });
     }
   }
