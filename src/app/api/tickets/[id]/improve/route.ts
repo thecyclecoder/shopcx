@@ -149,30 +149,70 @@ export async function POST(
     content: message,
   });
 
-  try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 1024,
-        system: `${SYSTEM_PROMPT}\n\n--- TICKET CONTEXT ---\n${ticketContext}`,
-        messages: claudeMessages,
-      }),
-    });
+  // Import data tools from Sonnet orchestrator v2
+  const { default: executeToolCallImprove } = await import("@/lib/improve-tools");
 
-    if (!res.ok) {
-      const errText = await res.text();
-      console.error("Anthropic API error:", errText);
-      return NextResponse.json({ error: "AI request failed" }, { status: 502 });
+  const tools = [
+    { name: "get_customer_account", description: "Get customer subscriptions, recent orders, loyalty points, unused coupons, linked accounts. Use to verify charges, check subscription status, etc.", input_schema: { type: "object" as const, properties: {}, required: [] as string[] } },
+    { name: "get_product_knowledge", description: "Get product catalog, macros, KB articles.", input_schema: { type: "object" as const, properties: { query: { type: "string", description: "Search term" } }, required: [] as string[] } },
+    { name: "get_returns", description: "Get customer return requests with status and refund details.", input_schema: { type: "object" as const, properties: {}, required: [] as string[] } },
+    { name: "get_chargebacks", description: "Get chargeback/dispute events for this customer.", input_schema: { type: "object" as const, properties: {}, required: [] as string[] } },
+    { name: "get_email_history", description: "Get email delivery history (sent, opened, clicked, bounced).", input_schema: { type: "object" as const, properties: {}, required: [] as string[] } },
+    { name: "get_crisis_status", description: "Get crisis/out-of-stock actions for this customer.", input_schema: { type: "object" as const, properties: {}, required: [] as string[] } },
+    { name: "get_dunning_status", description: "Get payment failure and recovery status.", input_schema: { type: "object" as const, properties: {}, required: [] as string[] } },
+  ];
+
+  try {
+    // Multi-turn tool use loop (max 3 rounds)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let aiMessages: any[] = [...claudeMessages];
+    let rawText = "";
+
+    for (let round = 0; round < 3; round++) {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 2000,
+          tools,
+          system: `${SYSTEM_PROMPT}\n\n--- TICKET CONTEXT ---\n${ticketContext}`,
+          messages: aiMessages,
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error("Anthropic API error:", errText);
+        return NextResponse.json({ error: "AI request failed" }, { status: 502 });
+      }
+
+      const data = await res.json();
+      const content = data.content || [];
+      const toolUseBlocks = content.filter((b: { type: string }) => b.type === "tool_use");
+      const textBlocks = content.filter((b: { type: string }) => b.type === "text");
+
+      if (toolUseBlocks.length === 0) {
+        // No tool calls — done
+        rawText = textBlocks.map((b: { text: string }) => b.text).join("");
+        break;
+      }
+
+      // Execute tool calls
+      const toolResults: { type: string; tool_use_id: string; content: string }[] = [];
+      for (const toolCall of toolUseBlocks) {
+        const result = await executeToolCallImprove(toolCall.name, toolCall.input || {}, workspaceId, ticket);
+        toolResults.push({ type: "tool_result", tool_use_id: toolCall.id, content: result });
+      }
+
+      aiMessages = [...aiMessages, { role: "assistant" as const, content }, { role: "user" as const, content: toolResults }];
     }
 
-    const data = await res.json();
-    const rawText = data.content?.[0]?.text || "";
+    if (!rawText) rawText = "I wasn't able to complete the analysis. Please try rephrasing.";
 
     // Try to parse as JSON
     const jsonMatch = rawText.match(/\{[\s\S]*\}/);
