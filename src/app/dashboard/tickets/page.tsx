@@ -704,6 +704,38 @@ export default function TicketsPage() {
             )}
           </div>
 
+          {selected.size >= 2 && (
+            <button
+              onClick={async () => {
+                const ids = Array.from(selected);
+                const targetId = ids[0]; // First selected = target
+                const sourceIds = ids.slice(1);
+                if (!confirm(`Merge ${sourceIds.length} ticket${sourceIds.length > 1 ? "s" : ""} into the first selected ticket? Source tickets will be archived.`)) return;
+                setBulkLoading(true);
+                try {
+                  const res = await fetch("/api/tickets/merge", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ target_ticket_id: targetId, source_ticket_ids: sourceIds }),
+                  });
+                  const data = await res.json();
+                  if (res.ok) {
+                    setBulkMessage(`Merged ${data.merged_count} ticket${data.merged_count > 1 ? "s" : ""} (${data.messages_moved} messages moved)`);
+                    setSelected(new Set());
+                    fetchTickets();
+                  } else {
+                    setBulkMessage(data.error || "Merge failed");
+                  }
+                } catch { setBulkMessage("Merge failed"); }
+                setBulkLoading(false);
+              }}
+              disabled={bulkLoading}
+              className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-violet-600 shadow-sm transition-colors hover:bg-violet-50 disabled:opacity-50 dark:bg-zinc-800 dark:text-violet-400 dark:hover:bg-zinc-700"
+            >
+              Merge
+            </button>
+          )}
+
           {isAdmin && (
             <button
               onClick={() => setShowDeleteConfirm(true)}

@@ -73,7 +73,20 @@ export async function GET(request: Request) {
     // Tickets escalated TO me or tickets I assigned that were escalated
     query = query.not("escalated_to", "is", null).or(`escalated_to.eq.${user.id},assigned_to.eq.${user.id}`);
   }
-  if (search) query = query.ilike("subject", `%${search}%`);
+  if (search) {
+    // Search by subject OR customer name/email
+    const { data: matchingCustomers } = await admin.from("customers")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .or(`email.ilike.%${search}%,first_name.ilike.%${search}%,last_name.ilike.%${search}%`)
+      .limit(50);
+    const custIds = (matchingCustomers || []).map(c => c.id);
+    if (custIds.length > 0) {
+      query = query.or(`subject.ilike.%${search}%,customer_id.in.(${custIds.join(",")})`);
+    } else {
+      query = query.ilike("subject", `%${search}%`);
+    }
+  }
 
   const ascending = order === "asc";
   query = query
