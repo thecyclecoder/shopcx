@@ -5,26 +5,36 @@ import { cookies } from "next/headers";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-const SYSTEM_PROMPT = `You are a support AI coach. An admin is reviewing a ticket where the AI (you) handled something incorrectly. They're telling you what should have happened differently.
+const SYSTEM_PROMPT = `You are a support AI assistant for admins. You can do TWO things:
 
-Your job:
-1. Understand what went wrong
-2. Determine if this can be fixed with a PROMPT RULE (a text instruction added to the AI's prompt database) or if it requires an ARCHITECTURE CHANGE (code modification)
-3. For prompt rules: propose a clear, specific rule with a title. Ask the admin to verify before they save it.
-4. For architecture changes: describe what needs to change in the codebase.
-5. If you're not sure what the admin wants, ask a clarifying question.
+1. **COACH** — When the admin tells you how a ticket was handled wrong, propose a prompt rule to fix it for the future.
+2. **ACT** — When the admin tells you to DO something on this ticket (refund, send message, cancel, pause, reactivate, apply coupon, etc.), propose the specific actions. ALWAYS verify before executing.
 
-ALWAYS verify before finalizing. Show your proposed rule and ask "Does this look right? Feel free to edit it before saving."
+## For coaching (future improvement):
+- Determine if it's a PROMPT RULE (text instruction for AI) or ARCHITECTURE CHANGE (code)
+- Propose the rule, ask admin to verify before saving
+- Category: rule, approach, knowledge, or tool_hint
 
+## For actions (fix this ticket now):
+- Propose specific actions you'll take (e.g. "I'll issue a $30 partial refund on order #SC127585 and send the customer a message")
+- List each action clearly
+- Wait for admin to say "yes" / "do it" / approve before executing
+- After approval, execute and report results
+
+## Response format:
 Return JSON:
 {
-  "type": "prompt" | "architecture" | "question",
+  "type": "prompt" | "architecture" | "question" | "action_proposal" | "action_execute",
   "message": "your conversational response to the admin",
   "proposed_rule": { "title": "...", "content": "...", "category": "rule" },
-  "architecture_description": "..."
+  "architecture_description": "...",
+  "proposed_actions": [{ "type": "partial_refund", "shopify_order_id": "...", "amount_cents": 3000, "reason": "..." }, { "type": "send_message", "body": "..." }]
 }
 
-Only include proposed_rule if type is "prompt". Only include architecture_description if type is "architecture".
+Only include the fields relevant to the type. For action_execute, include the same proposed_actions that were approved.
+
+Available action types: partial_refund(shopify_order_id, amount_cents, reason), send_message(body), update_line_item_price(contract_id, base_price_cents), reactivate(contract_id), apply_coupon(contract_id, code), crisis_pause(contract_id, crisis_action_id), skip_next_order(contract_id), change_frequency(contract_id, interval, interval_count), close_ticket, reopen_ticket.
+
 Category for proposed_rule should be one of: rule, approach, knowledge, tool_hint.`;
 
 export async function POST(
@@ -169,6 +179,97 @@ export async function POST(
     if (jsonMatch) {
       try {
         const parsed = JSON.parse(jsonMatch[0]);
+
+        // Execute actions if type is action_execute
+        if (parsed.type === "action_execute" && parsed.proposed_actions?.length) {
+          const results: string[] = [];
+          for (const action of parsed.proposed_actions) {
+            try {
+              switch (action.type) {
+                case "partial_refund": {
+                  const { partialRefundByAmount } = await import("@/lib/shopify-order-actions");
+                  const r = await partialRefundByAmount(workspaceId, action.shopify_order_id, action.amount_cents, action.reason);
+                  results.push(r.success ? `Refund of $${(action.amount_cents / 100).toFixed(2)} issued` : `Refund failed: ${r.error}`);
+                  break;
+                }
+                case "send_message": {
+                  const { data: wsInfo } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", workspaceId).single();
+                  // Get customer email for email channel
+                  const { data: t } = await admin.from("tickets").select("channel, customer_id, subject, email_message_id").eq("id", ticketId).single();
+                  await admin.from("ticket_messages").insert({
+                    ticket_id: ticketId, direction: "outbound", visibility: "external",
+                    author_type: "system", body: action.body, sent_at: new Date().toISOString(),
+                  });
+                  if (t?.channel === "email" && t.customer_id) {
+                    const { data: cust2 } = await admin.from("customers").select("email").eq("id", t.customer_id).single();
+                    if (cust2?.email && !wsInfo?.sandbox_mode) {
+                      const { sendTicketReply } = await import("@/lib/email");
+                      await sendTicketReply({ workspaceId, toEmail: cust2.email, subject: `Re: ${t.subject || "Your request"}`, body: action.body, inReplyTo: t.email_message_id, agentName: "Support", workspaceName: wsInfo?.name || "" });
+                    }
+                  }
+                  results.push("Message sent to customer");
+                  break;
+                }
+                case "reactivate": {
+                  const { appstleSubscriptionAction } = await import("@/lib/appstle");
+                  const r = await appstleSubscriptionAction(workspaceId, action.contract_id, "resume");
+                  results.push(r.success ? "Subscription reactivated" : `Reactivation failed: ${r.error}`);
+                  break;
+                }
+                case "update_line_item_price": {
+                  const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
+                  const r = await subUpdateLineItemPrice(workspaceId, action.contract_id, action.variant_id || "", action.base_price_cents);
+                  results.push(r.success ? `Base price updated to $${(action.base_price_cents / 100).toFixed(2)}` : `Price update failed: ${r.error}`);
+                  break;
+                }
+                case "apply_coupon": {
+                  const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
+                  const { getAppstleConfig } = await import("@/lib/subscription-items");
+                  const config = await getAppstleConfig(workspaceId);
+                  if (config) {
+                    const r = await applyDiscountWithReplace(config.apiKey, action.contract_id, action.code);
+                    results.push(r.success ? `Coupon ${action.code} applied` : `Coupon failed: ${r.error}`);
+                  } else results.push("Appstle not configured");
+                  break;
+                }
+                case "skip_next_order": {
+                  const { appstleSkipNextOrder } = await import("@/lib/appstle");
+                  const r = await appstleSkipNextOrder(workspaceId, action.contract_id);
+                  results.push(r.success ? "Next order skipped" : `Skip failed: ${r.error}`);
+                  break;
+                }
+                case "crisis_pause": {
+                  const { appstleSubscriptionAction } = await import("@/lib/appstle");
+                  const r = await appstleSubscriptionAction(workspaceId, action.contract_id, "pause", "Crisis pause via admin improve");
+                  results.push(r.success ? "Subscription paused (crisis)" : `Pause failed: ${r.error}`);
+                  break;
+                }
+                case "close_ticket": {
+                  await admin.from("tickets").update({ status: "closed", closed_at: new Date().toISOString() }).eq("id", ticketId);
+                  results.push("Ticket closed");
+                  break;
+                }
+                case "reopen_ticket": {
+                  await admin.from("tickets").update({ status: "open" }).eq("id", ticketId);
+                  results.push("Ticket reopened");
+                  break;
+                }
+                default:
+                  results.push(`Unknown action: ${action.type}`);
+              }
+            } catch (err) {
+              results.push(`Action ${action.type} error: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          // Log actions as internal note
+          await admin.from("ticket_messages").insert({
+            ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system",
+            body: `[Admin Improve] Actions executed:\n${results.map(r => `• ${r}`).join("\n")}`,
+          });
+          parsed.message = (parsed.message || "") + "\n\nResults:\n" + results.map(r => `• ${r}`).join("\n");
+          parsed.action_results = results;
+        }
+
         return NextResponse.json(parsed);
       } catch {
         // Fall through to text response

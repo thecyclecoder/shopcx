@@ -227,6 +227,8 @@ export default function TicketDetailPage() {
   const [improveLoading, setImproveLoading] = useState(false);
   const [proposedPrompt, setProposedPrompt] = useState<{ title: string; content: string; category: string } | null>(null);
   const [promptSaved, setPromptSaved] = useState(false);
+  const [proposedActions, setProposedActions] = useState<{ type: string; [key: string]: unknown }[] | null>(null);
+  const [actionsExecuted, setActionsExecuted] = useState(false);
   const [availableWorkflows, setAvailableWorkflows] = useState<{ id: string; name: string; template: string; trigger_tag: string }[]>([]);
   const [runningWorkflow, setRunningWorkflow] = useState(false);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState("");
@@ -1412,6 +1414,74 @@ export default function TicketDetailPage() {
                 </div>
               )}
 
+              {/* Proposed actions card */}
+              {proposedActions && !actionsExecuted && (
+                <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-950">
+                  <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">Proposed Actions</p>
+                  <ul className="mt-2 space-y-1">
+                    {proposedActions.map((a, i) => (
+                      <li key={i} className="text-sm text-amber-700 dark:text-amber-300">
+                        {a.type === "partial_refund" && `Refund $${(((a.amount_cents as number) || 0) / 100).toFixed(2)} on order ${a.shopify_order_id}`}
+                        {a.type === "send_message" && `Send message: "${String(a.body || "").slice(0, 80)}..."`}
+                        {a.type === "reactivate" && `Reactivate subscription ${a.contract_id}`}
+                        {a.type === "close_ticket" && "Close this ticket"}
+                        {a.type === "reopen_ticket" && "Reopen this ticket"}
+                        {a.type === "skip_next_order" && `Skip next order on ${a.contract_id}`}
+                        {a.type === "crisis_pause" && `Pause subscription (crisis) ${a.contract_id}`}
+                        {a.type === "apply_coupon" && `Apply coupon ${a.code} to ${a.contract_id}`}
+                        {a.type === "update_line_item_price" && `Update base price to $${(((a.base_price_cents as number) || 0) / 100).toFixed(2)}`}
+                        {!["partial_refund", "send_message", "reactivate", "close_ticket", "reopen_ticket", "skip_next_order", "crisis_pause", "apply_coupon", "update_line_item_price"].includes(a.type) && JSON.stringify(a)}
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      onClick={async () => {
+                        setImproveLoading(true);
+                        setImproveMessages(prev => [...prev, { role: "user", content: "Yes, execute those actions." }]);
+                        try {
+                          const res = await fetch(`/api/tickets/${id}/improve`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              message: "Yes, execute those actions.",
+                              conversationHistory: [...improveMessages, { role: "user", content: "Yes, execute those actions." }],
+                            }),
+                          });
+                          if (res.ok) {
+                            const data = await res.json();
+                            setImproveMessages(prev => [...prev, { role: "assistant", content: data.message }]);
+                            if (data.action_results) {
+                              setActionsExecuted(true);
+                              setProposedActions(null);
+                              fetch(`/api/tickets/${id}`).then(r => r.json()).then(d => { if (d.messages) setMessages(d.messages); });
+                            }
+                          }
+                        } catch {
+                          setImproveMessages(prev => [...prev, { role: "assistant", content: "Something went wrong executing actions." }]);
+                        }
+                        setImproveLoading(false);
+                      }}
+                      disabled={improveLoading}
+                      className="rounded bg-amber-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50"
+                    >
+                      {improveLoading ? "Executing..." : "Approve & Execute"}
+                    </button>
+                    <button
+                      onClick={() => setProposedActions(null)}
+                      className="rounded border border-zinc-300 px-3 py-1.5 text-sm text-zinc-600 dark:border-zinc-600 dark:text-zinc-400"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+              {actionsExecuted && (
+                <div className="mt-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                  Actions executed. Check the conversation for results.
+                </div>
+              )}
+
               {/* Input */}
               <div className="mt-3 flex gap-2">
                 <input
@@ -1444,10 +1514,20 @@ export default function TicketDetailPage() {
                               content: data.proposed_rule.content,
                               category: data.proposed_rule.category || "rule",
                             });
-                          } else if (data.type === "architecture" && data.architecture_description) {
+                            setProposedActions(null);
+                          } else if (data.type === "action_proposal" && data.proposed_actions?.length) {
+                            setProposedActions(data.proposed_actions);
+                            setActionsExecuted(false);
                             setProposedPrompt(null);
+                          } else if (data.type === "action_execute" && data.action_results) {
+                            setProposedActions(null);
+                            setActionsExecuted(true);
+                            setProposedPrompt(null);
+                            // Refresh ticket messages
+                            fetch(`/api/tickets/${id}`).then(r => r.json()).then(d => { if (d.messages) setMessages(d.messages); });
                           } else {
                             setProposedPrompt(null);
+                            setProposedActions(null);
                           }
                         }
                       } catch {
