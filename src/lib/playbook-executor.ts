@@ -77,6 +77,7 @@ interface SubscriptionData {
   billing_interval_count: number;
   next_billing_date: string | null;
   created_at: string;
+  subscription_created_at: string | null;
 }
 
 export interface PlaybookExecResult {
@@ -147,6 +148,23 @@ export async function executePlaybookStep(
   const timelineChanges = (recentEvents || [])
     .map(e => `${e.event_type}: ${e.summary} (${new Date(e.created_at).toLocaleDateString()})`)
     .join("\n");
+
+  // Fetch subscription activity (interval changes, pauses, resumes, cancellations)
+  // Goes back 90 days — not just since ticket creation
+  const since90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: subEvents } = await admin.from("customer_events")
+    .select("event_type, summary, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", ticket.customer_id)
+    .gte("created_at", since90d)
+    .or("event_type.ilike.subscription%,event_type.ilike.portal.subscription%")
+    .order("created_at", { ascending: false })
+    .limit(15);
+  if (subEvents?.length) {
+    ctx._subscription_activity = subEvents
+      .map(e => `${new Date(e.created_at).toLocaleDateString()}: ${e.summary}`)
+      .join("\n");
+  }
 
   // Execute the step
   const stepResult = await executeStep(
@@ -536,7 +554,7 @@ async function fetchSubscriptions(admin: Admin, wsId: string, custId: string): P
   }
 
   const { data } = await admin.from("subscriptions")
-    .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count, next_billing_date, created_at")
+    .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count, next_billing_date, created_at, subscription_created_at")
     .eq("workspace_id", wsId)
     .in("customer_id", linkedIds)
     .order("created_at", { ascending: false });
@@ -566,8 +584,16 @@ function buildDataContext(
     parts.push(`\nSubscriptions (${subs.length}):`);
     for (const s of subs) {
       const items = (s.items as { title?: string }[] || []).map(i => i.title || "item").join(", ");
-      parts.push(`  #${s.shopify_contract_id} — ${s.status} — ${s.billing_interval}/${s.billing_interval_count} — ${items} — created ${new Date(s.created_at).toLocaleDateString()}`);
+      const subCreated = s.subscription_created_at || s.created_at;
+      parts.push(`  #${s.shopify_contract_id} — ${s.status} — ${s.billing_interval}/${s.billing_interval_count} — ${items} — created ${new Date(subCreated).toLocaleDateString()}`);
     }
+  }
+
+  // Include subscription activity from customer_events (interval changes, pauses, etc.)
+  // This is injected by the caller — stored in ctx._subscription_activity
+  const subActivity = ctx._subscription_activity as string | undefined;
+  if (subActivity) {
+    parts.push(`\nSubscription activity (recent changes):\n${subActivity}`);
   }
 
   if (timelineChanges) {
