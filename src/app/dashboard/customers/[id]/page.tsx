@@ -14,6 +14,10 @@ import { formatCents, formatDate } from "@/components/shared/format-utils";
 import type { OrderRow } from "@/components/shared/OrdersTable";
 import type { SubscriptionData } from "@/components/shared/SubscriptionsList";
 import type { LoyaltyMemberData, LoyaltyRedemption } from "@/components/shared/LoyaltyCard";
+import ChargebacksList from "@/components/shared/ChargebacksList";
+import type { ChargebackItem } from "@/components/shared/ChargebacksList";
+import FraudCasesList from "@/components/shared/FraudCasesList";
+import type { FraudCaseItem } from "@/components/shared/FraudCasesList";
 
 interface Customer {
   id: string;
@@ -155,6 +159,8 @@ export default function CustomerDetailPage() {
   const [loyaltyMember, setLoyaltyMember] = useState<LoyaltyMemberData | null>(null);
   const [loyaltyTiers, setLoyaltyTiers] = useState<{ label: string; points_cost: number; discount_value: number; affordable: boolean }[]>([]);
   const [loyaltyRedemptions, setLoyaltyRedemptions] = useState<LoyaltyRedemption[]>([]);
+  const [chargebacks, setChargebacks] = useState<ChargebackItem[]>([]);
+  const [fraudCases, setFraudCases] = useState<FraudCaseItem[]>([]);
   const [customerReturns, setCustomerReturns] = useState<{ id: string; order_number: string; status: string; resolution_type: string; net_refund_cents: number; created_at: string }[]>([]);
   const [customerReplacements, setCustomerReplacements] = useState<ReplacementItem[]>([]);
 
@@ -216,6 +222,14 @@ export default function CustomerDetailPage() {
       fetch(`/api/workspaces/${workspace.id}/replacements?customer_id=${id}&limit=50`)
         .then(r => r.json())
         .then(d => setCustomerReplacements(d.replacements || []))
+        .catch(() => {});
+      fetch(`/api/chargebacks?customer_id=${id}&limit=10`)
+        .then(r => r.json())
+        .then(d => { if (d.data) setChargebacks(d.data); })
+        .catch(() => {});
+      fetch(`/api/workspaces/${workspace.id}/fraud-cases?customer_id=${id}&limit=10`)
+        .then(r => r.json())
+        .then(d => { if (d.cases) setFraudCases(d.cases); })
         .catch(() => {});
       // Loyalty
       fetch(`/api/loyalty/members?workspace_id=${workspace.id}&customer_id=${id}`)
@@ -674,6 +688,26 @@ export default function CustomerDetailPage() {
           </h2>
           <div className="mt-3 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
             <ReplacementsList replacements={customerReplacements} />
+          </div>
+        </div>
+      )}
+
+      {/* Chargebacks */}
+      {chargebacks.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-sm font-medium text-red-600 dark:text-red-400">Chargebacks ({chargebacks.length})</h2>
+          <div className="mt-3">
+            <ChargebacksList chargebacks={chargebacks} />
+          </div>
+        </div>
+      )}
+
+      {/* Fraud Cases */}
+      {fraudCases.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-sm font-medium text-amber-600 dark:text-amber-400">Fraud Cases ({fraudCases.length})</h2>
+          <div className="mt-3">
+            <FraudCasesList cases={fraudCases} />
           </div>
         </div>
       )}

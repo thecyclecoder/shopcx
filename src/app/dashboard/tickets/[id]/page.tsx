@@ -16,6 +16,10 @@ import LoyaltyCard from "@/components/shared/LoyaltyCard";
 import type { LoyaltyMemberData, LoyaltyRedemption } from "@/components/shared/LoyaltyCard";
 import type { SubscriptionData as CustomerSubscription } from "@/components/shared/SubscriptionsList";
 import EmailPreviewModal from "@/components/email-preview-modal";
+import ChargebacksList from "@/components/shared/ChargebacksList";
+import type { ChargebackItem } from "@/components/shared/ChargebacksList";
+import FraudCasesList from "@/components/shared/FraudCasesList";
+import type { FraudCaseItem } from "@/components/shared/FraudCasesList";
 
 interface Member {
   user_id: string;
@@ -209,7 +213,7 @@ export default function TicketDetailPage() {
   const [sending, setSending] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"messages" | "history">("messages");
-  const [mobileSection, setMobileSection] = useState<"conversation" | "details" | "customer" | "subscriptions" | "orders" | "returns" | "loyalty" | "reviews" | "actions">("conversation");
+  const [mobileSection, setMobileSection] = useState<"conversation" | "details" | "customer" | "subscriptions" | "orders" | "returns" | "replacements" | "chargebacks" | "fraud" | "loyalty" | "reviews" | "actions">("conversation");
   const [customerEvents, setCustomerEvents] = useState<{ id: string; event_type: string; source: string; summary: string; created_at: string }[]>([]);
   const [closeWithReply, setCloseWithReply] = useState(true);
   const [editorFocused, setEditorFocused] = useState(false);
@@ -252,6 +256,8 @@ export default function TicketDetailPage() {
   // Loyalty state
   const [loyaltyMember, setLoyaltyMember] = useState<LoyaltyMemberData | null>(null);
   const [loyaltyRedemptions, setLoyaltyRedemptions] = useState<LoyaltyRedemption[]>([]);
+  const [chargebacks, setChargebacks] = useState<ChargebackItem[]>([]);
+  const [fraudCases, setFraudCases] = useState<FraudCaseItem[]>([]);
   const [loyaltySettings, setLoyaltySettings] = useState<{
     enabled: boolean;
     redemption_tiers: { label: string; points_cost: number; discount_value: number }[];
@@ -415,6 +421,18 @@ export default function TicketDetailPage() {
           setTicketReplacements(Array.from(map.values()));
         }).catch(() => {});
       }
+
+        // Load chargebacks for customer
+        fetch(`/api/chargebacks?customer_id=${data.customer.id}&limit=10`)
+          .then(r => r.json())
+          .then(d => { if (d.data) setChargebacks(d.data); })
+          .catch(() => {});
+
+        // Load fraud cases for customer
+        fetch(`/api/workspaces/${workspace.id}/fraud-cases?customer_id=${data.customer.id}&limit=10`)
+          .then(r => r.json())
+          .then(d => { if (d.cases) setFraudCases(d.cases); })
+          .catch(() => {});
 
       // Load existing AI draft
       fetch(`/api/tickets/${id}/ai-draft`)
@@ -783,6 +801,9 @@ export default function TicketDetailPage() {
           <option value="subscriptions">Subscriptions</option>
           <option value="orders">Orders</option>
           <option value="returns">Returns</option>
+          <option value="replacements">Replacements</option>
+          <option value="chargebacks">Chargebacks</option>
+          <option value="fraud">Fraud</option>
           <option value="loyalty">Loyalty</option>
           <option value="reviews">Reviews</option>
           <option value="actions">Actions</option>
@@ -2918,6 +2939,38 @@ export default function TicketDetailPage() {
             )}
           </div>
         )}
+
+        {/* ═══ CHARGEBACKS ═══ */}
+        <div className={`${mobileSection !== "chargebacks" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
+        {chargebacks.length > 0 && (
+          <div className="mt-4 rounded-lg border border-red-200 bg-white dark:border-red-800 dark:bg-zinc-900">
+            <div className="p-4">
+              <h3 className="text-xs font-medium uppercase tracking-wider text-red-500">
+                Chargebacks <span className="text-xs text-red-400">({chargebacks.length})</span>
+              </h3>
+            </div>
+            <div className="border-t border-red-100 px-4 pb-3 dark:border-red-900">
+              <ChargebacksList chargebacks={chargebacks} compact />
+            </div>
+          </div>
+        )}
+        </div>
+
+        {/* ═══ FRAUD ═══ */}
+        <div className={`${mobileSection !== "fraud" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
+        {fraudCases.length > 0 && (
+          <div className="mt-4 rounded-lg border border-amber-200 bg-white dark:border-amber-800 dark:bg-zinc-900">
+            <div className="p-4">
+              <h3 className="text-xs font-medium uppercase tracking-wider text-amber-500">
+                Fraud Cases <span className="text-xs text-amber-400">({fraudCases.length})</span>
+              </h3>
+            </div>
+            <div className="border-t border-amber-100 px-4 pb-3 dark:border-amber-900">
+              <FraudCasesList cases={fraudCases} compact />
+            </div>
+          </div>
+        )}
+        </div>
 
         {/* ═══ LOYALTY CARD ═══ */}
         <div className={`${mobileSection !== "loyalty" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>

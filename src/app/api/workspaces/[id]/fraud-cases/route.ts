@@ -40,6 +40,8 @@ export async function GET(
     .order("created_at", { ascending: false })
     .range(offset, offset + limit - 1);
 
+  const customerId = new URL(request.url).searchParams.get("customer_id");
+  if (customerId) query = query.contains("customer_ids", [customerId]);
   if (status) query = query.eq("status", status);
   if (ruleType) query = query.eq("rule_type", ruleType);
   if (severity) query = query.eq("severity", severity);

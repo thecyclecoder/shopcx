@@ -30,6 +30,8 @@ export async function GET(request: Request) {
     )
     .eq("workspace_id", workspaceId);
 
+  const customerId = searchParams.get("customer_id");
+  if (customerId) query = query.eq("customer_id", customerId);
   if (status && status !== "all") query = query.eq("status", status);
   if (reason) query = query.eq("reason", reason);
 
