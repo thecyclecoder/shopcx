@@ -464,7 +464,7 @@ async function executeStep(
 
     case "apply_policy": {
       if (!policy) return { action: "advance", newStep: step.step_order + 1, systemNote: "No policy configured." };
-      return handleApplyPolicy(admin, wsId, policy, orders, subs, ctx, step, dataContext, pers, policyRules);
+      return handleApplyPolicy(admin, wsId, policy, orders, subs, ctx, step, dataContext, pers, policyRules, msg);
     }
 
     case "offer_exception": {
@@ -509,6 +509,18 @@ async function executeStep(
 
     case "adjust_subscription":
       return handleAdjustSubscription(admin, wsId, subs, ctx, step, pers);
+
+    case "ask_return_reason":
+      return handleAskReturnReason(ctx, step, pers);
+
+    case "save_with_review":
+      return handleSaveWithReview(admin, wsId, orders, ctx, step, msg, pers);
+
+    case "confirm_return":
+      return handleConfirmReturn(admin, wsId, orders, ctx, step, msg, pers);
+
+    case "process_return":
+      return handleProcessReturn(admin, wsId, tid, customer, orders, ctx, step, msg, pers);
 
     case "explain":
     case "custom":
@@ -959,12 +971,18 @@ async function handleApplyPolicy(
   policy: PlaybookPolicy, orders: OrderData[], subs: SubscriptionData[],
   ctx: Record<string, unknown>,
   step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null, policyRules: string,
+  customerMessage = "",
 ): Promise<PlaybookExecResult> {
   const identifiedOrders = (ctx.identified_orders as string[]) || [];
   const orderObjs = orders.filter(o => identifiedOrders.includes(o.order_number));
   const identifiedSub = ctx.identified_subscription as string | undefined;
   const subCreated = ctx.subscription_created as string | undefined;
   const subStatus = ctx.subscription_status as string | undefined;
+
+  // ── Handle 30-day money back flow continuation ──
+  if (ctx._30day_eligible && ctx._30day_phase) {
+    return handle30DayFlow(admin, wsId, orders, ctx, step, customerMessage, pers);
+  }
 
   // Evaluate each order against policy conditions
   const inPolicy: string[] = [];
@@ -990,6 +1008,41 @@ async function handleApplyPolicy(
         }
       }
       failureReasons.push(`${o.order_number}: ${reasons.join("; ") || "does not meet policy conditions"}`);
+    }
+  }
+
+  // ── 30-day money back guarantee flow ──
+  // If all identified orders are in-policy checkout orders ≤30 days, use the save-first flow
+  if (inPolicy.length > 0 && outOfPolicy.length === 0 && !ctx._30day_flow_skipped) {
+    const allCheckout = orderObjs.every(o => {
+      const src = (o.source_name || "").toLowerCase();
+      return !src.includes("subscription") || src.includes("checkout");
+    });
+    const allWithin30 = orderObjs.every(o => {
+      const days = Math.floor((Date.now() - new Date(o.created_at).getTime()) / 86400000);
+      return days <= 30;
+    });
+
+    if (allCheckout && allWithin30) {
+      // Get product IDs from the order for review matching
+      const productIds = orderObjs.flatMap(o =>
+        ((o.line_items as { product_id?: string }[]) || []).map(i => i.product_id).filter(Boolean)
+      );
+
+      return {
+        action: "respond",
+        context: {
+          _30day_eligible: true,
+          _30day_order_numbers: inPolicy,
+          _30day_product_ids: productIds,
+          _30day_phase: "ask_reason",
+        },
+        response: wrapResponse(
+          `<p>I'm here to help! I see you'd like to use our 30-day money back guarantee. Before I set that up, can you share what isn't working for you? I'd love to see if there's anything we can do to help.</p>`,
+          pers, !ctx.playbook_intro_sent,
+        ),
+        systemNote: `[Playbook] Order(s) ${inPolicy.join(", ")} qualify for 30-day money back guarantee. Asking for reason before processing.`,
+      };
     }
   }
 
@@ -2707,4 +2760,186 @@ async function handleAdjustSubscription(
   const response = `Your replacement order${orderRef} has been created and will ship within 2-3 business days.${subNote}`;
 
   return { action: "complete", response, context: ctx };
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── 30-Day Money Back Guarantee Flow ──
+// ══════════════════════════════════════════════════════════════════
+
+async function handle30DayFlow(
+  admin: Admin, wsId: string, orders: OrderData[],
+  ctx: Record<string, unknown>, step: PlaybookStep,
+  customerMessage: string, pers: { name?: string; tone?: string } | null,
+): Promise<PlaybookExecResult> {
+  const phase = ctx._30day_phase as string;
+  const orderNumbers = (ctx._30day_order_numbers as string[]) || [];
+  const orderObjs = orders.filter(o => orderNumbers.includes(o.order_number));
+
+  switch (phase) {
+    case "ask_reason": {
+      // Customer replied with their reason — now try to save with a review
+      const reason = customerMessage.replace(/<[^>]*>/g, " ").trim();
+      ctx._30day_return_reason = reason;
+      ctx._30day_phase = "save_attempt";
+
+      // Fetch featured reviews for products in the order
+      const productIds = (ctx._30day_product_ids as string[]) || [];
+      let reviewBlock = "";
+      if (productIds.length) {
+        try {
+          const { getReviewsForProducts } = await import("@/lib/klaviyo");
+          const reviews = await getReviewsForProducts(wsId, productIds);
+          const best = reviews.find(r => r.rating >= 4 && r.summary);
+          if (best) {
+            reviewBlock = ` This review from ${best.reviewer_name || "a customer"} says it best: "${best.summary || best.body?.slice(0, 100)}"`;
+          }
+        } catch { /* no reviews available */ }
+      }
+
+      const saveMsg = `<p>I completely understand your concern. Most customers see the best results when they stay consistent for 2-3 months.${reviewBlock}</p><p>Would you like to give it a bit more time, or would you prefer I go ahead and process your return?</p>`;
+
+      return {
+        action: "respond",
+        response: wrapResponse(saveMsg, pers, false),
+        context: ctx,
+        systemNote: `[Playbook] 30-day flow: customer reason: "${reason.slice(0, 80)}". Showing save attempt with review.`,
+      };
+    }
+
+    case "save_attempt": {
+      // Customer replied to save attempt — check if they want to continue or return
+      const msg = customerMessage.toLowerCase().replace(/<[^>]*>/g, " ").trim();
+      const wantsReturn = msg.includes("return") || msg.includes("refund") || msg.includes("money back") ||
+        msg.includes("process") || msg.includes("go ahead") || msg.includes("prefer") ||
+        msg.includes("no") || msg.includes("cancel");
+      const wantsToStay = msg.includes("try") || msg.includes("keep") || msg.includes("stay") ||
+        msg.includes("give it") || msg.includes("more time") || msg.includes("ok") || msg.includes("sure");
+
+      if (wantsToStay && !wantsReturn) {
+        // Saved!
+        return {
+          action: "complete",
+          response: wrapResponse(
+            `<p>That's great to hear! I think you'll really love the results. If you have any questions along the way, don't hesitate to reach out. We're here for you!</p>`,
+            pers, false,
+          ),
+          context: { ...ctx, _30day_outcome: "saved" },
+          systemNote: `[Playbook] 30-day flow: customer decided to keep product. Saved!`,
+        };
+      }
+
+      // Customer wants to proceed with return — estimate label cost
+      ctx._30day_phase = "confirm_return";
+
+      // Estimate label cost — use $7.95 default (actual cost calculated at purchase)
+      const labelCostCents = 795;
+
+      const orderTotal = orderObjs.reduce((sum, o) => sum + (o.total_cents || 0), 0);
+      const netRefund = orderTotal - labelCostCents;
+      ctx._30day_label_cost_cents = labelCostCents;
+      ctx._30day_net_refund_cents = netRefund;
+
+      return {
+        action: "respond",
+        response: wrapResponse(
+          `<p>No problem at all. Here's what the return looks like:</p><p>Order total: <b>$${(orderTotal / 100).toFixed(2)}</b><br/>Return shipping label: <b>-$${(labelCostCents / 100).toFixed(2)}</b><br/>Your refund: <b>$${(netRefund / 100).toFixed(2)}</b></p><p>The label cost is deducted from your refund. Would you like me to go ahead and process this?</p>`,
+          pers, false,
+        ),
+        context: ctx,
+        systemNote: `[Playbook] 30-day flow: customer wants return. Label ~$${(labelCostCents / 100).toFixed(2)}, net refund $${(netRefund / 100).toFixed(2)}.`,
+      };
+    }
+
+    case "confirm_return": {
+      const msg = customerMessage.toLowerCase().replace(/<[^>]*>/g, " ").trim();
+      const confirmed = msg.includes("yes") || msg.includes("go ahead") || msg.includes("process") ||
+        msg.includes("proceed") || msg.includes("sure") || msg.includes("ok") || msg.includes("please");
+      const pushback = msg.includes("no") || msg.includes("too much") || msg.includes("expensive") ||
+        msg.includes("why do i") || msg.includes("shouldn't have to");
+
+      if (pushback) {
+        // Stand firm on label cost
+        const labelCost = (ctx._30day_label_cost_cents as number) || 795;
+        const netRefund = (ctx._30day_net_refund_cents as number) || 0;
+        return {
+          action: "respond",
+          response: wrapResponse(
+            `<p>I understand that's frustrating. The return shipping label cost of $${(labelCost / 100).toFixed(2)} is standard for all returns and is deducted from your refund of $${(netRefund / 100).toFixed(2)}. This is the best we can offer for the return. Would you like me to go ahead?</p>`,
+            pers, false,
+          ),
+          context: ctx,
+          systemNote: `[Playbook] 30-day flow: customer pushed back on label cost. Standing firm.`,
+        };
+      }
+
+      if (!confirmed) {
+        // Unclear response — ask again
+        return {
+          action: "respond",
+          response: wrapResponse(
+            `<p>Just to confirm — would you like me to process the return? I'll send you a prepaid shipping label right away.</p>`,
+            pers, false,
+          ),
+          context: ctx,
+          systemNote: `[Playbook] 30-day flow: unclear confirmation response.`,
+        };
+      }
+
+      // Confirmed — create return record (pending label generation by agent/Inngest)
+      ctx._30day_phase = "processing";
+
+      const orderTotal = orderObjs[0]?.total_cents || 0;
+      const estLabelCost = (ctx._30day_label_cost_cents as number) || 795;
+      const netRefund = orderTotal - estLabelCost;
+
+      const customerId = await (async () => {
+        const { data: o } = await admin.from("orders").select("customer_id").eq("order_number", orderObjs[0]?.order_number).eq("workspace_id", wsId).single();
+        return o?.customer_id;
+      })();
+
+      await admin.from("returns").insert({
+        workspace_id: wsId,
+        order_id: orderObjs[0]?.id,
+        order_number: orderObjs[0]?.order_number,
+        shopify_order_gid: orderObjs[0]?.shopify_order_id ? `gid://shopify/Order/${orderObjs[0].shopify_order_id}` : null,
+        customer_id: customerId || null,
+        status: "pending_label",
+        resolution_type: "refund",
+        source: "playbook",
+        order_total_cents: orderTotal,
+        label_cost_cents: estLabelCost,
+        net_refund_cents: netRefund,
+      });
+
+      return {
+        action: "complete",
+        response: wrapResponse(
+          `<p>Your return has been approved! We're generating your prepaid shipping label now and will email it to you shortly.</p><p>Your refund of <b>$${(netRefund / 100).toFixed(2)}</b> will be processed once we receive the package back.</p><p>If you have any questions in the meantime, just reply to this email!</p>`,
+          pers, false,
+        ),
+        context: { ...ctx, _30day_outcome: "returned" },
+        systemNote: `[Playbook] 30-day flow: return approved. Pending label. Est. refund: $${(netRefund / 100).toFixed(2)}.`,
+      };
+    }
+
+    default:
+      return { action: "advance", newStep: step.step_order + 1, systemNote: `[Playbook] Unknown 30-day phase: ${phase}` };
+  }
+}
+
+// Stub handlers for the step types (delegated to handle30DayFlow via apply_policy)
+async function handleAskReturnReason(ctx: Record<string, unknown>, step: PlaybookStep, pers: { name?: string; tone?: string } | null): Promise<PlaybookExecResult> {
+  return { action: "advance", newStep: step.step_order + 1, systemNote: "[Playbook] ask_return_reason handled via 30-day flow." };
+}
+
+async function handleSaveWithReview(admin: Admin, wsId: string, orders: OrderData[], ctx: Record<string, unknown>, step: PlaybookStep, msg: string, pers: { name?: string; tone?: string } | null): Promise<PlaybookExecResult> {
+  return { action: "advance", newStep: step.step_order + 1, systemNote: "[Playbook] save_with_review handled via 30-day flow." };
+}
+
+async function handleConfirmReturn(admin: Admin, wsId: string, orders: OrderData[], ctx: Record<string, unknown>, step: PlaybookStep, msg: string, pers: { name?: string; tone?: string } | null): Promise<PlaybookExecResult> {
+  return { action: "advance", newStep: step.step_order + 1, systemNote: "[Playbook] confirm_return handled via 30-day flow." };
+}
+
+async function handleProcessReturn(admin: Admin, wsId: string, tid: string, customer: CustomerData, orders: OrderData[], ctx: Record<string, unknown>, step: PlaybookStep, msg: string, pers: { name?: string; tone?: string } | null): Promise<PlaybookExecResult> {
+  return { action: "advance", newStep: step.step_order + 1, systemNote: "[Playbook] process_return handled via 30-day flow." };
 }
