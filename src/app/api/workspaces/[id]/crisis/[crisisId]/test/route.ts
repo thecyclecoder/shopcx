@@ -253,18 +253,28 @@ export async function POST(
 <p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:white;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose a Different Flavor →</a></p>
 <p style="color:#6b7280;font-size:13px;">If you're happy with ${defaultSwap}, no action needed — your next shipment will include it automatically.</p>`;
 
-  // Send email first to get message ID
+  // Inject tracking (open pixel + click links)
+  const { injectFullTracking, mapTrackingToken } = await import("@/lib/email-tracking");
+  const { html: trackedBody, trackingToken } = injectFullTracking(emailBody);
+
+  // Send email with tracking
+  const testSubject = `[TEST] Update about your ${crisis.affected_product_title || "subscription"}`;
   const emailResult = await sendTicketReply({
     workspaceId,
     toEmail: customer.email,
-    subject: `[TEST] Update about your ${crisis.affected_product_title || "subscription"}`,
-    body: emailBody,
+    subject: testSubject,
+    body: trackedBody,
     inReplyTo: null,
     agentName: "Customer Care",
     workspaceName: ws?.name || "",
   });
 
-  // Insert ticket message with email_message_id for threading
+  // Map tracking token
+  if (emailResult.messageId) {
+    await mapTrackingToken(trackingToken, emailResult.messageId, workspaceId, customer.email, testSubject, ticket?.id, sub.customer_id);
+  }
+
+  // Insert ticket message (clean body for display)
   const emailMessageId = emailResult.messageId ? `<${emailResult.messageId}@resend.dev>` : null;
   await admin.from("ticket_messages").insert({
     ticket_id: ticket?.id,

@@ -5,6 +5,95 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import crypto from "crypto";
+
+/**
+ * Generate a tracking token and inject a self-hosted open tracking pixel.
+ * Call BEFORE sending the email. After sending, call mapTrackingToken()
+ * to link the token to the actual resend email ID.
+ *
+ * Only add to emails we want to track (crisis, marketing — NOT transactional).
+ */
+export function injectTrackingPixel(html: string): { html: string; trackingToken: string } {
+  const trackingToken = crypto.randomUUID();
+  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
+  const pixelUrl = `${siteUrl}/api/track/open/${trackingToken}`;
+  const pixel = `<img src="${pixelUrl}" width="1" height="1" style="display:none" alt="" />`;
+
+  let tracked: string;
+  if (html.includes("</div>")) {
+    const lastDiv = html.lastIndexOf("</div>");
+    tracked = html.slice(0, lastDiv) + pixel + html.slice(lastDiv);
+  } else {
+    tracked = html + pixel;
+  }
+
+  return { html: tracked, trackingToken };
+}
+
+/**
+ * After sending, map the tracking token to the actual resend email ID.
+ * This allows the pixel endpoint to find the right email event.
+ */
+export async function mapTrackingToken(
+  trackingToken: string,
+  resendEmailId: string,
+  workspaceId: string,
+  recipientEmail: string,
+  subject: string,
+  ticketId?: string | null,
+  customerId?: string | null,
+): Promise<void> {
+  const admin = createAdminClient();
+  // Insert a "sent" event with the tracking token as an alias
+  await admin.from("email_events").upsert({
+    workspace_id: workspaceId,
+    resend_email_id: trackingToken, // The pixel will hit this ID
+    event_type: "sent",
+    occurred_at: new Date().toISOString(),
+    recipient_email: recipientEmail,
+    subject,
+    ticket_id: ticketId || null,
+    customer_id: customerId || null,
+    metadata: { resend_email_id: resendEmailId, tracked: true },
+  }, { onConflict: "resend_email_id,event_type,occurred_at" });
+
+  // Also log the actual resend ID
+  await logEmailSent({
+    workspaceId,
+    resendEmailId,
+    recipientEmail,
+    subject,
+    ticketId,
+    customerId,
+  });
+}
+
+/**
+ * Rewrite links in email HTML to pass through our click tracking redirect.
+ * Only rewrites http/https links, skips mailto: and tel: links.
+ */
+export function injectTrackingLinks(html: string, trackingToken: string): string {
+  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
+  return html.replace(
+    /href="(https?:\/\/[^"]+)"/g,
+    (match, url: string) => {
+      // Don't track links to our own tracking endpoints
+      if (url.includes("/api/track/")) return match;
+      const trackUrl = `${siteUrl}/api/track/click/${trackingToken}?url=${encodeURIComponent(url)}`;
+      return `href="${trackUrl}"`;
+    },
+  );
+}
+
+/**
+ * Convenience: inject both tracking pixel AND link tracking in one call.
+ */
+export function injectFullTracking(html: string): { html: string; trackingToken: string } {
+  const { html: withPixel, trackingToken } = injectTrackingPixel(html);
+  const withLinks = injectTrackingLinks(withPixel, trackingToken);
+  return { html: withLinks, trackingToken };
+}
 
 const STATUS_HIERARCHY: Record<string, number> = {
   sent: 1,

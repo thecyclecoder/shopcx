@@ -243,18 +243,23 @@ export const crisisDailyCampaign = inngest.createFunction(
 <p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose a Different Flavor →</a></p>
 <p style="color:#6b7280;font-size:13px;">If you're happy with ${defaultSwap}, no action needed — your next shipment will include it automatically.</p>`;
 
-          // Send email first to get message ID for threading
+          // Inject open tracking pixel + click tracking links
+          const { injectFullTracking, mapTrackingToken } = await import("@/lib/email-tracking");
+          const { html: trackedBody, trackingToken } = injectFullTracking(emailBody);
+
+          // Send email with tracking pixel
+          const crisisSubject = `Update about your ${crisis.affected_product_title || "subscription"}`;
           const emailResult = await sendTicketReply({
             workspaceId: crisis.workspace_id,
             toEmail: customer.email,
-            subject: `Update about your ${crisis.affected_product_title || "subscription"}`,
-            body: emailBody,
+            subject: crisisSubject,
+            body: trackedBody,
             inReplyTo: null,
             agentName: "Customer Care",
             workspaceName: ws?.name || "",
           });
 
-          // Insert ticket message with email_message_id for threading
+          // Insert ticket message (store original body without pixel for display)
           const emailMsgId = emailResult.messageId ? `<${emailResult.messageId}@resend.dev>` : null;
           await admin.from("ticket_messages").insert({
             ticket_id: ticket?.id,
@@ -268,10 +273,9 @@ export const crisisDailyCampaign = inngest.createFunction(
             email_status: emailResult.messageId ? "sent" : null,
           });
 
-          // Log email tracking event
+          // Map tracking token → resend email ID for open tracking
           if (emailResult.messageId && ticket?.id) {
-            const { logEmailSent } = await import("@/lib/email-tracking");
-            await logEmailSent({ workspaceId: crisis.workspace_id, resendEmailId: emailResult.messageId, recipientEmail: customer.email, subject: `Update about your ${crisis.affected_product_title || "subscription"}`, ticketId: ticket.id, customerId: sub.customerId });
+            await mapTrackingToken(trackingToken, emailResult.messageId, crisis.workspace_id, customer.email, crisisSubject, ticket.id, sub.customerId);
           }
 
           totalNew++;
@@ -393,12 +397,16 @@ export const crisisAdvanceTier = inngest.createFunction(
 <p>We'd love to help you try something new — and to sweeten the deal, we'll give you <b>${couponPct}% off</b> your next order when you pick a new product.</p>
 <p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Swap for One of Our Best-Sellers →</a></p>`;
 
+          const { injectFullTracking, mapTrackingToken } = await import("@/lib/email-tracking");
+          const { html: trackedBody2, trackingToken: tt2 } = injectFullTracking(emailBody);
+
           const threading = await getTicketThreading(admin, ticket_id);
+          const tier2Subject = threading.subject ? `Re: ${threading.subject}` : `${couponPct}% off — try something new while ${crisis.affected_product_title || "your item"} is restocking`;
           const tier2Result = await sendTicketReply({
             workspaceId: workspace_id,
             toEmail: customer.email,
-            subject: threading.subject ? `Re: ${threading.subject}` : `${couponPct}% off — try something new while ${crisis.affected_product_title || "your item"} is restocking`,
-            body: emailBody,
+            subject: tier2Subject,
+            body: trackedBody2,
             inReplyTo: threading.inReplyTo,
             agentName: "Customer Care",
             workspaceName: ws?.name || "",
@@ -409,7 +417,10 @@ export const crisisAdvanceTier = inngest.createFunction(
             direction: "outbound", visibility: "external", author_type: "system",
             body: emailBody, sent_at: new Date().toISOString(),
             email_message_id: tier2MsgId,
+            resend_email_id: tier2Result.messageId || null,
+            email_status: tier2Result.messageId ? "sent" : null,
           });
+          if (tier2Result.messageId) await mapTrackingToken(tt2, tier2Result.messageId, workspace_id, customer.email, tier2Subject, ticket_id, customer_id);
         }
 
         await admin.from("crisis_customer_actions").update({
@@ -475,12 +486,16 @@ export const crisisAdvanceTier = inngest.createFunction(
 <p>We can remove ${crisis.affected_product_title || "the out-of-stock item"} from your subscription and keep shipping your other items as usual. We'll automatically add it back when it's in stock (expected <b>${restockDate}</b>).</p>
 <p style="text-align:center;margin:20px 0;"><a href="${journeyUrl}" style="display:inline-block;padding:12px 28px;background:${primaryColor};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;">Choose What Works for You →</a></p>`;
 
+          const { injectFullTracking, mapTrackingToken } = await import("@/lib/email-tracking");
+          const { html: trackedBody3, trackingToken: tt3 } = injectFullTracking(emailBody);
+
           const threading3 = await getTicketThreading(admin, ticket_id);
+          const tier3Subject = threading3.subject ? `Re: ${threading3.subject}` : `About your ${crisis.affected_product_title || "subscription"} — let us know what you'd prefer`;
           const tier3Result = await sendTicketReply({
             workspaceId: workspace_id,
             toEmail: customer.email,
-            subject: threading3.subject ? `Re: ${threading3.subject}` : `About your ${crisis.affected_product_title || "subscription"} — let us know what you'd prefer`,
-            body: emailBody,
+            subject: tier3Subject,
+            body: trackedBody3,
             inReplyTo: threading3.inReplyTo,
             agentName: "Customer Care",
             workspaceName: ws?.name || "",
@@ -491,7 +506,10 @@ export const crisisAdvanceTier = inngest.createFunction(
             direction: "outbound", visibility: "external", author_type: "system",
             body: emailBody, sent_at: new Date().toISOString(),
             email_message_id: tier3MsgId,
+            resend_email_id: tier3Result.messageId || null,
+            email_status: tier3Result.messageId ? "sent" : null,
           });
+          if (tier3Result.messageId) await mapTrackingToken(tt3, tier3Result.messageId, workspace_id, customer.email, tier3Subject, ticket_id, customer_id);
         }
 
         await admin.from("crisis_customer_actions").update({

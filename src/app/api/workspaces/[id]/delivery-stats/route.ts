@@ -76,10 +76,20 @@ export async function GET(
   const bounced = bouncedIds.size;
   const complained = complainedIds.size;
 
+  // Count tracked emails (those with tracking pixel) for accurate open rate
+  const trackedSentIds = new Set<string>();
+  for (const e of events) {
+    if (e.event_type === "sent" && (e.metadata as { tracked?: boolean })?.tracked) {
+      trackedSentIds.add(e.resend_email_id);
+    }
+  }
+  const trackedSent = trackedSentIds.size;
+
   // Calculate rates
   const deliveryRate = sent > 0 ? Math.round((delivered / sent) * 1000) / 10 : 0;
   const bounceRate = sent > 0 ? Math.round((bounced / sent) * 1000) / 10 : 0;
-  const openRate = delivered > 0 ? Math.round((opened / delivered) * 1000) / 10 : 0;
+  // Open rate only counts tracked emails — transactional emails don't have tracking pixels
+  const openRate = trackedSent > 0 ? Math.round((opened / trackedSent) * 1000) / 10 : 0;
   const clickRate = opened > 0 ? Math.round((clicked / opened) * 1000) / 10 : 0;
   const complaintRate = delivered > 0 ? Math.round((complained / delivered) * 10000) / 100 : 0;
 
@@ -97,7 +107,7 @@ export async function GET(
 
   return NextResponse.json({
     days,
-    stats: { sent, delivered, opened, clicked, bounced, complained },
+    stats: { sent, delivered, opened, clicked, bounced, complained, trackedSent },
     rates: { deliveryRate, bounceRate, openRate, clickRate, complaintRate },
     score: { value: score, label: scoreLabel, color: scoreColor },
     bounces: bounceList,
