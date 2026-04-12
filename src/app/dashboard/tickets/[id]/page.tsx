@@ -1330,7 +1330,12 @@ export default function TicketDetailPage() {
               <div className="flex-1 space-y-3 overflow-y-auto" style={{ maxHeight: 400 }}>
                 {improveMessages.length === 0 && (
                   <p className="py-8 text-center text-sm text-zinc-400">
-                    Tell Sonnet what it should have done differently on this ticket.
+                    Chat with Sonnet about this ticket. You can:
+                    <ul className="mt-2 space-y-1 text-left text-xs">
+                      <li>Improve future responses — "You should have paused instead of cancelling"</li>
+                      <li>Fix this ticket — "Refund the customer $30 and send them an apology"</li>
+                      <li>Investigate — "Did we double charge this customer?"</li>
+                    </ul>
                   </p>
                 )}
                 {improveMessages.map((m, i) => (
@@ -1537,7 +1542,7 @@ export default function TicketDetailPage() {
                       }
                     }
                   }}
-                  placeholder="What should the AI have done differently?"
+                  placeholder="Improve, fix, or investigate..."
                   className="flex-1 rounded border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                   disabled={improveLoading}
                 />

@@ -315,8 +315,9 @@ export default function Sidebar({
             (item.href !== "/dashboard" && pathname.startsWith(item.href));
           const isTickets = item.href === "/dashboard/tickets";
 
-          // Add separator before Settings
+          // Add separator before Settings — hide for non-admin roles
           const isSettings = item.href === "/dashboard/settings";
+          if (isSettings && !["owner", "admin"].includes(workspace.role)) return null;
 
           return (
             <div key={item.href}>
