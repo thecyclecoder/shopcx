@@ -361,7 +361,9 @@ async function handleBillingEvent(
     // Log event
     const billingMsg = eventType === "subscription.billing-failure" ? "Payment failed"
       : eventType === "subscription.billing-skipped" ? "Billing skipped"
-      : "Payment succeeded";
+      : eventType === "subscription.billing-success" ? "Payment succeeded"
+      : eventType === "subscription.upcoming-order-notification" ? "Upcoming order notification"
+      : eventType;
 
     await logCustomerEvent({
       workspaceId,
