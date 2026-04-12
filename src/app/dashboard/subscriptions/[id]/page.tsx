@@ -9,6 +9,10 @@ import ReturnsList from "@/components/shared/ReturnsList";
 import { ReplacementsList } from "@/components/shared/ReplacementsList";
 import type { ReplacementItem } from "@/components/shared/ReplacementsList";
 import OrdersTable from "@/components/shared/OrdersTable";
+import ChargebacksList from "@/components/shared/ChargebacksList";
+import FraudCasesList from "@/components/shared/FraudCasesList";
+import type { ChargebackItem } from "@/components/shared/ChargebacksList";
+import type { FraudCaseItem } from "@/components/shared/FraudCasesList";
 import { formatCents, formatDate } from "@/components/shared/format-utils";
 import type { OrderRow } from "@/components/shared/OrdersTable";
 
@@ -201,6 +205,8 @@ export default function SubscriptionDetailPage() {
   const [showStoreCreditModal, setShowStoreCreditModal] = useState(false);
   const [subReturns, setSubReturns] = useState<{ id: string; order_number: string; status: string; resolution_type: string; net_refund_cents: number; created_at: string }[]>([]);
   const [subReplacements, setSubReplacements] = useState<ReplacementItem[]>([]);
+  const [chargebacks, setChargebacks] = useState<ChargebackItem[]>([]);
+  const [fraudCases, setFraudCases] = useState<FraudCaseItem[]>([]);
 
   const loadSub = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}`);
@@ -232,6 +238,18 @@ export default function SubscriptionDetailPage() {
       fetch(`/api/workspaces/${workspace.id}/replacements?subscription_id=${subId}&limit=50`)
         .then(r => r.json())
         .then(d => setSubReplacements(d.replacements || []))
+        .catch(() => {});
+
+      // Fetch chargebacks for this customer
+      fetch(`/api/chargebacks?customer_id=${data.subscription.customer_id}&limit=10`)
+        .then(r => r.json())
+        .then(d => setChargebacks(d.data || []))
+        .catch(() => {});
+
+      // Fetch fraud cases for this customer
+      fetch(`/api/workspaces/${workspace.id}/fraud-cases?customer_id=${data.subscription.customer_id}&limit=10`)
+        .then(r => r.json())
+        .then(d => setFraudCases(d.cases || []))
         .catch(() => {});
     }
   }, [workspace.id, subId, router]);
@@ -849,6 +867,22 @@ export default function SubscriptionDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Chargebacks */}
+      {chargebacks.length > 0 && (
+        <div className="mt-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+          <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Chargebacks</h3>
+          <ChargebacksList chargebacks={chargebacks} />
+        </div>
+      )}
+
+      {/* Fraud Cases */}
+      {fraudCases.length > 0 && (
+        <div className="mt-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+          <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Fraud Cases</h3>
+          <FraudCasesList cases={fraudCases} />
+        </div>
+      )}
 
       {/* Store Credit Modal */}
       {showStoreCreditModal && sub && (

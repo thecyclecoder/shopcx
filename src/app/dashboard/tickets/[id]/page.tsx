@@ -904,13 +904,13 @@ export default function TicketDetailPage() {
               const isSmart = tag.startsWith("smart:");
               const displayTag = tag;
               return (
-                <span key={tag} className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-sm font-medium ${
+                <span key={tag} className={`inline-flex max-w-[180px] items-center gap-0.5 rounded px-1.5 py-0.5 text-sm font-medium ${
                   isSmart
                     ? "bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
                     : "bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400"
                 }`}>
-                  {isSmart && <svg className="mr-0.5 h-2.5 w-2.5" fill="currentColor" viewBox="0 0 20 20"><path d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" /></svg>}
-                  {displayTag}
+                  {isSmart && <svg className="mr-0.5 h-2.5 w-2.5 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" /></svg>}
+                  <span className="truncate">{displayTag}</span>
                   {ticket.status !== "archived" && (
                   <button
                     onClick={async () => {
@@ -2416,7 +2416,7 @@ export default function TicketDetailPage() {
                   {ticket.tags.map((tag) => (
                     <span
                       key={tag}
-                      className="rounded-full bg-zinc-100 px-2 py-0.5 text-sm font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                      className="max-w-[180px] truncate rounded-full bg-zinc-100 px-2 py-0.5 text-sm font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
                     >
                       {tag}
                     </span>
