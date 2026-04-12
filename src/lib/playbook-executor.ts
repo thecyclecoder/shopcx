@@ -872,16 +872,41 @@ async function handleIdentifySubscription(
   }
 
   // Find subscription that generated the identified order(s)
-  // Match by checking if subscription items overlap with order items
-  const activeSubs = subs.filter(s => s.status === "active" || s.status === "paused");
-  const cancelledSubs = subs.filter(s => s.status === "cancelled");
+  // Match by checking if subscription items overlap with order line items
+  const identifiedOrder = orders.find(o => identifiedOrders.includes(o.order_number));
+  const orderItems = (identifiedOrder?.line_items as { title?: string; sku?: string; product_id?: string }[] || []);
+  const orderSkus = new Set(orderItems.map(i => (i.sku || "").toUpperCase()).filter(Boolean));
+  const orderTitles = new Set(orderItems.map(i => (i.title || "").toLowerCase()).filter(Boolean));
 
-  const matchedSub = activeSubs[0] || cancelledSubs[0];
+  // Also check subscription_id on the order directly
+  let matchedSub: SubscriptionData | undefined;
+  if (identifiedOrder?.subscription_id) {
+    matchedSub = subs.find(s => s.id === identifiedOrder.subscription_id);
+  }
+
+  // Fall back to item matching
+  if (!matchedSub) {
+    const allSubs = [...subs.filter(s => s.status === "active" || s.status === "paused"), ...subs.filter(s => s.status === "cancelled")];
+    for (const sub of allSubs) {
+      const subItems = (sub.items as { title?: string; sku?: string }[] || []);
+      const hasMatch = subItems.some(si => {
+        if (si.sku && orderSkus.has(si.sku.toUpperCase())) return true;
+        if (si.title && orderTitles.has(si.title.toLowerCase())) return true;
+        return false;
+      });
+      if (hasMatch) { matchedSub = sub; break; }
+    }
+  }
+
+  // Last resort: first active sub
+  if (!matchedSub) matchedSub = subs.filter(s => s.status === "active")[0] || subs[0];
+
   if (matchedSub) {
+    const subCreated = (matchedSub as SubscriptionData & { subscription_created_at?: string }).subscription_created_at || matchedSub.created_at;
     return {
       action: "advance", newStep: step.step_order + 1,
-      context: { identified_subscription: matchedSub.shopify_contract_id, subscription_status: matchedSub.status, subscription_created: matchedSub.created_at },
-      systemNote: `[Playbook] Matched subscription #${matchedSub.shopify_contract_id} (${matchedSub.status}, created ${new Date(matchedSub.created_at).toLocaleDateString()}).`,
+      context: { identified_subscription: matchedSub.shopify_contract_id, subscription_status: matchedSub.status, subscription_created: subCreated },
+      systemNote: `[Playbook] Matched subscription #${matchedSub.shopify_contract_id} (${matchedSub.status}, created ${new Date(subCreated).toLocaleDateString()}).`,
     };
   }
 
