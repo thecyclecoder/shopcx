@@ -524,45 +524,75 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
   const sourceName = (payload.source_name as string) || "";
   if (!orderError && shopifyCustomerId && sourceName.includes("subscription")) {
     try {
-      const { data: subs } = await admin
-        .from("subscriptions")
-        .select("id")
-        .eq("workspace_id", workspaceId)
-        .eq("shopify_customer_id", shopifyCustomerId)
-        .in("status", ["active", "paused"]);
-
-      // Always try SKU matching first — even with 1 sub, verify it's the right one
-      const orderSkus = new Set(lineItems.map((li: { sku: unknown }) => String(li.sku || "")).filter(Boolean));
       let matched = false;
 
-      if (orderSkus.size > 0) {
-        const { data: subsWithItems } = await admin
-          .from("subscriptions")
-          .select("id, items")
-          .eq("workspace_id", workspaceId)
-          .eq("shopify_customer_id", shopifyCustomerId)
-          .in("status", ["active", "paused"]);
-
-        const match = subsWithItems?.find((s) => {
-          const subSkus = (Array.isArray(s.items) ? s.items : [])
-            .map((i: { sku?: string }) => String(i.sku || "")).filter(Boolean);
-          return subSkus.some((sk) => orderSkus.has(sk));
+      // PRIMARY: Get contract ID from Shopify order metafield (Appstle stores it there)
+      try {
+        const { getShopifyCredentials } = await import("@/lib/shopify-sync");
+        const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
+        const { shop: shopDomain, accessToken } = await getShopifyCredentials(workspaceId);
+        const gqlRes = await fetch(`https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+          method: "POST",
+          headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: `{ order(id: "gid://shopify/Order/${shopifyOrderId}") { metafields(first: 5, keys: ["appstle_subscription.details"]) { nodes { value } } } }`,
+          }),
         });
-        if (match) {
-          await admin.from("orders")
-            .update({ subscription_id: match.id })
-            .eq("workspace_id", workspaceId)
-            .eq("shopify_order_id", shopifyOrderId);
-          matched = true;
+        const gqlData = await gqlRes.json();
+        const metaValue = gqlData?.data?.order?.metafields?.nodes?.[0]?.value;
+        if (metaValue) {
+          const parsed = JSON.parse(metaValue);
+          const contractId = String(parsed?.subscriptionContract?.id || "");
+          if (contractId) {
+            const { data: sub } = await admin.from("subscriptions")
+              .select("id").eq("shopify_contract_id", contractId).eq("workspace_id", workspaceId).maybeSingle();
+            if (sub) {
+              await admin.from("orders")
+                .update({ subscription_id: sub.id })
+                .eq("workspace_id", workspaceId)
+                .eq("shopify_order_id", shopifyOrderId);
+              matched = true;
+            }
+          }
         }
-      }
+      } catch { /* metafield lookup failed — fall through to SKU matching */ }
 
-      // Fallback: single sub assignment only if SKU matching didn't work
-      if (!matched && subs?.length === 1) {
-        await admin.from("orders")
-          .update({ subscription_id: subs[0].id })
-          .eq("workspace_id", workspaceId)
-          .eq("shopify_order_id", shopifyOrderId);
+      // FALLBACK: SKU matching
+      if (!matched) {
+        const orderSkus = new Set(lineItems.map((li: { sku: unknown }) => String(li.sku || "")).filter(Boolean));
+        if (orderSkus.size > 0) {
+          const { data: subsWithItems } = await admin
+            .from("subscriptions")
+            .select("id, items")
+            .eq("workspace_id", workspaceId)
+            .eq("shopify_customer_id", shopifyCustomerId)
+            .in("status", ["active", "paused"]);
+
+          const match = subsWithItems?.find((s) => {
+            const subSkus = (Array.isArray(s.items) ? s.items : [])
+              .map((i: { sku?: string }) => String(i.sku || "")).filter(Boolean);
+            return subSkus.some((sk) => orderSkus.has(sk));
+          });
+          if (match) {
+            await admin.from("orders")
+              .update({ subscription_id: match.id })
+              .eq("workspace_id", workspaceId)
+              .eq("shopify_order_id", shopifyOrderId);
+            matched = true;
+          }
+        }
+
+        // Last resort: single sub assignment
+        if (!matched) {
+          const { data: subs } = await admin.from("subscriptions").select("id")
+            .eq("workspace_id", workspaceId).eq("shopify_customer_id", shopifyCustomerId).in("status", ["active", "paused"]);
+          if (subs?.length === 1) {
+            await admin.from("orders")
+              .update({ subscription_id: subs[0].id })
+              .eq("workspace_id", workspaceId)
+              .eq("shopify_order_id", shopifyOrderId);
+          }
+        }
       }
     } catch (e) {
       console.error("Subscription linkage error:", e);

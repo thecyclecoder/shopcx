@@ -124,6 +124,40 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     return handleAppstleError(e);
   }
 
+  // Preserve grandfathered pricing on flavor swaps
+  // If the old variant had a lower-than-standard base price, apply it to the new variant
+  if (oldVariants.length === 1 && newVariants && Object.keys(newVariants).length === 1) {
+    try {
+      const adminDb = createAdminClient();
+      const oldVariantId = String(oldVariants[0]);
+      const newVariantId = Object.keys(newVariants)[0];
+
+      // Get the sub's current item pricing
+      const { data: subData } = await adminDb.from("subscriptions")
+        .select("items").eq("shopify_contract_id", String(contractId)).single();
+      const items = (subData?.items as { variant_id?: string; price_cents?: number; product_id?: string }[]) || [];
+      const oldItem = items.find(i => String(i.variant_id) === oldVariantId);
+
+      if (oldItem?.price_cents) {
+        // Check if grandfathered
+        const { data: products } = await adminDb.from("products").select("variants").eq("workspace_id", auth.workspaceId);
+        const priceMap = new Map<string, number>();
+        for (const p of products || []) {
+          for (const v of (p.variants as { id?: string; price_cents?: number }[]) || []) {
+            if (v.id && v.price_cents) priceMap.set(String(v.id), v.price_cents);
+          }
+        }
+        const standardPrice = priceMap.get(oldVariantId);
+        const effectiveBase = Math.round(oldItem.price_cents / 0.75);
+        if (standardPrice && effectiveBase < standardPrice) {
+          // Grandfathered — preserve the base price on the new variant
+          const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
+          await subUpdateLineItemPrice(auth.workspaceId, String(contractId), newVariantId, effectiveBase);
+        }
+      }
+    } catch { /* non-fatal — price preservation is best-effort */ }
+  }
+
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
   if (customer) {
     await logPortalAction({
