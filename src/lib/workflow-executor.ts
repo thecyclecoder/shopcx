@@ -79,6 +79,9 @@ export async function executeWorkflow(
       case "account_login":
         await executeAccountLogin(admin, workflow.config as Record<string, unknown>, context);
         break;
+      case "end_chat":
+        await executeEndChat(admin, context);
+        break;
     }
     // Mark ticket as handled by workflow
     await admin.from("tickets").update({ handled_by: `Workflow: ${workflow.name}` }).eq("id", ticketId);
@@ -1004,4 +1007,32 @@ async function executeAccountLogin(admin: Admin, config: Record<string, unknown>
   }
 
   await addNote(admin, ctx, `Magic login link sent to ${email}.`);
+}
+
+// ── End Chat ──
+
+async function executeEndChat(admin: Admin, ctx: WorkflowContext): Promise<void> {
+  const email = (ctx.customer?.email as string) || null;
+
+  // The message must contain "send you an email" — this is the trigger phrase
+  // that the chat widget detects to set chatEnded = true
+  const msg = email
+    ? `<p>Thanks for chatting with us! I'll send you an email at ${email} if we need to follow up. Have a great day!</p>`
+    : `<p>Thanks for chatting with us! We'll follow up via email if needed. Have a great day!</p>`;
+
+  await admin.from("ticket_messages").insert({
+    ticket_id: ctx.ticketId,
+    direction: "outbound",
+    visibility: "external",
+    author_type: "system",
+    body: msg,
+    sent_at: new Date().toISOString(),
+  });
+
+  await admin.from("tickets").update({
+    status: "closed",
+    updated_at: new Date().toISOString(),
+  }).eq("id", ctx.ticketId);
+
+  await addNote(admin, ctx, "Chat ended by agent via End Chat workflow.");
 }
