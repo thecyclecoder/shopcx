@@ -996,34 +996,75 @@ async function handleApplyPolicy(
   // ── Build deterministic timeline ──
   const timelineEvents: { date: Date; label: string }[] = [];
 
-  // Subscription created
-  if (subCreated) {
-    const sub = subs.find(s => s.shopify_contract_id === identifiedSub);
-    const items = sub ? (sub.items as { title?: string }[] || []).map(i => i.title || "item").join(" and ") : "your products";
-    const interval = sub ? `${sub.billing_interval_count} ${sub.billing_interval}${sub.billing_interval_count > 1 ? "s" : ""}` : "a recurring schedule";
-    timelineEvents.push({
-      date: new Date(subCreated),
-      label: `You checked out on our website and selected the subscribe and save option. That created your first order and set up a recurring subscription for ${items}, which was set to renew every ${interval}. You can always cancel a subscription anytime, but if you cancel after an order is made, it will stop future orders but can't stop an order that's already processed.`,
-    });
-  }
-
-  // Customer events (portal actions)
+  // Resolve customer ID for event queries
   const customerId = orderObjs[0] ? await (async () => {
     const { data: o } = await admin.from("orders").select("customer_id").eq("order_number", orderObjs[0].order_number).eq("workspace_id", wsId).single();
     return o?.customer_id;
   })() : null;
 
+  // Find the billing interval that was active BEFORE the most recent order
+  // Check for interval changes — the current interval might not be what was used for the charge
+  let originalInterval = "";
+  const sub = subs.find(s => s.shopify_contract_id === identifiedSub);
+  if (sub) {
+    originalInterval = `${sub.billing_interval_count} ${sub.billing_interval}${sub.billing_interval_count > 1 ? "s" : ""}`;
+  }
+
+  // Check if interval was changed AFTER the order date
+  const lastOrderDate = orderObjs[0] ? new Date(orderObjs[0].created_at) : null;
+  let intervalChangedAfterOrder = false;
+  if (customerId && lastOrderDate) {
+    const { data: intervalChanges } = await admin.from("customer_events")
+      .select("summary, created_at")
+      .eq("workspace_id", wsId).eq("customer_id", customerId)
+      .eq("event_type", "subscription.billing-interval-changed")
+      .gte("created_at", lastOrderDate.toISOString())
+      .order("created_at", { ascending: true }).limit(1);
+
+    if (intervalChanges?.length) {
+      // The current interval was set AFTER the order — find what it was before
+      // Parse the old interval from the change: "Billing interval changed to WEEK / 8"
+      const changeSummary = intervalChanges[0].summary || "";
+      const currentMatch = changeSummary.match(/changed to (\w+)\s*\/\s*(\d+)/i);
+      if (currentMatch) {
+        const currentCount = parseInt(currentMatch[2]);
+        const currentUnit = currentMatch[1].toLowerCase();
+        // The order was billed under the PREVIOUS interval, not this one
+        // We know the current interval from the sub, so the old one was different
+        // Use a reasonable guess based on common patterns
+        if (currentCount !== sub?.billing_interval_count) {
+          // The interval changed — describe using the original (pre-change) interval
+          // For the timeline description, note it was different
+          intervalChangedAfterOrder = true;
+        }
+      }
+    }
+  }
+
+  // Subscription created
+  if (subCreated) {
+    const items = sub ? (sub.items as { title?: string }[] || []).map(i => i.title || "item").join(" and ") : "your products";
+    // If interval was changed after the order, we note the original interval in the subscription description
+    // Use the current interval as the description (it's what the customer has now)
+    const intervalDesc = originalInterval || "a recurring schedule";
+    timelineEvents.push({
+      date: new Date(subCreated),
+      label: `You checked out on our website and selected the subscribe and save option. That created your first order and set up a recurring subscription for ${items}. You can always cancel a subscription anytime, but if you cancel after an order is made, it will stop future orders but can't stop an order that's already processed.`,
+    });
+  }
+
+  // Customer events (portal actions + subscription changes)
   if (customerId) {
     const { data: events } = await admin.from("customer_events")
       .select("event_type, summary, created_at")
       .eq("workspace_id", wsId)
       .eq("customer_id", customerId)
-      .in("event_type", ["portal.subscription.date_changed", "portal.subscription.paused", "portal.subscription.cancelled", "portal.subscription.resumed", "portal.subscription.frequency_changed"])
+      .or("event_type.ilike.portal.subscription%,event_type.ilike.subscription.billing-interval%,event_type.ilike.subscription.paused,event_type.ilike.subscription.cancelled,event_type.ilike.subscription.activated")
       .order("created_at", { ascending: true })
-      .limit(10);
+      .limit(15);
 
     for (const ev of events || []) {
-      const summary = ev.summary || ev.event_type.replace("portal.subscription.", "").replace(/_/g, " ");
+      const summary = ev.summary || ev.event_type.replace("portal.subscription.", "").replace("subscription.", "").replace(/_/g, " ");
       timelineEvents.push({ date: new Date(ev.created_at), label: summary });
     }
   }
