@@ -219,7 +219,7 @@ function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing, 
   const [open, setOpen] = useState(false);
   const [flavorOpen, setFlavorOpen] = useState(false);
   const [flavorBusy, setFlavorBusy] = useState(false);
-  const { showToast } = useContext(PortalContext);
+  const { showToast, startAction, completeAction, failAction } = useContext(PortalContext);
 
   // Close panel when forceClose changes (after mutations)
   useEffect(() => { setOpen(false); setFlavorOpen(false); }, [forceClose]);
@@ -239,26 +239,29 @@ function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing, 
   );
   const hasFlavorOptions = flavorVariants.length > 0;
 
-  async function handleFlavorChange(variantId) {
+  async function handleFlavorChange(variantId, variantTitle) {
     if (flavorBusy) return;
     setFlavorBusy(true);
+    setFlavorOpen(false);
+    setOpen(false);
+    startAction();
     try {
       const payload = {
         contractId: contract.id,
         oldLineId: safeStr(ln.id),
         newVariants: [{ variantId: String(variantId), quantity: ln.quantity || 1 }],
+        carryForwardDiscount: 'EXISTING_PLAN',
       };
       const resp = await postJson('replaceVariants', payload);
-      showToast('Flavor updated!', 'success');
+      completeAction('Flavor changed to ' + (variantTitle || 'new flavor') + '!');
       clearCaches();
-      setFlavorOpen(false);
       if (resp?.patch?.lines && Array.isArray(resp.patch.lines) && onPatchLines) {
         onPatchLines(resp.patch.lines);
       } else {
         onDone?.();
       }
     } catch (e) {
-      showToast(e?.message || 'Could not change flavor.', 'error');
+      failAction(e?.message || 'Could not change flavor.');
     }
     setFlavorBusy(false);
   }
@@ -299,7 +302,7 @@ function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing, 
                   ) : (
                     flavorVariants.map(v => (
                       <button key={v.id} type="button" class="sp-flavor-picker__option"
-                        onClick={() => handleFlavorChange(v.id)}>
+                        onClick={() => handleFlavorChange(v.id, v.title)}>
                         {v.title}
                       </button>
                     ))

@@ -49,32 +49,20 @@ export default function ShippingProtectionCard({ contract, shipLine, onUpdate })
 
   return (
     <div class={'sp-card sp-detail__card sp-shipprot' + (hasShipProt ? ' sp-shipprot--active' : '')}>
-      <div class="sp-shipprot__header">
-        <div class="sp-shipprot__icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            {hasShipProt && <polyline points="9 12 11 14 15 10" />}
-          </svg>
-        </div>
-        <div class="sp-shipprot__text">
-          <div class="sp-shipprot__title">Shipping Protection</div>
-          <div class="sp-shipprot__status">
-            {hasShipProt ? 'Protected' : 'Not Protected'}
+      <div class="sp-shipprot__toprow">
+        <div class="sp-shipprot__header">
+          <div class="sp-shipprot__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              {hasShipProt && <polyline points="9 12 11 14 15 10" />}
+            </svg>
           </div>
-        </div>
-      </div>
-      <p class="sp-shipprot__desc">
-        {hasShipProt
-          ? 'Your orders are protected against loss, theft, and damage during shipping.'
-          : 'Add protection against loss, theft, and damage during shipping.'}
-      </p>
-      <div class="sp-shipprot__footer">
-        <div class="sp-shipprot__price">
-          {hasShipProt
-            ? <strong>{onPriceText}</strong>
-            : <><span class="sp-shipprot__strike">{listPrice}</span><strong class="sp-shipprot__now">{discPrice}</strong></>
-          }
-          <span class="sp-shipprot__per">/ order</span>
+          <div class="sp-shipprot__text">
+            <div class="sp-shipprot__title">Shipping Protection</div>
+            <div class="sp-shipprot__status">
+              {hasShipProt ? 'Protected' : 'Not Protected'}
+            </div>
+          </div>
         </div>
         <div class="sp-switchwrap">
           <input class="sp-switch" type="checkbox" id={toggleId}
@@ -85,9 +73,22 @@ export default function ShippingProtectionCard({ contract, shipLine, onUpdate })
           </label>
         </div>
       </div>
-      {!hasShipProt && (
-        <div class="sp-shipprot__social">85% of customers add this</div>
-      )}
+      <p class="sp-shipprot__desc">
+        {hasShipProt
+          ? 'Your orders are protected against loss, theft, and damage.'
+          : 'Protect against loss, theft, and damage.'}
+      </p>
+      <div class="sp-shipprot__footer">
+        <div class="sp-shipprot__price">
+          {hasShipProt
+            ? <><strong>{onPriceText}</strong><span class="sp-shipprot__per"> / order</span></>
+            : <><span class="sp-shipprot__strike">{listPrice}</span> <strong class="sp-shipprot__now">{discPrice}</strong><span class="sp-shipprot__per"> / order</span></>
+          }
+        </div>
+        {!hasShipProt && (
+          <div class="sp-shipprot__social">85% of customers add this</div>
+        )}
+      </div>
     </div>
   );
 }

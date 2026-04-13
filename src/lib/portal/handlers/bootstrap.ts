@@ -111,33 +111,24 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
     : [];
 
   if (rawSpIds.length && auth.workspaceId) {
-    // Look up products that contain these variant IDs and check for selling plans
+    // rawSpIds are Shopify PRODUCT IDs — look up the actual variant IDs
     const { data: spProducts } = await admin
       .from("products")
-      .select("variants")
-      .eq("workspace_id", auth.workspaceId);
+      .select("shopify_product_id, variants")
+      .eq("workspace_id", auth.workspaceId)
+      .in("shopify_product_id", rawSpIds);
 
     if (spProducts) {
-      const rawSpIdSet = new Set(rawSpIds.map(String));
       for (const p of spProducts) {
         const variants = Array.isArray(p.variants) ? p.variants : [];
-        for (const v of variants as { id?: string; selling_plan_group_ids?: string[] }[]) {
-          const vid = String(v.id || "");
-          if (rawSpIdSet.has(vid)) {
-            // Only include if variant has selling plans
-            const hasSellingPlans = Array.isArray(v.selling_plan_group_ids) && v.selling_plan_group_ids.length > 0;
-            if (hasSellingPlans) {
-              shippingProtectionVariantIds.push(vid);
-            }
+        // Pick the first variant with stock (shipping protection typically has one variant)
+        for (const v of variants as { id?: string; inventory_quantity?: number }[]) {
+          if (v.id) {
+            shippingProtectionVariantIds.push(String(v.id));
+            break; // one variant per product
           }
         }
       }
-    }
-
-    // If no variants with selling plans found, fall through to raw IDs
-    // (Appstle may handle subscription additions without selling plans)
-    if (!shippingProtectionVariantIds.length) {
-      shippingProtectionVariantIds = rawSpIds.map(String);
     }
   }
 
