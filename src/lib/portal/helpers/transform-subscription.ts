@@ -10,6 +10,7 @@ interface DbItem {
   price_cents?: number;
   selling_plan?: string;
   variant_title?: string;
+  line_id?: string;
 }
 
 interface VariantInfo {
@@ -54,6 +55,7 @@ export function transformSubscription(
     const imageUrl = variantByTitle?.image_url || variantBySku?.image_url || product?.productImage || "";
 
     return {
+      id: item.line_id || "",
       title: item.title || "Item",
       variantTitle: item.variant_title || "",
       quantity: item.quantity || 1,

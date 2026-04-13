@@ -52,12 +52,17 @@ function computePrice(variant, qty) {
 function Stars({ value, count }) {
   const v = Number(value) || 0;
   const full = Math.floor(v);
-  const stars = Array.from({ length: 5 }, (_, i) => i < full ? '\u2605' : '\u2606');
+  const half = v - full >= 0.25;
+  const stars = Array.from({ length: 5 }, (_, i) => {
+    if (i < full) return '\u2605';
+    if (i === full && half) return '\u2605';
+    return '\u2606';
+  });
   return (
-    <span class="sp-addswap-rating">
-      <span class="sp-addswap__stars">{stars.join('')}</span>
-      {v > 0 && <span class="sp-addswap-rating__val">{v.toFixed(1)}</span>}
-      {count && <span class="sp-addswap-rating__count">({count})</span>}
+    <span class="sp-addswap-stars">
+      <span class="sp-addswap-stars__glyphs">{stars.join('')}</span>
+      {v > 0 && <span class="sp-addswap-stars__text">{v.toFixed(1)}</span>}
+      {count && <span class="sp-addswap-stars__text">({count})</span>}
     </span>
   );
 }
@@ -107,20 +112,22 @@ export default function AddSwapModal({ mode, contract, line, catalog, onClose, o
           <div class="sp-note__title">Step 1: Choose a product</div>
           <div class="sp-note__body">Select a product, then pick your flavor.</div>
         </div>
-        <div class="sp-addswap-products">
+        <div class="sp-addswap-list">
           {products.map(p => {
             const img = pickImage(p);
             const rating = p.rating || {};
             return (
-              <button key={p.productId || p.id} type="button" class="sp-addswap-product"
+              <button key={p.productId || p.id} type="button" class="sp-addswap-rowbtn"
                 onClick={() => { setSelectedProduct(p); setStep(2); setSelectedVariant(p.variants?.[0] || null); }}>
-                {img ? <img class="sp-addswap__img" src={img} alt={p.title} /> : <div class="sp-addswap__img sp-addswap__img--placeholder" />}
-                <div class="sp-addswap-product__text">
-                  <div class="sp-addswap-product__title">{p.title}</div>
-                  {p.metafields?.direct_response_headline && <div class="sp-addswap-product__headline sp-muted">{p.metafields.direct_response_headline}</div>}
-                  <Stars value={rating.value} count={rating.count} />
-                  <span class="sp-addswap__select-btn">Select product</span>
+                <div class="sp-addswap-rowbtn__inner sp-addswap-prodrow">
+                  {img ? <img class="sp-addswap-prodrow__img" src={img} alt={p.title} /> : <div class="sp-addswap-prodrow__img sp-addswap-prodrow__img--placeholder" />}
+                  <div class="sp-addswap-prodrow__text">
+                    <div class="sp-addswap-prodrow__title">{p.title}</div>
+                    {p.metafields?.direct_response_headline && <div class="sp-addswap-prodrow__headline sp-muted">{p.metafields.direct_response_headline}</div>}
+                    <Stars value={rating.value} count={rating.count} />
+                  </div>
                 </div>
+                <span class="sp-addswap-selectbtn">Select product</span>
               </button>
             );
           })}
