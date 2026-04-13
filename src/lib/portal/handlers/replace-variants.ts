@@ -6,15 +6,22 @@ import { enrichItemTitles } from "@/lib/subscription-items";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
+function extractNumericId(val: unknown): number {
+  const s = String(val || "");
+  // Strip GID prefix: "gid://shopify/ProductVariant/123" → "123"
+  const numeric = s.includes("/") ? s.split("/").pop() || s : s;
+  return Number(numeric);
+}
+
 function asIntArray(v: unknown): number[] {
   if (!Array.isArray(v)) return [];
   return v.map((item) => {
     // Support both number format [123] and object format [{ variantId: "123" }]
     if (typeof item === "object" && item !== null) {
       const id = (item as Record<string, unknown>).variantId ?? (item as Record<string, unknown>).id;
-      return Number(id);
+      return extractNumericId(id);
     }
-    return Number(item);
+    return extractNumericId(item);
   }).filter(n => Number.isFinite(n) && n > 0).map(Math.trunc);
 }
 
@@ -28,16 +35,16 @@ function asQtyMap(v: unknown): Record<string, number> | null {
     for (const item of v) {
       if (typeof item === "object" && item !== null) {
         const obj = item as Record<string, unknown>;
-        const id = clampInt(obj.variantId ?? obj.id, 0);
+        const id = extractNumericId(obj.variantId ?? obj.id);
         const qty = clampInt(obj.quantity ?? 1, 0);
-        if (id > 0 && qty > 0) out[String(id)] = qty;
+        if (id > 0 && qty > 0) out[String(Math.trunc(id))] = qty;
       }
     }
   } else if (typeof v === "object") {
     for (const k of Object.keys(v as Record<string, unknown>)) {
-      const id = clampInt(k, 0);
+      const id = extractNumericId(k);
       const qty = clampInt((v as Record<string, unknown>)[k], 0);
-      if (id > 0 && qty > 0) out[String(id)] = qty;
+      if (id > 0 && qty > 0) out[String(Math.trunc(id))] = qty;
     }
   }
 

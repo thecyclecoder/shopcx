@@ -29,7 +29,7 @@ export const address: RouteHandler = async ({ auth, route, req }) => {
   const address1 = s(payload?.address1);
   const address2 = s(payload?.address2);
   const city = s(payload?.city);
-  const provinceCode = s(payload?.provinceCode);
+  const provinceCode = s(payload?.provinceCode) || s(payload?.province);
   const zip = s(payload?.zip);
   const countryCode = s(payload?.countryCode || "US");
   const country = s(payload?.country || "United States");
