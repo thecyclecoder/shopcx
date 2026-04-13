@@ -144,11 +144,23 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
 
   // Preserve grandfathered pricing on flavor swaps
   // If the old variant had a lower-than-standard base price, apply it to the new variant
-  if (oldVariants.length === 1 && newVariants && Object.keys(newVariants).length === 1) {
+  // Supports both oldVariants (array) and oldLineId (single line) swaps
+  const isSingleSwap = (oldVariants.length === 1 || !!oldLineId) && newVariants && Object.keys(newVariants).length === 1;
+  if (isSingleSwap) {
     try {
       const adminDb = createAdminClient();
-      const oldVariantId = String(oldVariants[0]);
-      const newVariantId = Object.keys(newVariants)[0];
+      const newVariantId = Object.keys(newVariants!)[0];
+
+      // Resolve old variant ID: from oldVariants array or from oldLineId → subscription items
+      let oldVariantId: string | null = oldVariants.length === 1 ? String(oldVariants[0]) : null;
+      if (!oldVariantId && oldLineId) {
+        const { data: subData } = await adminDb.from("subscriptions")
+          .select("items").eq("shopify_contract_id", String(contractId)).single();
+        const items = (subData?.items as { variant_id?: string; line_id?: string }[]) || [];
+        const lineItem = items.find(i => i.line_id === oldLineId || `gid://shopify/SubscriptionLine/${i.line_id}` === oldLineId);
+        oldVariantId = lineItem?.variant_id ? String(lineItem.variant_id) : null;
+      }
+      if (!oldVariantId) throw new Error("skip");
 
       // Get the sub's current item pricing
       const { data: subData } = await adminDb.from("subscriptions")
