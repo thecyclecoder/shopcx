@@ -2817,12 +2817,14 @@ async function handle30DayFlow(
           const reviews = await getReviewsForProducts(wsId, productIds);
           const best = reviews.find(r => r.rating >= 4 && r.summary);
           if (best) {
-            reviewBlock = ` This review from ${best.reviewer_name || "a customer"} says it best: "${best.summary || best.body?.slice(0, 100)}"`;
+            const reviewer = best.reviewer_name || "a customer";
+            const quote = best.summary || best.body?.slice(0, 100) || "";
+            reviewBlock = `</p><p><b>${reviewer} says: "${quote}"</b></p><p>`;
           }
         } catch { /* no reviews available */ }
       }
 
-      const saveMsg = `<p>I completely understand your concern. Most customers see the best results when they stay consistent for 2-3 months.${reviewBlock}</p><p>Would you like to give it a bit more time, or would you prefer I go ahead and process your return?</p>`;
+      const saveMsg = `<p>I completely understand your concern. Most customers see the best results when they stay consistent for 2-3 months.${reviewBlock}Would you like to give it a bit more time, or would you prefer I go ahead and process your return?</p>`;
 
       return {
         action: "respond",
