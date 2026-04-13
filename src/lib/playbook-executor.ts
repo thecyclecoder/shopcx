@@ -671,7 +671,7 @@ function basePrompt(step: PlaybookStep, pers: { name?: string; tone?: string; si
 - Use HTML for formatting (<p>, <b>, <ul>, <li>). Do NOT use markdown.
 - Max 2-3 sentences per paragraph.
 - NEVER include order numbers (like SC127106) or subscription contract numbers in your response. Refer to orders by date and amount: "your April 4th order for $5.87". Log IDs in system notes only.
-- NEVER re-greet the customer. No "Hi [name]," after the first message.
+- NEVER introduce yourself or re-greet the customer. No "Hi [name]," or "I'm [name]" — introductions are handled separately.
 - NEVER repeat context already covered (order details, subscription timeline, product lists). The customer already knows — just talk about the current offer.
 - Messages should get SHORTER as the conversation progresses.
 - NEVER promise to connect with a specialist or escalate to a supervisor — you handle the full resolution.
@@ -686,11 +686,14 @@ function basePrompt(step: PlaybookStep, pers: { name?: string; tone?: string; si
 function wrapResponse(response: string, pers: { name?: string; sign_off?: string | null } | null, isFirstMessage: boolean): string {
   let result = response;
 
-  // Add intro on first message
+  // Add intro on first message (skip if AI already introduced itself)
   if (isFirstMessage && pers?.name) {
-    const hasGreeting = /^(hi|hey|hello|dear)\b/i.test(result.trim());
-    if (!hasGreeting) {
-      result = `Hi, I'm ${pers.name} and I'm here to help you with this.\n\n${result}`;
+    const alreadyIntros = new RegExp(`I'm ${pers.name}|I am ${pers.name}|my name is ${pers.name}`, "i").test(result);
+    if (!alreadyIntros) {
+      const hasGreeting = /^(hi|hey|hello|dear)\b/i.test(result.trim());
+      if (!hasGreeting) {
+        result = `Hi, I'm ${pers.name} and I'm here to help you with this.\n\n${result}`;
+      }
     }
   }
 
@@ -718,17 +721,11 @@ async function handleIdentifyOrder(
   }
 
   if (orders.length === 1) {
-    const o = orders[0];
-    const items = (o.line_items as { title?: string }[] || []).map(i => i.title).join(", ");
-    const date = new Date(o.created_at).toLocaleDateString("en-US", { month: "long", day: "numeric" });
-    const response = await aiGenerate(
-      basePrompt(step, pers, policyRules),
-      `Customer data:\n${dataCtx}\n\nCustomer message: "${msg}"\n\nThey have one recent order from ${date} for ${items} ($${(o.total_cents / 100).toFixed(2)}). Confirm this is the order they're asking about. Do NOT include the order number — refer to it by date and amount only.`,
-    );
+    // Single order — skip confirmation and auto-advance
     return {
-      action: "respond", response,
-      context: { identified_orders: [o.order_number] },
-      systemNote: `[Playbook] Single order found: ${o.order_number}. Confirming with customer.`,
+      action: "advance", newStep: step.step_order + 1,
+      context: { identified_orders: [orders[0].order_number] },
+      systemNote: `[Playbook] Single order auto-identified: ${orders[0].order_number}. Skipping confirmation.`,
     };
   }
 
