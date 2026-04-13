@@ -1022,9 +1022,23 @@ async function handleApplyPolicy(
 
     if (allCheckout && allWithin30) {
       // Get product IDs from the order for review matching
-      const productIds = orderObjs.flatMap(o =>
-        ((o.line_items as { product_id?: string }[]) || []).map(i => i.product_id).filter(Boolean)
+      // Resolve product IDs from variant IDs (line items may not have product_id)
+      const variantIds = orderObjs.flatMap(o =>
+        ((o.line_items as { variant_id?: string; product_id?: string }[]) || [])
+          .map(i => i.product_id || i.variant_id).filter(Boolean)
       );
+      const productIds: string[] = [];
+      if (variantIds.length) {
+        const { data: prods } = await admin.from("products").select("shopify_product_id, variants").eq("workspace_id", wsId);
+        for (const p of prods || []) {
+          for (const v of (p.variants as { id?: string }[]) || []) {
+            if (variantIds.includes(String(v.id))) {
+              productIds.push(p.shopify_product_id);
+              break;
+            }
+          }
+        }
+      }
 
       return {
         action: "respond",
