@@ -37,6 +37,9 @@ export async function GET(
     if (filters.tag) query = query.contains("tags", [filters.tag]);
     if (filters.search) query = query.ilike("subject", `%${filters.search}%`);
 
+    // Exclude snoozed tickets (matches ticket list page behavior)
+    query = query.or("snoozed_until.is.null,snoozed_until.lte." + new Date().toISOString());
+
     query = query.limit(100);
     const { count } = await query;
     return { ...view, count: count ?? 0 };
