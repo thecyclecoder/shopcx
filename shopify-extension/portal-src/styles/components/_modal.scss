@@ -232,7 +232,7 @@ body.sp-modal-open {
 
 .sp-addswap-prodrow__img {
   width: 100%;
-  height: auto;
+  aspect-ratio: 1 / 1;
   border-radius: 14px;
   border: 1px solid var(--sp-border);
   object-fit: cover;
@@ -298,9 +298,9 @@ body.sp-modal-open {
 
 .sp-addswap-selectbtn {
   display: block;
-  width: 100%;
-  margin-top: 10px;
-  padding: 10px 16px;
+  width: calc(100% - 40px);
+  margin: 10px 20px 15px;
+  padding: 10px 20px;
   font-size: 14px;
   font-weight: 700;
   text-align: center;
@@ -339,25 +339,23 @@ body.sp-modal-open {
 /* Selected product summary (Step 2) */
 .sp-addswap-selected {
   margin-top: 12px;
-  border: 1px solid var(--sp-border);
   border-radius: 16px;
   padding: 12px;
 
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--sp-gap-12, 12px);
+  grid-template-columns: 120px 1fr;
+  gap: 12px;
   align-items: center;
 
-  background: #fff;
+  background: #f9fafb;
 }
 
 .sp-addswap-selected__img {
-  width: 100%;
-  height: auto;
-  border-radius: 14px;
-  border: 1px solid var(--sp-border);
+  width: 120px;
+  height: 120px;
+  border-radius: 12px;
+  border: none;
   object-fit: cover;
-  flex: 0 0 auto;
   background: #fff;
 }
 
@@ -367,7 +365,7 @@ body.sp-modal-open {
 
 .sp-addswap-selected__text {
   min-width: 0;
-  text-align: center;
+  text-align: left;
 }
 
 .sp-addswap-selected__title {

@@ -208,12 +208,15 @@ function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing, 
   // Close panel when forceClose changes (after mutations)
   useEffect(() => { setOpen(false); }, [forceClose]);
 
+  const imgSrc = getLineImage(ln);
+  const sizedImg = imgSrc ? (imgSrc.includes('?') ? imgSrc + '&width=800' : imgSrc + '?width=800') : '';
+
   return (
     <div class="sp-line-group">
+      {sizedImg
+        ? <img class="sp-line__hero" src={sizedImg} alt={safeStr(ln.title)} />
+        : <div class="sp-line__hero sp-line__hero--placeholder" />}
       <div class="sp-line">
-        {getLineImage(ln)
-          ? <img class="sp-line__img" src={getLineImage(ln)} alt={safeStr(ln.title)} />
-          : <div class="sp-line__img sp-line__img--placeholder" />}
         <div class="sp-line__meta">
           <div class="sp-line__title">{safeStr(ln.title) || 'Item'}</div>
           <div class="sp-line__subwrap sp-muted">
@@ -298,10 +301,8 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
         {lines.map((ln, i) => (
           isCancelled ? (
             <div key={i} class="sp-line-group">
+              {(() => { const src = getLineImage(ln); const sized = src ? (src.includes('?') ? src + '&width=800' : src + '?width=800') : ''; return sized ? <img class="sp-line__hero" src={sized} alt={safeStr(ln.title)} /> : <div class="sp-line__hero sp-line__hero--placeholder" />; })()}
               <div class="sp-line">
-                {getLineImage(ln)
-                  ? <img class="sp-line__img" src={getLineImage(ln)} alt={safeStr(ln.title)} />
-                  : <div class="sp-line__img sp-line__img--placeholder" />}
                 <div class="sp-line__meta">
                   <div class="sp-line__title">{safeStr(ln.title) || 'Item'}</div>
                   <div class="sp-line__subwrap sp-muted">
