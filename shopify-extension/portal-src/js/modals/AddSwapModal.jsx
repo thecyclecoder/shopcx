@@ -51,18 +51,19 @@ function computePrice(variant, qty) {
 
 function Stars({ value, count }) {
   const v = Number(value) || 0;
+  if (v === 0 && !count) return null;
   const full = Math.floor(v);
   const half = v - full >= 0.25;
-  const stars = Array.from({ length: 5 }, (_, i) => {
-    if (i < full) return '\u2605';
-    if (i === full && half) return '\u2605';
-    return '\u2606';
-  });
   return (
     <span class="sp-addswap-stars">
-      <span class="sp-addswap-stars__glyphs">{stars.join('')}</span>
-      {v > 0 && <span class="sp-addswap-stars__text">{v.toFixed(1)}</span>}
-      {count && <span class="sp-addswap-stars__text">({count})</span>}
+      <span class="sp-addswap-stars__glyphs">
+        {Array.from({ length: 5 }, (_, i) => {
+          const filled = i < full || (i === full && half);
+          return <span key={i} style={{ opacity: filled ? 1 : 0.25 }}>{'\u2605'}</span>;
+        })}
+      </span>
+      {v > 0 && <span class="sp-addswap-stars__text">{v.toFixed(2)}</span>}
+      {count > 0 && <span class="sp-addswap-stars__text">({count})</span>}
     </span>
   );
 }
