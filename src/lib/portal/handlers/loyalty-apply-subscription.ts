@@ -178,10 +178,10 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
     const result = await applyDiscountWithReplace(apiKey, String(contractId), code);
     if (!result.success) {
-      return jsonErr({ error: "coupon_apply_failed", message: result.error }, 502);
+      return jsonErr({ error: "coupon_apply_failed", message: result.error, request_payload: { contractId, code } }, 502);
     }
   } catch (e) {
-    return handleAppstleError(e);
+    return handleAppstleError(e, { route: "loyaltyApplySubscription", payload: { contractId, code } });
   }
 
   // Mark redemption as 'applied' (if it was from an existing coupon)

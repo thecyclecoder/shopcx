@@ -150,8 +150,41 @@ export async function GET(
   // Top remedy (by acceptance rate with min 5 shows)
   const topRemedy = remedyPerformance.filter(r => r.shown >= 5).sort((a, b) => b.acceptance_rate - a.acceptance_rate)[0] || null;
 
+  // ── Error Log ──
+  const { data: errorEvents } = await admin
+    .from("customer_events")
+    .select("customer_id, event_type, summary, properties, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("event_type", "portal.error")
+    .gte("created_at", start)
+    .lte("created_at", end)
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  // Resolve customer names for error log
+  const errorCustomerIds = [...new Set((errorEvents || []).map(e => e.customer_id))];
+  const customerNames: Record<string, string> = {};
+  if (errorCustomerIds.length) {
+    const { data: customers } = await admin.from("customers").select("id, first_name, last_name, email").in("id", errorCustomerIds);
+    for (const c of customers || []) {
+      customerNames[c.id] = `${c.first_name || ""} ${c.last_name || ""}`.trim() || c.email || c.id;
+    }
+  }
+
+  const errorLog = (errorEvents || []).map(e => ({
+    timestamp: e.created_at,
+    customer: customerNames[e.customer_id] || e.customer_id,
+    customer_id: e.customer_id,
+    route: (e.properties as Record<string, unknown>)?.route || "unknown",
+    error: (e.properties as Record<string, unknown>)?.error || "unknown",
+    message: (e.properties as Record<string, unknown>)?.message || null,
+    appstle_details: (e.properties as Record<string, unknown>)?.appstle_details || null,
+    request_payload: (e.properties as Record<string, unknown>)?.request_payload || null,
+  }));
+
   return NextResponse.json({
     range,
+    error_log: errorLog,
     summary: {
       sessions: sessionCount,
       cancel_flow_starts: cancelFlowStarts,

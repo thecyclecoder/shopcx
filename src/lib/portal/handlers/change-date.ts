@@ -43,10 +43,11 @@ export const changeDate: RouteHandler = async ({ auth, route, req }) => {
       { method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store" }
     );
     if (!res.ok && res.status !== 204) {
-      throw new Error(`Appstle API error: ${res.status}`);
+      const errText = await res.text().catch(() => "");
+      throw Object.assign(new Error(`Appstle API error: ${res.status}`), { details: errText });
     }
   } catch (e) {
-    return handleAppstleError(e);
+    return handleAppstleError(e, { route: "changeDate", payload: { contractId, nextBillingDate } });
   }
 
   // Update local DB

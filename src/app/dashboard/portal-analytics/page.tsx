@@ -41,12 +41,24 @@ interface CancelFunnel {
   abandoned: number;
 }
 
+interface ErrorLogEntry {
+  timestamp: string;
+  customer: string;
+  customer_id: string;
+  route: string;
+  error: string;
+  message: string | null;
+  appstle_details: string | null;
+  request_payload: Record<string, unknown> | null;
+}
+
 interface AnalyticsData {
   summary: Summary;
   portal_actions: PortalAction[];
   cancel_reasons: CancelReason[];
   remedy_performance: RemedyPerf[];
   cancel_funnel: CancelFunnel;
+  error_log: ErrorLogEntry[];
 }
 
 const DATE_RANGES = [
@@ -305,6 +317,56 @@ export default function PortalAnalyticsPage() {
                 </table>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Error Log ── */}
+      {data && data.error_log && data.error_log.length > 0 && (
+        <div className="rounded-xl border border-red-200 bg-white p-5 shadow-sm dark:border-red-800/50 dark:bg-zinc-900">
+          <h3 className="text-sm font-semibold text-red-600 dark:text-red-400 mb-4">Error Log ({data.error_log.length})</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-zinc-400 uppercase tracking-wider border-b border-zinc-100 dark:border-zinc-800">
+                  <th className="pb-2 pr-4">Time</th>
+                  <th className="pb-2 pr-4">Customer</th>
+                  <th className="pb-2 pr-4">Route</th>
+                  <th className="pb-2 pr-4">Error</th>
+                  <th className="pb-2">Details</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-50 dark:divide-zinc-800">
+                {data.error_log.map((e, i) => (
+                  <tr key={i} className="group">
+                    <td className="py-2.5 pr-4 text-zinc-400 whitespace-nowrap text-xs">
+                      {new Date(e.timestamp).toLocaleString()}
+                    </td>
+                    <td className="py-2.5 pr-4 text-zinc-700 dark:text-zinc-300">
+                      <a href={`/dashboard/customers/${e.customer_id}`} className="hover:text-indigo-600 dark:hover:text-indigo-400">
+                        {e.customer}
+                      </a>
+                    </td>
+                    <td className="py-2.5 pr-4 font-mono text-xs text-zinc-500">{e.route}</td>
+                    <td className="py-2.5 pr-4">
+                      <span className="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">
+                        {e.error}
+                      </span>
+                    </td>
+                    <td className="py-2.5 text-xs text-zinc-400 max-w-xs">
+                      {e.message && <div>{e.message}</div>}
+                      {e.appstle_details && <div className="mt-0.5 font-mono text-red-400 truncate">{typeof e.appstle_details === 'string' ? e.appstle_details.substring(0, 200) : JSON.stringify(e.appstle_details).substring(0, 200)}</div>}
+                      {e.request_payload && (
+                        <details className="mt-1">
+                          <summary className="cursor-pointer text-zinc-400 hover:text-zinc-600">Payload</summary>
+                          <pre className="mt-1 text-xs bg-zinc-50 dark:bg-zinc-800 p-2 rounded overflow-x-auto max-h-32">{JSON.stringify(e.request_payload, null, 2)}</pre>
+                        </details>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

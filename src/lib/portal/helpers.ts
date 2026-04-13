@@ -108,7 +108,7 @@ export async function checkPortalBan(workspaceId: string, shopifyCustomerId: str
 /**
  * Wrap Appstle errors into portal-friendly responses.
  */
-export function handleAppstleError(e: unknown): NextResponse {
+export function handleAppstleError(e: unknown, context?: { route?: string; payload?: unknown }): NextResponse {
   const err = e as { message?: string; status?: number; details?: unknown };
   if (err?.message === "Appstle not configured") {
     return jsonErr({ error: "missing_appstle_config" }, 500);
@@ -116,5 +116,7 @@ export function handleAppstleError(e: unknown): NextResponse {
   return jsonErr({
     error: "appstle_error",
     message: err?.message || "Unknown error",
+    appstle_details: err?.details || null,
+    request_payload: context?.payload || null,
   }, 502);
 }

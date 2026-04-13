@@ -120,10 +120,13 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
       body: JSON.stringify(body),
       cache: "no-store",
     });
-    if (!res.ok) throw new Error(`Appstle API error: ${res.status}`);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw Object.assign(new Error(`Appstle API error: ${res.status}`), { details: errText });
+    }
     updated = await res.json().catch(() => null);
   } catch (e) {
-    return handleAppstleError(e);
+    return handleAppstleError(e, { route: "replaceVariants", payload: body });
   }
 
   // Preserve grandfathered pricing on flavor swaps

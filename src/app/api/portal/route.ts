@@ -95,6 +95,12 @@ async function handle(req: NextRequest) {
       return jsonErr({ error: "unknown_route", route }, 400);
     }
 
+    // Capture request body for error logging
+    let requestPayload: unknown = null;
+    if (req.method === "POST") {
+      try { requestPayload = await req.clone().json(); } catch { /* not JSON */ }
+    }
+
     const response = await handler({ req, url, auth, route });
 
     // Log error responses for portal analytics visibility
@@ -109,7 +115,14 @@ async function handle(req: NextRequest) {
             eventType: "portal.error",
             source: "portal",
             summary: `Portal error on ${route}: ${body?.error || response.status}`,
-            properties: { route, status: response.status, error: body?.error || null },
+            properties: {
+              route,
+              status: response.status,
+              error: body?.error || null,
+              message: body?.message || null,
+              appstle_details: body?.appstle_details || null,
+              request_payload: requestPayload,
+            },
           });
         }
       } catch { /* non-fatal */ }
