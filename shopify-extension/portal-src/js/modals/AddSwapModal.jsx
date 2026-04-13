@@ -10,14 +10,13 @@ import Modal from '../components/Modal.jsx';
 function pickImage(obj) {
   const src = obj?.image?.src || obj?.featuredImage?.src || obj?.image || '';
   if (!src) return '';
-  // Use Shopify _300x300 size transform for smaller images
-  return src.includes('?') ? src + '&width=300' : src + '?width=300';
+  return src.includes('?') ? src + '&width=800' : src + '?width=800';
 }
 
 function variantImage(v) {
   const src = v?.image?.src || '';
   if (!src) return '';
-  return src.includes('?') ? src + '&width=300' : src + '?width=300';
+  return src.includes('?') ? src + '&width=800' : src + '?width=800';
 }
 
 function cents(v) {
@@ -63,7 +62,6 @@ function Stars({ value, count }) {
         })}
       </span>
       {v > 0 && <span class="sp-addswap-stars__text">{v.toFixed(2)}</span>}
-      {count > 0 && <span class="sp-addswap-stars__text">({count})</span>}
     </span>
   );
 }
@@ -79,9 +77,11 @@ export default function AddSwapModal({ mode, contract, line, catalog, onClose, o
   const isSwap = mode === 'swap';
   const allProducts = Array.isArray(catalog) ? catalog : [];
   // When swapping, exclude the current product (customer should use "Change flavor" for same-product swaps)
+  // Match by both Shopify productId and internal UUID (internalId) since line.productId may be either
   // Also exclude products with no in-stock variants
+  const linePid = String(line?.productId || '');
   const products = allProducts
-    .filter(p => !(isSwap && line && String(p.productId || p.id) === String(line.productId)))
+    .filter(p => !(isSwap && line && (String(p.productId || '') === linePid || String(p.internalId || '') === linePid)))
     .filter(p => (p.variants || []).some(v => v.inventory_quantity == null || v.inventory_quantity > 0));
 
   async function handleSubmit() {

@@ -84,18 +84,20 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
     const { data: products } = await admin
       .from("products")
       .select(
-        "shopify_product_id, title, handle, image_url, variants, rating, rating_count"
+        "id, shopify_product_id, title, handle, image_url, variants, rating, rating_count, metafields"
       )
       .eq("workspace_id", auth.workspaceId)
       .in("shopify_product_id", productIds);
 
     if (products) {
       catalog = products.map((p) => ({
+        internalId: p.id,
         productId: p.shopify_product_id,
         title: p.title,
         handle: p.handle,
         image: { src: p.image_url || "", alt: p.title },
         rating: { value: p.rating || 0, count: p.rating_count || 0 },
+        metafields: typeof p.metafields === "object" && p.metafields ? p.metafields : {},
         variants: (Array.isArray(p.variants) ? p.variants : []).filter(
           (v: { inventory_quantity?: number }) => v.inventory_quantity == null || v.inventory_quantity > 0
         ),

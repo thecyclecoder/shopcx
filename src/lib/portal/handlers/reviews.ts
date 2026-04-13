@@ -32,14 +32,21 @@ export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
   }
 
   // Map product IDs to product names (for matching reviews with unknown product IDs)
+  // Support both Shopify product IDs and internal UUIDs
   const { data: products } = await admin.from("products")
-    .select("shopify_product_id, title")
+    .select("id, shopify_product_id, title")
     .eq("workspace_id", auth.workspaceId)
-    .in("shopify_product_id", productIds);
+    .or(productIds.map(id => `shopify_product_id.eq.${id},id.eq.${id}`).join(","));
 
   const productNameToId: Record<string, string> = {};
+  const internalToShopifyId: Record<string, string> = {};
   for (const p of products || []) {
     if (p.title) productNameToId[p.title.toLowerCase()] = p.shopify_product_id;
+    if (p.id && p.shopify_product_id) internalToShopifyId[p.id] = p.shopify_product_id;
+    // Ensure byProductId has entries for both ID formats
+    if (p.id && productIds.includes(p.id) && !byProductId[p.shopify_product_id]) {
+      byProductId[p.shopify_product_id] = { ok: true, reviews: [] };
+    }
   }
 
   // Fetch reviews: try by shopify_product_id first, then by product_name match

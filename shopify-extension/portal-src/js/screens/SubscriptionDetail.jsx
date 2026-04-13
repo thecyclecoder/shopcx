@@ -228,8 +228,12 @@ function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing, 
   const sizedImg = imgSrc ? (imgSrc.includes('?') ? imgSrc + '&width=800' : imgSrc + '?width=800') : '';
 
   // Find flavor variants for "Change flavor" — same product, in-stock, not current variant
+  // Match by both Shopify productId and internal UUID (internalId) since ln.productId may be either
   const catalogProducts = Array.isArray(catalog) ? catalog : [];
-  const currentProduct = catalogProducts.find(p => String(p.productId || p.id) === String(ln.productId));
+  const lnPid = String(ln.productId || '');
+  const currentProduct = catalogProducts.find(p =>
+    String(p.productId || '') === lnPid || String(p.internalId || '') === lnPid
+  );
   const flavorVariants = (currentProduct?.variants || []).filter(v =>
     String(v.id) !== String(ln.variantId) && (v.inventory_quantity == null || v.inventory_quantity > 0)
   );
@@ -426,44 +430,138 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
   );
 }
 
+const US_STATES = [
+  ['AL','Alabama'],['AK','Alaska'],['AZ','Arizona'],['AR','Arkansas'],['CA','California'],
+  ['CO','Colorado'],['CT','Connecticut'],['DE','Delaware'],['FL','Florida'],['GA','Georgia'],
+  ['HI','Hawaii'],['ID','Idaho'],['IL','Illinois'],['IN','Indiana'],['IA','Iowa'],
+  ['KS','Kansas'],['KY','Kentucky'],['LA','Louisiana'],['ME','Maine'],['MD','Maryland'],
+  ['MA','Massachusetts'],['MI','Michigan'],['MN','Minnesota'],['MS','Mississippi'],['MO','Missouri'],
+  ['MT','Montana'],['NE','Nebraska'],['NV','Nevada'],['NH','New Hampshire'],['NJ','New Jersey'],
+  ['NM','New Mexico'],['NY','New York'],['NC','North Carolina'],['ND','North Dakota'],['OH','Ohio'],
+  ['OK','Oklahoma'],['OR','Oregon'],['PA','Pennsylvania'],['RI','Rhode Island'],['SC','South Carolina'],
+  ['SD','South Dakota'],['TN','Tennessee'],['TX','Texas'],['UT','Utah'],['VT','Vermont'],
+  ['VA','Virginia'],['WA','Washington'],['WV','West Virginia'],['WI','Wisconsin'],['WY','Wyoming'],
+  ['DC','District of Columbia'],['PR','Puerto Rico'],['VI','Virgin Islands'],['GU','Guam'],
+  ['AS','American Samoa'],['MP','Northern Mariana Islands'],
+];
+
 function AddressCard({ contract, showToast, onUpdate }) {
   const addr = contract?.deliveryMethod?.address || {};
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({
     firstName: addr.firstName || '', lastName: addr.lastName || '',
     address1: addr.address1 || '', address2: addr.address2 || '',
-    city: addr.city || '', province: addr.province || '', zip: addr.zip || '',
+    city: addr.city || '', province: addr.province || addr.provinceCode || '', zip: addr.zip || '',
   });
   const [busy, setBusy] = useState(false);
+  const [verification, setVerification] = useState(null); // { entered, suggested, errors }
 
-  async function save() {
+  async function save(skipVerification) {
     setBusy(true);
+    setVerification(null);
     try {
-      await postJson('address', { contractId: contract.id, ...form });
+      const resp = await postJson('address', { contractId: contract.id, ...form, skipVerification: !!skipVerification });
+      if (resp?.verification && !resp.verification.valid) {
+        // Show verification result — let customer choose
+        setVerification(resp.verification);
+        setBusy(false);
+        return;
+      }
       showToast('Address updated!', 'success');
       clearCaches(); setEditing(false); onUpdate();
     } catch { showToast('Could not update address.', 'error'); }
     setBusy(false);
   }
 
-  const display = [addr.address1, addr.address2, [addr.city, addr.province, addr.zip].filter(Boolean).join(', ')].filter(Boolean).join('\n');
+  function useSuggested() {
+    if (!verification?.suggested) return;
+    const s = verification.suggested;
+    setForm(prev => ({
+      ...prev,
+      address1: s.address1 || prev.address1,
+      address2: s.address2 || '',
+      city: s.city || prev.city,
+      province: s.province || prev.province,
+      zip: s.zip || prev.zip,
+    }));
+    setVerification(null);
+    // Re-save with the suggested address (skip verification since it came from EasyPost)
+    setTimeout(() => save(true), 100);
+  }
+
+  function useEntered() {
+    setVerification(null);
+    save(true);
+  }
+
+  const display = [addr.address1, addr.address2, [addr.city, addr.province || addr.provinceCode, addr.zip].filter(Boolean).join(', ')].filter(Boolean).join('\n');
+
+  const textFields = ['firstName', 'lastName', 'address1', 'address2', 'city', 'zip'];
+  const fieldLabels = { firstName: 'First name', lastName: 'Last name', address1: 'Address', address2: 'Apt / Suite', city: 'City', zip: 'ZIP code' };
 
   return (
     <div class="sp-card sp-detail__card">
       <div class="sp-detail__sectionhead"><div class="sp-title2">Shipping address</div></div>
       <p class="sp-muted" style={{ whiteSpace: 'pre-line', marginBottom: '12px' }}>{display || 'No address on file'}</p>
-      <button class="sp-btn sp-btn--ghost" onClick={() => setEditing(true)}>Change address</button>
+      <button class="sp-btn sp-btn--ghost" onClick={() => { setVerification(null); setEditing(true); }}>Change address</button>
       {editing && (
-        <Modal title="Change shipping address" onClose={() => setEditing(false)} footer={
-          <><button class="sp-btn sp-btn-primary" disabled={busy} onClick={save}>Save</button>
-          <button class="sp-btn sp-btn--ghost" onClick={() => setEditing(false)}>Cancel</button></>
+        <Modal title="Change shipping address" onClose={() => { setEditing(false); setVerification(null); }} footer={
+          verification ? null : (
+            <><button class="sp-btn sp-btn-primary" disabled={busy} onClick={() => save(false)}>{busy ? 'Verifying…' : 'Save'}</button>
+            <button class="sp-btn sp-btn--ghost" onClick={() => { setEditing(false); setVerification(null); }}>Cancel</button></>
+          )
         }>
-          {['firstName', 'lastName', 'address1', 'address2', 'city', 'province', 'zip'].map(k => (
-            <div key={k} class="sp-field">
-              <label class="sp-field__label">{k.replace(/([A-Z])/g, ' $1').replace(/^\w/, c => c.toUpperCase())}</label>
-              <input class="sp-input" value={form[k]} onInput={(e) => setForm(prev => ({ ...prev, [k]: e.target.value }))} />
+          {verification ? (
+            <div class="sp-address-verify">
+              {verification.errors?.length > 0 && (
+                <div class="sp-address-verify__errors">
+                  {verification.errors.map((e, i) => <div key={i} class="sp-muted">{e}</div>)}
+                </div>
+              )}
+              {verification.suggested && (
+                <>
+                  <div class="sp-address-verify__label">Suggested address</div>
+                  <button type="button" class="sp-address-verify__option sp-address-verify__option--suggested" onClick={useSuggested}>
+                    <div>{verification.suggested.address1}</div>
+                    {verification.suggested.address2 && <div>{verification.suggested.address2}</div>}
+                    <div>{verification.suggested.city}, {verification.suggested.province} {verification.suggested.zip}</div>
+                    <span class="sp-address-verify__badge">Use this address</span>
+                  </button>
+                  <div class="sp-address-verify__label">You entered</div>
+                  <button type="button" class="sp-address-verify__option" onClick={useEntered}>
+                    <div>{verification.entered.address1}</div>
+                    {verification.entered.address2 && <div>{verification.entered.address2}</div>}
+                    <div>{verification.entered.city}, {verification.entered.province} {verification.entered.zip}</div>
+                    <span class="sp-address-verify__badge sp-address-verify__badge--muted">Use as entered</span>
+                  </button>
+                </>
+              )}
+              {!verification.suggested && (
+                <div class="sp-address-verify__actions">
+                  <button class="sp-btn sp-btn--ghost" onClick={() => setVerification(null)}>Edit address</button>
+                  <button class="sp-btn sp-btn-primary" onClick={useEntered}>Save anyway</button>
+                </div>
+              )}
             </div>
-          ))}
+          ) : (
+            <>
+              {textFields.map(k => (
+                <div key={k} class="sp-field">
+                  <label class="sp-field__label">{fieldLabels[k]}</label>
+                  <input class="sp-input" value={form[k]} onInput={(e) => setForm(prev => ({ ...prev, [k]: e.target.value }))} />
+                </div>
+              ))}
+              <div class="sp-field">
+                <label class="sp-field__label">State</label>
+                <select class="sp-select" value={form.province} onChange={(e) => setForm(prev => ({ ...prev, province: e.target.value }))}>
+                  <option value="">Select state</option>
+                  {US_STATES.map(([code, name]) => (
+                    <option key={code} value={code}>{name}</option>
+                  ))}
+                </select>
+              </div>
+            </>
+          )}
         </Modal>
       )}
     </div>
@@ -581,14 +679,14 @@ function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
           <button class="sp-btn sp-btn--ghost sp-btn--sm" disabled={busy} onClick={() => removeDiscount(d)}>Remove</button>
         </div>
       ))}
-      {/* Coupon input: blocked when manual discount exists */}
-      {hasManualDiscount ? (
+      {/* Coupon input: hidden when any coupon is applied, blocked when manual discount exists */}
+      {hasAnyCoupon ? null : hasManualDiscount ? (
         <div class="sp-muted" style={{ marginTop: allDiscounts.length > 0 ? '12px' : '0', fontSize: '13px' }}>
           Remove your existing discount to apply a coupon code
         </div>
       ) : (
         <>
-          <div class="sp-detail__coupon-row" style={allDiscounts.length > 0 ? { marginTop: '12px' } : undefined}>
+          <div class="sp-detail__coupon-row">
             <input class="sp-input" placeholder="Discount code" value={code}
               onInput={(e) => setCode(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') apply(); }} />
             <button class="sp-btn sp-btn-primary" disabled={busy || !code.trim()} onClick={apply}>Apply</button>
@@ -632,6 +730,13 @@ function FrequencyCard({ contract, showToast, onUpdate, startAction, completeAct
     { label: 'Every 2 Months', interval: 'WEEK', count: 8 },
   ];
 
+  // Determine which option matches the current billing policy
+  const currentInterval = (contract?.billingPolicy?.interval || '').toUpperCase();
+  const currentCount = Number(contract?.billingPolicy?.intervalCount) || 0;
+  function isCurrent(o) {
+    return o.interval === currentInterval && o.count === currentCount;
+  }
+
   async function save() {
     const opt = options.find(o => o.label === selected);
     if (!opt) return;
@@ -659,12 +764,17 @@ function FrequencyCard({ contract, showToast, onUpdate, startAction, completeAct
           <button class="sp-btn sp-btn--ghost" onClick={() => setModal(false)}>Cancel</button></>
         }>
           <div class="sp-radio-list">
-            {options.map(o => (
-              <label key={o.label} class={'sp-radio-row' + (selected === o.label ? ' is-selected' : '')}>
-                <input type="radio" name="freq" value={o.label} checked={selected === o.label} onChange={() => setSelected(o.label)} />
-                <span>{o.label}</span>
-              </label>
-            ))}
+            {options.map(o => {
+              const current = isCurrent(o);
+              return (
+                <label key={o.label} class={'sp-radio-row' + (selected === o.label ? ' is-selected' : '') + (current ? ' is-disabled' : '')}>
+                  <input type="radio" name="freq" value={o.label} checked={selected === o.label}
+                    disabled={current} onChange={() => setSelected(o.label)} />
+                  <span>{o.label}</span>
+                  {current && <span class="sp-badge sp-badge--muted" style={{ marginLeft: '8px', fontSize: '11px' }}>Current</span>}
+                </label>
+              );
+            })}
           </div>
         </Modal>
       )}
@@ -808,7 +918,19 @@ export default function SubscriptionDetail() {
     payment_update_url: contract?.portalState?.paymentUpdateUrl || '',
   } : null;
 
-  const productIds = lines.map(ln => shortId(ln?.productId)).filter(Boolean);
+  // Resolve line product IDs to Shopify product IDs for review lookups
+  // ln.productId may be an internal UUID; catalog has both internalId and productId (Shopify)
+  const catalogProducts = Array.isArray(config?.catalog) ? config.catalog : [];
+  const productIds = lines.map(ln => {
+    const lnPid = String(ln?.productId || '');
+    if (!lnPid) return '';
+    // Find matching catalog entry by either ID format
+    const match = catalogProducts.find(p =>
+      String(p.productId || '') === lnPid || String(p.internalId || '') === lnPid
+    );
+    // Return the Shopify product ID for the reviews API
+    return shortId(match?.productId || lnPid);
+  }).filter(Boolean);
 
   return (
     <div class="sp-wrap sp-detail">

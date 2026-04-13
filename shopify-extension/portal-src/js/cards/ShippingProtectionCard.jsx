@@ -1,4 +1,4 @@
-// cards/ShippingProtectionCard.jsx — Toggle shipping protection
+// cards/ShippingProtectionCard.jsx — Toggle shipping protection (redesigned)
 import { useState, useContext } from 'preact/hooks';
 import { PortalContext } from '../App.jsx';
 import { postJson, clearCaches } from '../core/api.js';
@@ -25,13 +25,11 @@ export default function ShippingProtectionCard({ contract, shipLine, onUpdate })
     const nextOn = !hasShipProt;
     try {
       if (nextOn) {
-        // Adding shipping protection — pure add (no old variant to replace)
         await postJson('replaceVariants', {
           contractId: contract.id,
           newVariants: [{ variantId: String(variantIds[0]), quantity: 1 }],
         });
       } else {
-        // Removing shipping protection
         await postJson('replaceVariants', {
           contractId: contract.id,
           oldVariants: [{ variantId: safeStr(shipLine?.variantId) }],
@@ -50,22 +48,33 @@ export default function ShippingProtectionCard({ contract, shipLine, onUpdate })
   const toggleId = 'sp_shipprot_' + (contract?.id || 'x');
 
   return (
-    <div class="sp-card sp-detail__card">
-      <div class="sp-detail__sectionhead">
-        <div class="sp-title2">Shipping Protection</div>
-        <p class="sp-muted sp-detail__section-sub">Protect orders from loss or theft during shipping.</p>
-      </div>
-      <div class="sp-detail__shiprow">
-        <div class="sp-detail__shipmeta">
-          <div class="sp-detail__shipstate">{hasShipProt ? 'Currently on' : 'Currently off'}</div>
-          <p class="sp-muted sp-detail__shipsub">85% of customers choose this.</p>
-          <div class="sp-muted sp-shipprot__priceRow">
-            <span>Price: </span>
-            {hasShipProt
-              ? <strong>{onPriceText}</strong>
-              : <><span class="sp-shipprot__strike">{listPrice}</span><strong class="sp-shipprot__now">{discPrice}</strong></>
-            }
+    <div class={'sp-card sp-detail__card sp-shipprot' + (hasShipProt ? ' sp-shipprot--active' : '')}>
+      <div class="sp-shipprot__header">
+        <div class="sp-shipprot__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            {hasShipProt && <polyline points="9 12 11 14 15 10" />}
+          </svg>
+        </div>
+        <div class="sp-shipprot__text">
+          <div class="sp-shipprot__title">Shipping Protection</div>
+          <div class="sp-shipprot__status">
+            {hasShipProt ? 'Protected' : 'Not Protected'}
           </div>
+        </div>
+      </div>
+      <p class="sp-shipprot__desc">
+        {hasShipProt
+          ? 'Your orders are protected against loss, theft, and damage during shipping.'
+          : 'Add protection against loss, theft, and damage during shipping.'}
+      </p>
+      <div class="sp-shipprot__footer">
+        <div class="sp-shipprot__price">
+          {hasShipProt
+            ? <strong>{onPriceText}</strong>
+            : <><span class="sp-shipprot__strike">{listPrice}</span><strong class="sp-shipprot__now">{discPrice}</strong></>
+          }
+          <span class="sp-shipprot__per">/ order</span>
         </div>
         <div class="sp-switchwrap">
           <input class="sp-switch" type="checkbox" id={toggleId}
@@ -76,6 +85,9 @@ export default function ShippingProtectionCard({ contract, shipLine, onUpdate })
           </label>
         </div>
       </div>
+      {!hasShipProt && (
+        <div class="sp-shipprot__social">85% of customers add this</div>
+      )}
     </div>
   );
 }

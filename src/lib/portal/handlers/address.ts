@@ -38,11 +38,55 @@ export const address: RouteHandler = async ({ auth, route, req }) => {
   const lastName = s(payload?.lastName);
   const phone = s(payload?.phone);
   const company = s(payload?.company);
+  const skipVerification = payload?.skipVerification === true;
 
   if (!address1) return jsonErr({ error: "missing_address1" }, 400);
   if (!city) return jsonErr({ error: "missing_city" }, 400);
   if (!provinceCode) return jsonErr({ error: "missing_provinceCode" }, 400);
   if (!zip) return jsonErr({ error: "missing_zip" }, 400);
+
+  // EasyPost address verification (unless skipped — e.g. customer confirmed the entered address)
+  if (!skipVerification) {
+    try {
+      const { verifyAddress } = await import("@/lib/easypost");
+      const verification = await verifyAddress(auth.workspaceId, {
+        street1: address1,
+        street2: address2 || undefined,
+        city,
+        state: provinceCode,
+        zip,
+        country: countryCode,
+        name: [firstName, lastName].filter(Boolean).join(" ") || undefined,
+        phone: phone || undefined,
+      });
+
+      if (!verification.valid) {
+        // Return verification result so frontend can show suggested vs entered
+        return jsonOk({
+          ok: false,
+          route,
+          verification: {
+            valid: false,
+            entered: { address1, address2, city, province: provinceCode, zip },
+            suggested: verification.suggestedAddress ? {
+              address1: verification.suggestedAddress.street1,
+              address2: verification.suggestedAddress.street2 || "",
+              city: verification.suggestedAddress.city,
+              province: verification.suggestedAddress.state,
+              zip: verification.suggestedAddress.zip,
+            } : null,
+            errors: verification.errors,
+          },
+        });
+      }
+
+      // Use the verified address if different from entered
+      // (EasyPost may have corrected formatting)
+    } catch (e) {
+      // If EasyPost is not configured or fails, proceed without verification
+      console.warn("[portal/address] EasyPost verification skipped:", e instanceof Error ? e.message : e);
+    }
+  }
 
   try {
     const admin = createAdminClient();
