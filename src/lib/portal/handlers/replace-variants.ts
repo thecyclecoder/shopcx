@@ -120,6 +120,53 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   if (newVariants) body.newVariants = newVariants;
   if (newOneTimeVariants) body.newOneTimeVariants = newOneTimeVariants;
 
+  // PRE-SWAP: Capture old item pricing for grandfathered price preservation
+  // Must read BEFORE the Appstle swap call replaces the old line
+  const isSingleSwap = (oldVariants.length === 1 || !!oldLineId) && newVariants && Object.keys(newVariants).length === 1;
+  let grandfatheredBase: number | null = null;
+  let newVariantIdForPrice: string | null = null;
+  if (isSingleSwap) {
+    try {
+      const adminDb = createAdminClient();
+      newVariantIdForPrice = Object.keys(newVariants!)[0];
+
+      // Resolve old variant ID
+      let oldVariantId: string | null = oldVariants.length === 1 ? String(oldVariants[0]) : null;
+      if (!oldVariantId && oldLineId) {
+        const { data: subData } = await adminDb.from("subscriptions")
+          .select("items").eq("shopify_contract_id", String(contractId)).single();
+        const items = (subData?.items as { variant_id?: string; line_id?: string }[]) || [];
+        const rawLineId = oldLineId.startsWith("gid://") ? oldLineId.split("/").pop() : oldLineId;
+        const lineItem = items.find(i => i.line_id === rawLineId || i.line_id === oldLineId);
+        oldVariantId = lineItem?.variant_id ? String(lineItem.variant_id) : null;
+      }
+
+      if (oldVariantId) {
+        // Get the sub's current item pricing (BEFORE swap)
+        const { data: subData } = await adminDb.from("subscriptions")
+          .select("items").eq("shopify_contract_id", String(contractId)).single();
+        const items = (subData?.items as { variant_id?: string; price_cents?: number }[]) || [];
+        const oldItem = items.find(i => String(i.variant_id) === oldVariantId);
+
+        if (oldItem?.price_cents) {
+          const { data: products } = await adminDb.from("products").select("variants").eq("workspace_id", auth.workspaceId);
+          const priceMap = new Map<string, number>();
+          for (const p of products || []) {
+            for (const v of (p.variants as { id?: string; price_cents?: number }[]) || []) {
+              if (v.id && v.price_cents) priceMap.set(String(v.id), v.price_cents);
+            }
+          }
+          const standardPrice = priceMap.get(oldVariantId);
+          const effectiveBase = Math.round(oldItem.price_cents / 0.75);
+          const newStandardPrice = priceMap.get(newVariantIdForPrice);
+          if (standardPrice && effectiveBase < standardPrice && newStandardPrice === standardPrice) {
+            grandfatheredBase = effectiveBase;
+          }
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
+
   let updated: Record<string, unknown> | null = null;
   try {
     const admin = createAdminClient();
@@ -142,52 +189,12 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     return handleAppstleError(e, { route: "replaceVariants", payload: body });
   }
 
-  // Preserve grandfathered pricing on flavor swaps
-  // If the old variant had a lower-than-standard base price, apply it to the new variant
-  // Supports both oldVariants (array) and oldLineId (single line) swaps
-  const isSingleSwap = (oldVariants.length === 1 || !!oldLineId) && newVariants && Object.keys(newVariants).length === 1;
-  if (isSingleSwap) {
+  // POST-SWAP: Apply grandfathered base price if detected
+  if (grandfatheredBase && newVariantIdForPrice) {
     try {
-      const adminDb = createAdminClient();
-      const newVariantId = Object.keys(newVariants!)[0];
-
-      // Resolve old variant ID: from oldVariants array or from oldLineId → subscription items
-      let oldVariantId: string | null = oldVariants.length === 1 ? String(oldVariants[0]) : null;
-      if (!oldVariantId && oldLineId) {
-        const { data: subData } = await adminDb.from("subscriptions")
-          .select("items").eq("shopify_contract_id", String(contractId)).single();
-        const items = (subData?.items as { variant_id?: string; line_id?: string }[]) || [];
-        const lineItem = items.find(i => i.line_id === oldLineId || `gid://shopify/SubscriptionLine/${i.line_id}` === oldLineId);
-        oldVariantId = lineItem?.variant_id ? String(lineItem.variant_id) : null;
-      }
-      if (!oldVariantId) throw new Error("skip");
-
-      // Get the sub's current item pricing
-      const { data: subData } = await adminDb.from("subscriptions")
-        .select("items").eq("shopify_contract_id", String(contractId)).single();
-      const items = (subData?.items as { variant_id?: string; price_cents?: number; product_id?: string }[]) || [];
-      const oldItem = items.find(i => String(i.variant_id) === oldVariantId);
-
-      if (oldItem?.price_cents) {
-        // Check if grandfathered
-        const { data: products } = await adminDb.from("products").select("variants").eq("workspace_id", auth.workspaceId);
-        const priceMap = new Map<string, number>();
-        for (const p of products || []) {
-          for (const v of (p.variants as { id?: string; price_cents?: number }[]) || []) {
-            if (v.id && v.price_cents) priceMap.set(String(v.id), v.price_cents);
-          }
-        }
-        const standardPrice = priceMap.get(oldVariantId);
-        const effectiveBase = Math.round(oldItem.price_cents / 0.75);
-        const newStandardPrice = priceMap.get(newVariantId);
-        if (standardPrice && effectiveBase < standardPrice && newStandardPrice === standardPrice) {
-          // Grandfathered — preserve the base price on the new variant
-          // Only if old and new variants have the same MSRP (same-tier product)
-          const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
-          await subUpdateLineItemPrice(auth.workspaceId, String(contractId), newVariantId, effectiveBase);
-        }
-      }
-    } catch { /* non-fatal — price preservation is best-effort */ }
+      const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
+      await subUpdateLineItemPrice(auth.workspaceId, String(contractId), newVariantIdForPrice, grandfatheredBase);
+    } catch { /* non-fatal */ }
   }
 
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
