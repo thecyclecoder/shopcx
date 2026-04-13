@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { mergeTickets } from "@/lib/ticket-merge";
 
 /**
- * POST: Merge multiple tickets into one.
- * Moves all messages from source tickets into the target ticket chronologically.
- * Source tickets are archived after merge.
+ * POST: Merge multiple tickets into the newest one.
+ * Moves all messages chronologically, archives old tickets with merged_into reference.
  */
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -13,86 +13,39 @@ export async function POST(request: Request) {
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();
-  const { ticket_ids } = body as { ticket_ids: string[]; target_ticket_id?: string; source_ticket_ids?: string[] };
+  const ticketIds: string[] = body.ticket_ids || [];
 
-  // Support both formats: { ticket_ids } (auto-sort) or { target_ticket_id, source_ticket_ids } (manual)
-  const admin = createAdminClient();
-
-  let targetId: string;
-  let sourceIds: string[];
-
-  if (ticket_ids?.length >= 2) {
-    // Auto-sort: oldest ticket becomes target, newest ones get merged in
-    const { data: allTickets } = await admin.from("tickets")
-      .select("id, created_at")
-      .in("id", ticket_ids)
-      .order("created_at", { ascending: true });
-    if (!allTickets || allTickets.length < 2) {
-      return NextResponse.json({ error: "Need at least 2 valid tickets" }, { status: 400 });
-    }
-    targetId = allTickets[0].id; // Oldest
-    sourceIds = allTickets.slice(1).map(t => t.id); // Newest
-  } else if (body.target_ticket_id && body.source_ticket_ids?.length) {
-    targetId = body.target_ticket_id;
-    sourceIds = body.source_ticket_ids;
-  } else {
-    return NextResponse.json({ error: "ticket_ids (2+) required" }, { status: 400 });
+  if (ticketIds.length < 2) {
+    return NextResponse.json({ error: "Need at least 2 ticket IDs" }, { status: 400 });
   }
 
-  // Verify target ticket exists
-  const { data: target } = await admin.from("tickets")
-    .select("id, workspace_id, subject")
-    .eq("id", targetId).single();
-  if (!target) return NextResponse.json({ error: "Target ticket not found" }, { status: 404 });
+  // Get workspace from first ticket
+  const admin = createAdminClient();
+  const { data: ticket } = await admin.from("tickets")
+    .select("workspace_id")
+    .eq("id", ticketIds[0]).single();
+  if (!ticket) return NextResponse.json({ error: "Ticket not found" }, { status: 404 });
 
   // Get agent display name
   const { data: member } = await admin.from("workspace_members")
     .select("display_name")
-    .eq("workspace_id", target.workspace_id)
+    .eq("workspace_id", ticket.workspace_id)
     .eq("user_id", user.id).single();
-  const agentName = member?.display_name || "Agent";
 
-  let totalMoved = 0;
+  const result = await mergeTickets(
+    ticket.workspace_id,
+    ticketIds,
+    member?.display_name || "Agent",
+  );
 
-  for (const sourceId of sourceIds) {
-    const { data: source } = await admin.from("tickets")
-      .select("id, subject, workspace_id")
-      .eq("id", sourceId).single();
-    if (!source || source.workspace_id !== target.workspace_id) continue;
-
-    // Move all messages from source to target
-    const { data: messages } = await admin.from("ticket_messages")
-      .select("id")
-      .eq("ticket_id", sourceId);
-
-    if (messages?.length) {
-      await admin.from("ticket_messages")
-        .update({ ticket_id: targetId })
-        .eq("ticket_id", sourceId);
-      totalMoved += messages.length;
-    }
-
-    // Add merge note to target
-    await admin.from("ticket_messages").insert({
-      ticket_id: targetId,
-      direction: "outbound",
-      visibility: "internal",
-      author_type: "system",
-      body: `${agentName} merged ticket "${source.subject || sourceId}" into this ticket (${messages?.length || 0} messages).`,
-    });
-
-    // Archive source ticket
-    await admin.from("tickets").update({
-      status: "archived",
-      archived_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    }).eq("id", sourceId);
+  if (!result.success) {
+    return NextResponse.json({ error: result.error }, { status: 400 });
   }
 
   return NextResponse.json({
     success: true,
-    target_ticket_id: targetId,
-    merged_count: sourceIds.length,
-    messages_moved: totalMoved,
+    target_ticket_id: result.targetTicketId,
+    merged_count: result.mergedCount,
+    messages_moved: result.messagesMoved,
   });
 }
