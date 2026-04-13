@@ -69,7 +69,7 @@ function Stars({ value, count }) {
 }
 
 export default function AddSwapModal({ mode, contract, line, catalog, onClose, onDone, onPatchLines, totalRealQty }) {
-  const { showToast } = useContext(PortalContext);
+  const { showToast, startAction, completeAction, failAction } = useContext(PortalContext);
   const [step, setStep] = useState(1);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [selectedVariant, setSelectedVariant] = useState(null);
@@ -87,6 +87,8 @@ export default function AddSwapModal({ mode, contract, line, catalog, onClose, o
   async function handleSubmit() {
     if (!selectedVariant || busy) return;
     setBusy(true);
+    onClose();
+    startAction();
     try {
       const payload = {
         contractId: contract.id,
@@ -96,17 +98,15 @@ export default function AddSwapModal({ mode, contract, line, catalog, onClose, o
         payload.oldLineId = safeStr(line.id);
       }
       const resp = await postJson('replaceVariants', payload);
-      showToast(isSwap ? 'Item swapped!' : 'Item added!', 'success');
+      completeAction(isSwap ? 'Item swapped!' : 'Item added!');
       clearCaches();
       if (resp?.patch?.lines && Array.isArray(resp.patch.lines) && onPatchLines) {
         onPatchLines(resp.patch.lines);
       } else {
         onDone?.();
       }
-      onClose();
     } catch (e) {
-      showToast(e?.message || 'Something went wrong.', 'error');
-      setBusy(false);
+      failAction(e?.message || 'Something went wrong.');
     }
   }
 

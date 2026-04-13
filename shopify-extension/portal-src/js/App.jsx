@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import { useRouter } from './hooks/useRouter.js';
 import { useToast } from './hooks/useToast.js';
+import { useActionOverlay } from './hooks/useActionOverlay.js';
 import Home from './screens/Home.jsx';
 import Subscriptions from './screens/Subscriptions.jsx';
 import SubscriptionDetail from './screens/SubscriptionDetail.jsx';
@@ -17,6 +18,7 @@ export const PortalContext = createContext(null);
 export default function App({ config }) {
   const router = useRouter(config.portalPage);
   const { toast, showToast, hideToast } = useToast();
+  const { overlay, startAction, completeAction, failAction } = useActionOverlay();
   const prevScreen = useRef(router.screen);
 
   // Scroll to top on screen change
@@ -52,7 +54,7 @@ export default function App({ config }) {
     window.location.reload();
   };
 
-  const ctx = { config, router, showToast };
+  const ctx = { config, router, showToast, startAction, completeAction, failAction };
 
   // Breadcrumbs per screen
   const goHome = () => router.navigate(router.base);
@@ -94,6 +96,7 @@ export default function App({ config }) {
     <PortalContext.Provider value={ctx}>
       <Breadcrumbs items={breadcrumbs} />
       {screen}
+      {overlay}
       {toastEl && createPortal(toastEl, document.body)}
       {linkMatches && createPortal(
         <LinkAccountsModal matches={linkMatches} onClose={handleLinkClose} onLinked={handleLinked} />,

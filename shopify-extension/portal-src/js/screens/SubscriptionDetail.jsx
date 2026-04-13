@@ -17,15 +17,19 @@ import { fireConfetti } from '../core/confetti.js';
 
 // ---- Inline cards ----
 
-function PauseCard({ contract, onUpdate, showToast }) {
+function PauseCard({ contract, onUpdate, showToast, startAction, completeAction, failAction }) {
   const [busy, setBusy] = useState(false);
   async function doPause(days) {
     setBusy(true);
+    startAction();
     try {
       await postJson('pause', { contractId: contract.id, pauseDays: days });
-      showToast('Subscription paused for ' + days + ' days', 'success');
+      const resumeDate = new Date();
+      resumeDate.setDate(resumeDate.getDate() + days);
+      const label = resumeDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+      completeAction('Subscription paused until ' + label);
       clearCaches(); onUpdate();
-    } catch { showToast('Could not pause. Please try again.', 'error'); }
+    } catch { failAction('Could not pause.'); }
     setBusy(false);
   }
   return (
@@ -42,15 +46,16 @@ function PauseCard({ contract, onUpdate, showToast }) {
   );
 }
 
-function ResumeCard({ contract, onUpdate, showToast }) {
+function ResumeCard({ contract, onUpdate, showToast, startAction, completeAction, failAction }) {
   const [busy, setBusy] = useState(false);
   async function doResume() {
     setBusy(true);
+    startAction();
     try {
       await postJson('resume', { contractId: contract.id });
-      showToast('Subscription resumed!', 'success');
+      completeAction('Subscription resumed!');
       clearCaches(); onUpdate();
-    } catch { showToast('Could not resume. Please try again.', 'error'); }
+    } catch { failAction('Could not resume.'); }
     setBusy(false);
   }
   return (
@@ -64,7 +69,7 @@ function ResumeCard({ contract, onUpdate, showToast }) {
   );
 }
 
-function ReactivateCard({ contract, showToast, onUpdate }) {
+function ReactivateCard({ contract, showToast, onUpdate, startAction, completeAction, failAction }) {
   const [modal, setModal] = useState(false);
   const [busy, setBusy] = useState(false);
   const [selectedDate, setSelectedDate] = useState('');
@@ -79,14 +84,16 @@ function ReactivateCard({ contract, showToast, onUpdate }) {
   async function doReactivate() {
     if (!selectedDate || busy) return;
     setBusy(true);
+    setModal(false);
+    startAction();
     try {
       await postJson('reactivate', { contractId: contract.id, nextBillingDate: selectedDate });
-      showToast('Subscription reactivated!', 'success');
-      clearCaches(); setModal(false);
+      completeAction('Subscription reactivated!');
+      clearCaches();
       // Optimistic update — Appstle may be async so re-fetch could return stale cancelled status
       onUpdate({ status: 'ACTIVE', nextBillingDate: selectedDate });
     } catch (e) {
-      showToast(e?.message || 'Could not reactivate. Please try again.', 'error');
+      failAction(e?.message || 'Could not reactivate.');
     }
     setBusy(false);
   }
@@ -117,7 +124,7 @@ function ReactivateCard({ contract, showToast, onUpdate }) {
   );
 }
 
-function OrderActionsCard({ contract, showToast, onUpdate }) {
+function OrderActionsCard({ contract, showToast, onUpdate, startAction, completeAction, failAction }) {
   const [dateModal, setDateModal] = useState(false);
   const [orderNowConfirm, setOrderNowConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -133,24 +140,30 @@ function OrderActionsCard({ contract, showToast, onUpdate }) {
   async function saveDate() {
     if (!selectedDate || busy) return;
     setBusy(true);
+    setDateModal(false);
+    startAction();
     try {
       await postJson('changeDate', { contractId: contract.id, nextBillingDate: selectedDate });
-      showToast('Next order date updated!', 'success');
-      clearCaches(); setDateModal(false); onUpdate();
+      const d = new Date(selectedDate + 'T00:00:00');
+      const label = d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+      completeAction('Next order date changed to ' + label);
+      clearCaches(); onUpdate();
     } catch (e) {
-      showToast(e?.message || 'Could not update date.', 'error');
+      failAction(e?.message || 'Could not update date.');
     }
     setBusy(false);
   }
 
   async function doOrderNow() {
     setBusy(true);
+    setOrderNowConfirm(false);
+    startAction();
     try {
       await postJson('orderNow', { contractId: contract.id });
-      showToast('Order placed! You\'ll receive a confirmation email shortly.', 'success');
-      clearCaches(); setOrderNowConfirm(false); onUpdate();
+      completeAction('Order placed! Check your email for confirmation.');
+      clearCaches(); onUpdate();
     } catch (e) {
-      showToast(e?.message || 'Could not place order.', 'error');
+      failAction(e?.message || 'Could not place order.');
     }
     setBusy(false);
   }
@@ -607,7 +620,7 @@ function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
   );
 }
 
-function FrequencyCard({ contract, showToast, onUpdate }) {
+function FrequencyCard({ contract, showToast, onUpdate, startAction, completeAction, failAction }) {
   const label = billingLabel(contract?.billingPolicy) || 'Not set';
   const [modal, setModal] = useState(false);
   const [selected, setSelected] = useState('');
@@ -623,11 +636,13 @@ function FrequencyCard({ contract, showToast, onUpdate }) {
     const opt = options.find(o => o.label === selected);
     if (!opt) return;
     setBusy(true);
+    setModal(false);
+    startAction();
     try {
       await postJson('frequency', { contractId: contract.id, intervalCount: opt.count, interval: opt.interval });
-      showToast('Frequency updated!', 'success');
-      clearCaches(); setModal(false); onUpdate();
-    } catch { showToast('Could not update frequency.', 'error'); }
+      completeAction('Delivery frequency changed to ' + opt.label);
+      clearCaches(); onUpdate();
+    } catch { failAction('Could not update frequency.'); }
     setBusy(false);
   }
 
@@ -678,7 +693,7 @@ function CancelCard({ router, contractId }) {
 // ---- Main screen ----
 
 export default function SubscriptionDetail() {
-  const { config, router, showToast } = useContext(PortalContext);
+  const { config, router, showToast, startAction, completeAction, failAction } = useContext(PortalContext);
   const contractId = new URLSearchParams(window.location.search).get('id') || '';
 
   const [contract, setContract] = useState(null);
@@ -828,14 +843,14 @@ export default function SubscriptionDetail() {
 
       <div class="sp-grid sp-detail__grid">
         <div class="sp-detail__col">
-          {isCancelled && <ReactivateCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
-          {b === 'paused' && !isReadOnly && <ResumeCard contract={contract} onUpdate={handleUpdate} showToast={showToast} />}
-          {b === 'active' && !isReadOnly && <PauseCard contract={contract} onUpdate={handleUpdate} showToast={showToast} />}
-          {b === 'active' && !isReadOnly && <OrderActionsCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
+          {isCancelled && <ReactivateCard contract={contract} showToast={showToast} onUpdate={handleUpdate} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
+          {b === 'paused' && !isReadOnly && <ResumeCard contract={contract} onUpdate={handleUpdate} showToast={showToast} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
+          {b === 'active' && !isReadOnly && <PauseCard contract={contract} onUpdate={handleUpdate} showToast={showToast} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
+          {b === 'active' && !isReadOnly && <OrderActionsCard contract={contract} showToast={showToast} onUpdate={handleUpdate} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
           <ItemsCard contract={contract} lines={lines} shipLine={shipLine}
             onUpdate={handleUpdate} onPatchLines={patchLines} showToast={showToast}
             config={config} isCancelled={isCancelled} disclosureKey={disclosureKey} />
-          {!isReadOnly && <FrequencyCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
+          {!isReadOnly && <FrequencyCard contract={contract} showToast={showToast} onUpdate={handleUpdate} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
         </div>
         <div class="sp-detail__col">
           {!isCancelled && <RewardsCard contractId={shortId(contract.id)} hideRedeem={!couponAppliedLocal} showRedeemOverride={couponAppliedLocal} />}

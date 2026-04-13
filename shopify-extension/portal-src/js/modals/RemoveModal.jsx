@@ -6,7 +6,7 @@ import { safeStr } from '../core/utils.js';
 import Modal from '../components/Modal.jsx';
 
 export default function RemoveModal({ contract, line, onClose, onDone, onPatchLines, onSwapInstead }) {
-  const { showToast } = useContext(PortalContext);
+  const { showToast, startAction, completeAction, failAction } = useContext(PortalContext);
   const [busy, setBusy] = useState(false);
 
   const img = line?.variantImage?.transformedSrc || '';
@@ -15,23 +15,23 @@ export default function RemoveModal({ contract, line, onClose, onDone, onPatchLi
 
   async function doRemove() {
     setBusy(true);
+    onClose();
+    startAction();
     try {
       const resp = await postJson('replaceVariants', {
         contractId: contract.id,
         oldLineId: safeStr(line?.id),
         allowRemoveWithoutAdd: true,
       });
-      showToast('Item removed.', 'success');
+      completeAction('Item removed.');
       clearCaches();
       if (resp?.patch?.lines && Array.isArray(resp.patch.lines) && onPatchLines) {
         onPatchLines(resp.patch.lines);
       } else {
         onDone?.();
       }
-      onClose();
     } catch (e) {
-      showToast(e?.message || 'Could not remove item.', 'error');
-      setBusy(false);
+      failAction(e?.message || 'Could not remove item.');
     }
   }
 

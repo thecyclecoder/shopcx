@@ -1,0 +1,168 @@
+/* ==========================================================================
+   Action Overlay — full-screen overlay for mutation actions
+   ========================================================================== */
+
+.sp-action-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.85);
+  animation: sp-overlay-fadein 0.2s ease-out;
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Helvetica,
+    Arial,
+    sans-serif;
+}
+
+@keyframes sp-overlay-fadein {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Card */
+.sp-action-overlay__card {
+  background: #ffffff;
+  border-radius: 24px;
+  padding: 40px 32px;
+  max-width: 340px;
+  width: calc(100vw - 48px);
+  text-align: center;
+  box-shadow:
+    0 4px 24px rgba(0, 0, 0, 0.08),
+    0 1px 4px rgba(0, 0, 0, 0.04);
+}
+
+/* ---- Bouncing emojis (loading) ---- */
+
+.sp-action-overlay__emojis {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 16px;
+  height: 64px;
+  margin-bottom: 20px;
+}
+
+.sp-action-overlay__emoji {
+  font-size: 36px;
+  display: inline-block;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+
+.sp-action-overlay__emoji--1 {
+  animation: sp-bounce 0.6s infinite alternate ease-in-out;
+}
+
+.sp-action-overlay__emoji--2 {
+  animation: sp-bounce 0.7s infinite alternate ease-in-out;
+  animation-delay: 0.15s;
+}
+
+.sp-action-overlay__emoji--3 {
+  animation: sp-bounce 0.8s infinite alternate ease-in-out;
+  animation-delay: 0.3s;
+}
+
+@keyframes sp-bounce {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(-15px); }
+}
+
+/* ---- Animated checkmark (success) ---- */
+
+.sp-action-overlay__check {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+
+.sp-action-overlay__check-svg {
+  width: 56px;
+  height: 56px;
+}
+
+.sp-action-overlay__check-circle {
+  stroke-dasharray: 151;
+  stroke-dashoffset: 151;
+  animation: sp-check-circle 0.5s ease-out forwards;
+}
+
+.sp-action-overlay__check-mark {
+  stroke-dasharray: 40;
+  stroke-dashoffset: 40;
+  animation: sp-check-draw 0.35s ease-out 0.35s forwards;
+}
+
+@keyframes sp-check-circle {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes sp-check-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+/* ---- Error icon ---- */
+
+.sp-action-overlay__error-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+}
+
+/* ---- Typography ---- */
+
+.sp-action-overlay__title {
+  font-size: 20px;
+  font-weight: 700;
+  color: #111827;
+  margin-bottom: 4px;
+}
+
+.sp-action-overlay__title--success {
+  color: #16a34a;
+}
+
+.sp-action-overlay__title--error {
+  color: #111827;
+}
+
+.sp-action-overlay__sub {
+  font-size: 15px;
+  color: #6b7280;
+  line-height: 1.45;
+  margin-top: 4px;
+  margin-bottom: 0;
+}
+
+/* ---- Close button ---- */
+
+.sp-action-overlay__btn {
+  display: block;
+  width: 100%;
+  margin-top: 24px;
+  padding: 14px 0;
+  border: none;
+  border-radius: 14px;
+  background: #111827;
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  font-family: inherit;
+}
+
+.sp-action-overlay__btn:hover {
+  background: #1f2937;
+}
+
+.sp-action-overlay__btn:active {
+  background: #374151;
+}
