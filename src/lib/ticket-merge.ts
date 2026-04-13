@@ -70,15 +70,15 @@ export async function mergeTickets(
   let totalMoved = 0;
 
   for (const source of sources) {
-    // Move all messages from source to target (keep original timestamps)
+    // Copy messages from source to target (keep originals on source for reference)
     const { data: messages } = await admin.from("ticket_messages")
-      .select("id")
-      .eq("ticket_id", source.id);
+      .select("direction, visibility, author_type, author_id, body, email_message_id, ai_draft, created_at, macro_id, ai_personalized, meta_message_id, body_clean, pending_send_at, sent_at, send_cancelled, resend_email_id, email_status")
+      .eq("ticket_id", source.id)
+      .order("created_at", { ascending: true });
 
     if (messages?.length) {
-      await admin.from("ticket_messages")
-        .update({ ticket_id: target.id })
-        .eq("ticket_id", source.id);
+      const copies = messages.map(m => ({ ...m, ticket_id: target.id }));
+      await admin.from("ticket_messages").insert(copies);
       totalMoved += messages.length;
     }
 
@@ -120,15 +120,12 @@ export async function mergeTickets(
 
     // Add system note on source (for reference when viewing archived ticket)
     await admin.from("ticket_messages").insert({
-      ticket_id: source.id, // This will stay — it's the archive note
+      ticket_id: source.id,
       direction: "outbound",
       visibility: "internal",
       author_type: "system",
       body: `[System] This ticket was merged into ticket ${target.id}.`,
     });
-    // Fix: the note above just got moved to target because we moved all messages first.
-    // We need to re-assign it back to the source. Let's insert it differently:
-    // Actually, we moved messages BEFORE inserting this note, so this note stays on source. Good.
 
     // Archive source with merged_into reference
     await admin.from("tickets").update({
