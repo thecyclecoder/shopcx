@@ -5,7 +5,7 @@ import { postJson, clearCaches } from '../core/api.js';
 import { safeStr } from '../core/utils.js';
 
 export default function ShippingProtectionCard({ contract, shipLine, onUpdate }) {
-  const { config, showToast } = useContext(PortalContext);
+  const { config, startAction, completeAction, failAction } = useContext(PortalContext);
   const [busy, setBusy] = useState(false);
   const hasShipProt = !!shipLine;
   const variantIds = config.shippingProtectionProductIds || [];
@@ -23,6 +23,7 @@ export default function ShippingProtectionCard({ contract, shipLine, onUpdate })
     if (busy) return;
     setBusy(true);
     const nextOn = !hasShipProt;
+    startAction();
     try {
       if (nextOn) {
         await postJson('replaceVariants', {
@@ -36,11 +37,11 @@ export default function ShippingProtectionCard({ contract, shipLine, onUpdate })
           allowRemoveWithoutAdd: true,
         });
       }
-      showToast(nextOn ? 'Shipping protection added!' : 'Shipping protection removed.', 'success');
+      completeAction(nextOn ? 'Shipping protection added!' : 'Shipping protection removed.');
       clearCaches();
       onUpdate();
-    } catch {
-      showToast('Could not update shipping protection.', 'error');
+    } catch (e) {
+      failAction(e?.message || 'Could not update shipping protection.');
     }
     setBusy(false);
   }
