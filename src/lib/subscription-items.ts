@@ -10,7 +10,7 @@ export async function resolveVariantTitles(
   variantIds: string[],
 ): Promise<Map<string, { title: string; variant_title: string; product_id: string }>> {
   const admin = createAdminClient();
-  const { data: products } = await admin.from("products").select("id, title, variants").eq("workspace_id", workspaceId);
+  const { data: products } = await admin.from("products").select("id, shopify_product_id, title, variants").eq("workspace_id", workspaceId);
   const map = new Map<string, { title: string; variant_title: string; product_id: string }>();
   for (const p of products || []) {
     for (const v of (p.variants as { id?: string | number; title?: string }[]) || []) {
@@ -19,7 +19,7 @@ export async function resolveVariantTitles(
         map.set(vid, {
           title: p.title || "",
           variant_title: v.title === "Default Title" ? "" : (v.title || ""),
-          product_id: String(p.id || ""),
+          product_id: p.shopify_product_id || String(p.id || ""),
         });
       }
     }

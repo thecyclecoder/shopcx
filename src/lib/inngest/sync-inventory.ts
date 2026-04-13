@@ -12,6 +12,7 @@ import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 interface VariantNode {
   id: string;
   inventoryQuantity: number;
+  image?: { url?: string } | null;
 }
 
 interface MetafieldNode {
@@ -21,6 +22,7 @@ interface MetafieldNode {
 
 interface ProductNode {
   id: string;
+  images?: { nodes: { url: string }[] };
   variants: { nodes: VariantNode[] };
   metafields?: { nodes: MetafieldNode[] };
 }
@@ -37,8 +39,9 @@ async function fetchInventory(shop: string, accessToken: string): Promise<Produc
           cursor
           node {
             id
+            images(first: 1) { nodes { url } }
             variants(first: 100) {
-              nodes { id inventoryQuantity }
+              nodes { id inventoryQuantity image { url } }
             }
             metafields(keys: ["reviews.rating", "reviews.rating_count"], first: 2) {
               nodes { key value }
@@ -103,9 +106,12 @@ export const syncInventory = inngest.createFunction(
         for (const product of products) {
           const shopifyProductId = extractId(product.id);
           const inventoryMap = new Map<string, number>();
+          const imageMap = new Map<string, string>();
           for (const v of product.variants.nodes) {
             inventoryMap.set(extractId(v.id), v.inventoryQuantity);
+            if (v.image?.url) imageMap.set(extractId(v.id), v.image.url);
           }
+          const productImage = product.images?.nodes?.[0]?.url || null;
 
           // Get our product record
           const { data: dbProduct } = await admin.from("products")
@@ -116,16 +122,26 @@ export const syncInventory = inngest.createFunction(
 
           if (!dbProduct) continue;
 
-          // Update each variant with inventory_quantity
+          // Update each variant with inventory_quantity + image_url
           const variants = (dbProduct.variants as { id?: string }[]) || [];
           let changed = false;
           const updated = variants.map(v => {
-            const qty = inventoryMap.get(String(v.id));
-            if (qty !== undefined && (v as Record<string, unknown>).inventory_quantity !== qty) {
-              changed = true;
-              return { ...v, inventory_quantity: qty };
+            const vid = String(v.id);
+            const rec = v as Record<string, unknown>;
+            const qty = inventoryMap.get(vid);
+            const img = imageMap.get(vid);
+            let varChanged = false;
+            const out = { ...v };
+            if (qty !== undefined && rec.inventory_quantity !== qty) {
+              (out as Record<string, unknown>).inventory_quantity = qty;
+              varChanged = true;
             }
-            return v;
+            if (img && rec.image_url !== img) {
+              (out as Record<string, unknown>).image_url = img;
+              varChanged = true;
+            }
+            if (varChanged) changed = true;
+            return out;
           });
 
           // Extract rating from metafields
@@ -146,6 +162,7 @@ export const syncInventory = inngest.createFunction(
           }
           if (ratingValue !== null) updatePayload.rating = ratingValue;
           if (ratingCount !== null) updatePayload.rating_count = ratingCount;
+          if (productImage) updatePayload.image_url = productImage;
 
           if (Object.keys(updatePayload).length > 0) {
             await admin.from("products").update(updatePayload).eq("id", dbProduct.id);
