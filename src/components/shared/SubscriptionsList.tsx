@@ -2,10 +2,11 @@
 
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
-import { formatCents, formatDate } from "./format-utils";
+import { formatCents, formatDate, formatItemName } from "./format-utils";
 
 export interface SubscriptionItemData {
   title: string | null;
+  variant_title?: string | null;
   sku?: string | null;
   quantity: number;
   price_cents: number;
@@ -82,7 +83,7 @@ export default function SubscriptionsList({
               <div className="mt-1 space-y-0.5">
                 {sub.items.slice(0, maxItems).map((item, idx) => (
                   <p key={idx} className="truncate text-sm text-zinc-500 dark:text-zinc-400">
-                    {item.quantity}x {item.title}
+                    {item.quantity}x {formatItemName(item)}
                   </p>
                 ))}
                 {sub.items.length > maxItems && (
@@ -140,7 +141,7 @@ export default function SubscriptionsList({
             <div className="mt-2 space-y-0.5">
               {sub.items.map((item, idx) => (
                 <div key={idx} className="flex justify-between text-sm">
-                  <span className="text-zinc-600 dark:text-zinc-400">{item.quantity}x {item.title}</span>
+                  <span className="text-zinc-600 dark:text-zinc-400">{item.quantity}x {formatItemName(item)}</span>
                   {showPrices && (
                     <span className="text-zinc-400">{formatCents(item.price_cents * item.quantity)}</span>
                   )}

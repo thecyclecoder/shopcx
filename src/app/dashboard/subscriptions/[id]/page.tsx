@@ -13,7 +13,7 @@ import ChargebacksList from "@/components/shared/ChargebacksList";
 import FraudCasesList from "@/components/shared/FraudCasesList";
 import type { ChargebackItem } from "@/components/shared/ChargebacksList";
 import type { FraudCaseItem } from "@/components/shared/FraudCasesList";
-import { formatCents, formatDate } from "@/components/shared/format-utils";
+import { formatCents, formatDate, formatItemName } from "@/components/shared/format-utils";
 import type { OrderRow } from "@/components/shared/OrdersTable";
 
 interface CustomerData {

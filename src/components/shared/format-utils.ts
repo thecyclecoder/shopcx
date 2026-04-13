@@ -29,3 +29,14 @@ export function formatDateTime(dateStr: string): string {
     minute: "2-digit",
   });
 }
+
+/**
+ * Format a subscription item's display name.
+ * - If variant_title exists: "Product Name — Variant" (e.g. "Superfood Tabs — Strawberry Lemonade")
+ * - If variant_title is missing: just title (handles legacy combined format like "Superfood Tabs - Mixed Berry")
+ */
+export function formatItemName(item: { title?: string | null; variant_title?: string | null }): string {
+  const title = item.title || "Item";
+  if (item.variant_title) return `${title} — ${item.variant_title}`;
+  return title;
+}

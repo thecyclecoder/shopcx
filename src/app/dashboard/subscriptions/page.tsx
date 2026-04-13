@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
+import { formatItemName } from "@/components/shared/format-utils";
 
 interface Product {
   id: string;
@@ -14,7 +15,7 @@ interface Subscription {
   id: string;
   shopify_contract_id: string;
   status: string;
-  items: { title?: string; quantity?: number; price_cents?: number }[] | null;
+  items: { title?: string; variant_title?: string; quantity?: number; price_cents?: number }[] | null;
   billing_interval: string | null;
   billing_interval_count: number | null;
   next_billing_date: string | null;
@@ -260,7 +261,7 @@ export default function SubscriptionsPage() {
                       <div className="text-xs text-zinc-400">{customer?.email}</div>
                     </td>
                     <td className="max-w-[200px] truncate px-4 py-2.5 text-zinc-600 dark:text-zinc-400">
-                      {items.slice(0, 2).map(i => i.title || "Item").join(", ")}
+                      {items.slice(0, 2).map(i => formatItemName(i)).join(", ")}
                       {items.length > 2 && <span className="text-zinc-400"> +{items.length - 2}</span>}
                     </td>
                     <td className="px-4 py-2.5">

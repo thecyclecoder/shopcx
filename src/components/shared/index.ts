@@ -3,7 +3,7 @@ export { default as ReturnsList } from "./ReturnsList";
 export { default as OrdersTable } from "./OrdersTable";
 export { default as SubscriptionsList } from "./SubscriptionsList";
 export { default as LoyaltyCard } from "./LoyaltyCard";
-export { formatCents, formatDate, formatDateTime } from "./format-utils";
+export { formatCents, formatDate, formatDateTime, formatItemName } from "./format-utils";
 export type { ReturnItem } from "./ReturnsList";
 export type { OrderRow, OrderLineItem, OrderFulfillment } from "./OrdersTable";
 export type { SubscriptionData, SubscriptionItemData } from "./SubscriptionsList";

@@ -15,6 +15,7 @@ import SubscriptionsList from "@/components/shared/SubscriptionsList";
 import LoyaltyCard from "@/components/shared/LoyaltyCard";
 import type { LoyaltyMemberData, LoyaltyRedemption } from "@/components/shared/LoyaltyCard";
 import type { SubscriptionData as CustomerSubscription } from "@/components/shared/SubscriptionsList";
+import { formatItemName } from "@/components/shared/format-utils";
 import EmailPreviewModal from "@/components/email-preview-modal";
 import ChargebacksList from "@/components/shared/ChargebacksList";
 import type { ChargebackItem } from "@/components/shared/ChargebacksList";
@@ -2000,7 +2001,7 @@ export default function TicketDetailPage() {
                           {subs.map((sub) => {
                             const title = sub.items
                               ?.filter(i => i.title && !i.title.toLowerCase().includes("shipping protection"))
-                              .map(i => i.title)
+                              .map(i => formatItemName(i))
                               .join(", ") || "Subscription";
                             const nextDate = sub.next_billing_date
                               ? new Date(sub.next_billing_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })
