@@ -77,7 +77,12 @@ export default function AddSwapModal({ mode, contract, line, catalog, onClose, o
   const [busy, setBusy] = useState(false);
 
   const isSwap = mode === 'swap';
-  const products = Array.isArray(catalog) ? catalog : [];
+  const allProducts = Array.isArray(catalog) ? catalog : [];
+  // When swapping, exclude the current product (customer should use "Change flavor" for same-product swaps)
+  // Also exclude products with no in-stock variants
+  const products = allProducts
+    .filter(p => !(isSwap && line && String(p.productId || p.id) === String(line.productId)))
+    .filter(p => (p.variants || []).some(v => v.inventory_quantity == null || v.inventory_quantity > 0));
 
   async function handleSubmit() {
     if (!selectedVariant || busy) return;
@@ -137,8 +142,8 @@ export default function AddSwapModal({ mode, contract, line, catalog, onClose, o
     );
   }
 
-  // Step 2: variant + quantity
-  const variants = selectedProduct?.variants || [];
+  // Step 2: variant + quantity (only in-stock variants)
+  const variants = (selectedProduct?.variants || []).filter(v => v.inventory_quantity == null || v.inventory_quantity > 0);
   const pricing = selectedVariant ? computePrice(selectedVariant, qty) : {};
   const varImg = variantImage(selectedVariant) || pickImage(selectedProduct);
 

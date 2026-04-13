@@ -1069,6 +1069,56 @@
   font-size: 14px;
 }
 
+/* Wrapper for actions with inline sub-panels (e.g. flavor picker) */
+.sp-disclosure__action-wrap {
+  display: flex;
+  flex-direction: column;
+}
+
+/* =========================================================
+   Inline Flavor Picker (below "Change flavor" action)
+========================================================= */
+
+.sp-flavor-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px 10px;
+  background: #fafafa;
+  border: 1px solid var(--sp-border, rgba(0, 0, 0, 0.06));
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  margin-top: -2px;
+}
+
+.sp-flavor-picker__busy {
+  text-align: center;
+  padding: 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--sp-muted, #6b7280);
+}
+
+.sp-flavor-picker__option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--sp-border, rgba(0, 0, 0, 0.08));
+  background: #fff;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--sp-text, #111);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.sp-flavor-picker__option:hover {
+  background: #f3f3f3;
+  border-color: rgba(0, 0, 0, 0.14);
+}
+
 /* =========================================================
    Loyalty Widget
 ========================================================= */

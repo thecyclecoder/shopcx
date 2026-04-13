@@ -202,14 +202,49 @@ function OrderActionsCard({ contract, showToast, onUpdate }) {
   );
 }
 
-function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing, forceClose }) {
+function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing, forceClose, catalog, contract, onPatchLines, onDone }) {
   const [open, setOpen] = useState(false);
+  const [flavorOpen, setFlavorOpen] = useState(false);
+  const [flavorBusy, setFlavorBusy] = useState(false);
+  const { showToast } = useContext(PortalContext);
 
   // Close panel when forceClose changes (after mutations)
-  useEffect(() => { setOpen(false); }, [forceClose]);
+  useEffect(() => { setOpen(false); setFlavorOpen(false); }, [forceClose]);
 
   const imgSrc = getLineImage(ln);
   const sizedImg = imgSrc ? (imgSrc.includes('?') ? imgSrc + '&width=800' : imgSrc + '?width=800') : '';
+
+  // Find flavor variants for "Change flavor" — same product, in-stock, not current variant
+  const catalogProducts = Array.isArray(catalog) ? catalog : [];
+  const currentProduct = catalogProducts.find(p => String(p.productId || p.id) === String(ln.productId));
+  const flavorVariants = (currentProduct?.variants || []).filter(v =>
+    String(v.id) !== String(ln.variantId) && (v.inventory_quantity == null || v.inventory_quantity > 0)
+  );
+  const hasFlavorOptions = flavorVariants.length > 0;
+
+  async function handleFlavorChange(variantId) {
+    if (flavorBusy) return;
+    setFlavorBusy(true);
+    try {
+      const payload = {
+        contractId: contract.id,
+        oldLineId: safeStr(ln.id),
+        newVariants: [{ variantId: String(variantId), quantity: ln.quantity || 1 }],
+      };
+      const resp = await postJson('replaceVariants', payload);
+      showToast('Flavor updated!', 'success');
+      clearCaches();
+      setFlavorOpen(false);
+      if (resp?.patch?.lines && Array.isArray(resp.patch.lines) && onPatchLines) {
+        onPatchLines(resp.patch.lines);
+      } else {
+        onDone?.();
+      }
+    } catch (e) {
+      showToast(e?.message || 'Could not change flavor.', 'error');
+    }
+    setFlavorBusy(false);
+  }
 
   return (
     <div class="sp-line-group">
@@ -233,9 +268,32 @@ function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing, 
       </button>
       {open && (
         <div class="sp-disclosure__panel">
+          {hasFlavorOptions && (
+            <div class="sp-disclosure__action-wrap">
+              <button class="sp-disclosure__action" disabled={flavorBusy}
+                onClick={() => setFlavorOpen(!flavorOpen)}>
+                <div class="sp-disclosure__action-title">Change flavor</div>
+                <div class="sp-disclosure__action-sub sp-muted">Switch to another flavor of this product.</div>
+              </button>
+              {flavorOpen && (
+                <div class="sp-flavor-picker">
+                  {flavorBusy ? (
+                    <div class="sp-flavor-picker__busy">Updating flavor…</div>
+                  ) : (
+                    flavorVariants.map(v => (
+                      <button key={v.id} type="button" class="sp-flavor-picker__option"
+                        onClick={() => handleFlavorChange(v.id)}>
+                        {v.title}
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           <button class="sp-disclosure__action" onClick={onSwap}>
-            <div class="sp-disclosure__action-title">Swap</div>
-            <div class="sp-disclosure__action-sub sp-muted">Choose different flavor or product.</div>
+            <div class="sp-disclosure__action-title">Swap product</div>
+            <div class="sp-disclosure__action-sub sp-muted">Replace with a different product.</div>
           </button>
           <button class="sp-disclosure__action" onClick={onQty}>
             <div class="sp-disclosure__action-title">Change quantity</div>
@@ -317,6 +375,10 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
             <LineItemDisclosure key={i} ln={ln} canRemove={canRemove}
               removing={removingLine === (ln.sku || ln.variantId)}
               forceClose={disclosureKey}
+              catalog={config.catalog}
+              contract={contract}
+              onPatchLines={onPatchLines}
+              onDone={onUpdate}
               onSwap={() => setModal({ type: 'addSwap', line: ln, mode: 'swap' })}
               onQty={() => setModal({ type: 'quantity', line: ln })}
               onRemove={() => doRemove(ln)}
