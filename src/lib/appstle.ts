@@ -110,9 +110,18 @@ export async function appstleUpdateBillingInterval(
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
+  // Normalize intervals that Appstle can't handle
+  // WEEK/8 → MONTH/2 (Appstle 504s on WEEK/8)
+  let normalizedInterval = interval;
+  let normalizedCount = intervalCount;
+  if (interval === "WEEK" && intervalCount === 8) {
+    normalizedInterval = "MONTH";
+    normalizedCount = 2;
+  }
+
   try {
     const res = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-interval?contractId=${contractId}&interval=${interval}&intervalCount=${intervalCount}&api_key=${creds.apiKey}`,
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-interval?contractId=${contractId}&interval=${normalizedInterval}&intervalCount=${normalizedCount}&api_key=${creds.apiKey}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
 
@@ -127,8 +136,8 @@ export async function appstleUpdateBillingInterval(
     await admin
       .from("subscriptions")
       .update({
-        billing_interval: interval.toLowerCase(),
-        billing_interval_count: intervalCount,
+        billing_interval: normalizedInterval.toLowerCase(),
+        billing_interval_count: normalizedCount,
         updated_at: new Date().toISOString(),
       })
       .eq("workspace_id", workspaceId)
