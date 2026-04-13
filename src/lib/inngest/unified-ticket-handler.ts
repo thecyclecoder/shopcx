@@ -791,10 +791,9 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
     // Sonnet sees conversation history including pending journeys and decides whether
     // to resend, answer the question, or move on.
 
-    // ── 3b. Active playbook — Sonnet handles routing. When a playbook is active,
-    // Sonnet sees it in context and routes back to it if the message is a playbook response.
-    // The action executor's handlePlaybook() detects active playbook and calls executePlaybookStep().
-    /* DISABLED — Sonnet routes to active playbook via action_type: "playbook"
+    // ── 3b. Active playbook — check if customer message is playbook-related
+    // If playbook is active, use Haiku to determine if the message is about the playbook
+    // or a completely new topic. Playbook-related → execute step. New topic → Sonnet handles.
     if (!isNew) {
       const pbActive = await step.run("check-playbook", async () => {
         const { data: t } = await admin.from("tickets").select("active_playbook_id").eq("id", tid).single();
@@ -802,8 +801,27 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
       });
 
       if (pbActive) {
-        const delay = await step.run("playbook-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
-        // delay handled by sendWithDelay
+        // Ask Haiku: is this message about the active playbook or something new?
+        const isPlaybookRelated = await step.run("classify-playbook-msg", async () => {
+          const { data: pb } = await admin.from("playbooks").select("name").eq("id", pbActive).single();
+          const pbName = pb?.name || "active issue";
+          const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+          const result = await claude(
+            `A customer has an active "${pbName}" case being handled. They just sent this message:
+
+"${cleanMsg}"
+
+Is this message related to their ${pbName.toLowerCase()} case (e.g. answering a question, providing info, following up, confirming, requesting to proceed), or is it about a completely DIFFERENT topic?
+
+Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10);
+          return (result || "").trim().toUpperCase().includes("PLAYBOOK");
+        });
+
+        if (!isPlaybookRelated) {
+          // New topic — let Sonnet handle it normally (falls through to orchestrator)
+          await step.run("pb-drift-note", () => sysNote(admin, tid, `[System] Customer message classified as new topic (not related to active playbook). Routing to Sonnet.`));
+        } else {
+          // Playbook-related — execute the step directly
 
         const pbResult = await step.run("exec-playbook-step", async () => {
           if (await newerActivity(admin, tid, t0)) return { action: "cancelled" as const };
@@ -903,9 +921,9 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
         }
 
         return { status: "playbook_step", action: pbResult.action };
+        } // end isPlaybookRelated else
       }
     }
-    END DISABLED PLAYBOOK SHORTCUT */
 
     // ── 4. Positive close ──
     // Check on all follow-up messages (not just active handlers) — covers post-playbook "thanks"
