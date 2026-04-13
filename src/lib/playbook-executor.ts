@@ -2794,7 +2794,22 @@ async function handle30DayFlow(
       ctx._30day_phase = "save_attempt";
 
       // Fetch featured reviews for products in the order
-      const productIds = (ctx._30day_product_ids as string[]) || [];
+      let productIds = (ctx._30day_product_ids as string[]) || [];
+      // Resolve product IDs if not yet populated (from variant IDs on the order)
+      if (!productIds.length && orderObjs.length) {
+        const variantIds = orderObjs.flatMap(o =>
+          ((o.line_items as { variant_id?: string }[]) || []).map(i => i.variant_id).filter(Boolean)
+        );
+        if (variantIds.length) {
+          const { data: prods } = await admin.from("products").select("shopify_product_id, variants").eq("workspace_id", wsId);
+          for (const p of prods || []) {
+            for (const v of (p.variants as { id?: string }[]) || []) {
+              if (variantIds.includes(String(v.id))) { productIds.push(p.shopify_product_id); break; }
+            }
+          }
+          ctx._30day_product_ids = productIds;
+        }
+      }
       let reviewBlock = "";
       if (productIds.length) {
         try {
