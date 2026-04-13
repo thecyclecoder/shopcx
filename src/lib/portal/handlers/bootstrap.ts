@@ -95,8 +95,10 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
         title: p.title,
         handle: p.handle,
         image: { src: p.image_url || "", alt: p.title },
-        variants: Array.isArray(p.variants) ? p.variants : [],
-      }));
+        variants: (Array.isArray(p.variants) ? p.variants : []).filter(
+          (v: { inventory_quantity?: number }) => v.inventory_quantity == null || v.inventory_quantity > 0
+        ),
+      })).filter(p => (p.variants as unknown[]).length > 0);
     }
   }
 
