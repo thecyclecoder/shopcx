@@ -14,9 +14,15 @@ interface VariantNode {
   inventoryQuantity: number;
 }
 
+interface MetafieldNode {
+  key: string;
+  value: string;
+}
+
 interface ProductNode {
   id: string;
   variants: { nodes: VariantNode[] };
+  metafields?: { nodes: MetafieldNode[] };
 }
 
 async function fetchInventory(shop: string, accessToken: string): Promise<ProductNode[]> {
@@ -33,6 +39,9 @@ async function fetchInventory(shop: string, accessToken: string): Promise<Produc
             id
             variants(first: 100) {
               nodes { id inventoryQuantity }
+            }
+            metafields(keys: ["reviews.rating", "reviews.rating_count"], first: 2) {
+              nodes { key value }
             }
           }
         }
@@ -119,12 +128,28 @@ export const syncInventory = inngest.createFunction(
             return v;
           });
 
+          // Extract rating from metafields
+          const metafields = product.metafields?.nodes || [];
+          const ratingMeta = metafields.find(m => m.key === "reviews.rating");
+          const ratingCountMeta = metafields.find(m => m.key === "reviews.rating_count");
+          let ratingValue: number | null = null;
+          if (ratingMeta?.value) {
+            try { const p = JSON.parse(ratingMeta.value); ratingValue = parseFloat(p.value || p) || null; }
+            catch { ratingValue = parseFloat(ratingMeta.value) || null; }
+          }
+          const ratingCount = ratingCountMeta?.value ? parseInt(ratingCountMeta.value) || null : null;
+
+          const updatePayload: Record<string, unknown> = {};
           if (changed) {
-            await admin.from("products").update({
-              variants: updated,
-              inventory_updated_at: new Date().toISOString(),
-            }).eq("id", dbProduct.id);
-            totalUpdated++;
+            updatePayload.variants = updated;
+            updatePayload.inventory_updated_at = new Date().toISOString();
+          }
+          if (ratingValue !== null) updatePayload.rating = ratingValue;
+          if (ratingCount !== null) updatePayload.rating_count = ratingCount;
+
+          if (Object.keys(updatePayload).length > 0) {
+            await admin.from("products").update(updatePayload).eq("id", dbProduct.id);
+            if (changed) totalUpdated++;
           }
         }
       });

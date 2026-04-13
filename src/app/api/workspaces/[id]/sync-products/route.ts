@@ -54,6 +54,9 @@ export async function POST(
             node {
               id title handle productType vendor status tags
               images(first: 1) { edges { node { url } } }
+              metafields(keys: ["reviews.rating", "reviews.rating_count"], first: 2) {
+                edges { node { key value } }
+              }
               variants(first: 20) {
                 edges { node { id title sku price image { url } } }
               }
@@ -91,6 +94,22 @@ export async function POST(
 
       const imageUrl = p.images?.edges?.[0]?.node?.url || null;
 
+      // Extract rating from metafields
+      const metafields = (p.metafields?.edges || []).map((e: { node: { key: string; value: string } }) => e.node);
+      const ratingMeta = metafields.find((m: { key: string }) => m.key === "reviews.rating");
+      const ratingCountMeta = metafields.find((m: { key: string }) => m.key === "reviews.rating_count");
+      // Rating metafield value is JSON: {"value": "4.74", "scale_min": "1.0", "scale_max": "5.0"}
+      let ratingValue: number | null = null;
+      if (ratingMeta?.value) {
+        try {
+          const parsed = JSON.parse(ratingMeta.value);
+          ratingValue = parseFloat(parsed.value || parsed) || null;
+        } catch {
+          ratingValue = parseFloat(ratingMeta.value) || null;
+        }
+      }
+      const ratingCount = ratingCountMeta?.value ? parseInt(ratingCountMeta.value) || null : null;
+
       await admin.from("products").upsert({
         workspace_id: workspaceId,
         shopify_product_id: shopifyId,
@@ -102,6 +121,8 @@ export async function POST(
         tags: p.tags || [],
         image_url: imageUrl,
         variants,
+        rating: ratingValue,
+        rating_count: ratingCount,
         updated_at: new Date().toISOString(),
       }, { onConflict: "workspace_id,shopify_product_id" });
 
