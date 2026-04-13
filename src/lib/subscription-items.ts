@@ -19,7 +19,7 @@ export async function resolveVariantTitles(
         map.set(vid, {
           title: p.title || "",
           variant_title: v.title === "Default Title" ? "" : (v.title || ""),
-          product_id: p.shopify_product_id || String(p.id || ""),
+          product_id: String(p.id || ""),
         });
       }
     }

@@ -104,11 +104,12 @@ export async function getProductMap(
 ): Promise<ProductMap> {
   if (!productIds.length) return {};
 
+  // Look up by both internal UUID and Shopify product ID
   const { data: products } = await admin
     .from("products")
-    .select("shopify_product_id, image_url, variants")
+    .select("id, shopify_product_id, image_url, variants")
     .eq("workspace_id", workspaceId)
-    .in("shopify_product_id", productIds);
+    .or(productIds.map(id => `id.eq.${id},shopify_product_id.eq.${id}`).join(","));
 
   const map: ProductMap = {};
   for (const p of products || []) {
@@ -122,11 +123,10 @@ export async function getProductMap(
       if (v.sku) variantsBySku[v.sku] = info;
     }
 
-    map[p.shopify_product_id] = {
-      productImage: p.image_url || "",
-      variantsByTitle,
-      variantsBySku,
-    };
+    const entry = { productImage: p.image_url || "", variantsByTitle, variantsBySku };
+    // Index by both IDs so lookups work regardless of which is stored
+    map[p.id] = entry;
+    map[p.shopify_product_id] = entry;
   }
   return map;
 }
