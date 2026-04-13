@@ -9,6 +9,9 @@ function safeStr(v: unknown): string {
 }
 
 function normalizeProductId(input: string): string {
+  // UUIDs contain hyphens and letters — don't strip them
+  if (input.includes("-") && input.length >= 32) return input;
+  // Shopify GIDs: gid://shopify/Product/123 → 123
   const parts = input.split("/");
   const last = parts[parts.length - 1] || input;
   return last.replace(/[^\d]/g, "") || last;

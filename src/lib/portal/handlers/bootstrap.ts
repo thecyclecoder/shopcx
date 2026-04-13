@@ -84,7 +84,7 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
     const { data: products } = await admin
       .from("products")
       .select(
-        "id, shopify_product_id, title, handle, image_url, variants, rating, rating_count, metafields"
+        "id, shopify_product_id, title, handle, image_url, variants, rating, rating_count"
       )
       .eq("workspace_id", auth.workspaceId)
       .in("shopify_product_id", productIds);
@@ -97,7 +97,6 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
         handle: p.handle,
         image: { src: p.image_url || "", alt: p.title },
         rating: { value: p.rating || 0, count: p.rating_count || 0 },
-        metafields: typeof p.metafields === "object" && p.metafields ? p.metafields : {},
         variants: (Array.isArray(p.variants) ? p.variants : []).filter(
           (v: { inventory_quantity?: number }) => v.inventory_quantity == null || v.inventory_quantity > 0
         ),
