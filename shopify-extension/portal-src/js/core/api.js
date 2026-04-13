@@ -59,17 +59,33 @@ async function fetchJson(route, params, opts = {}) {
   const url = buildUrl(route, params);
   log('FETCH:', url);
 
-  const res = await fetch(url, {
-    method: opts.method || 'GET',
-    credentials: 'include',
-    cache: 'no-store',
-    headers: {
-      Accept: 'application/json',
-      'Cache-Control': 'no-cache',
-      ...(opts.headers || {}),
-    },
-    body: opts.body || undefined,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 45000); // 45s timeout
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method: opts.method || 'GET',
+      credentials: 'include',
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        'Cache-Control': 'no-cache',
+        ...(opts.headers || {}),
+      },
+      body: opts.body || undefined,
+    });
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e?.name === 'AbortError') {
+      const err = new Error('Request timed out. Your change may have been applied — please refresh to check.');
+      err.status = 408;
+      throw err;
+    }
+    throw e;
+  }
+  clearTimeout(timeoutId);
 
   const ct = (res.headers.get('content-type') || '').toLowerCase();
   const text = await res.text();

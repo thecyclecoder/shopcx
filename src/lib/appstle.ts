@@ -110,22 +110,18 @@ export async function appstleUpdateBillingInterval(
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
-  // Normalize intervals that Appstle can't handle
-  // WEEK/8 → MONTH/2 (Appstle 504s on WEEK/8)
-  let normalizedInterval = interval;
-  let normalizedCount = intervalCount;
-  if (interval === "WEEK" && intervalCount === 8) {
-    normalizedInterval = "MONTH";
-    normalizedCount = 2;
-  }
-
   try {
     const res = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-interval?contractId=${contractId}&interval=${normalizedInterval}&intervalCount=${normalizedCount}&api_key=${creds.apiKey}`,
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-interval?contractId=${contractId}&interval=${interval}&intervalCount=${intervalCount}&api_key=${creds.apiKey}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
 
-    if (!res.ok && res.status !== 204) {
+    if (res.status === 504) {
+      // Appstle sometimes times out but still applies the change — verify
+      const verified = await verifyBillingInterval(creds.apiKey, contractId, interval, intervalCount);
+      if (!verified) return { success: false, error: "Request timed out and change could not be verified" };
+      // Fall through to update local DB
+    } else if (!res.ok && res.status !== 204) {
       const text = await res.text();
       console.error(`Appstle frequency update error for contract ${contractId}:`, text);
       return { success: false, error: `Appstle API error: ${res.status}` };
@@ -136,8 +132,8 @@ export async function appstleUpdateBillingInterval(
     await admin
       .from("subscriptions")
       .update({
-        billing_interval: normalizedInterval.toLowerCase(),
-        billing_interval_count: normalizedCount,
+        billing_interval: interval.toLowerCase(),
+        billing_interval_count: intervalCount,
         updated_at: new Date().toISOString(),
       })
       .eq("workspace_id", workspaceId)
@@ -147,6 +143,24 @@ export async function appstleUpdateBillingInterval(
   } catch (err) {
     console.error("Appstle frequency update failed:", err);
     return { success: false, error: String(err) };
+  }
+}
+
+async function verifyBillingInterval(
+  apiKey: string, contractId: string, expectedInterval: string, expectedCount: number,
+): Promise<boolean> {
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${apiKey}`,
+      { headers: { "X-API-Key": apiKey } }
+    );
+    if (!res.ok) return false;
+    const data = await res.json();
+    const bp = data.billingPolicy;
+    return bp?.interval?.toUpperCase() === expectedInterval.toUpperCase()
+      && bp?.intervalCount === expectedCount;
+  } catch {
+    return false;
   }
 }
 
