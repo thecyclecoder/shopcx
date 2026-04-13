@@ -279,7 +279,14 @@ async function sendWithDelay(admin: Admin, wsId: string, tid: string, ch: string
     const { data: c } = await admin.from("customers").select("email").eq("id", t.customer_id).single();
     custEmail = c?.email || null;
   }
-  const delay = await responseDelay(admin, wsId, ch, custEmail);
+  // If chat customer is idle, use email response delay instead of chat delay
+  let effectiveCh = ch;
+  if (ch === "chat") {
+    const { getDeliveryChannel } = await import("@/lib/delivery-channel");
+    const deliveryCh = await getDeliveryChannel(tid, ch);
+    if (deliveryCh === "email") effectiveCh = "email";
+  }
+  const delay = await responseDelay(admin, wsId, effectiveCh, custEmail);
   await send(admin, wsId, tid, ch, msg, sandbox, delay > 0, delay);
 }
 
