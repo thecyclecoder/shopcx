@@ -164,8 +164,9 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
           }
         }
       }
-    } catch { /* non-fatal */ }
+    } catch (e) { console.error("[replaceVariants] grandfathered pricing pre-check error:", e); }
   }
+  console.log("[replaceVariants] grandfathered check:", { isSingleSwap, grandfatheredBase, newVariantIdForPrice, oldLineId, oldVariantsLen: oldVariants.length });
 
   let updated: Record<string, unknown> | null = null;
   try {
