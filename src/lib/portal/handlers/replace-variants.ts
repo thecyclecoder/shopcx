@@ -179,8 +179,10 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
         }
         const standardPrice = priceMap.get(oldVariantId);
         const effectiveBase = Math.round(oldItem.price_cents / 0.75);
-        if (standardPrice && effectiveBase < standardPrice) {
+        const newStandardPrice = priceMap.get(newVariantId);
+        if (standardPrice && effectiveBase < standardPrice && newStandardPrice === standardPrice) {
           // Grandfathered — preserve the base price on the new variant
+          // Only if old and new variants have the same MSRP (same-tier product)
           const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
           await subUpdateLineItemPrice(auth.workspaceId, String(contractId), newVariantId, effectiveBase);
         }
