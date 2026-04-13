@@ -7,6 +7,8 @@ import { cookies } from "next/headers";
 import { requireAppProxy, type PortalAuthResult } from "@/lib/portal/auth";
 import { routeMap } from "@/lib/portal/handlers";
 import { decrypt } from "@/lib/crypto";
+import { logCustomerEvent } from "@/lib/customer-events";
+import { findCustomer } from "@/lib/portal/helpers";
 
 function jsonErr(body: Record<string, unknown>, status = 400) {
   return NextResponse.json({ ok: false, ...body }, { status });
@@ -93,7 +95,27 @@ async function handle(req: NextRequest) {
       return jsonErr({ error: "unknown_route", route }, 400);
     }
 
-    return await handler({ req, url, auth, route });
+    const response = await handler({ req, url, auth, route });
+
+    // Log error responses for portal analytics visibility
+    if (response.status >= 400 && auth.workspaceId && auth.loggedInCustomerId) {
+      try {
+        const body = await response.clone().json();
+        const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
+        if (customer) {
+          await logCustomerEvent({
+            workspaceId: auth.workspaceId,
+            customerId: customer.id,
+            eventType: "portal.error",
+            source: "portal",
+            summary: `Portal error on ${route}: ${body?.error || response.status}`,
+            properties: { route, status: response.status, error: body?.error || null },
+          });
+        }
+      } catch { /* non-fatal */ }
+    }
+
+    return response;
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unauthorized";
 
