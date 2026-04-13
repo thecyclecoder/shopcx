@@ -80,7 +80,13 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   let payload: Record<string, unknown> | null = null;
   try { payload = await req.json(); } catch { payload = null; }
 
-  const shop = s(payload?.shop) || auth.shop;
+  let shop = s(payload?.shop) || auth.shop;
+  if (!shop) {
+    // Resolve shop from workspace for cookie/magic-link sessions
+    const adminDb = createAdminClient();
+    const { data: ws } = await adminDb.from("workspaces").select("shopify_myshopify_domain").eq("id", auth.workspaceId).single();
+    shop = ws?.shopify_myshopify_domain || "";
+  }
   if (!shop) return jsonErr({ error: "missing_shop" }, 400);
 
   const contractId = clampInt(payload?.contractId, 0);
@@ -108,7 +114,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
 
   const body: Record<string, unknown> = { shop, contractId, eventSource: "CUSTOMER_PORTAL", stopSwapEmails };
   if (carryForwardDiscount) body.carryForwardDiscount = carryForwardDiscount;
-  if (oldLineId) body.oldLineId = oldLineId;
+  if (oldLineId) body.oldLineId = oldLineId.startsWith("gid://") ? oldLineId : `gid://shopify/SubscriptionLine/${oldLineId}`;
   if (oldVariants.length) body.oldVariants = oldVariants;
   if (oldOneTimeVariants.length) body.oldOneTimeVariants = oldOneTimeVariants;
   if (newVariants) body.newVariants = newVariants;
