@@ -287,6 +287,7 @@ export const importChunkProcess = inngest.createFunction(
           price_cents: Math.round(parseFloat(row[linePriceIdx] || "0") * 100),
           product_id: row[lineProductIdx]?.trim() || null,
           variant_id: row[lineVariantIdx]?.trim() || null,
+          variant_title: null,
           selling_plan: row[linePlanNameIdx]?.trim() || null,
         })).filter(i => i.title);
 

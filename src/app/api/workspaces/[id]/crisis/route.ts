@@ -61,8 +61,8 @@ export async function GET(
       const crisisActions = (actions || []).filter(a => a.crisis_id === cid);
       countsByCrisis[cid] = {
         total: crisisActions.length,
-        tier1_accepted: crisisActions.filter(a => a.tier1_response === "accepted_swap").length,
-        tier2_accepted: crisisActions.filter(a => a.tier2_response === "accepted_swap").length,
+        tier1_accepted: crisisActions.filter(a => a.tier1_response === "accepted_default_swap" || a.tier1_response === "swapped_flavor" || a.tier1_response === "accepted_swap").length,
+        tier2_accepted: crisisActions.filter(a => a.tier2_response === "swapped_product" || a.tier2_response === "accepted_swap").length,
         tier3_accepted: crisisActions.filter(a =>
           a.tier3_response === "accepted_pause" || a.tier3_response === "accepted_remove"
         ).length,

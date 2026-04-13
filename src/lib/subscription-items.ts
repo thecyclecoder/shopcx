@@ -4,6 +4,47 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 
+/** Look up product title + variant title from our catalog by variant ID */
+export async function resolveVariantTitles(
+  workspaceId: string,
+  variantIds: string[],
+): Promise<Map<string, { title: string; variant_title: string; product_id: string }>> {
+  const admin = createAdminClient();
+  const { data: products } = await admin.from("products").select("id, title, variants").eq("workspace_id", workspaceId);
+  const map = new Map<string, { title: string; variant_title: string; product_id: string }>();
+  for (const p of products || []) {
+    for (const v of (p.variants as { id?: string | number; title?: string }[]) || []) {
+      const vid = String(v.id || "");
+      if (variantIds.includes(vid)) {
+        map.set(vid, {
+          title: p.title || "",
+          variant_title: v.title === "Default Title" ? "" : (v.title || ""),
+          product_id: String(p.id || ""),
+        });
+      }
+    }
+  }
+  return map;
+}
+
+/** Enrich subscription items array with titles from our product catalog */
+export async function enrichItemTitles(
+  workspaceId: string,
+  items: Record<string, unknown>[],
+): Promise<Record<string, unknown>[]> {
+  const variantIds = items.map(i => String(i.variant_id || "")).filter(Boolean);
+  if (!variantIds.length) return items;
+  const titleMap = await resolveVariantTitles(workspaceId, variantIds);
+  return items.map(i => {
+    const vid = String(i.variant_id || "");
+    const resolved = titleMap.get(vid);
+    if (resolved) {
+      return { ...i, title: resolved.title, variant_title: resolved.variant_title, product_id: resolved.product_id };
+    }
+    return i;
+  });
+}
+
 export async function getAppstleConfig(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
   const admin = createAdminClient();
   const { data: ws } = await admin.from("workspaces")
@@ -52,7 +93,9 @@ async function syncItemsAfterMutation(
       .eq("shopify_contract_id", contractId)
       .single();
     const currentItems = (sub?.items as Record<string, unknown>[] | null) || [];
-    const updatedItems = mutate(currentItems);
+    const mutatedItems = mutate(currentItems);
+    // Enrich with titles from our product catalog
+    const updatedItems = await enrichItemTitles(workspaceId, mutatedItems);
     await admin.from("subscriptions")
       .update({ items: updatedItems, updated_at: new Date().toISOString() })
       .eq("shopify_contract_id", contractId);
@@ -82,7 +125,7 @@ export async function subAddItem(
   if (result.success) {
     await syncItemsAfterMutation(workspaceId, contractId, (items) => [
       ...items,
-      { variantId, quantity, title: "", variantTitle: "", price: "0", productId: "" },
+      { variant_id: variantId, quantity, title: "", variant_title: "", price_cents: 0, product_id: "" },
     ]);
   }
 
@@ -109,7 +152,7 @@ export async function subRemoveItem(
 
   if (result.success) {
     await syncItemsAfterMutation(workspaceId, contractId, (items) =>
-      items.filter((item) => String(item.variantId) !== variantId),
+      items.filter((item) => String(item.variant_id) !== variantId),
     );
   }
 
@@ -139,7 +182,7 @@ export async function subChangeQuantity(
   if (result.success) {
     await syncItemsAfterMutation(workspaceId, contractId, (items) =>
       items.map((item) =>
-        String(item.variantId) === variantId ? { ...item, quantity } : item,
+        String(item.variant_id) === variantId ? { ...item, quantity } : item,
       ),
     );
   }
@@ -283,8 +326,8 @@ export async function subSwapVariant(
   if (result.success) {
     await syncItemsAfterMutation(workspaceId, contractId, (items) =>
       items.map((item) =>
-        String(item.variantId) === oldVariantId
-          ? { ...item, variantId: newVariantId, quantity }
+        String(item.variant_id) === oldVariantId
+          ? { ...item, variant_id: newVariantId, quantity }
           : item,
       ),
     );

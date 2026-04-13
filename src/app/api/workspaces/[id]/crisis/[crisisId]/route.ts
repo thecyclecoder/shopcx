@@ -56,13 +56,13 @@ export async function GET(
     },
     tier1: {
       sent: allActions.filter(a => a.tier1_sent_at).length,
-      accepted: allActions.filter(a => a.tier1_response === "accepted_swap").length,
+      accepted: allActions.filter(a => a.tier1_response === "accepted_swap" || a.tier1_response === "accepted_default_swap" || a.tier1_response === "swapped_flavor").length,
       rejected: allActions.filter(a => a.tier1_response === "rejected").length,
       pending: allActions.filter(a => a.tier1_sent_at && !a.tier1_response).length,
     },
     tier2: {
       sent: allActions.filter(a => a.tier2_sent_at).length,
-      accepted: allActions.filter(a => a.tier2_response === "accepted_swap").length,
+      accepted: allActions.filter(a => a.tier2_response === "swapped_product" || a.tier2_response === "accepted_swap").length,
       rejected: allActions.filter(a => a.tier2_response === "rejected").length,
       pending: allActions.filter(a => a.tier2_sent_at && !a.tier2_response).length,
     },

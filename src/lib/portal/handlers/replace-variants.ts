@@ -2,6 +2,7 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { enrichItemTitles } from "@/lib/subscription-items";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -51,13 +52,14 @@ function parseAppstleLineItems(contract: Record<string, unknown>): Record<string
   if (!Array.isArray(rawNodes)) return [];
   return rawNodes.map((n: unknown) => {
     const node = ((n as Record<string, unknown>).node ?? n) as Record<string, unknown>;
+    const extractId = (gid: unknown) => typeof gid === "string" && gid.includes("/") ? gid.split("/").pop() || String(gid) : String(gid || "");
     return {
-      variantId: node.variantId ?? node.id,
+      variant_id: extractId(node.variantId ?? node.id),
       title: node.title ?? "",
       quantity: node.quantity ?? 1,
-      price: (node.currentPrice as Record<string, unknown> | undefined)?.amount ?? node.price ?? (node.lineDiscountedPrice as Record<string, unknown> | undefined)?.amount ?? "0",
-      variantTitle: node.variantTitle ?? "",
-      productId: node.productId ?? "",
+      price_cents: Math.round(parseFloat(String((node.currentPrice as Record<string, unknown> | undefined)?.amount ?? node.price ?? (node.lineDiscountedPrice as Record<string, unknown> | undefined)?.amount ?? "0")) * 100),
+      variant_title: node.variantTitle ?? "",
+      product_id: extractId(node.productId ?? ""),
     };
   });
 }
@@ -178,10 +180,11 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     }
     if ((updated as Record<string, unknown>).deliveryPrice) patch.deliveryPrice = (updated as Record<string, unknown>).deliveryPrice;
 
-    // Update local DB items array from the Appstle response
-    const dbItems = parseAppstleLineItems(updated);
-    if (dbItems.length > 0) {
+    // Update local DB items array from the Appstle response, enriched with catalog titles
+    const rawDbItems = parseAppstleLineItems(updated);
+    if (rawDbItems.length > 0) {
       const adminDb = createAdminClient();
+      const dbItems = await enrichItemTitles(auth.workspaceId, rawDbItems);
       await adminDb.from("subscriptions")
         .update({ items: dbItems, updated_at: new Date().toISOString() })
         .eq("shopify_contract_id", String(contractId));

@@ -352,8 +352,8 @@ export async function POST(
         actionLog.push("Tier 1 rejected — will advance to Tier 2");
       } else if (flavorChoice === "keep_current") {
         await admin.from("crisis_customer_actions").update({
-          tier1_response: "accepted_swap",
-          tier1_swapped_to: { variantId: metadata.defaultSwapVariantId, title: "Kept default swap" },
+          tier1_response: "accepted_default_swap",
+          tier1_swapped_to: { variantId: metadata.defaultSwapVariantId, title: metadata.defaultSwapTitle || "Default swap" },
           exhausted_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         }).eq("id", actionId);
@@ -383,7 +383,7 @@ export async function POST(
         }
         const chosenLabel = responses?.flavor_choice?.label || flavorChoice;
         await admin.from("crisis_customer_actions").update({
-          tier1_response: "accepted_swap",
+          tier1_response: "swapped_flavor",
           tier1_swapped_to: { variantId: flavorChoice, title: chosenLabel },
           exhausted_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -481,7 +481,7 @@ export async function POST(
         const variantLabel = responses?.variant_choice?.label || "";
         const chosenLabel = variantLabel ? `${productLabel} — ${variantLabel}` : productLabel;
         await admin.from("crisis_customer_actions").update({
-          tier2_response: "accepted_swap",
+          tier2_response: "swapped_product",
           tier2_swapped_to: { variantId: swapVariantId, title: chosenLabel, quantity: qty },
           tier2_coupon_applied: !!(metadata.tier2CouponCode),
           exhausted_at: new Date().toISOString(),

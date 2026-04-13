@@ -6,6 +6,7 @@ import { calculateRetentionScore } from "@/lib/retention-score";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { inngest } from "@/lib/inngest/client";
+import { enrichItemTitles } from "@/lib/subscription-items";
 
 function mapStatus(status: string): "active" | "paused" | "cancelled" | "expired" | "failed" {
   switch (status?.toUpperCase()) {
@@ -141,17 +142,19 @@ async function handleSubscriptionEvent(
 
   // Extract subscription items
   const lines = (data.lines as { nodes?: Record<string, unknown>[] })?.nodes || [];
-  const items = lines.map((line) => ({
-    title: line.title,
-    sku: line.sku,
-    quantity: line.quantity,
+  const rawItems = lines.map((line) => ({
+    title: line.title as string || "",
+    sku: line.sku as string || null,
+    quantity: line.quantity as number || 1,
     price_cents: dollarsToCents((line.currentPrice as { amount?: string })?.amount),
     product_id: line.productId ? extractId(line.productId as string) : null,
     variant_id: line.variantId ? extractId(line.variantId as string) : null,
-    variant_title: line.variantTitle || null,
-    selling_plan: line.sellingPlanName || null,
+    variant_title: (line.variantTitle as string) || null,
+    selling_plan: (line.sellingPlanName as string) || null,
     line_id: line.id ? extractId(line.id as string) : null,
   }));
+  // Enrich titles from our product catalog (IDs are source of truth, not payload titles)
+  const items = await enrichItemTitles(workspaceId, rawItems as Record<string, unknown>[]) as typeof rawItems;
 
   const billingPolicy = data.billingPolicy as { interval?: string; intervalCount?: number } | undefined;
   const deliveryPrice = data.deliveryPrice as { amount?: string } | undefined;
@@ -296,6 +299,18 @@ async function handleSubscriptionEvent(
       items: items.map(i => i.title).filter(Boolean),
     },
   });
+
+  // Mark crisis record as cancelled if applicable
+  if (eventType === "subscription.cancelled" && contractId) {
+    const { data: sub } = await admin.from("subscriptions").select("id").eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
+    if (sub) {
+      await admin.from("crisis_customer_actions")
+        .update({ cancelled: true, cancel_date: new Date().toISOString() })
+        .eq("workspace_id", workspaceId)
+        .eq("subscription_id", sub.id)
+        .eq("cancelled", false);
+    }
+  }
 
   // Evaluate rules
   const { data: subCtx } = contractId

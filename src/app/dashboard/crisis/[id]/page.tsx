@@ -102,9 +102,10 @@ function getActionResponse(a: CrisisAction): string {
   if (a.tier3_response === "accepted_pause") return "Paused";
   if (a.tier3_response === "accepted_remove") return "Removed item";
   if (a.tier3_response === "rejected") return "Tier 3 rejected";
-  if (a.tier2_response === "accepted_swap") return "Product swap";
+  if (a.tier2_response === "swapped_product" || a.tier2_response === "accepted_swap") return "Product swap";
   if (a.tier2_response === "rejected") return "Tier 2 rejected";
-  if (a.tier1_response === "accepted_swap") return "Flavor swap";
+  if (a.tier1_response === "swapped_flavor") return "Flavor swap";
+  if (a.tier1_response === "accepted_default_swap" || a.tier1_response === "accepted_swap") return "Kept default";
   if (a.tier1_response === "rejected") return "Tier 1 rejected";
   if (a.current_tier > 0) return "Pending";
   return "Not started";
