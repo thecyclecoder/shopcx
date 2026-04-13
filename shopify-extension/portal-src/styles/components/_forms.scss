@@ -130,3 +130,9 @@
 .sp-radio-row span {
   padding-left: 0;
 }
+
+.sp-radio-row.is-disabled {
+  opacity: 0.5;
+  cursor: default;
+  pointer-events: none;
+}

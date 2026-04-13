@@ -7,6 +7,18 @@
 .sp-detail {
   max-width: 1100px;
   margin: 0 auto;
+  overflow: hidden;
+}
+
+/* Ensure two-column grid stacks on mobile */
+.sp-detail__grid.sp-grid {
+  @media (max-width: 899px) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sp-detail__col {
+  min-width: 0; /* prevent flex/grid children from pushing column wider */
 }
 
 .sp-detail__header {
@@ -356,6 +368,188 @@
   }
 }
 
+/* ------------------------------------------------------------
+   Shipping Protection Card (redesigned)
+   ------------------------------------------------------------ */
+
+.sp-shipprot {
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.04), rgba(16, 185, 129, 0.06));
+  transition: border-color 0.2s;
+}
+
+.sp-shipprot--active {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.06), rgba(16, 185, 129, 0.1));
+}
+
+.sp-shipprot__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.sp-shipprot__icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #22c55e, #10b981);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.sp-shipprot__text {
+  min-width: 0;
+}
+
+.sp-shipprot__title {
+  font-weight: 800;
+  font-size: 16px;
+  color: var(--sp-text, #111);
+}
+
+.sp-shipprot__status {
+  font-size: 13px;
+  font-weight: 700;
+  margin-top: 2px;
+}
+
+.sp-shipprot--active .sp-shipprot__status {
+  color: #16a34a;
+}
+
+.sp-shipprot:not(.sp-shipprot--active) .sp-shipprot__status {
+  color: var(--sp-muted, #9ca3af);
+}
+
+.sp-shipprot__desc {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--sp-muted, #6b7280);
+  line-height: 1.4;
+  margin-bottom: 12px;
+}
+
+.sp-shipprot__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sp-shipprot__price {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 15px;
+}
+
+.sp-shipprot__strike {
+  text-decoration: line-through;
+  color: var(--sp-muted, #9ca3af);
+  font-size: 13px;
+}
+
+.sp-shipprot__now {
+  color: #16a34a;
+}
+
+.sp-shipprot__per {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--sp-muted, #9ca3af);
+}
+
+.sp-shipprot__social {
+  margin-top: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #16a34a;
+  text-align: center;
+}
+
+/* ------------------------------------------------------------
+   Address Verification UI
+   ------------------------------------------------------------ */
+
+.sp-address-verify__label {
+  font-weight: 700;
+  font-size: 13px;
+  margin: 12px 0 6px;
+  color: var(--sp-muted, #6b7280);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sp-address-verify__label:first-child {
+  margin-top: 0;
+}
+
+.sp-address-verify__option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--sp-border, #e5e7eb);
+  background: #fff;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1.4;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.sp-address-verify__option:hover {
+  border-color: #d1d5db;
+  background: #fafafa;
+}
+
+.sp-address-verify__option--suggested {
+  border-color: rgba(34, 197, 94, 0.3);
+  background: rgba(34, 197, 94, 0.04);
+}
+
+.sp-address-verify__option--suggested:hover {
+  border-color: rgba(34, 197, 94, 0.5);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.sp-address-verify__badge {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #16a34a;
+}
+
+.sp-address-verify__badge--muted {
+  color: var(--sp-muted, #6b7280);
+}
+
+.sp-address-verify__errors {
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.15);
+  margin-bottom: 12px;
+  font-size: 14px;
+  color: #dc2626;
+}
+
+.sp-address-verify__actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.sp-address-verify__actions .sp-btn {
+  flex: 1;
+}
+
 /* Frequency text (small helper) */
 .sp-detail__freq-value {
   margin-bottom: 10px;
@@ -440,13 +634,22 @@
 }
 
 .sp-detail__cancel-title {
-  font-weight: 950;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--sp-muted, #6b7280);
 }
 
 .sp-detail__cancel-sub {
   margin-top: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--sp-muted, #9ca3af);
+}
+
+.sp-detail__cancel .sp-btn--danger {
   font-size: 13px;
-  font-weight: 650;
+  padding: 6px 14px;
+  opacity: 0.7;
 }
 
 @media (max-width: 720px) {
@@ -999,6 +1202,13 @@
   margin: 0;
 }
 
+.sp-line-group .sp-disclosure {
+  margin-left: 12px;
+  margin-right: 12px;
+  margin-bottom: 10px;
+  width: calc(100% - 24px);
+}
+
 .sp-disclosure {
   display: flex;
   align-items: center;
@@ -1027,6 +1237,7 @@
 
 .sp-disclosure__panel {
   margin-top: 8px;
+  padding: 0 12px 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
