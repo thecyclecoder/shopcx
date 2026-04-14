@@ -60,12 +60,12 @@ export async function POST(
   // Verify admin/owner role
   const { data: member } = await admin
     .from("workspace_members")
-    .select("workspace_role")
+    .select("role")
     .eq("workspace_id", workspaceId)
     .eq("user_id", user.id)
     .single();
 
-  if (!member || !["owner", "admin"].includes(member.workspace_role)) {
+  if (!member || !["owner", "admin"].includes(member.role)) {
     return NextResponse.json({ error: "Admin or owner role required" }, { status: 403 });
   }
 
