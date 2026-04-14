@@ -257,12 +257,20 @@ async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: st
         const { data: cust } = await admin.from("customers").select("email").eq("id", t.customer_id).single();
         if (cust?.email) {
           const { data: ws } = await admin.from("workspaces").select("name").eq("id", wsId).single();
-          await sendTicketReply({
+          const emailResult = await sendTicketReply({
             workspaceId: wsId, toEmail: cust.email,
             subject: `Re: ${t.subject || "Your chat with us"}`,
             body: html,
             inReplyTo: null, agentName: "Support", workspaceName: ws?.name || "",
           });
+          // Save email message ID for threading — so replies to this email thread into this ticket
+          if (emailResult.messageId) {
+            const emailMsgId = `<${emailResult.messageId}@resend.dev>`;
+            await admin.from("tickets").update({ email_message_id: emailMsgId }).eq("id", tid);
+            await admin.from("ticket_messages").update({ resend_email_id: emailResult.messageId, email_status: "sent" })
+              .eq("ticket_id", tid).eq("direction", "outbound").is("resend_email_id", null)
+              .order("created_at", { ascending: false }).limit(1);
+          }
           await sysNote(admin, tid, `[System] Chat customer idle. Reply also sent via email to ${cust.email}.`);
         }
       }
