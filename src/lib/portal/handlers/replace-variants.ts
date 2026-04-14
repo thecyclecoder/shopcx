@@ -191,12 +191,39 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   }
 
   // POST-SWAP: Apply grandfathered base price if detected
-  if (grandfatheredBase && newVariantIdForPrice) {
+  if (grandfatheredBase && newVariantIdForPrice && updated) {
     try {
-      console.log("[replaceVariants] Applying grandfathered price:", { contractId, newVariantIdForPrice, grandfatheredBase });
-      const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
-      const priceResult = await subUpdateLineItemPrice(auth.workspaceId, String(contractId), newVariantIdForPrice, grandfatheredBase);
-      console.log("[replaceVariants] Price update result:", priceResult);
+      // Get the new line_id from the Appstle response (DB is stale at this point)
+      const respLines = (updated as Record<string, unknown>).lines;
+      const nodes = respLines && typeof respLines === "object"
+        ? (respLines as Record<string, unknown>).nodes || respLines
+        : null;
+      let newLineGid: string | null = null;
+      if (Array.isArray(nodes)) {
+        for (const n of nodes) {
+          const node = (n as Record<string, unknown>).node || n;
+          const vid = String((node as Record<string, unknown>).variantId || "").split("/").pop();
+          if (vid === newVariantIdForPrice) {
+            newLineGid = String((node as Record<string, unknown>).id || "");
+            break;
+          }
+        }
+      }
+      if (newLineGid) {
+        console.log("[replaceVariants] Applying grandfathered price:", { contractId, newLineGid, grandfatheredBase });
+        const { getAppstleConfig } = await import("@/lib/subscription-items");
+        const cfg = await getAppstleConfig(auth.workspaceId);
+        if (cfg) {
+          const priceDecimal = (grandfatheredBase / 100).toFixed(2);
+          const priceRes = await fetch(
+            `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-line-item-price?contractId=${contractId}&lineId=${encodeURIComponent(newLineGid)}&basePrice=${priceDecimal}`,
+            { method: "PUT", headers: { "X-API-Key": cfg.apiKey }, cache: "no-store" },
+          );
+          console.log("[replaceVariants] Price update status:", priceRes.status);
+        }
+      } else {
+        console.log("[replaceVariants] Could not find new line in Appstle response for variant", newVariantIdForPrice);
+      }
     } catch (e) {
       console.error("[replaceVariants] Price update failed:", e);
     }
