@@ -35,7 +35,7 @@ export async function GET(
 
   let query = admin
     .from("fraud_cases")
-    .select("*, fraud_rules!inner(name)", { count: "exact" })
+    .select("*, fraud_rules(name)", { count: "exact" })
     .eq("workspace_id", workspaceId)
     .order("created_at", { ascending: false })
     .range(offset, offset + limit - 1);
