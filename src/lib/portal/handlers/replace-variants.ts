@@ -210,16 +210,32 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
         }
       }
       if (newLineGid) {
-        console.log("[replaceVariants] Applying grandfathered price:", { contractId, newLineGid, grandfatheredBase });
         const { getAppstleConfig } = await import("@/lib/subscription-items");
         const cfg = await getAppstleConfig(auth.workspaceId);
         if (cfg) {
           const priceDecimal = (grandfatheredBase / 100).toFixed(2);
+          const discountedDecimal = (Math.round(grandfatheredBase * 0.75) / 100).toFixed(2);
           const priceRes = await fetch(
             `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-line-item-price?contractId=${contractId}&lineId=${encodeURIComponent(newLineGid)}&basePrice=${priceDecimal}`,
             { method: "PUT", headers: { "X-API-Key": cfg.apiKey }, cache: "no-store" },
           );
-          console.log("[replaceVariants] Price update status:", priceRes.status);
+          if (priceRes.ok) {
+            // Patch the Appstle response so the UI shows the corrected price
+            if (Array.isArray(nodes)) {
+              for (const n of nodes) {
+                const node = (n as Record<string, unknown>).node || n;
+                if (String((node as Record<string, unknown>).id || "") === newLineGid) {
+                  (node as Record<string, unknown>).currentPrice = { __typename: "MoneyV2", amount: discountedDecimal, currencyCode: "USD" };
+                  (node as Record<string, unknown>).pricingPolicy = {
+                    __typename: "SubscriptionPricingPolicy",
+                    basePrice: { __typename: "MoneyV2", amount: priceDecimal, currencyCode: "USD" },
+                    cycleDiscounts: [{ __typename: "SubscriptionCyclePriceAdjustment", afterCycle: 0, adjustmentType: "PERCENTAGE", adjustmentValue: { __typename: "SellingPlanPricingPolicyPercentageValue", percentage: 25 }, computedPrice: { __typename: "MoneyV2", amount: discountedDecimal, currencyCode: "USD" } }],
+                  };
+                  break;
+                }
+              }
+            }
+          }
         }
       } else {
         console.log("[replaceVariants] Could not find new line in Appstle response for variant", newVariantIdForPrice);
