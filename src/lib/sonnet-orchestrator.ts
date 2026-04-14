@@ -46,7 +46,7 @@ export interface SonnetDecision {
 const FALLBACK_DECISION: SonnetDecision = {
   reasoning: "Sonnet orchestrator failed — escalating to human agent",
   action_type: "escalate",
-  response_message: "Let me connect you with a team member who can help.",
+  response_message: "I'm going to look into this and send you an email shortly.",
 };
 
 // ── Context builder ──

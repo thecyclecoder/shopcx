@@ -615,7 +615,7 @@ async function handleDirectAction(
   } else {
     // Some failed — send error + escalate
     const errorMsg =
-      "I ran into an issue processing your request. Let me connect you with a team member who can help.";
+      "I ran into an issue processing your request. I'm going to look into this and send you an email shortly.";
     await send(errorMsg, ctx.sandbox);
     await escalateTicket(ctx, `Direct action failures: ${failures.map((f) => `${f.action.type}: ${f.result.error}`).join("; ")}`);
   }
@@ -859,7 +859,7 @@ async function handleEscalate(
   // Send holding message to customer
   const holdingMsg =
     decision.response_message ||
-    "Let me connect you with a team member who can help with this right away.";
+    "I'm going to look into this and send you an email shortly.";
   await send(holdingMsg, ctx.sandbox);
   await sysNote(`Escalated: ${reason}`);
 }
