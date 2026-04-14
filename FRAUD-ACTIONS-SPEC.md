@@ -85,7 +85,43 @@ Amplifier URL format: `https://my.amplifier.com/orders/{amplifier_order_id}`
   - Bootstrap returns the ban flag and frontend blocks, but a direct API call bypasses the frontend
 - **Action:** Add `checkPortalBan` to all handlers missing it (except `bootstrap` which handles ban differently, `index` which is the route map, and `ban-request` which IS the ban check)
 
-## 6. API Endpoints Used
+## 6. Banned Customer — Ticket Handling
+When a banned/fraud customer contacts us (email, chat, any channel):
+
+### Ticket Display
+- Ticket should show a prominent red "FRAUD CUSTOMER" banner at the top of the ticket detail page
+- Check: `customers.portal_banned === true`
+- The banner should be impossible to miss — full-width red bar above the messages
+
+### Sonnet Behavior
+- In the unified ticket handler, after resolving the customer, check `portal_banned`
+- If banned → skip ALL processing (no Sonnet, no playbook, no journey, no workflow)
+- Send a single response: "We're sorry, but we've noticed unusual activity on your account and we are unable to provide further assistance."
+- Close the ticket
+- Do NOT escalate to an agent — don't waste their time
+
+### Implementation
+In `src/lib/inngest/unified-ticket-handler.ts`, after the resolve step:
+```ts
+if (customer?.portal_banned) {
+  await sendWithDelay(admin, wsId, tid, ch, 
+    "<p>We're sorry, but we've noticed unusual activity on your account and we are unable to provide further assistance.</p>", 
+    cfg.sandbox);
+  await admin.from("tickets").update({ status: "closed", tags: [...tags, "fraud_customer"] }).eq("id", tid);
+  return { status: "banned_customer" };
+}
+```
+
+In `src/app/dashboard/tickets/[id]/page.tsx`:
+```tsx
+{customer?.portal_banned && (
+  <div className="bg-red-600 text-white px-4 py-2 text-center font-bold text-sm rounded-lg mb-4">
+    FRAUD CUSTOMER — Account banned
+  </div>
+)}
+```
+
+## 7. API Endpoints Used
 
 ### Cancel Subscription (fraud reason)
 ```ts
