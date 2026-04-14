@@ -193,9 +193,13 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   // POST-SWAP: Apply grandfathered base price if detected
   if (grandfatheredBase && newVariantIdForPrice) {
     try {
+      console.log("[replaceVariants] Applying grandfathered price:", { contractId, newVariantIdForPrice, grandfatheredBase });
       const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
-      await subUpdateLineItemPrice(auth.workspaceId, String(contractId), newVariantIdForPrice, grandfatheredBase);
-    } catch { /* non-fatal */ }
+      const priceResult = await subUpdateLineItemPrice(auth.workspaceId, String(contractId), newVariantIdForPrice, grandfatheredBase);
+      console.log("[replaceVariants] Price update result:", priceResult);
+    } catch (e) {
+      console.error("[replaceVariants] Price update failed:", e);
+    }
   }
 
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
