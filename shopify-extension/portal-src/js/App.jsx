@@ -63,24 +63,24 @@ export default function App({ config }) {
   let screen;
 
   if (config.banned) {
-    breadcrumbs = [{ label: 'Manager' }, { label: 'Restricted' }];
+    breadcrumbs = [{ icon: true }, { label: 'Restricted' }];
     screen = <BannedView />;
   } else {
     switch (router.screen) {
       case 'subscriptions':
-        breadcrumbs = [{ label: 'Manager', onClick: goHome }, { label: 'Subscriptions' }];
+        breadcrumbs = [{ icon: true, onClick: goHome }, { label: 'Subscriptions' }];
         screen = <Subscriptions />;
         break;
       case 'detail':
-        breadcrumbs = [{ label: 'Manager', onClick: goHome }, { label: 'Subscriptions', onClick: goSubs }, { label: 'View' }];
+        breadcrumbs = [{ icon: true, onClick: goHome }, { label: 'Subscriptions', onClick: goSubs }, { label: 'View' }];
         screen = <SubscriptionDetail />;
         break;
       case 'cancel':
-        breadcrumbs = [{ label: 'Manager', onClick: goHome }, { label: 'Subscriptions', onClick: goSubs }, { label: 'Cancel' }];
+        breadcrumbs = [{ icon: true, onClick: goHome }, { label: 'Subscriptions', onClick: goSubs }, { label: 'Cancel' }];
         screen = <Cancel />;
         break;
       default:
-        breadcrumbs = [{ label: 'Manager', onClick: goHome }, { label: 'Home' }];
+        breadcrumbs = [{ icon: true, onClick: goHome }, { label: 'Home' }];
         screen = <Home />;
     }
   }
