@@ -1005,16 +1005,26 @@ async function handleApplyPolicy(
   }
 
   // ── 30-day money back guarantee flow ──
-  // If all identified orders are in-policy checkout orders ≤30 days, use the save-first flow
-  if (inPolicy.length > 0 && outOfPolicy.length === 0 && !ctx._30day_flow_skipped) {
-    const allCheckout = orderObjs.every(o => {
-      const src = (o.source_name || "").toLowerCase();
-      return !src.includes("subscription") || src.includes("checkout");
-    });
-    const allWithin30 = orderObjs.every(o => {
-      const days = Math.floor((Date.now() - new Date(o.created_at).getTime()) / 86400000);
-      return days <= 30;
-    });
+  // If ANY identified orders are in-policy checkout orders ≤30 days, use the save-first flow for those
+  // Out-of-policy renewal orders are denied with no exception offers
+  const inPolicyObjs = orderObjs.filter(o => inPolicy.includes(o.order_number));
+  const checkoutInPolicy = inPolicyObjs.filter(o => {
+    const src = (o.source_name || "").toLowerCase();
+    const isCheckout = !src.includes("subscription") || src.includes("checkout");
+    const days = Math.floor((Date.now() - new Date(o.created_at).getTime()) / 86400000);
+    return isCheckout && days <= 30;
+  });
+
+  if (checkoutInPolicy.length > 0 && !ctx._30day_flow_skipped) {
+    // If there are also out-of-policy renewals, note that they don't qualify
+    if (outOfPolicy.length > 0) {
+      ctx._renewal_orders_denied = outOfPolicy;
+      ctx._no_exception_for_renewals = true; // firm rule: no escalation on renewals when first order gets 30-day return
+    }
+    // Use the in-policy checkout orders for the 30-day flow
+    ctx.identified_orders = checkoutInPolicy.map(o => o.order_number);
+    const allCheckout = true;
+    const allWithin30 = true;
 
     if (allCheckout && allWithin30) {
       // Get product IDs from the order for review matching
@@ -1036,16 +1046,22 @@ async function handleApplyPolicy(
         }
       }
 
+      const renewalDeniedNote = (ctx._renewal_orders_denied as string[] | undefined)?.length
+        ? `</p><p>Regarding your renewal order${(ctx._renewal_orders_denied as string[]).length > 1 ? "s" : ""} — subscription renewal orders are not eligible for return under our policy, so I won't be able to process a refund on ${(ctx._renewal_orders_denied as string[]).length > 1 ? "those" : "that one"}.`
+        : "";
+
       return {
         action: "respond",
         context: {
           _30day_eligible: true,
-          _30day_order_numbers: inPolicy,
+          _30day_order_numbers: checkoutInPolicy.map(o => o.order_number),
           _30day_product_ids: productIds,
           _30day_phase: "ask_reason",
+          _renewal_orders_denied: ctx._renewal_orders_denied,
+          _no_exception_for_renewals: ctx._no_exception_for_renewals,
         },
         response: wrapResponse(
-          `<p>I'm here to help! I see you'd like to use our 30-day money back guarantee. Before I set that up, can you share what isn't working for you? I'd love to see if there's anything we can do to help.</p>`,
+          `<p>I'm here to help! I see your first order qualifies for our 30-day money back guarantee. Before I set that up, can you share what isn't working for you? I'd love to see if there's anything we can do to help.${renewalDeniedNote}</p>`,
           pers, !ctx.playbook_intro_sent,
         ),
         systemNote: `[Playbook] Order(s) ${inPolicy.join(", ")} qualify for 30-day money back guarantee. Asking for reason before processing.`,
@@ -1312,9 +1328,9 @@ async function handleApplyPolicy(
   response += `\n\nLet me know if I can help with anything.`;
 
   return {
-    action: "respond", response,
+    action: "advance", newStep: step.step_order + 1, response,
     context: { in_policy: inPolicy, out_of_policy: outOfPolicy, policy_applied: policy.name, failure_reasons: failureReasons },
-    systemNote: `[Playbook] Policy "${policy.name}": ${inPolicy.length} in-policy, ${outOfPolicy.length} out-of-policy. Reasons: ${failureReasons.join("; ")}`,
+    systemNote: `[Playbook] Policy "${policy.name}": ${inPolicy.length} in-policy, ${outOfPolicy.length} out-of-policy. Reasons: ${failureReasons.join("; ")}. Advancing to next step.`,
   };
 }
 
@@ -1330,6 +1346,16 @@ async function handleOfferException(
   const outOfPolicy = (ctx.out_of_policy as string[]) || [];
   if (outOfPolicy.length === 0) {
     return { action: "advance", newStep: step.step_order + 1, systemNote: "[Playbook] All orders in policy, no exception needed." };
+  }
+
+  // Rule: one return per subscription — if 30-day guarantee was used on the checkout order,
+  // no exceptions allowed on renewal orders from the same subscription
+  if (ctx._30day_eligible || ctx._30day_phase) {
+    return {
+      action: "advance", newStep: step.step_order + 1,
+      context: { exception_blocked_reason: "30_day_return_active" },
+      systemNote: "[Playbook] Exception blocked — 30-day money back guarantee already applies to this subscription. One return per subscription.",
+    };
   }
 
   // Check auto-grant exceptions first
