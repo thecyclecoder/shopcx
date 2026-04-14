@@ -82,7 +82,7 @@ export async function POST(
   // Get ticket details
   const { data: ticket } = await admin
     .from("tickets")
-    .select("id, subject, tags, status, channel, customer_email, handled_by, ai_turn_count, escalation_reason")
+    .select("id, subject, tags, status, channel, customer_id, handled_by, ai_turn_count, escalation_reason")
     .eq("id", ticketId)
     .eq("workspace_id", workspaceId)
     .single();
@@ -101,13 +101,11 @@ export async function POST(
 
   // Get customer info if available
   let customerInfo = "";
-  if (ticket.customer_email) {
+  if (ticket.customer_id) {
     const { data: cust } = await admin
       .from("customers")
       .select("first_name, last_name, email, subscription_status, retention_score, total_orders, ltv")
-      .eq("workspace_id", workspaceId)
-      .eq("email", ticket.customer_email)
-      .limit(1)
+      .eq("id", ticket.customer_id)
       .single();
     if (cust) {
       customerInfo = `Customer: ${cust.first_name || ""} ${cust.last_name || ""} (${cust.email}), Subscription: ${cust.subscription_status || "none"}, Retention: ${cust.retention_score || 0}, Orders: ${cust.total_orders || 0}, LTV: $${cust.ltv || 0}`;
