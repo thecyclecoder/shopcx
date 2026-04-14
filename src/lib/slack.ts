@@ -284,17 +284,23 @@ export function buildChargebackMessage(data: {
 export function buildFraudMessage(data: {
   customer: { name?: string; email?: string };
   severity: string;
-  rules: string[];
+  rules?: string[];
+  reason?: string;
+  orderId?: string;
   caseId?: string;
 }): { blocks: unknown[]; text: string } {
   const text = `Fraud case detected: ${data.severity} severity for ${data.customer.email}`;
+  const detection = data.rules?.length ? data.rules.join(", ") : (data.reason || "AI Fraud Detection");
+  const lines = [
+    `*Customer:* ${customerLine(data.customer)}`,
+    `*Severity:* ${data.severity}`,
+    `*Detection:* ${detection}`,
+  ];
+  if (data.orderId) lines.push(`*Order:* ${data.orderId}`);
+  lines.push(`<https://shopcx.ai/dashboard/fraud|Review in ShopCX>`);
   const blocks = [
     headerBlock("🛑", "Fraud Case Detected"),
-    sectionBlock(
-      `*Customer:* ${customerLine(data.customer)}\n` +
-      `*Severity:* ${data.severity}\n` +
-      `*Rules triggered:* ${data.rules.join(", ")}`
-    ),
+    sectionBlock(lines.join("\n")),
     dividerBlock(),
   ];
   return { blocks, text };
