@@ -441,14 +441,15 @@
   color: var(--sp-muted, #6b7280);
   line-height: 1.4;
   margin-bottom: 12px;
+  margin-left: 30px;
 }
 
 .sp-shipprot__footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
+  margin-left: 30px;
 }
 
 .sp-shipprot__price {
