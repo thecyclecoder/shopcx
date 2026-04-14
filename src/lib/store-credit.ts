@@ -86,7 +86,6 @@ const BALANCE_QUERY = `
                 createdAt
               }
               ... on StoreCreditAccountExpirationTransaction {
-                id
                 amount { amount currencyCode }
                 balanceAfterTransaction { amount currencyCode }
                 createdAt
