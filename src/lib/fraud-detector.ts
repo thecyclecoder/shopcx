@@ -603,21 +603,30 @@ Respond with EXACTLY "FRAUD" or "OK".`;
         if (answer.includes("FRAUD")) {
           flagged = true;
           // Create fraud case
+          const orderNum = order.order_number || order.shopify_order_id;
           const { data: existing } = await admin.from("fraud_cases")
-            .select("id").eq("workspace_id", workspaceId).eq("customer_id", effectiveCustomerId || "").eq("status", "open").limit(1);
+            .select("id").eq("workspace_id", workspaceId).contains("customer_ids", [effectiveCustomerId || ""]).eq("status", "open").limit(1);
           if (!existing?.length) {
             await admin.from("fraud_cases").insert({
               workspace_id: workspaceId,
-              customer_id: effectiveCustomerId,
+              rule_type: "ai_screen",
               severity: "high",
               status: "open",
-              source: "ai_screen",
-              notes: `AI flagged order ${order.order_number} as suspicious. Email: ${email}, Name: ${shippingName}`,
+              title: `AI flagged suspicious order ${orderNum}`,
+              summary: `AI detected fraud indicators: ${shippingName} (${email})`,
+              evidence: { ai_decision: "FRAUD", email, shipping_name: shippingName, billing_name: billingName, order_number: orderNum },
+              customer_ids: effectiveCustomerId ? [effectiveCustomerId] : [],
+              order_ids: [order.id],
+              first_detected_at: new Date().toISOString(),
+              last_seen_at: new Date().toISOString(),
             });
+          } else {
+            // Update existing case with latest activity
+            await admin.from("fraud_cases").update({ last_seen_at: new Date().toISOString() }).eq("id", existing[0].id);
           }
           // Slack notification
-          const { dispatchSlackNotification } = await import("@/lib/slack");
-          dispatchSlackNotification(workspaceId, "fraud", {
+          const { dispatchSlackNotification } = await import("@/lib/slack-notify");
+          dispatchSlackNotification(workspaceId, "fraud_case", {
             customer: { name: shippingName, email },
             severity: "high",
             reason: "AI flagged as suspicious",
