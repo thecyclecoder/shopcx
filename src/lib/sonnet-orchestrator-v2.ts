@@ -715,6 +715,35 @@ export async function callSonnetOrchestratorV2(
 
       if (!res.ok) {
         const errBody = await res.text().catch(() => "");
+        // Retry once on 529 (overloaded) after 2s delay
+        if (res.status === 529) {
+          console.warn("Sonnet v2: 529 overloaded, retrying in 2s...");
+          await new Promise(r => setTimeout(r, 2000));
+          const retry = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+            body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 2000, tools, messages }),
+          });
+          if (retry.ok) {
+            const retryData = await retry.json();
+            // Replace content blocks and continue processing this round
+            const retryContent = retryData.content || [];
+            const retryToolUse = retryContent.filter((b: { type: string }) => b.type === "tool_use");
+            const retryText = retryContent.filter((b: { type: string }) => b.type === "text");
+            if (retryToolUse.length === 0) {
+              return parseSonnetDecision(retryText.map((b: { text: string }) => b.text).join(""));
+            }
+            // Has tool calls — execute them and continue the loop
+            const retryResults: unknown[] = [];
+            for (const tc of retryToolUse) {
+              const result = await executeToolCall(tc.name, tc.input || {}, workspaceId, customerId, ticketId);
+              retryResults.push({ type: "tool_result", tool_use_id: tc.id, content: result });
+            }
+            messages.push({ role: "assistant", content: retryContent });
+            messages.push({ role: "user", content: retryResults });
+            continue;
+          }
+        }
         console.error(`Sonnet v2 API error: ${res.status}`, errBody.slice(0, 300));
         return { ...FALLBACK_DECISION, reasoning: `Sonnet API error ${res.status}: ${errBody.slice(0, 100)}` };
       }
@@ -757,8 +786,25 @@ export async function callSonnetOrchestratorV2(
       messages.push({ role: "user", content: toolResults });
     }
 
-    // Max rounds exceeded
-    console.error("Sonnet v2: max tool rounds exceeded");
+    // Max rounds exceeded — force a final response without tools
+    console.warn("Sonnet v2: max tool rounds exceeded, forcing final response");
+    try {
+      const forceRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 2000,
+          messages: [...messages, { role: "user", content: "You have gathered enough data. Based on what you know, provide your decision NOW as JSON. Do not call any more tools." }],
+          // No tools — forces text response
+        }),
+      });
+      if (forceRes.ok) {
+        const forceData = await forceRes.json();
+        const text = (forceData.content || []).filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => b.text).join("");
+        if (text) return parseSonnetDecision(text);
+      }
+    } catch { /* fall through to fallback */ }
     return FALLBACK_DECISION;
   } catch (err) {
     console.error("Sonnet v2 error:", err);
