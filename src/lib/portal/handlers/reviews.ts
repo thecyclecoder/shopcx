@@ -56,17 +56,21 @@ export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
   // Fetch reviews: try by shopify_product_id first, then by product_name match
   // Columns: featured (not smart_featured), reviewer_name (not author), smart_quote
   // Get Shopify product IDs for the query (resolve from UUIDs if needed)
-  const shopifyPids = productIds.map(id => internalToShopifyId[id] || id).filter(Boolean);
-  const { data: reviews } = await admin.from("product_reviews")
-    .select("shopify_product_id, product_name, reviewer_name, rating, title, body, summary, smart_quote, featured, created_at")
-    .eq("workspace_id", auth.workspaceId)
-    .in("shopify_product_id", shopifyPids)
-    .gte("rating", 4)
-    .or("status.in.(published,featured),status.is.null")
-    .order("featured", { ascending: false })
-    .order("rating", { ascending: false })
-    .order("created_at", { ascending: false })
-    .limit(100);
+  const shopifyPids = [...new Set(productIds.map(id => internalToShopifyId[id] || id).filter(Boolean))];
+  // Query per product to avoid .in() issues, then merge
+  let reviews: { shopify_product_id: string; product_name: string; reviewer_name: string; rating: number; title: string; body: string; summary: string; smart_quote: string; featured: boolean; created_at: string }[] = [];
+  for (const spid of shopifyPids) {
+    const { data } = await admin.from("product_reviews")
+      .select("shopify_product_id, product_name, reviewer_name, rating, title, body, summary, smart_quote, featured, created_at")
+      .eq("workspace_id", auth.workspaceId)
+      .eq("shopify_product_id", spid)
+      .gte("rating", 4)
+      .order("featured", { ascending: false })
+      .order("rating", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(10);
+    if (data) reviews = reviews.concat(data);
+  }
 
   // Match reviews to requested product IDs
   for (const r of reviews || []) {

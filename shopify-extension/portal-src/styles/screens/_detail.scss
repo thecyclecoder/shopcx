@@ -1615,6 +1615,27 @@
   }
 }
 
+/* Line item MSRP strikethrough */
+.sp-line__msrp {
+  text-decoration: line-through;
+  color: var(--sp-muted, #9ca3af);
+  font-weight: 500;
+  font-size: 14px;
+  margin-right: 6px;
+}
+
+.sp-line__now {
+  font-weight: 800;
+  font-size: 15px;
+}
+
+.sp-subtotal__msrp {
+  text-decoration: line-through;
+  color: var(--sp-muted, #9ca3af);
+  font-weight: 500;
+  margin-right: 6px;
+}
+
 /* Mobile: full-width action buttons */
 @media (max-width: 640px) {
   .sp-detail__card .sp-btn:not(.sp-btn--sm):not(.sp-btn--danger):not(.sp-detail__coupon-row .sp-btn):not(.sp-switchwrap .sp-btn) {

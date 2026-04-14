@@ -15,6 +15,39 @@ import RemoveModal from '../modals/RemoveModal.jsx';
 import QuantityModal from '../modals/QuantityModal.jsx';
 import { fireConfetti } from '../core/confetti.js';
 
+// Compute MSRP (full retail) for a line item × quantity
+// 1. pricingPolicy.basePrice (set after swap mutations)
+// 2. catalog variant compare_at_price_cents or price_cents
+function getLineMsrp(ln, catalogProducts) {
+  const qty = ln.quantity || 1;
+  // Source 1: pricingPolicy basePrice (MoneyV2 — dollars)
+  const bp = ln.pricingPolicy?.basePrice?.amount;
+  if (bp != null && isFinite(Number(bp))) return Number(bp) * qty;
+  // Source 2: catalog variant compare_at_price_cents or price_cents
+  if (Array.isArray(catalogProducts)) {
+    const lnPid = String(ln.productId || '');
+    const prod = catalogProducts.find(p =>
+      String(p.productId || '') === lnPid || String(p.internalId || '') === lnPid
+    );
+    if (prod?.variants) {
+      const vid = String(ln.variantId || '');
+      const v = prod.variants.find(vr => String(vr.id || '') === vid);
+      if (v) {
+        const raw = v.compare_at_price_cents || v.compare_at_price || v.price_cents || v.price;
+        if (raw != null) {
+          const n = Number(raw);
+          if (isFinite(n)) {
+            // If it looks like cents (no decimal & >= 1000), convert; otherwise treat as dollars
+            const dollars = (String(raw).includes('.') || n < 1000) ? n : n / 100;
+            return dollars * qty;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
 // ---- Inline cards ----
 
 function PauseCard({ contract, onUpdate, showToast, startAction, completeAction, failAction }) {
@@ -279,7 +312,19 @@ function LineItemDisclosure({ ln, canRemove, onSwap, onQty, onRemove, removing, 
             <div class="sp-line__qty">Qty {ln.quantity || 1}</div>
           </div>
         </div>
-        <div class="sp-line__price">{ln.currentPrice ? money(ln.currentPrice) : ''}</div>
+        <div class="sp-line__price">{(() => {
+          const msrp = getLineMsrp(ln, catalogProducts);
+          const actual = ln.currentPrice ? Number(ln.currentPrice.amount) * (ln.quantity || 1) : 0;
+          if (msrp && msrp > actual) {
+            return (
+              <>
+                <span class="sp-line__msrp">{money({ amount: String(msrp.toFixed(2)), currencyCode: ln.currentPrice?.currencyCode || 'USD' })}</span>
+                {' '}<span class="sp-line__now">{money({ amount: String(actual.toFixed(2)), currencyCode: ln.currentPrice?.currencyCode || 'USD' })}</span>
+              </>
+            );
+          }
+          return ln.currentPrice ? money({ amount: String(actual.toFixed(2)), currencyCode: ln.currentPrice?.currencyCode || 'USD' }) : '';
+        })()}</div>
       </div>
       <button type="button" class={'sp-disclosure' + (open ? ' is-open' : '')}
         onClick={() => setOpen(!open)}>
@@ -388,7 +433,20 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
                     <div class="sp-line__qty">Qty {ln.quantity || 1}</div>
                   </div>
                 </div>
-                <div class="sp-line__price">{ln.currentPrice ? money(ln.currentPrice) : ''}</div>
+                <div class="sp-line__price">{(() => {
+                  const catalogProducts = Array.isArray(config?.catalog) ? config.catalog : [];
+                  const msrp = getLineMsrp(ln, catalogProducts);
+                  const actual = ln.currentPrice ? Number(ln.currentPrice.amount) * (ln.quantity || 1) : 0;
+                  if (msrp && msrp > actual) {
+                    return (
+                      <>
+                        <span class="sp-line__msrp">{money({ amount: String(msrp.toFixed(2)), currencyCode: ln.currentPrice?.currencyCode || 'USD' })}</span>
+                        {' '}<span class="sp-line__now">{money({ amount: String(actual.toFixed(2)), currencyCode: ln.currentPrice?.currencyCode || 'USD' })}</span>
+                      </>
+                    );
+                  }
+                  return ln.currentPrice ? money({ amount: String(actual.toFixed(2)), currencyCode: ln.currentPrice?.currencyCode || 'USD' }) : '';
+                })()}</div>
               </div>
             </div>
           ) : (
@@ -406,12 +464,23 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
           )
         ))}
       </div>
-      {isFinite(total) && total > 0 && (
-        <div class="sp-detail__totals" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span class="sp-muted">Subtotal</span>
-          <span class="sp-detail__total-price">{toMoney(total)}</span>
-        </div>
-      )}
+      {isFinite(total) && total > 0 && (() => {
+        const catalogProducts = Array.isArray(config?.catalog) ? config.catalog : [];
+        const msrpTotal = lines.reduce((sum, ln) => {
+          const m = getLineMsrp(ln, catalogProducts);
+          return sum + (m || (getLinePrice(ln) * (ln.quantity || 1)));
+        }, 0);
+        const showMsrp = isFinite(msrpTotal) && msrpTotal > total;
+        return (
+          <div class="sp-detail__totals" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span class="sp-muted">Subtotal</span>
+            <span class="sp-detail__total-price">
+              {showMsrp && <span class="sp-subtotal__msrp">{toMoney(msrpTotal)}</span>}
+              {toMoney(total)}
+            </span>
+          </div>
+        );
+      })()}
       {!isCancelled && (
         <div class="sp-detail__items-actions">
           <button class="sp-btn sp-btn--ghost" disabled={mutating} onClick={() => setModal({ type: 'addSwap', mode: 'add' })}>
