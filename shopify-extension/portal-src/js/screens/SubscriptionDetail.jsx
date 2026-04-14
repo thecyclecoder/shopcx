@@ -1039,11 +1039,11 @@ export default function SubscriptionDetail() {
         <div class="sp-detail__col">
           {isCancelled && <ReactivateCard contract={contract} showToast={showToast} onUpdate={handleUpdate} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
           {b === 'paused' && !isReadOnly && <ResumeCard contract={contract} onUpdate={handleUpdate} showToast={showToast} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
-          {b === 'active' && !isReadOnly && <PauseCard contract={contract} onUpdate={handleUpdate} showToast={showToast} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
-          {b === 'active' && !isReadOnly && <OrderActionsCard contract={contract} showToast={showToast} onUpdate={handleUpdate} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
           <ItemsCard contract={contract} lines={lines} shipLine={shipLine}
             onUpdate={handleUpdate} onPatchLines={patchLines} showToast={showToast}
             config={config} isCancelled={isCancelled} disclosureKey={disclosureKey} />
+          {b === 'active' && !isReadOnly && <PauseCard contract={contract} onUpdate={handleUpdate} showToast={showToast} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
+          {b === 'active' && !isReadOnly && <OrderActionsCard contract={contract} showToast={showToast} onUpdate={handleUpdate} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
           {!isReadOnly && <FrequencyCard contract={contract} showToast={showToast} onUpdate={handleUpdate} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
         </div>
         <div class="sp-detail__col">
