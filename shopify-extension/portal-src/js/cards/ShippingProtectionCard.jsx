@@ -81,14 +81,9 @@ export default function ShippingProtectionCard({ contract, shipLine, onUpdate })
       </p>
       <div class="sp-shipprot__footer">
         <div class="sp-shipprot__price">
-          {hasShipProt
-            ? <><strong>{onPriceText}</strong><span class="sp-shipprot__per"> / order</span></>
-            : <><span class="sp-shipprot__strike">{listPrice}</span> <strong class="sp-shipprot__now">{discPrice}</strong><span class="sp-shipprot__per"> / order</span></>
-          }
+          <span class="sp-shipprot__strike">{listPrice}</span> <strong class="sp-shipprot__now">{discPrice}</strong><span class="sp-shipprot__per"> / order</span>
         </div>
-        {!hasShipProt && (
-          <div class="sp-shipprot__social">85% of customers add this</div>
-        )}
+        <div class="sp-shipprot__social-pill">85% of customers choose this</div>
       </div>
     </div>
   );

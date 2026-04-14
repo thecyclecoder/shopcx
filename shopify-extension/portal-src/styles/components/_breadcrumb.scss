@@ -54,11 +54,16 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
   background: #dbeafe;
   color: #3b82f6;
+}
+
+.sp-bc__icon svg {
+  width: 14px;
+  height: 14px;
 }
 
 .sp-bc__icon svg {
