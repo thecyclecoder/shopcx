@@ -47,22 +47,26 @@ export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
     if (p.title) productNameToId[p.title.toLowerCase()] = p.shopify_product_id;
     if (p.id && p.shopify_product_id) internalToShopifyId[p.id] = p.shopify_product_id;
     // Ensure byProductId has entries for both ID formats
-    if (p.id && productIds.includes(p.id) && !byProductId[p.shopify_product_id]) {
+    // Reviews are keyed by shopify_product_id, but frontend sends internal UUIDs
+    if (p.shopify_product_id && !byProductId[p.shopify_product_id]) {
       byProductId[p.shopify_product_id] = { ok: true, reviews: [] };
     }
   }
 
   // Fetch reviews: try by shopify_product_id first, then by product_name match
   // Columns: featured (not smart_featured), reviewer_name (not author), smart_quote
+  // Get Shopify product IDs for the query (resolve from UUIDs if needed)
+  const shopifyPids = productIds.map(id => internalToShopifyId[id] || id).filter(Boolean);
   const { data: reviews } = await admin.from("product_reviews")
     .select("shopify_product_id, product_name, reviewer_name, rating, title, body, summary, smart_quote, featured, created_at")
     .eq("workspace_id", auth.workspaceId)
+    .in("shopify_product_id", shopifyPids)
     .gte("rating", 4)
     .or("status.in.(published,featured),status.is.null")
     .order("featured", { ascending: false })
     .order("rating", { ascending: false })
     .order("created_at", { ascending: false })
-    .limit(200);
+    .limit(100);
 
   // Match reviews to requested product IDs
   for (const r of reviews || []) {
@@ -77,10 +81,10 @@ export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
     }
 
     if (!pid || !byProductId[pid]) continue;
-    if (byProductId[pid].reviews.length >= 5) continue;
+    if (byProductId[pid].reviews.length >= 10) continue;
 
-    // Featured first, then 5-star only
-    if (!r.featured && r.rating < 5) continue;
+    // Featured first, then 4+ star
+    if (!r.featured && r.rating < 4) continue;
 
     byProductId[pid].reviews.push({
       rating: r.rating,
@@ -102,7 +106,7 @@ export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
       pid = productNameToId[r.product_name.toLowerCase()] || null;
     }
     if (!pid || !byProductId[pid]) continue;
-    if (byProductId[pid].reviews.length >= 3) continue;
+    if (byProductId[pid].reviews.length >= 10) continue;
     if (r.featured || r.rating >= 5) continue; // already added above
 
     byProductId[pid].reviews.push({
@@ -114,6 +118,16 @@ export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
       featured: !!r.featured,
       createdAt: r.created_at,
     });
+  }
+
+  // Alias: if frontend sent UUIDs, copy Shopify-keyed results to UUID keys
+  for (const pid of productIds) {
+    if (!byProductId[pid]?.reviews?.length) {
+      const shopifyId = internalToShopifyId[pid];
+      if (shopifyId && byProductId[shopifyId]?.reviews?.length) {
+        byProductId[pid] = byProductId[shopifyId];
+      }
+    }
   }
 
   return jsonOk({
