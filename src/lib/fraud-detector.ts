@@ -484,11 +484,45 @@ export async function checkOrderForFraud(
   // Load the order with address details
   const { data: order } = await admin
     .from("orders")
-    .select("id, shopify_order_id, normalized_shipping_address, customer_id, subscription_id, billing_address, shipping_address")
+    .select("id, shopify_order_id, normalized_shipping_address, customer_id, subscription_id, billing_address, shipping_address, source_name, email, order_number, line_items, total_cents")
     .eq("id", orderId)
     .single();
 
   if (!order) return;
+
+  // Fetch billing address + payment details from Shopify if not stored
+  if (!order.billing_address && order.shopify_order_id) {
+    try {
+      const { getShopifyCredentials } = await import("@/lib/shopify-sync");
+      const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
+      const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+      const gid = order.shopify_order_id.includes("gid://") ? order.shopify_order_id : `gid://shopify/Order/${order.shopify_order_id}`;
+      const query = `{ order(id: "${gid}") { billingAddress { firstName lastName address1 address2 city province provinceCode zip country countryCode } transactions(first: 1) { id gateway paymentDetails { ... on CardPaymentDetails { name number bin company expirationMonth expirationYear avsResultCode cvvResultCode } } } } }`;
+      const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+        method: "POST",
+        headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+        body: JSON.stringify({ query }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const billingAddr = data?.data?.order?.billingAddress;
+        const txn = data?.data?.order?.transactions?.[0];
+        const updates: Record<string, unknown> = {};
+        if (billingAddr) {
+          order.billing_address = billingAddr;
+          updates.billing_address = billingAddr;
+        }
+        if (txn?.paymentDetails && Object.keys(txn.paymentDetails).length > 0) {
+          updates.payment_details = { gateway: txn.gateway, ...txn.paymentDetails };
+        }
+        if (Object.keys(updates).length) {
+          await admin.from("orders").update(updates).eq("id", orderId);
+        }
+      }
+    } catch (e) {
+      console.error("[fraud] Failed to fetch billing/payment details from Shopify:", e);
+    }
+  }
 
   // Load customer for name comparison
   const effectiveCustomerId = order.customer_id || customerId;
@@ -519,6 +553,72 @@ export async function checkOrderForFraud(
       }
     } catch (err) {
       console.error(`Real-time fraud check error for rule ${rule.id}:`, err);
+    }
+  }
+
+  // AI fraud screen — analyze web checkout orders for suspicious patterns
+  if (!flagged && order.source_name === "web") {
+    const { data: ws } = await admin.from("workspaces").select("fraud_ai_enabled").eq("id", workspaceId).single();
+    if (ws?.fraud_ai_enabled) {
+      try {
+        const shipping = order.shipping_address as Record<string, string> | null;
+        const billing = order.billing_address as Record<string, string> | null;
+        const email = order.email || "";
+        const custName = customer ? `${customer.first_name || ""} ${customer.last_name || ""}`.trim() : "";
+        const shippingName = shipping ? `${shipping.firstName || ""} ${shipping.lastName || ""}`.trim() : "";
+        const billingName = billing ? `${billing.firstName || ""} ${billing.lastName || ""}`.trim() : "";
+
+        const prompt = `Analyze this e-commerce order for fraud indicators. Return ONLY "FRAUD" or "OK".
+
+Order: ${order.order_number}
+Email: ${email}
+Customer name: ${custName}
+Shipping name: ${shippingName}
+Shipping address: ${shipping ? `${shipping.address1 || ""} ${shipping.address2 || ""}, ${shipping.city || ""} ${shipping.provinceCode || ""} ${shipping.zip || ""}` : "unknown"}
+Billing name: ${billingName}
+Billing address: ${billing ? `${billing.address1 || ""} ${billing.address2 || ""}, ${billing.city || ""} ${billing.provinceCode || ""} ${billing.zip || ""}` : "unknown"}
+Amount: $${((order.total_cents || 0) / 100).toFixed(2)}
+
+Look for:
+- Gibberish/random names (e.g. "Wzavallone Jzchristian")
+- Email name doesn't match order name
+- Disposable/suspicious email domains
+- Random characters in address fields (e.g. "bcv1524" in address2)
+- Gmail+ aliases (e.g. user+abc123@gmail.com)
+- Name/address combinations that look auto-generated
+
+Respond with EXACTLY "FRAUD" or "OK".`;
+
+        const apiKey = process.env.ANTHROPIC_API_KEY;
+        if (!apiKey) throw new Error("No API key");
+        const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 10, messages: [{ role: "user", content: prompt }] }),
+        });
+        if (!aiRes.ok) throw new Error(`AI API error: ${aiRes.status}`);
+        const aiData = await aiRes.json();
+        const answer = ((aiData.content?.[0] as { text: string })?.text || "").trim().toUpperCase();
+
+        if (answer.includes("FRAUD")) {
+          flagged = true;
+          // Create fraud case
+          const { data: existing } = await admin.from("fraud_cases")
+            .select("id").eq("workspace_id", workspaceId).eq("customer_id", effectiveCustomerId || "").eq("status", "open").limit(1);
+          if (!existing?.length) {
+            await admin.from("fraud_cases").insert({
+              workspace_id: workspaceId,
+              customer_id: effectiveCustomerId,
+              severity: "high",
+              status: "open",
+              source: "ai_screen",
+              notes: `AI flagged order ${order.order_number} as suspicious. Email: ${email}, Name: ${shippingName}`,
+            });
+          }
+        }
+      } catch (e) {
+        console.error("[fraud] AI screen error:", e);
+      }
     }
   }
 
