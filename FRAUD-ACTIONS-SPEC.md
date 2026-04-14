@@ -84,6 +84,8 @@ Amplifier URL format: `https://my.amplifier.com/orders/{amplifier_order_id}`
   - These are read-only routes, but a banned customer shouldn't access them at all
   - Bootstrap returns the ban flag and frontend blocks, but a direct API call bypasses the frontend
 - **Action:** Add `checkPortalBan` to all handlers missing it (except `bootstrap` which handles ban differently, `index` which is the route map, and `ban-request` which IS the ban check)
+- **CRITICAL:** `link-accounts` handler MUST check ban. A banned customer could link to a legitimate customer's account and gain access to their subscriptions/orders. Block account linking entirely for banned customers.
+- Also block account linking TO a banned customer — check if any of the target accounts being linked are banned
 
 ## 6. Banned Customer — Ticket Handling
 When a banned/fraud customer contacts us (email, chat, any channel):
