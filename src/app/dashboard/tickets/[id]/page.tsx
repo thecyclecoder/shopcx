@@ -1210,7 +1210,7 @@ export default function TicketDetailPage() {
                         </button>
                       </div>
                     )}
-                    {(m as TicketMessage & { send_cancelled?: boolean }).send_cancelled && (
+                    {(m as TicketMessage & { send_cancelled?: boolean }).send_cancelled && ticket.channel !== "chat" && (
                       <div className="mt-1.5 text-xs text-zinc-400 line-through">Send cancelled</div>
                     )}
                     {/* Email delivery status */}
