@@ -1140,66 +1140,92 @@ async function handleApplyPolicy(
     });
   }
 
-  // Customer events (portal actions + subscription changes)
+  // Summarize renewal orders (don't list each one individually)
+  if (customerId && identifiedSub) {
+    const { data: allOrders } = await admin.from("orders")
+      .select("created_at")
+      .eq("workspace_id", wsId)
+      .eq("customer_id", customerId)
+      .eq("subscription_id", sub?.id || "___")
+      .order("created_at", { ascending: true });
+    // First order is the checkout, rest are renewals
+    const renewals = (allOrders || []).slice(1);
+    if (renewals.length > 0) {
+      const lastRenewal = renewals[renewals.length - 1];
+      const lastDate = new Date(lastRenewal.created_at).toLocaleDateString("en-US", { month: "long", day: "numeric" });
+      timelineEvents.push({
+        date: new Date(lastRenewal.created_at),
+        label: renewals.length === 1
+          ? `Your renewal order processed.`
+          : `Since then, you've had ${renewals.length} renewal orders, with the most recent on ${lastDate}.`,
+      });
+    }
+  } else {
+    // Fallback: just show the identified order
+    for (const o of orderObjs) {
+      timelineEvents.push({ date: new Date(o.created_at), label: "Your renewal order processed." });
+    }
+  }
+
+  // Key subscription status changes (paused, frequency changes — NOT cancel reasons or portal internals)
   if (customerId) {
     const { data: events } = await admin.from("customer_events")
       .select("event_type, summary, created_at")
       .eq("workspace_id", wsId)
       .eq("customer_id", customerId)
-      .or("event_type.ilike.portal.subscription%,event_type.ilike.portal.frequency%,event_type.ilike.subscription.billing-interval%,event_type.ilike.subscription.paused,event_type.ilike.subscription.cancelled,event_type.ilike.subscription.activated")
+      .in("event_type", ["subscription.paused", "subscription.activated", "subscription.billing-interval-changed"])
       .order("created_at", { ascending: true })
-      .limit(15);
+      .limit(10);
 
     for (const ev of events || []) {
-      let summary = ev.summary || ev.event_type.replace("portal.subscription.", "").replace("portal.frequency.", "").replace("subscription.", "").replace(/_/g, " ");
-      // Translate interval notation to human-friendly
-      summary = translateIntervals(summary);
-      timelineEvents.push({ date: new Date(ev.created_at), label: summary });
+      const type = ev.event_type;
+      let label = "";
+      if (type === "subscription.paused") label = "Your subscription was paused.";
+      else if (type === "subscription.activated") label = "Your subscription was resumed.";
+      else if (type === "subscription.billing-interval-changed") label = translateIntervals(ev.summary || "Delivery frequency changed.");
+      if (label) timelineEvents.push({ date: new Date(ev.created_at), label });
     }
   }
 
-  // Order processed
-  for (const o of orderObjs) {
-    timelineEvents.push({
-      date: new Date(o.created_at),
-      label: "Your renewal order processed.",
-    });
-  }
-
-  // Subscription cancelled (if applicable)
-  if (subStatus === "cancelled" && identifiedSub) {
-    // Try to find cancellation event
+  // Subscription cancelled (single clean line)
+  if (subStatus === "cancelled") {
     if (customerId) {
       const { data: cancelEvent } = await admin.from("customer_events")
-        .select("created_at, summary")
+        .select("created_at")
         .eq("workspace_id", wsId)
         .eq("customer_id", customerId)
-        .ilike("event_type", "%cancel%")
+        .eq("event_type", "subscription.cancelled")
         .order("created_at", { ascending: false })
-        .limit(1).single();
+        .limit(1).maybeSingle();
 
-      if (cancelEvent) {
-        timelineEvents.push({ date: new Date(cancelEvent.created_at), label: cancelEvent.summary || "Your subscription was cancelled." });
-      } else {
-        timelineEvents.push({ date: new Date(), label: "Your subscription is currently cancelled." });
-      }
+      timelineEvents.push({
+        date: cancelEvent ? new Date(cancelEvent.created_at) : new Date(),
+        label: "You cancelled your subscription. No more future orders will be sent.",
+      });
     }
   }
 
-  // Sort by date and build HTML
+  // Sort by date, deduplicate same-day same-label events
   timelineEvents.sort((a, b) => a.date.getTime() - b.date.getTime());
+  const deduped: typeof timelineEvents = [];
+  for (const ev of timelineEvents) {
+    const dateKey = ev.date.toISOString().split("T")[0];
+    const exists = deduped.some(d => d.date.toISOString().split("T")[0] === dateKey && d.label === ev.label);
+    if (!exists) deduped.push(ev);
+  }
+  const finalEvents = deduped;
 
   const channel = (ctx._channel as string) || "email";
   const useHtml = ["email", "chat", "help_center"].includes(channel);
 
   let timeline: string;
   if (useHtml) {
-    timeline = timelineEvents.map(e => {
+    timeline = finalEvents.map(e => {
       const dateStr = e.date.toLocaleDateString("en-US", { month: "long", day: "numeric" });
       return `<p><b>${dateStr}</b><br>${e.label}</p>`;
     }).join("");
   } else {
-    timeline = timelineEvents.map(e => {
+    timeline = finalEvents.map(e => {
       const dateStr = e.date.toLocaleDateString("en-US", { month: "long", day: "numeric" });
       return `${dateStr}\n${e.label}`;
     }).join("\n\n");
