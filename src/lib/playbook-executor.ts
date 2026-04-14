@@ -304,14 +304,10 @@ async function executeStep(
     const isAlreadyCancelled = identifiedSubObj?.status === "cancelled";
 
     if (isAlreadyCancelled && activeSubs.length === 0) {
-      // All subs cancelled — confirm and don't mention refund
-      const response = `I checked on your account and your subscription is cancelled. No more orders will be sent to you. No further action is needed on your part.`;
+      // Sub already cancelled — mark it and fall through to apply_policy
+      // which will show the timeline explaining the charges
       ctx.cancel_handled = true;
-      return {
-        action: "respond", response,
-        context: { cancel_handled: true, subscription_cancelled: true },
-        systemNote: `[Playbook] Cancel detected — subscription already cancelled. No active subs. Playbook paused, not mentioning refund.`,
-      };
+      ctx.subscription_cancelled = true;
     }
 
     if (activeSubs.length > 0) {
