@@ -1,0 +1,1 @@
+ALTER TABLE fraud_cases ALTER COLUMN rule_id DROP NOT NULL;
