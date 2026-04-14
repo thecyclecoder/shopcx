@@ -265,9 +265,14 @@ export const chargebackReceived = inngest.createFunction(
         });
       }
 
-      // Slack notification
+      // Slack notification — resolve customer name
+      let custName = "";
+      if (customerId) {
+        const { data: cust } = await admin.from("customers").select("first_name, last_name").eq("id", customerId).single();
+        if (cust) custName = [cust.first_name, cust.last_name].filter(Boolean).join(" ");
+      }
       dispatchSlackNotification(workspaceId, "chargeback", {
-        customer: { email: cb.email || "" },
+        customer: { name: custName, email: cb.email || "" },
         amount: amountStr,
         reason: cb.reason || "unknown",
         orderId: orderLabel,
