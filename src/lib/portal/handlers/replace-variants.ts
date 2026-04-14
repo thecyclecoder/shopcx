@@ -191,58 +191,36 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   }
 
   // POST-SWAP: Apply grandfathered base price if detected
-  if (grandfatheredBase && newVariantIdForPrice && updated) {
+  if (grandfatheredBase && newVariantIdForPrice) {
     try {
-      // Get the new line_id from the Appstle response (DB is stale at this point)
-      const respLines = (updated as Record<string, unknown>).lines;
-      const nodes = respLines && typeof respLines === "object"
-        ? (respLines as Record<string, unknown>).nodes || respLines
-        : null;
-      let newLineGid: string | null = null;
-      if (Array.isArray(nodes)) {
-        for (const n of nodes) {
-          const node = (n as Record<string, unknown>).node || n;
-          const vid = String((node as Record<string, unknown>).variantId || "").split("/").pop();
-          if (vid === newVariantIdForPrice) {
-            newLineGid = String((node as Record<string, unknown>).id || "");
-            break;
-          }
-        }
-      }
-      if (newLineGid) {
-        const { getAppstleConfig } = await import("@/lib/subscription-items");
-        const cfg = await getAppstleConfig(auth.workspaceId);
-        if (cfg) {
-          const priceDecimal = (grandfatheredBase / 100).toFixed(2);
-          const discountedDecimal = (Math.round(grandfatheredBase * 0.75) / 100).toFixed(2);
-          const priceRes = await fetch(
-            `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-line-item-price?contractId=${contractId}&lineId=${encodeURIComponent(newLineGid)}&basePrice=${priceDecimal}`,
-            { method: "PUT", headers: { "X-API-Key": cfg.apiKey }, cache: "no-store" },
-          );
-          if (priceRes.ok) {
-            // Patch the Appstle response so the UI shows the corrected price
-            if (Array.isArray(nodes)) {
-              for (const n of nodes) {
-                const node = (n as Record<string, unknown>).node || n;
-                if (String((node as Record<string, unknown>).id || "") === newLineGid) {
-                  (node as Record<string, unknown>).currentPrice = { __typename: "MoneyV2", amount: discountedDecimal, currencyCode: "USD" };
-                  (node as Record<string, unknown>).pricingPolicy = {
-                    __typename: "SubscriptionPricingPolicy",
-                    basePrice: { __typename: "MoneyV2", amount: priceDecimal, currencyCode: "USD" },
-                    cycleDiscounts: [{ __typename: "SubscriptionCyclePriceAdjustment", afterCycle: 0, adjustmentType: "PERCENTAGE", adjustmentValue: { __typename: "SellingPlanPricingPolicyPercentageValue", percentage: 25 }, computedPrice: { __typename: "MoneyV2", amount: discountedDecimal, currencyCode: "USD" } }],
-                  };
-                  break;
-                }
-              }
+      const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
+      const priceResult = await subUpdateLineItemPrice(auth.workspaceId, String(contractId), newVariantIdForPrice, grandfatheredBase);
+
+      // Patch the response so the UI shows the corrected price
+      if (priceResult.success && updated) {
+        const priceDecimal = (grandfatheredBase / 100).toFixed(2);
+        const discountedDecimal = (Math.round(grandfatheredBase * 0.75) / 100).toFixed(2);
+        const respLines = (updated as Record<string, unknown>).lines;
+        const nodes = respLines && typeof respLines === "object"
+          ? (respLines as Record<string, unknown>).nodes || respLines
+          : null;
+        if (Array.isArray(nodes)) {
+          for (const n of nodes) {
+            const node = (n as Record<string, unknown>).node || n;
+            const vid = String((node as Record<string, unknown>).variantId || "").split("/").pop();
+            if (vid === newVariantIdForPrice) {
+              (node as Record<string, unknown>).currentPrice = { __typename: "MoneyV2", amount: discountedDecimal, currencyCode: "USD" };
+              (node as Record<string, unknown>).pricingPolicy = {
+                __typename: "SubscriptionPricingPolicy",
+                basePrice: { __typename: "MoneyV2", amount: priceDecimal, currencyCode: "USD" },
+                cycleDiscounts: [{ __typename: "SubscriptionCyclePriceAdjustment", afterCycle: 0, adjustmentType: "PERCENTAGE", adjustmentValue: { __typename: "SellingPlanPricingPolicyPercentageValue", percentage: 25 }, computedPrice: { __typename: "MoneyV2", amount: discountedDecimal, currencyCode: "USD" } }],
+              };
+              break;
             }
           }
         }
-      } else {
-        console.log("[replaceVariants] Could not find new line in Appstle response for variant", newVariantIdForPrice);
       }
-    } catch (e) {
-      console.error("[replaceVariants] Price update failed:", e);
-    }
+    } catch { /* non-fatal */ }
   }
 
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
