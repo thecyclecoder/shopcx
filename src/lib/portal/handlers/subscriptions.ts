@@ -1,7 +1,7 @@
 // DB-first subscription list with contract shape transformation
 
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, findCustomer } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, findCustomer, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { transformSubscription, getProductMap } from "@/lib/portal/helpers/transform-subscription";
 
@@ -38,6 +38,9 @@ function bucketStatus(status: string): Bucket {
 
 export const subscriptions: RouteHandler = async ({ auth, route }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
+
+  const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
+  if (banCheck) return banCheck;
 
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
   if (!customer) return jsonOk({ ok: true, route, contracts: [], buckets: { active: [], paused: [], cancelled: [], other: [] }, summary: { total: 0 } });

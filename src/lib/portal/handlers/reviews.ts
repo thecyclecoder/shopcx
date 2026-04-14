@@ -1,7 +1,7 @@
 // UPGRADED: Uses our product_reviews table instead of direct Klaviyo API calls
 
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 function safeStr(v: unknown): string {
@@ -19,6 +19,9 @@ function normalizeProductId(input: string): string {
 
 export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
+
+  const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
+  if (banCheck) return banCheck;
 
   const rawIds = safeStr(url.searchParams.get("productIds")) || safeStr(url.searchParams.get("ids"));
   if (!rawIds) return jsonErr({ error: "missing_product_ids" }, 400);

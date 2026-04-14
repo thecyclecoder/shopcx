@@ -25,7 +25,7 @@ export const changeDate: RouteHandler = async ({ auth, route, req }) => {
 
   const now = new Date();
   const tomorrow = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
-  const maxDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 60));
+  const maxDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 90));
 
   if (picked < tomorrow) return jsonErr({ error: "date_too_early" }, 400);
   if (picked > maxDate) return jsonErr({ error: "date_too_far" }, 400);

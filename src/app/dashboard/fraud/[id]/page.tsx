@@ -5,6 +5,14 @@ import { useParams, useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 import Link from "next/link";
 
+interface AIAnalysis {
+  risk_level: string;
+  summary: string;
+  indicators: string[];
+  recommended_actions: string[];
+  analyzed_at: string;
+}
+
 interface FraudCaseDetail {
   id: string;
   rule_type: string;
@@ -12,6 +20,7 @@ interface FraudCaseDetail {
   severity: string;
   title: string;
   summary: string | null;
+  ai_analysis: AIAnalysis | null;
   evidence: Record<string, unknown>;
   customer_ids: string[];
   order_ids: string[];
@@ -87,6 +96,20 @@ export default function FraudCaseDetailPage() {
   const [dismissalReason, setDismissalReason] = useState("");
   const [assignTo, setAssignTo] = useState("");
 
+  // AI analysis
+  const [aiAnalysis, setAiAnalysis] = useState<AIAnalysis | null>(null);
+  const [analyzingAi, setAnalyzingAi] = useState(false);
+
+  // Confirm fraud wizard
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardStep, setWizardStep] = useState(0);
+  const [wizardLoading, setWizardLoading] = useState(false);
+  const [wizardAmplifierOrders, setWizardAmplifierOrders] = useState<{ order_id: string; order_number: string; amplifier_order_id: string | null; amplifier_status: string | null; amplifier_shipped_at: string | null; at_amplifier: boolean; shipped: boolean; cancellable: boolean; amplifier_url: string | null }[]>([]);
+  const [wizardSubResults, setWizardSubResults] = useState<{ subscription_id: string; shopify_contract_id: string; success: boolean; error?: string }[]>([]);
+  const [wizardOrderResults, setWizardOrderResults] = useState<{ order_id: string; order_number: string; success: boolean; error?: string }[]>([]);
+  const [wizardBanResults, setWizardBanResults] = useState<{ customer_id: string; success: boolean }[]>([]);
+  const [wizardComplete, setWizardComplete] = useState(false);
+
   const applyData = (data: { case: FraudCaseDetail; history: HistoryEntry[]; members: Member[] }) => {
     setFraudCase(data.case);
     setHistory(data.history || []);
@@ -95,7 +118,81 @@ export default function FraudCaseDetailPage() {
     setResolution(data.case.resolution || "");
     setDismissalReason(data.case.dismissal_reason || "");
     setAssignTo(data.case.assigned_to || "");
+    setAiAnalysis(data.case.ai_analysis || null);
     setLoading(false);
+  };
+
+  const runAiAnalysis = async () => {
+    setAnalyzingAi(true);
+    try {
+      const res = await fetch(`/api/workspaces/${workspace.id}/fraud-cases/${caseId}/analyze`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setAiAnalysis(data.ai_analysis);
+      }
+    } finally {
+      setAnalyzingAi(false);
+    }
+  };
+
+  // Auto-run AI analysis if not cached
+  useEffect(() => {
+    if (fraudCase && !fraudCase.ai_analysis && !aiAnalysis && !analyzingAi) {
+      runAiAnalysis();
+    }
+  }, [fraudCase?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Wizard step handlers
+  const wizardCallStep = async (stepName: string, body?: Record<string, unknown>) => {
+    setWizardLoading(true);
+    try {
+      const res = await fetch(`/api/workspaces/${workspace.id}/fraud-cases/${caseId}/confirm-fraud`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ step: stepName, ...body }),
+      });
+      return res.ok ? await res.json() : null;
+    } finally {
+      setWizardLoading(false);
+    }
+  };
+
+  const startWizard = async () => {
+    setWizardOpen(true);
+    setWizardStep(0);
+    setWizardComplete(false);
+    setWizardSubResults([]);
+    setWizardOrderResults([]);
+    setWizardBanResults([]);
+    // Step 0: check amplifier
+    setWizardLoading(true);
+    const data = await wizardCallStep("check_amplifier");
+    if (data) setWizardAmplifierOrders(data.orders || []);
+    setWizardLoading(false);
+  };
+
+  const wizardCancelSubs = async () => {
+    const data = await wizardCallStep("cancel_subscriptions");
+    if (data) setWizardSubResults(data.results || []);
+    setWizardStep(2);
+  };
+
+  const wizardCancelOrders = async () => {
+    const data = await wizardCallStep("cancel_refund_orders");
+    if (data) setWizardOrderResults(data.results || []);
+    setWizardStep(3);
+  };
+
+  const wizardBanCustomer = async () => {
+    const data = await wizardCallStep("ban_customer");
+    if (data) setWizardBanResults(data.results || []);
+    setWizardStep(4);
+  };
+
+  const wizardFinish = async () => {
+    await wizardCallStep("complete", { review_notes: reviewNotes, resolution });
+    setWizardComplete(true);
+    refreshCase();
   };
 
   const refreshCase = async () => {
@@ -181,13 +278,67 @@ export default function FraudCaseDetailPage() {
       <div className="grid gap-6 lg:grid-cols-3">
         {/* Main content */}
         <div className="space-y-6 lg:col-span-2">
-          {/* AI Summary */}
-          {fraudCase.summary && (
-            <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 px-5 py-4 dark:border-indigo-800 dark:bg-indigo-950/30">
-              <p className="mb-1 text-xs font-semibold uppercase text-indigo-500">AI Analysis</p>
-              <p className="text-sm leading-relaxed text-zinc-700 dark:text-zinc-300">{fraudCase.summary}</p>
+          {/* AI Analysis (cached) */}
+          <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 px-5 py-4 dark:border-indigo-800 dark:bg-indigo-950/30">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-xs font-semibold uppercase text-indigo-500">AI Analysis</p>
+              <button
+                onClick={runAiAnalysis}
+                disabled={analyzingAi}
+                className="rounded-md border border-indigo-200 bg-white px-2 py-1 text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 disabled:opacity-50 dark:border-indigo-800 dark:bg-indigo-950 dark:text-indigo-400"
+              >
+                {analyzingAi ? "Analyzing..." : "Re-analyze"}
+              </button>
             </div>
-          )}
+            {analyzingAi && !aiAnalysis ? (
+              <div className="flex items-center gap-2">
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-600" />
+                <span className="text-sm text-indigo-500">Running AI analysis...</span>
+              </div>
+            ) : aiAnalysis ? (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${aiAnalysis.risk_level === "high" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" : aiAnalysis.risk_level === "medium" ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400" : "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"}`}>
+                    Risk: {aiAnalysis.risk_level}
+                  </span>
+                  {aiAnalysis.analyzed_at && (
+                    <span className="text-[10px] text-indigo-400">Analyzed {new Date(aiAnalysis.analyzed_at).toLocaleString()}</span>
+                  )}
+                </div>
+                <p className="text-sm leading-relaxed text-zinc-700 dark:text-zinc-300">{aiAnalysis.summary}</p>
+                {aiAnalysis.indicators?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-indigo-600 dark:text-indigo-400">Suspicious indicators:</p>
+                    <ul className="mt-1 space-y-0.5">
+                      {aiAnalysis.indicators.map((ind, i) => (
+                        <li key={i} className="flex items-start gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
+                          <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-red-400" />
+                          {ind}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {aiAnalysis.recommended_actions?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-indigo-600 dark:text-indigo-400">Recommended actions:</p>
+                    <ul className="mt-1 space-y-0.5">
+                      {aiAnalysis.recommended_actions.map((act, i) => (
+                        <li key={i} className="flex items-start gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
+                          <span className="mt-0.5 text-indigo-400">&#8250;</span>
+                          {act}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            ) : fraudCase.summary ? (
+              <p className="text-sm leading-relaxed text-zinc-700 dark:text-zinc-300">{fraudCase.summary}</p>
+            ) : (
+              <p className="text-sm text-zinc-400">No analysis available.</p>
+            )}
+          </div>
 
           {/* Evidence */}
           {fraudCase.rule_type === "shared_address" && (
@@ -325,14 +476,11 @@ export default function FraudCaseDetailPage() {
                   </button>
                 )}
                 <button
-                  onClick={() => {
-                    if (!reviewNotes.trim()) { alert("Review notes are required to confirm fraud."); return; }
-                    updateCase({ status: "confirmed_fraud", review_notes: reviewNotes, resolution });
-                  }}
+                  onClick={() => startWizard()}
                   disabled={saving}
                   className="w-full rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
                 >
-                  Confirm Fraud
+                  Confirmed Fraud
                 </button>
 
                 {/* Dismiss */}
@@ -372,6 +520,213 @@ export default function FraudCaseDetailPage() {
           </div>
         </div>
       </div>
+
+      {/* ═══ CONFIRMED FRAUD WIZARD MODAL ═══ */}
+      {wizardOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="relative w-full max-w-lg rounded-xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-700 dark:bg-zinc-900">
+            {/* Close button */}
+            {!wizardComplete && (
+              <button onClick={() => setWizardOpen(false)} className="absolute right-3 top-3 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300">
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+
+            {/* Progress bar */}
+            <div className="border-b border-zinc-100 px-6 pt-5 pb-4 dark:border-zinc-800">
+              <h2 className="text-lg font-bold text-zinc-900 dark:text-zinc-100">
+                {wizardComplete ? "Case Resolved" : "Confirmed Fraud Actions"}
+              </h2>
+              {!wizardComplete && (
+                <div className="mt-3 flex gap-1.5">
+                  {["Amplifier Check", "Cancel Subs", "Cancel Orders", "Ban Customer", "Complete"].map((label, i) => (
+                    <div key={label} className="flex-1">
+                      <div className={`h-1.5 rounded-full transition-colors ${i <= wizardStep ? "bg-red-500" : "bg-zinc-200 dark:bg-zinc-700"}`} />
+                      <p className={`mt-1 text-[9px] font-medium ${i === wizardStep ? "text-red-600 dark:text-red-400" : i < wizardStep ? "text-green-600 dark:text-green-400" : "text-zinc-400"}`}>{label}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="max-h-[60vh] overflow-y-auto px-6 py-4">
+              {/* Step 0: Amplifier Check */}
+              {wizardStep === 0 && !wizardComplete && (
+                <div className="space-y-3">
+                  <p className="text-sm text-zinc-600 dark:text-zinc-400">Checking order fulfillment status...</p>
+                  {wizardLoading ? (
+                    <div className="flex items-center gap-2 py-4">
+                      <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-red-600" />
+                      <span className="text-sm text-zinc-500">Checking Amplifier...</span>
+                    </div>
+                  ) : wizardAmplifierOrders.length === 0 ? (
+                    <div className="rounded-md bg-green-50 p-3 text-sm text-green-700 dark:bg-green-900/20 dark:text-green-400">
+                      <span className="mr-1">&#10003;</span> No orders at Amplifier. Safe to proceed.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {wizardAmplifierOrders.map(o => (
+                        <div key={o.order_id} className="rounded-md border border-zinc-200 p-3 dark:border-zinc-700">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Order #{o.order_number}</span>
+                            {!o.at_amplifier ? (
+                              <span className="rounded bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">Not at 3PL</span>
+                            ) : o.shipped ? (
+                              <span className="rounded bg-red-100 px-2 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">Already shipped</span>
+                            ) : o.cancellable ? (
+                              <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">Cancellable at Amplifier</span>
+                            ) : (
+                              <span className="rounded bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-600">Status: {o.amplifier_status || "unknown"}</span>
+                            )}
+                          </div>
+                          {o.at_amplifier && o.amplifier_url && (
+                            <a href={o.amplifier_url} target="_blank" rel="noopener noreferrer" className="mt-1 inline-block text-xs text-indigo-600 hover:underline dark:text-indigo-400">
+                              Open in Amplifier &#8599;
+                            </a>
+                          )}
+                          {o.cancellable && (
+                            <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">Cancel this order at Amplifier before proceeding.</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {!wizardLoading && (
+                    <button
+                      onClick={() => { setWizardStep(1); wizardCancelSubs(); }}
+                      className="mt-2 w-full rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+                    >
+                      Continue to Cancel Subscriptions
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Step 1: Cancel Subscriptions */}
+              {wizardStep === 1 && !wizardComplete && (
+                <div className="space-y-3">
+                  <p className="text-sm text-zinc-600 dark:text-zinc-400">Cancelling all active subscriptions...</p>
+                  {wizardLoading ? (
+                    <div className="flex items-center gap-2 py-4">
+                      <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-red-600" />
+                      <span className="text-sm text-zinc-500">Cancelling subscriptions via Appstle...</span>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-zinc-500">Processing...</p>
+                  )}
+                </div>
+              )}
+
+              {/* Step 2: Cancel/Refund Orders */}
+              {wizardStep === 2 && !wizardComplete && (
+                <div className="space-y-3">
+                  <p className="mb-1 text-xs font-semibold uppercase text-green-500">Subscriptions Cancelled</p>
+                  {wizardSubResults.length === 0 ? (
+                    <p className="text-sm text-zinc-400">No active subscriptions found.</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {wizardSubResults.map(r => (
+                        <div key={r.subscription_id} className="flex items-center gap-2 text-sm">
+                          <span className={r.success ? "text-green-600" : "text-red-500"}>{r.success ? "&#10003;" : "&#10007;"}</span>
+                          <span className="text-zinc-700 dark:text-zinc-300">Subscription {r.shopify_contract_id}</span>
+                          {r.error && <span className="text-xs text-red-400">({r.error})</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    onClick={wizardCancelOrders}
+                    disabled={wizardLoading}
+                    className="mt-2 w-full rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                  >
+                    {wizardLoading ? "Cancelling orders..." : "Cancel & Refund Orders"}
+                  </button>
+                </div>
+              )}
+
+              {/* Step 3: Ban Customer */}
+              {wizardStep === 3 && !wizardComplete && (
+                <div className="space-y-3">
+                  <p className="mb-1 text-xs font-semibold uppercase text-green-500">Orders Cancelled & Refunded</p>
+                  {wizardOrderResults.length === 0 ? (
+                    <p className="text-sm text-zinc-400">No orders to cancel.</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {wizardOrderResults.map(r => (
+                        <div key={r.order_id} className="flex items-center gap-2 text-sm">
+                          <span className={r.success ? "text-green-600" : "text-red-500"}>{r.success ? "&#10003;" : "&#10007;"}</span>
+                          <span className="text-zinc-700 dark:text-zinc-300">Order #{r.order_number}</span>
+                          {r.error && <span className="text-xs text-red-400">({r.error})</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    onClick={wizardBanCustomer}
+                    disabled={wizardLoading}
+                    className="mt-2 w-full rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                  >
+                    {wizardLoading ? "Banning customer..." : "Ban Customer from Portal"}
+                  </button>
+                </div>
+              )}
+
+              {/* Step 4: Complete */}
+              {wizardStep === 4 && !wizardComplete && (
+                <div className="space-y-3">
+                  <p className="mb-1 text-xs font-semibold uppercase text-green-500">Customer Banned</p>
+                  {wizardBanResults.map(r => (
+                    <div key={r.customer_id} className="flex items-center gap-2 text-sm">
+                      <span className={r.success ? "text-green-600" : "text-red-500"}>{r.success ? "&#10003;" : "&#10007;"}</span>
+                      <span className="text-zinc-700 dark:text-zinc-300">Customer banned from self-service portal</span>
+                    </div>
+                  ))}
+                  <button
+                    onClick={wizardFinish}
+                    disabled={wizardLoading}
+                    className="mt-2 w-full rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                  >
+                    {wizardLoading ? "Completing..." : "Mark Case as Confirmed Fraud"}
+                  </button>
+                </div>
+              )}
+
+              {/* Success state */}
+              {wizardComplete && (
+                <div className="py-6 text-center">
+                  <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30">
+                    <svg className="h-8 w-8 text-green-600 dark:text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+                    </svg>
+                  </div>
+                  <h3 className="text-lg font-bold text-zinc-900 dark:text-zinc-100">Fraud case resolved!</h3>
+                  <p className="mt-2 text-sm text-zinc-500">You protected the business. All actions have been completed.</p>
+                  <div className="mt-4 space-y-1 text-left">
+                    {wizardSubResults.length > 0 && (
+                      <p className="text-sm text-zinc-600 dark:text-zinc-400"><span className="text-green-600">&#10003;</span> {wizardSubResults.filter(r => r.success).length} subscription(s) cancelled</p>
+                    )}
+                    {wizardOrderResults.length > 0 && (
+                      <p className="text-sm text-zinc-600 dark:text-zinc-400"><span className="text-green-600">&#10003;</span> {wizardOrderResults.filter(r => r.success).length} order(s) cancelled & refunded</p>
+                    )}
+                    {wizardBanResults.length > 0 && (
+                      <p className="text-sm text-zinc-600 dark:text-zinc-400"><span className="text-green-600">&#10003;</span> Customer banned from portal</p>
+                    )}
+                    <p className="text-sm text-zinc-600 dark:text-zinc-400"><span className="text-green-600">&#10003;</span> Case marked as confirmed fraud</p>
+                  </div>
+                  <button
+                    onClick={() => setWizardOpen(false)}
+                    className="mt-6 rounded-md bg-zinc-900 px-6 py-2 text-sm font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                  >
+                    Done
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -615,7 +970,13 @@ interface InvestOrder {
   order_number: string;
   customer_id: string;
   total_price_cents: number | null;
-  line_items: { title?: string; quantity?: number }[] | null;
+  line_items: { title?: string; quantity?: number; price?: string }[] | null;
+  billing_address: Record<string, string> | null;
+  shipping_address: Record<string, string> | null;
+  payment_details: { credit_card_number?: string; credit_card_company?: string; gateway?: string } | null;
+  amplifier_order_id: string | null;
+  amplifier_status: string | null;
+  amplifier_shipped_at: string | null;
   created_at: string;
 }
 
@@ -852,47 +1213,98 @@ function InvestigationPanel({ workspaceId, caseId }: { workspaceId: string; case
         </div>
       )}
 
-      {/* Recent Orders */}
+      {/* Recent Orders (Enhanced) */}
       {orders.length > 0 && (
         <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
           <div className="border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
-            <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Recent Orders ({orders.length})</h3>
+            <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Orders ({orders.length})</h3>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-zinc-100 text-left text-xs font-medium uppercase text-zinc-400 dark:border-zinc-800">
-                  <th className="px-5 py-2">Order</th>
-                  <th className="px-5 py-2">Customer</th>
-                  <th className="px-5 py-2">Items</th>
-                  <th className="px-5 py-2">Total</th>
-                  <th className="px-5 py-2">Date</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orders.slice(0, 20).map((o) => {
-                  const owner = customers.find(c => c.id === o.customer_id);
-                  const items = (o.line_items as { title?: string; quantity?: number }[] | null) || [];
-                  return (
-                    <tr key={o.id} className="border-b border-zinc-50 dark:border-zinc-800/50">
-                      <td className="whitespace-nowrap px-5 py-2 font-medium text-zinc-900 dark:text-zinc-100">{o.order_number || o.id.slice(0, 8)}</td>
-                      <td className="px-5 py-2 text-xs text-zinc-500">
-                        {owner?.email || "—"}
-                        {owner?.is_linked && <span className="ml-1 rounded bg-blue-100 px-1 py-0.5 text-[10px] text-blue-600">linked</span>}
-                      </td>
-                      <td className="px-5 py-2 text-xs text-zinc-400">
-                        {items.slice(0, 2).map(i => `${i.quantity || 1}x ${(i.title || "").slice(0, 25)}`).join(", ")}
-                        {items.length > 2 && ` +${items.length - 2}`}
-                      </td>
-                      <td className="whitespace-nowrap px-5 py-2 tabular-nums text-zinc-600 dark:text-zinc-400">
+          <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+            {orders.slice(0, 20).map((o) => {
+              const owner = customers.find(c => c.id === o.customer_id);
+              const items = (o.line_items as { title?: string; quantity?: number; price?: string }[] | null) || [];
+              const billing = o.billing_address as Record<string, string> | null;
+              const shipping = o.shipping_address as Record<string, string> | null;
+              const payment = o.payment_details as { credit_card_number?: string; credit_card_company?: string; gateway?: string } | null;
+
+              // Fraud indicators
+              const billingName = billing ? `${billing.first_name || ""} ${billing.last_name || ""}`.trim() : "";
+              const custName = owner ? `${owner.first_name || ""} ${owner.last_name || ""}`.trim() : "";
+              const nameMismatch = billingName && custName && billingName.toLowerCase() !== custName.toLowerCase();
+              const billingZip = billing?.zip || "";
+              const shippingZip = shipping?.zip || "";
+              const zipMismatch = billingZip && shippingZip && billingZip !== shippingZip;
+              const emailDomain = owner?.email?.split("@")[1] || "";
+              const susEmail = owner?.email?.includes("+") || /^[a-z]{10,}[0-9]+@/.test(owner?.email || "");
+              const isGibberish = (name: string) => /^[a-z]{1,2}[a-z]{8,}$/i.test(name.replace(/\s/g, "")) && !/[aeiou]{2,}/i.test(name);
+              const gibberishName = isGibberish(billingName) || isGibberish(custName);
+
+              return (
+                <div key={o.id} className="px-5 py-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">#{o.order_number || o.id.slice(0, 8)}</span>
+                      <span className="text-xs text-zinc-400">{new Date(o.created_at).toLocaleDateString()}</span>
+                      <span className="text-sm font-medium tabular-nums text-zinc-600 dark:text-zinc-400">
                         {o.total_price_cents != null ? formatCents(o.total_price_cents) : "—"}
-                      </td>
-                      <td className="whitespace-nowrap px-5 py-2 text-xs text-zinc-400">{new Date(o.created_at).toLocaleDateString()}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                      </span>
+                      {owner?.is_linked && <span className="rounded bg-blue-100 px-1 py-0.5 text-[10px] text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">linked</span>}
+                    </div>
+                    {o.amplifier_order_id && (
+                      <a href={`https://my.amplifier.com/orders/${o.amplifier_order_id}`} target="_blank" rel="noopener noreferrer" className="text-[10px] text-indigo-600 hover:underline dark:text-indigo-400">
+                        Amplifier{o.amplifier_shipped_at ? " (shipped)" : ""}
+                      </a>
+                    )}
+                  </div>
+
+                  {/* Line items */}
+                  <div className="mt-1 space-y-0.5">
+                    {items.map((item, i) => (
+                      <p key={i} className="text-xs text-zinc-500">{item.quantity || 1}x {item.title || "Item"}{item.price ? ` @ $${item.price}` : ""}</p>
+                    ))}
+                  </div>
+
+                  {/* Address + Payment row */}
+                  <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-[11px]">
+                    {billing && (
+                      <div>
+                        <span className="font-medium text-zinc-500">Billing:</span>{" "}
+                        <span className={nameMismatch || gibberishName ? "rounded bg-red-100 px-1 text-red-700 dark:bg-red-900/30 dark:text-red-400" : "text-zinc-400"}>
+                          {billingName || "—"}
+                        </span>
+                        <span className={`ml-1 ${zipMismatch ? "rounded bg-red-100 px-1 text-red-700 dark:bg-red-900/30 dark:text-red-400" : "text-zinc-400"}`}>
+                          {billing.city ? `${billing.city}, ${billing.province || ""} ${billingZip}` : billingZip}
+                        </span>
+                      </div>
+                    )}
+                    {shipping && (
+                      <div>
+                        <span className="font-medium text-zinc-500">Shipping:</span>{" "}
+                        <span className="text-zinc-400">
+                          {shipping.city ? `${shipping.city}, ${shipping.province || ""} ${shipping.zip || ""}` : shipping.address1 || "—"}
+                        </span>
+                      </div>
+                    )}
+                    {payment && (
+                      <div>
+                        <span className="font-medium text-zinc-500">Payment:</span>{" "}
+                        <span className="text-zinc-400">{payment.credit_card_company || ""} {payment.credit_card_number || ""}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Fraud indicator badges */}
+                  {(nameMismatch || zipMismatch || susEmail || gibberishName) && (
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {nameMismatch && <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">Name mismatch</span>}
+                      {zipMismatch && <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">ZIP mismatch</span>}
+                      {gibberishName && <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">Gibberish name</span>}
+                      {susEmail && <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">Suspicious email</span>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

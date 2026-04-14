@@ -110,7 +110,7 @@ function ReactivateCard({ contract, showToast, onUpdate, startAction, completeAc
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
   const maxDate = new Date();
-  maxDate.setDate(maxDate.getDate() + 60);
+  maxDate.setDate(maxDate.getDate() + 90);
   const minStr = tomorrow.toISOString().split('T')[0];
   const maxStr = maxDate.toISOString().split('T')[0];
 
@@ -166,12 +166,17 @@ function OrderActionsCard({ contract, showToast, onUpdate, startAction, complete
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
   const maxDate = new Date();
-  maxDate.setDate(maxDate.getDate() + 60);
+  maxDate.setDate(maxDate.getDate() + 90);
   const minStr = tomorrow.toISOString().split('T')[0];
   const maxStr = maxDate.toISOString().split('T')[0];
 
   async function saveDate() {
     if (!selectedDate || busy) return;
+    // Validate date range client-side
+    if (selectedDate < minStr || selectedDate > maxStr) {
+      showToast('Please select a date within the next 90 days.', 'error');
+      return;
+    }
     setBusy(true);
     setDateModal(false);
     startAction();
@@ -942,7 +947,7 @@ export default function SubscriptionDetail() {
 
   useEffect(() => { fetchContract(); }, [fetchContract]);
 
-  if (!contractId) return <div class="sp-wrap sp-grid"><div class="sp-card"><h2 class="sp-title">Missing subscription id</h2></div></div>;
+  if (!contractId) { router.navigate(router.base + '/subscriptions'); return null; }
 
   if (loading) {
     return (
@@ -957,7 +962,8 @@ export default function SubscriptionDetail() {
   }
 
   if (error || !contract) {
-    return <div class="sp-wrap sp-grid"><div class="sp-card"><h2 class="sp-title">Could not load subscription</h2><p class="sp-muted">Please refresh.</p></div></div>;
+    router.navigate(router.base + '/subscriptions');
+    return null;
   }
 
   const b = getBucket(contract);

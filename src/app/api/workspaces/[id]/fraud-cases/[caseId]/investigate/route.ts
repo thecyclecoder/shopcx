@@ -156,10 +156,10 @@ export async function GET(
     }
   }
 
-  // Load orders for all customers
+  // Load orders for all customers (with address + payment + amplifier data)
   const { data: orders } = await admin
     .from("orders")
-    .select("id, shopify_order_id, order_number, customer_id, total_price_cents, line_items, fulfillments, created_at, source_name")
+    .select("id, shopify_order_id, order_number, customer_id, total_price_cents, total_cents, line_items, fulfillments, billing_address, shipping_address, payment_details, amplifier_order_id, amplifier_status, amplifier_shipped_at, created_at, source_name")
     .eq("workspace_id", workspaceId)
     .in("customer_id", customerIdArray.length > 0 ? customerIdArray : ["__none__"])
     .order("created_at", { ascending: false })

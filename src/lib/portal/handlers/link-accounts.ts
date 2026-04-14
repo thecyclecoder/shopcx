@@ -1,10 +1,13 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, findCustomer, logPortalAction } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, findCustomer, logPortalAction, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import crypto from "crypto";
 
 export const linkAccounts: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
+
+  const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
+  if (banCheck) return banCheck;
 
   let payload: Record<string, unknown> | null = null;
   try { payload = await req.json(); } catch { payload = null; }
@@ -50,6 +53,17 @@ export const linkAccounts: RouteHandler = async ({ auth, route, req }) => {
   // action === "link"
   if (selectedIds.length === 0 && rejectedIds.length === 0) {
     return jsonErr({ error: "no_selections" }, 400);
+  }
+
+  // Block linking to banned customers
+  if (selectedIds.length > 0) {
+    const { data: bannedTargets } = await admin.from("customers")
+      .select("id")
+      .in("id", selectedIds)
+      .eq("portal_banned", true);
+    if (bannedTargets?.length) {
+      return jsonErr({ error: "cannot_link_banned_account" }, 403);
+    }
   }
 
   // Link selected accounts

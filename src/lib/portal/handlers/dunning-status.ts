@@ -1,9 +1,12 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, findCustomer } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, findCustomer, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dunningStatus: RouteHandler = async ({ auth, route, url }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
+
+  const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
+  if (banCheck) return banCheck;
 
   const contractId = url.searchParams.get("contractId") || "";
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);

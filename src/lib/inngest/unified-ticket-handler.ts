@@ -454,6 +454,25 @@ export const unifiedTicketHandler = inngest.createFunction(
 
     if (st.intervened) return { status: "skipped", reason: "agent_intervened" };
 
+    // ── 1b. Banned customer check ──
+    if (st.custId) {
+      const banned = await step.run("check-banned", async () => {
+        const { data: cust } = await admin.from("customers").select("portal_banned").eq("id", st.custId!).single();
+        return !!cust?.portal_banned;
+      });
+      if (banned) {
+        await step.run("handle-banned", async () => {
+          const cfg = await channelCfg(admin, wsId, st.ch);
+          await sendWithDelay(admin, wsId, tid, st.ch,
+            "<p>We're sorry, but we've noticed unusual activity on your account and we are unable to provide further assistance.</p>",
+            cfg.sandbox);
+          await addTicketTag(tid, "fraud_customer");
+          await admin.from("tickets").update({ status: "closed" }).eq("id", tid);
+        });
+        return { status: "banned_customer" };
+      }
+    }
+
     // ── 1a. Auto-merge: check if customer has other recent tickets about the same issue ──
     if (st.custId) {
       const mergeResult = await step.run("auto-merge", async () => {

@@ -1,10 +1,13 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { findCustomer } from "@/lib/portal/helpers";
 
 export const home: RouteHandler = async ({ auth, route }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
+
+  const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
+  if (banCheck) return banCheck;
 
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
 

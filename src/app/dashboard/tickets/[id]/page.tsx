@@ -101,6 +101,7 @@ interface CustomerDetail {
   ltv_cents: number;
   total_orders: number;
   subscription_status: string;
+  portal_banned?: boolean;
   recent_orders: RecentOrder[];
   subscriptions: CustomerSubscription[];
   linked_identities: LinkedIdentity[];
@@ -830,6 +831,13 @@ export default function TicketDetailPage() {
                   Replies on this ticket will not be sent to the customer. This ticket was received via a forwarded support email. Disable sandbox mode in Settings to send real replies.
                 </p>
               </div>
+            </div>
+          )}
+
+          {/* Fraud customer banner */}
+          {customer?.portal_banned && (
+            <div className="mb-4 rounded-lg bg-red-600 px-4 py-2 text-center text-sm font-bold text-white">
+              FRAUD CUSTOMER — Account banned
             </div>
           )}
 
