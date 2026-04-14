@@ -615,6 +615,14 @@ Respond with EXACTLY "FRAUD" or "OK".`;
               notes: `AI flagged order ${order.order_number} as suspicious. Email: ${email}, Name: ${shippingName}`,
             });
           }
+          // Slack notification
+          const { dispatchSlackNotification } = await import("@/lib/slack");
+          dispatchSlackNotification(workspaceId, "fraud", {
+            customer: { name: shippingName, email },
+            severity: "high",
+            reason: "AI flagged as suspicious",
+            orderId: order.order_number || order.shopify_order_id,
+          }).catch(() => {});
         }
       } catch (e) {
         console.error("[fraud] AI screen error:", e);
