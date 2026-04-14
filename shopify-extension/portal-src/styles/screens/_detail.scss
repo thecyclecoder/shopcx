@@ -451,7 +451,7 @@
 .sp-shipprot__footer {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  justify-content: space-between;
   gap: 12px;
   padding: 0 15px;
 }
@@ -488,7 +488,6 @@
 }
 
 .sp-shipprot__social-pill {
-  margin-top: 10px;
   display: inline-block;
   padding: 6px 14px;
   font-size: 12px;
