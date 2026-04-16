@@ -916,14 +916,15 @@ export default function SubscriptionDetail() {
   }
 
   const fetchContract = useCallback(async () => {
-    let c = getCachedContractById(contractId);
-    if (c) { setContract(normalizeContract(c)); setLoading(false); return; }
+    // Use cached data as instant preview, but always fetch full detail
+    const cached = getCachedContractById(contractId);
+    if (cached) { setContract(normalizeContract(cached)); setLoading(false); }
     try {
       const resp = await requestJson('subscriptionDetail', { id: contractId }, { force: true });
       if (resp?.ok) {
         setContract(normalizeContract(resp.contract || resp.data || resp.subscription));
-      } else { setError(true); }
-    } catch { setError(true); }
+      } else if (!cached) { setError(true); }
+    } catch { if (!cached) setError(true); }
     setLoading(false);
   }, [contractId]);
 
