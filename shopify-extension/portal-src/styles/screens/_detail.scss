@@ -90,6 +90,18 @@
   line-height: 1.35;
 }
 
+.sp-alert--crisis {
+  border-color: rgba(59, 130, 246, 0.3);
+  background: rgba(59, 130, 246, 0.06);
+  color: #1e40af;
+}
+
+.sp-alert--crisis .sp-alert__body {
+  color: #1e40af;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 /* ------------------------------------------------------------
    Detail actions layout
    ------------------------------------------------------------ */

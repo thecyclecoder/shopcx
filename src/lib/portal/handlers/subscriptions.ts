@@ -117,6 +117,30 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
     }
   }
 
+  // Crisis banners — check for active crisis actions on each sub
+  const subDbIds = allSubs.map(s => s.id).filter(Boolean);
+  const crisisMap: Record<string, { type: string; message: string; product: string }> = {};
+  if (subDbIds.length) {
+    const { data: crisisActions } = await admin.from("crisis_customer_actions")
+      .select("subscription_id, auto_readd, auto_resume, paused_at, removed_item_at, cancelled, crisis_events(affected_product_title, status)")
+      .in("subscription_id", subDbIds)
+      .not("cancelled", "eq", true);
+
+    for (const ca of crisisActions || []) {
+      const ce = ca.crisis_events as { affected_product_title?: string; status?: string } | null;
+      if (ce?.status !== "active") continue;
+      const product = ce.affected_product_title || "an item";
+
+      if (ca.paused_at && ca.auto_resume) {
+        crisisMap[ca.subscription_id] = { type: "paused", message: `Your subscription is paused because ${product} is out of stock. It will automatically resume when it's back in stock.`, product };
+      } else if (ca.removed_item_at && ca.auto_readd) {
+        crisisMap[ca.subscription_id] = { type: "removed", message: `${product} has been removed because it's out of stock. It will be added back when it's available.`, product };
+      } else if (ca.auto_readd && !ca.paused_at && !ca.removed_item_at) {
+        crisisMap[ca.subscription_id] = { type: "swapped", message: `${product} is temporarily out of stock. Your flavor will switch back when it's available.`, product };
+      }
+    }
+  }
+
   // Transform, annotate, and bucket
   const buckets: Record<Bucket, unknown[]> = { active: [], paused: [], cancelled: [], other: [] };
   let needsAttentionCount = 0;
@@ -143,6 +167,7 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
 
     const enriched = {
       ...contract,
+      crisisBanner: crisisMap[sub.id] || null,
       portalState: {
         bucket,
         needsAttention: !!needsAttention,

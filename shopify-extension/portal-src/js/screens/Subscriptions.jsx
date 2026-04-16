@@ -53,6 +53,11 @@ function SubscriptionCard({ contract }) {
           <div class="sp-alert__body">{safeStr(contract?.portalState?.attentionMessage) || 'Action needed: payment failed'}</div>
         </div>
       )}
+      {contract?.crisisBanner && (
+        <div class="sp-alert sp-alert--crisis">
+          <div class="sp-alert__body">{contract.crisisBanner.message}</div>
+        </div>
+      )}
       <div class="sp-subcard__header sp-row">
         <div class="sp-subcard__header-left">
           <div class="sp-subcard__title">

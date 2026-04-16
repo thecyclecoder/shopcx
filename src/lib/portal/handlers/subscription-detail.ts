@@ -151,6 +151,43 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
   // Keep backward compat: appliedDiscount = first discount
   const appliedDiscount = appliedDiscounts[0] || null;
 
+  // Crisis status — check if this sub has an active crisis action
+  let crisisBanner: { type: string; message: string; product: string } | null = null;
+  {
+    const { data: crisisAction } = await admin.from("crisis_customer_actions")
+      .select("auto_readd, auto_resume, paused_at, removed_item_at, cancelled, crisis_events(name, affected_product_title, status)")
+      .eq("subscription_id", sub.id)
+      .not("cancelled", "eq", true)
+      .limit(1)
+      .maybeSingle();
+
+    if (crisisAction) {
+      const ce = crisisAction.crisis_events as { name?: string; affected_product_title?: string; status?: string } | null;
+      const product = ce?.affected_product_title || "an item";
+      const isActive = ce?.status === "active";
+
+      if (isActive && crisisAction.paused_at && crisisAction.auto_resume) {
+        crisisBanner = {
+          type: "paused",
+          message: `Your subscription is paused because ${product} is out of stock. It will automatically resume when it's back in stock.`,
+          product,
+        };
+      } else if (isActive && crisisAction.removed_item_at && crisisAction.auto_readd) {
+        crisisBanner = {
+          type: "removed",
+          message: `${product} has been removed from your subscription because it's out of stock. It will be automatically added back when it's available.`,
+          product,
+        };
+      } else if (isActive && crisisAction.auto_readd && !crisisAction.paused_at && !crisisAction.removed_item_at) {
+        crisisBanner = {
+          type: "swapped",
+          message: `${product} is temporarily out of stock. Your subscription has been switched to a different flavor and will automatically switch back when it's available.`,
+          product,
+        };
+      }
+    }
+  }
+
   return jsonOk({
     ok: true,
     shop: auth.shop,
@@ -160,6 +197,7 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
       ...contract,
       appliedDiscount,
       appliedDiscounts,
+      crisisBanner,
       portalState: {
         bucket: sub.status === "cancelled" ? "cancelled" : sub.status === "paused" ? "paused" : "active",
         needsAttention: sub.last_payment_status === "failed",

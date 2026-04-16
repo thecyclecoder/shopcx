@@ -1020,6 +1020,11 @@ export default function SubscriptionDetail() {
           </div>
           <Pill kind={statusKind}>{statusText}</Pill>
         </div>
+        {contract.crisisBanner && (
+          <div class="sp-alert sp-alert--crisis" style={{ marginTop: '10px' }}>
+            <div class="sp-alert__body">{contract.crisisBanner.message}</div>
+          </div>
+        )}
       </div>
 
       {savedBanner && (
