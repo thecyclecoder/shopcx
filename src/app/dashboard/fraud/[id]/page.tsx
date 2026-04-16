@@ -452,29 +452,9 @@ export default function FraudCaseDetailPage() {
               placeholder="Notes about this case..."
             />
 
-            {/* Resolution */}
-            <label className="mb-1 block text-xs font-medium text-zinc-500">Action Taken</label>
-            <input
-              type="text"
-              value={resolution}
-              onChange={(e) => setResolution(e.target.value)}
-              disabled={isTerminal}
-              className="mb-4 w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-              placeholder='e.g. "Cancelled accounts", "Verified — family"'
-            />
-
             {/* Action buttons */}
             {!isTerminal && (
               <div className="space-y-2">
-                {fraudCase.status === "open" && (
-                  <button
-                    onClick={() => updateCase({ status: "reviewing", review_notes: reviewNotes })}
-                    disabled={saving}
-                    className="w-full rounded-md bg-amber-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-amber-600 disabled:opacity-50"
-                  >
-                    Mark as Reviewing
-                  </button>
-                )}
                 <button
                   onClick={() => startWizard()}
                   disabled={saving}
@@ -1241,61 +1221,77 @@ function InvestigationPanel({ workspaceId, caseId }: { workspaceId: string; case
               const gibberishName = isGibberish(billingName) || isGibberish(custName);
 
               return (
-                <div key={o.id} className="px-5 py-3">
-                  <div className="flex items-center justify-between">
+                <div key={o.id} className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800/50">
+                  {/* Header */}
+                  <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{o.order_number || o.id.slice(0, 8)}</span>
-                      {o.shopify_order_id && (
-                        <a href={`https://admin.shopify.com/store/2c6b02-3/orders/${o.shopify_order_id}`} target="_blank" rel="noopener noreferrer" className="text-[10px] text-indigo-600 hover:underline dark:text-indigo-400">View on Shopify</a>
-                      )}
-                      <span className="text-xs text-zinc-400">{new Date(o.created_at).toLocaleDateString()}</span>
-                      <span className="text-sm font-medium tabular-nums text-zinc-600 dark:text-zinc-400">
+                      <span className="text-base font-bold text-zinc-900 dark:text-zinc-100">{o.order_number || o.id.slice(0, 8)}</span>
+                      <span className="text-sm font-semibold tabular-nums text-zinc-600 dark:text-zinc-400">
                         {o.total_price_cents != null ? formatCents(o.total_price_cents) : "—"}
                       </span>
-                      {owner?.is_linked && <span className="rounded bg-blue-100 px-1 py-0.5 text-[10px] text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">linked</span>}
+                      <span className="text-xs text-zinc-400">{new Date(o.created_at).toLocaleDateString()}</span>
+                      {owner?.is_linked && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">linked</span>}
                     </div>
-                    {o.amplifier_order_id && (
-                      <a href={`https://my.amplifier.com/orders/${o.amplifier_order_id}`} target="_blank" rel="noopener noreferrer" className="text-[10px] text-indigo-600 hover:underline dark:text-indigo-400">
-                        Amplifier{o.amplifier_shipped_at ? " (shipped)" : ""}
-                      </a>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {o.amplifier_order_id && (
+                        <a href={`https://my.amplifier.com/orders/${o.amplifier_order_id}`} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 hover:underline dark:text-indigo-400">
+                          Amplifier{o.amplifier_shipped_at ? " (shipped)" : ""}
+                        </a>
+                      )}
+                      {o.shopify_order_id && (
+                        <a href={`https://admin.shopify.com/store/2c6b02-3/orders/${o.shopify_order_id}`} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 hover:underline dark:text-indigo-400">Shopify</a>
+                      )}
+                    </div>
                   </div>
 
                   {/* Line items */}
-                  <div className="mt-1 space-y-0.5">
+                  <div className="mb-3 rounded-md bg-zinc-50 p-3 dark:bg-zinc-900/50">
+                    <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Items</p>
                     {items.map((item, i) => (
-                      <p key={i} className="text-xs text-zinc-500">{item.quantity || 1}x {item.title || "Item"}{item.price ? ` @ $${item.price}` : ""}</p>
+                      <div key={i} className="flex justify-between text-sm">
+                        <span className="text-zinc-700 dark:text-zinc-300">{item.quantity || 1}x {item.title || "Item"}</span>
+                        {item.price && <span className="tabular-nums text-zinc-500">${item.price}</span>}
+                      </div>
                     ))}
                   </div>
 
-                  {/* Address + Payment row */}
-                  <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-[11px]">
+                  {/* Addresses grid */}
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 mb-3">
                     {billing && (
-                      <div>
-                        <span className="font-medium text-zinc-500">Billing:</span>{" "}
-                        <span className={nameMismatch || gibberishName ? "rounded bg-red-100 px-1 text-red-700 dark:bg-red-900/30 dark:text-red-400" : "text-zinc-400"}>
+                      <div className="rounded-md bg-zinc-50 p-3 dark:bg-zinc-900/50">
+                        <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Billing Address</p>
+                        <p className={`text-sm font-medium ${nameMismatch || gibberishName ? "text-red-600 dark:text-red-400" : "text-zinc-700 dark:text-zinc-300"}`}>
                           {billingName || "—"}
-                        </span>
-                        <span className={`ml-1 ${zipMismatch ? "rounded bg-red-100 px-1 text-red-700 dark:bg-red-900/30 dark:text-red-400" : "text-zinc-400"}`}>
-                          {billing.city ? `${billing.city}, ${billing.province || ""} ${billingZip}` : billingZip}
-                        </span>
+                        </p>
+                        <p className="text-xs text-zinc-500">{billing.address1 || ""} {billing.address2 || ""}</p>
+                        <p className={`text-xs ${zipMismatch ? "text-red-600 dark:text-red-400" : "text-zinc-500"}`}>
+                          {[billing.city, billing.province || billing.provinceCode, billingZip].filter(Boolean).join(", ")}
+                        </p>
                       </div>
                     )}
                     {shipping && (
-                      <div>
-                        <span className="font-medium text-zinc-500">Shipping:</span>{" "}
-                        <span className="text-zinc-400">
-                          {shipping.city ? `${shipping.city}, ${shipping.province || ""} ${shipping.zip || ""}` : shipping.address1 || "—"}
-                        </span>
-                      </div>
-                    )}
-                    {payment && (
-                      <div>
-                        <span className="font-medium text-zinc-500">Payment:</span>{" "}
-                        <span className="text-zinc-400">{payment.credit_card_company || ""} {payment.credit_card_number || ""}</span>
+                      <div className="rounded-md bg-zinc-50 p-3 dark:bg-zinc-900/50">
+                        <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Shipping Address</p>
+                        <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                          {`${shipping.firstName || shipping.first_name || ""} ${shipping.lastName || shipping.last_name || ""}`.trim() || "—"}
+                        </p>
+                        <p className="text-xs text-zinc-500">{shipping.address1 || ""} {shipping.address2 || ""}</p>
+                        <p className="text-xs text-zinc-500">
+                          {[shipping.city, shipping.province || shipping.provinceCode || shipping.province_code, shipping.zip].filter(Boolean).join(", ")}
+                        </p>
                       </div>
                     )}
                   </div>
+
+                  {/* Payment */}
+                  {payment && (
+                    <div className="rounded-md bg-zinc-50 p-3 dark:bg-zinc-900/50 mb-3">
+                      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Payment</p>
+                      <p className="text-sm text-zinc-700 dark:text-zinc-300">
+                        {payment.credit_card_company || payment.gateway || "Unknown"} {payment.credit_card_number || ""}
+                      </p>
+                    </div>
+                  )}
 
                   {/* Fraud indicator badges */}
                   {(nameMismatch || zipMismatch || susEmail || gibberishName) && (
