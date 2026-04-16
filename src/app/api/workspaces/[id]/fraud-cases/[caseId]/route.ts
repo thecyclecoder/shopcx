@@ -195,11 +195,18 @@ export async function PATCH(
       .eq("id", caseId)
       .single();
 
-    if (dismissedCase?.orders_held && dismissedCase.order_ids?.length) {
+    if (dismissedCase?.order_ids?.length) {
       for (const orderId of dismissedCase.order_ids as string[]) {
         if (orderId) {
-          removeOrderTags(workspaceId, orderId, ["suspicious"]).catch((err) => {
-            console.error(`Failed to remove suspicious tag from order ${orderId}:`, err);
+          // Resolve Shopify order ID (order_ids may be internal UUIDs or Shopify IDs)
+          let shopifyOrderId = orderId;
+          if (orderId.includes("-")) {
+            // UUID — look up Shopify ID
+            const { data: order } = await admin.from("orders").select("shopify_order_id").eq("id", orderId).single();
+            shopifyOrderId = order?.shopify_order_id || orderId;
+          }
+          removeOrderTags(workspaceId, shopifyOrderId, ["suspicious"]).catch((err) => {
+            console.error(`Failed to remove suspicious tag from order ${shopifyOrderId}:`, err);
           });
         }
       }
