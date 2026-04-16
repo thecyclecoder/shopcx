@@ -78,10 +78,9 @@ function SubscriptionCard({ contract }) {
           <>
             {lines.slice(0, 3).map((ln, i) => (
               <div key={i} class="sp-line">
-                {getLineImage(ln)
-                  ? <img class="sp-line__img" src={getLineImage(ln)} alt={safeStr(ln.title) || 'Item'} />
-                  : <div class="sp-line__img sp-line__img--placeholder" />
-                }
+                {getLineImage(ln) && (
+                  <img class="sp-line__img" src={getLineImage(ln)} alt={safeStr(ln.title) || 'Item'} />
+                )}
                 <div class="sp-line__meta">
                   <div class="sp-line__title">{safeStr(ln.title) || 'Item'}</div>
                   <div class="sp-line__subwrap sp-muted">
