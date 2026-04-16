@@ -105,11 +105,13 @@ export async function getProductMap(
   if (!productIds.length) return {};
 
   // Look up by both internal UUID and Shopify product ID
-  const { data: products } = await admin
+  const { data: products, error: prodErr } = await admin
     .from("products")
     .select("id, shopify_product_id, image_url, variants")
     .eq("workspace_id", workspaceId)
     .or(productIds.map(id => `id.eq.${id},shopify_product_id.eq.${id}`).join(","));
+
+  if (prodErr) console.error("[getProductMap] query error:", prodErr.message, "productIds:", productIds);
 
   const map: ProductMap = {};
   for (const p of products || []) {
