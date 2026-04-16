@@ -67,9 +67,9 @@ export async function GET(
   // Load workspace members for assignment dropdown
   const { data: members } = await admin
     .from("workspace_members")
-    .select("id, user_id, role, users:user_id(email, raw_user_meta_data)")
+    .select("id, user_id, role, display_name")
     .eq("workspace_id", workspaceId)
-    .in("role", ["owner", "admin"]);
+    .in("role", ["owner", "admin", "agent"]);
 
   return NextResponse.json({
     case: fraudCase,
@@ -120,9 +120,7 @@ export async function PATCH(
   }
 
   // Validate status transitions
-  if (status === "confirmed_fraud" && !review_notes) {
-    return NextResponse.json({ error: "Review notes required to confirm fraud" }, { status: 400 });
-  }
+  // Review notes are optional for confirmed fraud
   if (status === "dismissed" && !dismissal_reason) {
     return NextResponse.json({ error: "Dismissal reason required" }, { status: 400 });
   }

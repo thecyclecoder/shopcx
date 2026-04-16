@@ -51,7 +51,7 @@ interface Member {
   id: string;
   user_id: string;
   role: string;
-  users: { email: string; raw_user_meta_data: { full_name?: string; name?: string } } | null;
+  display_name: string | null;
 }
 
 const SEVERITY_COLORS: Record<string, string> = {
@@ -436,7 +436,7 @@ export default function FraudCaseDetailPage() {
               <option value="">Unassigned</option>
               {members.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.users?.raw_user_meta_data?.full_name || m.users?.raw_user_meta_data?.name || m.users?.email}
+                  {m.display_name || m.user_id?.slice(0, 8)}
                 </option>
               ))}
             </select>
