@@ -104,9 +104,13 @@ async function handle(req: NextRequest) {
     const response = await handler({ req, url, auth, route });
 
     // Log error responses for portal analytics visibility
+    // Skip validation errors (expected user input issues, not real errors)
+    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in"]);
     if (response.status >= 400 && auth.workspaceId && auth.loggedInCustomerId) {
       try {
         const body = await response.clone().json();
+        if (VALIDATION_ERRORS.has(body?.error)) { /* skip logging validation errors */ }
+        else {
         const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
         if (customer) {
           await logCustomerEvent({
@@ -125,6 +129,7 @@ async function handle(req: NextRequest) {
             },
           });
         }
+        } // end else (not validation error)
       } catch { /* non-fatal */ }
     }
 

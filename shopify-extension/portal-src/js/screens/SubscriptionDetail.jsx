@@ -108,7 +108,7 @@ function ReactivateCard({ contract, showToast, onUpdate, startAction, completeAc
   const [selectedDate, setSelectedDate] = useState('');
 
   const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setDate(tomorrow.getDate() + 2);
   const maxDate = new Date();
   maxDate.setDate(maxDate.getDate() + 90);
   const minStr = tomorrow.toISOString().split('T')[0];
@@ -164,7 +164,7 @@ function OrderActionsCard({ contract, showToast, onUpdate, startAction, complete
   const [selectedDate, setSelectedDate] = useState('');
 
   const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setDate(tomorrow.getDate() + 2);
   const maxDate = new Date();
   maxDate.setDate(maxDate.getDate() + 90);
   const minStr = tomorrow.toISOString().split('T')[0];

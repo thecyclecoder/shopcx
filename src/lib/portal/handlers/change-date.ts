@@ -24,7 +24,7 @@ export const changeDate: RouteHandler = async ({ auth, route, req }) => {
   if (isNaN(picked.getTime())) return jsonErr({ error: "invalid_date" }, 400);
 
   const now = new Date();
-  const tomorrow = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+  const tomorrow = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 2));
   const maxDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 90));
 
   if (picked < tomorrow) return jsonErr({ error: "date_too_early" }, 400);
