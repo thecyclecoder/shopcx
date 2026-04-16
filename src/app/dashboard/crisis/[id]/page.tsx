@@ -124,6 +124,8 @@ export default function CrisisDetailPage() {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [resolving, setResolving] = useState(false);
+  const [autoSwapping, setAutoSwapping] = useState(false);
+  const [honorGrandfathered, setHonorGrandfathered] = useState(true);
   const [error, setError] = useState("");
 
   // Editable fields
@@ -299,6 +301,35 @@ export default function CrisisDetailPage() {
           </div>
           {isAdmin && (
             <div className="flex items-center gap-2">
+              {crisis.status === "active" && (
+                <button
+                  onClick={async () => {
+                    if (!confirm("This will swap all affected subscriptions to the default swap variant. Continue?")) return;
+                    setAutoSwapping(true);
+                    try {
+                      const res = await fetch(`/api/workspaces/${workspace.id}/crisis/${crisis.id}/auto-swap`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ honor_grandfathered: honorGrandfathered }),
+                      });
+                      const data = await res.json();
+                      alert(`Auto-swap complete!\n\nSwapped: ${data.swapped}\nSkipped (already done): ${data.skipped}\nFailed: ${data.failed}${data.errors?.length ? "\n\nErrors:\n" + data.errors.join("\n") : ""}`);
+                      window.location.reload();
+                    } catch { alert("Auto-swap failed"); }
+                    setAutoSwapping(false);
+                  }}
+                  disabled={autoSwapping}
+                  className="rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50 transition-colors"
+                >
+                  {autoSwapping ? "Swapping..." : "Start Auto-Swap"}
+                </button>
+              )}
+              {crisis.status === "active" && (
+                <label className="flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+                  <input type="checkbox" checked={honorGrandfathered} onChange={(e) => setHonorGrandfathered(e.target.checked)} className="rounded" />
+                  Honor grandfathered pricing
+                </label>
+              )}
               {crisis.status !== "resolved" && (
                 <button
                   onClick={handleResolve}

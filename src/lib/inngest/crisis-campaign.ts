@@ -132,33 +132,9 @@ export const crisisDailyCampaign = inngest.createFunction(
           const nonAffectedItems = realItems.filter(i => i !== affectedItem);
           const segment = nonAffectedItems.length === 0 ? "berry_only" : "berry_plus";
 
-          // Auto-swap the item to default flavor via Appstle + preserve base price
-          let preservedBasePriceCents: number | null = null;
-          if (crisis.default_swap_variant_id && sub.contractId) {
-            try {
-              const { subSwapVariant, getLastOrderPrice, calcBasePrice, subUpdateLineItemPrice } = await import("@/lib/subscription-items");
-
-              // Get the price customer was paying before the swap
-              const lastPrice = await getLastOrderPrice(crisis.workspace_id, sub.customerId, affectedItem.sku || null, affectedItem.variant_id || null);
-              if (lastPrice) {
-                // Calculate base price so that after 25% discount, they pay the same
-                preservedBasePriceCents = calcBasePrice(lastPrice, 25);
-              }
-
-              await subSwapVariant(
-                crisis.workspace_id,
-                sub.contractId,
-                affectedItem.variant_id || crisis.affected_variant_id,
-                crisis.default_swap_variant_id,
-                affectedItem.quantity || 1,
-              );
-
-              // Update the price on the new variant to preserve customer's pricing
-              if (preservedBasePriceCents) {
-                await subUpdateLineItemPrice(crisis.workspace_id, sub.contractId, crisis.default_swap_variant_id, preservedBasePriceCents);
-              }
-            } catch { /* non-fatal */ }
-          }
+          // Auto-swap REMOVED from cron — now triggered manually via "Start Auto-Swap" button
+          // on the crisis detail page. This ensures swaps are monitored and errors are visible.
+          const preservedBasePriceCents: number | null = null;
 
           // Create a ticket for this customer
           const { data: ticket } = await admin.from("tickets").insert({
