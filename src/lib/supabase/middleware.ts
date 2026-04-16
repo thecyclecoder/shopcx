@@ -57,10 +57,13 @@ export async function updateSession(request: NextRequest) {
           return NextResponse.rewrite(url);
         }
 
-        // /portal/* → portal minisite
+        // /portal/* → portal minisite (client-side router handles sub-paths)
         if (pathname.startsWith("/portal/") || pathname === "/portal") {
+          // Only pass through /login and /callback as server routes
           const portalPath = pathname === "/portal" ? "" : pathname.slice(7);
-          url.pathname = `/portal/${slug}${portalPath}`;
+          const isServerRoute = portalPath.endsWith("/login") || portalPath.endsWith("/callback");
+          url.pathname = isServerRoute ? `/portal/${slug}${portalPath}` : `/portal/${slug}`;
+          // Preserve query params (e.g. ?id=123, ?status=active)
           return NextResponse.rewrite(url);
         }
 
