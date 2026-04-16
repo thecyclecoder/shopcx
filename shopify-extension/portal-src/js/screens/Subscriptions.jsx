@@ -128,7 +128,7 @@ export default function Subscriptions() {
   const [status, setStatus] = useState(getStatusFromUrl);
 
   useEffect(() => {
-    requestJson('subscriptions')
+    requestJson('subscriptions', {}, { force: true })
       .then(d => setData(d))
       .catch(() => setError(true));
   }, []);
