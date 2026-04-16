@@ -565,8 +565,8 @@ export async function checkOrderForFraud(
         const billing = order.billing_address as Record<string, string> | null;
         const email = order.email || "";
         const custName = customer ? `${customer.first_name || ""} ${customer.last_name || ""}`.trim() : "";
-        const shippingName = shipping ? `${shipping.firstName || ""} ${shipping.lastName || ""}`.trim() : "";
-        const billingName = billing ? `${billing.firstName || ""} ${billing.lastName || ""}`.trim() : "";
+        const shippingName = shipping ? `${shipping.firstName || shipping.first_name || ""} ${shipping.lastName || shipping.last_name || ""}`.trim() : "";
+        const billingName = billing ? `${billing.firstName || billing.first_name || ""} ${billing.lastName || billing.last_name || ""}`.trim() : "";
 
         const prompt = `Analyze this e-commerce order for fraud indicators. Return ONLY "FRAUD" or "OK".
 
@@ -574,9 +574,9 @@ Order: ${order.order_number}
 Email: ${email}
 Customer name: ${custName}
 Shipping name: ${shippingName}
-Shipping address: ${shipping ? `${shipping.address1 || ""} ${shipping.address2 || ""}, ${shipping.city || ""} ${shipping.provinceCode || ""} ${shipping.zip || ""}` : "unknown"}
+Shipping address: ${shipping ? `${shipping.address1 || ""} ${shipping.address2 || ""}, ${shipping.city || ""} ${shipping.provinceCode || shipping.province_code || ""} ${shipping.zip || ""}` : "unknown"}
 Billing name: ${billingName}
-Billing address: ${billing ? `${billing.address1 || ""} ${billing.address2 || ""}, ${billing.city || ""} ${billing.provinceCode || ""} ${billing.zip || ""}` : "unknown"}
+Billing address: ${billing ? `${billing.address1 || ""} ${billing.address2 || ""}, ${billing.city || ""} ${billing.provinceCode || billing.province_code || ""} ${billing.zip || ""}` : "unknown"}
 Amount: $${((order.total_cents || 0) / 100).toFixed(2)}
 
 Look for:
