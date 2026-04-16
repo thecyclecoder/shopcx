@@ -256,6 +256,18 @@ export async function subUpdateLineItemPrice(
       console.error("Appstle updateLineItemPrice error:", text);
       return { success: false, error: `Appstle API error: ${res.status} — ${text.slice(0, 200)}` };
     }
+
+    // Update our DB with the new price
+    const discountedCents = Math.round(basePriceCents * 0.75);
+    await admin.from("subscriptions").update({
+      items: items.map(i =>
+        String(i.variant_id) === String(variantId)
+          ? { ...i, price_cents: discountedCents }
+          : i
+      ),
+      updated_at: new Date().toISOString(),
+    }).eq("shopify_contract_id", contractId);
+
     return { success: true };
   } catch (err) {
     console.error("Appstle updateLineItemPrice failed:", err);
