@@ -215,8 +215,8 @@ export default function FraudMonitorPage() {
             </thead>
             <tbody>
               {cases.map((c) => {
-                const valueAtRisk = (c.evidence as { total_order_value_cents?: number; total_spend_in_window_cents?: number })
-                  .total_order_value_cents || (c.evidence as { total_spend_in_window_cents?: number }).total_spend_in_window_cents || 0;
+                const ev = (c.evidence || {}) as Record<string, unknown>;
+                const valueAtRisk = Number(ev.total_order_value_cents || ev.total_spend_in_window_cents || ev.amount_cents || 0);
 
                 return (
                   <tr

@@ -967,6 +967,7 @@ interface InvestCustomer {
 
 interface InvestOrder {
   id: string;
+  shopify_order_id: string;
   order_number: string;
   customer_id: string;
   total_price_cents: number | null;
@@ -1243,7 +1244,10 @@ function InvestigationPanel({ workspaceId, caseId }: { workspaceId: string; case
                 <div key={o.id} className="px-5 py-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">#{o.order_number || o.id.slice(0, 8)}</span>
+                      <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{o.order_number || o.id.slice(0, 8)}</span>
+                      {o.shopify_order_id && (
+                        <a href={`https://admin.shopify.com/store/2c6b02-3/orders/${o.shopify_order_id}`} target="_blank" rel="noopener noreferrer" className="text-[10px] text-indigo-600 hover:underline dark:text-indigo-400">View on Shopify</a>
+                      )}
                       <span className="text-xs text-zinc-400">{new Date(o.created_at).toLocaleDateString()}</span>
                       <span className="text-sm font-medium tabular-nums text-zinc-600 dark:text-zinc-400">
                         {o.total_price_cents != null ? formatCents(o.total_price_cents) : "—"}
