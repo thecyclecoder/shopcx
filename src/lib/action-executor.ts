@@ -882,6 +882,8 @@ async function escalateTicket(ctx: ActionContext, reason: string): Promise<void>
     .update({
       status: "open",
       assigned_to: assignee,
+      escalated_to: assignee,
+      escalated_at: new Date().toISOString(),
       escalation_reason: reason,
     })
     .eq("id", ctx.ticketId);

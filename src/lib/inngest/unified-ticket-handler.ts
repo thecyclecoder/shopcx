@@ -377,6 +377,8 @@ async function escalate(admin: Admin, wsId: string, tid: string, ch: string, int
     status: "open",
     ai_clarification_turn: 0,
     assigned_to: assignedTo,
+    escalated_to: assignedTo,
+    escalated_at: new Date().toISOString(),
     escalation_reason: intent || "unknown",
   }).eq("id", tid);
 
@@ -385,9 +387,8 @@ async function escalate(admin: Admin, wsId: string, tid: string, ch: string, int
   }
 
   // Always send a customer-facing message on escalation
-  let escalationMsg = ch === "chat" && customerEmail
-    ? `I need to look into this a bit more. I'll send you an email at ${customerEmail} with an update shortly.`
-    : "I need to look into this a bit more. I'll get back to you shortly.";
+  // Must contain "send you an email" to trigger chatEnded in the widget
+  const escalationMsg = "I'm going to look into this and send you an email shortly.";
 
   await sendWithDelay(admin, wsId, tid, ch, escalationMsg, false);
 
