@@ -950,7 +950,7 @@ interface InvestOrder {
   shopify_order_id: string;
   order_number: string;
   customer_id: string;
-  total_price_cents: number | null;
+  total_cents: number | null;
   line_items: { title?: string; quantity?: number; price?: string }[] | null;
   billing_address: Record<string, string> | null;
   shipping_address: Record<string, string> | null;
@@ -1227,7 +1227,7 @@ function InvestigationPanel({ workspaceId, caseId }: { workspaceId: string; case
                     <div className="flex items-center gap-2">
                       <span className="text-base font-bold text-zinc-900 dark:text-zinc-100">{o.order_number || o.id.slice(0, 8)}</span>
                       <span className="text-sm font-semibold tabular-nums text-zinc-600 dark:text-zinc-400">
-                        {o.total_price_cents != null ? formatCents(o.total_price_cents) : "—"}
+                        {o.total_cents != null ? formatCents(o.total_cents) : "—"}
                       </span>
                       <span className="text-xs text-zinc-400">{new Date(o.created_at).toLocaleDateString()}</span>
                       {owner?.is_linked && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">linked</span>}
