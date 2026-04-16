@@ -102,9 +102,8 @@ export async function POST(
         } catch { /* price preservation is best-effort */ }
       }
 
-      // Update crisis record
+      // Update crisis record — only set auto_readd, don't set tier1 fields (those are for journey responses)
       await admin.from("crisis_customer_actions").update({
-        tier1_swapped_to: { variantId: crisis.default_swap_variant_id, title: crisis.default_swap_title || "Default swap" },
         auto_readd: true,
         updated_at: new Date().toISOString(),
       }).eq("id", action.id);
