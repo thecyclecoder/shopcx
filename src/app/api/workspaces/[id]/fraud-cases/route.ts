@@ -75,11 +75,21 @@ export async function GET(
   }
 
   if (allOrderIds.length) {
-    const { data: orders } = await admin.from("orders")
-      .select("id, order_number")
-      .in("id", allOrderIds);
-    for (const o of orders || []) {
-      orderMap.set(o.id, o.order_number || o.id);
+    // order_ids in fraud_cases stores shopify_order_id (text), but one code path stores internal UUIDs — look up by both.
+    const { data: ordersByShopifyId } = await admin.from("orders")
+      .select("id, shopify_order_id, order_number")
+      .in("shopify_order_id", allOrderIds);
+    for (const o of ordersByShopifyId || []) {
+      if (o.shopify_order_id) orderMap.set(o.shopify_order_id, o.order_number || o.shopify_order_id);
+    }
+    const missing = allOrderIds.filter(id => !orderMap.has(id));
+    if (missing.length) {
+      const { data: ordersByUuid } = await admin.from("orders")
+        .select("id, order_number")
+        .in("id", missing);
+      for (const o of ordersByUuid || []) {
+        orderMap.set(o.id, o.order_number || o.id);
+      }
     }
   }
 
