@@ -152,7 +152,7 @@ export async function GET(
   // Get sandbox mode
   const { data: ws } = await admin
     .from("workspaces")
-    .select("sandbox_mode, resend_domain, shopify_domain")
+    .select("sandbox_mode, resend_domain, shopify_myshopify_domain")
     .eq("id", workspaceId)
     .single();
 
@@ -166,7 +166,7 @@ export async function GET(
     customer,
     sandbox_mode: sandboxMode,
     email_live: !sandboxMode || isInboundTicket,
-    shopify_domain: ws?.shopify_domain || null,
+    shopify_domain: ws?.shopify_myshopify_domain || null,
   });
 }
 

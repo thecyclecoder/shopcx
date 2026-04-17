@@ -2848,7 +2848,7 @@ export default function TicketDetailPage() {
                       <div className="mt-1 flex items-center gap-2 text-sm text-zinc-400">
                         <span>{formatDate(o.created_at)}</span>
                         <a
-                          href={`/dashboard/orders?search=${o.order_number}`}
+                          href={`/dashboard/orders/${o.id}`}
                           onClick={e => e.stopPropagation()}
                           className="text-indigo-500 hover:text-indigo-400"
                         >
