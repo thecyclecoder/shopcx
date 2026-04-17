@@ -208,8 +208,8 @@ export default function FraudMonitorPage() {
                 <th className="px-4 py-3">Severity</th>
                 <th className="px-4 py-3">Type</th>
                 <th className="px-4 py-3">Case</th>
-                <th className="hidden px-4 py-3 sm:table-cell">Customer</th>
-                <th className="hidden px-4 py-3 sm:table-cell">Order #</th>
+                <th className="px-4 py-3">Customer</th>
+                <th className="px-4 py-3">Order #</th>
                 <th className="hidden px-4 py-3 md:table-cell">Value</th>
                 <th className="hidden px-4 py-3 md:table-cell">Detected</th>
                 <th className="px-4 py-3">Status</th>
@@ -242,10 +242,10 @@ export default function FraudMonitorPage() {
                     <td className="max-w-xs truncate px-4 py-3 font-medium text-zinc-900 dark:text-zinc-100">
                       {c.title}
                     </td>
-                    <td className="hidden max-w-[160px] truncate px-4 py-3 text-zinc-600 dark:text-zinc-400 sm:table-cell">
+                    <td className="max-w-[160px] truncate px-4 py-3 text-zinc-600 dark:text-zinc-400">
                       {c.customer_names?.length ? c.customer_names.join(", ") : "—"}
                     </td>
-                    <td className="hidden px-4 py-3 text-zinc-500 sm:table-cell">
+                    <td className="px-4 py-3 text-zinc-500">
                       {c.order_numbers?.length ? c.order_numbers.join(", ") : "—"}
                     </td>
                     <td className="hidden px-4 py-3 tabular-nums text-zinc-600 dark:text-zinc-400 md:table-cell">
