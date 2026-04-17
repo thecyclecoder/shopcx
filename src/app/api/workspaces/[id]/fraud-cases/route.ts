@@ -57,8 +57,40 @@ export async function GET(
     p_workspace_id: workspaceId,
   });
 
+  // Resolve customer names and order numbers for display
+  const allCustomerIds = [...new Set((cases || []).flatMap(c => (c.customer_ids as string[]) || []))];
+  const allOrderIds = [...new Set((cases || []).flatMap(c => (c.order_ids as string[]) || []))];
+
+  const customerMap = new Map<string, string>();
+  const orderMap = new Map<string, string>();
+
+  if (allCustomerIds.length) {
+    const { data: customers } = await admin.from("customers")
+      .select("id, first_name, last_name, email")
+      .in("id", allCustomerIds);
+    for (const c of customers || []) {
+      const name = [c.first_name, c.last_name].filter(Boolean).join(" ") || c.email || "Unknown";
+      customerMap.set(c.id, name);
+    }
+  }
+
+  if (allOrderIds.length) {
+    const { data: orders } = await admin.from("orders")
+      .select("id, order_number")
+      .in("id", allOrderIds);
+    for (const o of orders || []) {
+      orderMap.set(o.id, o.order_number || o.id);
+    }
+  }
+
+  const enrichedCases = (cases || []).map(c => ({
+    ...c,
+    customer_names: ((c.customer_ids as string[]) || []).map(id => customerMap.get(id) || "Unknown"),
+    order_numbers: ((c.order_ids as string[]) || []).map(id => orderMap.get(id) || "?"),
+  }));
+
   return NextResponse.json({
-    cases: cases || [],
+    cases: enrichedCases,
     total: count || 0,
     stats: stats?.[0] || { open_count: 0, confirmed_30d: 0, dismissed_30d: 0, value_at_risk_cents: 0 },
   });
