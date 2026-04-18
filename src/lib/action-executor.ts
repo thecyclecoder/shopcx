@@ -452,6 +452,68 @@ const directActionHandlers: Record<
     }
     return { ...r, summary: "Removed item (will auto-add when back in stock)" };
   },
+
+  create_replacement_order: async (ctx, p) => {
+    const { getShopifyCredentials } = await import("@/lib/shopify-sync");
+    const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
+    const { shop, accessToken } = await getShopifyCredentials(ctx.workspaceId);
+
+    // Get customer's Shopify ID and shipping address from their subscription
+    const { data: cust } = await ctx.admin.from("customers")
+      .select("shopify_customer_id").eq("id", ctx.customerId).single();
+    if (!cust?.shopify_customer_id) return { success: false, error: "No Shopify customer ID" };
+
+    // Get shipping address from any active sub
+    const { data: subs } = await ctx.admin.from("subscriptions")
+      .select("shipping_address").eq("customer_id", ctx.customerId).eq("status", "active").limit(1);
+    const addr = (subs?.[0]?.shipping_address || {}) as Record<string, string>;
+    if (!addr.address1) return { success: false, error: "No shipping address found" };
+
+    const variantId = p.variant_id || "42614433513645"; // default Peach Mango
+    const quantity = p.quantity || 1;
+
+    const draftRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+      method: "POST",
+      headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: `mutation($input: DraftOrderInput!) { draftOrderCreate(input: $input) { draftOrder { id name } userErrors { field message } } }`,
+        variables: {
+          input: {
+            customerId: `gid://shopify/Customer/${cust.shopify_customer_id}`,
+            lineItems: [{ variantId: `gid://shopify/ProductVariant/${variantId}`, quantity }],
+            shippingAddress: {
+              firstName: addr.firstName || addr.first_name || "",
+              lastName: addr.lastName || addr.last_name || "",
+              address1: addr.address1 || "", address2: addr.address2 || "",
+              city: addr.city || "",
+              provinceCode: addr.provinceCode || addr.province_code || addr.province || "",
+              zip: addr.zip || "", countryCode: "US",
+            },
+            note: "Replacement order — crisis swap compensation",
+            tags: ["replacement", "crisis"],
+            appliedDiscount: { value: 100.0, valueType: "PERCENTAGE", title: "Replacement" },
+          },
+        },
+      }),
+    });
+    const draftData = await draftRes.json();
+    if (draftData.data?.draftOrderCreate?.userErrors?.length) {
+      return { success: false, error: draftData.data.draftOrderCreate.userErrors.map((e: { message: string }) => e.message).join(", ") };
+    }
+    const draftId = draftData.data?.draftOrderCreate?.draftOrder?.id;
+    if (!draftId) return { success: false, error: "Draft order creation failed" };
+
+    // Complete the draft
+    const completeRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+      method: "POST",
+      headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ query: `mutation { draftOrderComplete(id: "${draftId}") { draftOrder { order { name } } userErrors { message } } }` }),
+    });
+    const completeData = await completeRes.json();
+    const orderName = completeData.data?.draftOrderComplete?.draftOrder?.order?.name;
+
+    return { success: true, summary: `Replacement order ${orderName || "created"} — ${quantity}x Peach Mango shipped free` };
+  },
 };
 
 async function notifySlack(ctx: ActionContext, p: ActionParams, amountDecimal: string): Promise<void> {

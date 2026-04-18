@@ -203,6 +203,11 @@ async function generatePositiveClose(msg: string, ch: string, p: { name?: string
  */
 async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: string, sandbox: boolean, pending = false, delaySec = 0) {
   const html = toHtml(msg);
+
+  // Tag ticket as AI-handled
+  const { addTicketTag } = await import("@/lib/ticket-tags");
+  await addTicketTag(tid, "ai");
+
   if (sandbox) {
     await admin.from("ticket_messages").insert({ ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "ai", body: `[AI Draft] ${html}` });
     return;
