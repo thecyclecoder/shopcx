@@ -87,12 +87,13 @@ export const crisisDailyCampaign = inngest.createFunction(
         if (!unemailed?.length) return [];
 
         // Get their subscriptions to check billing date
+        // Batch size 100 — 500 UUIDs exceeds Supabase/PostgREST URL length limit
         const subIds = unemailed.map(a => a.subscription_id);
         const subs: { id: string; customer_id: string; shopify_contract_id: string; items: unknown; next_billing_date: string | null }[] = [];
-        for (let i = 0; i < subIds.length; i += 500) {
+        for (let i = 0; i < subIds.length; i += 100) {
           const { data } = await admin.from("subscriptions")
             .select("id, customer_id, shopify_contract_id, items, next_billing_date")
-            .in("id", subIds.slice(i, i + 500))
+            .in("id", subIds.slice(i, i + 100))
             .in("status", ["active", "paused"])
             .lte("next_billing_date", cutoffDate);
           if (data) subs.push(...data);
