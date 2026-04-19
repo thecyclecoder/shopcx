@@ -133,7 +133,7 @@ export async function POST(
         preservedBasePriceCents = calcBasePrice(lastPrice, 25);
       }
 
-      await subSwapVariant(
+      const swapResult = await subSwapVariant(
         workspaceId,
         sub.shopify_contract_id,
         affectedItem.variant_id || crisis.affected_variant_id,
@@ -143,7 +143,7 @@ export async function POST(
 
       // Update price on new variant to preserve customer's pricing
       if (preservedBasePriceCents) {
-        await subUpdateLineItemPrice(workspaceId, sub.shopify_contract_id, crisis.default_swap_variant_id, preservedBasePriceCents);
+        await subUpdateLineItemPrice(workspaceId, sub.shopify_contract_id, crisis.default_swap_variant_id, preservedBasePriceCents, swapResult.newLineGid);
       }
     } catch { /* non-fatal */ }
   }

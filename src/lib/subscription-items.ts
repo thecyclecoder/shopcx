@@ -199,14 +199,16 @@ export async function subUpdateLineItemPrice(
   contractId: string,
   variantId: string,
   basePriceCents: number,
+  lineGid?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
   const priceDecimal = (basePriceCents / 100).toFixed(2);
   try {
-    // Resolve lineId — check DB first, fall back to Appstle API
-    let lineId: string | null = null;
+    // Resolve lineId — always query Appstle for the authoritative GID.
+    // DB line_ids go stale after swaps (swap creates a new line, old GID is dead).
+    let lineId: string | null = lineGid || null;
 
     const admin = createAdminClient();
     const { data: sub } = await admin.from("subscriptions")
@@ -214,15 +216,7 @@ export async function subUpdateLineItemPrice(
       .eq("shopify_contract_id", contractId)
       .single();
     const items = (sub?.items as { variant_id?: string; line_id?: string }[]) || [];
-    const match = items.find(i => String(i.variant_id) === String(variantId));
-    if (match?.line_id) {
-      // DB stores UUID — Appstle API needs full GID
-      lineId = match.line_id.startsWith("gid://")
-        ? match.line_id
-        : `gid://shopify/SubscriptionLine/${match.line_id}`;
-    }
 
-    // Fall back to Appstle contract-external API (returns full GIDs)
     if (!lineId) {
       const detailRes = await fetch(
         `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
@@ -235,7 +229,7 @@ export async function subUpdateLineItemPrice(
           const vid = l.variantId?.split("/").pop() || l.variantId;
           return String(vid) === String(variantId);
         });
-        if (lineMatch?.id) lineId = lineMatch.id; // Keep full GID
+        if (lineMatch?.id) lineId = lineMatch.id;
       }
     }
 
@@ -321,7 +315,7 @@ export async function subSwapVariant(
   oldVariantId: string,
   newVariantId: string,
   quantity: number = 1,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; newLineGid?: string }> {
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
@@ -335,6 +329,8 @@ export async function subSwapVariant(
     stopSwapEmails: true,
   });
 
+  let newLineGid: string | undefined;
+
   if (result.success) {
     await syncItemsAfterMutation(workspaceId, contractId, (items) =>
       items.map((item) =>
@@ -343,7 +339,24 @@ export async function subSwapVariant(
           : item,
       ),
     );
+
+    // Query Appstle for the new line's GID (swap creates a new line, old GID is dead)
+    try {
+      const detailRes = await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
+        { headers: { "X-API-Key": config.apiKey }, cache: "no-store" },
+      );
+      if (detailRes.ok) {
+        const detail = await detailRes.json();
+        const lines = (detail?.lines?.nodes || []) as { id?: string; variantId?: string }[];
+        const lineMatch = lines.find(l => {
+          const vid = l.variantId?.split("/").pop() || l.variantId;
+          return String(vid) === String(newVariantId);
+        });
+        if (lineMatch?.id) newLineGid = lineMatch.id;
+      }
+    } catch { /* non-fatal — callers can still use subUpdateLineItemPrice without GID */ }
   }
 
-  return result;
+  return { ...result, newLineGid };
 }

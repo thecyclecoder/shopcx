@@ -96,7 +96,7 @@ export async function POST(
               }
             }
             if (standardPrice && basePriceCents < standardPrice) {
-              await subUpdateLineItemPrice(workspaceId, sub.shopify_contract_id, crisis.default_swap_variant_id, basePriceCents);
+              await subUpdateLineItemPrice(workspaceId, sub.shopify_contract_id, crisis.default_swap_variant_id, basePriceCents, result.newLineGid);
             }
           }
         } catch { /* price preservation is best-effort */ }
