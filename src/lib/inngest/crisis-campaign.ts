@@ -54,7 +54,7 @@ export const crisisDailyCampaign = inngest.createFunction(
   {
     id: "crisis-daily-campaign",
     concurrency: [{ limit: 1 }],
-    triggers: [{ cron: "0 14 * * *" }], // 9 AM Central = 14:00 UTC
+    triggers: [{ cron: "0 14 * * *" }, { event: "crisis/run-campaign" }], // 9 AM Central = 14:00 UTC + manual trigger
   },
   async ({ step }) => {
     const admin = createAdminClient();
