@@ -103,13 +103,14 @@ export const crisisDailyCampaign = inngest.createFunction(
           );
         });
 
-        // Exclude already processed
+        // Exclude subs that already received the Tier 1 email
         const { data: existing } = await admin.from("crisis_customer_actions")
           .select("subscription_id")
-          .eq("crisis_id", crisis.id);
-        const processedSubIds = new Set((existing || []).map(e => e.subscription_id));
+          .eq("crisis_id", crisis.id)
+          .not("tier1_sent_at", "is", null);
+        const emailedSubIds = new Set((existing || []).map(e => e.subscription_id));
 
-        const newSubs = eligible.filter(s => !processedSubIds.has(s.id));
+        const newSubs = eligible.filter(s => !emailedSubIds.has(s.id));
         return newSubs.map(s => ({
           subId: s.id,
           customerId: s.customer_id,
@@ -147,22 +148,36 @@ export const crisisDailyCampaign = inngest.createFunction(
             handled_by: `Crisis: ${crisis.name}`,
           }).select("id").single();
 
-          // Record the action
-          const { data: actionRecord } = await admin.from("crisis_customer_actions").insert({
-            crisis_id: crisis.id,
-            workspace_id: crisis.workspace_id,
-            subscription_id: sub.subId,
-            customer_id: sub.customerId,
-            segment,
-            original_item: affectedItem,
-            current_tier: 1,
-            tier1_sent_at: new Date().toISOString(),
-            tier1_swapped_to: crisis.default_swap_variant_id
-              ? { variantId: crisis.default_swap_variant_id, title: crisis.default_swap_title || "default swap" }
-              : null,
-            ticket_id: ticket?.id || null,
-            preserved_base_price_cents: preservedBasePriceCents,
-          }).select("id").single();
+          // Record the action (or update existing if record was pre-created by auto-swap)
+          const { data: existingAction } = await admin.from("crisis_customer_actions")
+            .select("id").eq("crisis_id", crisis.id).eq("subscription_id", sub.subId).maybeSingle();
+
+          let actionRecord: { id: string } | null = null;
+          if (existingAction) {
+            await admin.from("crisis_customer_actions").update({
+              tier1_sent_at: new Date().toISOString(),
+              current_tier: 1,
+              ticket_id: ticket?.id || null,
+            }).eq("id", existingAction.id);
+            actionRecord = existingAction;
+          } else {
+            const { data: newAction } = await admin.from("crisis_customer_actions").insert({
+              crisis_id: crisis.id,
+              workspace_id: crisis.workspace_id,
+              subscription_id: sub.subId,
+              customer_id: sub.customerId,
+              segment,
+              original_item: affectedItem,
+              current_tier: 1,
+              tier1_sent_at: new Date().toISOString(),
+              tier1_swapped_to: crisis.default_swap_variant_id
+                ? { variantId: crisis.default_swap_variant_id, title: crisis.default_swap_title || "default swap" }
+                : null,
+              ticket_id: ticket?.id || null,
+              preserved_base_price_cents: preservedBasePriceCents,
+            }).select("id").single();
+            actionRecord = newAction;
+          }
 
           // Create a journey session for Tier 1 flavor swap
           const token = crypto.randomBytes(24).toString("hex");
