@@ -72,51 +72,45 @@ export const crisisDailyCampaign = inngest.createFunction(
     let totalNew = 0;
 
     for (const crisis of crises) {
-      // ── Step 1: Find new eligible subscriptions ──
+      // ── Step 1: Find crisis records that haven't received Tier 1 email + billing within lead time ──
       const newActions = await step.run(`find-new-${crisis.id.slice(0, 8)}`, async () => {
-        const affectedSku = crisis.affected_sku;
-        const affectedVariantId = crisis.affected_variant_id;
         const leadDays = crisis.lead_time_days || 7;
         const cutoffDate = new Date(Date.now() + leadDays * 24 * 60 * 60 * 1000).toISOString();
 
-        // Get all active subs (including those in dunning)
-        const { data: allSubs } = await admin.from("subscriptions")
-          .select("id, customer_id, shopify_contract_id, status, items, next_billing_date")
-          .eq("workspace_id", crisis.workspace_id)
-          .in("status", ["active", "paused"]) // include paused for dunning
-          .lte("next_billing_date", cutoffDate);
-
-        // Also get dunning subs
-        const { data: dunningCycles } = await admin.from("dunning_cycles")
-          .select("subscription_id")
-          .eq("workspace_id", crisis.workspace_id)
-          .eq("status", "active");
-        const dunningSubIds = new Set((dunningCycles || []).map(d => d.subscription_id));
-
-        // Filter to subs with affected item
-        const eligible = (allSubs || []).filter(s => {
-          if (s.status === "paused" && !dunningSubIds.has(s.id)) return false; // only include paused if in dunning
-          const items = (s.items as { sku?: string; variant_id?: string; title?: string }[]) || [];
-          return items.some(i =>
-            (i.sku && i.sku.toUpperCase() === affectedSku?.toUpperCase()) ||
-            (i.variant_id && i.variant_id === affectedVariantId)
-          );
-        });
-
-        // Exclude subs that already received the Tier 1 email
-        const { data: existing } = await admin.from("crisis_customer_actions")
-          .select("subscription_id")
+        // Get crisis records that haven't been emailed yet
+        const { data: unemailed } = await admin.from("crisis_customer_actions")
+          .select("id, subscription_id, customer_id, segment, original_item")
           .eq("crisis_id", crisis.id)
-          .not("tier1_sent_at", "is", null);
-        const emailedSubIds = new Set((existing || []).map(e => e.subscription_id));
+          .is("tier1_sent_at", null)
+          .eq("cancelled", false);
 
-        const newSubs = eligible.filter(s => !emailedSubIds.has(s.id));
-        return newSubs.map(s => ({
-          subId: s.id,
-          customerId: s.customer_id,
-          contractId: s.shopify_contract_id,
-          items: s.items,
-        }));
+        if (!unemailed?.length) return [];
+
+        // Get their subscriptions to check billing date
+        const subIds = unemailed.map(a => a.subscription_id);
+        const subs: { id: string; customer_id: string; shopify_contract_id: string; items: unknown; next_billing_date: string | null }[] = [];
+        for (let i = 0; i < subIds.length; i += 500) {
+          const { data } = await admin.from("subscriptions")
+            .select("id, customer_id, shopify_contract_id, items, next_billing_date")
+            .in("id", subIds.slice(i, i + 500))
+            .in("status", ["active", "paused"])
+            .lte("next_billing_date", cutoffDate);
+          if (data) subs.push(...data);
+        }
+        const eligibleSubIds = new Set(subs.map(s => s.id));
+
+        // Return only records whose sub billing is within lead time
+        return unemailed
+          .filter(a => eligibleSubIds.has(a.subscription_id))
+          .map(a => {
+            const sub = subs.find(s => s.id === a.subscription_id)!;
+            return {
+              subId: sub.id,
+              customerId: sub.customer_id,
+              contractId: sub.shopify_contract_id,
+              items: sub.items,
+            };
+          });
       });
 
       // ── Step 2: Process new subs — auto-swap + send Tier 1 ──
