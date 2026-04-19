@@ -24,7 +24,7 @@ export async function POST(
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { return_id, order_id, shipment_id } = body;
+  const { return_id, order_id, shipment_id, deduct_label_cost = true } = body;
   if (!return_id || !order_id) {
     return NextResponse.json(
       { error: "return_id and order_id are required" },
@@ -49,7 +49,7 @@ export async function POST(
   // Look up order for shipping address
   const { data: order } = await admin
     .from("orders")
-    .select("id, fulfillments, line_items, total_price_cents")
+    .select("id, fulfillments, line_items, total_price_cents, shipping_address")
     .eq("id", order_id)
     .eq("workspace_id", workspaceId)
     .single();
@@ -66,25 +66,28 @@ export async function POST(
       label = await purchaseReturnLabel(workspaceId, shipment_id);
     } else {
       // No shipment_id — create new shipment + get rates + buy cheapest
+      // Resolve address: order.shipping_address first, then fulfillment fallback
+      const orderAddr = order.shipping_address as {
+        first_name?: string;
+        last_name?: string;
+        name?: string;
+        address1?: string;
+        address2?: string;
+        city?: string;
+        province_code?: string;
+        zip?: string;
+        country_code?: string;
+        phone?: string;
+      } | null;
+
       const fulfillments = (order.fulfillments || []) as {
-        shipping_address?: {
-          first_name?: string;
-          last_name?: string;
-          name?: string;
-          address1?: string;
-          address2?: string;
-          city?: string;
-          province_code?: string;
-          zip?: string;
-          country_code?: string;
-          phone?: string;
-        };
+        shipping_address?: typeof orderAddr;
       }[];
 
-      const shippingAddress = fulfillments[0]?.shipping_address;
+      const shippingAddress = orderAddr?.address1 ? orderAddr : fulfillments[0]?.shipping_address;
       if (!shippingAddress?.address1 || !shippingAddress?.city || !shippingAddress?.zip) {
         return NextResponse.json(
-          { error: "No shipping address found on order fulfillments" },
+          { error: "No shipping address found on order" },
           { status: 400 },
         );
       }
@@ -123,7 +126,9 @@ export async function POST(
     }
 
     const orderTotalCents = ret.order_total_cents || order.total_price_cents || 0;
-    const netRefundCents = Math.max(0, orderTotalCents - label.costCents);
+    const netRefundCents = deduct_label_cost
+      ? Math.max(0, orderTotalCents - label.costCents)
+      : orderTotalCents;
 
     // Update the returns record
     await admin

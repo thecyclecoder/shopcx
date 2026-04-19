@@ -74,12 +74,12 @@ export async function sendReturnLabelEmail({
               <td style="padding: 4px 0;">Order total</td>
               <td style="padding: 4px 0; text-align: right;">${formatCents(orderTotalCents)}</td>
             </tr>
-            <tr>
+            ${netRefundCents < orderTotalCents ? `<tr>
               <td style="padding: 4px 0;">Return shipping</td>
               <td style="padding: 4px 0; text-align: right; color: #dc2626;">-${formatCents(labelCostCents)}</td>
-            </tr>
+            </tr>` : ""}
             <tr style="border-top: 1px solid #d4d4d8;">
-              <td style="padding: 8px 0 0; font-weight: 600; color: #18181b;">Net ${resolutionLabel}</td>
+              <td style="padding: 8px 0 0; font-weight: 600; color: #18181b;">Your ${resolutionLabel}</td>
               <td style="padding: 8px 0 0; text-align: right; font-weight: 600; color: #18181b;">${formatCents(netRefundCents)}</td>
             </tr>
           </table>
