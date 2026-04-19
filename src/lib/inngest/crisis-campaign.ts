@@ -101,6 +101,7 @@ export const crisisDailyCampaign = inngest.createFunction(
         const eligibleSubIds = new Set(subs.map(s => s.id));
 
         // Return only records whose sub billing is within lead time
+        // Include crisis action data (original_item, segment) since sub items are already swapped
         return unemailed
           .filter(a => eligibleSubIds.has(a.subscription_id))
           .map(a => {
@@ -110,6 +111,8 @@ export const crisisDailyCampaign = inngest.createFunction(
               customerId: sub.customer_id,
               contractId: sub.shopify_contract_id,
               items: sub.items,
+              originalItem: a.original_item,
+              segment: a.segment,
             };
           });
       });
@@ -117,16 +120,9 @@ export const crisisDailyCampaign = inngest.createFunction(
       // ── Step 2: Process new subs — auto-swap + send Tier 1 ──
       for (const sub of newActions) {
         await step.run(`tier1-${sub.subId.slice(0, 8)}`, async () => {
-          const items = (sub.items as { title: string; quantity: number; sku?: string; variant_id?: string }[]) || [];
-          const realItems = items.filter(i => !i.title.toLowerCase().includes("shipping protection") && !i.title.toLowerCase().includes("insure"));
-          const affectedItem = realItems.find(i =>
-            (i.sku && i.sku.toUpperCase() === crisis.affected_sku?.toUpperCase()) ||
-            (i.variant_id && i.variant_id === crisis.affected_variant_id)
-          );
-          if (!affectedItem) return;
-
-          const nonAffectedItems = realItems.filter(i => i !== affectedItem);
-          const segment = nonAffectedItems.length === 0 ? "berry_only" : "berry_plus";
+          // Use segment + original_item from crisis_customer_actions (sub items are already swapped)
+          const segment = (sub as any).segment || "berry_only";
+          const affectedItem = (sub as any).originalItem;
 
           // Auto-swap REMOVED from cron — now triggered manually via "Start Auto-Swap" button
           // on the crisis detail page. This ensures swaps are monitored and errors are visible.
