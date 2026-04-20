@@ -17,6 +17,7 @@ interface Demographics {
   health_priorities: string[] | null;
   census_data_year: number | null;
   enriched_at: string | null;
+  timezone: string | null;
 }
 
 const INCOME_LABELS: Record<string, string> = {
@@ -146,8 +147,21 @@ export default function CustomerDemographicsCard({ customerId }: { customerId: s
         </div>
       )}
 
+      {demographics.timezone && (
+        <div className="mt-3 flex items-center gap-1.5">
+          <svg className="h-3.5 w-3.5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="text-[11px] text-zinc-500">
+            {new Date().toLocaleTimeString("en-US", { timeZone: demographics.timezone, hour: "numeric", minute: "2-digit", hour12: true })}
+            {" "}
+            <span className="text-zinc-400">{demographics.timezone.split("/").pop()?.replace(/_/g, " ")}</span>
+          </span>
+        </div>
+      )}
+
       {demographics.zip_code && (
-        <p className="mt-3 text-[10px] text-zinc-400">
+        <p className="mt-2 text-[10px] text-zinc-400">
           Zip {demographics.zip_code} · US Census ACS {demographics.census_data_year || 2022}
         </p>
       )}

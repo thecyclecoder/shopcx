@@ -151,7 +151,11 @@ export const researchIngredients = inngest.createFunction(
       await step.run(`research-${ing.id}`, async () => {
         const admin = createAdminClient();
         const system = `You are a nutritional science researcher. Respond with strict JSON only — no prose, no markdown fences.`;
-        const user = `Research the ingredient "${ing.name}" at a dosage of ${ing.dosage_display || "unspecified"}.
+        const hasDosage = !!(ing.dosage_display || ing.dosage_mg);
+        const dosageInstruction = hasDosage
+          ? `at a dosage of ${ing.dosage_display || ing.dosage_mg + "mg"}`
+          : "(dosage not specified — focus on the ingredient's general benefits, skip dosage comparison)";
+        const user = `Research the ingredient "${ing.name}" ${dosageInstruction}.
 
 Target customer profile: ${targetCustomer}
 
@@ -159,13 +163,14 @@ For this ingredient, provide each clinically studied benefit as a separate objec
 - benefit_headline (e.g. "Supports Joint Flexibility")
 - mechanism_explanation (2-3 sentences)
 - clinically_studied_benefits (array of related endpoints studied)
-- dosage_comparison (how the product dosage compares to studied ranges)
+- dosage_comparison (${hasDosage ? "how the product dosage compares to studied ranges" : "null — dosage not provided"})
 - citations (array of {title, authors, journal, year, doi, url})
 - contraindications (string, for ${targetCustomer})
 - ai_confidence (number 0-1):
   1.0 = multiple RCTs, 0.8 = single RCT, 0.7 = meta-analysis observational,
   0.5 = observational only, 0.3 = traditional use, 0.1 = theoretical
 
+${!hasDosage ? "Since no dosage is specified, set dosage_comparison to null and do not lower confidence scores due to missing dosage info." : ""}
 Be conservative with confidence scores. Return a JSON array of benefit objects (no wrapper object).`;
 
         const result = await callSonnet(system, user, 4096, 0);

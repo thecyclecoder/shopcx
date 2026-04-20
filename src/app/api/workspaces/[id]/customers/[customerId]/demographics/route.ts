@@ -21,5 +21,16 @@ export async function GET(
     .eq("customer_id", customerId)
     .maybeSingle();
 
-  return NextResponse.json({ demographics: data || null });
+  // Include timezone from customers table
+  let timezone: string | null = null;
+  if (data) {
+    const { data: cust } = await admin
+      .from("customers")
+      .select("timezone")
+      .eq("id", customerId)
+      .single();
+    timezone = cust?.timezone || null;
+  }
+
+  return NextResponse.json({ demographics: data ? { ...data, timezone } : null });
 }
