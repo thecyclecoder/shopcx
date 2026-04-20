@@ -80,15 +80,32 @@ export default function SubscriptionsList({
               )}
             </div>
             {sub.items?.length > 0 && (
-              <div className="mt-1 space-y-0.5">
-                {sub.items.slice(0, maxItems).map((item, idx) => (
-                  <p key={idx} className="truncate text-sm text-zinc-500 dark:text-zinc-400">
-                    {item.quantity}x {formatItemName(item)}
-                  </p>
-                ))}
+              <div className="mt-1.5 space-y-1.5">
+                {sub.items.slice(0, maxItems).map((item, idx) => {
+                  const baseCents = Math.round(item.price_cents / 0.75);
+                  return (
+                    <div key={idx}>
+                      <p className="text-sm text-zinc-600 dark:text-zinc-300">
+                        {item.quantity}x {formatItemName(item)}
+                      </p>
+                      <p className="text-[10px] tabular-nums text-zinc-400">
+                        Base {formatCents(baseCents)}/ea · Sub {formatCents(item.price_cents)}/ea · Total {formatCents(item.price_cents * item.quantity)}
+                      </p>
+                    </div>
+                  );
+                })}
                 {sub.items.length > maxItems && (
-                  <p className="text-sm text-zinc-400">+{sub.items.length - maxItems} more</p>
+                  <p className="text-[10px] text-zinc-400">+{sub.items.length - maxItems} more</p>
                 )}
+              </div>
+            )}
+            {sub.applied_discounts && sub.applied_discounts.length > 0 && (
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {sub.applied_discounts.map((d, i) => (
+                  <span key={i} className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400">
+                    {d.title} −{d.valueType === "PERCENTAGE" ? `${d.value}%` : formatCents(d.value * 100)}
+                  </span>
+                ))}
               </div>
             )}
             {sub.next_billing_date && (
@@ -138,22 +155,49 @@ export default function SubscriptionsList({
             )}
           </div>
           {sub.items?.length > 0 && (
-            <div className="mt-2 space-y-0.5">
-              {sub.items.map((item, idx) => (
-                <div key={idx} className="flex justify-between text-sm">
-                  <span className="text-zinc-600 dark:text-zinc-400">{item.quantity}x {formatItemName(item)}</span>
-                  {showPrices && (
-                    <span className="text-zinc-400">{formatCents(item.price_cents * item.quantity)}</span>
-                  )}
-                </div>
-              ))}
+            <div className="mt-2 space-y-1">
+              {sub.items.map((item, idx) => {
+                const baseCents = Math.round(item.price_cents / 0.75);
+                const isGrandfathered = baseCents < 7995; // below MSRP
+                const lineTotal = item.price_cents * item.quantity;
+                return (
+                  <div key={idx} className="text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-zinc-600 dark:text-zinc-400">{item.quantity}x {formatItemName(item)}</span>
+                      {showPrices && (
+                        <div className="flex items-center gap-1.5 text-right">
+                          {isGrandfathered && (
+                            <span className="text-[10px] text-zinc-400 line-through">{formatCents(Math.round(7995 * 0.75) * item.quantity)}</span>
+                          )}
+                          <span className="text-zinc-600 dark:text-zinc-300">{formatCents(lineTotal)}</span>
+                        </div>
+                      )}
+                    </div>
+                    {showPrices && (
+                      <div className="flex items-center gap-2 text-[10px] text-zinc-400">
+                        <span>Base: {formatCents(baseCents)}/unit</span>
+                        <span>·</span>
+                        <span>Sub price: {formatCents(item.price_cents)}/unit</span>
+                        {isGrandfathered && (
+                          <>
+                            <span>·</span>
+                            <span className="text-amber-600 dark:text-amber-400">Grandfathered</span>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
           {sub.applied_discounts && sub.applied_discounts.length > 0 && (
             <div className="mt-1.5 flex flex-wrap gap-1">
               {sub.applied_discounts.map((d, i) => (
-                <span key={i} className="inline-flex items-center rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400">
-                  {d.title} {d.value}{d.valueType === "PERCENTAGE" ? "%" : ""} off
+                <span key={i} className="inline-flex items-center gap-1 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400">
+                  <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z" /><path strokeLinecap="round" strokeLinejoin="round" d="M6 6h.008v.008H6V6z" /></svg>
+                  {d.title}
+                  <span className="text-emerald-600">−{d.valueType === "PERCENTAGE" ? `${d.value}%` : formatCents(d.value * 100)}</span>
                 </span>
               ))}
             </div>
