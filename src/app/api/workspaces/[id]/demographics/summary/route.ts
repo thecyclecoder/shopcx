@@ -101,9 +101,14 @@ export async function GET(
   let customerIdFilter: string[] | null = null;
   if (productId) {
     const { data: product } = await admin.from("products")
-      .select("shopify_product_id").eq("id", productId).single();
-    if (product?.shopify_product_id) {
-      // Find orders containing this product's variants
+      .select("variants").eq("id", productId).single();
+    if (product?.variants) {
+      // Get all variant IDs and SKUs for this product
+      const variants = product.variants as { id?: string; sku?: string }[];
+      const variantIds = new Set(variants.map(v => String(v.id)).filter(Boolean));
+      const skus = new Set(variants.map(v => v.sku).filter(Boolean) as string[]);
+
+      // Find orders containing any of these variants
       const allCustIds = new Set<string>();
       let offset = 0;
       while (true) {
@@ -113,8 +118,11 @@ export async function GET(
           .range(offset, offset + 999);
         if (!orders?.length) break;
         for (const o of orders) {
-          const items = (o.line_items || []) as { product_id?: string }[];
-          if (items.some(i => i.product_id === product.shopify_product_id || i.product_id === productId)) {
+          const items = (o.line_items || []) as { variant_id?: string; sku?: string }[];
+          if (items.some(i =>
+            (i.variant_id && variantIds.has(String(i.variant_id))) ||
+            (i.sku && skus.has(i.sku))
+          )) {
             allCustIds.add(o.customer_id);
           }
         }
