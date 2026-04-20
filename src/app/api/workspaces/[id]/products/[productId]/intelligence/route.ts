@@ -32,6 +32,12 @@ export async function PATCH(
   if (Array.isArray(body.certifications)) {
     update.certifications = body.certifications.filter((c: unknown) => typeof c === "string");
   }
+  if (Array.isArray(body.allergen_free)) {
+    update.allergen_free = body.allergen_free.filter((c: unknown) => typeof c === "string");
+  }
+  if (Array.isArray(body.awards)) {
+    update.awards = body.awards.filter((c: unknown) => typeof c === "string");
+  }
 
   if (Object.keys(update).length === 0) {
     return NextResponse.json({ error: "No fields to update" }, { status: 400 });

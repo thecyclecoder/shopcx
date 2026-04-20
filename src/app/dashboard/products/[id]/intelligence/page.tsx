@@ -362,6 +362,36 @@ export default function ProductIntelligenceEnginePage() {
 // Overview: Target Customer & Certifications
 // =============================================================================
 
+function TagListEditor({ items, onChange, placeholder }: { items: string[]; onChange: (v: string[]) => void; placeholder: string }) {
+  const [input, setInput] = useState("");
+  return (
+    <>
+      <div className="mb-2 flex flex-wrap gap-1.5">
+        {items.map((c, i) => (
+          <span key={i} className="inline-flex items-center gap-1 rounded bg-zinc-100 px-2 py-0.5 text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+            {c}
+            <button onClick={() => onChange(items.filter((_, j) => j !== i))} className="text-zinc-400 hover:text-red-500" type="button">×</button>
+          </span>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && input.trim()) { onChange([...items, input.trim()]); setInput(""); } }}
+          placeholder={placeholder}
+          className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+        />
+        <button
+          onClick={() => { if (input.trim()) { onChange([...items, input.trim()]); setInput(""); } }}
+          className="rounded-md bg-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-800 dark:text-zinc-300"
+          type="button"
+        >Add</button>
+      </div>
+    </>
+  );
+}
+
 function OverviewStage({
   workspaceId,
   productId,
@@ -381,7 +411,8 @@ function OverviewStage({
 }) {
   const [targetCustomer, setTargetCustomer] = useState(overview.product.target_customer || "");
   const [certifications, setCertifications] = useState<string[]>(overview.product.certifications || []);
-  const [certInput, setCertInput] = useState("");
+  const [allergenFree, setAllergenFree] = useState<string[]>((overview.product as Record<string, unknown>).allergen_free as string[] || []);
+  const [awards, setAwards] = useState<string[]>((overview.product as Record<string, unknown>).awards as string[] || []);
   const [suggestedTarget, setSuggestedTarget] = useState<string | null>(null);
 
   useEffect(() => {
@@ -400,7 +431,7 @@ function OverviewStage({
       const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/intelligence`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target_customer: targetCustomer, certifications }),
+        body: JSON.stringify({ target_customer: targetCustomer, certifications, allergen_free: allergenFree, awards }),
       });
       if (!res.ok) throw new Error("Failed to save");
       onChange();
@@ -412,87 +443,52 @@ function OverviewStage({
 
   return (
     <div className="space-y-6">
+      {/* Target Customer */}
       <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
         <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Target Customer</h2>
-
         {suggestedTarget && !targetCustomer && (
           <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 p-3 dark:border-indigo-800 dark:bg-indigo-950">
             <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-indigo-500">Auto-suggested from your customer data</p>
             <p className="text-sm text-indigo-700 dark:text-indigo-300">{suggestedTarget}</p>
-            <button
-              onClick={() => setTargetCustomer(suggestedTarget)}
-              className="mt-2 rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500"
-            >
-              Use this
-            </button>
+            <button onClick={() => setTargetCustomer(suggestedTarget)} className="mt-2 rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500">Use this</button>
           </div>
         )}
-
-        <label className="mb-4 block">
-          <span className="mb-1 block text-xs font-medium text-zinc-500">Target customer profile</span>
-          <input
-            value={targetCustomer}
-            onChange={(e) => setTargetCustomer(e.target.value)}
-            placeholder="e.g. Women 45-65 seeking joint mobility"
-            className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-          />
-        </label>
-
-        <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Certifications</h2>
-        <div className="mb-2 flex flex-wrap gap-1.5">
-          {certifications.map((c, i) => (
-            <span
-              key={i}
-              className="inline-flex items-center gap-1 rounded bg-zinc-100 px-2 py-0.5 text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-            >
-              {c}
-              <button
-                onClick={() => setCertifications(certifications.filter((_, j) => j !== i))}
-                className="text-zinc-400 hover:text-red-500"
-                type="button"
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-        <div className="flex gap-2">
-          <input
-            value={certInput}
-            onChange={(e) => setCertInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && certInput.trim()) {
-                setCertifications([...certifications, certInput.trim()]);
-                setCertInput("");
-              }
-            }}
-            placeholder="e.g. USDA Organic, NSF Certified (Enter to add)"
-            className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-          />
-          <button
-            onClick={() => {
-              if (certInput.trim()) {
-                setCertifications([...certifications, certInput.trim()]);
-                setCertInput("");
-              }
-            }}
-            className="rounded-md bg-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-800 dark:text-zinc-300"
-            type="button"
-          >
-            Add
-          </button>
-        </div>
-
-        <div className="mt-4">
-          <button
-            onClick={saveMeta}
-            disabled={saving}
-            className="rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
-          >
-            {saving ? "Saving..." : "Save"}
-          </button>
-        </div>
+        <input
+          value={targetCustomer}
+          onChange={(e) => setTargetCustomer(e.target.value)}
+          placeholder="e.g. Women 45-65 seeking joint mobility"
+          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+        />
       </div>
+
+      {/* Certifications */}
+      <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Certifications</h2>
+        <p className="mb-3 text-xs text-zinc-500">Trust badges — Non-GMO, 3rd Party Tested, USDA Organic, etc.</p>
+        <TagListEditor items={certifications} onChange={setCertifications} placeholder="e.g. Non-GMO, 3rd Party Tested (Enter to add)" />
+      </div>
+
+      {/* Allergen-Free */}
+      <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Allergen-Free Claims</h2>
+        <p className="mb-3 text-xs text-zinc-500">What's NOT in the product — removes purchase objections.</p>
+        <TagListEditor items={allergenFree} onChange={setAllergenFree} placeholder="e.g. Gluten Free, Dairy Free, Soy Free (Enter to add)" />
+      </div>
+
+      {/* Awards & Press */}
+      <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Awards & Press</h2>
+        <p className="mb-3 text-xs text-zinc-500">Social proof for the hero section — awards, press mentions, rankings.</p>
+        <TagListEditor items={awards} onChange={setAwards} placeholder='e.g. Best Tasting Superfood Coffee — Gourmet Magazine 2025 (Enter to add)' />
+      </div>
+
+      <button
+        onClick={saveMeta}
+        disabled={saving}
+        className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+      >
+        {saving ? "Saving..." : "Save All"}
+      </button>
     </div>
   );
 }
@@ -518,7 +514,7 @@ function IngredientsStage({
   setSaving: (v: boolean) => void;
   setError: (v: string | null) => void;
 }) {
-  const [newIng, setNewIng] = useState({ name: "", dosage_mg: "", dosage_display: "" });
+  const [newIng, setNewIng] = useState({ name: "", dosage: "" });
   const [busy, setBusy] = useState(false);
 
   const addIngredient = async () => {
@@ -529,11 +525,10 @@ function IngredientsStage({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: newIng.name.trim(),
-        dosage_mg: newIng.dosage_mg ? Number(newIng.dosage_mg) : null,
-        dosage_display: newIng.dosage_display.trim() || null,
+        dosage_display: newIng.dosage.trim() || null,
       }),
     });
-    setNewIng({ name: "", dosage_mg: "", dosage_display: "" });
+    setNewIng({ name: "", dosage: "" });
     setBusy(false);
     onChange();
   };
@@ -584,8 +579,7 @@ function IngredientsStage({
             <thead>
               <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
                 <th className="py-2">Name</th>
-                <th className="py-2">Dosage (mg)</th>
-                <th className="py-2">Display</th>
+                <th className="py-2">Dosage</th>
                 <th className="py-2 text-right">Actions</th>
               </tr>
             </thead>
@@ -610,17 +604,10 @@ function IngredientsStage({
             className="flex-1 min-w-[180px] rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
           />
           <input
-            value={newIng.dosage_mg}
-            onChange={(e) => setNewIng({ ...newIng, dosage_mg: e.target.value })}
-            placeholder="Dosage (mg)"
-            type="number"
-            className="w-32 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-          />
-          <input
-            value={newIng.dosage_display}
-            onChange={(e) => setNewIng({ ...newIng, dosage_display: e.target.value })}
-            placeholder="Display (e.g. 500mg)"
-            className="w-40 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+            value={newIng.dosage}
+            onChange={(e) => setNewIng({ ...newIng, dosage: e.target.value })}
+            placeholder="Dosage (optional, e.g. 500mg, 10 billion CFU)"
+            className="w-64 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
           />
           <button
             onClick={addIngredient}
@@ -659,15 +646,10 @@ function IngredientRow({
 }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(ingredient.name);
-  const [dosageMg, setDosageMg] = useState(ingredient.dosage_mg?.toString() || "");
-  const [dosageDisplay, setDosageDisplay] = useState(ingredient.dosage_display || "");
+  const [dosage, setDosage] = useState(ingredient.dosage_display || "");
 
   const save = async () => {
-    await onUpdate({
-      name,
-      dosage_mg: dosageMg ? (Number(dosageMg) as number) : null,
-      dosage_display: dosageDisplay || null,
-    });
+    await onUpdate({ name, dosage_display: dosage || null });
     setEditing(false);
   };
 
@@ -678,10 +660,7 @@ function IngredientRow({
           <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800" />
         </td>
         <td className="py-2 pr-2">
-          <input value={dosageMg} onChange={(e) => setDosageMg(e.target.value)} type="number" className="w-24 rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800" />
-        </td>
-        <td className="py-2 pr-2">
-          <input value={dosageDisplay} onChange={(e) => setDosageDisplay(e.target.value)} className="w-32 rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800" />
+          <input value={dosage} onChange={(e) => setDosage(e.target.value)} placeholder="e.g. 500mg" className="w-40 rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800" />
         </td>
         <td className="py-2 text-right">
           <button onClick={save} className="mr-2 text-xs font-medium text-indigo-500 hover:text-indigo-700">Save</button>
@@ -694,8 +673,7 @@ function IngredientRow({
   return (
     <tr className="border-b border-zinc-100 dark:border-zinc-800/50">
       <td className="py-2 text-zinc-900 dark:text-zinc-100">{ingredient.name}</td>
-      <td className="py-2 text-zinc-600 dark:text-zinc-400">{ingredient.dosage_mg ?? "—"}</td>
-      <td className="py-2 text-zinc-600 dark:text-zinc-400">{ingredient.dosage_display ?? "—"}</td>
+      <td className="py-2 text-zinc-600 dark:text-zinc-400">{ingredient.dosage_display || "—"}</td>
       <td className="py-2 text-right">
         <button onClick={() => setEditing(true)} className="mr-2 text-xs text-zinc-500 hover:text-zinc-700">Edit</button>
         <button onClick={onDelete} className="text-xs text-red-400 hover:text-red-600">Delete</button>

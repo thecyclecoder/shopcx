@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useParams } from "next/navigation";
 import Link from "next/link";
@@ -227,6 +227,10 @@ export default function StorefrontProductDetailPage() {
           )}
         </Card>
 
+        <Card title="Image Management" className="lg:col-span-3">
+          <ImageManagement workspaceId={workspace.id} productId={product.id} />
+        </Card>
+
         <Card title="Raw variant JSON" className="lg:col-span-3">
           <pre className="max-h-80 overflow-auto rounded bg-zinc-900 p-3 text-[11px] text-zinc-200">
             {JSON.stringify(variants, null, 2)}
@@ -267,5 +271,154 @@ function StatusPill({ status }: { status: Product["status"] }) {
     <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider ${colors[status]}`}>
       {status}
     </span>
+  );
+}
+
+// =============================================================================
+// Image Management
+// =============================================================================
+
+interface MediaItem {
+  slot: string;
+  url: string | null;
+  alt_text: string;
+}
+
+function ImageManagement({ workspaceId, productId }: { workspaceId: string; productId: string }) {
+  const [media, setMedia] = useState<MediaItem[]>([]);
+  const [loaded, setLoaded] = useState(false);
+
+  const load = useCallback(async () => {
+    const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/intelligence-overview`);
+    if (res.ok) {
+      const data = await res.json();
+      setMedia(data.media || []);
+    }
+    setLoaded(true);
+  }, [workspaceId, productId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const slots = useMemo(() => {
+    const base = ["hero", "lifestyle_1", "lifestyle_2", "packaging", "ugc_1", "ugc_2", "ugc_3", "ugc_4", "ugc_5", "ugc_6", "comparison"];
+    return base;
+  }, []);
+
+  const mediaBySlot = useMemo(() => {
+    const map = new Map<string, MediaItem>();
+    for (const m of media) map.set(m.slot, m);
+    return map;
+  }, [media]);
+
+  if (!loaded) return <p className="text-xs text-zinc-400">Loading...</p>;
+
+  return (
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {slots.map((slot) => (
+        <MediaSlot
+          key={slot}
+          slot={slot}
+          media={mediaBySlot.get(slot)}
+          workspaceId={workspaceId}
+          productId={productId}
+          onChange={load}
+        />
+      ))}
+    </div>
+  );
+}
+
+function MediaSlot({
+  slot,
+  media,
+  workspaceId,
+  productId,
+  onChange,
+}: {
+  slot: string;
+  media: MediaItem | undefined;
+  workspaceId: string;
+  productId: string;
+  onChange: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [altText, setAltText] = useState(media?.alt_text || "");
+
+  const upload = async (file: File) => {
+    setBusy(true);
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("alt_text", altText);
+    await fetch(`/api/workspaces/${workspaceId}/products/${productId}/media/${slot}`, {
+      method: "POST",
+      body: fd,
+    });
+    setBusy(false);
+    onChange();
+  };
+
+  const saveAlt = async () => {
+    await fetch(`/api/workspaces/${workspaceId}/products/${productId}/media/${slot}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ alt_text: altText }),
+    });
+  };
+
+  const removeImage = async () => {
+    if (!confirm("Remove this image?")) return;
+    setBusy(true);
+    await fetch(`/api/workspaces/${workspaceId}/products/${productId}/media/${slot}`, { method: "DELETE" });
+    setBusy(false);
+    onChange();
+  };
+
+  return (
+    <div className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+      <div className="mb-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+        {slot.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
+      </div>
+      <div
+        onClick={() => inputRef.current?.click()}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          e.preventDefault();
+          const f = e.dataTransfer.files[0];
+          if (f) upload(f);
+        }}
+        className="flex h-32 cursor-pointer items-center justify-center rounded border border-dashed border-zinc-300 bg-zinc-50 text-xs text-zinc-500 hover:border-indigo-400 dark:border-zinc-700 dark:bg-zinc-800"
+      >
+        {media?.url ? (
+          <img src={media.url} alt={media.alt_text || slot} className="h-full w-full rounded object-cover" />
+        ) : busy ? (
+          <span>Uploading...</span>
+        ) : (
+          <span>Click or drop to upload</span>
+        )}
+      </div>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) upload(f);
+        }}
+      />
+      <input
+        value={altText}
+        onChange={(e) => setAltText(e.target.value)}
+        onBlur={saveAlt}
+        placeholder="Alt text"
+        className="mt-2 w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+      />
+      {media?.url && (
+        <button onClick={removeImage} className="mt-2 text-[10px] text-red-400 hover:text-red-600">
+          Remove image
+        </button>
+      )}
+    </div>
   );
 }
