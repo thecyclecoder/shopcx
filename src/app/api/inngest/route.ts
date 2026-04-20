@@ -45,6 +45,11 @@ import { deliveryNightlyAudit } from "@/lib/inngest/delivery-audit";
 import { deliverPendingSends } from "@/lib/inngest/deliver-pending-send";
 import { crisisDailyCampaign, crisisAdvanceTier } from "@/lib/inngest/crisis-campaign";
 import { syncInventory } from "@/lib/inngest/sync-inventory";
+import {
+  researchIngredients,
+  analyzeReviews,
+  generateContent,
+} from "@/lib/inngest/product-intelligence";
 
 export const maxDuration = 300;
 
@@ -93,5 +98,8 @@ export const { GET, POST, PUT } = serve({
     crisisDailyCampaign,
     crisisAdvanceTier,
     syncInventory,
+    researchIngredients,
+    analyzeReviews,
+    generateContent,
   ],
 });
