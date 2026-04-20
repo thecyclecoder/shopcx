@@ -22,7 +22,7 @@ export default async function OpengraphImage({
   const headline =
     data?.page_content?.hero_headline || data?.product.title || "Shop";
   const subhead = data?.page_content?.hero_subheadline || "";
-  const image = data?.product.image_url || data?.media_by_slot["hero"]?.url || null;
+  const image = data?.media_by_slot["hero"]?.url || null;
 
   return new ImageResponse(
     (

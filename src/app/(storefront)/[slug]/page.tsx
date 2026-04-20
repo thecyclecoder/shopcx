@@ -60,13 +60,13 @@ export async function generateMetadata({
       type: "website",
       title,
       description,
-      images: data.product.image_url ? [{ url: data.product.image_url }] : undefined,
+      images: data.media_by_slot["hero"]?.url ? [{ url: data.media_by_slot["hero"].url }] : undefined,
     },
     twitter: {
       card: "summary_large_image",
       title,
       description,
-      images: data.product.image_url ? [data.product.image_url] : undefined,
+      images: data.media_by_slot["hero"]?.url ? [data.media_by_slot["hero"].url] : undefined,
     },
   };
 }

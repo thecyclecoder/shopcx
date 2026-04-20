@@ -15,8 +15,8 @@ import { ImageOrPlaceholder } from "../_components/ImageOrPlaceholder";
  * zero JS to jump to the price table.
  */
 export function HeroSection({ data }: { data: PageData }) {
-  const heroImage =
-    data.media_by_slot["hero"]?.url || data.product.image_url || null;
+  // Only use self-hosted media — never fall back to Shopify CDN
+  const heroImage = data.media_by_slot["hero"]?.url || null;
   const heroAlt =
     data.media_by_slot["hero"]?.alt_text || data.product.title;
 

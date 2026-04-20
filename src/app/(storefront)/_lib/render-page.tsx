@@ -69,7 +69,7 @@ function ProductSchema({
     "@context": "https://schema.org",
     "@type": "Product",
     name: data.product.title,
-    image: data.product.image_url ? [data.product.image_url] : undefined,
+    image: data.media_by_slot["hero"]?.url ? [data.media_by_slot["hero"].url] : undefined,
     description: data.page_content?.hero_subheadline || data.product.description,
     url: canonicalPath,
   };
