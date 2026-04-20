@@ -664,3 +664,139 @@ Return the JSON object only.`;
     return { generated: true };
   },
 );
+
+// =============================================================================
+// Benefit Gap Research — targeted search for studies backing a customer benefit
+// =============================================================================
+
+export const researchBenefitGap = inngest.createFunction(
+  {
+    id: "intelligence-research-benefit-gap",
+    retries: 2,
+    concurrency: [{ limit: 3, key: "event.data.workspace_id" }],
+    triggers: [{ event: "intelligence/research-benefit-gap" }],
+  },
+  async ({ event, step }) => {
+    const { workspace_id, product_id, theme_name, customer_benefit_names } = event.data as {
+      workspace_id: string;
+      product_id: string;
+      theme_name: string;
+      customer_benefit_names: string[];
+    };
+
+    const context = await step.run("fetch-context", async () => {
+      const admin = createAdminClient();
+      const { data: ingredients } = await admin
+        .from("product_ingredients")
+        .select("id, name, dosage_display")
+        .eq("workspace_id", workspace_id)
+        .eq("product_id", product_id)
+        .order("display_order");
+
+      const { data: product } = await admin
+        .from("products")
+        .select("title, target_customer")
+        .eq("id", product_id)
+        .single();
+
+      return { ingredients: ingredients || [], product };
+    });
+
+    if (!context.ingredients.length) return { found: 0 };
+
+    const results = await step.run("research-gap", async () => {
+      const admin = createAdminClient();
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) return [];
+
+      const ingredientList = context.ingredients
+        .map(i => `- ${i.name}${i.dosage_display ? ` (${i.dosage_display})` : ""}`)
+        .join("\n");
+
+      const benefitTerms = customer_benefit_names.join(", ");
+
+      const prompt = `Customers of "${context.product?.title || "this product"}" frequently report benefits related to: ${benefitTerms}
+
+The product contains these ingredients:
+${ingredientList}
+
+Search for peer-reviewed studies linking ANY of these ingredients to the reported benefits. Think broadly — for example:
+- "appetite suppression" could be supported by caffeine + metabolism studies, green tea + thermogenesis, matcha + satiety hormones
+- "weight loss" could be supported by any ingredient with metabolic, thermogenic, or appetite-related research
+- Related terms are the SAME category: appetite control, weight management, metabolism boost, fat oxidation, thermogenesis, satiety
+
+For each ingredient where you find relevant research, return a benefit object. You may return multiple results if multiple ingredients have evidence.
+
+Return JSON array:
+[{
+  "ingredient_name": "exact ingredient name from the list above",
+  "benefit_headline": "Clear benefit headline related to ${theme_name}",
+  "mechanism_explanation": "2-3 sentences on how this ingredient supports ${theme_name}",
+  "clinically_studied_benefits": ["specific endpoints studied"],
+  "dosage_comparison": "how the product dose compares to studied ranges, or null if dose unknown",
+  "citations": [{"title": "string", "authors": "string", "journal": "string", "year": number, "doi": "string"}],
+  "contraindications": "for ${context.product?.target_customer || "general population"}, or null",
+  "ai_confidence": number (0-1, same scale: 1.0=multiple RCTs, 0.8=single RCT, etc.)
+}]
+
+If no relevant studies exist for any ingredient, return an empty array []. Be honest — don't stretch.`;
+
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: SONNET,
+          max_tokens: 4096,
+          temperature: 0,
+          system: "You are a nutritional science researcher. Return strict JSON only — no prose, no markdown fences.",
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+
+      if (!res.ok) return [];
+      const data = await res.json();
+      const text = (data.content || []).find((c: AnthropicContentBlock) => c.type === "text")?.text || "[]";
+      const cleaned = text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      const parsed = JSON.parse(cleaned);
+      type GapBenefit = IngredientBenefit & { ingredient_name?: string };
+      const benefits: GapBenefit[] = Array.isArray(parsed) ? parsed : parsed.benefits || [];
+
+      // Save each result to product_ingredient_research
+      const ingredientNameMap = new Map(context.ingredients.map(i => [i.name.toLowerCase(), i.id]));
+
+      let saved = 0;
+      for (const b of benefits) {
+        if (!b.benefit_headline || !b.ingredient_name) continue;
+        const ingredientId = ingredientNameMap.get(b.ingredient_name.toLowerCase());
+        if (!ingredientId) continue;
+
+        await admin.from("product_ingredient_research").upsert(
+          {
+            workspace_id,
+            product_id,
+            ingredient_id: ingredientId,
+            benefit_headline: b.benefit_headline.trim(),
+            mechanism_explanation: b.mechanism_explanation || "",
+            clinically_studied_benefits: Array.isArray(b.clinically_studied_benefits) ? b.clinically_studied_benefits : [],
+            dosage_comparison: b.dosage_comparison || null,
+            citations: b.citations || [],
+            contraindications: b.contraindications || null,
+            ai_confidence: typeof b.ai_confidence === "number" ? b.ai_confidence : 0.5,
+            raw_ai_response: null,
+            researched_at: new Date().toISOString(),
+          },
+          { onConflict: "ingredient_id,benefit_headline" },
+        );
+        saved++;
+      }
+
+      return benefits.map(b => ({ ingredient: b.ingredient_name || "?", headline: b.benefit_headline, confidence: b.ai_confidence }));
+    });
+
+    return { theme: theme_name, found: results.length, results };
+  },
+);

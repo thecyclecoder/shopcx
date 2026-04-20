@@ -954,6 +954,19 @@ function ReviewSection({ title, children }: { title: string; children: React.Rea
 // Stage 4: Benefit Reconciliation
 // =============================================================================
 
+interface ReconcileTheme {
+  theme_name: string;
+  science_confirmed: boolean;
+  customer_confirmed: boolean;
+  max_confidence: number | null;
+  research_ids: string[];
+  ingredient_names: string[];
+  customer_benefit_names: string[];
+  customer_phrases: string[];
+  recommendation: "lead" | "supporting" | "skip";
+  reason: string;
+}
+
 function BenefitsStage({
   workspaceId,
   productId,
@@ -966,54 +979,77 @@ function BenefitsStage({
   onChange: () => void;
   setError: (v: string | null) => void;
 }) {
-  const [rows, setRows] = useState<BenefitSelection[]>([]);
-  const [suggestions, setSuggestions] = useState<BenefitSuggestion[]>([]);
+  const [themes, setThemes] = useState<ReconcileTheme[]>([]);
+  const [roles, setRoles] = useState<Record<string, "lead" | "supporting" | "skip">>({});
+  const [reconciling, setReconciling] = useState(false);
+  const [reconciled, setReconciled] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+  const [gapSearching, setGapSearching] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/benefit-selections`);
-    if (res.ok) {
-      const d = await res.json();
-      const existing: BenefitSelection[] = (d.benefits as BenefitSelection[]).map((b, i) => ({
-        ...b,
-        display_order: typeof b.display_order === "number" ? b.display_order : i,
-      }));
-
-      // Merge suggestions into rows if not already selected
-      const existingNames = new Set(existing.map((b) => b.benefit_name.toLowerCase()));
-      const sugg = (d.suggestions as BenefitSuggestion[]) || [];
-      const fromSugg: BenefitSelection[] = sugg
-        .filter((s) => !existingNames.has(s.benefit_name.toLowerCase()))
-        .map((s, i) => ({
-          benefit_name: s.benefit_name,
-          role: s.recommendation,
-          display_order: existing.length + i,
-          science_confirmed: s.science_confirmed,
-          customer_confirmed: s.customer_confirmed,
-          customer_phrases: [],
-          ingredient_research_ids: [],
-          ai_confidence: null,
-          notes: s.reason,
-        }));
-
-      setRows([...existing, ...fromSugg]);
-      setSuggestions(sugg);
-      setLoaded(true);
+  const reconcile = async () => {
+    setReconciling(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/reconcile-benefits`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        const t = (data.themes || []) as ReconcileTheme[];
+        setThemes(t);
+        const initialRoles: Record<string, "lead" | "supporting" | "skip"> = {};
+        t.forEach(th => { initialRoles[th.theme_name] = th.recommendation; });
+        setRoles(initialRoles);
+        setReconciled(true);
+      } else {
+        setError("Reconciliation failed");
+      }
+    } catch (err) {
+      setError(String(err));
     }
-  }, [workspaceId, productId]);
+    setReconciling(false);
+  };
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  const findStudies = async (theme: ReconcileTheme) => {
+    setGapSearching(theme.theme_name);
+    setError(null);
+    try {
+      await fetch(`/api/workspaces/${workspaceId}/products/${productId}/research-gap`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          theme_name: theme.theme_name,
+          customer_benefit_names: theme.customer_benefit_names,
+        }),
+      });
+      // Re-reconcile after gap research completes (give Inngest a moment)
+      setTimeout(() => {
+        reconcile();
+        setGapSearching(null);
+      }, 15000);
+    } catch (err) {
+      setError(String(err));
+      setGapSearching(null);
+    }
+  };
 
   const save = async () => {
     setBusy(true);
     setError(null);
+    const benefits = themes.map((t, i) => ({
+      benefit_name: t.theme_name,
+      role: roles[t.theme_name] || t.recommendation,
+      display_order: i,
+      science_confirmed: t.science_confirmed,
+      customer_confirmed: t.customer_confirmed,
+      customer_phrases: t.customer_phrases || [],
+      ingredient_research_ids: t.research_ids || [],
+      ai_confidence: t.max_confidence,
+      notes: `${t.ingredient_names.length ? "Ingredients: " + t.ingredient_names.join(", ") : ""}${t.customer_benefit_names.length ? " | Customer: " + t.customer_benefit_names.join(", ") : ""}`,
+    }));
+
     const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/benefit-selections`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ benefits: rows }),
+      body: JSON.stringify({ benefits }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -1024,111 +1060,143 @@ function BenefitsStage({
     setBusy(false);
   };
 
-  const setRole = (i: number, role: "lead" | "supporting" | "skip") => {
-    const next = [...rows];
-    next[i] = { ...next[i], role };
-    setRows(next);
-  };
-
   const moveUp = (i: number) => {
     if (i === 0) return;
-    const next = [...rows];
+    const next = [...themes];
     [next[i - 1], next[i]] = [next[i], next[i - 1]];
-    next.forEach((r, idx) => (r.display_order = idx));
-    setRows(next);
+    setThemes(next);
   };
-
-  if (!loaded) {
-    return <p className="text-sm text-zinc-500">Loading benefit selections...</p>;
-  }
 
   return (
     <div className="space-y-4">
-      <p className="text-sm text-zinc-500">
-        Editorial decision: which benefits lead the page, which support, and which to skip. AI suggestions are pre-populated.
-      </p>
+      {!reconciled ? (
+        <div className="rounded-lg border border-zinc-200 bg-white p-6 text-center dark:border-zinc-800 dark:bg-zinc-900">
+          <p className="mb-4 text-sm text-zinc-600 dark:text-zinc-400">
+            AI will analyze your ingredient studies and customer reviews,
+            then group them into unified benefit themes — matching science to customer voice.
+          </p>
+          <button
+            onClick={reconcile}
+            disabled={reconciling}
+            className="rounded-md bg-indigo-500 px-5 py-2.5 text-sm font-medium text-white hover:bg-indigo-600 disabled:opacity-50"
+          >
+            {reconciling ? "Analyzing..." : "Reconcile Science + Customer Benefits"}
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-zinc-500">
+              {themes.length} benefit themes identified. Green = both science + customer. Yellow = science only. Blue = customer only.
+              {themes.some(t => !t.science_confirmed && t.customer_confirmed) && (
+                <span className="ml-1 font-medium text-blue-600 dark:text-blue-400">Blue rows have a "Find Studies" button to search for backing research.</span>
+              )}
+            </p>
+            <button
+              onClick={reconcile}
+              disabled={reconciling}
+              className="rounded bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400"
+            >
+              {reconciling ? "..." : "Re-reconcile"}
+            </button>
+          </div>
 
-      <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
-              <th className="px-4 py-2">Benefit</th>
-              <th className="px-4 py-2">Science</th>
-              <th className="px-4 py-2">Customers</th>
-              <th className="px-4 py-2">Role</th>
-              <th className="px-4 py-2 text-right">Reorder</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((b, i) => {
-              const bg =
-                b.science_confirmed && b.customer_confirmed
-                  ? "bg-green-50/50 dark:bg-green-950/20"
-                  : b.science_confirmed
-                    ? "bg-amber-50/50 dark:bg-amber-950/20"
-                    : b.customer_confirmed
-                      ? "bg-blue-50/50 dark:bg-blue-950/20"
-                      : "";
-              const lowConfidenceLead = b.role === "lead" && typeof b.ai_confidence === "number" && b.ai_confidence < 0.5;
-              return (
-                <tr key={`${b.benefit_name}-${i}`} className={`border-b border-zinc-100 dark:border-zinc-800/50 ${bg}`}>
-                  <td className="px-4 py-3">
-                    <div className="text-sm text-zinc-900 dark:text-zinc-100">{b.benefit_name}</div>
-                    {b.notes && <div className="mt-0.5 text-[10px] text-zinc-500">{b.notes}</div>}
-                  </td>
-                  <td className="px-4 py-3 text-xs">
-                    {b.science_confirmed ? (
-                      <div className="flex items-center gap-1.5">
-                        <span className="h-2 w-2 rounded-full bg-green-500" />
-                        {typeof b.ai_confidence === "number" && (
-                          <span className="text-zinc-600 dark:text-zinc-400">{Math.round(b.ai_confidence * 100)}%</span>
-                        )}
-                      </div>
-                    ) : (
-                      <span className="text-zinc-400">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-xs">
-                    {b.customer_confirmed ? (
-                      <div className="flex items-center gap-1.5">
-                        <span className="h-2 w-2 rounded-full bg-blue-500" />
-                        {b.customer_phrases && b.customer_phrases[0] && (
-                          <span className="max-w-xs truncate text-zinc-500 italic">&ldquo;{b.customer_phrases[0]}&rdquo;</span>
-                        )}
-                      </div>
-                    ) : (
-                      <span className="text-zinc-400">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    <select
-                      value={b.role}
-                      onChange={(e) => setRole(i, e.target.value as "lead" | "supporting" | "skip")}
-                      className="rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                    >
-                      <option value="lead">Lead</option>
-                      <option value="supporting">Supporting</option>
-                      <option value="skip">Skip</option>
-                    </select>
-                    {lowConfidenceLead && (
-                      <div className="mt-1 text-[10px] text-red-500">
-                        Warning: confidence {Math.round((b.ai_confidence || 0) * 100)}% is below the 50% lead floor.
-                      </div>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={() => moveUp(i)}
-                      disabled={i === 0}
-                      className="text-xs text-zinc-500 hover:text-zinc-700 disabled:opacity-30"
-                    >
-                      ↑ Up
-                    </button>
-                  </td>
+          <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
+                  <th className="px-4 py-2">Benefit Theme</th>
+                  <th className="px-4 py-2">Science</th>
+                  <th className="px-4 py-2">Customers</th>
+                  <th className="px-4 py-2">Role</th>
+                  <th className="px-4 py-2 text-right">Actions</th>
                 </tr>
-              );
-            })}
-            {rows.length === 0 && (
+              </thead>
+              <tbody>
+                {themes.map((t, i) => {
+                  const bg =
+                    t.science_confirmed && t.customer_confirmed
+                      ? "bg-green-50/50 dark:bg-green-950/20"
+                      : t.science_confirmed
+                        ? "bg-amber-50/50 dark:bg-amber-950/20"
+                        : t.customer_confirmed
+                          ? "bg-blue-50/50 dark:bg-blue-950/20"
+                          : "";
+                  const role = roles[t.theme_name] || t.recommendation;
+                  const lowConfidence = role === "lead" && typeof t.max_confidence === "number" && t.max_confidence < 0.5;
+                  return (
+                    <tr key={t.theme_name} className={`border-b border-zinc-100 dark:border-zinc-800/50 ${bg}`}>
+                      <td className="px-4 py-3">
+                        <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{t.theme_name}</div>
+                        <div className="mt-0.5 text-[10px] text-zinc-500">{t.reason}</div>
+                        {t.ingredient_names.length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {t.ingredient_names.map(n => (
+                              <span key={n} className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">{n}</span>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-xs">
+                        {t.science_confirmed ? (
+                          <div className="flex items-center gap-1.5">
+                            <span className="h-2 w-2 rounded-full bg-green-500" />
+                            {typeof t.max_confidence === "number" && (
+                              <span className="text-zinc-600 dark:text-zinc-400">{Math.round(t.max_confidence * 100)}%</span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-zinc-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-xs">
+                        {t.customer_confirmed ? (
+                          <div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="h-2 w-2 rounded-full bg-blue-500" />
+                              <span className="text-zinc-600 dark:text-zinc-400">{t.customer_benefit_names.join(", ")}</span>
+                            </div>
+                            {t.customer_phrases?.[0] && (
+                              <div className="mt-1 max-w-xs truncate text-zinc-500 italic">&ldquo;{t.customer_phrases[0]}&rdquo;</div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-zinc-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <select
+                          value={role}
+                          onChange={(e) => setRoles({ ...roles, [t.theme_name]: e.target.value as "lead" | "supporting" | "skip" })}
+                          className="rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                        >
+                          <option value="lead">Lead</option>
+                          <option value="supporting">Supporting</option>
+                          <option value="skip">Skip</option>
+                        </select>
+                        {lowConfidence && (
+                          <div className="mt-1 text-[10px] text-red-500">Low confidence for lead</div>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right space-y-1">
+                        <button onClick={() => moveUp(i)} disabled={i === 0} className="block text-xs text-zinc-500 hover:text-zinc-700 disabled:opacity-30">↑ Up</button>
+                        {!t.science_confirmed && t.customer_confirmed && (
+                          <button
+                            onClick={() => findStudies(t)}
+                            disabled={gapSearching === t.theme_name}
+                            className="block rounded bg-blue-100 px-2 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-200 disabled:opacity-50 dark:bg-blue-900/30 dark:text-blue-400"
+                          >
+                            {gapSearching === t.theme_name ? "Searching..." : "Find Studies"}
+                          </button>
+                        )}
+                        {t.science_confirmed && !t.customer_confirmed && typeof t.max_confidence === "number" && t.max_confidence >= 0.7 && (
+                          <span className="block text-[10px] text-amber-600 dark:text-amber-400">Strong science — consider marketing</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {themes.length === 0 && (
               <tr>
                 <td colSpan={5} className="px-4 py-6 text-center text-xs text-zinc-500">
                   No benefits to reconcile yet. Run research and review analysis first.
@@ -1147,15 +1215,13 @@ function BenefitsStage({
         </p>
         <button
           onClick={save}
-          disabled={busy || rows.length === 0}
+          disabled={busy || themes.length === 0}
           className="rounded-md bg-indigo-500 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-600 disabled:opacity-50"
         >
           {busy ? "Saving..." : "Save Selections"}
         </button>
       </div>
-
-      {suggestions.length === 0 && rows.length > 0 && (
-        <p className="text-[10px] text-zinc-400">AI suggestions applied. Adjust roles as needed, then save.</p>
+        </>
       )}
     </div>
   );

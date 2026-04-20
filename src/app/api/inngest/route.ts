@@ -49,6 +49,7 @@ import {
   researchIngredients,
   analyzeReviews,
   generateContent,
+  researchBenefitGap,
 } from "@/lib/inngest/product-intelligence";
 import {
   enrichBatch as demographicsEnrichBatch,
@@ -105,6 +106,7 @@ export const { GET, POST, PUT } = serve({
     researchIngredients,
     analyzeReviews,
     generateContent,
+    researchBenefitGap,
     demographicsEnrichBatch,
     demographicsEnrichSingle,
   ],
