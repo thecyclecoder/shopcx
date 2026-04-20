@@ -27,8 +27,15 @@ export function StorefrontPage({
   canonicalPath: string;
   reviewSlug: string;
 }) {
+  const heroImage = data.media_by_slot["hero"]?.url || null;
+
   return (
     <>
+      {/* Preload hero image — browser starts downloading before it discovers the <img> */}
+      {heroImage && (
+        <link rel="preload" as="image" href={heroImage} fetchPriority="high" />
+      )}
+
       <ProductSchema data={data} canonicalPath={canonicalPath} />
       <FAQSchema data={data} />
 
