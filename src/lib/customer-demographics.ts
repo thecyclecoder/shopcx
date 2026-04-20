@@ -102,15 +102,16 @@ export function analyzeOrderHistory(
     ["cancelled", "canceled", "inactive", "expired"].includes((s.status || "").toLowerCase()),
   );
 
-  const firstSubCreatedAt = subscriptions
-    .map((s) => s.created_at)
-    .filter((c): c is string => typeof c === "string" && c.length > 0)
+  // Use first order date for tenure (subscription created_at can be stale from re-syncs)
+  const firstOrderDate = orders
+    .map((o) => o.created_at)
+    .filter((c) => c && c.length > 0)
     .sort()[0];
 
-  const subscription_tenure_days = firstSubCreatedAt
+  const subscription_tenure_days = firstOrderDate && hadSub
     ? Math.max(
         0,
-        Math.floor((now - new Date(firstSubCreatedAt).getTime()) / 86400000),
+        Math.floor((now - new Date(firstOrderDate).getTime()) / 86400000),
       )
     : 0;
 
