@@ -534,3 +534,213 @@ export const enrichSingle = inngest.createFunction(
     return { enriched: true };
   },
 );
+
+// =============================================================================
+// Snapshot builder — pre-computes demographics summaries for instant page loads
+// =============================================================================
+
+const CONFIDENCE_FLOOR = 0.65;
+const GENDERS = ["female", "male", "unknown"] as const;
+const AGE_RANGES = ["under_25", "25-34", "35-44", "45-54", "55-64", "65+"] as const;
+const INCOME_BRACKETS = ["under_40k", "40-60k", "60-80k", "80-100k", "100-125k", "125-150k", "150k+"] as const;
+const URBAN_TYPES = ["urban", "suburban", "rural"] as const;
+const BUYER_TYPES_LIST = ["committed_subscriber", "new_subscriber", "lapsed_subscriber", "value_buyer", "cautious_buyer", "one_time_buyer"] as const;
+
+function emptyDist<K extends string>(keys: readonly K[]): Record<K, number> {
+  const out = {} as Record<K, number>;
+  for (const k of keys) out[k] = 0;
+  return out;
+}
+
+function modeOf<K extends string>(dist: Record<K, number>): K | null {
+  let best: K | null = null;
+  let bestCount = 0;
+  for (const key of Object.keys(dist) as K[]) {
+    if (dist[key] > bestCount) { bestCount = dist[key]; best = key; }
+  }
+  return bestCount > 0 ? best : null;
+}
+
+type DemoRow = {
+  customer_id: string;
+  inferred_gender: string | null;
+  inferred_gender_conf: number | null;
+  inferred_age_range: string | null;
+  inferred_age_conf: number | null;
+  zip_income_bracket: string | null;
+  zip_urban_classification: string | null;
+  buyer_type: string | null;
+  health_priorities: string[] | null;
+};
+
+function computeSummary(rows: DemoRow[], totalCustomers: number) {
+  const gender_distribution = emptyDist(GENDERS);
+  const age_distribution = emptyDist(AGE_RANGES);
+  const income_distribution = emptyDist(INCOME_BRACKETS);
+  const urban_distribution = emptyDist(URBAN_TYPES);
+  const buyer_type_distribution = emptyDist(BUYER_TYPES_LIST);
+  const priorityCounts = new Map<string, number>();
+
+  for (const r of rows) {
+    if (r.inferred_gender && (r.inferred_gender_conf ?? 0) >= CONFIDENCE_FLOOR && GENDERS.includes(r.inferred_gender as typeof GENDERS[number])) {
+      gender_distribution[r.inferred_gender as typeof GENDERS[number]]++;
+    }
+    if (r.inferred_age_range && (r.inferred_age_conf ?? 0) >= CONFIDENCE_FLOOR && AGE_RANGES.includes(r.inferred_age_range as typeof AGE_RANGES[number])) {
+      age_distribution[r.inferred_age_range as typeof AGE_RANGES[number]]++;
+    }
+    if (r.zip_income_bracket && INCOME_BRACKETS.includes(r.zip_income_bracket as typeof INCOME_BRACKETS[number])) {
+      income_distribution[r.zip_income_bracket as typeof INCOME_BRACKETS[number]]++;
+    }
+    if (r.zip_urban_classification && URBAN_TYPES.includes(r.zip_urban_classification as typeof URBAN_TYPES[number])) {
+      urban_distribution[r.zip_urban_classification as typeof URBAN_TYPES[number]]++;
+    }
+    if (r.buyer_type && BUYER_TYPES_LIST.includes(r.buyer_type as typeof BUYER_TYPES_LIST[number])) {
+      buyer_type_distribution[r.buyer_type as typeof BUYER_TYPES_LIST[number]]++;
+    }
+    for (const p of r.health_priorities || []) {
+      if (typeof p === "string") priorityCounts.set(p, (priorityCounts.get(p) || 0) + 1);
+    }
+  }
+
+  const top_health_priorities = Array.from(priorityCounts.entries())
+    .sort((a, b) => b[1] - a[1]).slice(0, 10)
+    .map(([priority, count]) => ({ priority, count }));
+
+  // Suggested target customer
+  const parts: string[] = [];
+  const gMode = modeOf(gender_distribution);
+  const aMode = modeOf(age_distribution);
+  const iMode = modeOf(income_distribution);
+  const uMode = modeOf(urban_distribution);
+  const bMode = modeOf(buyer_type_distribution);
+  if (gMode && aMode) parts.push(`${gMode === "female" ? "Women" : gMode === "male" ? "Men" : "Adults"} ${aMode}`);
+  if (uMode) parts.push(`${uMode} households`);
+  if (iMode) parts.push(`${iMode.replace("_", " ")} income`);
+  if (bMode) parts.push(bMode.replace(/_/g, " "));
+  if (top_health_priorities.length) parts.push(`focused on ${top_health_priorities.slice(0, 2).map(p => p.priority.replace(/_/g, " ")).join(" and ")}`);
+
+  return {
+    total_customers: totalCustomers,
+    enriched_count: rows.length,
+    gender_distribution,
+    age_distribution,
+    income_distribution,
+    urban_distribution,
+    buyer_type_distribution,
+    top_health_priorities,
+    suggested_target_customer: rows.length > 0 ? parts.join(", ") : null,
+  };
+}
+
+export const demographicsSnapshotBuilder = inngest.createFunction(
+  {
+    id: "demographics-snapshot-builder",
+    concurrency: [{ limit: 1 }],
+    triggers: [
+      { cron: "0 8 * * *" },  // 3 AM Central = 8 UTC
+      { event: "demographics/rebuild-snapshots" },
+    ],
+  },
+  async ({ step }) => {
+    const admin = createAdminClient();
+
+    const workspaces = await step.run("get-workspaces", async () => {
+      const { data } = await admin.from("workspaces").select("id");
+      return data || [];
+    });
+
+    for (const ws of workspaces) {
+      await step.run(`snapshot-all-${ws.id.slice(0, 8)}`, async () => {
+        // All customers snapshot
+        const { data: allRows } = await admin.from("customer_demographics")
+          .select("customer_id, inferred_gender, inferred_gender_conf, inferred_age_range, inferred_age_conf, zip_income_bracket, zip_urban_classification, buyer_type, health_priorities")
+          .eq("workspace_id", ws.id);
+
+        const { count: totalCustomers } = await admin.from("customers")
+          .select("id", { count: "exact", head: true })
+          .eq("workspace_id", ws.id)
+          .gt("total_orders", 0);
+
+        const summary = computeSummary((allRows || []) as DemoRow[], totalCustomers || 0);
+
+        await admin.from("demographics_snapshots").upsert({
+          workspace_id: ws.id,
+          product_id: null,
+          ...summary,
+          computed_at: new Date().toISOString(),
+        }, { onConflict: "workspace_id" });
+      });
+
+      // Per-product snapshots
+      await step.run(`snapshot-products-${ws.id.slice(0, 8)}`, async () => {
+        const { data: products } = await admin.from("products")
+          .select("id, variants")
+          .eq("workspace_id", ws.id)
+          .eq("status", "active");
+
+        for (const product of products || []) {
+          const variants = (product.variants || []) as { id?: string; sku?: string }[];
+          const variantIds = new Set(variants.map(v => String(v.id)).filter(Boolean));
+          const skus = new Set(variants.map(v => v.sku).filter(Boolean) as string[]);
+          if (variantIds.size === 0 && skus.size === 0) continue;
+
+          // Find customer IDs who ordered this product
+          const custIds = new Set<string>();
+          let offset = 0;
+          while (true) {
+            const { data: orders } = await admin.from("orders")
+              .select("customer_id, line_items")
+              .eq("workspace_id", ws.id)
+              .range(offset, offset + 999);
+            if (!orders?.length) break;
+            for (const o of orders) {
+              const items = (o.line_items || []) as { variant_id?: string; sku?: string }[];
+              if (items.some(i =>
+                (i.variant_id && variantIds.has(String(i.variant_id))) ||
+                (i.sku && skus.has(i.sku))
+              )) {
+                custIds.add(o.customer_id);
+              }
+            }
+            if (orders.length < 1000) break;
+            offset += 1000;
+          }
+
+          if (custIds.size === 0) {
+            await admin.from("demographics_snapshots").upsert({
+              workspace_id: ws.id,
+              product_id: product.id,
+              total_customers: 0, enriched_count: 0,
+              gender_distribution: {}, age_distribution: {}, income_distribution: {},
+              urban_distribution: {}, buyer_type_distribution: {},
+              top_health_priorities: [], suggested_target_customer: null,
+              computed_at: new Date().toISOString(),
+            }, { onConflict: "workspace_id,product_id" });
+            continue;
+          }
+
+          // Get demographics for these customers
+          const allRows: DemoRow[] = [];
+          const custIdArr = [...custIds];
+          for (let i = 0; i < custIdArr.length; i += 100) {
+            const { data } = await admin.from("customer_demographics")
+              .select("customer_id, inferred_gender, inferred_gender_conf, inferred_age_range, inferred_age_conf, zip_income_bracket, zip_urban_classification, buyer_type, health_priorities")
+              .eq("workspace_id", ws.id)
+              .in("customer_id", custIdArr.slice(i, i + 100));
+            if (data) allRows.push(...(data as DemoRow[]));
+          }
+
+          const summary = computeSummary(allRows, custIds.size);
+          await admin.from("demographics_snapshots").upsert({
+            workspace_id: ws.id,
+            product_id: product.id,
+            ...summary,
+            computed_at: new Date().toISOString(),
+          }, { onConflict: "workspace_id,product_id" });
+        }
+      });
+    }
+
+    return { workspaces: workspaces.length };
+  },
+);

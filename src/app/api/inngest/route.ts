@@ -54,6 +54,7 @@ import {
 import {
   enrichBatch as demographicsEnrichBatch,
   enrichSingle as demographicsEnrichSingle,
+  demographicsSnapshotBuilder,
 } from "@/lib/inngest/customer-demographics";
 
 export const maxDuration = 300;
@@ -109,5 +110,6 @@ export const { GET, POST, PUT } = serve({
     researchBenefitGap,
     demographicsEnrichBatch,
     demographicsEnrichSingle,
+    demographicsSnapshotBuilder,
   ],
 });
