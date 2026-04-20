@@ -264,12 +264,15 @@ export default function ProductIntelligenceEnginePage() {
       {/* Tabs */}
       <div className="mb-6 border-b border-zinc-200 dark:border-zinc-800">
         <div className="flex gap-1 overflow-x-auto">
-          {STAGES.map((s, i) => {
+          {STAGES.map((s) => {
+            const hasIngredients = overview.ingredients.length > 0;
+            const hasResearch = overview.research.status !== "pending";
+            const hasReviews = !!overview.review_analysis;
+            const hasBenefits = overview.benefit_selections.length > 0;
             const disabled =
-              (s.key === "research" && stage < 1) ||
-              (s.key === "reviews" && stage < 2) ||
-              (s.key === "benefits" && !(overview.research.status !== "pending" && overview.review_analysis)) ||
-              (s.key === "content" && overview.product.intelligence_status !== "benefits_selected" && !overview.page_content);
+              (s.key === "research" && !hasIngredients) ||
+              (s.key === "benefits" && (!hasResearch || !hasReviews)) ||
+              (s.key === "content" && !hasBenefits);
 
             return (
               <button
@@ -284,7 +287,6 @@ export default function ProductIntelligenceEnginePage() {
                       : "border-transparent text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
                 }`}
               >
-                <span className="mr-1 text-[10px] font-semibold text-zinc-400">{i + 1}</span>
                 {s.label}
               </button>
             );
