@@ -36,7 +36,7 @@ const ICONS = {
   settings: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z",
 };
 
-interface NavItem { href: string; label: string; icon: string; comingSoon?: boolean }
+interface NavItem { href: string; label: string; icon: string; comingSoon?: boolean; adminOnly?: boolean }
 interface NavSection { label: string; icon?: string; items: NavItem[]; collapsible?: boolean }
 
 const NAV_STRUCTURE: (NavItem | NavSection)[] = [
@@ -48,6 +48,7 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
     collapsible: true,
     items: [
       { href: "/dashboard/customers", label: "Profiles", icon: ICONS.customers },
+      { href: "/dashboard/demographics", label: "Demographics", icon: "M2.25 18L9 11.25l4.306 4.306a11.95 11.95 0 015.814-5.518l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941", adminOnly: true },
       { href: "/dashboard/subscriptions", label: "Subscriptions", icon: ICONS.subscriptions },
       { href: "/dashboard/orders", label: "Orders", icon: ICONS.orders },
       { href: "/dashboard/returns", label: "Returns", icon: ICONS.returns },
@@ -271,6 +272,7 @@ export default function Sidebar({
                 {isExpanded && (
                   <div className="ml-6 mt-0.5 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-800">
                     {section.items.map(item => {
+                      if (item.adminOnly && !["owner", "admin"].includes(workspace.role)) return null;
                       const isActive = pathname === item.href || (item.href !== "#" && pathname.startsWith(item.href));
                       return (
                         <Link

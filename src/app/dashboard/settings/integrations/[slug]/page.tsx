@@ -13,6 +13,7 @@ const NAMES: Record<string, string> = {
   amplifier: "Amplifier",
   slack: "Slack",
   multipass: "Shopify Multipass",
+  census: "US Census Bureau",
 };
 
 export default function IntegrationDetailPage() {

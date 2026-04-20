@@ -18,6 +18,7 @@ import ChargebacksList from "@/components/shared/ChargebacksList";
 import type { ChargebackItem } from "@/components/shared/ChargebacksList";
 import FraudCasesList from "@/components/shared/FraudCasesList";
 import type { FraudCaseItem } from "@/components/shared/FraudCasesList";
+import CustomerDemographicsCard from "@/components/shared/CustomerDemographicsCard";
 
 interface Customer {
   id: string;
@@ -423,6 +424,11 @@ export default function CustomerDetailPage() {
             {formatDate(customer.shopify_created_at || customer.first_order_at || customer.created_at)}
           </p>
         </div>
+      </div>
+
+      {/* Demographics */}
+      <div className="mt-6">
+        <CustomerDemographicsCard customerId={customer.id} />
       </div>
 
       {/* Contact & Marketing */}

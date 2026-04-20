@@ -50,6 +50,10 @@ import {
   analyzeReviews,
   generateContent,
 } from "@/lib/inngest/product-intelligence";
+import {
+  enrichBatch as demographicsEnrichBatch,
+  enrichSingle as demographicsEnrichSingle,
+} from "@/lib/inngest/customer-demographics";
 
 export const maxDuration = 300;
 
@@ -101,5 +105,7 @@ export const { GET, POST, PUT } = serve({
     researchIngredients,
     analyzeReviews,
     generateContent,
+    demographicsEnrichBatch,
+    demographicsEnrichSingle,
   ],
 });

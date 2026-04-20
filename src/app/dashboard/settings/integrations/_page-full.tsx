@@ -76,6 +76,11 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
   const [klaviyoReviewCount, setKlaviyoReviewCount] = useState<number | null>(null);
   const [klaviyoSyncing, setKlaviyoSyncing] = useState(false);
 
+  // Census
+  const [censusApiKey, setCensusApiKey] = useState("");
+  const [censusConnected, setCensusConnected] = useState(false);
+  const [censusApiKeyHint, setCensusApiKeyHint] = useState<string | null>(null);
+
   // Amplifier
   const [amplifierApiKey, setAmplifierApiKey] = useState("");
   const [amplifierOrderSourceCode, setAmplifierOrderSourceCode] = useState("");
@@ -160,6 +165,8 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
         setKlaviyoPublicKey(data.klaviyo_public_key || "");
         setKlaviyoLastSync(data.klaviyo_last_sync_at);
         setKlaviyoReviewCount(data.klaviyo_review_count);
+        setCensusConnected(!!data.census_connected);
+        setCensusApiKeyHint(data.census_api_key_hint || null);
         setAmplifierConnected(data.amplifier_connected);
         setAmplifierApiKeyHint(data.amplifier_api_key_hint);
         setAmplifierOrderSourceCode(data.amplifier_order_source_code || "");
@@ -360,6 +367,28 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
       setMessage("Review sync failed");
     }
     setKlaviyoSyncing(false);
+  };
+
+  // Census handlers
+  const handleSaveCensus = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const body: Record<string, string> = {};
+    if (censusApiKey) body.census_api_key = censusApiKey;
+    if (await patchIntegrations(body)) {
+      setMessage("Census API key saved");
+      setCensusConnected(true);
+      setCensusApiKeyHint(censusApiKey ? `...${censusApiKey.slice(-4)}` : censusApiKeyHint);
+      setCensusApiKey("");
+    }
+  };
+
+  const handleDisconnectCensus = async () => {
+    if (await patchIntegrations({ census_api_key: null })) {
+      setCensusConnected(false);
+      setCensusApiKeyHint(null);
+      setCensusApiKey("");
+      setMessage("Census API key removed");
+    }
   };
 
   // EasyPost handlers
@@ -1324,6 +1353,106 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
                 <button
                   type="submit"
                   disabled={saving || !klaviyoApiKey}
+                  className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  Update
+                </button>
+              </form>
+            </div>
+          )}
+        </div>
+        )}
+
+        {show("census") && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-600/10">
+                <svg className="h-5 w-5 text-indigo-600 dark:text-indigo-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 21v-8.25M15.75 21v-8.25M8.25 21v-8.25M3 9l9-6 9 6m-1.5 12V10.332A48.36 48.36 0 0012 9.75c-2.551 0-5.056.2-7.5.582V21M3 21h18M12 6.75h.008v.008H12V6.75z" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">US Census Bureau</h2>
+                <p className="text-sm text-zinc-500">Zip-code demographics — median income, education, urban/rural</p>
+              </div>
+            </div>
+            {censusConnected ? (
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                Connected
+              </span>
+            ) : (
+              <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-sm font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                No key (public access)
+              </span>
+            )}
+          </div>
+
+          <p className="mt-3 text-xs text-zinc-500">
+            The Census API works without a key but has lower rate limits. Grab a free key at
+            {" "}
+            <a
+              href="https://api.census.gov/data/key_signup.html"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-indigo-600 hover:text-indigo-500 dark:text-indigo-400"
+            >
+              api.census.gov/data/key_signup.html
+            </a>
+            .
+          </p>
+
+          {canEdit && !censusConnected && (
+            <form onSubmit={handleSaveCensus} className="mt-5 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">API Key (optional)</label>
+                <input
+                  type="password"
+                  value={censusApiKey}
+                  onChange={(e) => setCensusApiKey(e.target.value)}
+                  placeholder="40-character hex key"
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={saving || !censusApiKey}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {saving ? "Saving..." : "Save"}
+              </button>
+            </form>
+          )}
+
+          {canEdit && censusConnected && (
+            <div className="mt-5 space-y-3">
+              <div className="rounded-md bg-zinc-50 p-3 dark:bg-zinc-800">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-zinc-500">API Key</span>
+                  <span className="font-mono text-sm text-zinc-400">{censusApiKeyHint}</span>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleDisconnectCensus}
+                  disabled={saving}
+                  className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                >
+                  Remove key
+                </button>
+              </div>
+              <form onSubmit={handleSaveCensus} className="flex gap-2">
+                <input
+                  type="password"
+                  value={censusApiKey}
+                  onChange={(e) => setCensusApiKey(e.target.value)}
+                  placeholder="New API key (leave blank to keep current)"
+                  className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+                <button
+                  type="submit"
+                  disabled={saving || !censusApiKey}
                   className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
                 >
                   Update
