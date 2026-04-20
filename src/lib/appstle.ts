@@ -62,11 +62,30 @@ export async function appstleSubscriptionAction(
     // Update local subscription status
     const admin = createAdminClient();
     const localStatusMap: Record<string, string> = { pause: "paused", cancel: "cancelled", resume: "active" };
-    await admin
+    const { data: sub } = await admin
       .from("subscriptions")
       .update({ status: localStatusMap[action], updated_at: new Date().toISOString() })
       .eq("workspace_id", workspaceId)
-      .eq("shopify_contract_id", contractId);
+      .eq("shopify_contract_id", contractId)
+      .select("customer_id")
+      .single();
+
+    // Keep customers.subscription_status in sync — use highest priority across all subs
+    if (sub?.customer_id) {
+      const { data: allSubs } = await admin
+        .from("subscriptions")
+        .select("status")
+        .eq("customer_id", sub.customer_id);
+      const statuses = new Set((allSubs || []).map(s => s.status));
+      const customerStatus = statuses.has("active") ? "active"
+        : statuses.has("paused") ? "paused"
+        : statuses.has("cancelled") ? "cancelled"
+        : "never";
+      await admin.from("customers").update({
+        subscription_status: customerStatus,
+        updated_at: new Date().toISOString(),
+      }).eq("id", sub.customer_id);
+    }
 
     return { success: true };
   } catch (err) {
