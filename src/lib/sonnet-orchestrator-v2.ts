@@ -409,6 +409,19 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
   // Loyalty
   if (loyaltyMember) {
     parts.push(`\nLOYALTY: ${loyaltyMember.points_balance || 0} points`);
+
+    // Show available redemption tiers so AI only offers real options
+    const { data: loyaltyConfig } = await admin.from("loyalty_settings")
+      .select("redemption_tiers")
+      .eq("workspace_id", wsId)
+      .single();
+    const tiers = (loyaltyConfig?.redemption_tiers || []) as { label: string; points_cost: number; discount_value: number }[];
+    if (tiers.length) {
+      const tierList = tiers.map(t => `${t.label} (${t.points_cost} pts → $${t.discount_value} off)`).join(", ");
+      parts.push(`Available redemption tiers: ${tierList}`);
+      parts.push("IMPORTANT: Only offer these exact tiers — never invent other amounts.");
+    }
+
     const { data: redemptions } = await admin.from("loyalty_redemptions")
       .select("discount_code, discount_value, expires_at")
       .eq("member_id", loyaltyMember.id).eq("status", "active").is("used_at", null);
