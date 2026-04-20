@@ -77,7 +77,7 @@ export default function DemographicsPage() {
   useEffect(() => {
     fetch(`/api/workspaces/${workspace.id}/products`)
       .then(r => r.ok ? r.json() : { products: [] })
-      .then(d => setProducts((d.products || []).filter((p: ProductOption & { status?: string }) => p.status === "active")))
+      .then(d => { const list = Array.isArray(d) ? d : d.products || []; setProducts(list.filter((p: ProductOption & { status?: string }) => !p.status || p.status === "active")); })
       .catch(() => {});
   }, [workspace.id]);
 
