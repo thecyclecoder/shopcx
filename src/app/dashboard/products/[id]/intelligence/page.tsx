@@ -983,8 +983,41 @@ function BenefitsStage({
   const [roles, setRoles] = useState<Record<string, "lead" | "supporting" | "skip">>({});
   const [reconciling, setReconciling] = useState(false);
   const [reconciled, setReconciled] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [gapSearching, setGapSearching] = useState<string | null>(null);
+
+  // Load saved selections on mount
+  useEffect(() => {
+    (async () => {
+      const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/benefit-selections`);
+      if (res.ok) {
+        const d = await res.json();
+        const saved = (d.benefits || []) as BenefitSelection[];
+        if (saved.length > 0) {
+          // Convert saved selections back to themes for display
+          const t: ReconcileTheme[] = saved.map(s => ({
+            theme_name: s.benefit_name,
+            science_confirmed: s.science_confirmed,
+            customer_confirmed: s.customer_confirmed,
+            max_confidence: s.ai_confidence ?? null,
+            research_ids: (s as unknown as Record<string, unknown>).ingredient_research_ids as string[] || [],
+            ingredient_names: ((s.notes || "").match(/Ingredients: ([^|]+)/)?.[1] || "").split(", ").filter(Boolean),
+            customer_benefit_names: ((s.notes || "").match(/Customer: (.+)/)?.[1] || "").split(", ").filter(Boolean),
+            customer_phrases: s.customer_phrases || [],
+            recommendation: s.role as "lead" | "supporting" | "skip",
+            reason: "",
+          }));
+          setThemes(t);
+          const r: Record<string, "lead" | "supporting" | "skip"> = {};
+          t.forEach(th => { r[th.theme_name] = th.recommendation; });
+          setRoles(r);
+          setReconciled(true);
+        }
+      }
+      setLoading(false);
+    })();
+  }, [workspaceId, productId]);
 
   const reconcile = async () => {
     setReconciling(true);
@@ -1069,7 +1102,9 @@ function BenefitsStage({
 
   return (
     <div className="space-y-4">
-      {!reconciled ? (
+      {loading ? (
+        <p className="text-sm text-zinc-500">Loading...</p>
+      ) : !reconciled ? (
         <div className="rounded-lg border border-zinc-200 bg-white p-6 text-center dark:border-zinc-800 dark:bg-zinc-900">
           <p className="mb-4 text-sm text-zinc-600 dark:text-zinc-400">
             AI will analyze your ingredient studies and customer reviews,
