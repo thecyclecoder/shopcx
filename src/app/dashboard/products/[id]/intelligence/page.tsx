@@ -1365,7 +1365,7 @@ function ContentStage({
     setDraftFields((d) => ({ ...d, [key]: value }));
   };
 
-  const editable = content.status === "draft";
+  const editable = true; // Always editable — approve/publish don't lock content
 
   return (
     <div className="space-y-6">
