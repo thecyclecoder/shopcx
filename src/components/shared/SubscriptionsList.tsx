@@ -81,30 +81,24 @@ export default function SubscriptionsList({
             </div>
             {sub.items?.length > 0 && (
               <div className="mt-1.5 space-y-1.5">
-                {sub.items.slice(0, maxItems).map((item, idx) => {
-                  const baseCents = Math.round(item.price_cents / 0.75);
-                  return (
-                    <div key={idx}>
-                      <p className="text-sm text-zinc-600 dark:text-zinc-300">
-                        {item.quantity}x {formatItemName(item)}
-                      </p>
-                      <p className="text-[10px] tabular-nums text-zinc-400">
-                        Base {formatCents(baseCents)}/ea · Sub {formatCents(item.price_cents)}/ea · Total {formatCents(item.price_cents * item.quantity)}
-                      </p>
-                    </div>
-                  );
-                })}
+                {sub.items.slice(0, maxItems).map((item, idx) => (
+                  <div key={idx} className="text-sm leading-snug">
+                    <p className="text-zinc-600 dark:text-zinc-300">{item.quantity}x {item.title || "Unknown"}</p>
+                    {item.variant_title && <p className="text-zinc-500 dark:text-zinc-400">{item.variant_title}</p>}
+                    <p className="tabular-nums text-zinc-400">{formatCents(item.price_cents)}/ea {formatCents(item.price_cents * item.quantity)}</p>
+                  </div>
+                ))}
                 {sub.items.length > maxItems && (
                   <p className="text-[10px] text-zinc-400">+{sub.items.length - maxItems} more</p>
                 )}
               </div>
             )}
             {sub.applied_discounts && sub.applied_discounts.length > 0 && (
-              <div className="mt-1.5 flex flex-wrap gap-1">
+              <div className="mt-1 space-y-0.5">
                 {sub.applied_discounts.map((d, i) => (
-                  <span key={i} className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400">
+                  <p key={i} className="truncate text-sm text-emerald-600 dark:text-emerald-400">
                     {d.title} −{d.valueType === "PERCENTAGE" ? `${d.value}%` : formatCents(d.value * 100)}
-                  </span>
+                  </p>
                 ))}
               </div>
             )}
