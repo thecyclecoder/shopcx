@@ -139,7 +139,8 @@ const STATUS_STAGES: Record<IntelligenceStatus, number> = {
   published: 4,
 };
 
-const STAGES: { key: "ingredients" | "research" | "reviews" | "benefits" | "content"; label: string }[] = [
+const STAGES: { key: "overview" | "ingredients" | "research" | "reviews" | "benefits" | "content"; label: string }[] = [
+  { key: "overview", label: "Overview" },
   { key: "ingredients", label: "Ingredients" },
   { key: "research", label: "Research" },
   { key: "reviews", label: "Reviews" },
@@ -184,7 +185,7 @@ export default function ProductIntelligenceEnginePage() {
 
   const [overview, setOverview] = useState<Overview | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"ingredients" | "research" | "reviews" | "benefits" | "content">("ingredients");
+  const [activeTab, setActiveTab] = useState<"overview" | "ingredients" | "research" | "reviews" | "benefits" | "content">("overview");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -294,6 +295,17 @@ export default function ProductIntelligenceEnginePage() {
         </div>
       </div>
 
+      {activeTab === "overview" && (
+        <OverviewStage
+          workspaceId={workspace.id}
+          productId={productId}
+          overview={overview}
+          onChange={load}
+          saving={saving}
+          setSaving={setSaving}
+          setError={setError}
+        />
+      )}
       {activeTab === "ingredients" && (
         <IngredientsStage
           workspaceId={workspace.id}
@@ -342,12 +354,145 @@ export default function ProductIntelligenceEnginePage() {
         />
       )}
 
-      <ImageManagement
-        workspaceId={workspace.id}
-        productId={productId}
-        overview={overview}
-        onChange={load}
-      />
+    </div>
+  );
+}
+
+// =============================================================================
+// Overview: Target Customer & Certifications
+// =============================================================================
+
+function OverviewStage({
+  workspaceId,
+  productId,
+  overview,
+  onChange,
+  saving,
+  setSaving,
+  setError,
+}: {
+  workspaceId: string;
+  productId: string;
+  overview: Overview;
+  onChange: () => void;
+  saving: boolean;
+  setSaving: (v: boolean) => void;
+  setError: (e: string | null) => void;
+}) {
+  const [targetCustomer, setTargetCustomer] = useState(overview.product.target_customer || "");
+  const [certifications, setCertifications] = useState<string[]>(overview.product.certifications || []);
+  const [certInput, setCertInput] = useState("");
+  const [suggestedTarget, setSuggestedTarget] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspaceId}/demographics/summary`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data?.suggested_target_customer) setSuggestedTarget(data.suggested_target_customer);
+      })
+      .catch(() => {});
+  }, [workspaceId]);
+
+  const saveMeta = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/intelligence`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_customer: targetCustomer, certifications }),
+      });
+      if (!res.ok) throw new Error("Failed to save");
+      onChange();
+    } catch (err) {
+      setError(String(err));
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Target Customer</h2>
+
+        {suggestedTarget && !targetCustomer && (
+          <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 p-3 dark:border-indigo-800 dark:bg-indigo-950">
+            <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-indigo-500">Auto-suggested from your customer data</p>
+            <p className="text-sm text-indigo-700 dark:text-indigo-300">{suggestedTarget}</p>
+            <button
+              onClick={() => setTargetCustomer(suggestedTarget)}
+              className="mt-2 rounded bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500"
+            >
+              Use this
+            </button>
+          </div>
+        )}
+
+        <label className="mb-4 block">
+          <span className="mb-1 block text-xs font-medium text-zinc-500">Target customer profile</span>
+          <input
+            value={targetCustomer}
+            onChange={(e) => setTargetCustomer(e.target.value)}
+            placeholder="e.g. Women 45-65 seeking joint mobility"
+            className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+          />
+        </label>
+
+        <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Certifications</h2>
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          {certifications.map((c, i) => (
+            <span
+              key={i}
+              className="inline-flex items-center gap-1 rounded bg-zinc-100 px-2 py-0.5 text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+            >
+              {c}
+              <button
+                onClick={() => setCertifications(certifications.filter((_, j) => j !== i))}
+                className="text-zinc-400 hover:text-red-500"
+                type="button"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <input
+            value={certInput}
+            onChange={(e) => setCertInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && certInput.trim()) {
+                setCertifications([...certifications, certInput.trim()]);
+                setCertInput("");
+              }
+            }}
+            placeholder="e.g. USDA Organic, NSF Certified (Enter to add)"
+            className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+          />
+          <button
+            onClick={() => {
+              if (certInput.trim()) {
+                setCertifications([...certifications, certInput.trim()]);
+                setCertInput("");
+              }
+            }}
+            className="rounded-md bg-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-800 dark:text-zinc-300"
+            type="button"
+          >
+            Add
+          </button>
+        </div>
+
+        <div className="mt-4">
+          <button
+            onClick={saveMeta}
+            disabled={saving}
+            className="rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+          >
+            {saving ? "Saving..." : "Save"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -373,23 +518,8 @@ function IngredientsStage({
   setSaving: (v: boolean) => void;
   setError: (v: string | null) => void;
 }) {
-  const [targetCustomer, setTargetCustomer] = useState(overview.product.target_customer || "");
-  const [certifications, setCertifications] = useState<string[]>(overview.product.certifications || []);
-  const [certInput, setCertInput] = useState("");
-
   const [newIng, setNewIng] = useState({ name: "", dosage_mg: "", dosage_display: "" });
   const [busy, setBusy] = useState(false);
-
-  const saveMeta = async () => {
-    setSaving(true);
-    await fetch(`/api/workspaces/${workspaceId}/products/${productId}/intelligence`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_customer: targetCustomer, certifications }),
-    });
-    setSaving(false);
-    onChange();
-  };
 
   const addIngredient = async () => {
     if (!newIng.name.trim()) return;
@@ -429,12 +559,6 @@ function IngredientsStage({
     if (overview.ingredients.length === 0) return;
     setBusy(true);
     setError(null);
-    // Save meta first
-    await fetch(`/api/workspaces/${workspaceId}/products/${productId}/intelligence`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_customer: targetCustomer, certifications }),
-    });
     try {
       await Promise.all([
         fetch(`/api/workspaces/${workspaceId}/products/${productId}/research`, { method: "POST" }),
@@ -449,74 +573,6 @@ function IngredientsStage({
 
   return (
     <div className="space-y-6">
-      <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-        <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Target Customer & Certifications</h2>
-        <label className="mb-3 block">
-          <span className="mb-1 block text-xs font-medium text-zinc-500">Target customer profile</span>
-          <input
-            value={targetCustomer}
-            onChange={(e) => setTargetCustomer(e.target.value)}
-            placeholder="e.g. Women 45-65 seeking joint mobility"
-            className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1 block text-xs font-medium text-zinc-500">Certifications</span>
-          <div className="mb-2 flex flex-wrap gap-1.5">
-            {certifications.map((c, i) => (
-              <span
-                key={i}
-                className="inline-flex items-center gap-1 rounded bg-zinc-100 px-2 py-0.5 text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-              >
-                {c}
-                <button
-                  onClick={() => setCertifications(certifications.filter((_, j) => j !== i))}
-                  className="text-zinc-400 hover:text-red-500"
-                  type="button"
-                >
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <input
-              value={certInput}
-              onChange={(e) => setCertInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && certInput.trim()) {
-                  setCertifications([...certifications, certInput.trim()]);
-                  setCertInput("");
-                }
-              }}
-              placeholder="e.g. USDA Organic, NSF Certified (Enter to add)"
-              className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-            />
-            <button
-              onClick={() => {
-                if (certInput.trim()) {
-                  setCertifications([...certifications, certInput.trim()]);
-                  setCertInput("");
-                }
-              }}
-              className="rounded-md bg-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-800 dark:text-zinc-300"
-              type="button"
-            >
-              Add
-            </button>
-          </div>
-        </label>
-        <div className="mt-3">
-          <button
-            onClick={saveMeta}
-            disabled={saving}
-            className="rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
-          >
-            {saving ? "Saving..." : "Save"}
-          </button>
-        </div>
-      </div>
-
       <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
         <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
           Ingredients ({overview.ingredients.length})
