@@ -16,7 +16,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
-import { fetchZipDemographics } from "@/lib/census";
+import { fetchZipDemographics, timezoneFromState } from "@/lib/census";
 import {
   analyzeOrderHistory,
   lifeStageFromAgeRange,
@@ -122,6 +122,13 @@ function extractZip(customer: CustomerShape): string | null {
   if (!addr) return null;
   const zip = (addr.zip ?? addr.postal_code ?? addr.postalCode ?? "") as string;
   return typeof zip === "string" && zip.trim().length > 0 ? zip.trim() : null;
+}
+
+function extractStateCode(customer: CustomerShape): string | null {
+  const addr = customer.default_address as Record<string, unknown> | null | undefined;
+  if (!addr) return null;
+  const state = (addr.province_code ?? addr.state_code ?? addr.state ?? "") as string;
+  return typeof state === "string" && state.trim().length > 0 ? state.trim() : null;
 }
 
 async function getCensusApiKey(workspaceId: string): Promise<string | undefined> {
@@ -247,6 +254,13 @@ async function enrichOne(
 
   const zip = extractZip(customer);
   const zipData = zip ? await fetchZipDemographics(zip, apiKey) : null;
+
+  // Derive timezone from state code and save on customer record
+  const stateCode = extractStateCode(customer);
+  const timezone = timezoneFromState(stateCode);
+  if (timezone) {
+    await admin.from("customers").update({ timezone }).eq("id", customer.id);
+  }
 
   const { orders, subscriptions } = await loadOrdersAndSubs(
     customer.workspace_id,
