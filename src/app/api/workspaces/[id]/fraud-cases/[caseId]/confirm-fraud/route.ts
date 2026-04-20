@@ -56,15 +56,27 @@ export async function POST(
 
   // ── Step: check_amplifier ──
   if (step === "check_amplifier") {
-    // Load orders with amplifier data
+    // Load orders with amplifier data — order_ids may be Shopify IDs or internal UUIDs
     const orders: { id: string; order_number: string; shopify_order_id: string; amplifier_order_id: string | null; amplifier_status: string | null; amplifier_shipped_at: string | null }[] = [];
 
     if (orderIds.length > 0) {
-      const { data } = await admin.from("orders")
+      // Try as shopify_order_id first
+      const { data: byShopify } = await admin.from("orders")
         .select("id, order_number, shopify_order_id, amplifier_order_id, amplifier_status, amplifier_shipped_at")
         .eq("workspace_id", workspaceId)
         .in("shopify_order_id", orderIds);
-      if (data) orders.push(...data);
+      if (byShopify?.length) orders.push(...byShopify);
+
+      // For any IDs not found, try as internal UUID
+      const foundShopifyIds = new Set(orders.map(o => o.shopify_order_id));
+      const missingIds = orderIds.filter(id => !foundShopifyIds.has(id) && !orders.some(o => o.id === id));
+      if (missingIds.length) {
+        const { data: byUuid } = await admin.from("orders")
+          .select("id, order_number, shopify_order_id, amplifier_order_id, amplifier_status, amplifier_shipped_at")
+          .eq("workspace_id", workspaceId)
+          .in("id", missingIds);
+        if (byUuid?.length) orders.push(...byUuid);
+      }
     }
 
     const results = orders.map(o => ({
@@ -112,14 +124,39 @@ export async function POST(
     const results: { order_id: string; order_number: string; success: boolean; error?: string }[] = [];
 
     for (const oid of orderIds) {
-      // Get order number for display
-      const { data: order } = await admin.from("orders")
-        .select("order_number, financial_status")
+      // order_ids may contain Shopify order IDs (rule-based) or internal UUIDs (AI-detected)
+      // Resolve to shopify_order_id in either case
+      let shopifyOrderId = oid;
+      let orderNumber = oid;
+
+      // Try as shopify_order_id first
+      const { data: orderByShopify } = await admin.from("orders")
+        .select("id, order_number, shopify_order_id")
         .eq("workspace_id", workspaceId)
         .eq("shopify_order_id", oid)
-        .single();
+        .maybeSingle();
 
-      const result = await cancelOrder(workspaceId, oid, {
+      if (orderByShopify) {
+        shopifyOrderId = orderByShopify.shopify_order_id;
+        orderNumber = orderByShopify.order_number || oid;
+      } else {
+        // Try as internal UUID
+        const { data: orderByUuid } = await admin.from("orders")
+          .select("id, order_number, shopify_order_id")
+          .eq("workspace_id", workspaceId)
+          .eq("id", oid)
+          .maybeSingle();
+
+        if (orderByUuid?.shopify_order_id) {
+          shopifyOrderId = orderByUuid.shopify_order_id;
+          orderNumber = orderByUuid.order_number || oid;
+        } else {
+          results.push({ order_id: oid, order_number: oid, success: false, error: "Order not found" });
+          continue;
+        }
+      }
+
+      const result = await cancelOrder(workspaceId, shopifyOrderId, {
         reason: "FRAUD",
         refund: true,
         restock: true,
@@ -127,7 +164,7 @@ export async function POST(
       });
       results.push({
         order_id: oid,
-        order_number: order?.order_number || oid,
+        order_number: orderNumber,
         success: result.success,
         error: result.error,
       });
