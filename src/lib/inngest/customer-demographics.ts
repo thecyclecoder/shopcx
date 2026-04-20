@@ -255,8 +255,8 @@ async function enrichOne(
   const zip = extractZip(customer);
   const zipData = zip ? await fetchZipDemographics(zip, apiKey) : null;
 
-  // Derive timezone from state code and save on customer record
-  const stateCode = extractStateCode(customer);
+  // Derive timezone from state code — try customer address, fall back to zip cache state
+  const stateCode = extractStateCode(customer) || zipData?.state || null;
   const timezone = timezoneFromState(stateCode);
   if (timezone) {
     await admin.from("customers").update({ timezone }).eq("id", customer.id);
