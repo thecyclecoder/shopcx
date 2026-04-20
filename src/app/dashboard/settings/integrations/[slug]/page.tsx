@@ -14,6 +14,7 @@ const NAMES: Record<string, string> = {
   slack: "Slack",
   multipass: "Shopify Multipass",
   census: "US Census Bureau",
+  versium: "Versium REACH",
 };
 
 export default function IntegrationDetailPage() {

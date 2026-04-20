@@ -81,6 +81,11 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
   const [censusConnected, setCensusConnected] = useState(false);
   const [censusApiKeyHint, setCensusApiKeyHint] = useState<string | null>(null);
 
+  // Versium
+  const [versiumApiKey, setVersiumApiKey] = useState("");
+  const [versiumConnected, setVersiumConnected] = useState(false);
+  const [versiumApiKeyHint, setVersiumApiKeyHint] = useState<string | null>(null);
+
   // Amplifier
   const [amplifierApiKey, setAmplifierApiKey] = useState("");
   const [amplifierOrderSourceCode, setAmplifierOrderSourceCode] = useState("");
@@ -167,6 +172,8 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
         setKlaviyoReviewCount(data.klaviyo_review_count);
         setCensusConnected(!!data.census_connected);
         setCensusApiKeyHint(data.census_api_key_hint || null);
+        setVersiumConnected(!!data.versium_connected);
+        setVersiumApiKeyHint(data.versium_api_key_hint || null);
         setAmplifierConnected(data.amplifier_connected);
         setAmplifierApiKeyHint(data.amplifier_api_key_hint);
         setAmplifierOrderSourceCode(data.amplifier_order_source_code || "");
@@ -388,6 +395,28 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
       setCensusApiKeyHint(null);
       setCensusApiKey("");
       setMessage("Census API key removed");
+    }
+  };
+
+  // Versium handlers
+  const handleSaveVersium = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const body: Record<string, string> = {};
+    if (versiumApiKey) body.versium_api_key = versiumApiKey;
+    if (await patchIntegrations(body)) {
+      setMessage("Versium API key saved");
+      setVersiumConnected(true);
+      setVersiumApiKeyHint(versiumApiKey ? `...${versiumApiKey.slice(-4)}` : versiumApiKeyHint);
+      setVersiumApiKey("");
+    }
+  };
+
+  const handleDisconnectVersium = async () => {
+    if (await patchIntegrations({ versium_api_key: null })) {
+      setVersiumConnected(false);
+      setVersiumApiKeyHint(null);
+      setVersiumApiKey("");
+      setMessage("Versium API key removed");
     }
   };
 
@@ -1463,6 +1492,88 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
         </div>
         )}
       </div>
+      {/* ── Versium REACH ── */}
+      {show("versium") && (
+      <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-600/10">
+              <svg className="h-5 w-5 text-violet-600 dark:text-violet-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Versium REACH</h2>
+              <p className="text-xs text-zinc-500">Individual-level demographic data — real age, household income, interests, marital status</p>
+            </div>
+          </div>
+          {versiumConnected ? (
+            <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">Connected</span>
+          ) : (
+            <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">Not connected</span>
+          )}
+        </div>
+        <p className="mt-3 text-xs leading-relaxed text-zinc-500">
+          Versium appends real demographic data to your customers using their email, name, or address. Replaces AI inference with actual data — individual income instead of zip-level median, real age instead of name guessing.
+        </p>
+        <div className="mt-5 space-y-4">
+          {canEdit && !versiumConnected && (
+            <form onSubmit={handleSaveVersium} className="space-y-3">
+              <input
+                type="password"
+                value={versiumApiKey}
+                onChange={(e) => setVersiumApiKey(e.target.value)}
+                placeholder="Versium API key"
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+              />
+              <button
+                type="submit"
+                disabled={saving || !versiumApiKey}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+              >
+                Save API Key
+              </button>
+            </form>
+          )}
+          {canEdit && versiumConnected && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-zinc-500">API Key</span>
+                  <span className="font-mono text-sm text-zinc-400">{versiumApiKeyHint}</span>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleDisconnectVersium}
+                  disabled={saving}
+                  className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                >
+                  Remove key
+                </button>
+              </div>
+              <form onSubmit={handleSaveVersium} className="flex gap-2">
+                <input
+                  type="password"
+                  value={versiumApiKey}
+                  onChange={(e) => setVersiumApiKey(e.target.value)}
+                  placeholder="New API key (leave blank to keep current)"
+                  className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+                <button
+                  type="submit"
+                  disabled={saving || !versiumApiKey}
+                  className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  Update
+                </button>
+              </form>
+            </div>
+          )}
+        </div>
+      </div>
+      )}
       {/* ── Returns / EasyPost ── */}
       {show("easypost") && (
       <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">

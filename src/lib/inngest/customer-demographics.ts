@@ -17,6 +17,7 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { fetchZipDemographics, timezoneFromState } from "@/lib/census";
+import { fetchVersiumDemographics } from "@/lib/versium";
 import {
   analyzeOrderHistory,
   lifeStageFromAgeRange,
@@ -262,14 +263,43 @@ async function enrichOne(
     await admin.from("customers").update({ timezone }).eq("id", customer.id);
   }
 
+  // Track 3: Versium (if configured)
+  const addr = customer.default_address as Record<string, unknown> | null;
+  const versium = await fetchVersiumDemographics(customer.workspace_id, {
+    email: (customer as Record<string, unknown>).email as string | undefined,
+    first_name: customer.first_name || undefined,
+    last_name: (customer as Record<string, unknown>).last_name as string | undefined,
+    address: (addr?.address1 as string) || undefined,
+    city: (addr?.city as string) || undefined,
+    state: (addr?.province_code as string) || (addr?.state as string) || undefined,
+    zip: zip || undefined,
+  });
+
   const { orders, subscriptions } = await loadOrdersAndSubs(
     customer.workspace_id,
     customer.id,
   );
   const orderAnalysis = analyzeOrderHistory(orders, subscriptions);
 
-  const ageRange = nameResult?.age_range ?? null;
-  const lifeStage = lifeStageFromAgeRange(ageRange);
+  // Use Versium data when available, fall back to Haiku inference
+  const ageRange = versium?.age_range ?? nameResult?.age_range ?? null;
+  const gender = versium?.gender ?? nameResult?.gender ?? "unknown";
+  const lifeStage = lifeStageFromAgeRange(ageRange as Parameters<typeof lifeStageFromAgeRange>[0]);
+
+  // Build Versium interests array from boolean flags
+  const versiumInterests: string[] = [];
+  if (versium) {
+    if (versium.interest_health_beauty) versiumInterests.push("health_beauty");
+    if (versium.interest_exercise) versiumInterests.push("exercise");
+    if (versium.interest_diet_weight_loss) versiumInterests.push("diet_weight_loss");
+    if (versium.interest_vitamins) versiumInterests.push("vitamins");
+    if (versium.interest_cooking) versiumInterests.push("cooking");
+    if (versium.interest_travel) versiumInterests.push("travel");
+    if (versium.interest_pets) versiumInterests.push("pets");
+    if (versium.interest_gardening) versiumInterests.push("gardening");
+    if (versium.interest_reading) versiumInterests.push("reading");
+    if (versium.online_purchasing) versiumInterests.push("online_purchasing");
+  }
 
   await admin
     .from("customer_demographics")
@@ -278,10 +308,10 @@ async function enrichOne(
         customer_id: customer.id,
         workspace_id: customer.workspace_id,
 
-        inferred_gender: nameResult?.gender ?? "unknown",
-        inferred_gender_conf: nameResult?.gender_confidence ?? 0,
+        inferred_gender: gender,
+        inferred_gender_conf: versium?.gender ? 1.0 : (nameResult?.gender_confidence ?? 0),
         inferred_age_range: ageRange,
-        inferred_age_conf: nameResult?.age_confidence ?? 0,
+        inferred_age_conf: versium?.age_range ? 1.0 : (nameResult?.age_confidence ?? 0),
         name_inference_notes: nameResult?.notes ?? null,
 
         zip_code: zip,
@@ -291,6 +321,21 @@ async function enrichOne(
         zip_urban_classification: zipData?.urban_classification ?? null,
         zip_owner_pct: zipData?.owner_pct ?? null,
         zip_college_pct: zipData?.college_pct ?? null,
+
+        // Versium fields
+        versium_gender: versium?.gender ?? null,
+        versium_age_range: versium?.age_range ?? null,
+        versium_household_income: versium?.household_income ?? null,
+        versium_net_worth: versium?.estimated_net_worth ?? null,
+        versium_education: versium?.education_level ?? null,
+        versium_marital_status: versium?.marital_status ?? null,
+        versium_home_owner: versium?.home_owner ?? null,
+        versium_home_value: versium?.home_market_value ?? null,
+        versium_household_size: versium?.household_size ?? null,
+        versium_presence_of_children: versium?.presence_of_children ?? null,
+        versium_interests: versiumInterests.length ? versiumInterests : [],
+        versium_raw: versium?.raw ?? null,
+        versium_enriched_at: versium ? new Date().toISOString() : null,
 
         inferred_life_stage: lifeStage,
         health_priorities: orderAnalysis.health_priorities,

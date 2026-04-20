@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted"
     )
     .eq("id", workspaceId)
     .single();
@@ -123,6 +123,12 @@ export async function GET(
     census_connected: !!workspace.census_api_key_encrypted,
     census_api_key_hint: workspace.census_api_key_encrypted
       ? `...${decrypt(workspace.census_api_key_encrypted).slice(-4)}`
+      : null,
+
+    // Versium
+    versium_connected: !!workspace.versium_api_key_encrypted,
+    versium_api_key_hint: workspace.versium_api_key_encrypted
+      ? `...${decrypt(workspace.versium_api_key_encrypted).slice(-4)}`
       : null,
 
     // Slack
@@ -282,6 +288,15 @@ export async function PATCH(
         updates.klaviyo_api_key_encrypted = encrypt(body.klaviyo_api_key);
       } else {
         updates.klaviyo_api_key_encrypted = null;
+      }
+    }
+
+    // Versium
+    if ("versium_api_key" in body) {
+      if (body.versium_api_key) {
+        updates.versium_api_key_encrypted = encrypt(body.versium_api_key);
+      } else {
+        updates.versium_api_key_encrypted = null;
       }
     }
 
