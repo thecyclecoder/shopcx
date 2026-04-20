@@ -615,6 +615,16 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
         data: { orderId: savedOrder.id, customerId, workspaceId },
       }).catch(() => {}); // fire and forget
     }
+
+    // Kick off demographic enrichment for this customer. The handler
+    // sleeps ~1h before reading data so we pick up the order + any
+    // related subscription once everything has settled.
+    if (customerId) {
+      inngest.send({
+        name: "demographics/enrich-single",
+        data: { workspace_id: workspaceId, customer_id: customerId },
+      }).catch(() => {});
+    }
   }
 
   // Duplicate order detection: check for multiple paid orders on the same subscription within 7 days

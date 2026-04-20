@@ -81,6 +81,14 @@ export default function IntegrationsPage() {
             connected: !!data.amplifier_connected,
           },
           {
+            slug: "census",
+            name: "US Census Bureau",
+            description: "Zip-code demographic enrichment — income, education, urban/rural",
+            icon: "M12 21v-8.25M15.75 21v-8.25M8.25 21v-8.25M3 9l9-6 9 6m-1.5 12V10.332A48.36 48.36 0 0012 9.75c-2.551 0-5.056.2-7.5.582V21M3 21h18M12 6.75h.008v.008H12V6.75z",
+            iconBg: "bg-indigo-600/10",
+            connected: !!data.census_connected,
+          },
+          {
             slug: "slack",
             name: "Slack",
             description: "Team notifications, ticket sharing",
