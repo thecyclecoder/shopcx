@@ -105,7 +105,7 @@ Return JSON array:
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
-      max_tokens: 4096,
+      max_tokens: 8192,
       temperature: 0,
       system: "You are a product marketing analyst. Return strict JSON only — no prose, no markdown fences.",
       messages: [{ role: "user", content: prompt }],
@@ -119,14 +119,27 @@ Return JSON array:
   const data = await res.json();
   const text = (data.content || []).find((c: { type: string }) => c.type === "text")?.text || "[]";
 
-  // Parse JSON — handle both raw array and wrapped
+  // Parse JSON — handle markdown fences and truncated responses
   let themes;
   try {
-    const cleaned = text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-    const parsed = JSON.parse(cleaned);
-    themes = Array.isArray(parsed) ? parsed : parsed.themes || [];
+    let cleaned = text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+    try {
+      const parsed = JSON.parse(cleaned);
+      themes = Array.isArray(parsed) ? parsed : parsed.themes || [];
+    } catch {
+      // Response may be truncated — try to salvage complete objects
+      // Find the last complete object by looking for the last "},"
+      const lastComplete = cleaned.lastIndexOf("},");
+      if (lastComplete > 0) {
+        cleaned = cleaned.slice(0, lastComplete + 1) + "]";
+        const parsed = JSON.parse(cleaned);
+        themes = Array.isArray(parsed) ? parsed : [];
+      } else {
+        throw new Error("Cannot parse");
+      }
+    }
   } catch {
-    return NextResponse.json({ error: "Failed to parse AI response", raw: text }, { status: 500 });
+    return NextResponse.json({ error: "Failed to parse AI response", raw: text.slice(0, 500) }, { status: 500 });
   }
 
   return NextResponse.json({ themes });
