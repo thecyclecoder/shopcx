@@ -57,6 +57,11 @@ function prettyKey(k: string, map?: Record<string, string>): string {
   return k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+interface ProductOption {
+  id: string;
+  title: string;
+}
+
 export default function DemographicsPage() {
   const workspace = useWorkspace();
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -65,16 +70,27 @@ export default function DemographicsPage() {
   const [enriching, setEnriching] = useState(false);
   const [forceAll, setForceAll] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [products, setProducts] = useState<ProductOption[]>([]);
+  const [selectedProduct, setSelectedProduct] = useState<string>("");
+
+  // Load products list once
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspace.id}/products`)
+      .then(r => r.ok ? r.json() : { products: [] })
+      .then(d => setProducts((d.products || []).filter((p: ProductOption & { status?: string }) => p.status === "active")))
+      .catch(() => {});
+  }, [workspace.id]);
 
   const load = useCallback(async () => {
+    const productParam = selectedProduct ? `?product_id=${selectedProduct}` : "";
     const [sumRes, statRes] = await Promise.all([
-      fetch(`/api/workspaces/${workspace.id}/demographics/summary`),
+      fetch(`/api/workspaces/${workspace.id}/demographics/summary${productParam}`),
       fetch(`/api/workspaces/${workspace.id}/demographics/status`),
     ]);
     if (sumRes.ok) setSummary(await sumRes.json());
     if (statRes.ok) setStatus(await statRes.json());
     setLoading(false);
-  }, [workspace.id]);
+  }, [workspace.id, selectedProduct]);
 
   useEffect(() => {
     load();
@@ -128,6 +144,21 @@ export default function DemographicsPage() {
           <p className="mt-1 text-sm text-zinc-500">
             Inferred from names (Claude Haiku), zip codes (US Census ACS), and order history. Internal use only.
           </p>
+          <div className="mt-3">
+            <select
+              value={selectedProduct}
+              onChange={e => { setSelectedProduct(e.target.value); setLoading(true); }}
+              className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+            >
+              <option value="">All Customers</option>
+              {products.map(p => (
+                <option key={p.id} value={p.id}>{p.title}</option>
+              ))}
+            </select>
+            {selectedProduct && (
+              <span className="ml-2 text-xs text-zinc-500">Showing demographics for customers who purchased this product</span>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <label className="flex items-center gap-1.5 text-xs text-zinc-500">

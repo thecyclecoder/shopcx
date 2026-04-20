@@ -63,6 +63,11 @@ export default function SettingsPage() {
           <SettingsCard href="/dashboard/settings/portal" title="Customer Portal" desc="Shopify extension, mini-site, products" />
         </SettingsSection>
 
+        <SettingsSection title="Storefront & Subscriptions">
+          <SettingsCard href="/dashboard/settings/pricing-rules" title="Pricing Rules" desc="Quantity discounts, free shipping, free gifts — assign to products" />
+          <SettingsCard href="/dashboard/settings/subscription-settings" title="Subscription Settings" desc="Subscribe & save discount, delivery frequencies, shipping rules" />
+        </SettingsSection>
+
         <SettingsSection title="Orders & Fulfillment">
           <SettingsCard href="/dashboard/settings/tracking-sla" title="Tracking SLA" desc="Expected shipping times, cutoff hours, and shipping days" />
         </SettingsSection>

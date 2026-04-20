@@ -88,7 +88,8 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id: workspaceId } = await params;
-  void request;
+  const url = new URL(request.url);
+  const productId = url.searchParams.get("product_id");
 
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -96,17 +97,66 @@ export async function GET(
 
   const admin = createAdminClient();
 
+  // If filtering by product, find customer IDs who ordered that product
+  let customerIdFilter: string[] | null = null;
+  if (productId) {
+    const { data: product } = await admin.from("products")
+      .select("shopify_product_id").eq("id", productId).single();
+    if (product?.shopify_product_id) {
+      // Find orders containing this product's variants
+      const allCustIds = new Set<string>();
+      let offset = 0;
+      while (true) {
+        const { data: orders } = await admin.from("orders")
+          .select("customer_id, line_items")
+          .eq("workspace_id", workspaceId)
+          .range(offset, offset + 999);
+        if (!orders?.length) break;
+        for (const o of orders) {
+          const items = (o.line_items || []) as { product_id?: string }[];
+          if (items.some(i => i.product_id === product.shopify_product_id || i.product_id === productId)) {
+            allCustIds.add(o.customer_id);
+          }
+        }
+        if (orders.length < 1000) break;
+        offset += 1000;
+      }
+      customerIdFilter = [...allCustIds];
+    }
+  }
+
   const [totalRes, demographicsRes] = await Promise.all([
     admin
       .from("customers")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId),
-    admin
-      .from("customer_demographics")
-      .select(
-        "inferred_gender, inferred_gender_conf, inferred_age_range, inferred_age_conf, zip_income_bracket, zip_urban_classification, buyer_type, health_priorities",
-      )
-      .eq("workspace_id", workspaceId),
+    (async () => {
+      if (customerIdFilter !== null && customerIdFilter.length === 0) {
+        return { data: [] };
+      }
+      let query = admin
+        .from("customer_demographics")
+        .select(
+          "customer_id, inferred_gender, inferred_gender_conf, inferred_age_range, inferred_age_conf, zip_income_bracket, zip_urban_classification, buyer_type, health_priorities",
+        )
+        .eq("workspace_id", workspaceId);
+      if (customerIdFilter) {
+        // Batch in groups of 100 to avoid URL length issues
+        const allRows: typeof query extends Promise<{ data: infer T }> ? NonNullable<T> : never[] = [];
+        for (let i = 0; i < customerIdFilter.length; i += 100) {
+          const { data } = await admin
+            .from("customer_demographics")
+            .select(
+              "customer_id, inferred_gender, inferred_gender_conf, inferred_age_range, inferred_age_conf, zip_income_bracket, zip_urban_classification, buyer_type, health_priorities",
+            )
+            .eq("workspace_id", workspaceId)
+            .in("customer_id", customerIdFilter.slice(i, i + 100));
+          if (data) (allRows as unknown[]).push(...data);
+        }
+        return { data: allRows };
+      }
+      return query;
+    })(),
   ]);
 
   const total_customers = totalRes.count || 0;
