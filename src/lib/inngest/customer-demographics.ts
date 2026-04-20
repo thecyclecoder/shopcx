@@ -342,11 +342,12 @@ export const enrichBatch = inngest.createFunction(
         `fetch-unenriched-${workspaceId}`,
         async () => {
           const admin = createAdminClient();
-          // Customers missing demographics or with old version
+          // Customers missing demographics or with old version — only those with orders
           let query = admin
             .from("customers")
             .select("id, workspace_id, first_name, default_address")
             .eq("workspace_id", workspaceId)
+            .gt("total_orders", 0)
             .limit(MAX_PER_RUN);
 
           if (!eventData.force_all) {
@@ -382,7 +383,8 @@ export const enrichBatch = inngest.createFunction(
           const { count: totalCustomers } = await admin
             .from("customers")
             .select("id", { count: "exact", head: true })
-            .eq("workspace_id", workspaceId);
+            .eq("workspace_id", workspaceId)
+            .gt("total_orders", 0);
           const { count: enrichedCount } = await admin
             .from("customer_demographics")
             .select("id", { count: "exact", head: true })
