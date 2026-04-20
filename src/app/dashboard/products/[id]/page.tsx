@@ -160,6 +160,14 @@ export default function ProductIntelligenceDetailPage() {
         </div>
         <div className="flex items-center gap-2">
           {saved && <span className="text-sm text-green-600">Saved</span>}
+          {data.products?.id && (
+            <Link
+              href={`/dashboard/products/${data.products.id}/intelligence`}
+              className="rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600"
+            >
+              Product Intelligence Engine
+            </Link>
+          )}
           {!editing ? (
             <button onClick={() => setEditing(true)} className="rounded-md bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-600">Edit</button>
           ) : (
