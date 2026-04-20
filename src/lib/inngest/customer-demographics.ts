@@ -441,9 +441,6 @@ export const enrichSingle = inngest.createFunction(
       customer_id: string;
     };
 
-    // Let order/subscription data settle before enriching
-    await step.sleep("settle", "1h");
-
     const customer = await step.run("fetch-customer", async () => {
       const admin = createAdminClient();
       const { data } = await admin
