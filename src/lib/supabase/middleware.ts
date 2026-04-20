@@ -1,15 +1,91 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula", "/coming-soon", "/api/shopify/callback", "/api/webhooks", "/api/inngest", "/csat", "/api/csat", "/help", "/api/help", "/api/portal", "/portal", "/journey", "/api/journey"];
+const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula", "/coming-soon", "/api/shopify/callback", "/api/webhooks", "/api/inngest", "/csat", "/api/csat", "/help", "/api/help", "/api/portal", "/portal", "/journey", "/api/journey", "/api/storefront", "/api/revalidate", "/store", "/sitemap.xml", "/robots.txt"];
 const WORKSPACE_SETUP_ROUTES = ["/workspace/new", "/workspace/select"];
 const ADMIN_EMAIL = "dylan@superfoodscompany.com";
 const PRIMARY_DOMAINS = ["shopcx.ai", "www.shopcx.ai", "localhost"];
+
+// ─── Storefront domain cache ────────────────────────────────────────────
+// Resolves custom storefront domain → workspace storefront_slug. Cached in
+// module memory with a 60s TTL so middleware stays fast at the edge.
+type StorefrontCacheEntry = { slug: string | null; expiresAt: number };
+const storefrontCache = new Map<string, StorefrontCacheEntry>();
+const STOREFRONT_CACHE_TTL_MS = 60_000;
+
+async function resolveStorefrontSlugByDomain(
+  hostname: string,
+): Promise<string | null> {
+  const cached = storefrontCache.get(hostname);
+  if (cached && cached.expiresAt > Date.now()) return cached.slug;
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !serviceKey) return null;
+
+  try {
+    const res = await fetch(
+      `${supabaseUrl}/rest/v1/workspaces?storefront_domain=eq.${encodeURIComponent(
+        hostname,
+      )}&select=storefront_slug&limit=1`,
+      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
+    );
+    const data = (await res.json()) as Array<{ storefront_slug?: string }>;
+    const slug = data?.[0]?.storefront_slug || null;
+    storefrontCache.set(hostname, {
+      slug,
+      expiresAt: Date.now() + STOREFRONT_CACHE_TTL_MS,
+    });
+    return slug;
+  } catch {
+    return null;
+  }
+}
 
 export async function updateSession(request: NextRequest) {
   // ── Subdomain routing for help center mini-sites ──
   const hostname = request.headers.get("host") || "";
   const isLocalhost = hostname.includes("localhost") || hostname.includes("127.0.0.1");
+
+  // ── Storefront routing ──
+  // External URLs:
+  //   shopcx.ai/store/{workspace}/{slug}  → admin preview route (noindex)
+  //   custom-domain.com/{slug}            → public route; middleware
+  //                                          injects x-storefront-
+  //                                          workspace-slug header so
+  //                                          the RSC page knows which
+  //                                          workspace to load.
+  {
+    const pathname = request.nextUrl.pathname;
+    const isInternal =
+      pathname.startsWith("/_next") ||
+      pathname.startsWith("/api/") ||
+      pathname === "/favicon.ico";
+
+    if (!isInternal && !isLocalhost) {
+      const isPrimaryDomain = PRIMARY_DOMAINS.some(
+        (d) => hostname === d || hostname.endsWith(`.${d}`),
+      );
+      if (!isPrimaryDomain) {
+        const storefrontSlug = await resolveStorefrontSlugByDomain(hostname);
+        if (storefrontSlug) {
+          const segs = pathname.split("/").filter(Boolean);
+          // Single-segment paths are product handles — forward them
+          // through the (storefront)/[slug] route with the workspace
+          // attached as a header. Multi-segment paths fall through.
+          if (segs.length === 1) {
+            const forwardedHeaders = new Headers(request.headers);
+            forwardedHeaders.set("x-storefront-workspace-slug", storefrontSlug);
+            // Short-circuit auth — storefront is public. Without this,
+            // unauthenticated visitors would bounce to /login.
+            return NextResponse.rewrite(request.nextUrl, {
+              request: { headers: forwardedHeaders },
+            });
+          }
+        }
+      }
+    }
+  }
 
   if (!isLocalhost) {
     const isPrimaryDomain = PRIMARY_DOMAINS.some(d => hostname === d || hostname.endsWith(`.${d}`));
