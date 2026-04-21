@@ -108,10 +108,14 @@ export interface MediaItem {
   url: string | null;
   webp_url: string | null;
   avif_url: string | null;
-  avif_640_url: string | null;
-  webp_640_url: string | null;
-  avif_1200_url: string | null;
-  webp_1200_url: string | null;
+  avif_480_url: string | null;
+  webp_480_url: string | null;
+  avif_750_url: string | null;
+  webp_750_url: string | null;
+  avif_1080_url: string | null;
+  webp_1080_url: string | null;
+  avif_1500_url: string | null;
+  webp_1500_url: string | null;
   avif_1920_url: string | null;
   webp_1920_url: string | null;
   alt_text: string | null;
@@ -288,7 +292,7 @@ export async function getPageData(
     admin
       .from("product_media")
       .select(
-        "slot, url, webp_url, avif_url, avif_640_url, webp_640_url, avif_1200_url, webp_1200_url, avif_1920_url, webp_1920_url, alt_text",
+        "slot, url, webp_url, avif_url, avif_480_url, webp_480_url, avif_750_url, webp_750_url, avif_1080_url, webp_1080_url, avif_1500_url, webp_1500_url, avif_1920_url, webp_1920_url, alt_text",
       )
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id),
@@ -351,10 +355,14 @@ export async function getPageData(
       url: m.url,
       webp_url: row.webp_url ?? null,
       avif_url: row.avif_url ?? null,
-      avif_640_url: row.avif_640_url ?? null,
-      webp_640_url: row.webp_640_url ?? null,
-      avif_1200_url: row.avif_1200_url ?? null,
-      webp_1200_url: row.webp_1200_url ?? null,
+      avif_480_url: row.avif_480_url ?? null,
+      webp_480_url: row.webp_480_url ?? null,
+      avif_750_url: row.avif_750_url ?? null,
+      webp_750_url: row.webp_750_url ?? null,
+      avif_1080_url: row.avif_1080_url ?? null,
+      webp_1080_url: row.webp_1080_url ?? null,
+      avif_1500_url: row.avif_1500_url ?? null,
+      webp_1500_url: row.webp_1500_url ?? null,
       avif_1920_url: row.avif_1920_url ?? null,
       webp_1920_url: row.webp_1920_url ?? null,
       alt_text: m.alt_text,

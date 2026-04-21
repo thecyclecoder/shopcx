@@ -47,52 +47,59 @@ export function pictureSources(m: {
   url: string | null;
   webp_url: string | null;
   avif_url: string | null;
-  avif_640_url: string | null;
-  webp_640_url: string | null;
-  avif_1200_url: string | null;
-  webp_1200_url: string | null;
+  avif_480_url: string | null;
+  webp_480_url: string | null;
+  avif_750_url: string | null;
+  webp_750_url: string | null;
+  avif_1080_url: string | null;
+  webp_1080_url: string | null;
+  avif_1500_url: string | null;
+  webp_1500_url: string | null;
   avif_1920_url: string | null;
   webp_1920_url: string | null;
   alt_text: string | null;
 } | null | undefined, altFallback: string, sizes: string): PictureSources | null {
   if (!m?.url) return null;
 
-  const avif640 = cdnUrl(m.avif_640_url);
-  const avif1200 = cdnUrl(m.avif_1200_url);
-  const avif1920 = cdnUrl(m.avif_1920_url);
-  const webp640 = cdnUrl(m.webp_640_url);
-  const webp1200 = cdnUrl(m.webp_1200_url);
-  const webp1920 = cdnUrl(m.webp_1920_url);
+  const widths = [480, 750, 1080, 1500, 1920] as const;
+  const urls = widths.map((w) => ({
+    width: w,
+    avif: cdnUrl(m[`avif_${w}_url` as keyof typeof m] as string | null),
+    webp: cdnUrl(m[`webp_${w}_url` as keyof typeof m] as string | null),
+  }));
 
-  const avifSet = [
-    avif640 && `${avif640} 640w`,
-    avif1200 && `${avif1200} 1200w`,
-    avif1920 && `${avif1920} 1920w`,
-  ].filter(Boolean).join(", ");
-
-  const webpSet = [
-    webp640 && `${webp640} 640w`,
-    webp1200 && `${webp1200} 1200w`,
-    webp1920 && `${webp1920} 1920w`,
-  ].filter(Boolean).join(", ");
+  const avifSet = urls
+    .filter((u) => u.avif)
+    .map((u) => `${u.avif} ${u.width}w`)
+    .join(", ");
+  const webpSet = urls
+    .filter((u) => u.webp)
+    .map((u) => `${u.webp} ${u.width}w`)
+    .join(", ");
 
   // Pick a single `src` for the fallback <img>. Browsers that honor
-  // <source type=image/*> never hit this; it's only used by bots and
-  // very old browsers. Prefer the smallest still-reasonable size so
-  // that path is cheap too.
+  // <source type=image/*> never hit this; bots / very old browsers
+  // do. Prefer the 750-wide variant — cheapest realistic size that
+  // still renders sharp on a typical 2× DPR phone.
+  const webp750 = urls.find((u) => u.width === 750)?.webp;
+  const avif750 = urls.find((u) => u.width === 750)?.avif;
   const fallback =
-    webp640 ||
-    avif640 ||
-    webp1200 ||
-    avif1200 ||
+    webp750 ||
+    avif750 ||
+    urls.find((u) => u.webp)?.webp ||
+    urls.find((u) => u.avif)?.avif ||
     cdnUrl(m.webp_url) ||
     cdnUrl(m.avif_url) ||
     cdnUrl(m.url) ||
     m.url;
 
+  // Pick the single-URL AVIF/WebP src — used by <source> without srcset
+  // (edge case) and by some legacy consumers of pictureSources().
+  const mid = urls.find((u) => u.width === 1080);
+
   return {
-    avifSrc: avif1200 || cdnUrl(m.avif_url),
-    webpSrc: webp1200 || cdnUrl(m.webp_url),
+    avifSrc: mid?.avif || cdnUrl(m.avif_url),
+    webpSrc: mid?.webp || cdnUrl(m.webp_url),
     fallbackSrc: fallback || "",
     avifSrcSet: avifSet || undefined,
     webpSrcSet: webpSet || undefined,

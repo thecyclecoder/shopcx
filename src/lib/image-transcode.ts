@@ -25,9 +25,14 @@ const WEBP_QUALITY = 78;
 const AVIF_QUALITY = 60;
 const JPEG_QUALITY = 82;
 
-// Responsive widths. Tuned for mobile-first: 640 covers phones at 2×
-// DPR, 1200 covers tablets + desktop, 1920 covers desktop retina.
-export const RESPONSIVE_WIDTHS = [640, 1200, 1920] as const;
+// Responsive widths. Tuned so every common device/DPR pair lands on
+// a variant within ~20% of actual need:
+//   480  — small phones at 1× DPR (iPhone SE 1x, older Androids)
+//   750  — mid phones at 2× DPR (iPhone 14 @ 2x ≈ 780)
+//   1080 — large phones at 3× DPR / tablets at 1.5× (iPhone Pro Max ≈ 1242)
+//   1500 — tablets + mid desktops at 2× DPR
+//   1920 — desktop retina / cap for anything larger
+export const RESPONSIVE_WIDTHS = [480, 750, 1080, 1500, 1920] as const;
 export type ResponsiveWidth = (typeof RESPONSIVE_WIDTHS)[number];
 
 export interface ResponsiveVariant {

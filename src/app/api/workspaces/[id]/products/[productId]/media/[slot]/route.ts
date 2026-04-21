@@ -134,7 +134,7 @@ export async function POST(
   const { data: existing } = await admin
     .from("product_media")
     .select(
-      "storage_path, webp_storage_path, avif_storage_path, avif_640_storage_path, webp_640_storage_path, avif_1200_storage_path, webp_1200_storage_path, avif_1920_storage_path, webp_1920_storage_path",
+      "storage_path, webp_storage_path, avif_storage_path, avif_480_storage_path, webp_480_storage_path, avif_750_storage_path, webp_750_storage_path, avif_1080_storage_path, webp_1080_storage_path, avif_1500_storage_path, webp_1500_storage_path, avif_1920_storage_path, webp_1920_storage_path",
     )
     .eq("workspace_id", workspaceId)
     .eq("product_id", productId)
@@ -149,23 +149,28 @@ export async function POST(
       ...Object.values(variantPaths).flatMap((p) => [p.avif, p.webp]),
     ].filter((p): p is string => !!p),
   );
+  const ex = existing as Record<string, string | null> | null;
   const toRemove = [
-    existing?.storage_path,
-    existing?.webp_storage_path,
-    existing?.avif_storage_path,
-    (existing as Record<string, string | null> | null)?.avif_640_storage_path,
-    (existing as Record<string, string | null> | null)?.webp_640_storage_path,
-    (existing as Record<string, string | null> | null)?.avif_1200_storage_path,
-    (existing as Record<string, string | null> | null)?.webp_1200_storage_path,
-    (existing as Record<string, string | null> | null)?.avif_1920_storage_path,
-    (existing as Record<string, string | null> | null)?.webp_1920_storage_path,
+    ex?.storage_path,
+    ex?.webp_storage_path,
+    ex?.avif_storage_path,
+    ex?.avif_480_storage_path,
+    ex?.webp_480_storage_path,
+    ex?.avif_750_storage_path,
+    ex?.webp_750_storage_path,
+    ex?.avif_1080_storage_path,
+    ex?.webp_1080_storage_path,
+    ex?.avif_1500_storage_path,
+    ex?.webp_1500_storage_path,
+    ex?.avif_1920_storage_path,
+    ex?.webp_1920_storage_path,
   ].filter((p): p is string => !!p && !newPaths.has(p));
   if (toRemove.length > 0) {
     await admin.storage.from(BUCKET).remove(toRemove).catch(() => {});
   }
 
   const variantColumns: Record<string, string | null> = {};
-  for (const w of [640, 1200, 1920] as const) {
+  for (const w of [480, 750, 1080, 1500, 1920] as const) {
     const paths = variantPaths[w] || { avif: null, webp: null };
     variantColumns[`avif_${w}_url`] = paths.avif ? urlFor(paths.avif) : null;
     variantColumns[`webp_${w}_url`] = paths.webp ? urlFor(paths.webp) : null;
@@ -268,7 +273,7 @@ export async function DELETE(
   const { data: existing } = await admin
     .from("product_media")
     .select(
-      "storage_path, webp_storage_path, avif_storage_path, avif_640_storage_path, webp_640_storage_path, avif_1200_storage_path, webp_1200_storage_path, avif_1920_storage_path, webp_1920_storage_path",
+      "storage_path, webp_storage_path, avif_storage_path, avif_480_storage_path, webp_480_storage_path, avif_750_storage_path, webp_750_storage_path, avif_1080_storage_path, webp_1080_storage_path, avif_1500_storage_path, webp_1500_storage_path, avif_1920_storage_path, webp_1920_storage_path",
     )
     .eq("workspace_id", workspaceId)
     .eq("product_id", productId)
@@ -280,10 +285,14 @@ export async function DELETE(
     e?.storage_path,
     e?.webp_storage_path,
     e?.avif_storage_path,
-    e?.avif_640_storage_path,
-    e?.webp_640_storage_path,
-    e?.avif_1200_storage_path,
-    e?.webp_1200_storage_path,
+    e?.avif_480_storage_path,
+    e?.webp_480_storage_path,
+    e?.avif_750_storage_path,
+    e?.webp_750_storage_path,
+    e?.avif_1080_storage_path,
+    e?.webp_1080_storage_path,
+    e?.avif_1500_storage_path,
+    e?.webp_1500_storage_path,
     e?.avif_1920_storage_path,
     e?.webp_1920_storage_path,
   ].filter((p): p is string => !!p);
@@ -301,14 +310,22 @@ export async function DELETE(
       webp_storage_path: null,
       avif_url: null,
       avif_storage_path: null,
-      avif_640_url: null,
-      webp_640_url: null,
-      avif_640_storage_path: null,
-      webp_640_storage_path: null,
-      avif_1200_url: null,
-      webp_1200_url: null,
-      avif_1200_storage_path: null,
-      webp_1200_storage_path: null,
+      avif_480_url: null,
+      webp_480_url: null,
+      avif_480_storage_path: null,
+      webp_480_storage_path: null,
+      avif_750_url: null,
+      webp_750_url: null,
+      avif_750_storage_path: null,
+      webp_750_storage_path: null,
+      avif_1080_url: null,
+      webp_1080_url: null,
+      avif_1080_storage_path: null,
+      webp_1080_storage_path: null,
+      avif_1500_url: null,
+      webp_1500_url: null,
+      avif_1500_storage_path: null,
+      webp_1500_storage_path: null,
       avif_1920_url: null,
       webp_1920_url: null,
       avif_1920_storage_path: null,
