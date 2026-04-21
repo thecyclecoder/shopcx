@@ -139,13 +139,14 @@ const STATUS_STAGES: Record<IntelligenceStatus, number> = {
   published: 4,
 };
 
-const STAGES: { key: "overview" | "ingredients" | "research" | "reviews" | "benefits" | "content"; label: string }[] = [
+const STAGES: { key: "overview" | "ingredients" | "research" | "reviews" | "benefits" | "content" | "seo"; label: string }[] = [
   { key: "overview", label: "Overview" },
   { key: "ingredients", label: "Ingredients" },
   { key: "research", label: "Research" },
   { key: "reviews", label: "Reviews" },
   { key: "benefits", label: "Benefits" },
   { key: "content", label: "Content" },
+  { key: "seo", label: "SEO" },
 ];
 
 function StatusBadge({ status }: { status: IntelligenceStatus }) {
@@ -185,7 +186,7 @@ export default function ProductIntelligenceEnginePage() {
 
   const [overview, setOverview] = useState<Overview | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"overview" | "ingredients" | "research" | "reviews" | "benefits" | "content">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "ingredients" | "research" | "reviews" | "benefits" | "content" | "seo">("overview");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -350,6 +351,13 @@ export default function ProductIntelligenceEnginePage() {
           productId={productId}
           overview={overview}
           onChange={load}
+          setError={setError}
+        />
+      )}
+      {activeTab === "seo" && (
+        <SEOStage
+          workspaceId={workspace.id}
+          productId={productId}
           setError={setError}
         />
       )}
@@ -1770,6 +1778,295 @@ function MediaSlot({
           Remove image
         </button>
       )}
+    </div>
+  );
+}
+
+// =============================================================================
+// SEO: Keyword Research + On-Page Optimization
+// =============================================================================
+
+interface SEOKeyword {
+  id: string;
+  keyword: string;
+  monthly_searches: number;
+  competition: string;
+  competition_index: number;
+  cpc_low_cents: number;
+  cpc_high_cents: number;
+  relevance: string;
+  is_selected: boolean;
+  source: string;
+  search_console_clicks: number;
+  search_console_impressions: number;
+  search_console_ctr: number;
+  search_console_position: number;
+}
+
+function SEOStage({
+  workspaceId,
+  productId,
+  setError,
+}: {
+  workspaceId: string;
+  productId: string;
+  setError: (e: string | null) => void;
+}) {
+  const [keywords, setKeywords] = useState<SEOKeyword[]>([]);
+  const [seoMeta, setSeoMeta] = useState<{ title: string; description: string; keywords: string[] } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [researching, setResearching] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [seoTitle, setSeoTitle] = useState("");
+  const [seoDesc, setSeoDesc] = useState("");
+
+  const load = useCallback(async () => {
+    const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/seo-keywords`);
+    if (res.ok) {
+      const data = await res.json();
+      setKeywords(data.keywords || []);
+      setSeoMeta(data.seo_meta);
+      if (data.seo_meta?.title) setSeoTitle(data.seo_meta.title);
+      if (data.seo_meta?.description) setSeoDesc(data.seo_meta.description);
+    }
+    setLoading(false);
+  }, [workspaceId, productId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const startResearch = async () => {
+    setResearching(true);
+    setError(null);
+    try {
+      await fetch(`/api/workspaces/${workspaceId}/products/${productId}/seo-keywords`, { method: "POST" });
+      // Poll for results
+      const poll = setInterval(async () => {
+        const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/seo-keywords`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.keywords?.length > 0) {
+            setKeywords(data.keywords);
+            setResearching(false);
+            clearInterval(poll);
+          }
+        }
+      }, 5000);
+      setTimeout(() => { clearInterval(poll); setResearching(false); }, 120000);
+    } catch (err) {
+      setError(String(err));
+      setResearching(false);
+    }
+  };
+
+  const toggleKeyword = (keyword: string) => {
+    setKeywords(prev => prev.map(k => k.keyword === keyword ? { ...k, is_selected: !k.is_selected } : k));
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    const selected = keywords.filter(k => k.is_selected).map(k => k.keyword);
+    await fetch(`/api/workspaces/${workspaceId}/products/${productId}/seo-keywords`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        selected_keywords: selected,
+        seo_title: seoTitle,
+        seo_description: seoDesc,
+        seo_keywords: selected,
+      }),
+    });
+    setSaving(false);
+  };
+
+  if (loading) return <p className="text-sm text-zinc-400">Loading...</p>;
+
+  const selected = keywords.filter(k => k.is_selected);
+  const primaryKw = keywords.filter(k => k.relevance === "primary" && k.monthly_searches > 0);
+  const secondaryKw = keywords.filter(k => k.relevance === "secondary" && k.monthly_searches > 0);
+  const longTail = keywords.filter(k => (k.relevance === "long_tail" || !k.monthly_searches) && k.source !== "search_console");
+  const fromConsole = keywords.filter(k => k.source === "search_console" || k.search_console_impressions > 0);
+
+  return (
+    <div className="space-y-6">
+      {/* Research button */}
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm text-zinc-500">
+            {keywords.length > 0
+              ? `${keywords.length} keywords researched · ${selected.length} selected`
+              : "Run keyword research to find SEO opportunities based on your product benefits and ingredients."
+            }
+          </p>
+        </div>
+        <button
+          onClick={startResearch}
+          disabled={researching}
+          className="rounded-md bg-indigo-500 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-600 disabled:opacity-50"
+        >
+          {researching ? "Researching..." : keywords.length > 0 ? "Re-research" : "Research Keywords"}
+        </button>
+      </div>
+
+      {keywords.length > 0 && (
+        <>
+          {/* SEO Meta Fields */}
+          <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+            <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">SEO Meta Tags</h2>
+            <label className="mb-3 block">
+              <span className="mb-1 block text-xs font-medium text-zinc-500">Title Tag <span className="text-zinc-400">({seoTitle.length}/60 chars)</span></span>
+              <input
+                value={seoTitle}
+                onChange={e => setSeoTitle(e.target.value)}
+                placeholder="e.g. Amazing Mushroom Coffee | 12 Superfoods | Superfoods Company"
+                maxLength={60}
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-zinc-500">Meta Description <span className="text-zinc-400">({seoDesc.length}/160 chars)</span></span>
+              <textarea
+                value={seoDesc}
+                onChange={e => setSeoDesc(e.target.value)}
+                placeholder="Compelling description with target keywords..."
+                maxLength={160}
+                rows={3}
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              />
+            </label>
+          </div>
+
+          {/* Search Console — existing rankings */}
+          {fromConsole.length > 0 && (
+            <KeywordTable
+              title="Already Ranking (Search Console)"
+              subtitle="Keywords you're already appearing for in Google"
+              keywords={fromConsole}
+              onToggle={toggleKeyword}
+              showConsoleData
+            />
+          )}
+
+          {/* Primary keywords (1000+ searches) */}
+          {primaryKw.length > 0 && (
+            <KeywordTable
+              title="High Volume Keywords"
+              subtitle="1,000+ monthly searches — competitive but high potential"
+              keywords={primaryKw}
+              onToggle={toggleKeyword}
+            />
+          )}
+
+          {/* Secondary keywords (100-999 searches) */}
+          {secondaryKw.length > 0 && (
+            <KeywordTable
+              title="Medium Volume Keywords"
+              subtitle="100-999 monthly searches — good balance of volume and competition"
+              keywords={secondaryKw}
+              onToggle={toggleKeyword}
+            />
+          )}
+
+          {/* Long tail */}
+          {longTail.length > 0 && (
+            <KeywordTable
+              title="Long-Tail Keywords"
+              subtitle="Lower volume but easier to rank — great for content and ads"
+              keywords={longTail}
+              onToggle={toggleKeyword}
+            />
+          )}
+
+          <button
+            onClick={save}
+            disabled={saving}
+            className="rounded-md bg-indigo-500 px-5 py-2 text-sm font-medium text-white hover:bg-indigo-600 disabled:opacity-50"
+          >
+            {saving ? "Saving..." : "Save SEO Settings"}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function KeywordTable({
+  title,
+  subtitle,
+  keywords,
+  onToggle,
+  showConsoleData = false,
+}: {
+  title: string;
+  subtitle: string;
+  keywords: SEOKeyword[];
+  onToggle: (keyword: string) => void;
+  showConsoleData?: boolean;
+}) {
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+        <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{title}</h3>
+        <p className="text-xs text-zinc-500">{subtitle}</p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
+              <th className="px-4 py-2 w-8"></th>
+              <th className="px-4 py-2">Keyword</th>
+              <th className="px-4 py-2 text-right">Monthly Searches</th>
+              <th className="px-4 py-2">Competition</th>
+              <th className="px-4 py-2 text-right">CPC</th>
+              {showConsoleData && (
+                <>
+                  <th className="px-4 py-2 text-right">Clicks</th>
+                  <th className="px-4 py-2 text-right">Impressions</th>
+                  <th className="px-4 py-2 text-right">Position</th>
+                </>
+              )}
+            </tr>
+          </thead>
+          <tbody>
+            {keywords.map(k => (
+              <tr key={k.keyword} className={`border-b border-zinc-100 dark:border-zinc-800/50 ${k.is_selected ? "bg-indigo-50/50 dark:bg-indigo-950/20" : ""}`}>
+                <td className="px-4 py-2">
+                  <input
+                    type="checkbox"
+                    checked={k.is_selected}
+                    onChange={() => onToggle(k.keyword)}
+                    className="rounded border-zinc-300 text-indigo-500"
+                  />
+                </td>
+                <td className="px-4 py-2 text-zinc-900 dark:text-zinc-100">{k.keyword}</td>
+                <td className="px-4 py-2 text-right tabular-nums text-zinc-600 dark:text-zinc-400">
+                  {k.monthly_searches > 0 ? k.monthly_searches.toLocaleString() : "—"}
+                </td>
+                <td className="px-4 py-2">
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                    k.competition === "LOW" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                    : k.competition === "MEDIUM" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                    : k.competition === "HIGH" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                    : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800"
+                  }`}>
+                    {k.competition}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-right tabular-nums text-zinc-500">
+                  {k.cpc_high_cents > 0 ? `$${(k.cpc_high_cents / 100).toFixed(2)}` : "—"}
+                </td>
+                {showConsoleData && (
+                  <>
+                    <td className="px-4 py-2 text-right tabular-nums text-zinc-600">{k.search_console_clicks || "—"}</td>
+                    <td className="px-4 py-2 text-right tabular-nums text-zinc-600">{k.search_console_impressions || "—"}</td>
+                    <td className="px-4 py-2 text-right tabular-nums text-zinc-600">{k.search_console_position ? k.search_console_position.toFixed(1) : "—"}</td>
+                  </>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

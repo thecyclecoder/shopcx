@@ -89,6 +89,14 @@ export default function IntegrationsPage() {
             connected: !!data.census_connected,
           },
           {
+            slug: "google-seo",
+            name: "Google SEO Tools",
+            description: "Keyword Planner (search volume) + Search Console (rankings)",
+            icon: "M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 15.803a7.5 7.5 0 0010.607 0z",
+            iconBg: "bg-blue-600/10",
+            connected: !!(data.google_ads_connected || data.google_search_console_connected),
+          },
+          {
             slug: "versium",
             name: "Versium REACH",
             description: "Individual-level demographic append — real age, income, interests, household",

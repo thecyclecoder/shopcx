@@ -64,6 +64,7 @@ export default function SettingsPage() {
         </SettingsSection>
 
         <SettingsSection title="Storefront & Subscriptions">
+          <SettingsCard href="/dashboard/settings/storefront-design" title="Storefront Design" desc="Logo, brand colors, fonts for your storefront" />
           <SettingsCard href="/dashboard/settings/storefront-domain" title="Storefront Domain" desc="Custom domain for your storefront — auto-configures Vercel" />
           <SettingsCard href="/dashboard/settings/pricing-rules" title="Pricing Rules" desc="Quantity discounts, free shipping, free gifts — assign to products" />
           <SettingsCard href="/dashboard/settings/subscription-settings" title="Subscription Settings" desc="Subscribe & save discount, delivery frequencies, shipping rules" />
