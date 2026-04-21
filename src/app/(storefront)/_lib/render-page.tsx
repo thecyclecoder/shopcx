@@ -1,17 +1,44 @@
+import dynamic from "next/dynamic";
 import type { PageData } from "./page-data";
 import { storefrontFont } from "./fonts";
+import { pictureSources } from "./image-urls";
 
+// Above-the-fold: imported directly, rendered in initial HTML, part of
+// main JS bundle (or zero JS, for server components).
 import { HeroSection } from "../_sections/HeroSection";
 import { MechanismSection } from "../_sections/MechanismSection";
 import { HowItWorksSection } from "../_sections/HowItWorksSection";
-import { PriceTableSection } from "../_sections/PriceTableSection";
+
+// Below-the-fold: server components still render into the initial
+// HTML (no interactive JS anyway), but client components — Reviews,
+// FAQ, StickyCTA — are dynamic-imported so their JS lands in a
+// separate chunk that only loads after initial render + hydration of
+// the critical path.
 import { UGCSection } from "../_sections/UGCSection";
 import { ComparisonSection } from "../_sections/ComparisonSection";
 import { IngredientsSection } from "../_sections/IngredientsSection";
-import { ReviewsSection } from "../_sections/ReviewsSection";
-import { FAQSection } from "../_sections/FAQSection";
 import { FinalCTASection } from "../_sections/FinalCTASection";
-import { StickyMobileCTA } from "../_sections/StickyMobileCTA";
+
+// PriceTable is mid-page but interactive on first scroll — load its
+// JS with the page but in a separate chunk so it doesn't inflate the
+// main runtime. ssr: true so the price table HTML is still in the
+// initial response for SEO + instant paint.
+const PriceTableSection = dynamic(
+  () => import("../_sections/PriceTableSection").then((m) => m.PriceTableSection),
+);
+
+const ReviewsSection = dynamic(
+  () => import("../_sections/ReviewsSection").then((m) => m.ReviewsSection),
+);
+
+const FAQSection = dynamic(
+  () => import("../_sections/FAQSection").then((m) => m.FAQSection),
+);
+
+const StickyMobileCTA = dynamic(
+  () => import("../_sections/StickyMobileCTA").then((m) => m.StickyMobileCTA),
+  { ssr: false }, // scroll-dependent, not needed in SSR HTML
+);
 
 /**
  * Shared render layer used by both the public route (/[slug]) and the
@@ -40,14 +67,33 @@ export function StorefrontPage({
     "--storefront-accent": design.accent_color || "#10b981",
   } as React.CSSProperties;
 
-  // The <img> in HeroSection carries fetchpriority=high, which Chromium
-  // treats as a priority hint and starts fetching during HTML parse.
-  // We do NOT emit a <link rel="preload"> here: the optimized _next/
-  // image URL isn't known at render time (it's a client-side srcset
-  // resolution), and an imprecise preload costs more than it saves.
+  // Hero image preload. The srcset/sizes exactly mirror the <picture>
+  // in HeroSection, so the browser picks the same variant via the
+  // preload that it would from the DOM — but the preload is in <head>,
+  // not deep in the body. Vercel auto-extracts <link rel=preload> from
+  // the HTML into an HTTP 103 Early Hints response, so the browser
+  // starts downloading the hero during TTFB instead of after parse.
+  const heroSources = pictureSources(
+    data.media_by_slot["hero"],
+    data.product.title,
+    "(min-width: 768px) 50vw, 100vw",
+  );
 
   return (
     <div className={font.className} style={themeStyle}>
+      {heroSources?.avifSrcSet && (
+        <link
+          rel="preload"
+          as="image"
+          type="image/avif"
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          {...({
+            imageSrcSet: heroSources.avifSrcSet,
+            imageSizes: heroSources.sizes,
+            fetchPriority: "high",
+          } as any)}
+        />
+      )}
       <ProductSchema data={data} canonicalPath={canonicalPath} />
       <FAQSchema data={data} />
 
