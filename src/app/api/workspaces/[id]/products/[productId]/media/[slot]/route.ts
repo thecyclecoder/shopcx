@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { transcodeUpload } from "@/lib/image-transcode";
+import { revalidatePath } from "next/cache";
 
 const BUCKET = "product-media";
 
@@ -206,6 +207,15 @@ export async function POST(
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Revalidate storefront pages so the new image appears immediately
+  try {
+    const { data: product } = await admin.from("products").select("handle").eq("id", productId).single();
+    const { data: ws } = await admin.from("workspaces").select("storefront_slug").eq("id", workspaceId).single();
+    if (product?.handle && ws?.storefront_slug) {
+      revalidatePath(`/store/${ws.storefront_slug}/${product.handle}`);
+    }
+  } catch { /* non-fatal */ }
 
   return NextResponse.json({ media: row });
 }
