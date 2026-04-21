@@ -3,28 +3,34 @@ import type { NextRequest } from "next/server";
 /**
  * Edge image proxy — /storefront-img/{bucket}/{objectPath...}
  *
- * Streams Supabase Storage public objects through Vercel's edge, but
- * rewrites the Cache-Control header so the response is actually
- * cacheable by Vercel's CDN. Supabase currently serves public bucket
- * objects with `Cache-Control: no-cache`, which kills edge caching
- * even though the content is genuinely immutable (every upload gets
- * a unique timestamped filename).
+ * Streams Supabase Storage public objects through Vercel's edge,
+ * replacing Supabase's `Cache-Control: no-cache` with headers that
+ * actually let Vercel's CDN hold the response.
  *
- * The proxy adds:
- *   Cache-Control: public, max-age=31536000, immutable, s-maxage=31536000
+ * Critical: Next.js 16 Route Handlers with dynamic segments are
+ * dynamic-by-default, which means Vercel won't cache the response
+ * based on Cache-Control: s-maxage alone. The Vercel-specific
+ * `CDN-Cache-Control` header is the escape hatch — it forces edge
+ * CDN caching regardless of runtime designation. We set all three
+ * cache headers so we hit every code path:
+ *
+ *   - Cache-Control        → browser + any intermediate proxy
+ *   - Vercel-CDN-Cache-Control → Vercel's edge CDN (takes precedence)
+ *   - CDN-Cache-Control    → generic CDN directive
  *
  * After the first request to a given variant URL anywhere in the
  * world, subsequent requests to the same Vercel edge POP return in
- * single-digit milliseconds without ever touching Supabase again.
- *
- * Runtime: edge. Adds ~5-10ms vs direct Supabase, but gains universal
- * edge caching, which is a net 300-400ms win on warm cache hits.
+ * single-digit ms without ever touching Supabase again.
  */
 
 export const runtime = "edge";
+// revalidate=false hints Next's Data Cache layer that the underlying
+// fetch result is long-lived; paired with CDN-Cache-Control, Vercel
+// also holds the Route Handler response at the edge.
+export const revalidate = 31536000;
 
-// Hold on the Vercel edge for a year.
-const PUBLIC_CACHE = "public, max-age=31536000, immutable, s-maxage=31536000";
+const CLIENT_CACHE = "public, max-age=31536000, immutable";
+const EDGE_CACHE = "public, max-age=31536000, immutable";
 
 export async function GET(
   request: NextRequest,
@@ -38,7 +44,6 @@ export async function GET(
 
   const [bucket, ...rest] = segs;
   if (bucket !== "product-media") {
-    // Allowlist — don't let this become a generic Supabase proxy.
     return new Response("Bucket not allowed", { status: 403 });
   }
 
@@ -48,7 +53,6 @@ export async function GET(
   const objectPath = rest.map((s) => encodeURIComponent(s)).join("/");
   const upstream = `${supabaseUrl}/storage/v1/object/public/${bucket}/${objectPath}`;
 
-  // Forward If-None-Match so conditional requests can short-circuit.
   const etag = request.headers.get("if-none-match");
   const ifModified = request.headers.get("if-modified-since");
 
@@ -57,38 +61,39 @@ export async function GET(
       ...(etag ? { "If-None-Match": etag } : {}),
       ...(ifModified ? { "If-Modified-Since": ifModified } : {}),
     },
-    // Explicitly ask the runtime to cache aggressively — this hints
-    // Vercel's fetch layer that the response is long-lived.
     cache: "force-cache",
     next: { revalidate: 31536000 },
   });
 
+  const cacheHeaders: Record<string, string> = {
+    "Cache-Control": CLIENT_CACHE,
+    "Vercel-CDN-Cache-Control": EDGE_CACHE,
+    "CDN-Cache-Control": EDGE_CACHE,
+  };
+
   if (originRes.status === 304) {
-    const headers = new Headers();
-    headers.set("Cache-Control", PUBLIC_CACHE);
-    return new Response(null, { status: 304, headers });
+    return new Response(null, {
+      status: 304,
+      headers: cacheHeaders,
+    });
   }
 
   if (!originRes.ok) {
-    // Don't cache errors.
     return new Response(originRes.statusText || "Not found", {
       status: originRes.status,
       headers: { "Cache-Control": "public, max-age=60" },
     });
   }
 
-  const headers = new Headers();
+  const headers = new Headers(cacheHeaders);
   const contentType = originRes.headers.get("content-type");
   if (contentType) headers.set("Content-Type", contentType);
-  const contentLength = originRes.headers.get("content-length");
-  if (contentLength) headers.set("Content-Length", contentLength);
   const originEtag = originRes.headers.get("etag");
   if (originEtag) headers.set("ETag", originEtag);
 
-  // Override whatever Supabase said.
-  headers.set("Cache-Control", PUBLIC_CACHE);
-  // Help CDN intermediaries key correctly.
-  headers.set("Vary", "Accept-Encoding");
+  // Note: no Vary header. Accept-Encoding variation is handled by
+  // Vercel's CDN implicitly, and a manual Vary can fragment the cache
+  // in ways that produce apparent MISS on every request.
 
   return new Response(originRes.body, { status: 200, headers });
 }
