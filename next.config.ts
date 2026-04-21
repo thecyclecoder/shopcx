@@ -10,6 +10,11 @@ const nextConfig: NextConfig = {
       { protocol: "https", hostname: "**.supabase.co" },
       { protocol: "https", hostname: "**.supabase.in" },
     ],
+    // Hold optimized variants at the edge for a year. Upload endpoint
+    // writes new URLs on replace, so there's no "stale cache" risk —
+    // changing the image changes the URL.
+    minimumCacheTTL: 31536000,
+    formats: ["image/avif", "image/webp"],
   },
 };
 

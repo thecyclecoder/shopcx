@@ -1,4 +1,5 @@
 import type { PageData } from "../_lib/page-data";
+import { bestMediaUrl } from "../_lib/page-data";
 import { ImageOrPlaceholder } from "../_components/ImageOrPlaceholder";
 
 /**
@@ -44,7 +45,7 @@ export function IngredientsSection({ data }: { data: PageData }) {
                       style={{ aspectRatio: "1 / 1" }}
                     >
                       <ImageOrPlaceholder
-                        src={image?.url}
+                        src={bestMediaUrl(image)}
                         alt={image?.alt_text || ing.name}
                         fill
                         sizes="64px"

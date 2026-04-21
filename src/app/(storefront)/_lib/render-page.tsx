@@ -1,4 +1,5 @@
 import type { PageData } from "./page-data";
+import { storefrontFont } from "./fonts";
 
 import { HeroSection } from "../_sections/HeroSection";
 import { MechanismSection } from "../_sections/MechanismSection";
@@ -27,15 +28,26 @@ export function StorefrontPage({
   canonicalPath: string;
   reviewSlug: string;
 }) {
-  const heroImage = data.media_by_slot["hero"]?.url || null;
+  // Per-workspace theming via CSS custom properties. The font allowlist
+  // is pre-registered in next/font so the browser picks the right file;
+  // primary/accent colors flow through Tailwind arbitrary values and
+  // inline styles on buttons.
+  const design = data.workspace.design || {};
+  const font = storefrontFont(design.font_key || null);
+  const themeStyle = {
+    fontFamily: font.stack,
+    "--storefront-primary": design.primary_color || "#18181b",
+    "--storefront-accent": design.accent_color || "#10b981",
+  } as React.CSSProperties;
+
+  // The <img> in HeroSection carries fetchpriority=high, which Chromium
+  // treats as a priority hint and starts fetching during HTML parse.
+  // We do NOT emit a <link rel="preload"> here: the optimized _next/
+  // image URL isn't known at render time (it's a client-side srcset
+  // resolution), and an imprecise preload costs more than it saves.
 
   return (
-    <>
-      {/* Preload hero image — browser starts downloading before it discovers the <img> */}
-      {heroImage && (
-        <link rel="preload" as="image" href={heroImage} fetchPriority="high" />
-      )}
-
+    <div className={font.className} style={themeStyle}>
       <ProductSchema data={data} canonicalPath={canonicalPath} />
       <FAQSchema data={data} />
 
@@ -53,7 +65,7 @@ export function StorefrontPage({
       </main>
 
       <StickyMobileCTA data={data} />
-    </>
+    </div>
   );
 }
 
