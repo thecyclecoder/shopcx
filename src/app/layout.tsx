@@ -2,14 +2,21 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
+// preload=false on both: dashboard pages still pick them up via the
+// CSS variables, but the fonts don't compete with the storefront
+// hero image for network bandwidth on Lighthouse-style cold loads.
+// Geist only matters for the dashboard; the storefront uses its own
+// per-workspace font (see src/app/(storefront)/_lib/fonts.ts).
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],
+  preload: false,
 });
 
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
+  preload: false,
 });
 
 export const viewport: Viewport = {
