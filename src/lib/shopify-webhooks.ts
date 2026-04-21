@@ -691,46 +691,61 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
   }
 
   // Update customer stats from DB (not payload — payload may be incomplete)
+  // Also update ALL linked profiles so total_orders/ltv stay accurate across linked accounts
   if (customerId) {
-    // Count orders and sum LTV from our DB (source of truth)
-    const { count: orderCount } = await admin
-      .from("orders")
-      .select("id", { count: "exact", head: true })
-      .eq("customer_id", customerId);
+    // Find all linked customer IDs (including self)
+    const allCustIds = [customerId];
+    const { data: link } = await admin.from("customer_links")
+      .select("group_id").eq("customer_id", customerId).maybeSingle();
+    if (link?.group_id) {
+      const { data: linked } = await admin.from("customer_links")
+        .select("customer_id").eq("group_id", link.group_id);
+      for (const l of linked || []) {
+        if (!allCustIds.includes(l.customer_id)) allCustIds.push(l.customer_id);
+      }
+    }
 
-    const { data: firstOrder } = await admin
-      .from("orders")
-      .select("created_at")
-      .eq("customer_id", customerId)
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .single();
+    // Aggregate orders + LTV across ALL linked profiles
+    let totalOrders = 0;
+    let totalLtv = 0;
+    let earliestOrder: string | null = null;
+    let latestOrder: string | null = null;
 
-    const { data: lastOrder } = await admin
-      .from("orders")
-      .select("created_at")
-      .eq("customer_id", customerId)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .single();
+    for (const cid of allCustIds) {
+      const { count } = await admin.from("orders")
+        .select("id", { count: "exact", head: true })
+        .eq("customer_id", cid);
+      totalOrders += count || 0;
 
-    // Sum total cents
-    const { data: ltvData } = await admin
-      .from("orders")
-      .select("total_cents")
-      .eq("customer_id", customerId);
+      const { data: ltvData } = await admin.from("orders")
+        .select("total_cents").eq("customer_id", cid);
+      totalLtv += (ltvData || []).reduce((sum, o) => sum + (o.total_cents || 0), 0);
 
-    const totalLtv = (ltvData || []).reduce((sum, o) => sum + (o.total_cents || 0), 0);
+      const { data: first } = await admin.from("orders")
+        .select("created_at").eq("customer_id", cid)
+        .order("created_at", { ascending: true }).limit(1).maybeSingle();
+      if (first?.created_at && (!earliestOrder || first.created_at < earliestOrder)) {
+        earliestOrder = first.created_at;
+      }
+
+      const { data: last } = await admin.from("orders")
+        .select("created_at").eq("customer_id", cid)
+        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      if (last?.created_at && (!latestOrder || last.created_at > latestOrder)) {
+        latestOrder = last.created_at;
+      }
+    }
 
     const customerUpdate: Record<string, unknown> = {
-      total_orders: orderCount || 0,
+      total_orders: totalOrders,
       ltv_cents: totalLtv,
-      first_order_at: firstOrder?.created_at || null,
-      last_order_at: lastOrder?.created_at || null,
+      first_order_at: earliestOrder,
+      last_order_at: latestOrder,
       updated_at: new Date().toISOString(),
     };
 
-    await admin.from("customers").update(customerUpdate).eq("id", customerId);
+    // Update ALL linked profiles with the same aggregate stats
+    await admin.from("customers").update(customerUpdate).in("id", allCustIds);
 
     // Recalculate retention score
     const { data: customer } = await admin
