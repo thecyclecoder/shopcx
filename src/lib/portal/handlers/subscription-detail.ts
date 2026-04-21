@@ -188,26 +188,48 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     }
   }
 
-  // Payment method — from the most recent order tied to this subscription
+  // Payment method — query Shopify GraphQL for the last order's transaction
   let paymentMethod: { brand: string | null; last4: string | null; expiry: string | null; gateway: string | null } | null = null;
   {
     const { data: lastOrder } = await admin.from("orders")
-      .select("payment_details")
+      .select("shopify_order_id")
       .eq("workspace_id", auth.workspaceId)
       .eq("customer_id", customer.id)
-      .not("payment_details", "is", null)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
-    if (lastOrder?.payment_details) {
-      const pd = lastOrder.payment_details as { company?: string; number?: string; expirationMonth?: number; expirationYear?: number; gateway?: string };
-      const last4 = pd.number ? pd.number.replace(/[^0-9]/g, "").slice(-4) : null;
-      paymentMethod = {
-        brand: pd.company || null,
-        last4,
-        expiry: pd.expirationMonth && pd.expirationYear ? `${pd.expirationMonth}/${pd.expirationYear}` : null,
-        gateway: pd.gateway || null,
-      };
+
+    if (lastOrder?.shopify_order_id && ws?.shopify_myshopify_domain) {
+      try {
+        const { decrypt } = await import("@/lib/crypto");
+        const { data: wsCreds } = await admin.from("workspaces")
+          .select("shopify_access_token_encrypted")
+          .eq("id", auth.workspaceId).single();
+        if (wsCreds?.shopify_access_token_encrypted) {
+          const shopToken = decrypt(wsCreds.shopify_access_token_encrypted);
+          const gqlRes = await fetch(`https://${ws.shopify_myshopify_domain}/admin/api/2024-10/graphql.json`, {
+            method: "POST",
+            headers: { "X-Shopify-Access-Token": shopToken, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              query: `{ order(id: "gid://shopify/Order/${lastOrder.shopify_order_id}") { transactions(first: 1) { gateway paymentDetails { ... on CardPaymentDetails { company number expirationMonth expirationYear } } } } }`,
+            }),
+          });
+          if (gqlRes.ok) {
+            const gqlData = await gqlRes.json();
+            const txn = gqlData.data?.order?.transactions?.[0];
+            if (txn?.paymentDetails) {
+              const pd = txn.paymentDetails;
+              const last4 = pd.number ? pd.number.replace(/[^0-9]/g, "").slice(-4) : null;
+              paymentMethod = {
+                brand: pd.company || null,
+                last4,
+                expiry: pd.expirationMonth && pd.expirationYear ? `${pd.expirationMonth}/${pd.expirationYear}` : null,
+                gateway: txn.gateway || null,
+              };
+            }
+          }
+        }
+      } catch { /* non-fatal — payment method display is best-effort */ }
     }
   }
 
