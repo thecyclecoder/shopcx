@@ -30,12 +30,12 @@ export const aiNightlyAnalysis = inngest.createFunction(
       const results = await step.run(`analyze-${workspaceId}`, async () => {
         const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-        // Get AI-handled tickets from last 24 hours
+        // Get tickets with 'ai' tag from last 24 hours
         const { data: tickets } = await admin
           .from("tickets")
           .select("id, subject, channel, ai_turn_count, escalation_reason, status")
           .eq("workspace_id", workspaceId)
-          .eq("handled_by", "AI Agent")
+          .contains("tags", ["ai"])
           .gte("updated_at", yesterday);
 
         if (!tickets?.length) return { analyzed: 0 };
