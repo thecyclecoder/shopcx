@@ -1,24 +1,19 @@
 import type { Metadata, Viewport } from "next";
-import { Inter } from "next/font/google";
+import { ALL_FONT_VARIABLES } from "./_lib/fonts";
 
 /**
  * Storefront layout — isolated from dashboard UI.
  *
- * This is a nested layout (the root layout at src/app/layout.tsx still
- * provides <html>/<body>), but everything dashboard-specific is kept out
- * of the rendered tree. Viewport is overridden to allow pinch-zoom (the
- * dashboard disables it), and a local Inter font is layered in via
- * next/font for predictable fallback metrics.
+ * Nested under the root layout (src/app/layout.tsx provides <html>/
+ * <body>), but nothing dashboard-specific renders here. Viewport is
+ * overridden to allow pinch-zoom, and the font is resolved via a
+ * curated allowlist (see _lib/fonts.ts) so each workspace can pick
+ * from a small set pre-registered with next/font.
  *
  * Child page.tsx files must remain React Server Components — no
  * "use client" on the page itself. Only leaf interactive components
  * (price toggle, review filter, FAQ accordion, sticky CTA) hydrate.
  */
-const inter = Inter({
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-storefront",
-});
 
 export const viewport: Viewport = {
   width: "device-width",
@@ -37,10 +32,12 @@ export default function StorefrontLayout({
 }: {
   children: React.ReactNode;
 }) {
+  // All pre-registered font variables are attached here. Each page
+  // picks which stack to apply via an inline fontFamily on the render
+  // wrapper (see render-page.tsx).
   return (
     <div
-      className={`${inter.variable} storefront min-h-screen bg-white text-zinc-900 antialiased`}
-      style={{ fontFamily: "var(--font-storefront), system-ui, sans-serif" }}
+      className={`${ALL_FONT_VARIABLES} storefront-root min-h-screen bg-white text-zinc-900 antialiased`}
     >
       {children}
     </div>

@@ -1,4 +1,5 @@
 import type { PageData } from "../_lib/page-data";
+import { bestMediaUrl } from "../_lib/page-data";
 import { StarRating } from "../_components/StarRating";
 import { BenefitChip } from "../_components/BenefitChip";
 import { ShieldIcon, TrustBadge } from "../_components/TrustBadge";
@@ -15,8 +16,10 @@ import { ImageOrPlaceholder } from "../_components/ImageOrPlaceholder";
  * zero JS to jump to the price table.
  */
 export function HeroSection({ data }: { data: PageData }) {
-  // Only use self-hosted media — never fall back to Shopify CDN
-  const heroImage = data.media_by_slot["hero"]?.url || null;
+  // Prefer the AVIF/WebP variant written by the upload transcoder —
+  // even through Vercel's optimizer, a pre-compressed source halves
+  // transfer bytes on cold cache.
+  const heroImage = bestMediaUrl(data.media_by_slot["hero"]);
   const heroAlt =
     data.media_by_slot["hero"]?.alt_text || data.product.title;
 
@@ -45,22 +48,39 @@ export function HeroSection({ data }: { data: PageData }) {
       data-section="hero"
       className="flex min-h-[600px] w-full flex-col bg-white"
     >
-      {/* Mobile image */}
-      <div className="relative w-full md:hidden" style={{ aspectRatio: "4 / 3" }}>
-        <ImageOrPlaceholder
-          src={heroImage}
-          alt={heroAlt}
-          fill
-          sizes="100vw"
-          priority
-          aspect="4/3"
-          className="object-cover"
-        />
-      </div>
+      <div className="mx-auto flex w-full max-w-6xl flex-col md:flex-row md:items-center md:gap-12 md:px-8 md:pt-16 md:pb-16">
+        {/* Hero image — single <img>, CSS swaps position between mobile
+            (above text, 4:3, full-bleed) and desktop (right side, 1:1) */}
+        <div
+          className="relative w-full overflow-hidden md:order-2 md:flex-1 md:rounded-2xl"
+          style={
+            {
+              "--mobile-aspect": "4 / 3",
+              "--desktop-aspect": "1 / 1",
+            } as React.CSSProperties
+          }
+        >
+          <div
+            className="relative w-full"
+            style={{ aspectRatio: "4 / 3" }}
+          >
+            <div className="absolute inset-0 md:static md:aspect-square">
+              <ImageOrPlaceholder
+                src={heroImage}
+                alt={heroAlt}
+                fill
+                sizes="(min-width: 768px) 50vw, 100vw"
+                priority
+                fetchPriority="high"
+                aspect="4/3"
+                className="object-cover"
+              />
+            </div>
+          </div>
+        </div>
 
-      <div className="mx-auto flex w-full max-w-6xl flex-col px-5 pt-6 pb-8 md:flex-row md:items-center md:gap-12 md:px-8 md:pt-16 md:pb-16">
         {/* Text column */}
-        <div className="order-2 flex min-h-[280px] flex-col md:order-1 md:flex-1">
+        <div className="order-2 flex min-h-[280px] flex-col px-5 pt-6 pb-8 md:order-1 md:flex-1 md:px-0 md:pt-0 md:pb-0">
           {ratingValue != null && (
             <div className="mb-3 flex items-center gap-2">
               <StarRating rating={ratingValue} size={18} />
@@ -103,21 +123,6 @@ export function HeroSection({ data }: { data: PageData }) {
 
           <div className="mt-6">
             <PressLogos media={data.media_by_slot} />
-          </div>
-        </div>
-
-        {/* Desktop image */}
-        <div className="relative order-1 hidden w-full md:order-2 md:block md:flex-1">
-          <div className="relative overflow-hidden rounded-2xl" style={{ aspectRatio: "1 / 1" }}>
-            <ImageOrPlaceholder
-              src={heroImage}
-              alt={heroAlt}
-              fill
-              sizes="(min-width: 1024px) 600px, 50vw"
-              priority
-              aspect="1/1"
-              className="object-cover"
-            />
           </div>
         </div>
       </div>

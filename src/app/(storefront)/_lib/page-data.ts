@@ -106,7 +106,20 @@ export interface HowItWorksStep {
 export interface MediaItem {
   slot: string;
   url: string | null;
+  webp_url: string | null;
+  avif_url: string | null;
   alt_text: string | null;
+}
+
+/**
+ * Pick the best-compressed URL that Vercel's image optimizer can
+ * fetch. AVIF > WebP > original. Vercel still re-serves it as AVIF/
+ * WebP to clients that accept them, but feeding it a pre-compressed
+ * source speeds cold cache and halves bytes through the CDN.
+ */
+export function bestMediaUrl(m: MediaItem | null | undefined): string | null {
+  if (!m) return null;
+  return m.avif_url || m.webp_url || m.url || null;
 }
 
 export interface Review {
@@ -157,6 +170,12 @@ export interface PageData {
     storefront_domain: string | null;
     shopify_myshopify_domain: string | null;
     support_email: string | null;
+    design: {
+      font_key: string | null;
+      primary_color: string | null;
+      accent_color: string | null;
+      logo_url: string | null;
+    };
   };
 }
 
@@ -168,7 +187,9 @@ export async function getWorkspaceBySlug(slug: string) {
   const admin = createAdminClient();
   const { data } = await admin
     .from("workspaces")
-    .select("id, storefront_slug, storefront_domain, shopify_myshopify_domain, support_email")
+    .select(
+      "id, storefront_slug, storefront_domain, shopify_myshopify_domain, support_email, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url",
+    )
     .eq("storefront_slug", slug)
     .maybeSingle();
   return data;
@@ -260,7 +281,7 @@ export async function getPageData(
       .order("display_order"),
     admin
       .from("product_media")
-      .select("slot, url, alt_text")
+      .select("slot, url, webp_url, avif_url, alt_text")
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id),
     admin
@@ -316,7 +337,13 @@ export async function getPageData(
 
   const mediaBySlot: Record<string, MediaItem> = {};
   for (const m of mediaRes.data || []) {
-    mediaBySlot[m.slot] = { slot: m.slot, url: m.url, alt_text: m.alt_text };
+    mediaBySlot[m.slot] = {
+      slot: m.slot,
+      url: m.url,
+      webp_url: (m as { webp_url?: string | null }).webp_url ?? null,
+      avif_url: (m as { avif_url?: string | null }).avif_url ?? null,
+      alt_text: m.alt_text,
+    };
   }
   void reviewCountRes;
 
@@ -339,6 +366,12 @@ export async function getPageData(
       storefront_domain: workspace.storefront_domain,
       shopify_myshopify_domain: workspace.shopify_myshopify_domain,
       support_email: workspace.support_email,
+      design: {
+        font_key: workspace.storefront_font || null,
+        primary_color: workspace.storefront_primary_color || null,
+        accent_color: workspace.storefront_accent_color || null,
+        logo_url: workspace.storefront_logo_url || null,
+      },
     },
   };
 }

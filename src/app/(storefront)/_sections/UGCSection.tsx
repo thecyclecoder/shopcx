@@ -1,4 +1,5 @@
 import type { PageData, MediaItem } from "../_lib/page-data";
+import { bestMediaUrl } from "../_lib/page-data";
 import { StarRating } from "../_components/StarRating";
 import { ImageOrPlaceholder } from "../_components/ImageOrPlaceholder";
 
@@ -41,7 +42,7 @@ export function UGCSection({ data }: { data: PageData }) {
               style={{ aspectRatio: "3 / 4" }}
             >
               <ImageOrPlaceholder
-                src={photo.url}
+                src={bestMediaUrl(photo)}
                 alt={photo.alt_text || "Customer photo"}
                 fill
                 sizes="(min-width: 768px) 200px, 180px"
