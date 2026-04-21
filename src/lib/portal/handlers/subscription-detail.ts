@@ -188,6 +188,29 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     }
   }
 
+  // Payment method — from the most recent order tied to this subscription
+  let paymentMethod: { brand: string | null; last4: string | null; expiry: string | null; gateway: string | null } | null = null;
+  {
+    const { data: lastOrder } = await admin.from("orders")
+      .select("payment_details")
+      .eq("workspace_id", auth.workspaceId)
+      .eq("customer_id", customer.id)
+      .not("payment_details", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (lastOrder?.payment_details) {
+      const pd = lastOrder.payment_details as { company?: string; number?: string; expirationMonth?: number; expirationYear?: number; gateway?: string };
+      const last4 = pd.number ? pd.number.replace(/[^0-9]/g, "").slice(-4) : null;
+      paymentMethod = {
+        brand: pd.company || null,
+        last4,
+        expiry: pd.expirationMonth && pd.expirationYear ? `${pd.expirationMonth}/${pd.expirationYear}` : null,
+        gateway: pd.gateway || null,
+      };
+    }
+  }
+
   return jsonOk({
     ok: true,
     shop: auth.shop,
@@ -198,6 +221,8 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
       appliedDiscount,
       appliedDiscounts,
       crisisBanner,
+      paymentMethod,
+      paymentManageUrl: "https://account.superfoodscompany.com/profile",
       portalState: {
         bucket: sub.status === "cancelled" ? "cancelled" : sub.status === "paused" ? "paused" : "active",
         needsAttention: sub.last_payment_status === "failed",

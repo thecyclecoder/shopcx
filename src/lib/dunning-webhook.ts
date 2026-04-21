@@ -33,6 +33,28 @@ export async function handlePaymentMethodEvent(
     return;
   }
 
+  // Auto-switch all active subscriptions to the new payment method
+  if (paymentMethodId) {
+    const { data: activeSubs } = await admin
+      .from("subscriptions")
+      .select("shopify_contract_id")
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", customer.id)
+      .in("status", ["active", "paused"]);
+
+    if (activeSubs?.length) {
+      const { appstleSwitchPaymentMethod } = await import("@/lib/appstle");
+      for (const sub of activeSubs) {
+        try {
+          await appstleSwitchPaymentMethod(workspaceId, sub.shopify_contract_id, paymentMethodId);
+          console.log(`Payment method webhook: switched sub ${sub.shopify_contract_id} to ${paymentMethodId}`);
+        } catch (err) {
+          console.error(`Payment method webhook: failed to switch sub ${sub.shopify_contract_id}:`, err);
+        }
+      }
+    }
+  }
+
   // Check if this customer has any active dunning cycles
   const { data: activeCycles } = await admin
     .from("dunning_cycles")

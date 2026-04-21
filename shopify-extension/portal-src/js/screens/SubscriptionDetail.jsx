@@ -522,6 +522,54 @@ const US_STATES = [
   ['AS','American Samoa'],['MP','Northern Mariana Islands'],
 ];
 
+function PaymentMethodCard({ contract }) {
+  const pm = contract?.paymentMethod;
+  const manageUrl = contract?.paymentManageUrl;
+
+  if (!pm && !manageUrl) return null;
+
+  const brandIcon = {
+    Visa: '💳', Mastercard: '💳', 'American Express': '💳', Discover: '💳',
+  };
+
+  return (
+    <div class="sp-card" style={{ marginTop: 16 }}>
+      <div class="sp-card__header">
+        <h3 class="sp-card__title">Payment Method</h3>
+      </div>
+      <div class="sp-card__body">
+        {pm ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <span style={{ fontSize: 20 }}>{brandIcon[pm.brand] || '💳'}</span>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>
+                {pm.brand || 'Card'} ending in {pm.last4 || '****'}
+              </div>
+              {pm.expiry && (
+                <div style={{ fontSize: 12, color: '#6b7280' }}>Expires {pm.expiry}</div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <p style={{ fontSize: 14, color: '#6b7280', marginBottom: 12 }}>No payment method on file.</p>
+        )}
+        {manageUrl && (
+          <a
+            href={manageUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="sp-btn sp-btn--secondary"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}
+          >
+            Manage Payment Methods
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AddressCard({ contract, showToast, onUpdate }) {
   const addr = contract?.deliveryMethod?.address || {};
   const [editing, setEditing] = useState(false);
@@ -1061,6 +1109,7 @@ export default function SubscriptionDetail() {
         <div class="sp-detail__col">
           {!isCancelled && <RewardsCard contractId={shortId(contract.id)} hideRedeem={!couponAppliedLocal} showRedeemOverride={couponAppliedLocal} />}
           {!isReadOnly && <CouponCard contract={contract} showToast={showToast} onUpdate={handleUpdate} onCouponStateChange={(v) => setCouponAppliedLocal(v)} />}
+          <PaymentMethodCard contract={contract} />
           {!isReadOnly && <AddressCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
           {!isReadOnly && <ShippingProtectionCard contract={contract} shipLine={shipLine} onUpdate={handleUpdate} />}
           {!isCancelled && productIds.length > 0 && <ReviewsCard productIds={productIds} />}
