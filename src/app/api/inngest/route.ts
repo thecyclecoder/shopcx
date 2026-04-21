@@ -51,6 +51,7 @@ import {
   generateContent,
   researchBenefitGap,
 } from "@/lib/inngest/product-intelligence";
+import { seoKeywordResearch } from "@/lib/inngest/seo-keyword-research";
 import {
   enrichBatch as demographicsEnrichBatch,
   enrichSingle as demographicsEnrichSingle,
@@ -108,6 +109,7 @@ export const { GET, POST, PUT } = serve({
     analyzeReviews,
     generateContent,
     researchBenefitGap,
+    seoKeywordResearch,
     demographicsEnrichBatch,
     demographicsEnrichSingle,
     demographicsSnapshotBuilder,

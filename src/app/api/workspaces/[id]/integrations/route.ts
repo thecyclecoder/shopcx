@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted, storefront_domain, storefront_slug"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted, storefront_domain, storefront_slug, google_ads_developer_token_encrypted, google_ads_client_id, google_ads_client_secret_encrypted, google_ads_refresh_token_encrypted, google_ads_customer_id, google_search_console_credentials_encrypted, google_search_console_site_url"
     )
     .eq("id", workspaceId)
     .single();
@@ -128,6 +128,15 @@ export async function GET(
     census_api_key_hint: workspace.census_api_key_encrypted
       ? `...${decrypt(workspace.census_api_key_encrypted).slice(-4)}`
       : null,
+
+    // Google Ads (Keyword Planner)
+    google_ads_connected: !!(workspace.google_ads_developer_token_encrypted && workspace.google_ads_refresh_token_encrypted),
+    google_ads_customer_id: workspace.google_ads_customer_id || null,
+    google_ads_client_id: workspace.google_ads_client_id || null,
+
+    // Google Search Console
+    google_search_console_connected: !!workspace.google_search_console_credentials_encrypted,
+    google_search_console_site_url: workspace.google_search_console_site_url || null,
 
     // Versium
     versium_connected: !!workspace.versium_api_key_encrypted,
@@ -293,6 +302,35 @@ export async function PATCH(
       } else {
         updates.klaviyo_api_key_encrypted = null;
       }
+    }
+
+    // Google Ads
+    if ("google_ads_developer_token" in body) {
+      updates.google_ads_developer_token_encrypted = body.google_ads_developer_token
+        ? encrypt(body.google_ads_developer_token) : null;
+    }
+    if ("google_ads_client_id" in body) {
+      updates.google_ads_client_id = body.google_ads_client_id || null;
+    }
+    if ("google_ads_client_secret" in body) {
+      updates.google_ads_client_secret_encrypted = body.google_ads_client_secret
+        ? encrypt(body.google_ads_client_secret) : null;
+    }
+    if ("google_ads_refresh_token" in body) {
+      updates.google_ads_refresh_token_encrypted = body.google_ads_refresh_token
+        ? encrypt(body.google_ads_refresh_token) : null;
+    }
+    if ("google_ads_customer_id" in body) {
+      updates.google_ads_customer_id = body.google_ads_customer_id || null;
+    }
+
+    // Google Search Console
+    if ("google_search_console_credentials" in body) {
+      updates.google_search_console_credentials_encrypted = body.google_search_console_credentials
+        ? encrypt(body.google_search_console_credentials) : null;
+    }
+    if ("google_search_console_site_url" in body) {
+      updates.google_search_console_site_url = body.google_search_console_site_url || null;
     }
 
     // Versium
