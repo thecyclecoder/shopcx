@@ -53,22 +53,31 @@ export async function POST(
 
   const stamp = Date.now();
   const baseName = `${slot}-${stamp}`;
-  const originalPath = `products/${productId}/${slot}/${baseName}.${transcoded.originalExt}`;
-  const webpPath = transcoded.webpBuffer
-    ? `products/${productId}/${slot}/${baseName}.webp`
-    : null;
-  const avifPath = transcoded.avifBuffer
-    ? `products/${productId}/${slot}/${baseName}.avif`
-    : null;
+  const baseDir = `products/${productId}/${slot}`;
 
+  const originalPath = `${baseDir}/${baseName}.${transcoded.originalExt}`;
+  const webpPath = transcoded.webpBuffer ? `${baseDir}/${baseName}.webp` : null;
+  const avifPath = transcoded.avifBuffer ? `${baseDir}/${baseName}.avif` : null;
+
+  // Variant paths: { 640: { avif, webp }, 1200: {...}, 1920: {...} }
+  const variantPaths: Record<number, { avif: string | null; webp: string | null }> = {};
+  for (const v of transcoded.variants) {
+    variantPaths[v.width] = {
+      avif: v.avifBuffer ? `${baseDir}/${baseName}-${v.width}.avif` : null,
+      webp: v.webpBuffer ? `${baseDir}/${baseName}-${v.width}.webp` : null,
+    };
+  }
+
+  // Push every file up in parallel. cacheControl is set on the object
+  // but also gets overridden by the edge image proxy (see
+  // /storefront-img/[...path]) which is what actually serves the hero
+  // bytes to end users.
   const uploads: Array<Promise<{ error: { message: string } | null }>> = [
-    admin.storage
-      .from(BUCKET)
-      .upload(originalPath, transcoded.originalBuffer, {
-        contentType: transcoded.originalContentType,
-        upsert: true,
-        cacheControl: "31536000",
-      }),
+    admin.storage.from(BUCKET).upload(originalPath, transcoded.originalBuffer, {
+      contentType: transcoded.originalContentType,
+      upsert: true,
+      cacheControl: "31536000",
+    }),
   ];
   if (webpPath && transcoded.webpBuffer) {
     uploads.push(
@@ -88,6 +97,28 @@ export async function POST(
       }),
     );
   }
+  for (const v of transcoded.variants) {
+    const paths = variantPaths[v.width];
+    if (paths.avif && v.avifBuffer) {
+      uploads.push(
+        admin.storage.from(BUCKET).upload(paths.avif, v.avifBuffer, {
+          contentType: "image/avif",
+          upsert: true,
+          cacheControl: "31536000",
+        }),
+      );
+    }
+    if (paths.webp && v.webpBuffer) {
+      uploads.push(
+        admin.storage.from(BUCKET).upload(paths.webp, v.webpBuffer, {
+          contentType: "image/webp",
+          upsert: true,
+          cacheControl: "31536000",
+        }),
+      );
+    }
+  }
+
   const results = await Promise.all(uploads);
   const failed = results.find((r) => r.error);
   if (failed?.error) {
@@ -102,19 +133,44 @@ export async function POST(
   // Remove prior files so storage doesn't accumulate orphans.
   const { data: existing } = await admin
     .from("product_media")
-    .select("storage_path, webp_storage_path, avif_storage_path")
+    .select(
+      "storage_path, webp_storage_path, avif_storage_path, avif_640_storage_path, webp_640_storage_path, avif_1200_storage_path, webp_1200_storage_path, avif_1920_storage_path, webp_1920_storage_path",
+    )
     .eq("workspace_id", workspaceId)
     .eq("product_id", productId)
     .eq("slot", slot)
     .maybeSingle();
 
+  const newPaths = new Set(
+    [
+      originalPath,
+      webpPath,
+      avifPath,
+      ...Object.values(variantPaths).flatMap((p) => [p.avif, p.webp]),
+    ].filter((p): p is string => !!p),
+  );
   const toRemove = [
     existing?.storage_path,
     existing?.webp_storage_path,
     existing?.avif_storage_path,
-  ].filter((p): p is string => !!p && p !== originalPath && p !== webpPath && p !== avifPath);
+    (existing as Record<string, string | null> | null)?.avif_640_storage_path,
+    (existing as Record<string, string | null> | null)?.webp_640_storage_path,
+    (existing as Record<string, string | null> | null)?.avif_1200_storage_path,
+    (existing as Record<string, string | null> | null)?.webp_1200_storage_path,
+    (existing as Record<string, string | null> | null)?.avif_1920_storage_path,
+    (existing as Record<string, string | null> | null)?.webp_1920_storage_path,
+  ].filter((p): p is string => !!p && !newPaths.has(p));
   if (toRemove.length > 0) {
     await admin.storage.from(BUCKET).remove(toRemove).catch(() => {});
+  }
+
+  const variantColumns: Record<string, string | null> = {};
+  for (const w of [640, 1200, 1920] as const) {
+    const paths = variantPaths[w] || { avif: null, webp: null };
+    variantColumns[`avif_${w}_url`] = paths.avif ? urlFor(paths.avif) : null;
+    variantColumns[`webp_${w}_url`] = paths.webp ? urlFor(paths.webp) : null;
+    variantColumns[`avif_${w}_storage_path`] = paths.avif;
+    variantColumns[`webp_${w}_storage_path`] = paths.webp;
   }
 
   const { data: row, error } = await admin
@@ -130,6 +186,7 @@ export async function POST(
         webp_storage_path: webpPath,
         avif_url: avifUrl,
         avif_storage_path: avifPath,
+        ...variantColumns,
         alt_text: altText,
         width: transcoded.width,
         height: transcoded.height,
@@ -210,16 +267,25 @@ export async function DELETE(
 
   const { data: existing } = await admin
     .from("product_media")
-    .select("storage_path, webp_storage_path, avif_storage_path")
+    .select(
+      "storage_path, webp_storage_path, avif_storage_path, avif_640_storage_path, webp_640_storage_path, avif_1200_storage_path, webp_1200_storage_path, avif_1920_storage_path, webp_1920_storage_path",
+    )
     .eq("workspace_id", workspaceId)
     .eq("product_id", productId)
     .eq("slot", slot)
     .maybeSingle();
 
+  const e = existing as Record<string, string | null> | null;
   const toRemove = [
-    existing?.storage_path,
-    existing?.webp_storage_path,
-    existing?.avif_storage_path,
+    e?.storage_path,
+    e?.webp_storage_path,
+    e?.avif_storage_path,
+    e?.avif_640_storage_path,
+    e?.webp_640_storage_path,
+    e?.avif_1200_storage_path,
+    e?.webp_1200_storage_path,
+    e?.avif_1920_storage_path,
+    e?.webp_1920_storage_path,
   ].filter((p): p is string => !!p);
   if (toRemove.length > 0) {
     await admin.storage.from(BUCKET).remove(toRemove).catch(() => {});
@@ -235,6 +301,18 @@ export async function DELETE(
       webp_storage_path: null,
       avif_url: null,
       avif_storage_path: null,
+      avif_640_url: null,
+      webp_640_url: null,
+      avif_640_storage_path: null,
+      webp_640_storage_path: null,
+      avif_1200_url: null,
+      webp_1200_url: null,
+      avif_1200_storage_path: null,
+      webp_1200_storage_path: null,
+      avif_1920_url: null,
+      webp_1920_url: null,
+      avif_1920_storage_path: null,
+      webp_1920_storage_path: null,
       file_size: null,
       mime_type: null,
       uploaded_at: null,

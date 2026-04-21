@@ -1,7 +1,6 @@
 import type { PageData, MediaItem } from "../_lib/page-data";
-import { bestMediaUrl } from "../_lib/page-data";
 import { StarRating } from "../_components/StarRating";
-import { ImageOrPlaceholder } from "../_components/ImageOrPlaceholder";
+import { Picture } from "../_components/PictureHero";
 
 /**
  * Real-people UGC — photo reviews first, then featured reviews. Mobile
@@ -38,15 +37,15 @@ export function UGCSection({ data }: { data: PageData }) {
           {ugcPhotos.map((photo) => (
             <div
               key={photo.slot}
-              className="relative h-52 w-44 flex-shrink-0 snap-center overflow-hidden rounded-2xl md:h-auto md:w-auto"
+              className="relative h-52 w-44 flex-shrink-0 snap-center overflow-hidden rounded-2xl md:h-auto md:w-auto [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover"
               style={{ aspectRatio: "3 / 4" }}
             >
-              <ImageOrPlaceholder
-                src={bestMediaUrl(photo)}
-                alt={photo.alt_text || "Customer photo"}
-                fill
+              <Picture
+                media={photo}
+                altFallback="Customer photo"
                 sizes="(min-width: 768px) 200px, 180px"
-                aspect="3/4"
+                width={300}
+                height={400}
                 className="object-cover"
               />
             </div>

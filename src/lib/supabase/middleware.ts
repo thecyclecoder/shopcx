@@ -1,7 +1,7 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula", "/coming-soon", "/api/shopify/callback", "/api/webhooks", "/api/inngest", "/csat", "/api/csat", "/help", "/api/help", "/api/portal", "/portal", "/journey", "/api/journey", "/api/storefront", "/api/revalidate", "/sitemap.xml", "/robots.txt"];
+const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula", "/coming-soon", "/api/shopify/callback", "/api/webhooks", "/api/inngest", "/csat", "/api/csat", "/help", "/api/help", "/api/portal", "/portal", "/journey", "/api/journey", "/api/storefront", "/api/revalidate", "/sitemap.xml", "/robots.txt", "/store/", "/storefront-img"];
 const WORKSPACE_SETUP_ROUTES = ["/workspace/new", "/workspace/select"];
 const ADMIN_EMAIL = "dylan@superfoodscompany.com";
 const PRIMARY_DOMAINS = ["shopcx.ai", "www.shopcx.ai", "localhost"];
@@ -48,13 +48,15 @@ export async function updateSession(request: NextRequest) {
   const isLocalhost = hostname.includes("localhost") || hostname.includes("127.0.0.1");
 
   // ── Storefront routing ──
-  // External URLs:
-  //   shopcx.ai/store/{workspace}/{slug}  → admin preview route (noindex)
-  //   custom-domain.com/{slug}            → public route; middleware
-  //                                          injects x-storefront-
-  //                                          workspace-slug header so
-  //                                          the RSC page knows which
-  //                                          workspace to load.
+  // Two external URL shapes, one underlying SSG route:
+  //
+  //   custom-domain.com/{slug}           → rewrite to /store/{ws}/{slug}
+  //   shopcx.ai/store/{workspace}/{slug} → admin preview, noindex applied
+  //
+  // The rewrite keeps the internal path static so Next.js can
+  // pre-render it with generateStaticParams and Vercel can serve the
+  // response from the edge CDN with sub-100ms TTFB. No headers() or
+  // cookies() calls in the page — those would force dynamic rendering.
   {
     const pathname = request.nextUrl.pathname;
     const isInternal =
@@ -62,25 +64,34 @@ export async function updateSession(request: NextRequest) {
       pathname.startsWith("/api/") ||
       pathname === "/favicon.ico";
 
-    if (!isInternal && !isLocalhost) {
-      const isPrimaryDomain = PRIMARY_DOMAINS.some(
-        (d) => hostname === d || hostname.endsWith(`.${d}`),
-      );
-      if (!isPrimaryDomain) {
+    if (!isInternal) {
+      const isPrimaryDomain =
+        isLocalhost ||
+        PRIMARY_DOMAINS.some((d) => hostname === d || hostname.endsWith(`.${d}`));
+
+      // 1) Admin preview on primary domain — pass through, but tell
+      //    Googlebot not to index it.
+      if (isPrimaryDomain && pathname.startsWith("/store/")) {
+        const segs = pathname.split("/").filter(Boolean);
+        if (segs.length === 3) {
+          const res = NextResponse.next({ request });
+          res.headers.set("x-robots-tag", "noindex, nofollow");
+          return res;
+        }
+      }
+
+      // 2) Custom domain with a single-segment path — rewrite to the
+      //    SSG route. Uses NextResponse.rewrite with a rewritten
+      //    pathname so Next.js caches under that key; no headers
+      //    injection, no dynamic rendering, no auth sideeffects.
+      if (!isPrimaryDomain && !isLocalhost) {
         const storefrontSlug = await resolveStorefrontSlugByDomain(hostname);
         if (storefrontSlug) {
           const segs = pathname.split("/").filter(Boolean);
-          // Single-segment paths are product handles — forward them
-          // through the (storefront)/[slug] route with the workspace
-          // attached as a header. Multi-segment paths fall through.
-          if (segs.length === 1) {
-            const forwardedHeaders = new Headers(request.headers);
-            forwardedHeaders.set("x-storefront-workspace-slug", storefrontSlug);
-            // Short-circuit auth — storefront is public. Without this,
-            // unauthenticated visitors would bounce to /login.
-            return NextResponse.rewrite(request.nextUrl, {
-              request: { headers: forwardedHeaders },
-            });
+          if (segs.length === 1 && segs[0] !== "favicon.ico") {
+            const url = request.nextUrl.clone();
+            url.pathname = `/store/${storefrontSlug}/${segs[0]}`;
+            return NextResponse.rewrite(url);
           }
         }
       }

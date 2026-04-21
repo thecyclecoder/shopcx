@@ -1,6 +1,5 @@
 import { ImageResponse } from "next/og";
-import { headers } from "next/headers";
-import { getPageData } from "../_lib/page-data";
+import { getPageData } from "../../../_lib/page-data";
 
 export const runtime = "nodejs";
 export const contentType = "image/png";
@@ -10,19 +9,15 @@ export const alt = "Product";
 export default async function OpengraphImage({
   params,
 }: {
-  params: { slug: string };
+  params: { workspace: string; slug: string };
 }) {
-  const h = await headers();
-  const workspaceSlug = h.get("x-storefront-workspace-slug");
-
-  const data = workspaceSlug
-    ? await getPageData(workspaceSlug, params.slug)
-    : null;
+  const data = await getPageData(params.workspace, params.slug);
 
   const headline =
     data?.page_content?.hero_headline || data?.product.title || "Shop";
   const subhead = data?.page_content?.hero_subheadline || "";
-  const image = data?.media_by_slot["hero"]?.url || null;
+  const image =
+    data?.media_by_slot["hero"]?.url || data?.product.image_url || null;
 
   return new ImageResponse(
     (

@@ -1,10 +1,9 @@
 import type { PageData } from "../_lib/page-data";
-import { bestMediaUrl } from "../_lib/page-data";
 import { StarRating } from "../_components/StarRating";
 import { BenefitChip } from "../_components/BenefitChip";
 import { ShieldIcon, TrustBadge } from "../_components/TrustBadge";
 import { PressLogos } from "../_components/PressLogos";
-import { ImageOrPlaceholder } from "../_components/ImageOrPlaceholder";
+import { PictureHero } from "../_components/PictureHero";
 
 /**
  * Hero — the LCP section. Server component. Pure HTML + CSS.
@@ -16,12 +15,8 @@ import { ImageOrPlaceholder } from "../_components/ImageOrPlaceholder";
  * zero JS to jump to the price table.
  */
 export function HeroSection({ data }: { data: PageData }) {
-  // Prefer the AVIF/WebP variant written by the upload transcoder —
-  // even through Vercel's optimizer, a pre-compressed source halves
-  // transfer bytes on cold cache.
-  const heroImage = bestMediaUrl(data.media_by_slot["hero"]);
-  const heroAlt =
-    data.media_by_slot["hero"]?.alt_text || data.product.title;
+  const heroMedia = data.media_by_slot["hero"] || null;
+  const heroAlt = heroMedia?.alt_text || data.product.title;
 
   const headline =
     data.benefit_angle?.hero_headline ||
@@ -49,31 +44,19 @@ export function HeroSection({ data }: { data: PageData }) {
       className="flex min-h-[600px] w-full flex-col bg-white"
     >
       <div className="mx-auto flex w-full max-w-6xl flex-col md:flex-row md:items-center md:gap-12 md:px-8 md:pt-16 md:pb-16">
-        {/* Hero image — single <img>, CSS swaps position between mobile
-            (above text, 4:3, full-bleed) and desktop (right side, 1:1) */}
-        <div
-          className="relative w-full overflow-hidden md:order-2 md:flex-1 md:rounded-2xl"
-          style={
-            {
-              "--mobile-aspect": "4 / 3",
-              "--desktop-aspect": "1 / 1",
-            } as React.CSSProperties
-          }
-        >
-          <div
-            className="relative w-full"
-            style={{ aspectRatio: "4 / 3" }}
-          >
-            <div className="absolute inset-0 md:static md:aspect-square">
-              <ImageOrPlaceholder
-                src={heroImage}
-                alt={heroAlt}
-                fill
+        {/* Hero image — native <picture>, no optimizer round trip.
+            Chromium fetchpriority=high starts the download during
+            HTML parse. Width/height lock layout; object-fit covers
+            the mobile 4:3 and desktop 1:1 containers. */}
+        <div className="relative w-full overflow-hidden md:order-2 md:flex-1 md:rounded-2xl">
+          <div className="relative w-full aspect-[4/3] md:aspect-square">
+            <div className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover">
+              <PictureHero
+                media={heroMedia}
+                altFallback={heroAlt}
                 sizes="(min-width: 768px) 50vw, 100vw"
-                priority
-                fetchPriority="high"
-                aspect="4/3"
-                className="object-cover"
+                width={1200}
+                height={900}
               />
             </div>
           </div>

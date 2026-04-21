@@ -108,14 +108,20 @@ export interface MediaItem {
   url: string | null;
   webp_url: string | null;
   avif_url: string | null;
+  avif_640_url: string | null;
+  webp_640_url: string | null;
+  avif_1200_url: string | null;
+  webp_1200_url: string | null;
+  avif_1920_url: string | null;
+  webp_1920_url: string | null;
   alt_text: string | null;
 }
 
 /**
- * Pick the best-compressed URL that Vercel's image optimizer can
- * fetch. AVIF > WebP > original. Vercel still re-serves it as AVIF/
- * WebP to clients that accept them, but feeding it a pre-compressed
- * source speeds cold cache and halves bytes through the CDN.
+ * Pick the best-compressed URL available. AVIF > WebP > original.
+ * Non-hero images feed this into `next/image`, which runs its own
+ * optimizer + cache layer. The hero uses pictureSources() instead,
+ * which routes through the edge proxy for cold-cache-proof delivery.
  */
 export function bestMediaUrl(m: MediaItem | null | undefined): string | null {
   if (!m) return null;
@@ -281,7 +287,9 @@ export async function getPageData(
       .order("display_order"),
     admin
       .from("product_media")
-      .select("slot, url, webp_url, avif_url, alt_text")
+      .select(
+        "slot, url, webp_url, avif_url, avif_640_url, webp_640_url, avif_1200_url, webp_1200_url, avif_1920_url, webp_1920_url, alt_text",
+      )
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id),
     admin
@@ -337,11 +345,18 @@ export async function getPageData(
 
   const mediaBySlot: Record<string, MediaItem> = {};
   for (const m of mediaRes.data || []) {
+    const row = m as Record<string, string | null>;
     mediaBySlot[m.slot] = {
       slot: m.slot,
       url: m.url,
-      webp_url: (m as { webp_url?: string | null }).webp_url ?? null,
-      avif_url: (m as { avif_url?: string | null }).avif_url ?? null,
+      webp_url: row.webp_url ?? null,
+      avif_url: row.avif_url ?? null,
+      avif_640_url: row.avif_640_url ?? null,
+      webp_640_url: row.webp_640_url ?? null,
+      avif_1200_url: row.avif_1200_url ?? null,
+      webp_1200_url: row.webp_1200_url ?? null,
+      avif_1920_url: row.avif_1920_url ?? null,
+      webp_1920_url: row.webp_1920_url ?? null,
       alt_text: m.alt_text,
     };
   }

@@ -1,6 +1,5 @@
 import type { PageData } from "../_lib/page-data";
-import { bestMediaUrl } from "../_lib/page-data";
-import { ImageOrPlaceholder } from "../_components/ImageOrPlaceholder";
+import { Picture } from "../_components/PictureHero";
 
 /**
  * Ingredients deep dive. Uses native <details>/<summary> for the expand/
@@ -41,15 +40,15 @@ export function IngredientsSection({ data }: { data: PageData }) {
                 <summary className="flex cursor-pointer list-none items-start justify-between gap-4">
                   <div className="flex flex-1 items-start gap-4">
                     <div
-                      className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-xl"
+                      className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-xl [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover"
                       style={{ aspectRatio: "1 / 1" }}
                     >
-                      <ImageOrPlaceholder
-                        src={bestMediaUrl(image)}
-                        alt={image?.alt_text || ing.name}
-                        fill
+                      <Picture
+                        media={image}
+                        altFallback={ing.name}
                         sizes="64px"
-                        aspect="1/1"
+                        width={128}
+                        height={128}
                         className="object-cover"
                       />
                     </div>
