@@ -37,7 +37,10 @@ const FAQSection = dynamic(
 
 const StickyMobileCTA = dynamic(
   () => import("../_sections/StickyMobileCTA").then((m) => m.StickyMobileCTA),
-  { ssr: false }, // scroll-dependent, not needed in SSR HTML
+  // ssr stays on — the SSR'd HTML renders the bar in its initial
+  // hidden state (visible=false in useState), and the scroll listener
+  // attaches on hydration. Can't disable SSR in a server-component
+  // context anyway.
 );
 
 /**
