@@ -24,12 +24,18 @@ import {
 
 // Preload=true on the default only — other fonts load lazily when
 // their className is applied (workspace-specific selection).
+//
+// adjustFontFallback: "Arial" generates a size-adjusted fallback so
+// the swap from fallback → Montserrat doesn't shift layout. Without
+// this the fallback uses Arial's raw metrics and the text block can
+// grow or shrink 10-30px total across the hero on font load.
 const montserrat = Montserrat({
   subsets: ["latin"],
   display: "swap",
   weight: ["400", "600", "700"],
   variable: "--font-montserrat",
   preload: true,
+  adjustFontFallback: "Arial",
 });
 const inter = Inter({ subsets: ["latin"], display: "swap", variable: "--font-inter", preload: false });
 const poppins = Poppins({ subsets: ["latin"], display: "swap", weight: ["400", "600", "700"], variable: "--font-poppins", preload: false });
