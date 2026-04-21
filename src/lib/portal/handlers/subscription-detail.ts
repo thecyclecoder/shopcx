@@ -191,13 +191,27 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
   // Payment method — query Shopify GraphQL for the last order's transaction
   let paymentMethod: { brand: string | null; last4: string | null; expiry: string | null; gateway: string | null } | null = null;
   {
-    const { data: lastOrder } = await admin.from("orders")
+    // Find last order tied to THIS subscription, fall back to any order for this customer
+    let lastOrder: { shopify_order_id: string } | null = null;
+    const { data: subOrder } = await admin.from("orders")
       .select("shopify_order_id")
       .eq("workspace_id", auth.workspaceId)
-      .eq("customer_id", customer.id)
+      .eq("subscription_id", sub.id)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
+    if (subOrder) {
+      lastOrder = subOrder;
+    } else {
+      const { data: anyOrder } = await admin.from("orders")
+        .select("shopify_order_id")
+        .eq("workspace_id", auth.workspaceId)
+        .eq("customer_id", customer.id)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      lastOrder = anyOrder;
+    }
 
     if (lastOrder?.shopify_order_id && ws?.shopify_myshopify_domain) {
       try {
