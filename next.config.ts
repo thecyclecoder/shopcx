@@ -4,14 +4,14 @@ const nextConfig: NextConfig = {
   // Prevent 308 trailing-slash redirects — Shopify app proxy follows 3xx redirects,
   // which breaks the proxy flow (redirects to storefront instead of proxying to backend)
   skipTrailingSlashRedirect: true,
-  experimental: {
-    // Inline CSS as <style> in <head> instead of emitting <link rel=
-    // stylesheet>. Eliminates a render-blocking round trip for first-
-    // time visitors — critical for the storefront LCP. Trade-off: no
-    // cached stylesheet for returning visitors, but landing-page
-    // traffic is overwhelmingly first-time so it's a net win.
-    inlineCss: true,
-  },
+  // Note: we tried experimental.inlineCss — Next.js recommends it for
+  // Tailwind — but on a page with 11 sections the inlined <style>
+  // bloated to 162 KB, pushing the hero <img> from byte ~5K to byte
+  // ~167K in the HTML. That delayed LCP more than the extra CSS
+  // round-trip ever would. Keep CSS as a separate resource; it loads
+  // in parallel with HTML and lets the browser discover the hero
+  // during the first few KB of HTML streaming.
+
   images: {
     remotePatterns: [
       { protocol: "https", hostname: "cdn.shopify.com" },
