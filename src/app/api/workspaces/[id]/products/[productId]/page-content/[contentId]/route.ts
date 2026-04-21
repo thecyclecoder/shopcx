@@ -72,12 +72,6 @@ export async function PATCH(
     .single();
 
   if (!current) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (current.status !== "draft") {
-    return NextResponse.json(
-      { error: `Cannot edit content with status "${current.status}"` },
-      { status: 400 },
-    );
-  }
 
   const body = await request.json().catch(() => ({}));
   const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
