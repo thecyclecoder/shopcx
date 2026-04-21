@@ -259,6 +259,9 @@ const directActionHandlers: Record<
     const config = await getAppstleConfig(ctx.workspaceId);
     if (!config) return { success: false, error: "Appstle not configured" };
 
+    // Brief delay — coupon may have just been created in Shopify and needs a moment to propagate
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
     // Try applying the existing coupon first
     const r = await applyDiscountWithReplace(config.apiKey, p.contract_id!, p.code!);
     if (r.success) return { ...r, summary: `Applied loyalty coupon ${p.code}` };

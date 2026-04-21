@@ -565,7 +565,7 @@ export default function TicketDetailPage() {
         const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/coupon`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code: body.code }),
+          body: JSON.stringify({ couponCode: body.code }),
         });
         const data = await res.json();
         actionSuccess = res.ok;
