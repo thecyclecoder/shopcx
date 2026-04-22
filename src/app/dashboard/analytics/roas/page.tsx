@@ -24,6 +24,13 @@ interface ROASData {
     amazon_sns_checkout_count: number;
     shopify_sub_rate: number;
     amazon_sub_rate: number;
+    shopify_ltv_cents: number;
+    amazon_ltv_cents: number;
+    blended_ltv_cents: number;
+    shopify_aov_cents: number;
+    amazon_aov_cents: number;
+    shopify_avg_churn_pct: number;
+    amazon_avg_churn_pct: number;
   };
 }
 
@@ -188,6 +195,41 @@ export default function ROASDashboard() {
               value={s.total_revenue_cents > 0 ? `${Math.round((s.amazon_checkout_revenue / s.total_revenue_cents) * 100)}%` : "—"}
               sub="AMZ / total checkout"
               color="text-amber-600 dark:text-amber-400"
+            />
+          </div>
+
+          {/* LTV Cards */}
+          <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <StatCard
+              label="Blended LTV"
+              value={s.blended_ltv_cents > 0 ? fmt(s.blended_ltv_cents) : "—"}
+              sub="Predicted lifetime value per customer"
+              color="text-emerald-600 dark:text-emerald-400"
+            />
+            <StatCard
+              label="Website LTV"
+              value={s.shopify_ltv_cents > 0 ? fmt(s.shopify_ltv_cents) : "—"}
+              sub={`AOV ${fmt(s.shopify_aov_cents)} · ${s.shopify_sub_rate}% sub · ${s.shopify_avg_churn_pct}% churn`}
+              color="text-emerald-600 dark:text-emerald-400"
+            />
+            <StatCard
+              label="Amazon LTV"
+              value={s.amazon_ltv_cents > 0 ? fmt(s.amazon_ltv_cents) : "—"}
+              sub={`AOV ${fmt(s.amazon_aov_cents)} · ${s.amazon_sub_rate}% sub · ${s.amazon_avg_churn_pct}% churn`}
+              color="text-amber-600 dark:text-amber-400"
+            />
+            <StatCard
+              label="LTV:CAC"
+              value={s.blended_ltv_cents > 0 && s.total_spend_cents > 0 && (s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count) > 0
+                ? `${(s.blended_ltv_cents / (s.total_spend_cents / (s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count))).toFixed(1)}x`
+                : "—"}
+              sub="LTV / cost per acquisition"
+              color={(() => {
+                const orders = s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count;
+                if (!orders || !s.total_spend_cents || !s.blended_ltv_cents) return "text-zinc-400";
+                const ratio = s.blended_ltv_cents / (s.total_spend_cents / orders);
+                return ratio >= 3 ? "text-emerald-600 dark:text-emerald-400" : ratio >= 2 ? "text-amber-600" : "text-red-600";
+              })()}
             />
           </div>
 

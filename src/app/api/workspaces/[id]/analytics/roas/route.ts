@@ -212,6 +212,48 @@ export async function GET(
   const amazonCheckoutTotal = totals.amazon_sns_checkout_revenue + totals.amazon_one_time_revenue;
   const amazonSubRate = amazonCheckoutTotal > 0 ? (totals.amazon_sns_checkout_revenue / amazonCheckoutTotal) * 100 : 0;
 
+  // ── Average churn from monthly revenue snapshots (for LTV calculation) ──
+  const { data: churnMonths } = await admin
+    .from("monthly_revenue_snapshots")
+    .select("churn_pct, amz_churn_pct")
+    .eq("workspace_id", workspaceId)
+    .eq("is_complete", true)
+    .gt("churn_pct", 0)
+    .order("month", { ascending: false })
+    .limit(6); // Last 6 complete months
+
+  const shopifyAvgChurn = churnMonths?.length
+    ? churnMonths.reduce((s, m) => s + Number(m.churn_pct), 0) / churnMonths.length / 100
+    : 0;
+
+  const amzChurnMonths = (churnMonths || []).filter(m => Number(m.amz_churn_pct) > 0);
+  const amazonAvgChurn = amzChurnMonths.length
+    ? amzChurnMonths.reduce((s, m) => s + Number(m.amz_churn_pct), 0) / amzChurnMonths.length / 100
+    : 0;
+
+  // ── LTV calculation ──
+  // LTV = AOV × ((1 - sub_rate) + (sub_rate / monthly_churn))
+  // Uses actual sub rate from selected period + average churn from historical data
+  const shopifyOrderCount = totals.shopify_new_sub_count + totals.shopify_one_time_count;
+  const shopifyAOV = shopifyOrderCount > 0 ? totals.shopify_checkout_revenue / shopifyOrderCount : 0;
+  const shopifySubRateDec = shopifySubRate / 100;
+  const shopifyLTV = shopifyAvgChurn > 0 && shopifyAOV > 0
+    ? shopifyAOV * ((1 - shopifySubRateDec) + (shopifySubRateDec / shopifyAvgChurn))
+    : shopifyAOV; // No churn data = just AOV
+
+  const amazonOrderCount = totals.amazon_one_time_count + totals.amazon_sns_checkout_count;
+  const amazonAOV = amazonOrderCount > 0 ? totals.amazon_checkout_revenue / amazonOrderCount : 0;
+  const amazonSubRateDec = amazonSubRate / 100;
+  const amazonLTV = amazonAvgChurn > 0 && amazonAOV > 0
+    ? amazonAOV * ((1 - amazonSubRateDec) + (amazonSubRateDec / amazonAvgChurn))
+    : amazonAOV;
+
+  // Blended LTV (weighted by order count)
+  const totalOrderCount = shopifyOrderCount + amazonOrderCount;
+  const blendedLTV = totalOrderCount > 0
+    ? (shopifyLTV * shopifyOrderCount + amazonLTV * amazonOrderCount) / totalOrderCount
+    : 0;
+
   return NextResponse.json({
     daily,
     totals,
@@ -227,6 +269,14 @@ export async function GET(
       amazon_sns_checkout_count: totals.amazon_sns_checkout_count,
       shopify_sub_rate: Math.round(shopifySubRate * 100) / 100,
       amazon_sub_rate: Math.round(amazonSubRate * 100) / 100,
+      // LTV
+      shopify_ltv_cents: Math.round(shopifyLTV),
+      amazon_ltv_cents: Math.round(amazonLTV),
+      blended_ltv_cents: Math.round(blendedLTV),
+      shopify_aov_cents: Math.round(shopifyAOV),
+      amazon_aov_cents: Math.round(amazonAOV),
+      shopify_avg_churn_pct: Math.round(shopifyAvgChurn * 10000) / 100,
+      amazon_avg_churn_pct: Math.round(amazonAvgChurn * 10000) / 100,
     },
     start: startDate,
     end: endDate,
