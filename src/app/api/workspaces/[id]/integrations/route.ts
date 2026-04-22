@@ -144,6 +144,18 @@ export async function GET(
       ? `...${decrypt(workspace.versium_api_key_encrypted).slice(-4)}`
       : null,
 
+    // Meta Ads
+    meta_ads_connected: await (async () => {
+      const { data } = await admin.from("meta_connections").select("id").eq("workspace_id", workspaceId).eq("is_active", true).maybeSingle();
+      return !!data;
+    })(),
+
+    // Amazon
+    amazon_connected: await (async () => {
+      const { data } = await admin.from("amazon_connections").select("id").eq("workspace_id", workspaceId).eq("is_active", true).maybeSingle();
+      return !!data;
+    })(),
+
     // Slack
     slack_connected: !!workspace.slack_bot_token_encrypted,
     slack_team_name: workspace.slack_team_name,
