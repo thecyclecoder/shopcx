@@ -54,13 +54,25 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
 
   let configSnapshot: Record<string, unknown>;
   if (isEmptyConfig) {
-    // Code-driven journey — the mini-site uses journeyType to run the right executor
+    // Code-driven journey — include metadata from the builder so the
+    // complete endpoint has subscription data, customer context, etc.
     configSnapshot = {
       codeDriven: true,
       journeyType: triggerIntent,
       ticketId,
       workspaceId,
     };
+
+    // For cancel journeys, call the builder to populate subscription metadata
+    if (triggerIntent === "cancel_subscription" || triggerIntent === "cancel") {
+      try {
+        const { buildCancelJourneySteps: buildCancelJourney } = await import("@/lib/cancel-journey-builder");
+        const cancelData = await buildCancelJourney(workspaceId, customerId, ticketId);
+        if (cancelData?.metadata) {
+          configSnapshot.metadata = cancelData.metadata;
+        }
+      } catch { /* non-fatal — complete handler will work without metadata but can't cancel */ }
+    }
   } else {
     configSnapshot = rawConfig as Record<string, unknown>;
   }
