@@ -13,30 +13,16 @@ export async function GET(
 
   const admin = createAdminClient();
   const url = new URL(request.url);
-  const range = url.searchParams.get("range") || "14d";
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  let startDate = new Date(today);
-  let endDate = new Date(today);
-  let days = 14;
 
-  if (range === "this_month") {
-    startDate = new Date(today.getFullYear(), today.getMonth(), 1);
-    endDate = new Date(today.getFullYear(), today.getMonth() + 1, 1);
-    days = Math.ceil((endDate.getTime() - startDate.getTime()) / 86400000);
-  } else if (range === "next_month") {
-    startDate = new Date(today.getFullYear(), today.getMonth() + 1, 1);
-    endDate = new Date(today.getFullYear(), today.getMonth() + 2, 1);
-    days = Math.ceil((endDate.getTime() - startDate.getTime()) / 86400000);
-  } else if (range === "all") {
-    startDate = new Date("2026-01-01");
-    endDate = new Date("2027-01-01");
-    days = Math.ceil((endDate.getTime() - startDate.getTime()) / 86400000);
-  } else {
-    days = parseInt(range) || 14;
-    endDate.setDate(endDate.getDate() + days);
-  }
+  const startParam = url.searchParams.get("start");
+  const endParam = url.searchParams.get("end");
+
+  const startDate = startParam ? new Date(startParam + "T00:00:00") : new Date(today);
+  const endDate = endParam ? new Date(endParam + "T00:00:00") : new Date(today.getTime() + 14 * 86400000);
+  const days = Math.ceil((endDate.getTime() - startDate.getTime()) / 86400000);
 
   // ── Fetch all forecasts in date range ──
   let allForecasts: any[] = [];
@@ -114,8 +100,8 @@ export async function GET(
     };
   }
 
-  // For bounded ranges, pre-populate all days. For "all", only create on demand.
-  if (range !== "all") {
+  // Pre-populate days (skip if range > 90 days to avoid huge empty tables)
+  if (days <= 90) {
     for (let i = 0; i < days; i++) {
       const d = new Date(startDate);
       d.setDate(d.getDate() + i);
@@ -127,7 +113,7 @@ export async function GET(
   // Populate from forecasts
   for (const f of allForecasts) {
     if (!dailyMap[f.expected_date]) {
-      if (range === "all") dailyMap[f.expected_date] = emptyDay(f.expected_date);
+      if (days > 90) dailyMap[f.expected_date] = emptyDay(f.expected_date);
       else continue;
     }
     const day = dailyMap[f.expected_date];
@@ -176,7 +162,7 @@ export async function GET(
   // Populate change events
   for (const e of allEvents) {
     if (!dailyMap[e.forecast_date]) {
-      if (range === "all") dailyMap[e.forecast_date] = emptyDay(e.forecast_date);
+      if (days > 90) dailyMap[e.forecast_date] = emptyDay(e.forecast_date);
       else continue;
     }
     const day = dailyMap[e.forecast_date];
@@ -227,7 +213,8 @@ export async function GET(
     daily,
     totals,
     changes: changesSummary,
-    range,
+    start: startDate.toISOString().slice(0, 10),
+    end: endDate.toISOString().slice(0, 10),
     days,
   });
 }

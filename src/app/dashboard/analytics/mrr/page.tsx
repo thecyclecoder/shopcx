@@ -95,15 +95,19 @@ export default function MRRDashboard() {
   const workspace = useWorkspace();
   const [data, setData] = useState<MRRData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [range, setRange] = useState("14d");
+  // Default: today through 14 days out
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const defaultEnd = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+  const [startDate, setStartDate] = useState(todayStr);
+  const [endDate, setEndDate] = useState(defaultEnd);
 
   useEffect(() => {
     setLoading(true);
-    fetch(`/api/workspaces/${workspace.id}/analytics/mrr?range=${range}`)
+    fetch(`/api/workspaces/${workspace.id}/analytics/mrr?start=${startDate}&end=${endDate}`)
       .then(r => r.json())
       .then(d => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));
-  }, [workspace.id, range]);
+  }, [workspace.id, startDate, endDate]);
 
   if (loading || !data) {
     return (
@@ -132,19 +136,21 @@ export default function MRRDashboard() {
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">MRR Forecast</h1>
           <p className="mt-1 text-sm text-zinc-500">Expected vs actual recurring revenue</p>
         </div>
-        <select
-          value={range}
-          onChange={(e) => setRange(e.target.value)}
-          className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-        >
-          <option value="7d">7 days</option>
-          <option value="14d">14 days</option>
-          <option value="this_month">This month</option>
-          <option value="next_month">Next month</option>
-          <option value="30d">30 days</option>
-          <option value="60d">60 days</option>
-          <option value="all">All time</option>
-        </select>
+        <div className="flex items-center gap-2">
+          <input
+            type="date"
+            value={startDate}
+            onChange={(e) => setStartDate(e.target.value)}
+            className="rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+          />
+          <span className="text-sm text-zinc-400">to</span>
+          <input
+            type="date"
+            value={endDate}
+            onChange={(e) => setEndDate(e.target.value)}
+            className="rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+          />
+        </div>
       </div>
 
       {/* Summary Cards */}
