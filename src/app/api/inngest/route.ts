@@ -40,6 +40,7 @@ import {
 import { portalAutoResume, portalAutoResumeCron } from "@/lib/inngest/portal-auto-resume";
 import { amazonSyncOrders, amazonSyncAsins, amazonDailySyncCron } from "@/lib/inngest/amazon-sync";
 import { monthlyRevenueSnapshot } from "@/lib/inngest/monthly-revenue-snapshot";
+import { metaSyncSpend, metaDailySyncCron } from "@/lib/inngest/meta-sync";
 import { ticketAutoArchive } from "@/lib/inngest/auto-archive";
 import { tagCancelRelevanceBulk, tagCancelRelevanceCron } from "@/lib/inngest/review-tagging";
 import { amplifierWebhookProcess } from "@/lib/inngest/amplifier-webhooks";
@@ -103,6 +104,8 @@ export const { GET, POST, PUT } = serve({
     amazonSyncAsins,
     amazonDailySyncCron,
     monthlyRevenueSnapshot,
+    metaSyncSpend,
+    metaDailySyncCron,
     ticketAutoArchive,
     tagCancelRelevanceBulk,
     tagCancelRelevanceCron,
