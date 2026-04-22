@@ -136,16 +136,16 @@ export default function RevenueDashboard() {
           {/* Monthly table */}
           <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1400px] text-sm">
+              <table className="w-full min-w-[1600px] text-sm">
                 <thead>
                   <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
                     <th className="sticky left-0 z-10 bg-white px-4 py-2 dark:bg-zinc-900">Month</th>
                     {/* Shopify */}
-                    <th className="px-3 py-2 text-right" colSpan={7}>
+                    <th className="px-3 py-2 text-right" colSpan={8}>
                       <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Shopify</span>
                     </th>
                     {/* Amazon */}
-                    <th className="px-3 py-2 text-right" colSpan={7}>
+                    <th className="px-3 py-2 text-right" colSpan={8}>
                       <span className="rounded bg-amber-100 px-1.5 py-0.5 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">Amazon</span>
                     </th>
                     {/* Combined */}
@@ -156,21 +156,23 @@ export default function RevenueDashboard() {
                   <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
                     <th className="sticky left-0 z-10 bg-white px-4 py-1 dark:bg-zinc-900"></th>
                     {/* Shopify columns */}
-                    <th className="px-3 py-1 text-right">Recurring</th>
-                    <th className="px-3 py-1 text-right">New Subs</th>
-                    <th className="px-3 py-1 text-right">MRR</th>
-                    <th className="px-3 py-1 text-right">Churn</th>
-                    <th className="px-3 py-1 text-right">Churn %</th>
-                    <th className="px-3 py-1 text-right">One-Time</th>
-                    <th className="px-3 py-1 text-right">Sub Rate</th>
+                    <th className="bg-emerald-50/50 px-3 py-1 text-right dark:bg-emerald-950/20">Recurring</th>
+                    <th className="bg-emerald-50/50 px-3 py-1 text-right dark:bg-emerald-950/20">New Subs</th>
+                    <th className="bg-emerald-50/50 px-3 py-1 text-right dark:bg-emerald-950/20">MRR</th>
+                    <th className="bg-emerald-50/50 px-3 py-1 text-right dark:bg-emerald-950/20">Churn</th>
+                    <th className="bg-emerald-50/50 px-3 py-1 text-right dark:bg-emerald-950/20">Churn %</th>
+                    <th className="bg-emerald-50/50 px-3 py-1 text-right dark:bg-emerald-950/20">One-Time</th>
+                    <th className="bg-emerald-50/50 px-3 py-1 text-right dark:bg-emerald-950/20">Sub Rate</th>
+                    <th className="bg-emerald-50/50 px-3 py-1 text-right font-semibold dark:bg-emerald-950/20">Total</th>
                     {/* Amazon columns */}
-                    <th className="px-3 py-1 text-right">Recurring</th>
-                    <th className="px-3 py-1 text-right">New SnS</th>
-                    <th className="px-3 py-1 text-right">MRR</th>
-                    <th className="px-3 py-1 text-right">Churn</th>
-                    <th className="px-3 py-1 text-right">Churn %</th>
-                    <th className="px-3 py-1 text-right">One-Time</th>
-                    <th className="px-3 py-1 text-right">Sub Rate</th>
+                    <th className="bg-amber-50/50 px-3 py-1 text-right dark:bg-amber-950/20">Recurring</th>
+                    <th className="bg-amber-50/50 px-3 py-1 text-right dark:bg-amber-950/20">New SnS</th>
+                    <th className="bg-amber-50/50 px-3 py-1 text-right dark:bg-amber-950/20">MRR</th>
+                    <th className="bg-amber-50/50 px-3 py-1 text-right dark:bg-amber-950/20">Churn</th>
+                    <th className="bg-amber-50/50 px-3 py-1 text-right dark:bg-amber-950/20">Churn %</th>
+                    <th className="bg-amber-50/50 px-3 py-1 text-right dark:bg-amber-950/20">One-Time</th>
+                    <th className="bg-amber-50/50 px-3 py-1 text-right dark:bg-amber-950/20">Sub Rate</th>
+                    <th className="bg-amber-50/50 px-3 py-1 text-right font-semibold dark:bg-amber-950/20">Total</th>
                     {/* Combined columns */}
                     <th className="px-3 py-1 text-right">Total</th>
                     <th className="px-3 py-1 text-right">AMZ Rate</th>
@@ -211,6 +213,9 @@ export default function RevenueDashboard() {
                       <td className="px-3 py-2.5 text-right tabular-nums text-zinc-500">
                         {m.subscription_rate > 0 ? `${m.subscription_rate.toFixed(0)}%` : "—"}
                       </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums font-semibold text-zinc-900 dark:text-zinc-100">
+                        {fmtShort(m.total_revenue_cents)}
+                      </td>
                       {/* Amazon */}
                       <td className="px-3 py-2.5 text-right tabular-nums text-emerald-600 dark:text-emerald-400">
                         {m.amz_recurring_revenue_cents > 0 ? fmtShort(m.amz_recurring_revenue_cents) : "—"}
@@ -238,6 +243,9 @@ export default function RevenueDashboard() {
                       </td>
                       <td className="px-3 py-2.5 text-right tabular-nums text-zinc-500">
                         {m.amz_subscription_rate > 0 ? `${m.amz_subscription_rate.toFixed(0)}%` : "—"}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums font-semibold text-zinc-900 dark:text-zinc-100">
+                        {(m.amz_total_revenue_cents || 0) > 0 ? fmtShort(m.amz_total_revenue_cents) : "—"}
                       </td>
                       {/* Combined */}
                       <td className="px-3 py-2.5 text-right tabular-nums font-semibold text-zinc-900 dark:text-zinc-100">
