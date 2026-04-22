@@ -9,6 +9,7 @@ interface PortalConfig {
     shipping_protection_product_ids: string[];
     products_available_to_add: string[];
     rewards_url: string;
+    payment_update_url: string;
   };
   shopify: {
     enabled: boolean;
@@ -212,6 +213,10 @@ export default function PortalSettingsPage() {
             onChange={(v) => updateGeneral("rewards_url", v)}
             placeholder="https://yourstore.com/pages/rewards"
             description="Link to your rewards/points page (Smile.io, etc.)." />
+          <Field label="Payment update URL" value={config.general.payment_update_url || ""}
+            onChange={(v) => updateGeneral("payment_update_url", v)}
+            placeholder="https://account.yourstore.com/profile"
+            description="Where to send customers to update their payment method (used in dunning emails)." />
         </Card>
 
         {/* Products */}

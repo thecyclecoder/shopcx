@@ -491,10 +491,11 @@ async function handleAllCardsExhausted(
   // Get customer + workspace info for our own email
   if (customerId) {
     const { data: customer } = await admin.from("customers").select("email, first_name, shopify_customer_id").eq("id", customerId).single();
-    const { data: ws } = await admin.from("workspaces").select("name, shopify_myshopify_domain").eq("id", workspaceId).single();
+    const { data: ws } = await admin.from("workspaces").select("name, portal_config").eq("id", workspaceId).single();
+    const portalGeneral = (ws?.portal_config as Record<string, any>)?.general || {};
+    const updateUrl = portalGeneral.payment_update_url || "";
 
-    if (customer?.email && ws?.name && ws?.shopify_myshopify_domain) {
-      const updateUrl = "https://account.superfoodscompany.com/profile";
+    if (customer?.email && ws?.name && updateUrl) {
 
       if (action === "pause") {
         await sendDunningPausedEmail({
