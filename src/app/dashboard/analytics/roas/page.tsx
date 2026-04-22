@@ -233,6 +233,9 @@ export default function ROASDashboard() {
             />
           </div>
 
+          {/* Margin Calculator */}
+          <MarginCalculator summary={s} />
+
           {/* ROAS Trendline — only for multi-day ranges */}
           {multiDay && (
             <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
@@ -325,5 +328,126 @@ function ROASChart({ daily }: { daily: DayData[] }) {
         </g>
       ))}
     </svg>
+  );
+}
+
+function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
+  const [cogsPct, setCogsPct] = useState(20);
+  const [shippingPct, setShippingPct] = useState(10);
+
+  const totalOrders = s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count;
+  const totalRevenue = s.total_revenue_cents;
+  const aov = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+  const cac = totalOrders > 0 && s.total_spend_cents > 0 ? s.total_spend_cents / totalOrders : 0;
+  const cogsPerOrder = aov * (cogsPct / 100);
+  const shippingPerOrder = aov * (shippingPct / 100);
+  const costPerOrder = cogsPerOrder + shippingPerOrder;
+
+  // First order margin
+  const firstOrderProfit = aov - cac - costPerOrder;
+  const firstOrderMargin = aov > 0 ? (firstOrderProfit / aov) * 100 : 0;
+
+  // Lifetime margin (using blended LTV)
+  const blendedSubRate = totalOrders > 0
+    ? ((s.shopify_new_sub_count + s.amazon_sns_checkout_count) / totalOrders)
+    : 0;
+  const avgChurn = s.shopify_avg_churn_pct > 0 ? s.shopify_avg_churn_pct / 100 : 0;
+  const lifetimeOrders = avgChurn > 0
+    ? (1 - blendedSubRate) + (blendedSubRate / avgChurn)
+    : 1;
+  const lifetimeRevenue = aov * lifetimeOrders;
+  const lifetimeCost = costPerOrder * lifetimeOrders;
+  const lifetimeProfit = lifetimeRevenue - cac - lifetimeCost;
+  const trueROAS = cac > 0 ? lifetimeProfit / cac : 0;
+
+  if (!totalOrders || !aov) return null;
+
+  return (
+    <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <h2 className="mb-4 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Margin Calculator</h2>
+
+      <div className="mb-4 flex flex-wrap gap-6">
+        <div>
+          <label className="block text-xs font-medium text-zinc-500 mb-1">COGS %</label>
+          <input type="number" value={cogsPct} onChange={(e) => setCogsPct(Number(e.target.value))}
+            className="w-20 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-zinc-500 mb-1">Shipping %</label>
+          <input type="number" value={shippingPct} onChange={(e) => setShippingPct(Number(e.target.value))}
+            className="w-20 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+        {/* First Order */}
+        <div className="rounded-lg border border-zinc-100 p-4 dark:border-zinc-800">
+          <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-zinc-400">First Order</h3>
+          <div className="space-y-2 text-sm">
+            <div className="flex justify-between">
+              <span className="text-zinc-500">AOV</span>
+              <span className="tabular-nums font-medium text-zinc-900 dark:text-zinc-100">{fmt(aov)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Ad cost (CAC)</span>
+              <span className="tabular-nums text-red-500">-{fmt(cac)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-zinc-500">COGS ({cogsPct}%)</span>
+              <span className="tabular-nums text-red-500">-{fmt(cogsPerOrder)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Shipping ({shippingPct}%)</span>
+              <span className="tabular-nums text-red-500">-{fmt(shippingPerOrder)}</span>
+            </div>
+            <div className="border-t border-zinc-100 pt-2 dark:border-zinc-800">
+              <div className="flex justify-between">
+                <span className="font-medium text-zinc-700 dark:text-zinc-300">Profit</span>
+                <span className={`tabular-nums font-semibold ${firstOrderProfit >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                  {fmt(firstOrderProfit)} ({firstOrderMargin.toFixed(1)}%)
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Lifetime */}
+        <div className="rounded-lg border border-zinc-100 p-4 dark:border-zinc-800">
+          <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-zinc-400">Lifetime (predicted)</h3>
+          <div className="space-y-2 text-sm">
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Avg orders per customer</span>
+              <span className="tabular-nums font-medium text-zinc-900 dark:text-zinc-100">{lifetimeOrders.toFixed(1)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Lifetime revenue</span>
+              <span className="tabular-nums font-medium text-emerald-600">{fmt(lifetimeRevenue)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Ad cost (one-time)</span>
+              <span className="tabular-nums text-red-500">-{fmt(cac)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-zinc-500">COGS + shipping ({lifetimeOrders.toFixed(1)} orders)</span>
+              <span className="tabular-nums text-red-500">-{fmt(lifetimeCost)}</span>
+            </div>
+            <div className="border-t border-zinc-100 pt-2 dark:border-zinc-800">
+              <div className="flex justify-between">
+                <span className="font-medium text-zinc-700 dark:text-zinc-300">Lifetime profit</span>
+                <span className={`tabular-nums font-semibold ${lifetimeProfit >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                  {fmt(lifetimeProfit)}
+                </span>
+              </div>
+              <div className="flex justify-between mt-1">
+                <span className="font-medium text-zinc-700 dark:text-zinc-300">True ROAS</span>
+                <span className={`tabular-nums font-semibold ${trueROAS >= 3 ? "text-emerald-600" : trueROAS >= 2 ? "text-amber-600" : "text-red-600"}`}>
+                  {trueROAS > 0 ? `${trueROAS.toFixed(1)}x` : "—"}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
