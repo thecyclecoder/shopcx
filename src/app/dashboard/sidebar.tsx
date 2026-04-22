@@ -36,7 +36,7 @@ const ICONS = {
   settings: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z",
 };
 
-interface NavItem { href: string; label: string; icon: string; comingSoon?: boolean; adminOnly?: boolean }
+interface NavItem { href: string; label: string; icon: string; comingSoon?: boolean; adminOnly?: boolean; ownerOnly?: boolean }
 interface NavSection { label: string; icon?: string; items: NavItem[]; collapsible?: boolean }
 
 const NAV_STRUCTURE: (NavItem | NavSection)[] = [
@@ -56,6 +56,14 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "/dashboard/crisis", label: "Crisis", icon: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" },
       { href: "/dashboard/loyalty", label: "Loyalty", icon: ICONS.loyalty },
       { href: "/dashboard/reviews", label: "Reviews", icon: ICONS.reviews },
+    ],
+  },
+  {
+    label: "Analytics",
+    icon: "M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z",
+    collapsible: true,
+    items: [
+      { href: "/dashboard/analytics/revenue", label: "Revenue", icon: "M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z", ownerOnly: true },
       { href: "/dashboard/portal-analytics", label: "Portal", icon: ICONS.portal },
     ],
   },
@@ -273,6 +281,7 @@ export default function Sidebar({
                   <div className="ml-6 mt-0.5 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-800">
                     {section.items.map(item => {
                       if (item.adminOnly && !["owner", "admin"].includes(workspace.role)) return null;
+                      if (item.ownerOnly && workspace.role !== "owner") return null;
                       const isActive = pathname === item.href || (item.href !== "#" && pathname.startsWith(item.href));
                       return (
                         <Link
