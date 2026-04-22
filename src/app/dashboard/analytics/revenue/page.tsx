@@ -24,6 +24,19 @@ interface MonthData {
   days: number;
   days_in_month: number;
   mismatches: number;
+  // Amazon
+  amz_recurring_count: number;
+  amz_recurring_revenue_cents: number;
+  amz_sns_checkout_count: number;
+  amz_sns_checkout_revenue_cents: number;
+  amz_one_time_count: number;
+  amz_one_time_revenue_cents: number;
+  amz_total_count: number;
+  amz_total_revenue_cents: number;
+  amz_mrr_cents: number;
+  amz_churn_cents: number;
+  amz_churn_pct: number;
+  amz_subscription_rate: number;
 }
 
 function fmt(cents: number): string {
@@ -121,62 +134,125 @@ export default function RevenueDashboard() {
           )}
 
           {/* Monthly table */}
-          <div className="overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
-                  <th className="px-4 py-2">Month</th>
-                  <th className="px-4 py-2 text-right">Recurring</th>
-                  <th className="px-4 py-2 text-right">New Subs</th>
-                  <th className="px-4 py-2 text-right">MRR</th>
-                  <th className="px-4 py-2 text-right">Churn</th>
-                  <th className="px-4 py-2 text-right">Churn %</th>
-                  <th className="px-4 py-2 text-right">One-Time</th>
-                  <th className="px-4 py-2 text-right">Sub Rate</th>
-                  <th className="px-4 py-2 text-right">Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[...months].reverse().map(m => (
-                  <tr key={m.month} className={`border-b border-zinc-100 dark:border-zinc-800/50 ${!m.is_complete ? "bg-amber-50/30 dark:bg-amber-950/10" : ""}`}>
-                    <td className="px-4 py-2.5 text-zinc-700 dark:text-zinc-300">
-                      {monthLabel(m.month)}
-                      {!m.is_complete && <span className="ml-1 text-[10px] text-amber-500">({m.days}d)</span>}
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums text-emerald-600 dark:text-emerald-400">
-                      {fmtShort(m.recurring_revenue_cents)}
-                      <span className="ml-1 text-[10px] text-zinc-400">({m.recurring_count})</span>
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums text-blue-600 dark:text-blue-400">
-                      {fmtShort(m.new_subscription_revenue_cents)}
-                      <span className="ml-1 text-[10px] text-zinc-400">({m.new_subscription_count})</span>
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums font-medium text-zinc-900 dark:text-zinc-100">
-                      {fmtShort(m.mrr_cents)}
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums text-red-600 dark:text-red-400">
-                      {m.churn_cents > 0 ? fmtShort(m.churn_cents) : "—"}
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">
-                      {m.churn_pct > 0 ? (
-                        <span className={m.churn_pct > 10 ? "text-red-600 font-medium" : m.churn_pct > 5 ? "text-amber-600" : "text-zinc-500"}>
-                          {m.churn_pct.toFixed(1)}%
-                        </span>
-                      ) : "—"}
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums text-violet-600 dark:text-violet-400">
-                      {m.one_time_revenue_cents > 0 ? fmtShort(m.one_time_revenue_cents) : "—"}
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums text-zinc-500">
-                      {m.subscription_rate > 0 ? `${m.subscription_rate.toFixed(0)}%` : "—"}
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums font-medium text-zinc-900 dark:text-zinc-100">
-                      {fmtShort(m.total_revenue_cents)}
-                    </td>
+          <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[1400px] text-sm">
+                <thead>
+                  <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
+                    <th className="sticky left-0 z-10 bg-white px-4 py-2 dark:bg-zinc-900">Month</th>
+                    {/* Shopify */}
+                    <th className="px-3 py-2 text-right" colSpan={7}>
+                      <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Shopify</span>
+                    </th>
+                    {/* Amazon */}
+                    <th className="px-3 py-2 text-right" colSpan={7}>
+                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">Amazon</span>
+                    </th>
+                    {/* Combined */}
+                    <th className="px-3 py-2 text-right" colSpan={2}>
+                      <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300">Combined</span>
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                  <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
+                    <th className="sticky left-0 z-10 bg-white px-4 py-1 dark:bg-zinc-900"></th>
+                    {/* Shopify columns */}
+                    <th className="px-3 py-1 text-right">Recurring</th>
+                    <th className="px-3 py-1 text-right">New Subs</th>
+                    <th className="px-3 py-1 text-right">MRR</th>
+                    <th className="px-3 py-1 text-right">Churn</th>
+                    <th className="px-3 py-1 text-right">Churn %</th>
+                    <th className="px-3 py-1 text-right">One-Time</th>
+                    <th className="px-3 py-1 text-right">Sub Rate</th>
+                    {/* Amazon columns */}
+                    <th className="px-3 py-1 text-right">Recurring</th>
+                    <th className="px-3 py-1 text-right">New SnS</th>
+                    <th className="px-3 py-1 text-right">MRR</th>
+                    <th className="px-3 py-1 text-right">Churn</th>
+                    <th className="px-3 py-1 text-right">Churn %</th>
+                    <th className="px-3 py-1 text-right">One-Time</th>
+                    <th className="px-3 py-1 text-right">Sub Rate</th>
+                    {/* Combined columns */}
+                    <th className="px-3 py-1 text-right">Total</th>
+                    <th className="px-3 py-1 text-right">AMZ Rate</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...months].reverse().map(m => (
+                    <tr key={m.month} className={`border-b border-zinc-100 dark:border-zinc-800/50 ${!m.is_complete ? "bg-amber-50/30 dark:bg-amber-950/10" : ""}`}>
+                      <td className="sticky left-0 z-10 bg-white px-4 py-2.5 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+                        {monthLabel(m.month)}
+                        {!m.is_complete && <span className="ml-1 text-[10px] text-amber-500">({m.days}d)</span>}
+                      </td>
+                      {/* Shopify */}
+                      <td className="px-3 py-2.5 text-right tabular-nums text-emerald-600 dark:text-emerald-400">
+                        {fmtShort(m.recurring_revenue_cents)}
+                        <span className="ml-1 text-[10px] text-zinc-400">({m.recurring_count})</span>
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-blue-600 dark:text-blue-400">
+                        {fmtShort(m.new_subscription_revenue_cents)}
+                        <span className="ml-1 text-[10px] text-zinc-400">({m.new_subscription_count})</span>
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums font-medium text-zinc-900 dark:text-zinc-100">
+                        {fmtShort(m.mrr_cents)}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-red-600 dark:text-red-400">
+                        {m.churn_cents > 0 ? fmtShort(m.churn_cents) : "—"}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums">
+                        {m.churn_pct > 0 ? (
+                          <span className={m.churn_pct > 10 ? "text-red-600 font-medium" : m.churn_pct > 5 ? "text-amber-600" : "text-zinc-500"}>
+                            {m.churn_pct.toFixed(1)}%
+                          </span>
+                        ) : "—"}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-violet-600 dark:text-violet-400">
+                        {m.one_time_revenue_cents > 0 ? fmtShort(m.one_time_revenue_cents) : "—"}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-zinc-500">
+                        {m.subscription_rate > 0 ? `${m.subscription_rate.toFixed(0)}%` : "—"}
+                      </td>
+                      {/* Amazon */}
+                      <td className="px-3 py-2.5 text-right tabular-nums text-emerald-600 dark:text-emerald-400">
+                        {m.amz_recurring_revenue_cents > 0 ? fmtShort(m.amz_recurring_revenue_cents) : "—"}
+                        {m.amz_recurring_count > 0 && <span className="ml-1 text-[10px] text-zinc-400">({m.amz_recurring_count})</span>}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-blue-600 dark:text-blue-400">
+                        {m.amz_sns_checkout_revenue_cents > 0 ? fmtShort(m.amz_sns_checkout_revenue_cents) : "—"}
+                        {m.amz_sns_checkout_count > 0 && <span className="ml-1 text-[10px] text-zinc-400">({m.amz_sns_checkout_count})</span>}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums font-medium text-zinc-900 dark:text-zinc-100">
+                        {m.amz_mrr_cents > 0 ? fmtShort(m.amz_mrr_cents) : "—"}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-red-600 dark:text-red-400">
+                        {m.amz_churn_cents > 0 ? fmtShort(m.amz_churn_cents) : "—"}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums">
+                        {m.amz_churn_pct > 0 ? (
+                          <span className={m.amz_churn_pct > 10 ? "text-red-600 font-medium" : m.amz_churn_pct > 5 ? "text-amber-600" : "text-zinc-500"}>
+                            {m.amz_churn_pct.toFixed(1)}%
+                          </span>
+                        ) : "—"}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-violet-600 dark:text-violet-400">
+                        {m.amz_one_time_revenue_cents > 0 ? fmtShort(m.amz_one_time_revenue_cents) : "—"}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-zinc-500">
+                        {m.amz_subscription_rate > 0 ? `${m.amz_subscription_rate.toFixed(0)}%` : "—"}
+                      </td>
+                      {/* Combined */}
+                      <td className="px-3 py-2.5 text-right tabular-nums font-semibold text-zinc-900 dark:text-zinc-100">
+                        {fmtShort(m.total_revenue_cents + (m.amz_total_revenue_cents || 0))}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-amber-600 dark:text-amber-400">
+                        {(m.amz_total_revenue_cents || 0) > 0
+                          ? `${((m.amz_total_revenue_cents / (m.total_revenue_cents + m.amz_total_revenue_cents)) * 100).toFixed(0)}%`
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </>
       )}

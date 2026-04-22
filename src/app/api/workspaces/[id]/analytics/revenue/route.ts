@@ -76,6 +76,47 @@ export async function GET(
       monthMap.set(monthKey, existing);
     }
 
+    // ── Amazon data ──
+    const { data: amazonSnapshots } = await admin
+      .from("daily_amazon_order_snapshots")
+      .select("snapshot_date, order_bucket, order_count, gross_revenue_cents")
+      .eq("workspace_id", workspaceId)
+      .gte("snapshot_date", earliestStr)
+      .order("snapshot_date", { ascending: true });
+
+    // Aggregate Amazon by month
+    const amzMonthMap = new Map<string, {
+      amz_recurring_count: number; amz_recurring_revenue_cents: number;
+      amz_sns_checkout_count: number; amz_sns_checkout_revenue_cents: number;
+      amz_one_time_count: number; amz_one_time_revenue_cents: number;
+      amz_total_count: number; amz_total_revenue_cents: number;
+    }>();
+
+    for (const s of amazonSnapshots || []) {
+      const monthKey = s.snapshot_date.slice(0, 7);
+      const existing = amzMonthMap.get(monthKey) || {
+        amz_recurring_count: 0, amz_recurring_revenue_cents: 0,
+        amz_sns_checkout_count: 0, amz_sns_checkout_revenue_cents: 0,
+        amz_one_time_count: 0, amz_one_time_revenue_cents: 0,
+        amz_total_count: 0, amz_total_revenue_cents: 0,
+      };
+      const rev = s.gross_revenue_cents || 0;
+      const count = s.order_count || 0;
+      if (s.order_bucket === "recurring") {
+        existing.amz_recurring_count += count;
+        existing.amz_recurring_revenue_cents += rev;
+      } else if (s.order_bucket === "sns_checkout") {
+        existing.amz_sns_checkout_count += count;
+        existing.amz_sns_checkout_revenue_cents += rev;
+      } else {
+        existing.amz_one_time_count += count;
+        existing.amz_one_time_revenue_cents += rev;
+      }
+      existing.amz_total_count += count;
+      existing.amz_total_revenue_cents += rev;
+      amzMonthMap.set(monthKey, existing);
+    }
+
     // Build monthly array with calculated values
     const sortedMonths = [...monthMap.keys()].sort();
     const months = sortedMonths.map((monthKey, idx) => {
@@ -106,6 +147,36 @@ export async function GET(
       const daysInMonth = new Date(y, m, 0).getDate();
       const is_complete = d.days >= daysInMonth;
 
+      // Amazon data for this month
+      const amz = amzMonthMap.get(monthKey) || {
+        amz_recurring_count: 0, amz_recurring_revenue_cents: 0,
+        amz_sns_checkout_count: 0, amz_sns_checkout_revenue_cents: 0,
+        amz_one_time_count: 0, amz_one_time_revenue_cents: 0,
+        amz_total_count: 0, amz_total_revenue_cents: 0,
+      };
+
+      // Amazon MRR = recurring + new SnS
+      const amz_mrr = amz.amz_recurring_revenue_cents + amz.amz_sns_checkout_revenue_cents;
+
+      // Amazon churn
+      let amz_churn_cents = 0;
+      let amz_churn_pct = 0;
+      let amz_prev_mrr = 0;
+      if (idx > 0) {
+        const prevAmz = amzMonthMap.get(sortedMonths[idx - 1]);
+        if (prevAmz) {
+          amz_prev_mrr = prevAmz.amz_recurring_revenue_cents + prevAmz.amz_sns_checkout_revenue_cents;
+          amz_churn_cents = Math.max(0, amz_prev_mrr - amz.amz_recurring_revenue_cents);
+          amz_churn_pct = amz_prev_mrr > 0 ? (amz_churn_cents / amz_prev_mrr) * 100 : 0;
+        }
+      }
+
+      // Amazon sub rate = new SnS / (new SnS + one-time)
+      const amzCheckoutTotal = amz.amz_sns_checkout_revenue_cents + amz.amz_one_time_revenue_cents;
+      const amz_subscription_rate = amzCheckoutTotal > 0
+        ? (amz.amz_sns_checkout_revenue_cents / amzCheckoutTotal) * 100
+        : 0;
+
       return {
         month: monthKey,
         ...d,
@@ -117,6 +188,12 @@ export async function GET(
         subscription_rate: Math.round(subscription_rate * 100) / 100,
         is_complete,
         days_in_month: daysInMonth,
+        // Amazon
+        ...amz,
+        amz_mrr_cents: amz_mrr,
+        amz_churn_cents,
+        amz_churn_pct: Math.round(amz_churn_pct * 100) / 100,
+        amz_subscription_rate: Math.round(amz_subscription_rate * 100) / 100,
       };
     });
 
