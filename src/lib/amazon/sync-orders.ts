@@ -15,7 +15,8 @@ interface AmazonOrderLine {
 }
 
 function bucketOrder(promoIds: string): "recurring" | "sns_checkout" | "one_time" {
-  if (promoIds.includes("FBA Subscribe and Save Discount")) return "recurring";
+  // Amazon uses "&" in the actual report data, not "and"
+  if (promoIds.includes("FBA Subscribe & Save Discount") || promoIds.includes("FBA Subscribe and Save Discount")) return "recurring";
   if (promoIds.includes("Subscribe and Save Promotion V2")) return "sns_checkout";
   return "one_time";
 }
