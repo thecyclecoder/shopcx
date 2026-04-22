@@ -7,6 +7,15 @@ import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { inngest } from "@/lib/inngest/client";
 import { enrichItemTitles } from "@/lib/subscription-items";
+import {
+  createForecast,
+  forecastCollected,
+  forecastFailed,
+  forecastCancelled,
+  forecastPaused,
+  forecastDateChanged,
+  forecastItemsChanged,
+} from "@/lib/billing-forecast";
 
 function mapStatus(status: string): "active" | "paused" | "cancelled" | "expired" | "failed" {
   switch (status?.toUpperCase()) {
@@ -321,6 +330,71 @@ async function handleSubscriptionEvent(
     subscription: subCtx || undefined,
     customer: custCtx || undefined,
   });
+
+  // ── Billing forecast updates ──
+  if (contractId) {
+    const forecastItems = items.map(i => ({
+      title: i.title,
+      sku: i.sku,
+      quantity: i.quantity,
+      price_cents: i.price_cents,
+      variant_title: i.variant_title,
+    }));
+    const nextDate = data.nextBillingDate as string | null;
+    const interval = billingPolicy?.interval || null;
+    const intervalCount = billingPolicy?.intervalCount || null;
+
+    try {
+      switch (eventType) {
+        case "subscription.created":
+          if (nextDate) {
+            await createForecast({
+              workspaceId, contractId, subscriptionId: subCtx?.id, customerId: dbCustomer.id,
+              expectedDate: nextDate, items: forecastItems,
+              billingInterval: interval, billingIntervalCount: intervalCount,
+              createdFrom: "subscription_created",
+            });
+          }
+          break;
+
+        case "subscription.activated":
+          if (nextDate) {
+            await createForecast({
+              workspaceId, contractId, subscriptionId: subCtx?.id, customerId: dbCustomer.id,
+              expectedDate: nextDate, items: forecastItems,
+              billingInterval: interval, billingIntervalCount: intervalCount,
+              createdFrom: "activated",
+            });
+          }
+          break;
+
+        case "subscription.cancelled":
+          await forecastCancelled(workspaceId, contractId);
+          break;
+
+        case "subscription.paused":
+          await forecastPaused(workspaceId, contractId);
+          break;
+
+        case "subscription.next-order-date-changed":
+          if (nextDate) {
+            await forecastDateChanged(workspaceId, contractId, nextDate);
+          }
+          break;
+
+        case "subscription.billing-interval-changed":
+          await forecastItemsChanged(workspaceId, contractId, forecastItems, nextDate);
+          break;
+
+        case "subscription.updated":
+          // Only update items/price — skip if a primary event already handled this contract
+          await forecastItemsChanged(workspaceId, contractId, forecastItems, nextDate);
+          break;
+      }
+    } catch (err) {
+      console.error(`[Forecast] Error processing ${eventType} for ${contractId}:`, err);
+    }
+  }
 }
 
 async function handleBillingEvent(
@@ -549,4 +623,60 @@ async function handleBillingEvent(
       console.error("Failed to send billing-success event:", err);
     }
   }
+
+  // ── Billing forecast updates ──
+  try {
+    if (eventType === "subscription.billing-success") {
+      const orderAmountCents = Math.round((Number(data.orderAmount) || 0) * 100);
+
+      // Get current sub data for next forecast
+      const { data: currentSub } = await admin.from("subscriptions")
+        .select("id, customer_id, items, next_billing_date, billing_interval, billing_interval_count")
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_contract_id", contractId)
+        .maybeSingle();
+
+      const forecastItems = ((currentSub?.items || []) as ForecastItem[]).map(i => ({
+        title: i.title || "",
+        sku: i.sku || null,
+        quantity: i.quantity || 1,
+        price_cents: i.price_cents || 0,
+        variant_title: (i as unknown as Record<string, unknown>).variant_title as string || null,
+      }));
+
+      await forecastCollected({
+        workspaceId, contractId,
+        actualRevenueCents: orderAmountCents,
+        orderId: data.orderId ? String(data.orderId) : null,
+        orderNumber: data.orderName as string || null,
+        billingAttemptId: data.billingAttemptId as string || null,
+        nextBillingDate: currentSub?.next_billing_date || null,
+        items: forecastItems,
+        billingInterval: currentSub?.billing_interval,
+        billingIntervalCount: currentSub?.billing_interval_count,
+      });
+    } else if (eventType === "subscription.billing-failure") {
+      let errorMsg: string | null = null;
+      if (data.billingAttemptResponseMessage) {
+        try {
+          errorMsg = JSON.parse(data.billingAttemptResponseMessage as string)?.error_message || null;
+        } catch { /* ignore */ }
+      }
+
+      await forecastFailed({
+        workspaceId, contractId,
+        failureReason: errorMsg,
+        billingAttemptId: data.billingAttemptId as string || null,
+      });
+    }
+  } catch (err) {
+    console.error(`[Forecast] Error processing ${eventType} for ${contractId}:`, err);
+  }
+}
+
+interface ForecastItem {
+  title: string;
+  sku: string | null;
+  quantity: number;
+  price_cents: number;
 }
