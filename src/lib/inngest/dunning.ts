@@ -494,7 +494,7 @@ async function handleAllCardsExhausted(
     const { data: ws } = await admin.from("workspaces").select("name, shopify_myshopify_domain").eq("id", workspaceId).single();
 
     if (customer?.email && ws?.name && ws?.shopify_myshopify_domain) {
-      const updateUrl = `https://${ws.shopify_myshopify_domain}/account`;
+      const updateUrl = "https://account.superfoodscompany.com/profile";
 
       if (action === "pause") {
         await sendDunningPausedEmail({
