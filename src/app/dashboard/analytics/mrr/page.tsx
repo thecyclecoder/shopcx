@@ -95,15 +95,15 @@ export default function MRRDashboard() {
   const workspace = useWorkspace();
   const [data, setData] = useState<MRRData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [days, setDays] = useState(14);
+  const [range, setRange] = useState("14d");
 
   useEffect(() => {
     setLoading(true);
-    fetch(`/api/workspaces/${workspace.id}/analytics/mrr?days=${days}`)
+    fetch(`/api/workspaces/${workspace.id}/analytics/mrr?range=${range}`)
       .then(r => r.json())
       .then(d => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));
-  }, [workspace.id, days]);
+  }, [workspace.id, range]);
 
   if (loading || !data) {
     return (
@@ -131,20 +131,23 @@ export default function MRRDashboard() {
           <p className="mt-1 text-sm text-zinc-500">Expected vs actual recurring revenue</p>
         </div>
         <select
-          value={days}
-          onChange={(e) => setDays(parseInt(e.target.value))}
+          value={range}
+          onChange={(e) => setRange(e.target.value)}
           className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
         >
-          <option value={7}>7 days</option>
-          <option value={14}>14 days</option>
-          <option value={30}>30 days</option>
-          <option value={60}>60 days</option>
+          <option value="7d">7 days</option>
+          <option value="14d">14 days</option>
+          <option value="this_month">This month</option>
+          <option value="next_month">Next month</option>
+          <option value="30d">30 days</option>
+          <option value="60d">60 days</option>
+          <option value="all">All time</option>
         </select>
       </div>
 
       {/* Summary Cards */}
       <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-        <StatCard label={`Static (${days}d)`} value={fmt(t.static_revenue)} sub={`${t.static_count} subs billing in window`} />
+        <StatCard label="Static Forecast" value={fmt(t.static_revenue)} sub={`${t.static_count} subs in window`} />
         <StatCard label="Expected" value={fmt(t.expected_revenue)}
           sub={`${t.expected_count} subs · ${retentionRate.toFixed(0)}% retention`}
           color={retentionRate < 90 ? "text-amber-600" : "text-zinc-900 dark:text-zinc-100"} />

@@ -13,12 +13,30 @@ export async function GET(
 
   const admin = createAdminClient();
   const url = new URL(request.url);
-  const days = parseInt(url.searchParams.get("days") || "14");
+  const range = url.searchParams.get("range") || "14d";
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const endDate = new Date(today);
-  endDate.setDate(endDate.getDate() + days);
+  let startDate = new Date(today);
+  let endDate = new Date(today);
+  let days = 14;
+
+  if (range === "this_month") {
+    startDate = new Date(today.getFullYear(), today.getMonth(), 1);
+    endDate = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+    days = Math.ceil((endDate.getTime() - startDate.getTime()) / 86400000);
+  } else if (range === "next_month") {
+    startDate = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+    endDate = new Date(today.getFullYear(), today.getMonth() + 2, 1);
+    days = Math.ceil((endDate.getTime() - startDate.getTime()) / 86400000);
+  } else if (range === "all") {
+    startDate = new Date("2026-01-01");
+    endDate = new Date("2027-01-01");
+    days = Math.ceil((endDate.getTime() - startDate.getTime()) / 86400000);
+  } else {
+    days = parseInt(range) || 14;
+    endDate.setDate(endDate.getDate() + days);
+  }
 
   // ── Fetch all forecasts in date range ──
   let allForecasts: any[] = [];
@@ -28,7 +46,7 @@ export async function GET(
       .from("billing_forecasts")
       .select("expected_date, expected_revenue_cents, actual_revenue_cents, status, forecast_type, created_from, shopify_contract_id")
       .eq("workspace_id", workspaceId)
-      .gte("expected_date", today.toISOString().slice(0, 10))
+      .gte("expected_date", startDate.toISOString().slice(0, 10))
       .lt("expected_date", endDate.toISOString().slice(0, 10))
       .range(offset, offset + 999);
     if (!data || data.length === 0) break;
@@ -81,12 +99,8 @@ export async function GET(
 
   const dailyMap: Record<string, DayData> = {};
 
-  // Initialize days
-  for (let i = 0; i < days; i++) {
-    const d = new Date(today);
-    d.setDate(d.getDate() + i);
-    const key = d.toISOString().slice(0, 10);
-    dailyMap[key] = {
+  function emptyDay(key: string): DayData {
+    return {
       date: key,
       static_count: 0, static_revenue: 0,
       expected_count: 0, expected_revenue: 0,
@@ -100,10 +114,23 @@ export async function GET(
     };
   }
 
+  // For bounded ranges, pre-populate all days. For "all", only create on demand.
+  if (range !== "all") {
+    for (let i = 0; i < days; i++) {
+      const d = new Date(startDate);
+      d.setDate(d.getDate() + i);
+      const key = d.toISOString().slice(0, 10);
+      dailyMap[key] = emptyDay(key);
+    }
+  }
+
   // Populate from forecasts
   for (const f of allForecasts) {
+    if (!dailyMap[f.expected_date]) {
+      if (range === "all") dailyMap[f.expected_date] = emptyDay(f.expected_date);
+      else continue;
+    }
     const day = dailyMap[f.expected_date];
-    if (!day) continue;
 
     const rev = f.expected_revenue_cents || 0;
 
@@ -148,8 +175,11 @@ export async function GET(
 
   // Populate change events
   for (const e of allEvents) {
+    if (!dailyMap[e.forecast_date]) {
+      if (range === "all") dailyMap[e.forecast_date] = emptyDay(e.forecast_date);
+      else continue;
+    }
     const day = dailyMap[e.forecast_date];
-    if (!day) continue;
     const type = e.event_type || "other";
     day.changes[type] = (day.changes[type] || 0) + (e.delta_cents || 0);
   }
@@ -197,6 +227,7 @@ export async function GET(
     daily,
     totals,
     changes: changesSummary,
+    range,
     days,
   });
 }
