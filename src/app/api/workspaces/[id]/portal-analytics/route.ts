@@ -41,17 +41,25 @@ export async function GET(
 
   const admin = createAdminClient();
 
-  // Fetch all portal events in date range
-  const { data: events } = await admin
-    .from("customer_events")
-    .select("event_type, created_at, properties")
-    .eq("workspace_id", workspaceId)
-    .like("event_type", "portal.%")
-    .gte("created_at", start)
-    .lte("created_at", end)
-    .order("created_at", { ascending: true });
-
-  const allEvents = events || [];
+  // Fetch all portal events in date range (paginate past Supabase 1000-row limit)
+  const allEvents: { event_type: string; created_at: string; properties: unknown }[] = [];
+  let offset = 0;
+  const pageSize = 1000;
+  while (true) {
+    const { data: page } = await admin
+      .from("customer_events")
+      .select("event_type, created_at, properties")
+      .eq("workspace_id", workspaceId)
+      .like("event_type", "portal.%")
+      .gte("created_at", start)
+      .lte("created_at", end)
+      .order("created_at", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (!page || page.length === 0) break;
+    allEvents.push(...page);
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
 
   // ── Portal Session Funnel ──
   // Count portal sessions (bootstrap = page load)
