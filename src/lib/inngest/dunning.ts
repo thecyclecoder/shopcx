@@ -698,6 +698,18 @@ export const dunningPaydayRetryCron = inngest.createFunction(
 
     for (const cycle of cycles) {
       const result = await step.run(`retry-${cycle.shopify_contract_id}`, async () => {
+        // Skip if sub is no longer active
+        if (cycle.subscription_id) {
+          const { data: sub } = await admin.from("subscriptions")
+            .select("status")
+            .eq("id", cycle.subscription_id)
+            .single();
+          if (!sub || sub.status === "cancelled") {
+            await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
+            return { contractId: cycle.shopify_contract_id, outcome: "sub_cancelled" };
+          }
+        }
+
         const settings = await getDunningSettings(cycle.workspace_id);
         if (!settings?.dunning_payday_retry_enabled) {
           await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
