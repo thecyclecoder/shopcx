@@ -104,11 +104,7 @@ async function executeRemedyAction(
         .eq("workspace_id", workspaceId)
         .eq("shopify_contract_id", contractId);
 
-      // Schedule auto-resume via Inngest
-      await inngest.send({
-        name: "portal/subscription-paused",
-        data: { workspaceId, contractId, pauseDays, resumeAt },
-      });
+      // Auto-resume handled by hourly cron (portal-auto-resume-cron)
 
       return {
         success: true,

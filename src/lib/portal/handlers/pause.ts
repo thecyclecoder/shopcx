@@ -77,16 +77,8 @@ export const pause: RouteHandler = async ({ auth, route, req }) => {
     .eq("workspace_id", auth.workspaceId)
     .eq("shopify_contract_id", String(contractId));
 
-  // Fire Inngest event for scheduled auto-resume
-  await inngest.send({
-    name: "portal/subscription-paused",
-    data: {
-      workspaceId: auth.workspaceId,
-      contractId: String(contractId),
-      pauseDays,
-      resumeAt,
-    },
-  });
+  // Auto-resume handled by hourly cron (portal-auto-resume-cron)
+  // No Inngest event needed — cron reads pause_resume_at from DB
 
   // Log customer event
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
