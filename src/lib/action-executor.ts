@@ -560,6 +560,9 @@ export async function executeSonnetDecision(
 
     case "journey":
       await handleJourney(ctx, decision, trackedSend, sysNote);
+      // Journey delivery sends its own messages — mark as sent so the
+      // ticket doesn't stay open with "no customer message sent"
+      messageSent = true;
       break;
 
     case "playbook":
