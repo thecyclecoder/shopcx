@@ -81,7 +81,7 @@ export default function RevenueDashboard() {
   };
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+    <div className="min-w-0 px-4 py-6 sm:px-6">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Revenue Analytics</h1>
         <p className="mt-1 text-sm text-zinc-500">
@@ -134,8 +134,8 @@ export default function RevenueDashboard() {
           )}
 
           {/* Monthly table */}
-          <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-            <div className="overflow-x-auto">
+          <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 max-w-full">
+            <div className="overflow-x-auto max-w-full">
               <table className="w-full min-w-[1600px] text-sm">
                 <thead>
                   <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
