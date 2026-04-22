@@ -116,37 +116,78 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   if (carryForwardDiscount) body.carryForwardDiscount = carryForwardDiscount;
   if (oldLineId) body.oldLineId = oldLineId.startsWith("gid://") ? oldLineId : `gid://shopify/SubscriptionLine/${oldLineId}`;
 
-  // Appstle replace-variants-v3 requires newVariants when using oldVariants.
-  // For removals (no newVariants), convert oldVariants to oldLineId by looking up the line.
+  // For removals without replacement, use the dedicated remove-line-item endpoint
   if (oldVariants.length && !newVariants && allowRemoveWithoutAdd) {
-    // Look up line IDs from Appstle contract for the variants being removed
     const adminDb = createAdminClient();
     const { data: ws2 } = await adminDb.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
-    if (ws2?.appstle_api_key_encrypted) {
-      const ak = decrypt(ws2.appstle_api_key_encrypted);
-      const contractRes = await fetch(
-        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${ak}`,
+    if (!ws2?.appstle_api_key_encrypted) return jsonErr({ error: "appstle_not_configured" }, 500);
+    const ak = decrypt(ws2.appstle_api_key_encrypted);
+
+    // Look up line IDs from Appstle contract
+    const contractRes = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${ak}`,
+    );
+    if (!contractRes.ok) return jsonErr({ error: "contract_fetch_failed" }, 500);
+    const contractData = await contractRes.json();
+    const contractLines = contractData.lines?.nodes || [];
+
+    // Remove each variant using the dedicated endpoint
+    for (const variantId of oldVariants) {
+      const line = contractLines.find((l: Record<string, unknown>) => {
+        const vid = String(l.variantId || "").split("/").pop();
+        return vid === String(variantId);
+      });
+      if (!line?.id) continue;
+
+      const removeRes = await fetch(
+        "https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-line-item",
+        {
+          method: "PUT",
+          headers: { "X-API-Key": ak, "Content-Type": "application/json" },
+          body: JSON.stringify({ contractId: String(contractId), lineId: line.id }),
+          cache: "no-store",
+        },
       );
-      if (contractRes.ok) {
-        const contractData = await contractRes.json();
-        const lines = contractData.lines?.nodes || [];
-        for (const variantId of oldVariants) {
-          const line = lines.find((l: Record<string, unknown>) => {
-            const vid = String(l.variantId || "").split("/").pop();
-            return vid === String(variantId);
-          });
-          if (line?.id) {
-            // Use oldLineId for each removal (only supports one at a time)
-            body.oldLineId = line.id;
-            break;
-          }
-        }
+      if (!removeRes.ok) {
+        const errText = await removeRes.text().catch(() => "");
+        return handleAppstleError(
+          Object.assign(new Error(`Appstle API error: ${removeRes.status}`), { details: errText }),
+          { route: "replaceVariants", payload: { contractId, lineId: line.id, action: "remove" } },
+        );
       }
     }
-  } else if (oldVariants.length) {
-    body.oldVariants = oldVariants;
+
+    // Update local DB items
+    const postRes = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${ak}`,
+    );
+    if (postRes.ok) {
+      const postContract = await postRes.json();
+      const rawDbItems = parseAppstleLineItems(postContract);
+      if (rawDbItems.length >= 0) {
+        const dbItems = await enrichItemTitles(auth.workspaceId, rawDbItems);
+        const adminDb2 = createAdminClient();
+        await adminDb2.from("subscriptions")
+          .update({ items: dbItems, updated_at: new Date().toISOString() })
+          .eq("shopify_contract_id", String(contractId));
+      }
+    }
+
+    const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
+    if (customer) {
+      await logPortalAction({
+        workspaceId: auth.workspaceId, customerId: customer.id,
+        eventType: "portal.items.swapped",
+        summary: "Customer removed item(s) from subscription via portal",
+        properties: { shopify_contract_id: String(contractId), removed_variants: oldVariants },
+        createNote: true,
+      });
+    }
+
+    return jsonOk({ ok: true, route, contractId });
   }
 
+  if (oldVariants.length) body.oldVariants = oldVariants;
   if (oldOneTimeVariants.length) body.oldOneTimeVariants = oldOneTimeVariants;
   if (newVariants) body.newVariants = newVariants;
   if (newOneTimeVariants) body.newOneTimeVariants = newOneTimeVariants;
