@@ -336,31 +336,52 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
   const [shippingPct, setShippingPct] = useState(10);
 
   const totalOrders = s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count;
-  const totalRevenue = s.total_revenue_cents;
-  const aov = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+  if (!totalOrders) return null;
+
   const cac = totalOrders > 0 && s.total_spend_cents > 0 ? s.total_spend_cents / totalOrders : 0;
-  const cogsPerOrder = aov * (cogsPct / 100);
-  const shippingPerOrder = aov * (shippingPct / 100);
-  const costPerOrder = cogsPerOrder + shippingPerOrder;
 
-  // First order margin
-  const firstOrderProfit = aov - cac - costPerOrder;
-  const firstOrderMargin = aov > 0 ? (firstOrderProfit / aov) * 100 : 0;
+  function calcChannel(label: string, revenue: number, orders: number, subCount: number, churnPct: number, color: string) {
+    if (!orders) return null;
+    const aov = revenue / orders;
+    const subRate = orders > 0 ? subCount / orders : 0;
+    const churn = churnPct / 100;
+    const cogsPerOrder = aov * (cogsPct / 100);
+    const shippingPerOrder = aov * (shippingPct / 100);
+    const costPerOrder = cogsPerOrder + shippingPerOrder;
+    const firstProfit = aov - cac - costPerOrder;
+    const firstMargin = aov > 0 ? (firstProfit / aov) * 100 : 0;
+    const lifetimeOrders = churn > 0 ? (1 - subRate) + (subRate / churn) : 1;
+    const lifetimeRev = aov * lifetimeOrders;
+    const lifetimeCost = costPerOrder * lifetimeOrders;
+    const lifetimeProfit = lifetimeRev - cac - lifetimeCost;
+    const trueROAS = cac > 0 ? lifetimeProfit / cac : 0;
 
-  // Lifetime margin (using blended LTV)
-  const blendedSubRate = totalOrders > 0
-    ? ((s.shopify_new_sub_count + s.amazon_sns_checkout_count) / totalOrders)
-    : 0;
-  const avgChurn = s.shopify_avg_churn_pct > 0 ? s.shopify_avg_churn_pct / 100 : 0;
-  const lifetimeOrders = avgChurn > 0
-    ? (1 - blendedSubRate) + (blendedSubRate / avgChurn)
-    : 1;
-  const lifetimeRevenue = aov * lifetimeOrders;
-  const lifetimeCost = costPerOrder * lifetimeOrders;
-  const lifetimeProfit = lifetimeRevenue - cac - lifetimeCost;
-  const trueROAS = cac > 0 ? lifetimeProfit / cac : 0;
-
-  if (!totalOrders || !aov) return null;
+    return (
+      <div className="rounded-lg border border-zinc-100 p-4 dark:border-zinc-800">
+        <h3 className={`mb-3 text-xs font-medium uppercase tracking-wider ${color}`}>{label}</h3>
+        <div className="space-y-1.5 text-sm">
+          <Row label="AOV" value={fmt(aov)} />
+          <Row label="Sub rate" value={`${(subRate * 100).toFixed(0)}%`} />
+          <Row label="Ad cost (CAC)" value={`-${fmt(cac)}`} color="text-red-500" />
+          <Row label={`COGS (${cogsPct}%)`} value={`-${fmt(cogsPerOrder)}`} color="text-red-500" />
+          <Row label={`Shipping (${shippingPct}%)`} value={`-${fmt(shippingPerOrder)}`} color="text-red-500" />
+          <div className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
+            <Row label="First order profit" value={`${fmt(firstProfit)} (${firstMargin.toFixed(0)}%)`}
+              color={firstProfit >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"} />
+          </div>
+          <div className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
+            <Row label="Avg lifetime orders" value={lifetimeOrders.toFixed(1)} bold />
+            <Row label="Lifetime revenue" value={fmt(lifetimeRev)} color="text-emerald-600" />
+            <Row label={`COGS + ship (${lifetimeOrders.toFixed(1)} orders)`} value={`-${fmt(lifetimeCost)}`} color="text-red-500" />
+            <Row label="Lifetime profit" value={fmt(lifetimeProfit)}
+              color={lifetimeProfit >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"} />
+            <Row label="True ROAS" value={trueROAS > 0 ? `${trueROAS.toFixed(1)}x` : "—"}
+              color={trueROAS >= 3 ? "text-emerald-600 font-semibold" : trueROAS >= 2 ? "text-amber-600 font-semibold" : "text-red-600 font-semibold"} />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
@@ -377,77 +398,28 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
           <input type="number" value={shippingPct} onChange={(e) => setShippingPct(Number(e.target.value))}
             className="w-20 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
         </div>
-      </div>
-
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-        {/* First Order */}
-        <div className="rounded-lg border border-zinc-100 p-4 dark:border-zinc-800">
-          <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-zinc-400">First Order</h3>
-          <div className="space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-zinc-500">AOV</span>
-              <span className="tabular-nums font-medium text-zinc-900 dark:text-zinc-100">{fmt(aov)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-zinc-500">Ad cost (CAC)</span>
-              <span className="tabular-nums text-red-500">-{fmt(cac)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-zinc-500">COGS ({cogsPct}%)</span>
-              <span className="tabular-nums text-red-500">-{fmt(cogsPerOrder)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-zinc-500">Shipping ({shippingPct}%)</span>
-              <span className="tabular-nums text-red-500">-{fmt(shippingPerOrder)}</span>
-            </div>
-            <div className="border-t border-zinc-100 pt-2 dark:border-zinc-800">
-              <div className="flex justify-between">
-                <span className="font-medium text-zinc-700 dark:text-zinc-300">Profit</span>
-                <span className={`tabular-nums font-semibold ${firstOrderProfit >= 0 ? "text-emerald-600" : "text-red-600"}`}>
-                  {fmt(firstOrderProfit)} ({firstOrderMargin.toFixed(1)}%)
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Lifetime */}
-        <div className="rounded-lg border border-zinc-100 p-4 dark:border-zinc-800">
-          <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-zinc-400">Lifetime (predicted)</h3>
-          <div className="space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-zinc-500">Avg orders per customer</span>
-              <span className="tabular-nums font-medium text-zinc-900 dark:text-zinc-100">{lifetimeOrders.toFixed(1)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-zinc-500">Lifetime revenue</span>
-              <span className="tabular-nums font-medium text-emerald-600">{fmt(lifetimeRevenue)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-zinc-500">Ad cost (one-time)</span>
-              <span className="tabular-nums text-red-500">-{fmt(cac)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-zinc-500">COGS + shipping ({lifetimeOrders.toFixed(1)} orders)</span>
-              <span className="tabular-nums text-red-500">-{fmt(lifetimeCost)}</span>
-            </div>
-            <div className="border-t border-zinc-100 pt-2 dark:border-zinc-800">
-              <div className="flex justify-between">
-                <span className="font-medium text-zinc-700 dark:text-zinc-300">Lifetime profit</span>
-                <span className={`tabular-nums font-semibold ${lifetimeProfit >= 0 ? "text-emerald-600" : "text-red-600"}`}>
-                  {fmt(lifetimeProfit)}
-                </span>
-              </div>
-              <div className="flex justify-between mt-1">
-                <span className="font-medium text-zinc-700 dark:text-zinc-300">True ROAS</span>
-                <span className={`tabular-nums font-semibold ${trueROAS >= 3 ? "text-emerald-600" : trueROAS >= 2 ? "text-amber-600" : "text-red-600"}`}>
-                  {trueROAS > 0 ? `${trueROAS.toFixed(1)}x` : "—"}
-                </span>
-              </div>
-            </div>
-          </div>
+        <div className="flex items-end">
+          <span className="text-xs text-zinc-400">CAC: {fmt(cac)} ({totalOrders} orders / {fmt(s.total_spend_cents)} spend)</span>
         </div>
       </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        {calcChannel("Website", s.shopify_checkout_revenue, s.shopify_new_sub_count + s.shopify_one_time_count, s.shopify_new_sub_count, s.shopify_avg_churn_pct, "text-emerald-500")}
+        {calcChannel("Amazon", s.amazon_checkout_revenue, s.amazon_one_time_count + s.amazon_sns_checkout_count, s.amazon_sns_checkout_count, s.amazon_avg_churn_pct, "text-amber-500")}
+        {calcChannel("Blended", s.total_revenue_cents, totalOrders, s.shopify_new_sub_count + s.amazon_sns_checkout_count,
+          // Weighted avg churn
+          s.shopify_avg_churn_pct > 0 ? s.shopify_avg_churn_pct : s.amazon_avg_churn_pct,
+          "text-zinc-400")}
+      </div>
+    </div>
+  );
+}
+
+function Row({ label, value, color, bold }: { label: string; value: string; color?: string; bold?: boolean }) {
+  return (
+    <div className="flex justify-between">
+      <span className="text-zinc-500">{label}</span>
+      <span className={`tabular-nums ${color || (bold ? "font-medium text-zinc-900 dark:text-zinc-100" : "text-zinc-700 dark:text-zinc-300")}`}>{value}</span>
     </div>
   );
 }
