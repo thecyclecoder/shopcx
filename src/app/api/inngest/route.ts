@@ -36,7 +36,7 @@ import {
   dunningBillingSuccess,
   dunningPaydayRetryCron,
 } from "@/lib/inngest/dunning";
-import { portalAutoResume } from "@/lib/inngest/portal-auto-resume";
+import { portalAutoResume, portalAutoResumeCron } from "@/lib/inngest/portal-auto-resume";
 import { ticketAutoArchive } from "@/lib/inngest/auto-archive";
 import { tagCancelRelevanceBulk, tagCancelRelevanceCron } from "@/lib/inngest/review-tagging";
 import { amplifierWebhookProcess } from "@/lib/inngest/amplifier-webhooks";
@@ -95,6 +95,7 @@ export const { GET, POST, PUT } = serve({
     dunningBillingSuccess,
     dunningPaydayRetryCron,
     portalAutoResume,
+    portalAutoResumeCron,
     ticketAutoArchive,
     tagCancelRelevanceBulk,
     tagCancelRelevanceCron,
