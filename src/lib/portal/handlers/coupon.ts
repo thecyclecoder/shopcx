@@ -35,7 +35,26 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
   const discountCode = s(payload?.discountCode);
   const discountId = s(payload?.discountId);
   if (mode === "apply" && !discountCode) return jsonErr({ error: "missing_discountCode" }, 400);
-  if (mode === "remove" && !discountId && !discountCode) return jsonErr({ error: "missing_discountId_or_discountCode" }, 400);
+  // If remove mode with no discountId, resolve from Appstle contract
+  let resolvedRemoveId = discountId;
+  if (mode === "remove" && !resolvedRemoveId && !discountCode) {
+    const adminDb = createAdminClient();
+    const { data: ws2 } = await adminDb.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
+    if (ws2?.appstle_api_key_encrypted) {
+      const ak = decrypt(ws2.appstle_api_key_encrypted);
+      const contractRes = await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${ak}`,
+      );
+      if (contractRes.ok) {
+        const contract = await contractRes.json();
+        const discounts = contract.discounts?.nodes || [];
+        // Find the first CODE_DISCOUNT
+        const codeDiscount = discounts.find((d: Record<string, unknown>) => d.type === "CODE_DISCOUNT");
+        if (codeDiscount?.id) resolvedRemoveId = String(codeDiscount.id);
+      }
+    }
+    if (!resolvedRemoveId) return jsonErr({ error: "missing_discountId_or_discountCode" }, 400);
+  }
 
   try {
     const admin = createAdminClient();
