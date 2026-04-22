@@ -697,7 +697,12 @@ export const dunningPaydayRetryCron = inngest.createFunction(
 
     const results: { contractId: string; outcome: string }[] = [];
 
-    for (const cycle of cycles) {
+    // Process in batches of 20 with 5s delay between batches to avoid rate limits
+    for (let batch = 0; batch < cycles.length; batch += 20) {
+      if (batch > 0) await step.sleep(`batch-delay-${batch}`, "5s");
+      const batchCycles = cycles.slice(batch, batch + 20);
+
+    for (const cycle of batchCycles) {
       const result = await step.run(`retry-${cycle.shopify_contract_id}`, async () => {
         // Skip if sub is no longer active
         if (cycle.subscription_id) {
@@ -795,9 +800,33 @@ export const dunningPaydayRetryCron = inngest.createFunction(
           return { contractId: cycle.shopify_contract_id, outcome: "scheduled_next_payday" };
         }
 
-        // No more paydays — exhausted
+        // No more paydays — exhausted. Send final payment update email.
         await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
         await resetBillingDateAfterDunning(cycle.workspace_id, cycle.shopify_contract_id, cycle.id, false);
+
+        // Send payment update email
+        if (cycle.customer_id) {
+          const { data: cust } = await admin.from("customers")
+            .select("email, first_name").eq("id", cycle.customer_id).single();
+          const { data: ws } = await admin.from("workspaces")
+            .select("name, portal_config").eq("id", cycle.workspace_id).single();
+          const portalGeneral = (ws?.portal_config as Record<string, unknown>)?.general as Record<string, string> | undefined;
+          const updateUrl = portalGeneral?.payment_update_url || "";
+
+          if (cust?.email && ws?.name && updateUrl) {
+            await sendDunningPaymentUpdateEmail({
+              workspaceId: cycle.workspace_id,
+              toEmail: cust.email,
+              customerName: cust.first_name,
+              workspaceName: ws.name,
+              updateUrl,
+            });
+          }
+
+          await postDunningNote(cycle.workspace_id, cycle.customer_id, dunningInternalNote(
+            `All payday retries exhausted for subscription ${cycle.shopify_contract_id}. Payment update email sent.`
+          ));
+        }
 
         dispatchSlackNotification(cycle.workspace_id, "dunning_failed", {
           customer: { email: "" },
@@ -809,6 +838,7 @@ export const dunningPaydayRetryCron = inngest.createFunction(
 
       results.push(result);
     }
+    } // end batch loop
 
     return { processed: results.length, results };
   }
