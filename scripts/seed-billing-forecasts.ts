@@ -73,15 +73,23 @@ async function run() {
 
   const toInsert: any[] = [];
 
-  // ── 1. Active subscriptions ──
+  // ── Build dunning contract set first (so active subs can check) ──
+  const dunningCycles = await fetchAll("dunning_cycles", { workspace_id: workspaceId, status: "retrying" },
+    "id, shopify_contract_id, subscription_id, customer_id, next_retry_at");
+  const dunningContracts = new Set(dunningCycles.map((d: any) => d.shopify_contract_id));
+  console.log(`Dunning contracts (retrying): ${dunningContracts.size}`);
+
+  // ── 1. Active subscriptions (excluding dunning — those go in section 3) ──
   const activeSubs = await fetchAll("subscriptions", { workspace_id: workspaceId, status: "active" },
     "id, shopify_contract_id, customer_id, next_billing_date, items, billing_interval, billing_interval_count");
 
   let activeCount = 0;
   let activeSkipped = 0;
+  let activeDunningSkipped = 0;
   for (const sub of activeSubs) {
     if (!sub.next_billing_date) continue;
     if (existingContracts.has(sub.shopify_contract_id)) { activeSkipped++; continue; }
+    if (dunningContracts.has(sub.shopify_contract_id)) { activeDunningSkipped++; continue; }
 
     const items = mapItems(sub.items || []);
     toInsert.push({
@@ -102,7 +110,7 @@ async function run() {
     existingContracts.add(sub.shopify_contract_id);
     activeCount++;
   }
-  console.log(`Active subs: ${activeCount} to insert, ${activeSkipped} already exist`);
+  console.log(`Active subs: ${activeCount} to insert, ${activeSkipped} already exist, ${activeDunningSkipped} in dunning (handled separately)`);
 
   // ── 2. Paused subscriptions ──
   const pausedSubs = await fetchAll("subscriptions", { workspace_id: workspaceId, status: "paused" },
@@ -158,10 +166,7 @@ async function run() {
   }
   console.log(`Paused subs: ${pausedCount} to insert, ${pausedSkipped} already exist`);
 
-  // ── 3. Dunning retries ──
-  const dunningCycles = await fetchAll("dunning_cycles", { workspace_id: workspaceId, status: "retrying" },
-    "id, shopify_contract_id, subscription_id, customer_id, next_retry_at");
-
+  // ── 3. Dunning retries (already fetched above) ──
   let dunningCount = 0;
   let dunningSkipped = 0;
   for (const dc of dunningCycles) {

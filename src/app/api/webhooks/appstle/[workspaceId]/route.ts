@@ -345,6 +345,16 @@ async function handleSubscriptionEvent(
     const interval = billingPolicy?.interval || null;
     const intervalCount = billingPolicy?.intervalCount || null;
 
+    // Check if this contract is in dunning
+    const { data: dunningCycle } = await admin.from("dunning_cycles")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .in("status", ["rotating", "retrying"])
+      .limit(1)
+      .maybeSingle();
+    const isDunning = !!dunningCycle;
+
     try {
       switch (eventType) {
         case "subscription.created":
@@ -354,6 +364,7 @@ async function handleSubscriptionEvent(
               expectedDate: nextDate, items: forecastItems,
               billingInterval: interval, billingIntervalCount: intervalCount,
               createdFrom: "subscription_created",
+              forecastType: isDunning ? "dunning" : "renewal",
             });
           }
           break;
@@ -365,6 +376,7 @@ async function handleSubscriptionEvent(
               expectedDate: nextDate, items: forecastItems,
               billingInterval: interval, billingIntervalCount: intervalCount,
               createdFrom: "activated",
+              forecastType: isDunning ? "dunning" : "renewal",
             });
           }
           break;
@@ -403,6 +415,7 @@ async function handleSubscriptionEvent(
               expectedDate: nextDate, items: forecastItems,
               billingInterval: interval, billingIntervalCount: intervalCount,
               createdFrom: "activated",
+              forecastType: isDunning ? "dunning" : "renewal",
             });
           } else {
             // Item/price/date changes
@@ -630,6 +643,14 @@ async function handleBillingEvent(
   }
 
   if (eventType === "subscription.billing-success") {
+    // Close any active dunning cycle immediately (don't wait for Inngest)
+    await admin.from("dunning_cycles")
+      .update({ status: "recovered", recovered_at: new Date().toISOString(), next_retry_at: null, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .in("status", ["rotating", "retrying", "skipped", "active"]);
+
+    // Also fire Inngest for post-recovery actions (tags, notes, email)
     try {
       await inngest.send({
         name: "dunning/billing-success",
