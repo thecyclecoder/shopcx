@@ -15,6 +15,7 @@ import {
   forecastPaused,
   forecastDateChanged,
   forecastItemsChanged,
+  getPendingForecast,
 } from "@/lib/billing-forecast";
 
 function mapStatus(status: string): "active" | "paused" | "cancelled" | "expired" | "failed" {
@@ -386,10 +387,29 @@ async function handleSubscriptionEvent(
           await forecastItemsChanged(workspaceId, contractId, forecastItems, nextDate);
           break;
 
-        case "subscription.updated":
-          // Only update items/price — skip if a primary event already handled this contract
-          await forecastItemsChanged(workspaceId, contractId, forecastItems, nextDate);
+        case "subscription.updated": {
+          // Check for status changes that may not have their own dedicated webhook
+          const updatedStatus = (status || "").toUpperCase();
+          const pendingForecast = await getPendingForecast(workspaceId, contractId);
+
+          if (updatedStatus === "CANCELLED" && pendingForecast?.status === "pending") {
+            await forecastCancelled(workspaceId, contractId);
+          } else if (updatedStatus === "PAUSED" && pendingForecast?.status === "pending") {
+            await forecastPaused(workspaceId, contractId);
+          } else if (updatedStatus === "ACTIVE" && !pendingForecast && nextDate) {
+            // Reactivated — create forecast if none exists
+            await createForecast({
+              workspaceId, contractId, subscriptionId: subCtx?.id, customerId: dbCustomer.id,
+              expectedDate: nextDate, items: forecastItems,
+              billingInterval: interval, billingIntervalCount: intervalCount,
+              createdFrom: "activated",
+            });
+          } else {
+            // Item/price/date changes
+            await forecastItemsChanged(workspaceId, contractId, forecastItems, nextDate);
+          }
           break;
+        }
       }
     } catch (err) {
       console.error(`[Forecast] Error processing ${eventType} for ${contractId}:`, err);

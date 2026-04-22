@@ -13,6 +13,10 @@ CREATE TABLE public.billing_forecasts (
   expected_revenue_cents INTEGER NOT NULL DEFAULT 0,
   expected_items JSONB DEFAULT '[]',  -- snapshot of line items at forecast time
 
+  -- Type: regular renewal vs dunning retry vs paused (resume pending)
+  forecast_type TEXT NOT NULL DEFAULT 'renewal'
+    CHECK (forecast_type IN ('renewal', 'dunning', 'paused')),
+
   -- Outcome
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'collected', 'failed', 'cancelled', 'paused', 'moved')),
@@ -70,3 +74,5 @@ CREATE POLICY "Service role full on billing_forecasts" ON public.billing_forecas
 
 GRANT ALL ON billing_forecasts TO service_role;
 GRANT SELECT ON billing_forecasts TO authenticated;
+
+-- forecast_type and billing_forecast_events added in 20260422220000
