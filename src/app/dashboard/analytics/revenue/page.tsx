@@ -211,8 +211,23 @@ function ChurnChart({ data }: { data: MonthData[] }) {
     return { x, y, data: d };
   });
 
+  // Average churn line
+  const avgChurn = data.reduce((s, d) => s + d.churn_pct, 0) / data.length;
+  const avgY = PAD.top + plotH - (avgChurn / yMax) * plotH;
+
   const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
-  const areaPath = linePath + ` L ${points[points.length - 1].x} ${PAD.top + plotH} L ${points[0].x} ${PAD.top + plotH} Z`;
+
+  // Split into segments above/below average for coloring
+  const segments: { path: string; above: boolean }[] = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const above = (p1.data.churn_pct + p2.data.churn_pct) / 2 > avgChurn;
+    segments.push({
+      path: `M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}`,
+      above,
+    });
+  }
 
   const monthLabel = (m: string) => {
     const [y, mo] = m.split("-").map(Number);
@@ -238,21 +253,29 @@ function ChurnChart({ data }: { data: MonthData[] }) {
         );
       })}
 
-      {/* Area fill */}
-      <path d={areaPath} className="fill-red-100/50 dark:fill-red-900/20" />
+      {/* Average churn line */}
+      <line x1={PAD.left} y1={avgY} x2={W - PAD.right} y2={avgY} strokeDasharray="6 4" className="stroke-amber-400 dark:stroke-amber-500" strokeWidth={1.5} />
+      <text x={W - PAD.right + 4} y={avgY + 4} className="fill-amber-500" fontSize={9} fontWeight={600}>
+        avg {avgChurn.toFixed(1)}%
+      </text>
 
-      {/* Line */}
-      <path d={linePath} fill="none" stroke="currentColor" className="text-red-500" strokeWidth={2} strokeLinejoin="round" />
-
-      {/* Points */}
-      {points.map((p, i) => (
-        <g key={i}>
-          <circle cx={p.x} cy={p.y} r={4} className="fill-red-500" />
-          <text x={p.x} y={p.y - 10} textAnchor="middle" className="fill-red-600 dark:fill-red-400" fontSize={10} fontWeight={600}>
-            {p.data.churn_pct.toFixed(1)}%
-          </text>
-        </g>
+      {/* Line segments — red above avg, green below */}
+      {segments.map((seg, i) => (
+        <path key={i} d={seg.path} fill="none" stroke={seg.above ? "#ef4444" : "#22c55e"} strokeWidth={2.5} strokeLinejoin="round" />
       ))}
+
+      {/* Points — red above avg, green below */}
+      {points.map((p, i) => {
+        const above = p.data.churn_pct > avgChurn;
+        return (
+          <g key={i}>
+            <circle cx={p.x} cy={p.y} r={4} fill={above ? "#ef4444" : "#22c55e"} />
+            <text x={p.x} y={p.y - 10} textAnchor="middle" fill={above ? "#dc2626" : "#16a34a"} fontSize={10} fontWeight={600}>
+              {p.data.churn_pct.toFixed(1)}%
+            </text>
+          </g>
+        );
+      })}
 
       {/* X axis labels */}
       {points.map((p, i) => (
