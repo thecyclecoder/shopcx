@@ -238,7 +238,8 @@ export async function POST(request: Request) {
         .eq("channel", channel)
         .single();
 
-      if (aiConfig?.enabled && (isAutoHandled || isUnassigned)) {
+      const wasReopenedFromClosed = ticket && (ticket.status === "pending" || ticket.status === "closed");
+      if (aiConfig?.enabled && (isAutoHandled || isUnassigned || wasReopenedFromClosed)) {
         await inngest.send({
           name: "ticket/inbound-message",
           data: {
