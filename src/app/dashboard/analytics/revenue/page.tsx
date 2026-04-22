@@ -139,7 +139,7 @@ export default function RevenueDashboard() {
               <table className="w-full min-w-[1600px] text-sm">
                 <thead>
                   <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
-                    <th className="sticky left-0 z-10 bg-white px-4 py-2 dark:bg-zinc-900">Month</th>
+                    <th className="sticky left-0 z-20 bg-white px-4 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)] py-2 dark:bg-zinc-900">Month</th>
                     {/* Shopify */}
                     <th className="px-3 py-2 text-right" colSpan={8}>
                       <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Shopify</span>
@@ -154,7 +154,7 @@ export default function RevenueDashboard() {
                     </th>
                   </tr>
                   <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
-                    <th className="sticky left-0 z-10 bg-white px-4 py-1 dark:bg-zinc-900"></th>
+                    <th className="sticky left-0 z-20 bg-white px-4 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)] py-1 dark:bg-zinc-900"></th>
                     {/* Shopify columns */}
                     <th className="bg-emerald-50/50 px-3 py-1 text-right dark:bg-emerald-950/20">Recurring</th>
                     <th className="bg-emerald-50/50 px-3 py-1 text-right dark:bg-emerald-950/20">New Subs</th>
@@ -181,7 +181,7 @@ export default function RevenueDashboard() {
                 <tbody>
                   {[...months].reverse().map(m => (
                     <tr key={m.month} className={`border-b border-zinc-100 dark:border-zinc-800/50 ${!m.is_complete ? "bg-amber-50/30 dark:bg-amber-950/10" : ""}`}>
-                      <td className="sticky left-0 z-10 bg-white px-4 py-2.5 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+                      <td className="sticky left-0 z-20 bg-white px-4 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)] py-2.5 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
                         {monthLabel(m.month)}
                         {!m.is_complete && <span className="ml-1 text-[10px] text-amber-500">({m.days}d)</span>}
                       </td>
