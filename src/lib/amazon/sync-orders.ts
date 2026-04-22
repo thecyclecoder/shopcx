@@ -43,6 +43,7 @@ function parseTsvReport(tsv: string): AmazonOrderLine[] {
     if (!line) continue;
     const cols = line.split("\t");
 
+    // Include Shipped, Shipping, and Pending — only exclude Cancelled
     const status = cols[statusIdx]?.toLowerCase() ?? "";
     if (status === "cancelled") continue;
 

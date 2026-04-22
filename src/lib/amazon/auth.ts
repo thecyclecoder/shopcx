@@ -10,7 +10,7 @@ export async function getAccessToken(connectionId: string): Promise<string> {
   const admin = createAdminClient();
   const { data: conn } = await admin
     .from("amazon_connections")
-    .select("id, refresh_token_encrypted, access_token_encrypted, access_token_expires_at")
+    .select("id, workspace_id, refresh_token_encrypted, client_id_encrypted, client_secret_encrypted, access_token_encrypted, access_token_expires_at")
     .eq("id", connectionId)
     .single();
 
@@ -24,9 +24,11 @@ export async function getAccessToken(connectionId: string): Promise<string> {
     }
   }
 
-  const clientId = process.env.AMAZON_CLIENT_ID;
-  const clientSecret = process.env.AMAZON_CLIENT_SECRET;
-  if (!clientId || !clientSecret) throw new Error("AMAZON_CLIENT_ID and AMAZON_CLIENT_SECRET must be set");
+  // Per-workspace credentials (stored encrypted in DB)
+  // Falls back to env vars for backwards compat
+  const clientId = conn.client_id_encrypted ? decrypt(conn.client_id_encrypted) : process.env.AMAZON_CLIENT_ID;
+  const clientSecret = conn.client_secret_encrypted ? decrypt(conn.client_secret_encrypted) : process.env.AMAZON_CLIENT_SECRET;
+  if (!clientId || !clientSecret) throw new Error("Amazon client_id and client_secret required — set in connection or env vars");
 
   const refreshToken = decrypt(conn.refresh_token_encrypted);
 

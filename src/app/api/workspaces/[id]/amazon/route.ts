@@ -88,14 +88,22 @@ export async function POST(
     return NextResponse.json({ error: "seller_id and refresh_token required" }, { status: 400 });
   }
 
-  const { data: conn, error } = await admin.from("amazon_connections").upsert({
+  const insertData: Record<string, unknown> = {
     workspace_id: workspaceId,
     seller_id,
     marketplace_id: marketplace_id || "ATVPDKIKX0DER",
     refresh_token_encrypted: encrypt(refresh_token),
     seller_name: body.seller_name || null,
     is_active: true,
-  }, { onConflict: "workspace_id,seller_id" }).select("id").single();
+  };
+
+  // Store client_id and client_secret per workspace if provided
+  if (body.client_id) insertData.client_id_encrypted = encrypt(body.client_id);
+  if (body.client_secret) insertData.client_secret_encrypted = encrypt(body.client_secret);
+
+  const { data: conn, error } = await admin.from("amazon_connections")
+    .upsert(insertData, { onConflict: "workspace_id,seller_id" })
+    .select("id").single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
