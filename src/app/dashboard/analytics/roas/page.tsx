@@ -16,6 +16,12 @@ interface ROASData {
     roas: number;
     total_revenue_cents: number;
     total_spend_cents: number;
+    shopify_checkout_revenue: number;
+    shopify_new_sub_count: number;
+    shopify_one_time_count: number;
+    amazon_checkout_revenue: number;
+    amazon_one_time_count: number;
+    amazon_sns_checkout_count: number;
     shopify_sub_rate: number;
     amazon_sub_rate: number;
   };
@@ -134,18 +140,30 @@ export default function ROASDashboard() {
       ) : (
         <>
           {/* Summary Cards */}
-          <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-5">
+          <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-8">
             <StatCard
               label="ROAS"
               value={s.roas > 0 ? `${s.roas.toFixed(2)}x` : "—"}
-              sub={s.total_spend_cents > 0 ? `${fmt(s.total_revenue_cents)} rev / ${fmt(s.total_spend_cents)} spend` : "No spend data"}
+              sub={s.total_spend_cents > 0 ? `${fmt(s.total_revenue_cents)} / ${fmt(s.total_spend_cents)}` : "No spend data"}
               color={s.roas >= 3 ? "text-emerald-600 dark:text-emerald-400" : s.roas >= 2 ? "text-amber-600" : s.roas > 0 ? "text-red-600" : "text-zinc-400"}
             />
             <StatCard
               label="Revenue"
               value={fmtShort(s.total_revenue_cents)}
-              sub="Checkout only (excl. recurring)"
+              sub="Checkout (excl. recurring)"
               color="text-emerald-600 dark:text-emerald-400"
+            />
+            <StatCard
+              label="Website Rev"
+              value={fmtShort(s.shopify_checkout_revenue)}
+              sub={`${s.shopify_new_sub_count + s.shopify_one_time_count} orders`}
+              color="text-emerald-600 dark:text-emerald-400"
+            />
+            <StatCard
+              label="Amazon Rev"
+              value={fmtShort(s.amazon_checkout_revenue)}
+              sub={`${s.amazon_one_time_count + s.amazon_sns_checkout_count} orders`}
+              color="text-amber-600 dark:text-amber-400"
             />
             <StatCard
               label="Spend"
@@ -156,13 +174,19 @@ export default function ROASDashboard() {
             <StatCard
               label="Website Sub Rate"
               value={s.shopify_sub_rate > 0 ? `${s.shopify_sub_rate.toFixed(0)}%` : "—"}
-              sub="New subs / checkout revenue"
+              sub="New subs / checkout"
               color="text-violet-600 dark:text-violet-400"
             />
             <StatCard
-              label="Amazon Sub Rate"
+              label="AMZ Sub Rate"
               value={s.amazon_sub_rate > 0 ? `${s.amazon_sub_rate.toFixed(0)}%` : "—"}
-              sub="SnS signups / checkout revenue"
+              sub="SnS signups / checkout"
+              color="text-amber-600 dark:text-amber-400"
+            />
+            <StatCard
+              label="AMZ Rate"
+              value={s.total_revenue_cents > 0 ? `${Math.round((s.amazon_checkout_revenue / s.total_revenue_cents) * 100)}%` : "—"}
+              sub="AMZ / total checkout"
               color="text-amber-600 dark:text-amber-400"
             />
           </div>

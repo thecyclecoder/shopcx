@@ -18,20 +18,64 @@ export async function GET(
 
   // ── Shopify checkout revenue (new subs + one-time, excludes recurring) ──
   const shopifyRows: Record<string, unknown>[] = [];
+  const today = new Date().toISOString().slice(0, 10);
   let offset = 0;
-  while (true) {
-    const { data } = await admin
-      .from("daily_order_snapshots")
-      .select("snapshot_date, new_subscription_count, new_subscription_revenue_cents, one_time_count, one_time_revenue_cents")
+
+  // Use snapshots for past days
+  const snapshotEnd = endDate >= today ? (() => {
+    const d = new Date(today); d.setDate(d.getDate() - 1);
+    return d.toISOString().slice(0, 10);
+  })() : endDate;
+
+  if (startDate <= snapshotEnd) {
+    while (true) {
+      const { data } = await admin
+        .from("daily_order_snapshots")
+        .select("snapshot_date, new_subscription_count, new_subscription_revenue_cents, one_time_count, one_time_revenue_cents")
+        .eq("workspace_id", workspaceId)
+        .gte("snapshot_date", startDate)
+        .lte("snapshot_date", snapshotEnd)
+        .order("snapshot_date", { ascending: true })
+        .range(offset, offset + 999);
+      if (!data || data.length === 0) break;
+      shopifyRows.push(...data);
+      if (data.length < 1000) break;
+      offset += 1000;
+    }
+  }
+
+  // Live query for today if in range
+  if (endDate >= today && startDate <= today) {
+    const utcStart = today + "T05:00:00Z"; // Central midnight
+    const utcEnd = (() => { const d = new Date(today); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10); })() + "T05:00:00Z";
+
+    const { data: todayOrders } = await admin
+      .from("orders")
+      .select("source_name, total_cents, tags, line_items")
       .eq("workspace_id", workspaceId)
-      .gte("snapshot_date", startDate)
-      .lte("snapshot_date", endDate)
-      .order("snapshot_date", { ascending: true })
-      .range(offset, offset + 999);
-    if (!data || data.length === 0) break;
-    shopifyRows.push(...data);
-    if (data.length < 1000) break;
-    offset += 1000;
+      .gte("created_at", utcStart)
+      .lt("created_at", utcEnd);
+
+    let newSubCount = 0, newSubRev = 0, oneTimeCount = 0, oneTimeRev = 0;
+    for (const o of todayOrders || []) {
+      if (o.source_name === "subscription_contract_checkout_one") continue; // recurring
+      const tags = (o.tags || "").toLowerCase();
+      if (tags.includes("first subscription")) {
+        newSubCount++;
+        newSubRev += o.total_cents || 0;
+      } else {
+        oneTimeCount++;
+        oneTimeRev += o.total_cents || 0;
+      }
+    }
+
+    shopifyRows.push({
+      snapshot_date: today,
+      new_subscription_count: newSubCount,
+      new_subscription_revenue_cents: newSubRev,
+      one_time_count: oneTimeCount,
+      one_time_revenue_cents: oneTimeRev,
+    });
   }
 
   // ── Amazon checkout revenue (one-time + sns_checkout, excludes recurring) ──
@@ -175,6 +219,12 @@ export async function GET(
       roas: Math.round(roas * 100) / 100,
       total_revenue_cents: totalRevenue,
       total_spend_cents: totalSpend,
+      shopify_checkout_revenue: totals.shopify_checkout_revenue,
+      shopify_new_sub_count: totals.shopify_new_sub_count,
+      shopify_one_time_count: totals.shopify_one_time_count,
+      amazon_checkout_revenue: totals.amazon_checkout_revenue,
+      amazon_one_time_count: totals.amazon_one_time_count,
+      amazon_sns_checkout_count: totals.amazon_sns_checkout_count,
       shopify_sub_rate: Math.round(shopifySubRate * 100) / 100,
       amazon_sub_rate: Math.round(amazonSubRate * 100) / 100,
     },
