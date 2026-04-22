@@ -115,7 +115,38 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   const body: Record<string, unknown> = { shop, contractId, eventSource: "CUSTOMER_PORTAL", stopSwapEmails };
   if (carryForwardDiscount) body.carryForwardDiscount = carryForwardDiscount;
   if (oldLineId) body.oldLineId = oldLineId.startsWith("gid://") ? oldLineId : `gid://shopify/SubscriptionLine/${oldLineId}`;
-  if (oldVariants.length) body.oldVariants = oldVariants;
+
+  // Appstle replace-variants-v3 requires newVariants when using oldVariants.
+  // For removals (no newVariants), convert oldVariants to oldLineId by looking up the line.
+  if (oldVariants.length && !newVariants && allowRemoveWithoutAdd) {
+    // Look up line IDs from Appstle contract for the variants being removed
+    const adminDb = createAdminClient();
+    const { data: ws2 } = await adminDb.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
+    if (ws2?.appstle_api_key_encrypted) {
+      const ak = decrypt(ws2.appstle_api_key_encrypted);
+      const contractRes = await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${ak}`,
+      );
+      if (contractRes.ok) {
+        const contractData = await contractRes.json();
+        const lines = contractData.lines?.nodes || [];
+        for (const variantId of oldVariants) {
+          const line = lines.find((l: Record<string, unknown>) => {
+            const vid = String(l.variantId || "").split("/").pop();
+            return vid === String(variantId);
+          });
+          if (line?.id) {
+            // Use oldLineId for each removal (only supports one at a time)
+            body.oldLineId = line.id;
+            break;
+          }
+        }
+      }
+    }
+  } else if (oldVariants.length) {
+    body.oldVariants = oldVariants;
+  }
+
   if (oldOneTimeVariants.length) body.oldOneTimeVariants = oldOneTimeVariants;
   if (newVariants) body.newVariants = newVariants;
   if (newOneTimeVariants) body.newOneTimeVariants = newOneTimeVariants;
