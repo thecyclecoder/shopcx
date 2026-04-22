@@ -10,16 +10,12 @@ export async function GET(
   const url = new URL(request.url);
   const startDate = url.searchParams.get("start");
   const endDate = url.searchParams.get("end");
-
-  if (!startDate || !endDate) {
-    return NextResponse.json({ error: "start and end date required" }, { status: 400 });
-  }
+  const mode = url.searchParams.get("mode") || "daily"; // "daily" | "monthly"
 
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  // Owner only
   const admin = createAdminClient();
   const { data: member } = await admin
     .from("workspace_members")
@@ -30,6 +26,106 @@ export async function GET(
 
   if (!member || member.role !== "owner") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  if (mode === "monthly") {
+    // Return monthly aggregates — last 16 months for trendline + YoY comparison
+    const monthsBack = parseInt(url.searchParams.get("months") || "16");
+    const now = new Date();
+    const earliest = new Date(now.getFullYear(), now.getMonth() - monthsBack, 1);
+    const earliestStr = earliest.toISOString().slice(0, 10);
+
+    const { data: snapshots } = await admin
+      .from("daily_order_snapshots")
+      .select("snapshot_date, recurring_count, recurring_revenue_cents, new_subscription_count, new_subscription_revenue_cents, one_time_count, one_time_revenue_cents, replacement_count, total_count, total_revenue_cents, shopify_mismatch")
+      .eq("workspace_id", workspaceId)
+      .gte("snapshot_date", earliestStr)
+      .order("snapshot_date", { ascending: true });
+
+    // Aggregate by month
+    const monthMap = new Map<string, {
+      recurring_count: number; recurring_revenue_cents: number;
+      new_subscription_count: number; new_subscription_revenue_cents: number;
+      one_time_count: number; one_time_revenue_cents: number;
+      replacement_count: number;
+      total_count: number; total_revenue_cents: number;
+      days: number; mismatches: number;
+    }>();
+
+    for (const s of snapshots || []) {
+      const monthKey = s.snapshot_date.slice(0, 7); // YYYY-MM
+      const existing = monthMap.get(monthKey) || {
+        recurring_count: 0, recurring_revenue_cents: 0,
+        new_subscription_count: 0, new_subscription_revenue_cents: 0,
+        one_time_count: 0, one_time_revenue_cents: 0,
+        replacement_count: 0,
+        total_count: 0, total_revenue_cents: 0,
+        days: 0, mismatches: 0,
+      };
+      existing.recurring_count += s.recurring_count;
+      existing.recurring_revenue_cents += s.recurring_revenue_cents;
+      existing.new_subscription_count += s.new_subscription_count;
+      existing.new_subscription_revenue_cents += s.new_subscription_revenue_cents;
+      existing.one_time_count += s.one_time_count;
+      existing.one_time_revenue_cents += s.one_time_revenue_cents;
+      existing.replacement_count += s.replacement_count;
+      existing.total_count += s.total_count;
+      existing.total_revenue_cents += s.total_revenue_cents;
+      existing.days++;
+      if (s.shopify_mismatch) existing.mismatches++;
+      monthMap.set(monthKey, existing);
+    }
+
+    // Build monthly array with calculated values
+    const sortedMonths = [...monthMap.keys()].sort();
+    const months = sortedMonths.map((monthKey, idx) => {
+      const d = monthMap.get(monthKey)!;
+      const mrr = d.recurring_revenue_cents + d.new_subscription_revenue_cents;
+
+      // Churn = previous month MRR - this month recurring
+      let churn_cents = 0;
+      let churn_pct = 0;
+      let prev_mrr = 0;
+      if (idx > 0) {
+        const prevData = monthMap.get(sortedMonths[idx - 1]);
+        if (prevData) {
+          prev_mrr = prevData.recurring_revenue_cents + prevData.new_subscription_revenue_cents;
+          churn_cents = Math.max(0, prev_mrr - d.recurring_revenue_cents);
+          churn_pct = prev_mrr > 0 ? (churn_cents / prev_mrr) * 100 : 0;
+        }
+      }
+
+      // Subscription rate = new sub rev / (new sub rev + one-time rev)
+      const checkoutTotal = d.new_subscription_revenue_cents + d.one_time_revenue_cents;
+      const subscription_rate = checkoutTotal > 0
+        ? (d.new_subscription_revenue_cents / checkoutTotal) * 100
+        : 0;
+
+      // Is this month complete?
+      const [y, m] = monthKey.split("-").map(Number);
+      const daysInMonth = new Date(y, m, 0).getDate();
+      const is_complete = d.days >= daysInMonth;
+
+      return {
+        month: monthKey,
+        ...d,
+        mrr_cents: mrr,
+        churn_cents,
+        churn_pct: Math.round(churn_pct * 100) / 100,
+        prev_mrr_cents: prev_mrr,
+        net_mrr_cents: mrr - churn_cents,
+        subscription_rate: Math.round(subscription_rate * 100) / 100,
+        is_complete,
+        days_in_month: daysInMonth,
+      };
+    });
+
+    return NextResponse.json({ months });
+  }
+
+  // Daily mode
+  if (!startDate || !endDate) {
+    return NextResponse.json({ error: "start and end date required" }, { status: 400 });
   }
 
   const { data: snapshots } = await admin
