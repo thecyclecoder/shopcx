@@ -639,6 +639,164 @@ Respond with EXACTLY "FRAUD" or "OK".`;
     }
   }
 
+  // ── Confirmed fraud similarity check ──
+  // Compare this order against all confirmed_fraud cases for address/name/email overlap
+  if (!flagged) {
+    try {
+      const { data: confirmedCases } = await admin
+        .from("fraud_cases")
+        .select("id, title, order_ids, customer_ids, evidence")
+        .eq("workspace_id", workspaceId)
+        .eq("status", "confirmed_fraud");
+
+      if (confirmedCases?.length) {
+        // Gather order IDs from confirmed cases
+        const fraudOrderIds = confirmedCases.flatMap(c => c.order_ids || []);
+        // Fetch fraud orders in batches of 100
+        const fraudOrders: Array<{
+          id: string; order_number: string; email: string | null;
+          shipping_address: Record<string, string> | null;
+          billing_address: Record<string, string> | null;
+          normalized_shipping_address: string | null;
+        }> = [];
+        for (let i = 0; i < fraudOrderIds.length; i += 100) {
+          const batch = fraudOrderIds.slice(i, i + 100);
+          const { data: batchOrders } = await admin
+            .from("orders")
+            .select("id, order_number, email, shipping_address, billing_address, normalized_shipping_address")
+            .in("id", batch);
+          if (batchOrders) fraudOrders.push(...batchOrders);
+        }
+
+        if (fraudOrders.length) {
+          const matches: Array<{ type: string; this_value: string; fraud_value: string; fraud_order: string; fraud_case_id: string }> = [];
+          const shipping = order.shipping_address as Record<string, string> | null;
+          const billing = order.billing_address as Record<string, string> | null;
+          const email = (order.email || "").toLowerCase().trim();
+          const emailBase = email.replace(/\+[^@]*@/, "@"); // strip gmail alias
+          const shipFirst = (shipping?.firstName || shipping?.first_name || "").toLowerCase().trim();
+          const shipLast = (shipping?.lastName || shipping?.last_name || "").toLowerCase().trim();
+          const billFirst = (billing?.firstName || billing?.first_name || "").toLowerCase().trim();
+          const billLast = (billing?.lastName || billing?.last_name || "").toLowerCase().trim();
+          const shipAddr1 = (shipping?.address1 || "").toLowerCase().replace(/[.,#]/g, "").trim();
+          const billAddr1 = (billing?.address1 || "").toLowerCase().replace(/[.,#]/g, "").trim();
+          const shipZip = (shipping?.zip || "").trim();
+          const billZip = (billing?.zip || "").trim();
+
+          for (const fo of fraudOrders) {
+            const fraudCase = confirmedCases.find(c => c.order_ids?.includes(fo.id));
+            const caseId = fraudCase?.id || "";
+            const foShip = fo.shipping_address as Record<string, string> | null;
+            const foBill = fo.billing_address as Record<string, string> | null;
+            const foEmail = (fo.email || "").toLowerCase().trim();
+            const foEmailBase = foEmail.replace(/\+[^@]*@/, "@");
+            const foShipFirst = (foShip?.firstName || foShip?.first_name || "").toLowerCase().trim();
+            const foShipLast = (foShip?.lastName || foShip?.last_name || "").toLowerCase().trim();
+            const foBillFirst = (foBill?.firstName || foBill?.first_name || "").toLowerCase().trim();
+            const foBillLast = (foBill?.lastName || foBill?.last_name || "").toLowerCase().trim();
+            const foShipAddr1 = (foShip?.address1 || "").toLowerCase().replace(/[.,#]/g, "").trim();
+            const foBillAddr1 = (foBill?.address1 || "").toLowerCase().replace(/[.,#]/g, "").trim();
+            const foShipZip = (foShip?.zip || "").trim();
+            const foBillZip = (foBill?.zip || "").trim();
+
+            // 1. Gmail alias match (same base email)
+            if (emailBase && foEmailBase && emailBase === foEmailBase && email !== foEmail) {
+              matches.push({ type: "gmail_alias", this_value: email, fraud_value: foEmail, fraud_order: fo.order_number, fraud_case_id: caseId });
+            }
+
+            // 2. Exact email match
+            if (email && foEmail && email === foEmail) {
+              matches.push({ type: "exact_email", this_value: email, fraud_value: foEmail, fraud_order: fo.order_number, fraud_case_id: caseId });
+            }
+
+            // 3. Shipping address match (same street + zip)
+            if (shipAddr1 && shipZip && foShipAddr1 && foShipZip && shipAddr1 === foShipAddr1 && shipZip === foShipZip) {
+              matches.push({ type: "shipping_address", this_value: `${shipAddr1}, ${shipZip}`, fraud_value: `${foShipAddr1}, ${foShipZip}`, fraud_order: fo.order_number, fraud_case_id: caseId });
+            }
+
+            // 4. Billing address match
+            if (billAddr1 && billZip && foBillAddr1 && foBillZip && billAddr1 === foBillAddr1 && billZip === foBillZip) {
+              matches.push({ type: "billing_address", this_value: `${billAddr1}, ${billZip}`, fraud_value: `${foBillAddr1}, ${foBillZip}`, fraud_order: fo.order_number, fraud_case_id: caseId });
+            }
+
+            // 5. Cross-match: this shipping = fraud billing or vice versa
+            if (shipAddr1 && shipZip && foBillAddr1 && foBillZip && shipAddr1 === foBillAddr1 && shipZip === foBillZip) {
+              matches.push({ type: "ship_to_fraud_billing", this_value: `${shipAddr1}, ${shipZip}`, fraud_value: `${foBillAddr1}, ${foBillZip}`, fraud_order: fo.order_number, fraud_case_id: caseId });
+            }
+            if (billAddr1 && billZip && foShipAddr1 && foShipZip && billAddr1 === foShipAddr1 && billZip === foShipZip) {
+              matches.push({ type: "bill_to_fraud_shipping", this_value: `${billAddr1}, ${billZip}`, fraud_value: `${foShipAddr1}, ${foShipZip}`, fraud_order: fo.order_number, fraud_case_id: caseId });
+            }
+
+            // 6. Same last name + same address (different first name = likely same fraudster)
+            if (shipLast && foShipLast && shipLast === foShipLast && shipAddr1 && foShipAddr1 && shipAddr1 === foShipAddr1) {
+              matches.push({ type: "same_lastname_same_address", this_value: `${shipFirst} ${shipLast} @ ${shipAddr1}`, fraud_value: `${foShipFirst} ${foShipLast} @ ${foShipAddr1}`, fraud_order: fo.order_number, fraud_case_id: caseId });
+            }
+
+            // 7. Same first+last name (different middle or different address = repeat offender)
+            if (shipFirst && shipLast && foShipFirst && foShipLast && shipFirst === foShipFirst && shipLast === foShipLast) {
+              matches.push({ type: "same_name", this_value: `${shipFirst} ${shipLast}`, fraud_value: `${foShipFirst} ${foShipLast}`, fraud_order: fo.order_number, fraud_case_id: caseId });
+            }
+          }
+
+          // Dedupe matches by type+fraud_order
+          const seen = new Set<string>();
+          const uniqueMatches = matches.filter(m => {
+            const key = `${m.type}:${m.fraud_order}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+
+          if (uniqueMatches.length > 0) {
+            flagged = true;
+            const orderNum = order.order_number || order.shopify_order_id;
+            const matchSummary = uniqueMatches.map(m => `${m.type}: "${m.this_value}" matches fraud order ${m.fraud_order} ("${m.fraud_value}")`).join("; ");
+            const linkedCaseIds = [...new Set(uniqueMatches.map(m => m.fraud_case_id).filter(Boolean))];
+
+            // Check for existing open case for this customer
+            const { data: existing } = await admin.from("fraud_cases")
+              .select("id").eq("workspace_id", workspaceId)
+              .contains("customer_ids", [effectiveCustomerId || ""])
+              .eq("status", "open").limit(1);
+
+            if (!existing?.length) {
+              const shipping = order.shipping_address as Record<string, string> | null;
+              const shippingName = shipping ? `${shipping.firstName || shipping.first_name || ""} ${shipping.lastName || shipping.last_name || ""}`.trim() : "";
+
+              await admin.from("fraud_cases").insert({
+                workspace_id: workspaceId,
+                rule_type: "confirmed_fraud_match",
+                severity: "high",
+                status: "open",
+                title: `Order ${orderNum} matches confirmed fraud`,
+                summary: `Order linked to ${linkedCaseIds.length} confirmed fraud case(s): ${matchSummary}`,
+                evidence: {
+                  order_number: orderNum,
+                  email: order.email,
+                  shipping_name: shippingName,
+                  matches: uniqueMatches,
+                  linked_fraud_case_ids: linkedCaseIds,
+                },
+                customer_ids: effectiveCustomerId ? [effectiveCustomerId] : [],
+                order_ids: [order.id],
+                first_detected_at: new Date().toISOString(),
+                last_seen_at: new Date().toISOString(),
+              });
+
+              // Fire case.created for AI summary + notifications
+              await inngest.send({
+                name: "fraud/case.created",
+                data: { workspace_id: workspaceId },
+              });
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("[fraud] Confirmed fraud similarity check error:", e);
+    }
+  }
+
   // Tag the Shopify order as "suspicious" if any rule flagged it
   if (flagged && order.shopify_order_id) {
     await addOrderTags(workspaceId, order.shopify_order_id, ["suspicious"]);

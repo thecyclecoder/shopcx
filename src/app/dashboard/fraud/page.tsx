@@ -56,6 +56,10 @@ const RULE_TYPE_LABELS: Record<string, string> = {
   shared_address: "Shared Address",
   high_velocity: "High Velocity",
   large_order: "Large Order",
+  ai_screen: "AI Screen",
+  address_distance: "Address Distance",
+  name_mismatch: "Name Mismatch",
+  confirmed_fraud_match: "Matches Confirmed Fraud",
 };
 
 const RULE_TYPE_ICONS: Record<string, string> = {
@@ -171,6 +175,8 @@ export default function FraudMonitorPage() {
           <option value="">All Rule Types</option>
           <option value="shared_address">Shared Address</option>
           <option value="high_velocity">High Velocity</option>
+          <option value="ai_screen">AI Screen</option>
+          <option value="confirmed_fraud_match">Matches Confirmed Fraud</option>
         </select>
 
         <select

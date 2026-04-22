@@ -356,6 +356,9 @@ export default function FraudCaseDetailPage() {
           {fraudCase.rule_type === "name_mismatch" && (
             <NameMismatchEvidence evidence={evidence} />
           )}
+          {fraudCase.rule_type === "confirmed_fraud_match" && (
+            <ConfirmedFraudMatchEvidence evidence={evidence} />
+          )}
 
           {/* Orders Held */}
           {fraudCase.orders_held && fraudCase.order_ids?.length > 0 && (
@@ -1217,7 +1220,7 @@ function InvestigationPanel({ workspaceId, caseId }: { workspaceId: string; case
               const zipMismatch = billingZip && shippingZip && billingZip !== shippingZip;
               const emailDomain = owner?.email?.split("@")[1] || "";
               const susEmail = owner?.email?.includes("+") || /^[a-z]{10,}[0-9]+@/.test(owner?.email || "");
-              const isGibberish = (name: string) => /^[a-z]{1,2}[a-z]{8,}$/i.test(name.replace(/\s/g, "")) && !/[aeiou]{2,}/i.test(name);
+              const isGibberish = (name: string) => name.trim().length > 0 && /^[a-z]{1,2}[a-z]{8,}$/i.test(name.replace(/\s/g, "")) && !/[aeiou]{2,}/i.test(name);
               const gibberishName = isGibberish(billingName) || isGibberish(custName);
 
               return (
@@ -1335,6 +1338,75 @@ function InvestigationPanel({ workspaceId, caseId }: { workspaceId: string; case
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ConfirmedFraudMatchEvidence({ evidence }: { evidence: Record<string, unknown> }) {
+  const e = evidence as {
+    order_number: string;
+    email: string;
+    shipping_name: string;
+    matches: Array<{ type: string; this_value: string; fraud_value: string; fraud_order: string; fraud_case_id: string }>;
+    linked_fraud_case_ids: string[];
+  };
+
+  const matchTypeLabels: Record<string, string> = {
+    exact_email: "Exact email match",
+    gmail_alias: "Gmail alias match",
+    shipping_address: "Same shipping address",
+    billing_address: "Same billing address",
+    ship_to_fraud_billing: "Ships to fraud billing address",
+    bill_to_fraud_shipping: "Bills to fraud shipping address",
+    same_lastname_same_address: "Same last name + same address",
+    same_name: "Same name as fraud order",
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-red-200 bg-red-50/50 p-5 dark:border-red-800 dark:bg-red-950/30">
+        <div className="mb-3 flex items-center gap-2">
+          <svg className="h-5 w-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+          </svg>
+          <h3 className="text-sm font-semibold text-red-900 dark:text-red-100">Matches Confirmed Fraud</h3>
+        </div>
+        <p className="mb-4 text-sm text-red-700 dark:text-red-300">
+          This order shares identifying information with {e.linked_fraud_case_ids?.length || 0} previously confirmed fraud case(s).
+        </p>
+
+        <div className="overflow-x-auto rounded-lg border border-red-200 bg-white dark:border-red-800 dark:bg-zinc-900">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-red-100 text-left text-xs font-medium uppercase text-zinc-400 dark:border-zinc-800">
+                <th className="px-4 py-2">Match Type</th>
+                <th className="px-4 py-2">This Order</th>
+                <th className="px-4 py-2">Fraud Order</th>
+                <th className="px-4 py-2">View Case</th>
+              </tr>
+            </thead>
+            <tbody>
+              {e.matches?.map((m, i) => (
+                <tr key={i} className="border-b border-zinc-50 dark:border-zinc-800/50">
+                  <td className="px-4 py-2 font-medium text-red-700 dark:text-red-400">{matchTypeLabels[m.type] || m.type}</td>
+                  <td className="px-4 py-2 text-zinc-600 dark:text-zinc-400">{m.this_value}</td>
+                  <td className="px-4 py-2 text-zinc-600 dark:text-zinc-400">
+                    <span className="font-medium">{m.fraud_order}</span>
+                    <span className="ml-1 text-zinc-400">({m.fraud_value})</span>
+                  </td>
+                  <td className="px-4 py-2">
+                    {m.fraud_case_id && (
+                      <Link href={`/dashboard/fraud/${m.fraud_case_id}`} className="text-indigo-600 hover:underline dark:text-indigo-400">
+                        View case →
+                      </Link>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
