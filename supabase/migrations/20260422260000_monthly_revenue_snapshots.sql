@@ -41,6 +41,9 @@ CREATE TABLE public.monthly_revenue_snapshots (
   amz_churn_pct NUMERIC(6,2) NOT NULL DEFAULT 0,
   amz_subscription_rate NUMERIC(6,2) NOT NULL DEFAULT 0,
 
+  -- Meta ad spend
+  meta_spend_cents INTEGER NOT NULL DEFAULT 0,
+
   computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(workspace_id, month)
 );
