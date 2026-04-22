@@ -17,48 +17,47 @@ export async function GET(
   const endDate = url.searchParams.get("end") || startDate;
 
   // ── Shopify checkout revenue (new subs + one-time, excludes recurring) ──
+  // For today: live query from orders table (snapshot cron runs at 1 AM)
+  // For past days: daily_order_snapshots
   const shopifyRows: Record<string, unknown>[] = [];
   const today = new Date().toISOString().slice(0, 10);
   let offset = 0;
 
-  // Use snapshots for past days
-  const snapshotEnd = endDate >= today ? (() => {
-    const d = new Date(today); d.setDate(d.getDate() - 1);
-    return d.toISOString().slice(0, 10);
-  })() : endDate;
-
-  if (startDate <= snapshotEnd) {
-    while (true) {
-      const { data } = await admin
-        .from("daily_order_snapshots")
-        .select("snapshot_date, new_subscription_count, new_subscription_revenue_cents, one_time_count, one_time_revenue_cents")
-        .eq("workspace_id", workspaceId)
-        .gte("snapshot_date", startDate)
-        .lte("snapshot_date", snapshotEnd)
-        .order("snapshot_date", { ascending: true })
-        .range(offset, offset + 999);
-      if (!data || data.length === 0) break;
-      shopifyRows.push(...data);
-      if (data.length < 1000) break;
-      offset += 1000;
-    }
+  // Snapshots for all days (today's Amazon/Meta updated every 5 min by cron)
+  while (true) {
+    const { data } = await admin
+      .from("daily_order_snapshots")
+      .select("snapshot_date, new_subscription_count, new_subscription_revenue_cents, one_time_count, one_time_revenue_cents")
+      .eq("workspace_id", workspaceId)
+      .gte("snapshot_date", startDate)
+      .lte("snapshot_date", endDate)
+      .order("snapshot_date", { ascending: true })
+      .range(offset, offset + 999);
+    if (!data || data.length === 0) break;
+    shopifyRows.push(...data);
+    if (data.length < 1000) break;
+    offset += 1000;
   }
 
-  // Live query for today if in range
+  // Live Shopify for today (Shopify snapshot runs at 1 AM, so today's is stale)
   if (endDate >= today && startDate <= today) {
-    const utcStart = today + "T05:00:00Z"; // Central midnight
+    // Remove stale today snapshot if present
+    const todayIdx = shopifyRows.findIndex(r => (r as Record<string, unknown>).snapshot_date === today);
+    if (todayIdx >= 0) shopifyRows.splice(todayIdx, 1);
+
+    const utcStart = today + "T05:00:00Z";
     const utcEnd = (() => { const d = new Date(today); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10); })() + "T05:00:00Z";
 
     const { data: todayOrders } = await admin
       .from("orders")
-      .select("source_name, total_cents, tags, line_items")
+      .select("source_name, total_cents, tags")
       .eq("workspace_id", workspaceId)
       .gte("created_at", utcStart)
       .lt("created_at", utcEnd);
 
     let newSubCount = 0, newSubRev = 0, oneTimeCount = 0, oneTimeRev = 0;
     for (const o of todayOrders || []) {
-      if (o.source_name === "subscription_contract_checkout_one") continue; // recurring
+      if (o.source_name === "subscription_contract_checkout_one") continue;
       const tags = (o.tags || "").toLowerCase();
       if (tags.includes("first subscription")) {
         newSubCount++;
@@ -79,100 +78,26 @@ export async function GET(
   }
 
   // ── Amazon checkout revenue (one-time + sns_checkout, excludes recurring) ──
+  // Today's data kept fresh by 5-min cron (today-sync)
   const amazonRows: Record<string, unknown>[] = [];
   offset = 0;
-
-  // Use snapshots for past days
-  if (startDate <= snapshotEnd) {
-    while (true) {
-      const { data } = await admin
-        .from("daily_amazon_order_snapshots")
-        .select("snapshot_date, order_bucket, order_count, gross_revenue_cents")
-        .eq("workspace_id", workspaceId)
-        .gte("snapshot_date", startDate)
-        .lte("snapshot_date", snapshotEnd)
-        .in("order_bucket", ["one_time", "sns_checkout"])
-        .order("snapshot_date", { ascending: true })
-        .range(offset, offset + 999);
-      if (!data || data.length === 0) break;
-      amazonRows.push(...data);
-      if (data.length < 1000) break;
-      offset += 1000;
-    }
-  }
-
-  // Live Amazon query for today — pull fresh report from SP-API
-  if (endDate >= today && startDate <= today) {
-    const { data: amzConn } = await admin
-      .from("amazon_connections")
-      .select("id, marketplace_id, refresh_token_encrypted")
+  while (true) {
+    const { data } = await admin
+      .from("daily_amazon_order_snapshots")
+      .select("snapshot_date, order_bucket, order_count, gross_revenue_cents")
       .eq("workspace_id", workspaceId)
-      .eq("is_active", true)
-      .maybeSingle();
-
-    if (amzConn) {
-      try {
-        const { requestReport, pollReportStatus, downloadReport } = await import("@/lib/amazon/sync-orders");
-
-        const reportId = await requestReport(amzConn.id, amzConn.marketplace_id, today + "T00:00:00Z", (() => { const d = new Date(today); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10); })() + "T00:00:00Z");
-
-        let documentId: string | null = null;
-        for (let i = 0; i < 30; i++) {
-          const status = await pollReportStatus(amzConn.id, amzConn.marketplace_id, reportId);
-          if (status.status === "DONE") { documentId = status.documentId; break; }
-          if (status.status === "CANCELLED" || status.status === "FATAL") break;
-          await new Promise(r => setTimeout(r, 3000));
-        }
-
-        if (documentId) {
-          const tsv = await downloadReport(amzConn.id, amzConn.marketplace_id, documentId);
-          const lines = tsv.split("\n");
-          if (lines.length > 1) {
-            const headers = lines[0].split("\t");
-            const promoIdx = headers.indexOf("promotion-ids");
-            const priceIdx = headers.indexOf("item-price");
-            const statusIdx = headers.indexOf("order-status");
-            const orderIdIdx = headers.indexOf("amazon-order-id");
-
-            const buckets: Record<string, { orders: Set<string>; rev: number }> = {
-              one_time: { orders: new Set(), rev: 0 },
-              sns_checkout: { orders: new Set(), rev: 0 },
-            };
-
-            for (let j = 1; j < lines.length; j++) {
-              const cols = lines[j].split("\t");
-              if ((cols[statusIdx] || "").toLowerCase() === "cancelled") continue;
-              const promo = cols[promoIdx] || "";
-              const price = parseFloat(cols[priceIdx]) || 0;
-              const orderId = cols[orderIdIdx] || "";
-
-              // Skip recurring (SnS renewals)
-              if (promo.includes("FBA Subscribe & Save Discount") || promo.includes("FBA Subscribe and Save Discount")) continue;
-
-              const bucket = promo.includes("Subscribe and Save Promotion V2") ? "sns_checkout" : "one_time";
-              buckets[bucket].orders.add(orderId);
-              buckets[bucket].rev += price;
-            }
-
-            for (const [bucket, data] of Object.entries(buckets)) {
-              if (data.orders.size > 0) {
-                amazonRows.push({
-                  snapshot_date: today,
-                  order_bucket: bucket,
-                  order_count: data.orders.size,
-                  gross_revenue_cents: Math.round(data.rev * 100),
-                });
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.error("[ROAS] Live Amazon query failed:", err);
-      }
-    }
+      .gte("snapshot_date", startDate)
+      .lte("snapshot_date", endDate)
+      .in("order_bucket", ["one_time", "sns_checkout"])
+      .order("snapshot_date", { ascending: true })
+      .range(offset, offset + 999);
+    if (!data || data.length === 0) break;
+    amazonRows.push(...data);
+    if (data.length < 1000) break;
+    offset += 1000;
   }
 
-  // ── Meta ad spend ──
+  // ── Meta ad spend (today kept fresh by 5-min cron) ──
   const metaRows: Record<string, unknown>[] = [];
   offset = 0;
   while (true) {
