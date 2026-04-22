@@ -227,18 +227,7 @@ export async function PATCH(
     if (body.status === "open" && existing.status === "closed") {
       updates.closed_at = null;
     }
-    // Fire CSAT event when ticket is closed
-    if (body.status === "closed" && existing.status !== "closed") {
-      await inngest.send({
-        name: "ticket/closed",
-        data: {
-          ticket_id: ticketId,
-          workspace_id: workspaceId,
-          customer_id: existing.customer_id,
-          subject: existing.subject,
-        },
-      });
-    }
+    // CSAT disabled — will be reimplemented differently
   }
 
   if ("assigned_to" in body) updates.assigned_to = body.assigned_to || null;

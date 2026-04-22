@@ -1,7 +1,8 @@
 import { serve } from "inngest/next";
 import { inngest } from "@/lib/inngest/client";
 import { syncCustomers, syncOrders } from "@/lib/inngest/sync-shopify";
-import { ticketCsat } from "@/lib/inngest/ticket-csat";
+// CSAT disabled — not currently in use, will be reimplemented differently
+// import { ticketCsat } from "@/lib/inngest/ticket-csat";
 import {
   importFileUpload,
   importFileSplit,
@@ -67,7 +68,7 @@ export const { GET, POST, PUT } = serve({
   functions: [
     syncCustomers,
     syncOrders,
-    ticketCsat,
+    // ticketCsat, // disabled
     importFileUpload,
     importFileSplit,
     importChunkProcess,
