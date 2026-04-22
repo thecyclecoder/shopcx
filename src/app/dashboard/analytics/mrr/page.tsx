@@ -118,9 +118,7 @@ export default function MRRDashboard() {
   }
 
   const t = data.totals;
-  // Renewal-only static = total static minus dunning and paused (those are separate categories)
-  const renewalStatic = t.static_revenue - t.dunning_revenue - t.paused_revenue;
-  const retentionRate = renewalStatic > 0 ? (t.expected_revenue / renewalStatic) * 100 : 0;
+  const retentionRate = t.static_revenue > 0 ? (t.expected_revenue / t.static_revenue) * 100 : 0;
   const collectionRate = t.expected_revenue > 0 ? (t.collected_revenue / t.expected_revenue) * 100 : 0;
 
   // Group changes for display
@@ -304,12 +302,12 @@ export default function MRRDashboard() {
         <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
           <h2 className="mb-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Retention Rate</h2>
           <p className="text-xs text-zinc-400 mb-3">Expected / Static forecast (how much survived cancels/pauses/changes?)</p>
-          {renewalStatic > 0 ? (
+          {t.static_revenue > 0 ? (
             <div className="flex items-end gap-2">
               <span className={`text-3xl font-bold tabular-nums ${retentionRate >= 90 ? "text-emerald-600 dark:text-emerald-400" : retentionRate >= 75 ? "text-amber-600" : "text-red-600"}`}>
                 {retentionRate.toFixed(1)}%
               </span>
-              <span className="mb-1 text-sm text-zinc-400">{fmt(t.expected_revenue)} of {fmt(renewalStatic)}</span>
+              <span className="mb-1 text-sm text-zinc-400">{fmt(t.expected_revenue)} of {fmt(t.static_revenue)}</span>
             </div>
           ) : (
             <p className="text-sm text-zinc-400">No data yet — trendline builds as events come in</p>
