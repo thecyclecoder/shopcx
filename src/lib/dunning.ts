@@ -202,7 +202,7 @@ export async function getActiveDunningCycle(
     .select("id, cycle_number, status, cards_tried, billing_attempt_id")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", shopifyContractId)
-    .in("status", ["active", "skipped", "paused"])
+    .in("status", ["active", "rotating", "retrying", "skipped", "paused"])
     .order("cycle_number", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -220,7 +220,7 @@ export async function getActiveDunningCyclesForCustomer(
     .select("id, shopify_contract_id, subscription_id, cycle_number, status, billing_attempt_id")
     .eq("workspace_id", workspaceId)
     .eq("customer_id", customerId)
-    .in("status", ["active", "skipped", "paused"]);
+    .in("status", ["active", "rotating", "retrying", "skipped", "paused"]);
 
   return data || [];
 }
@@ -255,7 +255,7 @@ export async function createDunningCycle(
       subscription_id: subscriptionId,
       customer_id: customerId,
       cycle_number: cycleNumber,
-      status: "active",
+      status: "rotating",
       billing_attempt_id: billingAttemptId,
     })
     .select("id, cycle_number")

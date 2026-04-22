@@ -177,6 +177,12 @@ export const dunningPaymentFailed = inngest.createFunction(
     for (let i = 0; i < maxRotations; i++) {
       // Wait 2 hours between rotation attempts (except first)
       if (i > 0) {
+        // Update next_retry_at so the DB reflects when next attempt happens
+        await step.run(`set-next-retry-${i}`, async () => {
+          await updateDunningCycle(cycle.id, {
+            next_retry_at: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+          });
+        });
         await step.sleep(`card-rotation-wait-${i}`, "2h");
       }
 
@@ -222,6 +228,7 @@ export const dunningPaymentFailed = inngest.createFunction(
         await updateDunningCycle(cycleCheck.id, {
           cards_tried: updatedTried,
           billing_attempt_id: attemptId,
+          next_retry_at: null, // Clear — we just attempted
         });
       });
 
@@ -240,93 +247,34 @@ export const dunningPaymentFailed = inngest.createFunction(
       return { status: "recovered", method: "card_rotation", cycle_id: cycle.id };
     }
 
-    // Step 6: All cards exhausted — skip/pause + send emails + schedule payday retries
+    // Step 6: All cards exhausted — skip/pause + send emails
     await step.run("all-cards-exhausted", async () => {
       await handleAllCardsExhausted(workspace_id, shopify_contract_id, customer_id, cycle, settings);
     });
 
-    // Step 7: Payday-aware retries — rotate through ALL cards on each payday
+    // Step 7: Schedule payday retry (cron-driven, not sleep-driven)
+    // The dunning/payday-cron picks up cycles with status='retrying' and next_retry_at <= now()
     if (settings.dunning_payday_retry_enabled) {
-      const paydayDates = getNextPaydayDates(new Date(), 3);
-      let paydayAttempt = attemptNumber;
-
-      for (let i = 0; i < paydayDates.length; i++) {
-        const retryTime = getRetryTime(paydayDates[i]);
-        await step.sleepUntil(`payday-retry-wait-${i}`, retryTime);
-
-        // Check if cycle was recovered
-        const cycleCheck = await step.run(`check-cycle-payday-${i}`, async () => {
-          return getActiveDunningCycle(workspace_id, shopify_contract_id);
-        });
-        if (!cycleCheck || cycleCheck.status === "recovered") break;
-
-        // Try ALL payment methods on this payday (2h between each)
-        const dbCardsTried = (cycleCheck.cards_tried as string[]) || [];
-        // Reset tried cards for payday — we want to retry all of them
-        const allMethods = paymentMethods.length > 0 ? paymentMethods : [];
-
-        for (let j = 0; j < allMethods.length; j++) {
-          if (j > 0) await step.sleep(`payday-card-wait-${i}-${j}`, "2h");
-
-          const paydayCheck = await step.run(`payday-card-check-${i}-${j}`, async () => {
-            return getActiveDunningCycle(workspace_id, shopify_contract_id);
-          });
-          if (!paydayCheck || paydayCheck.status === "recovered") break;
-
-          const card = allMethods[j];
-          await step.run(`payday-retry-${i}-${j}`, async () => {
-            await appstleSwitchPaymentMethod(workspace_id, shopify_contract_id, card.id);
-
-            const ordersRes = await appstleGetUpcomingOrders(workspace_id, shopify_contract_id);
-            if (!ordersRes.success || !ordersRes.orders?.length) return;
-
-            const attemptId = ordersRes.orders[0].id;
-            await appstleAttemptBilling(workspace_id, attemptId);
-
-            await logPaymentFailure({
-              workspaceId: workspace_id,
-              customerId: customer_id,
-              subscriptionId: subscription_id,
-              shopifyContractId: shopify_contract_id,
-              billingAttemptId: attemptId,
-              paymentMethodLast4: card.last4,
-              paymentMethodId: card.id,
-              attemptNumber: paydayAttempt,
-              attemptType: "payday_retry",
-              succeeded: false,
-            });
-
-            await updateDunningCycle(paydayCheck.id, { billing_attempt_id: attemptId });
-            paydayAttempt++;
+      await step.run("schedule-payday-retry", async () => {
+        const paydayDates = getNextPaydayDates(new Date(), 3);
+        if (paydayDates.length > 0) {
+          const nextRetry = getRetryTime(paydayDates[0]);
+          await updateDunningCycle(cycle.id, {
+            status: "retrying",
+            next_retry_at: nextRetry.toISOString(),
           });
         }
+      });
 
-        // Wait for billing result after trying all cards
-        await step.sleep(`payday-result-wait-${i}`, "30m");
-
-        const postPaydayCheck = await step.run(`post-payday-check-${i}`, async () => {
-          return getActiveDunningCycle(workspace_id, shopify_contract_id);
-        });
-        if (!postPaydayCheck || postPaydayCheck.status === "recovered") break;
-      }
+      return { status: "retrying", cycle_id: cycle.id, cycle_number: cycle.cycle_number };
     }
 
-    // Final check — was the cycle recovered during payday retries?
-    const finalCheck = await step.run("final-check", async () => {
-      return getActiveDunningCycle(workspace_id, shopify_contract_id);
-    });
-    if (!finalCheck || finalCheck.status === "recovered") {
-      await step.run("reset-date-payday", () => resetBillingDateAfterDunning(workspace_id, shopify_contract_id, cycle.id, true));
-      return { status: "recovered", method: "payday_retry", cycle_id: cycle.id };
-    }
-
-    // Step 8: Exhausted — mark cycle + reset billing date to stay on schedule
+    // No payday retries — mark exhausted
     await step.run("mark-exhausted", async () => {
       await updateDunningCycle(cycle.id, { status: "exhausted" });
       await resetBillingDateAfterDunning(workspace_id, shopify_contract_id, cycle.id, false);
     });
 
-    // Slack notification for exhausted dunning
     dispatchSlackNotification(workspace_id, "dunning_failed", {
       customer: { email: "" },
       attempts: cycle.cycle_number || 0,
@@ -373,8 +321,8 @@ export const dunningNewCardRecovery = inngest.createFunction(
     for (const cycle of activeCycles) {
       const result = await step.run(`recover-${cycle.shopify_contract_id}`, async () => {
         try {
-          // Unskip the order if it was skipped
-          if (cycle.status === "skipped" && cycle.billing_attempt_id) {
+          // Unskip the order if it was skipped or retrying (retrying = skipped + awaiting payday)
+          if ((cycle.status === "skipped" || cycle.status === "retrying") && cycle.billing_attempt_id) {
             await appstleUnskipOrder(workspace_id, cycle.billing_attempt_id);
           }
 
@@ -716,3 +664,139 @@ async function resetBillingDateAfterDunning(
     console.error(`Failed to reset billing date for ${shopifyContractId}:`, err);
   }
 }
+
+// ── dunning/payday-retry-cron ──
+// Runs hourly, picks up dunning cycles with status='retrying' and next_retry_at <= now()
+// Tries all payment methods, then schedules next payday or marks exhausted
+
+export const dunningPaydayRetryCron = inngest.createFunction(
+  {
+    id: "dunning-payday-retry-cron",
+    retries: 1,
+    concurrency: [{ limit: 1 }],
+    triggers: [{ cron: "0 * * * *" }], // Every hour
+  },
+  async ({ step }) => {
+    const admin = createAdminClient();
+
+    // Find cycles ready to retry
+    const cycles = await step.run("find-retryable-cycles", async () => {
+      const { data } = await admin
+        .from("dunning_cycles")
+        .select("id, workspace_id, shopify_contract_id, subscription_id, customer_id, cycle_number, cards_tried, billing_attempt_id")
+        .eq("status", "retrying")
+        .lte("next_retry_at", new Date().toISOString());
+
+      return data || [];
+    });
+
+    if (cycles.length === 0) {
+      return { status: "no_cycles_to_retry" };
+    }
+
+    const results: { contractId: string; outcome: string }[] = [];
+
+    for (const cycle of cycles) {
+      const result = await step.run(`retry-${cycle.shopify_contract_id}`, async () => {
+        const settings = await getDunningSettings(cycle.workspace_id);
+        if (!settings?.dunning_payday_retry_enabled) {
+          await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
+          return { contractId: cycle.shopify_contract_id, outcome: "payday_disabled" };
+        }
+
+        // Get customer's Shopify ID for payment methods
+        const { data: customer } = await admin.from("customers")
+          .select("shopify_customer_id")
+          .eq("id", cycle.customer_id!)
+          .single();
+
+        if (!customer?.shopify_customer_id) {
+          await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
+          return { contractId: cycle.shopify_contract_id, outcome: "no_shopify_customer" };
+        }
+
+        // Get all payment methods
+        let paymentMethods: Awaited<ReturnType<typeof getCustomerPaymentMethods>> = [];
+        try {
+          const methods = await getCustomerPaymentMethods(cycle.workspace_id, customer.shopify_customer_id);
+          paymentMethods = deduplicatePaymentMethods(methods);
+        } catch (e) {
+          console.error(`[Dunning Payday] Failed to get payment methods for ${cycle.shopify_contract_id}:`, e);
+        }
+
+        if (paymentMethods.length === 0) {
+          await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
+          return { contractId: cycle.shopify_contract_id, outcome: "no_payment_methods" };
+        }
+
+        // Try each payment method (no sleep — all at once for this cycle)
+        let recovered = false;
+        for (const card of paymentMethods) {
+          // Check if already recovered (billing-success webhook may fire)
+          const check = await getActiveDunningCycle(cycle.workspace_id, cycle.shopify_contract_id);
+          if (!check || check.status === "recovered") { recovered = true; break; }
+
+          try {
+            await appstleSwitchPaymentMethod(cycle.workspace_id, cycle.shopify_contract_id, card.id);
+
+            const ordersRes = await appstleGetUpcomingOrders(cycle.workspace_id, cycle.shopify_contract_id);
+            if (!ordersRes.success || !ordersRes.orders?.length) continue;
+
+            const attemptId = ordersRes.orders[0].id;
+            await appstleAttemptBilling(cycle.workspace_id, attemptId);
+
+            await logPaymentFailure({
+              workspaceId: cycle.workspace_id,
+              customerId: cycle.customer_id,
+              subscriptionId: cycle.subscription_id,
+              shopifyContractId: cycle.shopify_contract_id,
+              billingAttemptId: attemptId,
+              paymentMethodLast4: card.last4,
+              paymentMethodId: card.id,
+              attemptNumber: 0,
+              attemptType: "payday_retry",
+              succeeded: false,
+            });
+
+            await updateDunningCycle(cycle.id, { billing_attempt_id: attemptId });
+          } catch (e) {
+            console.error(`[Dunning Payday] Card ${card.last4} failed for ${cycle.shopify_contract_id}:`, e);
+          }
+        }
+
+        // Check final state
+        const finalCheck = await getActiveDunningCycle(cycle.workspace_id, cycle.shopify_contract_id);
+        if (!finalCheck || finalCheck.status === "recovered") {
+          await resetBillingDateAfterDunning(cycle.workspace_id, cycle.shopify_contract_id, cycle.id, true);
+          return { contractId: cycle.shopify_contract_id, outcome: "recovered" };
+        }
+
+        // Schedule next payday retry or mark exhausted
+        const paydayDates = getNextPaydayDates(new Date(), 3);
+        // Find next payday that's in the future
+        const futurePaydays = paydayDates.filter(d => d.getTime() > Date.now() + 60 * 60 * 1000); // at least 1h from now
+
+        if (futurePaydays.length > 0) {
+          const nextRetry = getRetryTime(futurePaydays[0]);
+          await updateDunningCycle(cycle.id, { next_retry_at: nextRetry.toISOString() });
+          return { contractId: cycle.shopify_contract_id, outcome: "scheduled_next_payday" };
+        }
+
+        // No more paydays — exhausted
+        await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
+        await resetBillingDateAfterDunning(cycle.workspace_id, cycle.shopify_contract_id, cycle.id, false);
+
+        dispatchSlackNotification(cycle.workspace_id, "dunning_failed", {
+          customer: { email: "" },
+          attempts: cycle.cycle_number || 0,
+        }).catch(() => {});
+
+        return { contractId: cycle.shopify_contract_id, outcome: "exhausted" };
+      });
+
+      results.push(result);
+    }
+
+    return { processed: results.length, results };
+  }
+);
