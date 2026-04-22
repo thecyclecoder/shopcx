@@ -55,6 +55,83 @@ export async function getAppstleConfig(workspaceId: string): Promise<{ apiKey: s
   return { apiKey: decrypt(ws.appstle_api_key_encrypted), shop: ws.shopify_myshopify_domain || "" };
 }
 
+/**
+ * Remove a line item from a subscription via Appstle's dedicated endpoint.
+ * Use this instead of replaceVariants when removing without replacement.
+ */
+export async function appstleRemoveLineItem(
+  workspaceId: string,
+  contractId: string,
+  variantId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const config = await getAppstleConfig(workspaceId);
+  if (!config) return { success: false, error: "Appstle not configured" };
+
+  try {
+    // Fetch contract to get the line GID for this variant
+    const contractRes = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
+    );
+    if (!contractRes.ok) return { success: false, error: `Contract fetch failed: ${contractRes.status}` };
+    const contractData = await contractRes.json();
+
+    const lines = contractData.lines?.nodes || [];
+    const line = lines.find((l: Record<string, unknown>) => {
+      const vid = String(l.variantId || "").split("/").pop();
+      return vid === String(variantId);
+    });
+
+    if (!line?.id) return { success: false, error: `Variant ${variantId} not found on contract` };
+
+    const removeUrl = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-line-item?contractId=${contractId}&lineId=${encodeURIComponent(line.id)}`;
+    const res = await fetch(removeUrl, {
+      method: "PUT",
+      headers: { "X-API-Key": config.apiKey },
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("[appstleRemoveLineItem] error:", text);
+      return { success: false, error: `Appstle API error: ${res.status}` };
+    }
+
+    // Update local DB
+    await syncContractItems(workspaceId, contractId, config.apiKey);
+
+    return { success: true };
+  } catch (err) {
+    console.error("[appstleRemoveLineItem] failed:", err);
+    return { success: false, error: String(err) };
+  }
+}
+
+/** Refresh local DB items from Appstle contract state */
+async function syncContractItems(workspaceId: string, contractId: string, apiKey: string) {
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${apiKey}`,
+    );
+    if (!res.ok) return;
+    const contract = await res.json();
+    const lines = contract.lines?.nodes || [];
+    const rawItems = lines.map((node: Record<string, unknown>) => ({
+      variant_id: String(node.variantId || "").split("/").pop() || "",
+      title: node.title || "",
+      quantity: node.quantity || 1,
+      price_cents: Math.round(parseFloat(String((node.currentPrice as Record<string, unknown>)?.amount || "0")) * 100),
+      variant_title: node.variantTitle || "",
+      product_id: String(node.productId || "").split("/").pop() || "",
+      line_id: String(node.id || "").split("/").pop() || "",
+    }));
+    const items = await enrichItemTitles(workspaceId, rawItems);
+    const admin = createAdminClient();
+    await admin.from("subscriptions")
+      .update({ items, updated_at: new Date().toISOString() })
+      .eq("shopify_contract_id", contractId);
+  } catch { /* non-fatal */ }
+}
+
 async function callReplaceVariants(
   apiKey: string,
   body: Record<string, unknown>,
@@ -138,25 +215,8 @@ export async function subRemoveItem(
   contractId: string,
   variantId: string,
 ): Promise<{ success: boolean; error?: string }> {
-  const config = await getAppstleConfig(workspaceId);
-  if (!config) return { success: false, error: "Appstle not configured" };
-
-  const result = await callReplaceVariants(config.apiKey, {
-    shop: config.shop,
-    contractId: Number(contractId),
-    eventSource: "CUSTOMER_PORTAL",
-    oldVariants: [Number(variantId)],
-    allowRemoveWithoutAdd: true,
-    stopSwapEmails: true,
-  });
-
-  if (result.success) {
-    await syncItemsAfterMutation(workspaceId, contractId, (items) =>
-      items.filter((item) => String(item.variant_id) !== variantId),
-    );
-  }
-
-  return result;
+  // Use dedicated remove-line-item endpoint (not replaceVariants)
+  return appstleRemoveLineItem(workspaceId, contractId, variantId);
 }
 
 /** Change quantity of a variant on a subscription (remove + re-add with new qty) */

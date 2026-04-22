@@ -2,7 +2,7 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { enrichItemTitles } from "@/lib/subscription-items";
+import { enrichItemTitles, appstleRemoveLineItem } from "@/lib/subscription-items";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -118,58 +118,13 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
 
   // For removals without replacement, use the dedicated remove-line-item endpoint
   if (oldVariants.length && !newVariants && allowRemoveWithoutAdd) {
-    const adminDb = createAdminClient();
-    const { data: ws2 } = await adminDb.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
-    if (!ws2?.appstle_api_key_encrypted) return jsonErr({ error: "appstle_not_configured" }, 500);
-    const ak = decrypt(ws2.appstle_api_key_encrypted);
-
-    // Look up line IDs from Appstle contract
-    const contractRes = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${ak}`,
-    );
-    if (!contractRes.ok) return jsonErr({ error: "contract_fetch_failed" }, 500);
-    const contractData = await contractRes.json();
-    const contractLines = contractData.lines?.nodes || [];
-
-    // Remove each variant using the dedicated endpoint
     for (const variantId of oldVariants) {
-      const line = contractLines.find((l: Record<string, unknown>) => {
-        const vid = String(l.variantId || "").split("/").pop();
-        return vid === String(variantId);
-      });
-      if (!line?.id) continue;
-
-      const removeRes = await fetch(
-        "https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-line-item",
-        {
-          method: "PUT",
-          headers: { "X-API-Key": ak, "Content-Type": "application/json" },
-          body: JSON.stringify({ contractId: String(contractId), lineId: line.id }),
-          cache: "no-store",
-        },
-      );
-      if (!removeRes.ok) {
-        const errText = await removeRes.text().catch(() => "");
+      const result = await appstleRemoveLineItem(auth.workspaceId, String(contractId), String(variantId));
+      if (!result.success) {
         return handleAppstleError(
-          Object.assign(new Error(`Appstle API error: ${removeRes.status}`), { details: errText }),
-          { route: "replaceVariants", payload: { contractId, lineId: line.id, action: "remove" } },
+          Object.assign(new Error(result.error || "Remove failed"), { details: "" }),
+          { route: "replaceVariants", payload: { contractId, variantId, action: "remove" } },
         );
-      }
-    }
-
-    // Update local DB items
-    const postRes = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${ak}`,
-    );
-    if (postRes.ok) {
-      const postContract = await postRes.json();
-      const rawDbItems = parseAppstleLineItems(postContract);
-      if (rawDbItems.length >= 0) {
-        const dbItems = await enrichItemTitles(auth.workspaceId, rawDbItems);
-        const adminDb2 = createAdminClient();
-        await adminDb2.from("subscriptions")
-          .update({ items: dbItems, updated_at: new Date().toISOString() })
-          .eq("shopify_contract_id", String(contractId));
       }
     }
 
