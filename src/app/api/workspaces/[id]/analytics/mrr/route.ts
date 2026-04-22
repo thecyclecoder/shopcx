@@ -107,6 +107,10 @@ export async function GET(
 
     const rev = f.expected_revenue_cents || 0;
 
+    // Static = ALL forecasts regardless of type (total initial expectation)
+    day.static_count++;
+    day.static_revenue += rev;
+
     if (f.forecast_type === "dunning") {
       day.dunning_count++;
       day.dunning_revenue += rev;
@@ -120,10 +124,7 @@ export async function GET(
       day.paused_count++;
       day.paused_revenue += rev;
     } else {
-      // Renewal — count toward static (initial forecast) always
-      day.static_count++;
-      day.static_revenue += rev;
-
+      // Renewal
       if (f.status === "pending") {
         day.expected_count++;
         day.expected_revenue += rev;

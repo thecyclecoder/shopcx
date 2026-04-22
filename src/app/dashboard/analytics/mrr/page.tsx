@@ -83,10 +83,10 @@ const CHANGE_LABELS: Record<string, string> = {
 
 function StatCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
   return (
-    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900 overflow-hidden">
       <p className="text-xs font-medium uppercase tracking-wider text-zinc-400">{label}</p>
-      <p className={`mt-1 text-2xl font-bold tabular-nums ${color || "text-zinc-900 dark:text-zinc-100"}`}>{value}</p>
-      {sub && <p className="mt-0.5 text-xs text-zinc-400">{sub}</p>}
+      <p className={`mt-1 text-xl font-bold tabular-nums truncate ${color || "text-zinc-900 dark:text-zinc-100"}`}>{value}</p>
+      {sub && <p className="mt-0.5 text-[11px] text-zinc-400 truncate">{sub}</p>}
     </div>
   );
 }
@@ -144,7 +144,7 @@ export default function MRRDashboard() {
 
       {/* Summary Cards */}
       <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-        <StatCard label="Static Forecast" value={fmt(t.static_revenue)} sub={`${t.static_count} subs`} />
+        <StatCard label={`Static (${days}d)`} value={fmt(t.static_revenue)} sub={`${t.static_count} subs billing in window`} />
         <StatCard label="Expected" value={fmt(t.expected_revenue)}
           sub={`${t.expected_count} subs · ${retentionRate.toFixed(0)}% retention`}
           color={retentionRate < 90 ? "text-amber-600" : "text-zinc-900 dark:text-zinc-100"} />
