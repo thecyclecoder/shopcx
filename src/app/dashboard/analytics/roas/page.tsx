@@ -140,7 +140,7 @@ export default function ROASDashboard() {
       ) : (
         <>
           {/* Summary Cards */}
-          <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-8">
+          <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
             <StatCard
               label="ROAS"
               value={s.roas > 0 ? `${s.roas.toFixed(2)}x` : "—"}
