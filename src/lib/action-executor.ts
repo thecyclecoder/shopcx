@@ -680,12 +680,109 @@ async function handleDirectAction(
     if (decision.response_message) {
       await send(decision.response_message, ctx.sandbox);
     }
+
+    // Self-healing: verify actions actually took effect in the DB
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    const verifyFailures: string[] = [];
+
+    for (const s of successes) {
+      const verified = await verifyActionInDB(ctx, s.action);
+      if (!verified) {
+        const { addTicketTag } = await import("@/lib/ticket-tags");
+        await addTicketTag(ctx.ticketId, "ai:fix");
+        await sysNote(`[Self-heal] Verification failed for ${s.action.type} — retrying...`);
+
+        // Retry the action once
+        const handler = directActionHandlers[s.action.type];
+        if (handler) {
+          try {
+            const retryResult = await handler(ctx, s.action);
+            if (retryResult.success) {
+              await sysNote(`[Self-heal] Retried ${s.action.type} — succeeded on retry.`);
+              await addTicketTag(ctx.ticketId, "ai:fix-success");
+            } else {
+              verifyFailures.push(`${s.action.type}: retry failed — ${retryResult.error}`);
+            }
+          } catch (err) {
+            verifyFailures.push(`${s.action.type}: retry threw — ${err instanceof Error ? err.message : String(err)}`);
+          }
+        } else {
+          verifyFailures.push(`${s.action.type}: verification failed, no handler for retry`);
+        }
+      }
+    }
+
+    if (verifyFailures.length > 0) {
+      const { addTicketTag } = await import("@/lib/ticket-tags");
+      await addTicketTag(ctx.ticketId, "ai:fix");
+      await addTicketTag(ctx.ticketId, "ai:fix-fail");
+      for (const f of verifyFailures) {
+        await sysNote(`[Self-heal] Action verification failed: ${f}`);
+      }
+      await send(
+        "I ran into a small issue completing one of the changes to your account. Don't worry — our team is on it and we'll send you a follow-up message once everything is confirmed.",
+        ctx.sandbox,
+      );
+      await escalateTicket(ctx, `Self-heal verification failures: ${verifyFailures.join("; ")}`);
+    }
   } else {
     // Some failed — send error + escalate
     const errorMsg =
       "I ran into an issue processing your request. I'm going to look into this and send you an email shortly.";
     await send(errorMsg, ctx.sandbox);
     await escalateTicket(ctx, `Direct action failures: ${failures.map((f) => `${f.action.type}: ${f.result.error}`).join("; ")}`);
+  }
+}
+
+/**
+ * Verify that a direct action's expected state change is reflected in the DB.
+ * Returns true if verified, false if the expected state wasn't found.
+ */
+async function verifyActionInDB(
+  ctx: ActionContext,
+  action: ActionParams,
+): Promise<boolean> {
+  const admin = ctx.admin;
+
+  switch (action.type) {
+    case "cancel": {
+      if (!action.contract_id) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("status").eq("shopify_contract_id", action.contract_id).single();
+      return data?.status === "cancelled";
+    }
+    case "pause":
+    case "crisis_pause": {
+      if (!action.contract_id) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("status").eq("shopify_contract_id", action.contract_id).single();
+      return data?.status === "paused";
+    }
+    case "resume":
+    case "reactivate": {
+      if (!action.contract_id) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("status").eq("shopify_contract_id", action.contract_id).single();
+      return data?.status === "active";
+    }
+    case "partial_refund": {
+      // Check if order financial_status changed
+      if (!action.shopify_order_id) return true;
+      const { data } = await admin.from("orders")
+        .select("financial_status").eq("shopify_order_id", action.shopify_order_id).single();
+      return data?.financial_status === "partially_refunded" || data?.financial_status === "refunded";
+    }
+    case "apply_coupon":
+    case "apply_loyalty_coupon": {
+      if (!action.contract_id || !action.code) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("applied_discounts").eq("shopify_contract_id", action.contract_id).single();
+      const discounts = (data?.applied_discounts || []) as { title?: string }[];
+      return discounts.some(d => d.title === action.code);
+    }
+    default:
+      // No verification logic for this action type — assume OK
+      return true;
   }
 }
 
