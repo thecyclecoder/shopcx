@@ -213,14 +213,14 @@ export async function GET(
   const amazonSubRate = amazonCheckoutTotal > 0 ? (totals.amazon_sns_checkout_revenue / amazonCheckoutTotal) * 100 : 0;
 
   // ── Average churn from monthly revenue snapshots (for LTV calculation) ──
+  // Average churn from ALL complete months (excludes current incomplete month)
   const { data: churnMonths } = await admin
     .from("monthly_revenue_snapshots")
     .select("churn_pct, amz_churn_pct")
     .eq("workspace_id", workspaceId)
     .eq("is_complete", true)
     .gt("churn_pct", 0)
-    .order("month", { ascending: false })
-    .limit(6); // Last 6 complete months
+    .order("month", { ascending: true });
 
   const shopifyAvgChurn = churnMonths?.length
     ? churnMonths.reduce((s, m) => s + Number(m.churn_pct), 0) / churnMonths.length / 100
