@@ -332,29 +332,39 @@ function ROASChart({ daily }: { daily: DayData[] }) {
 }
 
 function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
-  const [cogsPct, setCogsPct] = useState(20);
-  const [shippingPct, setShippingPct] = useState(10);
+  const [cogsPct, setCogsPct] = useState(15);
+  const [shippingPct, setShippingPct] = useState(14);
+  const [gaPct, setGaPct] = useState(20);
+  const [discountPct, setDiscountPct] = useState(9);
 
   const totalOrders = s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count;
   if (!totalOrders) return null;
 
+  const totalCostPct = cogsPct + shippingPct + gaPct + discountPct;
   const cac = totalOrders > 0 && s.total_spend_cents > 0 ? s.total_spend_cents / totalOrders : 0;
+
+  // Blended metrics for spend scaling
+  const blendedAov = s.total_revenue_cents / totalOrders;
+  const blendedSubRate = (s.shopify_new_sub_count + s.amazon_sns_checkout_count) / totalOrders;
+  const blendedChurn = (s.shopify_avg_churn_pct > 0 ? s.shopify_avg_churn_pct : s.amazon_avg_churn_pct) / 100;
+  const lifetimeOrders = blendedChurn > 0 ? (1 - blendedSubRate) + (blendedSubRate / blendedChurn) : 1;
+  const costPerOrderPct = totalCostPct / 100;
 
   function calcChannel(label: string, revenue: number, orders: number, subCount: number, churnPct: number, color: string) {
     if (!orders) return null;
     const aov = revenue / orders;
     const subRate = orders > 0 ? subCount / orders : 0;
     const churn = churnPct / 100;
-    const cogsPerOrder = aov * (cogsPct / 100);
-    const shippingPerOrder = aov * (shippingPct / 100);
-    const costPerOrder = cogsPerOrder + shippingPerOrder;
-    const firstProfit = aov - cac - costPerOrder;
+    const allCostPerOrder = aov * costPerOrderPct;
+    const firstProfit = aov - cac - allCostPerOrder;
     const firstMargin = aov > 0 ? (firstProfit / aov) * 100 : 0;
-    const lifetimeOrders = churn > 0 ? (1 - subRate) + (subRate / churn) : 1;
-    const lifetimeRev = aov * lifetimeOrders;
-    const lifetimeCost = costPerOrder * lifetimeOrders;
+    const ltOrders = churn > 0 ? (1 - subRate) + (subRate / churn) : 1;
+    const lifetimeRev = aov * ltOrders;
+    const lifetimeCost = allCostPerOrder * ltOrders;
     const lifetimeProfit = lifetimeRev - cac - lifetimeCost;
     const trueROAS = cac > 0 ? lifetimeProfit / cac : 0;
+    // Max CAC = breakeven point (lifetime revenue - lifetime cost)
+    const maxCac = lifetimeRev - lifetimeCost;
 
     return (
       <div className="rounded-lg border border-zinc-100 p-4 dark:border-zinc-800">
@@ -363,53 +373,123 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
           <Row label="AOV" value={fmt(aov)} />
           <Row label="Sub rate" value={`${(subRate * 100).toFixed(0)}%`} />
           <Row label="Ad cost (CAC)" value={`-${fmt(cac)}`} color="text-red-500" />
-          <Row label={`COGS (${cogsPct}%)`} value={`-${fmt(cogsPerOrder)}`} color="text-red-500" />
-          <Row label={`Shipping (${shippingPct}%)`} value={`-${fmt(shippingPerOrder)}`} color="text-red-500" />
+          <Row label={`All costs (${totalCostPct}%)`} value={`-${fmt(allCostPerOrder)}`} color="text-red-500" />
           <div className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
             <Row label="First order profit" value={`${fmt(firstProfit)} (${firstMargin.toFixed(0)}%)`}
               color={firstProfit >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"} />
           </div>
           <div className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
-            <Row label="Avg lifetime orders" value={lifetimeOrders.toFixed(1)} bold />
+            <Row label="Avg lifetime orders" value={ltOrders.toFixed(1)} bold />
             <Row label="Lifetime revenue" value={fmt(lifetimeRev)} color="text-emerald-600" />
-            <Row label={`COGS + ship (${lifetimeOrders.toFixed(1)} orders)`} value={`-${fmt(lifetimeCost)}`} color="text-red-500" />
+            <Row label="Lifetime costs" value={`-${fmt(lifetimeCost)}`} color="text-red-500" />
             <Row label="Lifetime profit" value={fmt(lifetimeProfit)}
               color={lifetimeProfit >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"} />
             <Row label="True ROAS" value={trueROAS > 0 ? `${trueROAS.toFixed(1)}x` : "—"}
               color={trueROAS >= 3 ? "text-emerald-600 font-semibold" : trueROAS >= 2 ? "text-amber-600 font-semibold" : "text-red-600 font-semibold"} />
+            <Row label="Max CAC (breakeven)" value={fmt(maxCac)} color="text-amber-600" />
           </div>
         </div>
       </div>
     );
   }
 
+  // Spend scaling scenarios
+  const scenarios = [1, 1.5, 2, 2.5, 3, 4, 5].map(mult => {
+    const spend = s.total_spend_cents * mult;
+    // Assume linear scaling for orders (simplification)
+    const orders = Math.round(totalOrders * mult);
+    const rev = blendedAov * orders;
+    const costs = rev * costPerOrderPct;
+    const adCost = spend;
+    const firstOrderProfit = rev - costs - adCost;
+    const ltRev = blendedAov * lifetimeOrders * orders;
+    const ltCosts = (blendedAov * costPerOrderPct) * lifetimeOrders * orders;
+    const ltProfit = ltRev - ltCosts - adCost;
+    const roas = adCost > 0 ? rev / adCost : 0;
+    return { mult, spend, orders, rev, firstOrderProfit, ltProfit, roas };
+  });
+
   return (
     <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
       <h2 className="mb-4 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Margin Calculator</h2>
 
-      <div className="mb-4 flex flex-wrap gap-6">
+      <div className="mb-4 flex flex-wrap gap-4">
         <div>
           <label className="block text-xs font-medium text-zinc-500 mb-1">COGS %</label>
           <input type="number" value={cogsPct} onChange={(e) => setCogsPct(Number(e.target.value))}
-            className="w-20 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
         </div>
         <div>
           <label className="block text-xs font-medium text-zinc-500 mb-1">Shipping %</label>
           <input type="number" value={shippingPct} onChange={(e) => setShippingPct(Number(e.target.value))}
-            className="w-20 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-zinc-500 mb-1">G&A %</label>
+          <input type="number" value={gaPct} onChange={(e) => setGaPct(Number(e.target.value))}
+            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-zinc-500 mb-1">Discounts %</label>
+          <input type="number" value={discountPct} onChange={(e) => setDiscountPct(Number(e.target.value))}
+            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
         </div>
         <div className="flex items-end">
-          <span className="text-xs text-zinc-400">CAC: {fmt(cac)} ({totalOrders} orders / {fmt(s.total_spend_cents)} spend)</span>
+          <span className="text-xs text-zinc-400">Total cost: {totalCostPct}% · CAC: {fmt(cac)}</span>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 mb-6">
         {calcChannel("Website", s.shopify_checkout_revenue, s.shopify_new_sub_count + s.shopify_one_time_count, s.shopify_new_sub_count, s.shopify_avg_churn_pct, "text-emerald-500")}
         {calcChannel("Amazon", s.amazon_checkout_revenue, s.amazon_one_time_count + s.amazon_sns_checkout_count, s.amazon_sns_checkout_count, s.amazon_avg_churn_pct, "text-amber-500")}
         {calcChannel("Blended", s.total_revenue_cents, totalOrders, s.shopify_new_sub_count + s.amazon_sns_checkout_count,
-          // Weighted avg churn
           s.shopify_avg_churn_pct > 0 ? s.shopify_avg_churn_pct : s.amazon_avg_churn_pct,
           "text-zinc-400")}
+      </div>
+
+      {/* Spend Scaling — what happens if you spend more */}
+      <div className="rounded-lg border border-zinc-100 p-4 dark:border-zinc-800">
+        <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-zinc-400">Spend Scaling (assuming linear acquisition)</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400 dark:border-zinc-800">
+                <th className="px-3 py-1">Ad Spend</th>
+                <th className="px-3 py-1 text-right">ROAS</th>
+                <th className="px-3 py-1 text-right">Orders</th>
+                <th className="px-3 py-1 text-right">Revenue</th>
+                <th className="px-3 py-1 text-right">First Order Profit</th>
+                <th className="px-3 py-1 text-right">Lifetime Profit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {scenarios.map(sc => {
+                const isCurrent = sc.mult === 1;
+                return (
+                  <tr key={sc.mult} className={`border-b border-zinc-50 dark:border-zinc-800/50 ${isCurrent ? "bg-indigo-50/50 dark:bg-indigo-950/20" : ""}`}>
+                    <td className="px-3 py-1.5 tabular-nums">
+                      {fmtShort(sc.spend)}
+                      {isCurrent && <span className="ml-1 text-[10px] text-indigo-500">current</span>}
+                      {!isCurrent && <span className="ml-1 text-[10px] text-zinc-400">{sc.mult}x</span>}
+                    </td>
+                    <td className={`px-3 py-1.5 text-right tabular-nums ${sc.roas >= 3 ? "text-emerald-600" : sc.roas >= 2 ? "text-amber-600" : "text-red-600"}`}>
+                      {sc.roas.toFixed(1)}x
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{sc.orders.toLocaleString()}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-zinc-700 dark:text-zinc-300">{fmtShort(sc.rev)}</td>
+                    <td className={`px-3 py-1.5 text-right tabular-nums font-medium ${sc.firstOrderProfit >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                      {fmtShort(sc.firstOrderProfit)}
+                    </td>
+                    <td className={`px-3 py-1.5 text-right tabular-nums font-semibold ${sc.ltProfit >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                      {fmtShort(sc.ltProfit)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <p className="mt-2 text-[10px] text-zinc-400">Assumes constant ROAS at increased spend. In practice, ROAS decreases as you scale — watch the trendline.</p>
       </div>
     </div>
   );
