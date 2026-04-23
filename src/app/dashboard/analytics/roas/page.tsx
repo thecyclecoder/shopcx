@@ -334,10 +334,10 @@ function ROASChart({ daily }: { daily: DayData[] }) {
 }
 
 function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
-  const [cogsPct, setCogsPct] = useState(15);
-  const [shippingPct, setShippingPct] = useState(14);
+  const [cogsPct, setCogsPct] = useState(17);
+  const [shippingPct, setShippingPct] = useState(15);
   const [gaFixed, setGaFixed] = useState(54542); // Fixed G&A (no platform fees, net of sublease)
-  const [discountPct, setDiscountPct] = useState(9);
+  const [discountPct, setDiscountPct] = useState(12);
   const [shopifyTxPct, setShopifyTxPct] = useState(3); // Shopify/PayPal/Braintree tx fees
   const [amzFeePct, setAmzFeePct] = useState(25); // Amazon FBA + seller fees (already includes tx)
 

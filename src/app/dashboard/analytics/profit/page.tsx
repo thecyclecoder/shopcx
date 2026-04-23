@@ -47,9 +47,9 @@ export default function ProfitDashboard() {
   const [period, setPeriod] = useState("this_month");
 
   // Cost assumptions (same as margin calculator)
-  const [cogsPct] = useState(15);
-  const [shippingPct] = useState(14);
-  const [discountPct] = useState(9);
+  const [cogsPct] = useState(17);
+  const [shippingPct] = useState(15);
+  const [discountPct] = useState(12);
   const [shopifyTxPct] = useState(3);
   const [amzFeePct] = useState(25);
   const [gaFixed] = useState(54542);
