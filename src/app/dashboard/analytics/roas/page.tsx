@@ -336,9 +336,10 @@ function ROASChart({ daily }: { daily: DayData[] }) {
 function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
   const [cogsPct, setCogsPct] = useState(15);
   const [shippingPct, setShippingPct] = useState(14);
-  const [gaFixed, setGaFixed] = useState(74361); // Monthly fixed G&A ($81,871 expenses - $7,510 sublease income)
+  const [gaFixed, setGaFixed] = useState(54542); // Fixed G&A (no platform fees, net of sublease)
   const [discountPct, setDiscountPct] = useState(9);
-  const [amzFeePct, setAmzFeePct] = useState(25);
+  const [shopifyTxPct, setShopifyTxPct] = useState(3); // Shopify/PayPal/Braintree tx fees
+  const [amzFeePct, setAmzFeePct] = useState(25); // Amazon FBA + seller fees (already includes tx)
 
   const totalOrders = s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count;
   if (!totalOrders) return null;

@@ -34,9 +34,10 @@ function fmt(cents: number): string {
 }
 
 function fmtK(cents: number): string {
-  if (Math.abs(cents) >= 10000000) return "$" + (cents / 10000000).toFixed(1) + "M";
-  if (Math.abs(cents) >= 100000) return "$" + (cents / 100000).toFixed(1) + "K";
-  return "$" + (cents / 100).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  const dollars = cents / 100;
+  if (Math.abs(dollars) >= 1000000) return "$" + (dollars / 1000000).toFixed(1) + "M";
+  if (Math.abs(dollars) >= 1000) return "$" + (dollars / 1000).toFixed(1) + "K";
+  return "$" + dollars.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 }
 
 export default function ProfitDashboard() {
