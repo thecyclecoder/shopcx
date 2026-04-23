@@ -80,10 +80,29 @@ export const deliverPendingSends = inngest.createFunction(
             const email = (ticket.customers as unknown as { email: string })?.email;
             if (email) {
               const { data: ws } = await admin.from("workspaces").select("name").eq("id", ticket.workspace_id).single();
+
+              // Convert embedded journey forms to CTA email links (forms don't render in email)
+              let emailBody = msg.body;
+              const journeyMatch = emailBody.match(/<!--JOURNEY:(\{[\s\S]*?\})-->/);
+              if (journeyMatch) {
+                try {
+                  const journeyData = JSON.parse(journeyMatch[1]);
+                  const token = journeyData.token;
+                  if (token) {
+                    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
+                    const journeyUrl = `${siteUrl}/journey/${token}`;
+                    // Replace the embedded form with a CTA button
+                    emailBody = emailBody.replace(journeyMatch[0],
+                      `<p><a href="${journeyUrl}" style="display:inline-block;padding:12px 24px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Continue Here</a></p>`
+                    );
+                  }
+                } catch { /* keep original body if parse fails */ }
+              }
+
               const chatEmailResult = await sendTicketReply({
                 workspaceId: ticket.workspace_id, toEmail: email,
                 subject: `Re: ${ticket.subject || "Your chat with us"}`,
-                body: msg.body, inReplyTo: null,
+                body: emailBody, inReplyTo: null,
                 agentName: "Support", workspaceName: ws?.name || "",
               });
               if (chatEmailResult.messageId) {
