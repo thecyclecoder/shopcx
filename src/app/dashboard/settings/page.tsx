@@ -62,6 +62,7 @@ export default function SettingsPage() {
           <SettingsCard href="/dashboard/settings/dunning" title="Recovery" desc="Card rotation, payday retries, automatic unskip" />
           <SettingsCard href="/dashboard/settings/portal" title="Customer Portal" desc="Shopify extension, mini-site, products" />
           <SettingsCard href="/dashboard/settings/amazon-pricing" title="Amazon Pricing" desc="Manage Amazon listing prices, bulk adjustments" />
+          <SettingsCard href="/dashboard/settings/email-filters" title="Email Filters" desc="Block spam, system notifications, PayPal alerts" />
         </SettingsSection>
 
         <SettingsSection title="Storefront & Subscriptions">
