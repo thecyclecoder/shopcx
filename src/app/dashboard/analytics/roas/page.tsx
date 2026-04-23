@@ -336,6 +336,7 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
   const [shippingPct, setShippingPct] = useState(14);
   const [gaPct, setGaPct] = useState(20);
   const [discountPct, setDiscountPct] = useState(9);
+  const [amzFeePct, setAmzFeePct] = useState(25);
 
   const totalOrders = s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count;
   if (!totalOrders) return null;
@@ -350,12 +351,14 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
   const lifetimeOrders = blendedChurn > 0 ? (1 - blendedSubRate) + (blendedSubRate / blendedChurn) : 1;
   const costPerOrderPct = totalCostPct / 100;
 
-  function calcChannel(label: string, revenue: number, orders: number, subCount: number, churnPct: number, color: string) {
+  function calcChannel(label: string, revenue: number, orders: number, subCount: number, churnPct: number, color: string, extraFeePct?: number) {
     if (!orders) return null;
     const aov = revenue / orders;
     const subRate = orders > 0 ? subCount / orders : 0;
     const churn = churnPct / 100;
-    const allCostPerOrder = aov * costPerOrderPct;
+    const channelCostPct = costPerOrderPct + (extraFeePct || 0) / 100;
+    const allCostPerOrder = aov * channelCostPct;
+    const channelTotalPct = totalCostPct + (extraFeePct || 0);
     const firstProfit = aov - cac - allCostPerOrder;
     const firstMargin = aov > 0 ? (firstProfit / aov) * 100 : 0;
     const ltOrders = churn > 0 ? (1 - subRate) + (subRate / churn) : 1;
@@ -363,7 +366,6 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
     const lifetimeCost = allCostPerOrder * ltOrders;
     const lifetimeProfit = lifetimeRev - cac - lifetimeCost;
     const trueROAS = cac > 0 ? lifetimeProfit / cac : 0;
-    // Max CAC = breakeven point (lifetime revenue - lifetime cost)
     const maxCac = lifetimeRev - lifetimeCost;
 
     return (
@@ -373,7 +375,8 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
           <Row label="AOV" value={fmt(aov)} />
           <Row label="Sub rate" value={`${(subRate * 100).toFixed(0)}%`} />
           <Row label="Ad cost (CAC)" value={`-${fmt(cac)}`} color="text-red-500" />
-          <Row label={`All costs (${totalCostPct}%)`} value={`-${fmt(allCostPerOrder)}`} color="text-red-500" />
+          <Row label={`All costs (${channelTotalPct}%)`} value={`-${fmt(allCostPerOrder)}`} color="text-red-500" />
+          {extraFeePct ? <Row label={`  incl. platform fees (${extraFeePct}%)`} value={`-${fmt(aov * extraFeePct / 100)}`} color="text-red-400" /> : null}
           <div className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
             <Row label="First order profit" value={`${fmt(firstProfit)} (${firstMargin.toFixed(0)}%)`}
               color={firstProfit >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"} />
@@ -434,14 +437,19 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
           <input type="number" value={discountPct} onChange={(e) => setDiscountPct(Number(e.target.value))}
             className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
         </div>
+        <div>
+          <label className="block text-xs font-medium text-zinc-500 mb-1">AMZ Fees %</label>
+          <input type="number" value={amzFeePct} onChange={(e) => setAmzFeePct(Number(e.target.value))}
+            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+        </div>
         <div className="flex items-end">
-          <span className="text-xs text-zinc-400">Total cost: {totalCostPct}% · CAC: {fmt(cac)}</span>
+          <span className="text-xs text-zinc-400">Base cost: {totalCostPct}% · AMZ: +{amzFeePct}% · CAC: {fmt(cac)}</span>
         </div>
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 mb-6">
         {calcChannel("Website", s.shopify_checkout_revenue, s.shopify_new_sub_count + s.shopify_one_time_count, s.shopify_new_sub_count, s.shopify_avg_churn_pct, "text-emerald-500")}
-        {calcChannel("Amazon", s.amazon_checkout_revenue, s.amazon_one_time_count + s.amazon_sns_checkout_count, s.amazon_sns_checkout_count, s.amazon_avg_churn_pct, "text-amber-500")}
+        {calcChannel("Amazon", s.amazon_checkout_revenue, s.amazon_one_time_count + s.amazon_sns_checkout_count, s.amazon_sns_checkout_count, s.amazon_avg_churn_pct, "text-amber-500", amzFeePct)}
         {calcChannel("Blended", s.total_revenue_cents, totalOrders, s.shopify_new_sub_count + s.amazon_sns_checkout_count,
           s.shopify_avg_churn_pct > 0 ? s.shopify_avg_churn_pct : s.amazon_avg_churn_pct,
           "text-zinc-400")}
