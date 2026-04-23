@@ -334,14 +334,15 @@ function ROASChart({ daily }: { daily: DayData[] }) {
 function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
   const [cogsPct, setCogsPct] = useState(15);
   const [shippingPct, setShippingPct] = useState(14);
-  const [gaPct, setGaPct] = useState(20);
+  const [gaFixed, setGaFixed] = useState(74361); // Monthly fixed G&A ($81,871 expenses - $7,510 sublease income)
   const [discountPct, setDiscountPct] = useState(9);
   const [amzFeePct, setAmzFeePct] = useState(25);
 
   const totalOrders = s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count;
   if (!totalOrders) return null;
 
-  const totalCostPct = cogsPct + shippingPct + gaPct + discountPct;
+  const variablePct = cogsPct + shippingPct + discountPct; // scales with revenue
+  const gaFixedCents = gaFixed * 100; // monthly fixed overhead
   const cac = totalOrders > 0 && s.total_spend_cents > 0 ? s.total_spend_cents / totalOrders : 0;
 
   // Blended metrics for spend scaling
@@ -349,24 +350,28 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
   const blendedSubRate = (s.shopify_new_sub_count + s.amazon_sns_checkout_count) / totalOrders;
   const blendedChurn = (s.shopify_avg_churn_pct > 0 ? s.shopify_avg_churn_pct : s.amazon_avg_churn_pct) / 100;
   const lifetimeOrders = blendedChurn > 0 ? (1 - blendedSubRate) + (blendedSubRate / blendedChurn) : 1;
-  const costPerOrderPct = totalCostPct / 100;
+  const variableCostPct = variablePct / 100;
+  // For per-channel cards, spread G&A across current orders
+  const gaPerOrder = totalOrders > 0 ? gaFixedCents / totalOrders : 0;
+  const costPerOrderPct = variableCostPct; // variable only for lifetime calc
 
   function calcChannel(label: string, revenue: number, orders: number, subCount: number, churnPct: number, color: string, extraFeePct?: number) {
     if (!orders) return null;
     const aov = revenue / orders;
     const subRate = orders > 0 ? subCount / orders : 0;
     const churn = churnPct / 100;
-    const channelCostPct = costPerOrderPct + (extraFeePct || 0) / 100;
-    const allCostPerOrder = aov * channelCostPct;
-    const channelTotalPct = totalCostPct + (extraFeePct || 0);
+    const channelVarPct = variableCostPct + (extraFeePct || 0) / 100;
+    const varCostPerOrder = aov * channelVarPct;
+    const allCostPerOrder = varCostPerOrder + gaPerOrder; // variable + allocated G&A
+    const channelTotalPct = variablePct + (extraFeePct || 0);
     const firstProfit = aov - cac - allCostPerOrder;
     const firstMargin = aov > 0 ? (firstProfit / aov) * 100 : 0;
     const ltOrders = churn > 0 ? (1 - subRate) + (subRate / churn) : 1;
     const lifetimeRev = aov * ltOrders;
-    const lifetimeCost = allCostPerOrder * ltOrders;
-    const lifetimeProfit = lifetimeRev - cac - lifetimeCost;
+    const lifetimeVarCost = varCostPerOrder * ltOrders; // variable scales with orders
+    const lifetimeProfit = lifetimeRev - cac - lifetimeVarCost - gaPerOrder; // G&A charged once
     const trueROAS = cac > 0 ? lifetimeProfit / cac : 0;
-    const maxCac = lifetimeRev - lifetimeCost;
+    const maxCac = lifetimeRev - lifetimeVarCost - gaPerOrder;
 
     return (
       <div className="rounded-lg border border-zinc-100 p-4 dark:border-zinc-800">
@@ -375,8 +380,9 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
           <Row label="AOV" value={fmt(aov)} />
           <Row label="Sub rate" value={`${(subRate * 100).toFixed(0)}%`} />
           <Row label="Ad cost (CAC)" value={`-${fmt(cac)}`} color="text-red-500" />
-          <Row label={`All costs (${channelTotalPct}%)`} value={`-${fmt(allCostPerOrder)}`} color="text-red-500" />
+          <Row label={`Variable costs (${channelTotalPct}%)`} value={`-${fmt(varCostPerOrder)}`} color="text-red-500" />
           {extraFeePct ? <Row label={`  incl. platform fees (${extraFeePct}%)`} value={`-${fmt(aov * extraFeePct / 100)}`} color="text-red-400" /> : null}
+          <Row label="G&A (fixed)" value={`-${fmt(gaPerOrder)}`} color="text-red-400" />
           <div className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
             <Row label="First order profit" value={`${fmt(firstProfit)} (${firstMargin.toFixed(0)}%)`}
               color={firstProfit >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"} />
@@ -384,7 +390,8 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
           <div className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
             <Row label="Avg lifetime orders" value={ltOrders.toFixed(1)} bold />
             <Row label="Lifetime revenue" value={fmt(lifetimeRev)} color="text-emerald-600" />
-            <Row label="Lifetime costs" value={`-${fmt(lifetimeCost)}`} color="text-red-500" />
+            <Row label={`Variable costs (${ltOrders.toFixed(1)} orders)`} value={`-${fmt(lifetimeVarCost)}`} color="text-red-500" />
+            <Row label="G&A (fixed, once)" value={`-${fmt(gaPerOrder)}`} color="text-red-400" />
             <Row label="Lifetime profit" value={fmt(lifetimeProfit)}
               color={lifetimeProfit >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"} />
             <Row label="True ROAS" value={trueROAS > 0 ? `${trueROAS.toFixed(1)}x` : "—"}
@@ -409,16 +416,15 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
     const predictedRoas = Math.max(0.3, theoreticalMaxRoas - roasDecayPerDollar * spendDollars);
     const revCents = spendCents * predictedRoas;
     const orders = blendedAov > 0 ? Math.round(revCents / blendedAov) : 0;
-    const costsCents = revCents * costPerOrderPct;
-    // First order: revenue - variable costs - ad spend (all first orders)
-    const firstOrderProfit = revCents - costsCents - spendCents;
-    // Lifetime: each customer generates lifetimeOrders worth of revenue
-    // Ad cost is one-time per customer, variable costs repeat each order
-    const ltRevPerCustomer = blendedAov * lifetimeOrders;
-    const ltCostPerCustomer = blendedAov * costPerOrderPct * lifetimeOrders;
+    const varCosts = revCents * variableCostPct; // only variable costs scale
+    // First order profit: revenue - variable costs - G&A (fixed) - ad spend
+    const firstOrderProfit = revCents - varCosts - gaFixedCents - spendCents;
+    // Lifetime: variable costs scale with orders, G&A is fixed, ad cost is one-time
     const cacPerCustomer = orders > 0 ? spendCents / orders : 0;
-    const ltProfitPerCustomer = ltRevPerCustomer - ltCostPerCustomer - cacPerCustomer;
-    const ltProfitTotal = ltProfitPerCustomer * orders;
+    const ltRevPerCustomer = blendedAov * lifetimeOrders;
+    const ltVarCostPerCustomer = blendedAov * variableCostPct * lifetimeOrders;
+    const ltProfitPerCustomer = ltRevPerCustomer - ltVarCostPerCustomer - cacPerCustomer;
+    const ltProfitTotal = ltProfitPerCustomer * orders - gaFixedCents; // G&A once for the business
     return { mult, spend: spendCents, orders, rev: revCents, firstOrderProfit, ltProfit: ltProfitTotal, roas: predictedRoas };
   });
 
@@ -438,9 +444,9 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
             className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
         </div>
         <div>
-          <label className="block text-xs font-medium text-zinc-500 mb-1">G&A %</label>
-          <input type="number" value={gaPct} onChange={(e) => setGaPct(Number(e.target.value))}
-            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
+          <label className="block text-xs font-medium text-zinc-500 mb-1">G&A $/mo (fixed)</label>
+          <input type="number" value={gaFixed} onChange={(e) => setGaFixed(Number(e.target.value))}
+            className="w-28 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
         </div>
         <div>
           <label className="block text-xs font-medium text-zinc-500 mb-1">Discounts %</label>
@@ -453,7 +459,7 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
             className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
         </div>
         <div className="flex items-end">
-          <span className="text-xs text-zinc-400">Base cost: {totalCostPct}% · AMZ: +{amzFeePct}% · CAC: {fmt(cac)}</span>
+          <span className="text-xs text-zinc-400">Variable: {variablePct}% · G&A: ${gaFixed.toLocaleString()}/mo · AMZ fees: +{amzFeePct}% · CAC: {fmt(cac)}</span>
         </div>
       </div>
 
