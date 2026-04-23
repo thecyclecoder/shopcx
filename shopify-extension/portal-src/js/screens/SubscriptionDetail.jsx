@@ -704,8 +704,9 @@ function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
   const allDiscounts = localApplied
     ? [localApplied, ...(contract?.appliedDiscounts || []).filter(d => d.id !== localApplied.id)]
     : (contract?.appliedDiscounts || []);
-  const hasManualDiscount = allDiscounts.some(d => d.type === 'MANUAL');
-  const hasAnyCoupon = allDiscounts.length > 0;
+  const hasManualDiscount = allDiscounts.some(d => d.type === 'MANUAL' || d.type === 'AUTOMATIC_DISCOUNT');
+  const hasCodeCoupon = allDiscounts.some(d => d.type === 'CODE_DISCOUNT' || d.type === 'code');
+  const hasAnyCoupon = hasCodeCoupon || allDiscounts.length > 0;
 
   // Backward compat: single coupon values for loyalty check
   const appliedCoupon = localApplied || contract?.appliedDiscount || contract?.discount || null;
@@ -781,7 +782,7 @@ function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
 
   const activeCoupons = loyalty?.unused_coupons?.filter(c => c.status === 'active') || [];
   const affordableTiers = loyalty?.tiers?.filter(t => t.affordable) || [];
-  const showLoyalty = !hasAnyCoupon && !isLoyaltyCoupon && loyalty && (activeCoupons.length > 0 || affordableTiers.length > 0);
+  const showLoyalty = !hasCodeCoupon && !isLoyaltyCoupon && loyalty && (activeCoupons.length > 0 || affordableTiers.length > 0);
 
   function formatDiscountValue(d) {
     if (!d?.value) return '';
@@ -805,7 +806,7 @@ function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
         </div>
       ))}
       {/* Coupon input: hidden when any coupon is applied, blocked when manual discount exists */}
-      {hasAnyCoupon ? null : hasManualDiscount ? (
+      {hasCodeCoupon ? null : hasManualDiscount ? (
         <div class="sp-muted" style={{ marginTop: allDiscounts.length > 0 ? '12px' : '0', fontSize: '13px' }}>
           Remove your existing discount to apply a coupon code
         </div>
