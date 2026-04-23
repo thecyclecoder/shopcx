@@ -166,7 +166,6 @@ export default function AmazonPricingPage() {
                 <th className="px-4 py-2">SKU</th>
                 <th className="px-4 py-2 text-right">Current Price</th>
                 <th className="px-4 py-2 text-right">New Price</th>
-                <th className="px-4 py-2 text-right">Business Price</th>
                 <th className="px-4 py-2 text-right">Change</th>
               </tr>
             </thead>
@@ -197,16 +196,6 @@ export default function AmazonPricingPage() {
                         value={edit?.price ?? a.current_price ?? ""}
                         onChange={(e) => setEdit(a.sku, "price", e.target.value)}
                         className={`w-24 rounded border px-2 py-1 text-right text-sm tabular-nums ${hasChange ? "border-amber-400 bg-amber-50 dark:border-amber-600 dark:bg-amber-950/30" : "border-zinc-200 dark:border-zinc-700 dark:bg-zinc-800"} dark:text-zinc-100`}
-                      />
-                    </td>
-                    <td className="px-4 py-2.5 text-right">
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={edit?.business_price ?? a.business_price ?? ""}
-                        onChange={(e) => setEdit(a.sku, "business_price", e.target.value)}
-                        placeholder="—"
-                        className={`w-24 rounded border px-2 py-1 text-right text-sm tabular-nums ${edit?.business_price ? "border-amber-400 bg-amber-50 dark:border-amber-600 dark:bg-amber-950/30" : "border-zinc-200 dark:border-zinc-700 dark:bg-zinc-800"} dark:text-zinc-100`}
                       />
                     </td>
                     <td className="px-4 py-2.5 text-right tabular-nums">

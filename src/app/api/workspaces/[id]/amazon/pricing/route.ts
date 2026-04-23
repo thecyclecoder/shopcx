@@ -64,6 +64,7 @@ export async function GET(
         }
 
         try {
+          // Use Listings API to get current price + B2B price
           const res = await spApiRequest(
             conn.id, conn.marketplace_id, "GET",
             `/listings/2021-08-01/items/${conn.seller_id}/${encodeURIComponent(asin.sku)}?marketplaceIds=${conn.marketplace_id}&issueLocale=en_US&includedData=attributes`
@@ -72,37 +73,20 @@ export async function GET(
           if (res.ok) {
             const data = await res.json();
             const offers = data.attributes?.purchasable_offer || [];
-            const mainOffer = offers[0];
-            const ourPrice = mainOffer?.our_price?.[0]?.schedule?.[0]?.value_with_tax ?? null;
-            const bizPrice = mainOffer?.business_price?.[0]?.schedule?.[0]?.value_with_tax ?? null;
-            const currency = mainOffer?.currency ?? mainOffer?.our_price?.[0]?.schedule?.[0]?.currency ?? "USD";
+            // ALL audience = standard price, B2B audience = business price
+            const allOffer = offers.find((o: Record<string, unknown>) => o.audience === "ALL" || !o.audience);
+            const b2bOffer = offers.find((o: Record<string, unknown>) => o.audience === "B2B");
+            const ourPrice = allOffer?.our_price?.[0]?.schedule?.[0]?.value_with_tax ?? null;
+            const bizPrice = b2bOffer?.our_price?.[0]?.schedule?.[0]?.value_with_tax ?? null;
 
             results.push({
               ...asin,
-              current_price: ourPrice ? parseFloat(ourPrice) : null,
-              business_price: bizPrice ? parseFloat(bizPrice) : null,
-              currency: currency || "USD",
+              current_price: ourPrice != null ? parseFloat(String(ourPrice)) : null,
+              business_price: bizPrice != null ? parseFloat(String(bizPrice)) : null,
+              currency: allOffer?.currency || "USD",
             });
           } else {
-            // Try pricing API fallback
-            const priceRes = await spApiRequest(
-              conn.id, conn.marketplace_id, "GET",
-              `/products/pricing/v0/price?MarketplaceId=${conn.marketplace_id}&Skus=${encodeURIComponent(asin.sku)}&ItemType=Sku`
-            );
-            if (priceRes.ok) {
-              const priceData = await priceRes.json();
-              const payload = priceData.payload?.[0];
-              const landedPrice = payload?.Product?.Offers?.[0]?.BuyingPrice?.LandedPrice?.Amount;
-              const listingPrice = payload?.Product?.Offers?.[0]?.BuyingPrice?.ListingPrice?.Amount;
-              results.push({
-                ...asin,
-                current_price: listingPrice ? parseFloat(listingPrice) : (landedPrice ? parseFloat(landedPrice) : null),
-                business_price: null,
-                currency: "USD",
-              });
-            } else {
-              results.push({ ...asin, current_price: null, business_price: null, currency: "USD" });
-            }
+            results.push({ ...asin, current_price: null, business_price: null, currency: "USD" });
           }
         } catch {
           results.push({ ...asin, current_price: null, business_price: null, currency: "USD" });
@@ -157,22 +141,29 @@ export async function POST(
         continue;
       }
 
-      const patchBody: Record<string, unknown> = {
+      // Only set ALL audience price — removes any B2B pricing
+      // (B2B price should never be lower than standard)
+      const offerValue: Record<string, unknown>[] = [
+        {
+          currency: "USD",
+          audience: "ALL",
+          our_price: [{ schedule: [{ value_with_tax: update.price }] }],
+          marketplace_id: conn.marketplace_id,
+        },
+      ];
+
+      const patchBody = {
         productType: "PRODUCT",
         patches: [
           {
             op: "replace",
             path: "/attributes/purchasable_offer",
-            value: [
-              {
-                marketplace_id: conn.marketplace_id,
-                currency: "USD",
-                our_price: [{ schedule: [{ value_with_tax: update.price }] }],
-                ...(update.business_price ? {
-                  business_price: [{ schedule: [{ value_with_tax: update.business_price }] }],
-                } : {}),
-              },
-            ],
+            value: offerValue,
+          },
+          {
+            op: "delete",
+            path: "/attributes/purchasable_offer",
+            value: [{ audience: "B2B", marketplace_id: conn.marketplace_id }],
           },
         ],
       };
