@@ -311,34 +311,112 @@ export const dunningNewCardRecovery = inngest.createFunction(
       return getActiveDunningCyclesForCustomer(workspace_id, customer_id);
     });
 
-    if (activeCycles.length === 0) {
+    // Step 1b: Also check for dunning-cancelled subs (exhausted cycle 2 = cancelled)
+    const cancelledSubs = await step.run("check-dunning-cancelled", async () => {
+      const admin = createAdminClient();
+      // Find cancelled subs where the last dunning cycle was exhausted
+      const { data: exhaustedCycles } = await admin
+        .from("dunning_cycles")
+        .select("shopify_contract_id, subscription_id, billing_attempt_id")
+        .eq("customer_id", customer_id)
+        .eq("status", "exhausted")
+        .gte("cycle_number", 2);
+
+      if (!exhaustedCycles?.length) return [];
+
+      // Check which ones are actually cancelled
+      const results: { contractId: string; subscriptionId: string | null; billingAttemptId: string | null }[] = [];
+      for (const dc of exhaustedCycles) {
+        if (!dc.subscription_id) continue;
+        const { data: sub } = await admin.from("subscriptions")
+          .select("status").eq("id", dc.subscription_id).single();
+        if (sub?.status === "cancelled") {
+          results.push({
+            contractId: dc.shopify_contract_id,
+            subscriptionId: dc.subscription_id,
+            billingAttemptId: dc.billing_attempt_id,
+          });
+        }
+      }
+      return results;
+    });
+
+    if (activeCycles.length === 0 && cancelledSubs.length === 0) {
       return { status: "no_active_cycles" };
     }
 
     const results: { contractId: string; recovered: boolean; error?: string }[] = [];
 
-    // Step 2: For each active dunning cycle, unskip + switch card + retry
+    // Step 2a: Reactivate dunning-cancelled subs
+    for (const cancelled of cancelledSubs) {
+      const result = await step.run(`reactivate-${cancelled.contractId}`, async () => {
+        try {
+          // Reactivate the subscription
+          await appstleSubscriptionAction(workspace_id, cancelled.contractId, "resume");
+
+          // Switch to new payment method
+          if (payment_method_id) {
+            await appstleSwitchPaymentMethod(workspace_id, cancelled.contractId, payment_method_id);
+          }
+
+          // Attempt billing
+          const ordersRes = await appstleGetUpcomingOrders(workspace_id, cancelled.contractId);
+          if (!ordersRes.success || !ordersRes.orders?.length) {
+            return { contractId: cancelled.contractId, recovered: true, error: "Reactivated but no upcoming orders to bill" };
+          }
+
+          const attemptId = ordersRes.orders[0].id;
+          const billingRes = await appstleAttemptBilling(workspace_id, attemptId);
+
+          await logPaymentFailure({
+            workspaceId: workspace_id,
+            customerId: customer_id,
+            subscriptionId: cancelled.subscriptionId,
+            shopifyContractId: cancelled.contractId,
+            billingAttemptId: attemptId,
+            paymentMethodId: payment_method_id,
+            attemptNumber: 1,
+            attemptType: "new_card_retry",
+            succeeded: billingRes.success,
+          });
+
+          if (billingRes.success) {
+            const admin = createAdminClient();
+            await admin.from("subscriptions")
+              .update({ status: "active", updated_at: new Date().toISOString() })
+              .eq("shopify_contract_id", cancelled.contractId);
+          }
+
+          return { contractId: cancelled.contractId, recovered: billingRes.success };
+        } catch (err) {
+          return { contractId: cancelled.contractId, recovered: false, error: String(err) };
+        }
+      });
+      results.push(result);
+    }
+
+    // Step 2b: For each active dunning cycle, unskip + switch card + retry
     for (const cycle of activeCycles) {
       const result = await step.run(`recover-${cycle.shopify_contract_id}`, async () => {
         try {
-          // Unskip the order if it was skipped or retrying (retrying = skipped + awaiting payday)
+          // Unskip the order if it was skipped or retrying
           if ((cycle.status === "skipped" || cycle.status === "retrying") && cycle.billing_attempt_id) {
             await appstleUnskipOrder(workspace_id, cycle.billing_attempt_id);
           }
 
-          // If subscription was paused (cycle 2), resume it
-          if (cycle.status === "paused" || cycle.cycle_number >= 2) {
-            // Check if subscription is actually paused
-            const admin = createAdminClient();
-            const { data: sub } = await admin.from("subscriptions")
-              .select("status")
-              .eq("workspace_id", workspace_id)
-              .eq("shopify_contract_id", cycle.shopify_contract_id)
-              .single();
+          // If subscription was cancelled (dunning exhausted), reactivate
+          const admin = createAdminClient();
+          const { data: sub } = await admin.from("subscriptions")
+            .select("status")
+            .eq("workspace_id", workspace_id)
+            .eq("shopify_contract_id", cycle.shopify_contract_id)
+            .single();
 
-            if (sub?.status === "paused") {
-              await appstleSubscriptionAction(workspace_id, cycle.shopify_contract_id, "resume");
-            }
+          if (sub?.status === "cancelled") {
+            await appstleSubscriptionAction(workspace_id, cycle.shopify_contract_id, "resume");
+          } else if (sub?.status === "paused") {
+            // Legacy paused subs — resume them too
+            await appstleSubscriptionAction(workspace_id, cycle.shopify_contract_id, "resume");
           }
 
           // Switch to new payment method if we have a specific ID
@@ -477,11 +555,12 @@ async function handleAllCardsExhausted(
     // Just mark our cycle status and continue with payment update email
     await updateDunningCycle(cycle.id, { status: "skipped", skipped_at: new Date().toISOString() });
     await tagCustomerTickets(workspaceId, customerId, "dunning:skipped");
-  } else if (action === "pause") {
-    // Pause the subscription
-    await appstleSubscriptionAction(workspaceId, shopifyContractId, "pause");
-    await updateDunningCycle(cycle.id, { status: "paused", paused_at: new Date().toISOString() });
-    await tagCustomerTickets(workspaceId, customerId, "dunning:paused");
+  } else if (action === "pause" || action === "cancel") {
+    // Cancel the subscription — cleaner than indefinite pause
+    // If customer adds a new payment method later, auto-reactivate via webhook
+    await appstleSubscriptionAction(workspaceId, shopifyContractId, "cancel", "dunning", "Cancelled by ShopCX — payment failed after multiple billing cycles");
+    await updateDunningCycle(cycle.id, { status: "exhausted", paused_at: new Date().toISOString() });
+    await tagCustomerTickets(workspaceId, customerId, "dunning:cancelled");
   }
 
   // Send payment update email via Appstle (triggers Shopify secure link)
@@ -497,7 +576,8 @@ async function handleAllCardsExhausted(
 
     if (customer?.email && ws?.name && updateUrl) {
 
-      if (action === "pause") {
+      if (action === "pause" || action === "cancel") {
+        // Subscription cancelled due to payment failure — send update email
         await sendDunningPausedEmail({
           workspaceId,
           toEmail: customer.email,
