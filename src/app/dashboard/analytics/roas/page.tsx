@@ -397,24 +397,29 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
   }
 
   // ROAS decay model: based on historical data, ROAS decreases with higher spend
-  // Model: ROAS = maxRoas - decayRate * monthlySpend
-  // Calibrated from current data point
-  const currentRoas = s.total_spend_cents > 0 ? s.total_revenue_cents / s.total_spend_cents : 0;
-  const roasDecayPerCent = 0.000008; // ~0.008x per $1K monthly spend (from historical regression)
+  // Model: ROAS = maxRoas - decayRate * monthlySpend (in dollars)
+  // From regression: each $1K/mo more spend reduces ROAS by ~0.008x
+  const roasDecayPerDollar = 0.000008; // 0.008 per $1K = 0.000008 per $1
   const theoreticalMaxRoas = 2.43; // ROAS at $0 spend
 
   const scenarios = [0.5, 1, 1.5, 2, 2.5, 3, 4, 5].map(mult => {
-    const spend = s.total_spend_cents * mult;
-    // Predict ROAS at this spend level using decay model
-    const predictedRoas = Math.max(0.1, theoreticalMaxRoas - roasDecayPerCent * spend);
-    const rev = spend * predictedRoas;
-    const orders = blendedAov > 0 ? Math.round(rev / blendedAov) : 0;
-    const costs = rev * costPerOrderPct;
-    const firstOrderProfit = rev - costs - spend;
-    const ltRev = blendedAov * lifetimeOrders * orders;
-    const ltCosts = (blendedAov * costPerOrderPct) * lifetimeOrders * orders;
-    const ltProfit = ltRev - ltCosts - spend;
-    return { mult, spend, orders, rev, firstOrderProfit, ltProfit, roas: predictedRoas };
+    const spendCents = s.total_spend_cents * mult;
+    const spendDollars = spendCents / 100;
+    // Predict ROAS at this spend level
+    const predictedRoas = Math.max(0.3, theoreticalMaxRoas - roasDecayPerDollar * spendDollars);
+    const revCents = spendCents * predictedRoas;
+    const orders = blendedAov > 0 ? Math.round(revCents / blendedAov) : 0;
+    const costsCents = revCents * costPerOrderPct;
+    // First order: revenue - variable costs - ad spend (all first orders)
+    const firstOrderProfit = revCents - costsCents - spendCents;
+    // Lifetime: each customer generates lifetimeOrders worth of revenue
+    // Ad cost is one-time per customer, variable costs repeat each order
+    const ltRevPerCustomer = blendedAov * lifetimeOrders;
+    const ltCostPerCustomer = blendedAov * costPerOrderPct * lifetimeOrders;
+    const cacPerCustomer = orders > 0 ? spendCents / orders : 0;
+    const ltProfitPerCustomer = ltRevPerCustomer - ltCostPerCustomer - cacPerCustomer;
+    const ltProfitTotal = ltProfitPerCustomer * orders;
+    return { mult, spend: spendCents, orders, rev: revCents, firstOrderProfit, ltProfit: ltProfitTotal, roas: predictedRoas };
   });
 
   return (
