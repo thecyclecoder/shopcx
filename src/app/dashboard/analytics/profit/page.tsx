@@ -50,8 +50,9 @@ export default function ProfitDashboard() {
   const [cogsPct] = useState(15);
   const [shippingPct] = useState(14);
   const [discountPct] = useState(9);
+  const [shopifyTxPct] = useState(3);
   const [amzFeePct] = useState(25);
-  const [gaFixed] = useState(74361);
+  const [gaFixed] = useState(54542);
 
   useEffect(() => {
     setLoading(true);
@@ -67,19 +68,27 @@ export default function ProfitDashboard() {
 
   const a = data.actual;
   const p = data.projected;
-  const varPct = (cogsPct + shippingPct + discountPct) / 100; // 38%
   const gaFixedCents = gaFixed * 100;
 
   // Helper to build P&L lines
   function buildPL(label: string, revenue: number, amzRevenue: number, adSpend: number, isProjection: boolean) {
     const shopifyRev = revenue - amzRevenue;
-    const shopifyVarCost = shopifyRev * varPct;
-    const amzVarCost = amzRevenue * (varPct + amzFeePct / 100);
-    const totalVarCost = shopifyVarCost + amzVarCost;
-    const grossProfit = revenue - totalVarCost;
+
+    // Revenue - Discounts = Income
+    const discounts = revenue * (discountPct / 100);
+    const income = revenue - discounts;
+
+    // Variable costs (COGS + Shipping on income, not gross revenue)
+    const cogsCost = income * (cogsPct / 100);
+    const shippingCost = income * (shippingPct / 100);
+    const shopifyTxCost = shopifyRev * (shopifyTxPct / 100);
+    const amzFees = amzRevenue * (amzFeePct / 100);
+    const totalVarCost = cogsCost + shippingCost + shopifyTxCost + amzFees;
+    const grossProfit = income - totalVarCost;
+
     const profitBeforeAds = grossProfit - gaFixedCents;
     const netProfit = profitBeforeAds - adSpend;
-    const netMargin = revenue > 0 ? (netProfit / revenue) * 100 : 0;
+    const netMargin = income > 0 ? (netProfit / income) * 100 : 0;
 
     return (
       <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
@@ -92,13 +101,17 @@ export default function ProfitDashboard() {
           )}
         </h3>
         <div className="space-y-2 text-sm">
-          <Row label="Revenue" value={fmtK(revenue)} color="text-emerald-600 font-semibold" />
-          <Row label={`  Shopify`} value={fmtK(shopifyRev)} color="text-emerald-500" sub />
-          <Row label={`  Amazon`} value={fmtK(amzRevenue)} color="text-amber-500" sub />
+          <Row label="Revenue (gross)" value={fmtK(revenue)} color="text-emerald-600 font-semibold" />
+          <Row label="  Shopify" value={fmtK(shopifyRev)} color="text-emerald-500" sub />
+          <Row label="  Amazon" value={fmtK(amzRevenue)} color="text-amber-500" sub />
+          <Row label={`Discounts / refunds / chargebacks (${discountPct}%)`} value={`-${fmtK(discounts)}`} color="text-red-400" />
+          <Row label="Income (net revenue)" value={fmtK(income)} color="text-emerald-600 font-medium" />
 
           <div className="border-t border-zinc-100 pt-2 dark:border-zinc-800" />
-          <Row label={`Variable costs (${(varPct * 100).toFixed(0)}%)`} value={`-${fmtK(shopifyVarCost)}`} color="text-red-500" />
-          <Row label={`Amazon fees (${amzFeePct}% of AMZ rev)`} value={`-${fmtK(amzRevenue * amzFeePct / 100)}`} color="text-red-500" />
+          <Row label={`COGS (${cogsPct}%)`} value={`-${fmtK(cogsCost)}`} color="text-red-500" />
+          <Row label={`Shipping (${shippingPct}%)`} value={`-${fmtK(shippingCost)}`} color="text-red-500" />
+          <Row label={`Shopify tx fees (${shopifyTxPct}%)`} value={`-${fmtK(shopifyTxCost)}`} color="text-red-500" />
+          <Row label={`Amazon fees (${amzFeePct}%)`} value={`-${fmtK(amzFees)}`} color="text-red-500" />
           <Row label="Gross profit" value={fmtK(grossProfit)} color={grossProfit >= 0 ? "text-emerald-600 font-medium" : "text-red-600 font-medium"} />
 
           <div className="border-t border-zinc-100 pt-2 dark:border-zinc-800" />
@@ -162,7 +175,7 @@ export default function ProfitDashboard() {
       {/* Assumptions */}
       <div className="mt-4 rounded-lg border border-zinc-100 bg-zinc-50/50 p-3 dark:border-zinc-800 dark:bg-zinc-800/30">
         <p className="text-[11px] text-zinc-400">
-          Assumptions: COGS {cogsPct}% · Shipping {shippingPct}% · Discounts {discountPct}% · Amazon fees {amzFeePct}% · G&A ${gaFixed.toLocaleString()}/mo (fixed).
+          Assumptions: COGS {cogsPct}% · Shipping {shippingPct}% · Discounts {discountPct}% · Shopify tx {shopifyTxPct}% · Amazon fees {amzFeePct}% · G&A ${gaFixed.toLocaleString()}/mo (fixed).
           {!data.is_complete && ` Projection extrapolates ${data.days_so_far}-day pace to full ${data.days_in_month}-day month.`}
         </p>
       </div>
