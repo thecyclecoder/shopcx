@@ -91,9 +91,12 @@ export const deliverPendingSends = inngest.createFunction(
                   if (token) {
                     const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
                     const journeyUrl = `${siteUrl}/journey/${token}`;
-                    // Replace the embedded form with a CTA button
+                    const buttonText = journeyData.ctaText || "Continue Here";
+                    const { data: wsColor } = await admin.from("workspaces").select("help_primary_color").eq("id", ticket.workspace_id).single();
+                    const brandColor = wsColor?.help_primary_color || "#4f46e5";
+                    // Replace the embedded form with a styled CTA button (leadIn text is already before the embed)
                     emailBody = emailBody.replace(journeyMatch[0],
-                      `<p><a href="${journeyUrl}" style="display:inline-block;padding:12px 24px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Continue Here</a></p>`
+                      `<p><a href="${journeyUrl}" style="display:inline-block;margin:8px 0;padding:12px 24px;background:${brandColor};color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">${buttonText}</a></p>`
                     );
                   }
                 } catch { /* keep original body if parse fails */ }

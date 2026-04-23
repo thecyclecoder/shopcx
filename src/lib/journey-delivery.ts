@@ -159,7 +159,7 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
 
     if (built.steps.length > 0) {
       // Embed journey form as hidden comment — widget parses and renders InlineJourneyForm
-      const journeyPayload = JSON.stringify({ token, steps: built.steps });
+      const journeyPayload = JSON.stringify({ token, steps: built.steps, ctaText });
       const body = `${leadIn}<!--JOURNEY:${journeyPayload}-->`;
       await admin.from("ticket_messages").insert({
         ticket_id: ticketId, direction: "outbound", visibility: "external",
