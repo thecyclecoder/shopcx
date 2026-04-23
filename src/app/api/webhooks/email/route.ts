@@ -59,6 +59,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "No sender" }, { status: 400 });
   }
 
+  const senderDomain = senderEmail.split("@")[1]?.toLowerCase() || "";
+  const senderLower = senderEmail.toLowerCase();
+  const subjectLower = (subject || "").toLowerCase();
+
   // Extract the receiving domain to find the workspace
   const toAddress = Array.isArray(toAddresses) ? toAddresses[0] : toAddresses;
   const toDomain = (typeof toAddress === "string" ? toAddress : toAddress?.address || "")
@@ -83,6 +87,27 @@ export async function POST(request: Request) {
   }
 
   const workspaceId = workspace.id;
+
+  // ── Email filter: block spam/system/marketing emails ──
+  const { data: filters } = await admin
+    .from("email_filters")
+    .select("filter_type, pattern, action")
+    .eq("workspace_id", workspaceId)
+    .eq("is_active", true);
+
+  if (filters?.length) {
+    const blocked = filters.some(f => {
+      if (f.action !== "block") return false;
+      if (f.filter_type === "domain" && senderDomain === f.pattern.toLowerCase()) return true;
+      if (f.filter_type === "sender" && senderLower.startsWith(f.pattern.toLowerCase())) return true;
+      if (f.filter_type === "subject" && subjectLower.includes(f.pattern.toLowerCase())) return true;
+      return false;
+    });
+
+    if (blocked) {
+      return NextResponse.json({ ok: true, filtered: true }); // Silently drop
+    }
+  }
 
   // Fetch the full email body from Resend's receiving API
   let emailContent = { html: null as string | null, text: null as string | null, headers: {} as Record<string, string> };
