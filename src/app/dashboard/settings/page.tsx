@@ -61,6 +61,7 @@ export default function SettingsPage() {
           <SettingsCard href="/dashboard/settings/coupons" title="Coupons" desc="Map Shopify discounts for AI and agents" />
           <SettingsCard href="/dashboard/settings/dunning" title="Recovery" desc="Card rotation, payday retries, automatic unskip" />
           <SettingsCard href="/dashboard/settings/portal" title="Customer Portal" desc="Shopify extension, mini-site, products" />
+          <SettingsCard href="/dashboard/settings/amazon-pricing" title="Amazon Pricing" desc="Manage Amazon listing prices, bulk adjustments" />
         </SettingsSection>
 
         <SettingsSection title="Storefront & Subscriptions">
