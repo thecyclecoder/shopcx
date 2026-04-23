@@ -176,7 +176,88 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     const apiKey = decrypt(ws.appstle_api_key_encrypted);
 
     const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-    const result = await applyDiscountWithReplace(apiKey, String(contractId), code);
+    let result = await applyDiscountWithReplace(apiKey, String(contractId), code);
+
+    // Self-healing: if Appstle rejects the code, regenerate it in Shopify and retry
+    if (!result.success && result.status === 400) {
+      try {
+        const { shop, accessToken } = await getShopifyCredentials(auth.workspaceId);
+
+        // Check if unused
+        const checkRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+          method: "POST", headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+          body: JSON.stringify({ query: `{ codeDiscountNodeByCode(code: "${code}") { id codeDiscount { ... on DiscountCodeBasic { asyncUsageCount } } } }` }),
+        });
+        const checkData = await checkRes.json();
+        const oldNodeId = checkData?.data?.codeDiscountNodeByCode?.id;
+        const usage = checkData?.data?.codeDiscountNodeByCode?.codeDiscount?.asyncUsageCount || 0;
+
+        if (usage === 0 && oldNodeId) {
+          // Delete old coupon
+          await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+            method: "POST", headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+            body: JSON.stringify({ query: `mutation { discountCodeDelete(id: "${oldNodeId}") { deletedCodeDiscountId userErrors { field message } } }` }),
+          });
+
+          // Generate new code
+          const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+          let rand = "";
+          for (let i = 0; i < 6; i++) rand += chars[Math.floor(Math.random() * chars.length)];
+          const newCode = `LOYALTY-${discountValue}-${rand}`;
+
+          const customer2 = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
+          const fName = customer2?.first_name || "Customer";
+          const lInit = customer2?.last_name ? customer2.last_name[0] : "";
+          const title = `Loyalty $${discountValue} - ${fName} ${lInit} (${newCode})`.trim();
+
+          const { getLoyaltySettings: getLS } = await import("@/lib/loyalty");
+          const ls = await getLS(auth.workspaceId);
+          const expAt = new Date();
+          expAt.setDate(expAt.getDate() + (ls.coupon_expiry_days || 90));
+
+          // Look up shopify_customer_id
+          const { data: custRow } = await admin.from("customers")
+            .select("shopify_customer_id")
+            .eq("id", customer2?.id || "")
+            .single();
+
+          const createRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+            method: "POST", headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              query: DISCOUNT_CREATE_MUTATION,
+              variables: {
+                basicCodeDiscount: {
+                  title, code: newCode,
+                  startsAt: new Date().toISOString(), endsAt: expAt.toISOString(),
+                  usageLimit: 1, appliesOncePerCustomer: true,
+                  customerSelection: { customers: { add: [`gid://shopify/Customer/${custRow?.shopify_customer_id}`] } },
+                  combinesWith: { productDiscounts: ls.coupon_combines_product ?? false, shippingDiscounts: ls.coupon_combines_shipping ?? true, orderDiscounts: ls.coupon_combines_order ?? false },
+                  customerGets: { appliesOnOneTimePurchase: (ls.coupon_applies_to || "both") !== "subscription", appliesOnSubscription: (ls.coupon_applies_to || "both") !== "one_time", items: { all: true }, value: { discountAmount: { amount: discountValue, appliesOnEachItem: false } } },
+                },
+              },
+            }),
+          });
+          const createData = await createRes.json();
+          const newNodeId = createData?.data?.discountCodeBasicCreate?.codeDiscountNode?.id;
+
+          if (newNodeId) {
+            // Retry apply with new code
+            result = await applyDiscountWithReplace(apiKey, String(contractId), newCode);
+            if (result.success) {
+              code = newCode;
+              // Update redemption if it exists
+              if (redemptionId) {
+                await admin.from("loyalty_redemptions").update({ discount_code: newCode, shopify_discount_id: newNodeId }).eq("id", redemptionId);
+              }
+              console.log(`[loyalty] Self-healed: regenerated ${code} → ${newCode} for contract ${contractId}`);
+            }
+          }
+        }
+      } catch (healErr) {
+        console.error("[loyalty] Self-healing failed:", healErr);
+      }
+    }
+
     if (!result.success) {
       return jsonErr({ error: "coupon_apply_failed", message: result.error, request_payload: { contractId, code } }, 502);
     }
