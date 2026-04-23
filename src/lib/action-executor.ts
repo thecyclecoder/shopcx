@@ -47,6 +47,8 @@ interface ActionParams {
   amount_cents?: number;
   base_price_cents?: number;
   crisis_action_id?: string;
+  order_number?: string;
+  free_label?: boolean;
 }
 
 export interface ActionContext {
@@ -394,6 +396,53 @@ const directActionHandlers: Record<
 
     const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id!, variantId, p.base_price_cents!);
     return { ...r, summary: `Updated base price to $${((p.base_price_cents || 0) / 100).toFixed(2)}` };
+  },
+
+  create_return: async (ctx, p) => {
+    const { createFullReturn } = await import("@/lib/shopify-returns");
+    const admin = createAdminClient();
+
+    // Look up order
+    const { data: order } = await admin.from("orders")
+      .select("id, order_number, shopify_order_id, shipping_address")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("order_number", p.order_number!)
+      .single();
+    if (!order) return { success: false, error: `Order ${p.order_number} not found` };
+
+    // Look up customer
+    const { data: customer } = await admin.from("customers")
+      .select("id, first_name, last_name, phone")
+      .eq("id", ctx.customerId!)
+      .single();
+
+    const addr = order.shipping_address as Record<string, string> | null;
+    if (!addr) return { success: false, error: "No shipping address on order" };
+
+    const r = await createFullReturn({
+      workspaceId: ctx.workspaceId,
+      orderId: order.id,
+      orderNumber: order.order_number,
+      shopifyOrderGid: `gid://shopify/Order/${order.shopify_order_id}`,
+      customerId: ctx.customerId!,
+      ticketId: ctx.ticketId,
+      customerName: `${customer?.first_name || ""} ${customer?.last_name || ""}`.trim() || "Customer",
+      customerPhone: customer?.phone || undefined,
+      shippingAddress: {
+        street1: addr.address1 || addr.street1 || "",
+        city: addr.city || "",
+        state: addr.province_code || addr.provinceCode || addr.state || "",
+        zip: addr.zip || "",
+        country: addr.country_code || addr.countryCode || "US",
+      },
+      source: "ai",
+      freeLabel: !!p.free_label,
+    });
+
+    if (r.success && r.labelUrl) {
+      return { ...r, summary: `Return created for ${order.order_number}. Label: ${r.labelUrl} | Tracking: ${r.trackingNumber}` };
+    }
+    return { ...r, summary: r.success ? `Return created for ${order.order_number}` : undefined };
   },
 
   partial_refund: async (ctx, p) => {

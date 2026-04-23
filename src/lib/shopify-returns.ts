@@ -42,7 +42,7 @@ export interface CreateReturnParams {
   ticketId?: string;
   resolutionType: "store_credit_return" | "refund_return" | "store_credit_no_return" | "refund_no_return";
   returnLineItems: { fulfillmentLineItemId: string; quantity: number; title: string }[];
-  source: "playbook" | "agent" | "portal";
+  source: "playbook" | "agent" | "portal" | "ai" | "system";
 }
 
 export interface CreateReturnResult {
@@ -646,4 +646,168 @@ export async function getReturnableItems(
   }
 
   return items;
+}
+
+// ── 7. createFullReturn — unified helper for the complete return flow ──
+// Used by: Sonnet actions, playbook executor, manual scripts
+// 1. Get returnable items from Shopify
+// 2. Create return in Shopify + our DB
+// 3. Buy cheapest EasyPost label
+// 4. Attach tracking to Shopify + update our DB
+
+export interface FullReturnParams {
+  workspaceId: string;
+  orderId: string;          // Our internal order UUID
+  orderNumber: string;      // SC126222
+  shopifyOrderGid: string;  // gid://shopify/Order/123
+  customerId: string;
+  ticketId?: string;
+  customerName: string;
+  customerPhone?: string;
+  shippingAddress: {
+    street1: string;
+    city: string;
+    state: string;
+    zip: string;
+    country?: string;
+  };
+  resolutionType?: "refund_return" | "store_credit_return";
+  source?: "playbook" | "agent" | "portal" | "ai" | "system";
+  freeLabel?: boolean; // If true, don't deduct label cost from refund (crisis returns)
+}
+
+export interface FullReturnResult {
+  success: boolean;
+  returnId?: string;
+  trackingNumber?: string;
+  labelUrl?: string;
+  carrier?: string;
+  labelCostCents?: number;
+  error?: string;
+}
+
+export async function createFullReturn(params: FullReturnParams): Promise<FullReturnResult> {
+  const admin = createAdminClient();
+
+  try {
+    // 1. Get returnable items
+    const items = await getReturnableItems(params.workspaceId, params.shopifyOrderGid);
+    if (items.length === 0) {
+      return { success: false, error: "No returnable items found on this order" };
+    }
+
+    // 2. Create Shopify return + DB record
+    const returnResult = await createShopifyReturn(params.workspaceId, {
+      orderId: params.orderId,
+      orderNumber: params.orderNumber,
+      shopifyOrderGid: params.shopifyOrderGid,
+      customerId: params.customerId,
+      ticketId: params.ticketId,
+      resolutionType: params.resolutionType || "refund_return",
+      returnLineItems: items.map(i => ({
+        fulfillmentLineItemId: i.fulfillmentLineItemId,
+        quantity: i.remainingQuantity,
+        title: i.title,
+      })),
+      source: params.source || "ai",
+    });
+
+    // 3. Buy cheapest EasyPost label
+    const { data: ws } = await admin.from("workspaces")
+      .select("easypost_live_api_key_encrypted, return_address, default_return_parcel")
+      .eq("id", params.workspaceId).single();
+
+    if (!ws?.easypost_live_api_key_encrypted) {
+      return { success: true, returnId: returnResult.returnId, error: "EasyPost not configured — return created without label" };
+    }
+
+    const { decrypt } = await import("@/lib/crypto");
+    const easypostKey = decrypt(ws.easypost_live_api_key_encrypted);
+    const returnAddr = ws.return_address as Record<string, string>;
+    const parcel = (ws.default_return_parcel || { length: 12, width: 10, height: 6, weight: 16 }) as Record<string, number>;
+
+    const shipmentRes = await fetch("https://api.easypost.com/v2/shipments", {
+      method: "POST",
+      headers: { Authorization: "Basic " + btoa(easypostKey + ":"), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        shipment: {
+          from_address: {
+            name: params.customerName,
+            street1: params.shippingAddress.street1,
+            city: params.shippingAddress.city,
+            state: params.shippingAddress.state,
+            zip: params.shippingAddress.zip,
+            country: params.shippingAddress.country || "US",
+            phone: params.customerPhone || "0000000000",
+          },
+          to_address: {
+            name: returnAddr.name,
+            street1: returnAddr.street1,
+            street2: returnAddr.street2 || "",
+            city: returnAddr.city,
+            state: returnAddr.state,
+            zip: returnAddr.zip,
+            country: returnAddr.country || "US",
+            phone: returnAddr.phone,
+          },
+          parcel: { length: parcel.length, width: parcel.width, height: parcel.height, weight: parcel.weight },
+        },
+      }),
+    });
+
+    const shipment = await shipmentRes.json();
+    if (!shipmentRes.ok) {
+      return { success: true, returnId: returnResult.returnId, error: `EasyPost shipment error: ${shipment?.error?.message || "unknown"}` };
+    }
+
+    // Buy cheapest rate
+    const rates = (shipment.rates || []).sort((a: { rate: string }, b: { rate: string }) => parseFloat(a.rate) - parseFloat(b.rate));
+    if (rates.length === 0) {
+      return { success: true, returnId: returnResult.returnId, error: "No shipping rates available" };
+    }
+
+    const buyRes = await fetch(`https://api.easypost.com/v2/shipments/${shipment.id}/buy`, {
+      method: "POST",
+      headers: { Authorization: "Basic " + btoa(easypostKey + ":"), "Content-Type": "application/json" },
+      body: JSON.stringify({ rate: { id: rates[0].id } }),
+    });
+
+    const purchased = await buyRes.json();
+    if (!buyRes.ok) {
+      return { success: true, returnId: returnResult.returnId, error: `EasyPost buy error: ${purchased?.error?.message || "unknown"}` };
+    }
+
+    const trackingNumber = purchased.tracking_code;
+    const labelUrl = purchased.postage_label?.label_url;
+    const carrier = purchased.selected_rate?.carrier || "Unknown";
+    const labelCostCents = Math.round(parseFloat(purchased.selected_rate?.rate || "0") * 100);
+
+    // 4. Attach tracking to Shopify + update our DB
+    if (returnResult.reverseFulfillmentOrderGid) {
+      await attachReturnTracking(params.workspaceId, {
+        returnId: returnResult.returnId,
+        trackingNumber,
+        carrier,
+        labelUrl,
+      });
+    }
+
+    // Update our DB with EasyPost details
+    await admin.from("returns").update({
+      easypost_shipment_id: shipment.id,
+      label_cost_cents: params.freeLabel ? 0 : labelCostCents,
+    }).eq("id", returnResult.returnId);
+
+    return {
+      success: true,
+      returnId: returnResult.returnId,
+      trackingNumber,
+      labelUrl,
+      carrier,
+      labelCostCents: params.freeLabel ? 0 : labelCostCents,
+    };
+  } catch (err) {
+    console.error("[createFullReturn] Error:", err);
+    return { success: false, error: String(err) };
+  }
 }

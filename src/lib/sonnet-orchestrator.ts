@@ -426,6 +426,7 @@ ${workflowLines || "None"}
 DIRECT ACTIONS (use when you can resolve without customer interaction):
 Subscription: resume, skip_next_order, change_frequency(interval, count), change_next_date(date), add_item(variant_id, qty), remove_item(variant_id), swap_variant(old_id, new_id, qty), change_quantity(variant_id, qty), update_line_item_price(contract_id, base_price_cents) — updates the crisis-affected line item's price (auto-resolves which item from crisis context)
 Refund: partial_refund(shopify_order_id, amount_cents, reason) — issue a partial refund on a Shopify order. Use when a customer was overcharged (e.g. price increased unexpectedly). Compare recent orders to verify the price difference before refunding.
+Return: create_return(order_number, free_label) — creates a full return: Shopify return + buys cheapest EasyPost label + attaches tracking. Returns the label URL and tracking number. Include the label URL in your message so the customer can download it. Set free_label=true for crisis returns (customer shouldn't pay for return shipping on a product they didn't choose).
 Crisis: crisis_pause(contract_id, crisis_action_id) — pause subscription until restock (auto-resume), crisis_remove(contract_id, variant_id, crisis_action_id) — remove affected item (auto-readd on restock)
 Subscription recovery: reactivate(contract_id) — reactivate a cancelled subscription
 Loyalty: redeem_points(tier_index), apply_loyalty_coupon(contract_id, code)
