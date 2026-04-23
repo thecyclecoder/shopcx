@@ -137,8 +137,31 @@ async function computeMonthlySnapshots(workspaceId: string) {
     amzMap.set(monthKey, existing);
   }
 
+  // ── Aggregate Meta spend by month ──
+  const metaSpendRows: Record<string, unknown>[] = [];
+  offset = 0;
+  while (true) {
+    const { data } = await admin
+      .from("daily_meta_ad_spend")
+      .select("snapshot_date, spend_cents")
+      .eq("workspace_id", workspaceId)
+      .order("snapshot_date", { ascending: true })
+      .range(offset, offset + 999);
+    if (!data || data.length === 0) break;
+    metaSpendRows.push(...data);
+    if (data.length < 1000) break;
+    offset += 1000;
+  }
+
+  const metaMap = new Map<string, number>();
+  for (const _s of metaSpendRows) {
+    const s = _s as Record<string, unknown>;
+    const monthKey = (s.snapshot_date as string).slice(0, 7);
+    metaMap.set(monthKey, (metaMap.get(monthKey) || 0) + ((s.spend_cents as number) || 0));
+  }
+
   // ── Build monthly rows ──
-  const allMonths = new Set([...shopMap.keys(), ...amzMap.keys()]);
+  const allMonths = new Set([...shopMap.keys(), ...amzMap.keys(), ...metaMap.keys()]);
   const sortedMonths = [...allMonths].sort();
 
   const upsertRows: Record<string, unknown>[] = [];
@@ -210,6 +233,7 @@ async function computeMonthlySnapshots(workspaceId: string) {
       amz_churn_cents,
       amz_churn_pct: Math.round(amz_churn_pct * 100) / 100,
       amz_subscription_rate: Math.round(amz_sub_rate * 100) / 100,
+      meta_spend_cents: metaMap.get(monthKey) || 0,
       computed_at: new Date().toISOString(),
     });
   }

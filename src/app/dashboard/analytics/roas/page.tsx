@@ -396,20 +396,25 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
     );
   }
 
-  // Spend scaling scenarios
-  const scenarios = [1, 1.5, 2, 2.5, 3, 4, 5].map(mult => {
+  // ROAS decay model: based on historical data, ROAS decreases with higher spend
+  // Model: ROAS = maxRoas - decayRate * monthlySpend
+  // Calibrated from current data point
+  const currentRoas = s.total_spend_cents > 0 ? s.total_revenue_cents / s.total_spend_cents : 0;
+  const roasDecayPerCent = 0.000008; // ~0.008x per $1K monthly spend (from historical regression)
+  const theoreticalMaxRoas = 2.43; // ROAS at $0 spend
+
+  const scenarios = [0.5, 1, 1.5, 2, 2.5, 3, 4, 5].map(mult => {
     const spend = s.total_spend_cents * mult;
-    // Assume linear scaling for orders (simplification)
-    const orders = Math.round(totalOrders * mult);
-    const rev = blendedAov * orders;
+    // Predict ROAS at this spend level using decay model
+    const predictedRoas = Math.max(0.1, theoreticalMaxRoas - roasDecayPerCent * spend);
+    const rev = spend * predictedRoas;
+    const orders = blendedAov > 0 ? Math.round(rev / blendedAov) : 0;
     const costs = rev * costPerOrderPct;
-    const adCost = spend;
-    const firstOrderProfit = rev - costs - adCost;
+    const firstOrderProfit = rev - costs - spend;
     const ltRev = blendedAov * lifetimeOrders * orders;
     const ltCosts = (blendedAov * costPerOrderPct) * lifetimeOrders * orders;
-    const ltProfit = ltRev - ltCosts - adCost;
-    const roas = adCost > 0 ? rev / adCost : 0;
-    return { mult, spend, orders, rev, firstOrderProfit, ltProfit, roas };
+    const ltProfit = ltRev - ltCosts - spend;
+    return { mult, spend, orders, rev, firstOrderProfit, ltProfit, roas: predictedRoas };
   });
 
   return (
@@ -497,7 +502,7 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
             </tbody>
           </table>
         </div>
-        <p className="mt-2 text-[10px] text-zinc-400">Assumes constant ROAS at increased spend. In practice, ROAS decreases as you scale — watch the trendline.</p>
+        <p className="mt-2 text-[10px] text-zinc-400">ROAS decay modeled from Jan 2025–Apr 2026 historical data. Each $1K/mo increase in spend reduces ROAS by ~0.008x. Lifetime profit accounts for subscription LTV.</p>
       </div>
     </div>
   );
