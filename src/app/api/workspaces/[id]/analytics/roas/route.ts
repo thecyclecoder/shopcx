@@ -27,7 +27,7 @@ export async function GET(
   while (true) {
     const { data } = await admin
       .from("daily_order_snapshots")
-      .select("snapshot_date, new_subscription_count, new_subscription_revenue_cents, one_time_count, one_time_revenue_cents")
+      .select("snapshot_date, new_subscription_count, new_subscription_revenue_cents, one_time_count, one_time_revenue_cents, recurring_count")
       .eq("workspace_id", workspaceId)
       .gte("snapshot_date", startDate)
       .lte("snapshot_date", endDate)
@@ -123,6 +123,7 @@ export async function GET(
     shopify_one_time_revenue: number;
     shopify_new_sub_count: number;
     shopify_one_time_count: number;
+    shopify_recurring_count: number;
     amazon_checkout_revenue: number;
     amazon_one_time_revenue: number;
     amazon_sns_checkout_revenue: number;
@@ -136,7 +137,7 @@ export async function GET(
   const emptyDay = (date: string): DayData => ({
     date,
     shopify_checkout_revenue: 0, shopify_new_sub_revenue: 0, shopify_one_time_revenue: 0,
-    shopify_new_sub_count: 0, shopify_one_time_count: 0,
+    shopify_new_sub_count: 0, shopify_one_time_count: 0, shopify_recurring_count: 0,
     amazon_checkout_revenue: 0, amazon_one_time_revenue: 0, amazon_sns_checkout_revenue: 0,
     amazon_one_time_count: 0, amazon_sns_checkout_count: 0,
     meta_spend: 0,
@@ -151,6 +152,7 @@ export async function GET(
     d.shopify_one_time_revenue += s.one_time_revenue_cents as number;
     d.shopify_new_sub_count += s.new_subscription_count as number;
     d.shopify_one_time_count += s.one_time_count as number;
+    d.shopify_recurring_count += (s.recurring_count as number) || 0;
     d.shopify_checkout_revenue += (s.new_subscription_revenue_cents as number) + (s.one_time_revenue_cents as number);
   }
 
@@ -187,6 +189,7 @@ export async function GET(
     shopify_one_time_revenue: acc.shopify_one_time_revenue + d.shopify_one_time_revenue,
     shopify_new_sub_count: acc.shopify_new_sub_count + d.shopify_new_sub_count,
     shopify_one_time_count: acc.shopify_one_time_count + d.shopify_one_time_count,
+    shopify_recurring_count: acc.shopify_recurring_count + d.shopify_recurring_count,
     amazon_checkout_revenue: acc.amazon_checkout_revenue + d.amazon_checkout_revenue,
     amazon_one_time_revenue: acc.amazon_one_time_revenue + d.amazon_one_time_revenue,
     amazon_sns_checkout_revenue: acc.amazon_sns_checkout_revenue + d.amazon_sns_checkout_revenue,
@@ -195,7 +198,7 @@ export async function GET(
     meta_spend: acc.meta_spend + d.meta_spend,
   }), {
     shopify_checkout_revenue: 0, shopify_new_sub_revenue: 0, shopify_one_time_revenue: 0,
-    shopify_new_sub_count: 0, shopify_one_time_count: 0,
+    shopify_new_sub_count: 0, shopify_one_time_count: 0, shopify_recurring_count: 0,
     amazon_checkout_revenue: 0, amazon_one_time_revenue: 0, amazon_sns_checkout_revenue: 0,
     amazon_one_time_count: 0, amazon_sns_checkout_count: 0,
     meta_spend: 0,
@@ -267,6 +270,9 @@ export async function GET(
       amazon_checkout_revenue: totals.amazon_checkout_revenue,
       amazon_one_time_count: totals.amazon_one_time_count,
       amazon_sns_checkout_count: totals.amazon_sns_checkout_count,
+      shopify_recurring_count: totals.shopify_recurring_count,
+      // For G&A allocation: total orders including recurring across all channels
+      total_all_orders: totals.shopify_new_sub_count + totals.shopify_one_time_count + totals.shopify_recurring_count + totals.amazon_one_time_count + totals.amazon_sns_checkout_count,
       shopify_sub_rate: Math.round(shopifySubRate * 100) / 100,
       amazon_sub_rate: Math.round(amazonSubRate * 100) / 100,
       // LTV

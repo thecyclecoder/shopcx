@@ -22,6 +22,8 @@ interface ROASData {
     amazon_checkout_revenue: number;
     amazon_one_time_count: number;
     amazon_sns_checkout_count: number;
+    shopify_recurring_count: number;
+    total_all_orders: number;
     shopify_sub_rate: number;
     amazon_sub_rate: number;
     shopify_ltv_cents: number;
@@ -351,8 +353,9 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
   const blendedChurn = (s.shopify_avg_churn_pct > 0 ? s.shopify_avg_churn_pct : s.amazon_avg_churn_pct) / 100;
   const lifetimeOrders = blendedChurn > 0 ? (1 - blendedSubRate) + (blendedSubRate / blendedChurn) : 1;
   const variableCostPct = variablePct / 100;
-  // For per-channel cards, spread G&A across current orders
-  const gaPerOrder = totalOrders > 0 ? gaFixedCents / totalOrders : 0;
+  // G&A spread across ALL orders (recurring + checkout + Amazon) — not just checkout
+  const allOrders = s.total_all_orders || totalOrders;
+  const gaPerOrder = allOrders > 0 ? gaFixedCents / allOrders : 0;
   const costPerOrderPct = variableCostPct; // variable only for lifetime calc
 
   function calcChannel(label: string, revenue: number, orders: number, subCount: number, churnPct: number, color: string, extraFeePct?: number) {
