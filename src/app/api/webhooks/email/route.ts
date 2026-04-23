@@ -225,8 +225,7 @@ export async function POST(request: Request) {
 
     // Unified handler handles all routing including positive close
     if (ticketData) {
-      const handledBy = ticketData.handled_by || "";
-      const isAutoHandled = handledBy === "AI Agent" || handledBy.startsWith("Workflow:") || handledBy.startsWith("Journey:") || ticketData.ai_handled;
+      const isAutoHandled = ticketData.ai_handled;
       const isUnassigned = !ticketData.assigned_to;
       const channel = ticketData.channel || "email";
 

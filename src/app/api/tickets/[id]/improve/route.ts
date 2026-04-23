@@ -82,7 +82,7 @@ export async function POST(
   // Get ticket details
   const { data: ticket } = await admin
     .from("tickets")
-    .select("id, subject, tags, status, channel, customer_id, handled_by, ai_turn_count, escalation_reason")
+    .select("id, subject, tags, status, channel, customer_id, ai_turn_count, escalation_reason")
     .eq("id", ticketId)
     .eq("workspace_id", workspaceId)
     .single();
@@ -118,7 +118,6 @@ export async function POST(
     `Status: ${ticket.status}`,
     `Channel: ${ticket.channel}`,
     `Tags: ${(ticket.tags || []).join(", ") || "none"}`,
-    `Handled by: ${ticket.handled_by || "unassigned"}`,
     `AI turns: ${ticket.ai_turn_count || 0}`,
     ticket.escalation_reason ? `Escalation reason: ${ticket.escalation_reason}` : null,
     customerInfo || null,

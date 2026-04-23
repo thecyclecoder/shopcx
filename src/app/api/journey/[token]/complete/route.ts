@@ -228,7 +228,6 @@ export async function POST(
         const updated = history.map(h => h.journey_id === session.journey_id ? { ...h, completed: true } : h);
         await admin.from("tickets").update({
           journey_history: updated,
-          handled_by: "Playbook: Replacement Order",
         }).eq("id", session.ticket_id);
 
         await inngest.send({
@@ -303,7 +302,6 @@ export async function POST(
         const updated2 = history2.map(h => h.journey_id === session.journey_id ? { ...h, completed: true } : h);
         await admin.from("tickets").update({
           journey_history: updated2,
-          handled_by: "Playbook: Replacement Order",
         }).eq("id", session.ticket_id);
 
         await inngest.send({
@@ -747,7 +745,6 @@ export async function POST(
           status: "closed",
           resolved_at: new Date().toISOString(),
           journey_step: 99,
-          handled_by: null,
         }).eq("id", session.ticket_id);
 
       }
@@ -822,7 +819,6 @@ export async function POST(
           status: "closed",
           resolved_at: new Date().toISOString(),
           journey_step: 99,
-          handled_by: null,
         }).eq("id", session.ticket_id);
       }
     }
@@ -952,7 +948,6 @@ export async function POST(
         resolved_at: new Date().toISOString(),
         journey_data: {},
         journey_nudge_count: 0,
-        handled_by: null,
       }).eq("id", session.ticket_id);
 
       await admin.from("ticket_messages").insert({

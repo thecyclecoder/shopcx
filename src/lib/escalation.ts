@@ -28,7 +28,6 @@ export async function handleEscalation(
   // Always: clear AI handling state. If chat channel, switch to email for agent follow-up.
   await admin.from("tickets").update({
     ai_handled: false,
-    handled_by: null,
     escalation_reason: reason,
     auto_reply_at: null,
     pending_auto_reply: null,

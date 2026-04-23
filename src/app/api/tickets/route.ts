@@ -46,9 +46,10 @@ export async function GET(request: Request) {
   }
   if (channel && channel !== "all") query = query.eq("channel", channel);
   if (assignedTo === "__ai_agent") {
-    query = query.eq("handled_by", "AI Agent");
+    query = query.eq("ai_handled", true).is("assigned_to", null);
   } else if (assignedTo === "__workflow") {
-    query = query.ilike("handled_by", "Workflow:%");
+    // Workflow-handled tickets no longer tracked via handled_by; filter by tag instead
+    query = query.contains("tags", ["touched"]).filter("tags", "cs", "{w:}");
   } else if (assignedTo) {
     query = query.eq("assigned_to", assignedTo);
   }
@@ -117,7 +118,7 @@ export async function GET(request: Request) {
     ...t,
     customer_email: t.customers?.email,
     customer_name: [t.customers?.first_name, t.customers?.last_name].filter(Boolean).join(" ") || null,
-    assigned_name: t.handled_by || (t.assigned_to ? assignedMap.get(t.assigned_to) || null : null),
+    assigned_name: t.assigned_to ? assignedMap.get(t.assigned_to) || null : null,
     snoozed_until: t.snoozed_until || null,
     customers: undefined,
   }));

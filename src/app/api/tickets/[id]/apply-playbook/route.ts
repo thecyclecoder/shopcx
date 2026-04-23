@@ -73,7 +73,6 @@ export async function POST(
       : { applied_by: agentName },
     playbook_exceptions_used: 0,
     status: "closed",
-    handled_by: `Playbook: ${playbook.name}`,
     updated_at: new Date().toISOString(),
   }).eq("id", ticketId);
 

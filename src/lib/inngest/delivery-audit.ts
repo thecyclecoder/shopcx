@@ -193,7 +193,6 @@ export const deliveryNightlyAudit = inngest.createFunction(
                         tracking_number: order.tracking_number,
                         carrier: order.carrier,
                       },
-                      handled_by: "Playbook: Replacement Order",
                     }).eq("id", ticket.id);
                   }
                 }
@@ -251,7 +250,6 @@ export const deliveryNightlyAudit = inngest.createFunction(
                       tracking_number: order.tracking_number,
                       carrier: order.carrier,
                     },
-                    handled_by: "Playbook: Replacement Order",
                   }).eq("id", ticket.id);
                 }
               }

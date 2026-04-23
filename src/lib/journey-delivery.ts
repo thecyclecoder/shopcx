@@ -222,7 +222,6 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
 
   await admin.from("tickets").update({
     journey_history: history,
-    handled_by: `Journey: ${journeyName}`,
   }).eq("id", ticketId);
 
   return true;

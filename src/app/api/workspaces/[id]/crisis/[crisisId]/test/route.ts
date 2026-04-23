@@ -156,7 +156,6 @@ export async function POST(
     status: "closed",
     channel: "email",
     tags: ["crisis", `crisis:${crisis.id.slice(0, 8)}`, "crisis:test", "touched", "ft:journey"],
-    handled_by: `Crisis: ${crisis.name}`,
   }).select("id").single();
 
   // Check for existing action (re-test)

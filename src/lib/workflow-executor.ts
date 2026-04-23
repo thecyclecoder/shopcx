@@ -83,8 +83,6 @@ export async function executeWorkflow(
         await executeEndChat(admin, context);
         break;
     }
-    // Mark ticket as handled by workflow
-    await admin.from("tickets").update({ handled_by: `Workflow: ${workflow.name}` }).eq("id", ticketId);
   } catch (err) {
     console.error(`Workflow "${workflow.name}" error:`, err);
     // Add internal note about the failure
@@ -590,7 +588,6 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
         tracking_number: ctx.fulfillment?.tracking_number,
         carrier: ctx.fulfillment?.carrier,
       };
-      playbookUpdates.handled_by = "Playbook: Replacement Order";
     }
 
     await admin.from("tickets").update(playbookUpdates).eq("id", ctx.ticketId);
@@ -960,7 +957,6 @@ async function executeAccountLogin(admin: Admin, config: Record<string, unknown>
         });
         // Stash intent so post-linking re-trigger sends the magic link
         await admin.from("tickets").update({
-          handled_by: `Journey: ${linkingJourney.name}`,
           ai_detected_intent: "account_login",
         }).eq("id", ctx.ticketId);
         await addNote(admin, ctx, `No Shopify account found for ${email}. Found potential linked accounts (${matchesWithShopify.map(m => m.email).join(", ")}). Sent account linking journey — magic link will follow after linking.`);

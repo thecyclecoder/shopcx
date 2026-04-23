@@ -890,12 +890,7 @@ async function handleJourney(
     ctaText: `${journey.name} →`,
   });
 
-  if (launched) {
-    await ctx.admin
-      .from("tickets")
-      .update({ handled_by: `Journey: ${journey.name}` })
-      .eq("id", ctx.ticketId);
-  } else {
+  if (!launched) {
     await sysNote(`Journey could not be launched on channel: ${ctx.channel}`);
     // Fall back to sending the response message directly
     if (decision.response_message) {
@@ -972,10 +967,6 @@ async function handlePlaybook(
       personality,
     );
 
-    await ctx.admin.from("tickets")
-      .update({ handled_by: `Playbook: ${playbook.name}` })
-      .eq("id", ctx.ticketId);
-
     if (result.systemNote) await sysNote(result.systemNote);
     if (result.response) { await send(result.response, ctx.sandbox); return; }
 
@@ -1024,11 +1015,6 @@ async function handleWorkflow(
   const { executeWorkflow } = await import("@/lib/workflow-executor");
   await executeWorkflow(ctx.workspaceId, ctx.ticketId, workflow.trigger_tag);
 
-  // Set handled_by
-  await ctx.admin
-    .from("tickets")
-    .update({ handled_by: `Workflow: ${workflow.name}` })
-    .eq("id", ctx.ticketId);
 }
 
 // ── Handler: Macro ──

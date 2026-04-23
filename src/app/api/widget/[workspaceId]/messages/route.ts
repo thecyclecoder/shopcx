@@ -205,13 +205,12 @@ export async function POST(
     // Check ticket assignment — only trigger AI if unassigned or AI-handled
     const { data: ticket } = await admin
       .from("tickets")
-      .select("assigned_to, handled_by")
+      .select("assigned_to, ai_handled")
       .eq("id", ticketId)
       .single();
 
-    const handledBy = ticket?.handled_by || "";
-    const isAutoHandled = handledBy === "AI Agent" || handledBy.startsWith("Workflow:") || handledBy.startsWith("Journey:");
-    const isUnassigned = !ticket?.assigned_to && !handledBy;
+    const isAutoHandled = ticket?.ai_handled;
+    const isUnassigned = !ticket?.assigned_to && !isAutoHandled;
 
     // Trigger AI for: AI-handled, workflow-handled, journey-handled, or unassigned
     if (isAutoHandled || isUnassigned) {

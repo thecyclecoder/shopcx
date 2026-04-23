@@ -426,7 +426,7 @@ export const unifiedTicketHandler = inngest.createFunction(
     // ── 1. Resolve ──
     const st = await step.run("resolve", async () => {
       const { data: ticket } = await admin.from("tickets")
-        .select("customer_id, channel, ai_clarification_turn, handled_by, agent_intervened, assigned_to, escalated_to, subject")
+        .select("customer_id, channel, ai_clarification_turn, agent_intervened, assigned_to, escalated_to, subject")
         .eq("id", tid).single();
       if (!ticket) throw new Error("Ticket not found");
       let cust: { id: string; email: string; first_name: string | null; phone: string | null; shopify_customer_id: string | null } | null = null;
@@ -453,7 +453,7 @@ export const unifiedTicketHandler = inngest.createFunction(
       return {
         hasCust: !!cust, custId: cust?.id || null, custEmail: cust?.email || null, hasShopifyCustomer,
         ch: ticket.channel || ch, turn: ticket.ai_clarification_turn || 0,
-        intervened: !!ticket.agent_intervened, handledBy: ticket.handled_by || "",
+        intervened: !!ticket.agent_intervened,
         assignedTo: ticket.assigned_to || null, escalatedTo: ticket.escalated_to || null,
         subject: ticket.subject || "",
       };
@@ -756,9 +756,8 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
       await step.run("early-pattern-note", () =>
         sysNote(admin, tid, `[System] Early pattern match: "${ep.patternName}" → ${ep.type}: ${ep.name} (${(ep.confidence * 100).toFixed(0)}%)`));
 
-      // Clear handled_by so this routes fresh
-      await step.run("clear-handled-by", () =>
-        admin.from("tickets").update({ handled_by: null, ai_clarification_turn: 0 }).eq("id", tid));
+      await step.run("clear-clarification", () =>
+        admin.from("tickets").update({ ai_clarification_turn: 0 }).eq("id", tid));
 
       if (ep.type === "journey" && st.hasCust) {
         const delay = await step.run("ep-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
@@ -771,7 +770,6 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
             journeyId: ep.id, journeyName: ep.name, triggerIntent: ep.intent || "",
             channel: st.ch, leadIn, ctaText,
           });
-          await admin.from("tickets").update({ handled_by: `Journey: ${ep.name}` }).eq("id", tid);
           await setStatus(admin, tid, cfg.auto_resolve);
         });
         return { status: "early_pattern_journey", journey: ep.name };
@@ -783,7 +781,6 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
           await startPlaybook(admin, tid, ep.id);
           await sysNote(admin, tid, `[System] → Playbook: ${ep.name} (${(ep.confidence * 100).toFixed(0)}%)`);
           await markFirstTouch(tid, "ai");
-          await admin.from("tickets").update({ handled_by: `Playbook: ${ep.name}` }).eq("id", tid);
         });
         // Execute first step
         const delay = await step.run("ep-pb-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
@@ -810,7 +807,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
             const { executeWorkflow } = await import("@/lib/workflow-executor");
             await executeWorkflow(wsId, tid, wfTag);
             await addTicketTag(tid, `w:${ep.name.toLowerCase().replace(/\s+/g, "_")}`);
-            await admin.from("tickets").update({ handled_by: `Workflow: ${ep.name}`, ai_clarification_turn: 0 }).eq("id", tid);
+            await admin.from("tickets").update({ ai_clarification_turn: 0 }).eq("id", tid);
             await setStatus(admin, tid, cfg.auto_resolve);
           });
           return { status: "early_pattern_workflow", workflow: ep.name };
@@ -1134,7 +1131,6 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10);
           journeyId: jd.id, journeyName: jd.name,
           triggerIntent: jd.intent, channel: st.ch, leadIn, ctaText,
         });
-        await admin.from("tickets").update({ handled_by: `Journey: ${jd.name}` }).eq("id", tid);
         await addTicketTag(tid, `j:${jd.intent || jd.name.toLowerCase().replace(/\s+/g, "_")}`);
         await markFirstTouch(tid, "journey");
         await setStatus(admin, tid, cfg.auto_resolve);
@@ -1182,7 +1178,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10);
             await executeWorkflow(wsId, tid, pmatch.tag!);
             await addTicketTag(tid, `w:${patternRouted.name.toLowerCase().replace(/\s+/g, "_")}`);
             await markFirstTouch(tid, "workflow");
-            await admin.from("tickets").update({ handled_by: `Workflow: ${patternRouted.name}`, ai_clarification_turn: 0 }).eq("id", tid);
+            await admin.from("tickets").update({ ai_clarification_turn: 0 }).eq("id", tid);
           }
           await setStatus(admin, tid, cfg.auto_resolve);
         });
@@ -1318,7 +1314,6 @@ async function routeExec(
     if (pbMatch) {
       await sysNote(admin, tid, `[System] → Playbook: ${pbMatch.name} (${conf}%)`);
       await startPlaybook(admin, tid, pbMatch.id);
-      await admin.from("tickets").update({ handled_by: `Playbook: ${pbMatch.name}` }).eq("id", tid);
       await addTicketTag(tid, `pb:${pbMatch.name.toLowerCase().replace(/\s+/g, "_")}`);
       await markFirstTouch(tid, "ai");
 
@@ -1347,7 +1342,6 @@ async function routeExec(
         await executeWorkflow(wsId, tid, w.trigger_tag);
         await addTicketTag(tid, `w:${w.name.toLowerCase().replace(/\s+/g, "_")}`);
         await markFirstTouch(tid, "workflow");
-        await admin.from("tickets").update({ handled_by: `Workflow: ${w.name}` }).eq("id", tid);
         await setStatus(admin, tid, cfg.auto_resolve);
         return;
       }
@@ -1366,7 +1360,6 @@ async function routeExec(
       if (await newerActivity(admin, tid, t0)) return;
       await sendWithDelay(admin, wsId, tid, ch, text, cfg.sandbox);
       await markFirstTouch(tid, "ai");
-      await admin.from("tickets").update({ handled_by: "AI Agent" }).eq("id", tid);
       await setStatus(admin, tid, cfg.auto_resolve);
       // Non-blocking account linking: mention it casually after answering
       if (pendingAccountLink && custId) {
@@ -1396,7 +1389,6 @@ async function routeExec(
       if (await newerActivity(admin, tid, t0)) return;
       await sendWithDelay(admin, wsId, tid, ch, text, cfg.sandbox);
       await markFirstTouch(tid, "ai");
-      await admin.from("tickets").update({ handled_by: "AI Agent" }).eq("id", tid);
       await setStatus(admin, tid, cfg.auto_resolve);
       if (pendingAccountLink && custId) {
         await launchJourneyForTicket({
@@ -1424,7 +1416,6 @@ async function routeExec(
     if (await newerActivity(admin, tid, t0)) return;
     await sendWithDelay(admin, wsId, tid, ch, text, cfg.sandbox);
     await markFirstTouch(tid, "ai");
-    await admin.from("tickets").update({ handled_by: "AI Agent" }).eq("id", tid);
     await setStatus(admin, tid, cfg.auto_resolve);
     if (pendingAccountLink && custId) {
       await launchJourneyForTicket({

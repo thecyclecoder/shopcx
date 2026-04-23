@@ -136,7 +136,6 @@ export const crisisDailyCampaign = inngest.createFunction(
             status: "closed",
             channel: "email",
             tags: ["crisis", `crisis:${crisis.id.slice(0, 8)}`, "touched", "ft:journey"],
-            handled_by: `Crisis: ${crisis.name}`,
           }).select("id").single();
 
           // Record the action (or update existing if record was pre-created by auto-swap)
