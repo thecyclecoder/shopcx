@@ -426,7 +426,7 @@ export const unifiedTicketHandler = inngest.createFunction(
     // ── 1. Resolve ──
     const st = await step.run("resolve", async () => {
       const { data: ticket } = await admin.from("tickets")
-        .select("customer_id, channel, ai_clarification_turn, handled_by, agent_intervened, subject")
+        .select("customer_id, channel, ai_clarification_turn, handled_by, agent_intervened, assigned_to, escalated_to, subject")
         .eq("id", tid).single();
       if (!ticket) throw new Error("Ticket not found");
       let cust: { id: string; email: string; first_name: string | null; phone: string | null; shopify_customer_id: string | null } | null = null;
@@ -454,11 +454,14 @@ export const unifiedTicketHandler = inngest.createFunction(
         hasCust: !!cust, custId: cust?.id || null, custEmail: cust?.email || null, hasShopifyCustomer,
         ch: ticket.channel || ch, turn: ticket.ai_clarification_turn || 0,
         intervened: !!ticket.agent_intervened, handledBy: ticket.handled_by || "",
+        assignedTo: ticket.assigned_to || null, escalatedTo: ticket.escalated_to || null,
         subject: ticket.subject || "",
       };
     });
 
-    if (st.intervened) return { status: "skipped", reason: "agent_intervened" };
+    // Agent-involved tickets still get AI processing, but Sonnet limits scope
+    // (positive closure OK, new requests get "an agent will be back with you shortly")
+    const agentAssigned = !!(st.assignedTo || st.escalatedTo || st.intervened);
 
     // ── 1b. Banned customer check ──
     if (st.custId) {
@@ -995,7 +998,8 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10);
       const { executeSonnetDecision } = await import("@/lib/action-executor");
 
       const sonnetDecision = await step.run("sonnet-orchestrate", async () => {
-        const decision = await callSonnetOrchestratorV2(wsId, tid, st.custId || "", msg, st.ch, pers);
+        const decision = await callSonnetOrchestratorV2(wsId, tid, st.custId || "", msg, st.ch, pers,
+          agentAssigned ? { assigned: true, intervened: st.intervened } : null);
         await sysNote(admin, tid, `[System] Sonnet: ${decision.action_type} — ${decision.reasoning}`);
         return decision;
       });

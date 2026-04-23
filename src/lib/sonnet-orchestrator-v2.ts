@@ -149,6 +149,7 @@ async function buildPreContext(
   message: string,
   channel: string,
   personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
+  agentContext?: { assigned: boolean; intervened: boolean } | null,
 ): Promise<string> {
   const admin = createAdminClient();
 
@@ -258,7 +259,8 @@ async function buildPreContext(
 You have tools to look up data. Use them to gather what you need before making your decision.
 
 CUSTOMER: ${cName} (${cEmail})
-TICKET TAGS: ${tags}${activePlaybookNote}
+TICKET TAGS: ${tags}${activePlaybookNote}${agentContext?.assigned ? `
+AGENT CONTEXT: This ticket has been handled by a human agent. You should still respond to the customer, but limit your scope: handle positive closures (thank you, goodbye → close ticket with warm response), and for new requests say "We're reviewing your ticket and an agent will be back with you shortly!" Do NOT take direct actions or provide detailed information — just acknowledge and hold.` : ""}
 
 CONVERSATION:
 ${convoBlock || `Customer: ${message.slice(0, 300)}`}
@@ -692,6 +694,7 @@ export async function callSonnetOrchestratorV2(
   message: string,
   channel: string,
   personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
+  agentContext?: { assigned: boolean; intervened: boolean } | null,
 ): Promise<SonnetDecision> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -700,7 +703,7 @@ export async function callSonnetOrchestratorV2(
   }
 
   try {
-    const preContext = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality);
+    const preContext = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext);
     const tools = buildToolDefinitions();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
