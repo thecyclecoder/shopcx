@@ -95,9 +95,9 @@ export default function MRRDashboard() {
   const workspace = useWorkspace();
   const [data, setData] = useState<MRRData | null>(null);
   const [loading, setLoading] = useState(true);
-  // Default: today through 14 days out
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const defaultEnd = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+  // Default: today (Central time) through 14 days out
+  const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+  const defaultEnd = new Date(Date.now() + 14 * 86400000).toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
   const [startDate, setStartDate] = useState(todayStr);
   const [endDate, setEndDate] = useState(defaultEnd);
 
@@ -208,7 +208,7 @@ export default function MRRDashboard() {
             </thead>
             <tbody>
               {data.daily.map((d) => {
-                const isToday = d.date === new Date().toISOString().slice(0, 10);
+                const isToday = d.date === todayStr;
                 const isPast = d.date < new Date().toISOString().slice(0, 10);
                 return (
                   <tr key={d.date} className={`border-b border-zinc-50 dark:border-zinc-800/50 ${isToday ? "bg-indigo-50/50 dark:bg-indigo-950/20" : ""}`}>
