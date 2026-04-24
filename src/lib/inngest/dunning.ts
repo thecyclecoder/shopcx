@@ -17,6 +17,7 @@ import {
   getLastSuccessfulCard,
   getActiveDunningCyclesForCustomer,
   dunningInternalNote,
+  isTerminalErrorCode,
 } from "@/lib/dunning";
 import {
   appstleAttemptBilling,
@@ -146,6 +147,11 @@ export const dunningPaymentFailed = inngest.createFunction(
       return { status: "skipped", reason: "active_cycle_exists" };
     }
 
+    // Step 3: Check if error code is terminal
+    const isTerminal = await step.run("check-terminal-error", async () => {
+      return isTerminalErrorCode(workspace_id, error_code);
+    });
+
     // Step 4: Get customer payment methods from Shopify
     if (!shopify_customer_id) {
       await step.run("no-customer-skip", async () => {
@@ -169,6 +175,56 @@ export const dunningPaymentFailed = inngest.createFunction(
       }
     });
 
+    // Step 4b: If terminal error + only 1 card → cancel immediately (no point rotating)
+    if (isTerminal && paymentMethods.length <= 1) {
+      await step.run("terminal-single-card-cancel", async () => {
+        await updateDunningCycle(cycle.id, {
+          status: "exhausted",
+          terminal_error_code: error_code,
+        });
+
+        // Cancel subscription — recovery webhook will reactivate if customer adds new card
+        await appstleSubscriptionAction(
+          workspace_id, shopify_contract_id, "cancel", "dunning",
+          `Cancelled by ShopCX — terminal billing error: ${error_code} (${error_message || "no details"}), no other payment methods available`
+        );
+
+        // Send payment update email so customer can add a new card
+        await appstleSendPaymentUpdateEmail(workspace_id, shopify_contract_id).catch(() => {});
+
+        const admin = createAdminClient();
+        const { data: customer } = await admin.from("customers").select("email, first_name").eq("id", customer_id).single();
+        const { data: ws } = await admin.from("workspaces").select("name, portal_config").eq("id", workspace_id).single();
+        const portalGeneral = (ws?.portal_config as Record<string, unknown>)?.general as Record<string, unknown> | undefined;
+        const updateUrl = (portalGeneral?.payment_update_url as string) || "";
+        if (customer?.email && ws?.name && updateUrl) {
+          await sendDunningPausedEmail({
+            workspaceId: workspace_id,
+            toEmail: customer.email,
+            customerName: customer.first_name,
+            workspaceName: ws.name,
+            updateUrl,
+          });
+        }
+
+        await postDunningNote(workspace_id, customer_id, dunningInternalNote(
+          `Terminal billing error: ${error_code}. Customer has only ${paymentMethods.length} payment method(s). Subscription cancelled — will auto-reactivate if customer adds a new payment method.`
+        ));
+        await tagCustomerTickets(workspace_id, customer_id, "dunning:terminal");
+      });
+
+      return { status: "terminal", error_code, cycle_id: cycle.id };
+    }
+
+    // If terminal but customer has other cards, log it and let rotation try them
+    if (isTerminal) {
+      await step.run("terminal-flag-default-card", async () => {
+        await postDunningNote(workspace_id, customer_id, dunningInternalNote(
+          `Terminal billing error: ${error_code} on default card. Customer has ${paymentMethods.length} payment methods — rotating to try others.`
+        ));
+      });
+    }
+
     // Step 5: Card rotation — try each untried card with 2h delays
     const maxRotations = Math.min(settings.dunning_max_card_rotations, paymentMethods.length);
     console.log(`[Dunning] Contract ${shopify_contract_id}: maxRotations=${maxRotations} (settings=${settings.dunning_max_card_rotations}, methods=${paymentMethods.length})`);
@@ -186,11 +242,19 @@ export const dunningPaymentFailed = inngest.createFunction(
         await step.sleep(`card-rotation-wait-${i}`, "2h");
       }
 
-      // Reload cycle from DB (gets current cards_tried, handles function restarts)
+      // Reload cycle from DB (gets current cards_tried + terminal_cards, handles function restarts)
       const cycleCheck = await step.run(`check-cycle-${i}`, async () => {
         return getActiveDunningCycle(workspace_id, shopify_contract_id);
       });
       if (!cycleCheck || cycleCheck.status === "recovered") break;
+
+      // Check if all payment methods are terminal (webhooks mark cards terminal between rotations)
+      const terminalCards = (cycleCheck.terminal_cards as string[]) || [];
+      const allTerminal = paymentMethods.length > 0 && paymentMethods.every(m => terminalCards.includes(m.last4));
+      if (allTerminal) {
+        console.log(`[Dunning] All ${paymentMethods.length} cards are terminal for ${shopify_contract_id} — skipping remaining rotations`);
+        break;
+      }
 
       // Get untried cards from DB state (not in-memory)
       const dbCardsTried = (cycleCheck.cards_tried as string[]) || [];
@@ -201,15 +265,24 @@ export const dunningPaymentFailed = inngest.createFunction(
 
       await step.run(`rotate-card-${i}`, async () => {
         const switchRes = await appstleSwitchPaymentMethod(workspace_id, shopify_contract_id, card.id);
-        if (!switchRes.success) return;
+        if (!switchRes.success) {
+          console.log(`[Dunning] Card switch rejected for ${shopify_contract_id} → ${card.last4}: ${switchRes.error}`);
+          // Still track the card as tried even if switch failed
+          const updatedTried = [...dbCardsTried, card.dedupeKey];
+          await updateDunningCycle(cycleCheck.id, { cards_tried: updatedTried });
+          return;
+        }
 
         const ordersRes = await appstleGetUpcomingOrders(workspace_id, shopify_contract_id);
-        if (!ordersRes.success || !ordersRes.orders?.length) return;
+        if (!ordersRes.success || !ordersRes.orders?.length) {
+          console.log(`[Dunning] No upcoming orders for ${shopify_contract_id}: ${ordersRes.error || "empty"}`);
+          return;
+        }
 
         const attemptId = ordersRes.orders[0].id;
-        await appstleAttemptBilling(workspace_id, attemptId);
+        const billingRes = await appstleAttemptBilling(workspace_id, attemptId);
 
-        // Log the attempt (not yet known if it succeeded — webhook will tell us)
+        // Log the attempt — includes whether Appstle accepted or rejected it
         await logPaymentFailure({
           workspaceId: workspace_id,
           customerId: customer_id,
@@ -218,10 +291,14 @@ export const dunningPaymentFailed = inngest.createFunction(
           billingAttemptId: attemptId,
           paymentMethodLast4: card.last4,
           paymentMethodId: card.id,
+          errorCode: billingRes.success ? null : "appstle_rejected",
+          errorMessage: billingRes.success ? "Billing attempt accepted by Appstle" : `Appstle rejected billing attempt: ${billingRes.error}`,
           attemptNumber,
           attemptType: "card_rotation",
-          succeeded: false, // Will be updated by billing-success webhook
+          succeeded: false, // Actual result comes via webhook — this is just "attempt submitted"
         });
+
+        console.log(`[Dunning] Billing attempt ${attemptId} for ${shopify_contract_id} card ${card.last4}: ${billingRes.success ? "accepted" : "rejected"} by Appstle${billingRes.error ? ` (${billingRes.error})` : ""}`);
 
         // Track tried card in DB (survives function restarts)
         const updatedTried = [...dbCardsTried, card.dedupeKey];
@@ -247,7 +324,49 @@ export const dunningPaymentFailed = inngest.createFunction(
       return { status: "recovered", method: "card_rotation", cycle_id: cycle.id };
     }
 
-    // Step 6: All cards exhausted — skip/pause + send emails
+    // Check if all cards returned terminal errors — cancel immediately, no payday retries
+    const finalTerminalCards = (postRotationCheck.terminal_cards as string[]) || [];
+    const allCardsTerminal = paymentMethods.length > 0 && paymentMethods.every(m => finalTerminalCards.includes(m.last4));
+
+    if (allCardsTerminal) {
+      await step.run("all-cards-terminal-cancel", async () => {
+        await updateDunningCycle(cycle.id, {
+          status: "exhausted",
+          terminal_error_code: error_code || "all_cards_terminal",
+        });
+
+        await appstleSubscriptionAction(
+          workspace_id, shopify_contract_id, "cancel", "dunning",
+          `Cancelled by ShopCX — all ${paymentMethods.length} payment methods returned terminal errors`
+        );
+
+        await appstleSendPaymentUpdateEmail(workspace_id, shopify_contract_id).catch(() => {});
+
+        const admin = createAdminClient();
+        const { data: customer } = await admin.from("customers").select("email, first_name").eq("id", customer_id).single();
+        const { data: ws } = await admin.from("workspaces").select("name, portal_config").eq("id", workspace_id).single();
+        const portalGeneral = (ws?.portal_config as Record<string, unknown>)?.general as Record<string, unknown> | undefined;
+        const updateUrl = (portalGeneral?.payment_update_url as string) || "";
+        if (customer?.email && ws?.name && updateUrl) {
+          await sendDunningPausedEmail({
+            workspaceId: workspace_id,
+            toEmail: customer.email,
+            customerName: customer.first_name,
+            workspaceName: ws.name,
+            updateUrl,
+          });
+        }
+
+        await postDunningNote(workspace_id, customer_id, dunningInternalNote(
+          `All ${paymentMethods.length} payment methods returned terminal errors (${finalTerminalCards.join(", ")}). Subscription cancelled — will auto-reactivate if customer adds a new payment method.`
+        ));
+        await tagCustomerTickets(workspace_id, customer_id, "dunning:terminal");
+      });
+
+      return { status: "terminal", reason: "all_cards_terminal", terminal_cards: finalTerminalCards, cycle_id: cycle.id };
+    }
+
+    // Step 6: All cards exhausted (non-terminal) — skip/pause + send emails
     await step.run("all-cards-exhausted", async () => {
       await handleAllCardsExhausted(workspace_id, shopify_contract_id, customer_id, cycle, settings);
     });
@@ -311,16 +430,16 @@ export const dunningNewCardRecovery = inngest.createFunction(
       return getActiveDunningCyclesForCustomer(workspace_id, customer_id);
     });
 
-    // Step 1b: Also check for dunning-cancelled subs (exhausted cycle 2 = cancelled)
+    // Step 1b: Also check for dunning-cancelled subs (exhausted = cancelled, including terminal errors)
     const cancelledSubs = await step.run("check-dunning-cancelled", async () => {
       const admin = createAdminClient();
       // Find cancelled subs where the last dunning cycle was exhausted
+      // No cycle_number gate — terminal errors cancel on cycle 1
       const { data: exhaustedCycles } = await admin
         .from("dunning_cycles")
         .select("shopify_contract_id, subscription_id, billing_attempt_id")
         .eq("customer_id", customer_id)
-        .eq("status", "exhausted")
-        .gte("cycle_number", 2);
+        .eq("status", "exhausted");
 
       if (!exhaustedCycles?.length) return [];
 

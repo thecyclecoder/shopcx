@@ -7,6 +7,7 @@ import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { inngest } from "@/lib/inngest/client";
 import { enrichItemTitles } from "@/lib/subscription-items";
+import { logPaymentFailure, trackErrorCode, isTerminalErrorCode } from "@/lib/dunning";
 import {
   createForecast,
   forecastCollected,
@@ -538,104 +539,172 @@ async function handleBillingEvent(
       } catch { /* ignore parse errors */ }
     }
 
-    // Fetch shopify_customer_id for card rotation lookup
-    const { data: subForDunning } = await admin.from("subscriptions").select("shopify_customer_id")
-      .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).single();
+    const billingAttemptId = data.billingAttemptId ? String(data.billingAttemptId) : null;
 
-    // Check if dunning is enabled
-    const { data: wsSettings } = await admin.from("workspaces").select("dunning_enabled").eq("id", workspaceId).single();
-    if (wsSettings?.dunning_enabled) {
-      // Guard: if a successful order exists within the current billing cycle,
-      // this is a false billing-failure from Appstle — do NOT trigger dunning.
-      const { data: subBilling } = await admin.from("subscriptions")
-        .select("id, billing_interval, billing_interval_count")
-        .eq("workspace_id", workspaceId)
-        .eq("shopify_contract_id", contractId)
-        .single();
+    // Always track error code for analytics + terminal classification
+    await trackErrorCode(workspaceId, errorCode, errorMsg);
 
-      let skipDunning = false;
-      if (subBilling) {
-        const interval = subBilling.billing_interval || "month";
-        const count = subBilling.billing_interval_count || 1;
-        let cycleDays = 28;
-        if (interval === "week") cycleDays = 7 * count;
-        else if (interval === "month") cycleDays = 28 * count;
-        else if (interval === "year") cycleDays = 365 * count;
-        else if (interval === "day") cycleDays = count;
+    // Always log to payment_failures — even if dunning cycle already exists.
+    // This captures card rotation and payday retry results with real error codes.
+    // Check if this is a follow-up failure for an existing dunning cycle
+    const { data: existingCycle } = await admin.from("dunning_cycles")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .in("status", ["active", "rotating", "retrying", "skipped"])
+      .limit(1)
+      .maybeSingle();
 
-        const cutoff = new Date(Date.now() - cycleDays * 24 * 60 * 60 * 1000).toISOString();
+    if (existingCycle) {
+      // This is a result from a card rotation or payday retry — log with billing_attempt_id
+      // so we can match it to the optimistic log entry
+      await logPaymentFailure({
+        workspaceId,
+        customerId: sub.customer_id,
+        subscriptionId: sub.id,
+        shopifyContractId: contractId,
+        billingAttemptId,
+        errorCode,
+        errorMessage: errorMsg,
+        attemptNumber: 0, // follow-up — exact number unknown here
+        attemptType: "card_rotation",
+        succeeded: false,
+      });
 
-        const { data: recentOrder } = await admin.from("orders")
-          .select("id, order_number, created_at")
-          .eq("workspace_id", workspaceId)
-          .eq("subscription_id", subBilling.id)
-          .eq("financial_status", "paid")
-          .gte("created_at", cutoff)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .single();
+      // If terminal error, find which card was used and mark it terminal on the cycle
+      if (errorCode && billingAttemptId) {
+        const terminal = await isTerminalErrorCode(workspaceId, errorCode);
+        if (terminal) {
+          // Look up the card from the optimistic log entry (logged when we fired the attempt)
+          const { data: originalAttempt } = await admin.from("payment_failures")
+            .select("payment_method_last4, payment_method_id")
+            .eq("workspace_id", workspaceId)
+            .eq("shopify_contract_id", contractId)
+            .eq("billing_attempt_id", billingAttemptId)
+            .not("payment_method_last4", "is", null)
+            .order("created_at", { ascending: true })
+            .limit(1)
+            .maybeSingle();
 
-        if (recentOrder) {
-          console.log(`Dunning guard: skipping for contract ${contractId} — paid order ${recentOrder.order_number} from ${recentOrder.created_at} (within ${cycleDays}-day cycle)`);
-          skipDunning = true;
+          if (originalAttempt?.payment_method_last4) {
+            // Add to terminal_cards on the cycle (uses dedupeKey-style matching)
+            const { data: cycle } = await admin.from("dunning_cycles")
+              .select("terminal_cards")
+              .eq("id", existingCycle.id)
+              .single();
+            const existing = (cycle?.terminal_cards as string[]) || [];
+            const cardKey = originalAttempt.payment_method_last4; // Use last4 as identifier
+            if (!existing.includes(cardKey)) {
+              await admin.from("dunning_cycles")
+                .update({ terminal_cards: [...existing, cardKey] })
+                .eq("id", existingCycle.id);
+              console.log(`[Dunning] Marked card ****${cardKey} as terminal (${errorCode}) on cycle ${existingCycle.id}`);
+            }
+          }
         }
       }
+      // Don't create a new cycle — one already exists
+    } else {
+      // No active cycle — check if we should create one
 
-      if (!skipDunning) {
-        // Atomically create cycle — unique index on (workspace_id, shopify_contract_id)
-        // WHERE status IN ('active','skipped','paused') prevents duplicates.
-        // If two webhooks race, only one insert succeeds; the other gets a conflict error.
-        const { data: prev } = await admin
-          .from("dunning_cycles")
-          .select("cycle_number")
+      // Fetch shopify_customer_id for card rotation lookup
+      const { data: subForDunning } = await admin.from("subscriptions").select("shopify_customer_id")
+        .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).single();
+
+      // Check if dunning is enabled
+      const { data: wsSettings } = await admin.from("workspaces").select("dunning_enabled").eq("id", workspaceId).single();
+      if (wsSettings?.dunning_enabled) {
+        // Guard: if a successful order exists within the current billing cycle,
+        // this is a false billing-failure from Appstle — do NOT trigger dunning.
+        const { data: subBilling } = await admin.from("subscriptions")
+          .select("id, billing_interval, billing_interval_count")
           .eq("workspace_id", workspaceId)
           .eq("shopify_contract_id", contractId)
-          .in("status", ["recovered", "exhausted"])
-          .order("cycle_number", { ascending: false })
-          .limit(1)
           .single();
 
-        const cycleNumber = prev ? prev.cycle_number + 1 : 1;
-        const billingAttemptId = data.billingAttemptId ? String(data.billingAttemptId) : null;
+        let skipDunning = false;
+        if (subBilling) {
+          const interval = subBilling.billing_interval || "month";
+          const count = subBilling.billing_interval_count || 1;
+          let cycleDays = 28;
+          if (interval === "week") cycleDays = 7 * count;
+          else if (interval === "month") cycleDays = 28 * count;
+          else if (interval === "year") cycleDays = 365 * count;
+          else if (interval === "day") cycleDays = count;
 
-        const originalBillingDate = data.billingDate ? String(data.billingDate) : new Date().toISOString();
+          const cutoff = new Date(Date.now() - cycleDays * 24 * 60 * 60 * 1000).toISOString();
 
-        const { data: newCycle, error: cycleError } = await admin
-          .from("dunning_cycles")
-          .insert({
-            workspace_id: workspaceId,
-            shopify_contract_id: contractId,
-            subscription_id: sub.id,
-            customer_id: sub.customer_id,
-            cycle_number: cycleNumber,
-            status: "active",
-            billing_attempt_id: billingAttemptId,
-            original_billing_date: originalBillingDate,
-          })
-          .select("id, cycle_number")
-          .single();
+          const { data: recentOrder } = await admin.from("orders")
+            .select("id, order_number, created_at")
+            .eq("workspace_id", workspaceId)
+            .eq("subscription_id", subBilling.id)
+            .eq("financial_status", "paid")
+            .gte("created_at", cutoff)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .single();
 
-        if (cycleError) {
-          // Unique constraint violation = another webhook already created the cycle
-          console.log(`Dunning: cycle already exists for contract ${contractId}, skipping duplicate`);
-        } else {
-          try {
-            await inngest.send({
-              name: "dunning/payment-failed",
-              data: {
-                workspace_id: workspaceId,
-                shopify_contract_id: contractId,
-                subscription_id: sub.id,
-                customer_id: sub.customer_id,
-                shopify_customer_id: subForDunning?.shopify_customer_id || null,
-                billing_attempt_id: billingAttemptId,
-                error_code: errorCode,
-                error_message: errorMsg,
-                cycle_id: newCycle.id,
-              },
-            });
-          } catch (err) {
-            console.error("Failed to send dunning event:", err);
+          if (recentOrder) {
+            console.log(`Dunning guard: skipping for contract ${contractId} — paid order ${recentOrder.order_number} from ${recentOrder.created_at} (within ${cycleDays}-day cycle)`);
+            skipDunning = true;
+          }
+        }
+
+        if (!skipDunning) {
+          // Atomically create cycle — unique index on (workspace_id, shopify_contract_id)
+          // WHERE status IN ('active','skipped','paused') prevents duplicates.
+          // If two webhooks race, only one insert succeeds; the other gets a conflict error.
+          const { data: prev } = await admin
+            .from("dunning_cycles")
+            .select("cycle_number")
+            .eq("workspace_id", workspaceId)
+            .eq("shopify_contract_id", contractId)
+            .in("status", ["recovered", "exhausted"])
+            .order("cycle_number", { ascending: false })
+            .limit(1)
+            .single();
+
+          const cycleNumber = prev ? prev.cycle_number + 1 : 1;
+
+          const originalBillingDate = data.billingDate ? String(data.billingDate) : new Date().toISOString();
+
+          const { data: newCycle, error: cycleError } = await admin
+            .from("dunning_cycles")
+            .insert({
+              workspace_id: workspaceId,
+              shopify_contract_id: contractId,
+              subscription_id: sub.id,
+              customer_id: sub.customer_id,
+              cycle_number: cycleNumber,
+              status: "active",
+              billing_attempt_id: billingAttemptId,
+              original_billing_date: originalBillingDate,
+            })
+            .select("id, cycle_number")
+            .single();
+
+          if (cycleError) {
+            // Unique constraint violation = another webhook already created the cycle
+            console.log(`Dunning: cycle already exists for contract ${contractId}, skipping duplicate`);
+          } else {
+            try {
+              await inngest.send({
+                name: "dunning/payment-failed",
+                data: {
+                  workspace_id: workspaceId,
+                  shopify_contract_id: contractId,
+                  subscription_id: sub.id,
+                  customer_id: sub.customer_id,
+                  shopify_customer_id: subForDunning?.shopify_customer_id || null,
+                  billing_attempt_id: billingAttemptId,
+                  error_code: errorCode,
+                  error_message: errorMsg,
+                  cycle_id: newCycle.id,
+                },
+              });
+            } catch (err) {
+              console.error("Failed to send dunning event:", err);
+            }
           }
         }
       }

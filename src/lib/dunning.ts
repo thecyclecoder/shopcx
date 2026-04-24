@@ -195,11 +195,11 @@ export async function getDunningSettings(workspaceId: string): Promise<DunningSe
 export async function getActiveDunningCycle(
   workspaceId: string,
   shopifyContractId: string,
-): Promise<{ id: string; cycle_number: number; status: string; cards_tried: string[]; billing_attempt_id: string | null } | null> {
+): Promise<{ id: string; cycle_number: number; status: string; cards_tried: string[]; terminal_cards: string[]; billing_attempt_id: string | null } | null> {
   const admin = createAdminClient();
   const { data } = await admin
     .from("dunning_cycles")
-    .select("id, cycle_number, status, cards_tried, billing_attempt_id")
+    .select("id, cycle_number, status, cards_tried, terminal_cards, billing_attempt_id")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", shopifyContractId)
     .in("status", ["active", "rotating", "retrying", "skipped", "paused"])
@@ -323,6 +323,57 @@ export async function getLastSuccessfulCard(
     .single();
 
   return data && data.payment_method_id ? data as { payment_method_id: string; payment_method_last4: string } : null;
+}
+
+// ── Error Code Classification ──
+
+export async function isTerminalErrorCode(
+  workspaceId: string,
+  errorCode: string | null,
+): Promise<boolean> {
+  if (!errorCode) return false;
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("dunning_error_codes")
+    .select("is_terminal")
+    .eq("workspace_id", workspaceId)
+    .eq("error_code", errorCode)
+    .single();
+  return data?.is_terminal === true;
+}
+
+export async function trackErrorCode(
+  workspaceId: string,
+  errorCode: string | null,
+  errorMessage: string | null,
+): Promise<void> {
+  if (!errorCode) return;
+  const admin = createAdminClient();
+  // Upsert: increment count if exists, create if new
+  const { data: existing } = await admin
+    .from("dunning_error_codes")
+    .select("id, occurrence_count")
+    .eq("workspace_id", workspaceId)
+    .eq("error_code", errorCode)
+    .maybeSingle();
+
+  if (existing) {
+    await admin.from("dunning_error_codes").update({
+      occurrence_count: existing.occurrence_count + 1,
+      last_seen_at: new Date().toISOString(),
+      // Update error_message to latest seen (some codes have multiple messages)
+      ...(errorMessage ? { error_message: errorMessage } : {}),
+    }).eq("id", existing.id);
+  } else {
+    // New error code — default is_terminal to false, admin reviews in settings
+    await admin.from("dunning_error_codes").insert({
+      workspace_id: workspaceId,
+      error_code: errorCode,
+      error_message: errorMessage,
+      is_terminal: false,
+      occurrence_count: 1,
+    });
+  }
 }
 
 // ── Internal Note Helpers ──

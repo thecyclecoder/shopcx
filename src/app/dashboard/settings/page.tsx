@@ -79,6 +79,7 @@ export default function SettingsPage() {
         <SettingsSection title="Revenue Protection">
           <SettingsCard href="/dashboard/settings/fraud" title="Fraud Detection" desc="Rules, thresholds, and severity levels" />
           <SettingsCard href="/dashboard/settings/chargebacks" title="Chargebacks" desc="Auto-cancel, evidence reminders, dispute handling" />
+          <SettingsCard href="/dashboard/settings/dunning" title="Recovery" desc="Card rotation, terminal errors, payday retries" />
         </SettingsSection>
 
         <SettingsSection title="Customer Engagement">
