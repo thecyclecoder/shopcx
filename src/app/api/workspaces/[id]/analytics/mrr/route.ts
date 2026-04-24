@@ -14,8 +14,9 @@ export async function GET(
   const admin = createAdminClient();
   const url = new URL(request.url);
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  // Use Central time for "today" so the date boundary matches business hours
+  const centralToday = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); // YYYY-MM-DD
+  const today = new Date(centralToday + "T00:00:00");
 
   const startParam = url.searchParams.get("start");
   const endParam = url.searchParams.get("end");
