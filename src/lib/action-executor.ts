@@ -49,6 +49,7 @@ interface ActionParams {
   crisis_action_id?: string;
   order_number?: string;
   free_label?: boolean;
+  pause_days?: number;
 }
 
 export interface ActionContext {
@@ -457,6 +458,87 @@ const directActionHandlers: Record<
     return { ...r, summary: r.success ? `Partial refund of $${amountDecimal} issued (${reason})` : undefined };
   },
 
+  redeem_points_as_refund: async (ctx, p) => {
+    const { getLoyaltySettings, getRedemptionTiers, validateRedemption, spendPoints } = await import("@/lib/loyalty");
+    const { partialRefundByAmount } = await import("@/lib/shopify-order-actions");
+
+    if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
+    if (p.tier_index == null) return { success: false, error: "Missing tier_index" };
+
+    const settings = await getLoyaltySettings(ctx.workspaceId);
+    const tiers = getRedemptionTiers(settings);
+    const tier = tiers[p.tier_index];
+    if (!tier) return { success: false, error: "Invalid tier" };
+
+    const { data: member } = await ctx.admin
+      .from("loyalty_members")
+      .select("*")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("customer_id", ctx.customerId)
+      .single();
+    if (!member) return { success: false, error: "No loyalty member" };
+
+    const validation = validateRedemption(member, tier);
+    if (!validation.valid) return { success: false, error: validation.error };
+
+    const { data: order } = await ctx.admin.from("orders")
+      .select("order_number, total_cents, financial_status")
+      .eq("workspace_id", ctx.workspaceId).eq("shopify_order_id", p.shopify_order_id).single();
+    if (!order) return { success: false, error: "Order not found" };
+    if (order.financial_status === "refunded") return { success: false, error: "Order already fully refunded" };
+
+    const amountCents = tier.discount_value * 100;
+    const reason = `Loyalty redemption — ${tier.points_cost} points for $${tier.discount_value} partial refund on renewal order #${order.order_number}`;
+
+    const refund = await partialRefundByAmount(ctx.workspaceId, p.shopify_order_id, amountCents, reason);
+    if (!refund.success) return { ...refund, summary: undefined };
+
+    await spendPoints(member, tier.points_cost, `Redeemed for partial refund on order #${order.order_number}`, null);
+
+    await ctx.admin.from("loyalty_redemptions").insert({
+      workspace_id: ctx.workspaceId,
+      member_id: member.id,
+      reward_tier: tier.label,
+      points_spent: tier.points_cost,
+      discount_code: `REFUND-${order.order_number}-${Date.now()}`,
+      shopify_discount_id: null,
+      discount_value: tier.discount_value,
+      status: "redeemed_as_refund",
+      used_at: new Date().toISOString(),
+    });
+
+    const newBalance = Math.max(0, (member.points_balance || 0) - tier.points_cost);
+    return {
+      success: true,
+      summary: `Redeemed ${tier.points_cost} points for $${tier.discount_value} partial refund on order #${order.order_number} (balance: ${newBalance} pts)`,
+    };
+  },
+
+  pause_timed: async (ctx, p) => {
+    const { appstleSubscriptionAction } = await import("@/lib/appstle");
+    if (!p.contract_id) return { success: false, error: "Missing contract_id" };
+    if (p.pause_days !== 30 && p.pause_days !== 60) return { success: false, error: "pause_days must be 30 or 60" };
+
+    const r = await appstleSubscriptionAction(
+      ctx.workspaceId, p.contract_id, "pause",
+      `Customer requested ${p.pause_days}-day pause after renewal charge`,
+    );
+    if (!r.success) return { ...r, summary: undefined };
+
+    const resumeAt = new Date(Date.now() + p.pause_days * 86400000);
+    await ctx.admin.from("subscriptions")
+      .update({
+        status: "paused",
+        pause_resume_at: resumeAt.toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("shopify_contract_id", p.contract_id);
+
+    const resumeLabel = resumeAt.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+    return { success: true, summary: `Paused for ${p.pause_days} days (auto-resumes ${resumeLabel})` };
+  },
+
   reactivate: async (ctx, p) => {
     const { appstleSubscriptionAction } = await import("@/lib/appstle");
     const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
@@ -814,12 +896,19 @@ async function verifyActionInDB(
         .select("status").eq("shopify_contract_id", action.contract_id).single();
       return data?.status === "active";
     }
-    case "partial_refund": {
+    case "partial_refund":
+    case "redeem_points_as_refund": {
       // Check if order financial_status changed
       if (!action.shopify_order_id) return true;
       const { data } = await admin.from("orders")
         .select("financial_status").eq("shopify_order_id", action.shopify_order_id).single();
       return data?.financial_status === "partially_refunded" || data?.financial_status === "refunded";
+    }
+    case "pause_timed": {
+      if (!action.contract_id) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("status").eq("shopify_contract_id", action.contract_id).single();
+      return data?.status === "paused";
     }
     case "apply_coupon":
     case "apply_loyalty_coupon": {
