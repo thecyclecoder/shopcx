@@ -59,24 +59,26 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
 type Preset = "today" | "yesterday" | "this_month" | "last_month" | "custom";
 
 function getPresetDates(preset: Preset): { start: string; end: string } {
-  const now = new Date();
-  const today = now.toISOString().slice(0, 10);
+  // Use Central time for date boundaries to match snapshot crons
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+  const [y, m] = today.split("-").map(Number);
 
   switch (preset) {
     case "today":
       return { start: today, end: today };
     case "yesterday": {
-      const y = new Date(now); y.setDate(y.getDate() - 1);
-      const yd = y.toISOString().slice(0, 10);
+      const yd = new Date(y, m - 1, Number(today.split("-")[2]) - 1).toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
       return { start: yd, end: yd };
     }
     case "this_month": {
-      const first = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+      const first = `${y}-${String(m).padStart(2, "0")}-01`;
       return { start: first, end: today };
     }
     case "last_month": {
-      const firstLast = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().slice(0, 10);
-      const lastDay = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().slice(0, 10);
+      const lm = m === 1 ? 12 : m - 1;
+      const ly = m === 1 ? y - 1 : y;
+      const firstLast = `${ly}-${String(lm).padStart(2, "0")}-01`;
+      const lastDay = new Date(y, m - 1, 0).toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
       return { start: firstLast, end: lastDay };
     }
     default:
@@ -88,7 +90,7 @@ export default function ROASDashboard() {
   const workspace = useWorkspace();
   const [data, setData] = useState<ROASData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [preset, setPreset] = useState<Preset>("this_month");
+  const [preset, setPreset] = useState<Preset>("today");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
 
