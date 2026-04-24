@@ -110,6 +110,8 @@ export async function createForecast(params: {
     source: params.source || "webhook",
     forecast_type: params.forecastType || "renewal",
     status: "pending",
+    static_revenue_cents: revenueCents,
+    static_date: dateOnly,
   }).select("id").single();
 
   return inserted?.id || null;

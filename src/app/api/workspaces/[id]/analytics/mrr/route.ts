@@ -26,15 +26,17 @@ export async function GET(
   const days = Math.ceil((endDate.getTime() - startDate.getTime()) / 86400000);
 
   // ── Fetch all forecasts in date range ──
+  // Need both expected_date (current) and static_date (original) for dual-column display
+  const rangeStart = startDate.toISOString().slice(0, 10);
+  const rangeEnd = endDate.toISOString().slice(0, 10);
   let allForecasts: any[] = [];
   let offset = 0;
   while (true) {
     const { data } = await admin
       .from("billing_forecasts")
-      .select("expected_date, expected_revenue_cents, actual_revenue_cents, status, forecast_type, created_from, shopify_contract_id")
+      .select("expected_date, expected_revenue_cents, actual_revenue_cents, status, forecast_type, created_from, shopify_contract_id, static_date, static_revenue_cents")
       .eq("workspace_id", workspaceId)
-      .gte("expected_date", startDate.toISOString().slice(0, 10))
-      .lt("expected_date", endDate.toISOString().slice(0, 10))
+      .or(`and(expected_date.gte.${rangeStart},expected_date.lt.${rangeEnd}),and(static_date.gte.${rangeStart},static_date.lt.${rangeEnd})`)
       .range(offset, offset + 999);
     if (!data || data.length === 0) break;
     allForecasts.push(...data);
@@ -112,13 +114,29 @@ export async function GET(
   }
 
   // Populate from forecasts
+  // Static uses static_date/static_revenue_cents (immutable, set at creation)
+  // Expected uses expected_date/expected_revenue_cents (mutable, reflects current state)
+  const seen = new Set<string>(); // dedup: a forecast may appear twice if static_date != expected_date
   for (const f of allForecasts) {
+    const fId = f.shopify_contract_id + "|" + f.status + "|" + f.expected_date;
+
+    // ── Static column: bucket by original date with original revenue ──
+    const staticDate = f.static_date || f.expected_date;
+    const staticRev = f.static_revenue_cents ?? f.expected_revenue_cents ?? 0;
+    if (dailyMap[staticDate] && f.forecast_type !== "dunning" && f.forecast_type !== "paused") {
+      dailyMap[staticDate].static_count++;
+      dailyMap[staticDate].static_revenue += staticRev;
+    }
+
+    // ── Expected/collected/etc: bucket by current expected_date ──
+    if (seen.has(fId)) continue;
+    seen.add(fId);
+
     if (!dailyMap[f.expected_date]) {
       if (days > 90) dailyMap[f.expected_date] = emptyDay(f.expected_date);
       else continue;
     }
     const day = dailyMap[f.expected_date];
-
     const rev = f.expected_revenue_cents || 0;
 
     if (f.forecast_type === "dunning") {
@@ -134,15 +152,11 @@ export async function GET(
       day.paused_count++;
       day.paused_revenue += rev;
     } else {
-      // Renewal — static = all renewals at seed time, expected = still pending/collected/failed
-      day.static_count++;
-      day.static_revenue += rev;
-
       if (f.status === "pending") {
         day.expected_count++;
         day.expected_revenue += rev;
       } else if (f.status === "collected") {
-        day.expected_count++; // Was expected
+        day.expected_count++;
         day.expected_revenue += rev;
         day.collected_count++;
         day.collected_revenue += f.actual_revenue_cents || 0;
@@ -152,9 +166,8 @@ export async function GET(
         day.failed_count++;
       } else if (f.status === "cancelled") {
         day.cancelled_count++;
-        // Not in expected — was removed
       } else if (f.status === "paused") {
-        // Not in expected — was paused
+        // Not in expected
       }
     }
   }
