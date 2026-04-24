@@ -13,14 +13,16 @@ export async function GET(
 
   const admin = createAdminClient();
   const url = new URL(request.url);
-  const startDate = url.searchParams.get("start") || new Date().toISOString().slice(0, 10);
+  // Use Central time for "today" to match snapshot boundaries
+  const centralToday = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+  const startDate = url.searchParams.get("start") || centralToday;
   const endDate = url.searchParams.get("end") || startDate;
 
   // ── Shopify checkout revenue (new subs + one-time, excludes recurring) ──
   // For today: live query from orders table (snapshot cron runs at 1 AM)
   // For past days: daily_order_snapshots
   const shopifyRows: Record<string, unknown>[] = [];
-  const today = new Date().toISOString().slice(0, 10);
+  const today = centralToday;
   let offset = 0;
 
   // Snapshots for all days (today's Amazon/Meta updated every 5 min by cron)
