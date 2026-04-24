@@ -223,6 +223,18 @@ export default function ROASDashboard() {
               color="text-amber-600 dark:text-amber-400"
             />
             <StatCard
+              label="CAC"
+              value={(() => {
+                const orders = s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count;
+                return orders > 0 && s.total_spend_cents > 0 ? fmt(s.total_spend_cents / orders) : "—";
+              })()}
+              sub={(() => {
+                const orders = s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count;
+                return orders > 0 && s.total_spend_cents > 0 ? `${fmt(s.total_spend_cents)} / ${orders} orders` : "No spend data";
+              })()}
+              color="text-red-500 dark:text-red-400"
+            />
+            <StatCard
               label="LTV:CAC"
               value={s.blended_ltv_cents > 0 && s.total_spend_cents > 0 && (s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count) > 0
                 ? `${(s.blended_ltv_cents / (s.total_spend_cents / (s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count))).toFixed(1)}x`
