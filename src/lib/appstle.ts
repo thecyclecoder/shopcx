@@ -193,8 +193,8 @@ export async function appstleUpdateNextBillingDate(
 
   try {
     const res = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-next-billing-date?contractId=${contractId}&nextBillingDate=${nextBillingDate}&api_key=${creds.apiKey}`,
-      { method: "PUT", headers: { "X-API-Key": creds.apiKey } },
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-date?contractId=${contractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(nextBillingDate)}`,
+      { method: "PUT", headers: { "X-API-Key": creds.apiKey }, cache: "no-store" },
     );
 
     if (!res.ok && res.status !== 204) {
