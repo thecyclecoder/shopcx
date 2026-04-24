@@ -289,7 +289,7 @@ When you have enough data, respond with ONLY valid JSON (no tool calls):
 
 // ── Tool Execution ──
 
-async function executeToolCall(
+export async function executeToolCall(
   name: string,
   input: Record<string, unknown>,
   workspaceId: string,
@@ -347,7 +347,7 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       .in("status", ["active", "paused", "cancelled"])
       .order("created_at", { ascending: false }),
     admin.from("orders")
-      .select("order_number, total_cents, line_items, created_at, financial_status, shopify_order_id, fulfillments")
+      .select("order_number, total_cents, line_items, discount_codes, created_at, financial_status, shopify_order_id, fulfillments")
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .order("created_at", { ascending: false }).limit(5),
     admin.from("loyalty_members")
@@ -399,7 +399,8 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       const date = new Date(o.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
       const fulfillments = (o.fulfillments as { tracking_number?: string; status?: string }[] || []);
       const tracking = fulfillments[0]?.tracking_number ? ` | tracking: ${fulfillments[0].tracking_number}` : "";
-      parts.push(`- #${o.order_number} | ${date} | $${((o.total_cents || 0) / 100).toFixed(2)} | ${o.financial_status || "?"} | ${items}${tracking} | shopify_order_id: ${o.shopify_order_id || "?"}`);
+      const coupons = (o.discount_codes as string[] | null)?.length ? ` | coupons: ${(o.discount_codes as string[]).join(", ")}` : "";
+      parts.push(`- #${o.order_number} | ${date} | $${((o.total_cents || 0) / 100).toFixed(2)} | ${o.financial_status || "?"} | ${items}${coupons}${tracking} | shopify_order_id: ${o.shopify_order_id || "?"}`);
     }
   } else {
     parts.push("\nRECENT ORDERS: None");
