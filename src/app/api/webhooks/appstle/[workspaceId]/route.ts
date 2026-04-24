@@ -571,35 +571,27 @@ async function handleBillingEvent(
         succeeded: false,
       });
 
-      // If terminal error, find which card was used and mark it terminal on the cycle
-      if (errorCode && billingAttemptId) {
+      // If terminal error, mark the card we just attempted as terminal on the cycle.
+      // Appstle's webhook payload never contains last4, so we read it from the cycle row
+      // (inngest writes cycle.last_attempted_last4 whenever it fires a billing attempt).
+      if (errorCode) {
         const terminal = await isTerminalErrorCode(workspaceId, errorCode);
         if (terminal) {
-          // Look up the card from the optimistic log entry (logged when we fired the attempt)
-          const { data: originalAttempt } = await admin.from("payment_failures")
-            .select("payment_method_last4, payment_method_id")
-            .eq("workspace_id", workspaceId)
-            .eq("shopify_contract_id", contractId)
-            .eq("billing_attempt_id", billingAttemptId)
-            .not("payment_method_last4", "is", null)
-            .order("created_at", { ascending: true })
-            .limit(1)
-            .maybeSingle();
-
-          if (originalAttempt?.payment_method_last4) {
-            // Add to terminal_cards on the cycle (uses dedupeKey-style matching)
-            const { data: cycle } = await admin.from("dunning_cycles")
-              .select("terminal_cards")
-              .eq("id", existingCycle.id)
-              .single();
+          const { data: cycle } = await admin.from("dunning_cycles")
+            .select("terminal_cards, last_attempted_last4")
+            .eq("id", existingCycle.id)
+            .single();
+          const cardKey = cycle?.last_attempted_last4;
+          if (cardKey) {
             const existing = (cycle?.terminal_cards as string[]) || [];
-            const cardKey = originalAttempt.payment_method_last4; // Use last4 as identifier
             if (!existing.includes(cardKey)) {
               await admin.from("dunning_cycles")
                 .update({ terminal_cards: [...existing, cardKey] })
                 .eq("id", existingCycle.id);
               console.log(`[Dunning] Marked card ****${cardKey} as terminal (${errorCode}) on cycle ${existingCycle.id}`);
             }
+          } else {
+            console.warn(`[Dunning] Terminal error ${errorCode} on cycle ${existingCycle.id} but no last_attempted_last4 set — can't mark card terminal`);
           }
         }
       }

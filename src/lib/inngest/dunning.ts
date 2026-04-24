@@ -301,10 +301,13 @@ export const dunningPaymentFailed = inngest.createFunction(
         console.log(`[Dunning] Billing attempt ${attemptId} for ${shopify_contract_id} card ${card.last4}: ${billingRes.success ? "accepted" : "rejected"} by Appstle${billingRes.error ? ` (${billingRes.error})` : ""}`);
 
         // Track tried card in DB (survives function restarts)
+        // last_attempted_last4 is how the billing-failure webhook identifies which card just failed
+        // (Appstle's webhook payload never includes last4).
         const updatedTried = [...dbCardsTried, card.dedupeKey];
         await updateDunningCycle(cycleCheck.id, {
           cards_tried: updatedTried,
           billing_attempt_id: attemptId,
+          last_attempted_last4: card.last4,
           next_retry_at: null, // Clear — we just attempted
         });
       });
@@ -975,7 +978,7 @@ export const dunningPaydayRetryCron = inngest.createFunction(
               succeeded: false,
             });
 
-            await updateDunningCycle(cycle.id, { billing_attempt_id: attemptId });
+            await updateDunningCycle(cycle.id, { billing_attempt_id: attemptId, last_attempted_last4: card.last4 });
           } catch (e) {
             console.error(`[Dunning Payday] Card ${card.last4} failed for ${cycle.shopify_contract_id}:`, e);
           }
