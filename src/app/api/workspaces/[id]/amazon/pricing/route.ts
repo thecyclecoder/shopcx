@@ -45,6 +45,10 @@ export async function GET(
     image_url: string | null;
     current_price: number | null;
     business_price: number | null;
+    list_price: number | null;
+    sale_price: number | null;
+    sale_start_at: string | null;
+    sale_end_at: string | null;
     currency: string;
   }> = [];
 
@@ -59,7 +63,7 @@ export async function GET(
       // Use getListingOffers for each SKU
       for (const asin of batch) {
         if (!asin.sku) {
-          results.push({ ...asin, current_price: null, business_price: null, currency: "USD" });
+          results.push({ ...asin, current_price: null, business_price: null, list_price: null, sale_price: null, sale_start_at: null, sale_end_at: null, currency: "USD" });
           continue;
         }
 
@@ -78,23 +82,36 @@ export async function GET(
             const b2bOffer = offers.find((o: Record<string, unknown>) => o.audience === "B2B");
             const ourPrice = allOffer?.our_price?.[0]?.schedule?.[0]?.value_with_tax ?? null;
             const bizPrice = b2bOffer?.our_price?.[0]?.schedule?.[0]?.value_with_tax ?? null;
+            // list_price uses `value`, not `value_with_tax`
+            const listEntry = data.attributes?.list_price?.[0];
+            const listPrice = listEntry?.value ?? listEntry?.value_with_tax ?? null;
+            // discounted_price (sale) lives inside the ALL audience purchasable_offer
+            const discounted = (allOffer?.discounted_price as Array<{ schedule?: Array<{ value_with_tax?: number; start_at?: string; end_at?: string }> }>) || [];
+            const sched = discounted[0]?.schedule?.[0];
+            const salePrice = sched?.value_with_tax ?? null;
+            const saleStart = sched?.start_at ?? null;
+            const saleEnd = sched?.end_at ?? null;
 
             results.push({
               ...asin,
               current_price: ourPrice != null ? parseFloat(String(ourPrice)) : null,
               business_price: bizPrice != null ? parseFloat(String(bizPrice)) : null,
+              list_price: listPrice != null ? parseFloat(String(listPrice)) : null,
+              sale_price: salePrice != null ? parseFloat(String(salePrice)) : null,
+              sale_start_at: saleStart,
+              sale_end_at: saleEnd,
               currency: allOffer?.currency || "USD",
             });
           } else {
-            results.push({ ...asin, current_price: null, business_price: null, currency: "USD" });
+            results.push({ ...asin, current_price: null, business_price: null, list_price: null, sale_price: null, sale_start_at: null, sale_end_at: null, currency: "USD" });
           }
         } catch {
-          results.push({ ...asin, current_price: null, business_price: null, currency: "USD" });
+          results.push({ ...asin, current_price: null, business_price: null, list_price: null, sale_price: null, sale_start_at: null, sale_end_at: null, currency: "USD" });
         }
       }
     } catch {
       for (const asin of batch) {
-        results.push({ ...asin, current_price: null, business_price: null, currency: "USD" });
+        results.push({ ...asin, current_price: null, business_price: null, list_price: null, sale_price: null, sale_start_at: null, sale_end_at: null, currency: "USD" });
       }
     }
   }
@@ -117,7 +134,16 @@ export async function POST(
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();
-  const { updates } = body as { updates: Array<{ sku: string; price: number; business_price?: number }> };
+  const { updates } = body as {
+    updates: Array<{
+      sku: string;
+      price: number;
+      business_price?: number;
+      sale_price?: number | null;
+      sale_start_at?: string | null;
+      sale_end_at?: string | null;
+    }>;
+  };
 
   if (!updates?.length) return NextResponse.json({ error: "No updates" }, { status: 400 });
 
@@ -141,16 +167,49 @@ export async function POST(
         continue;
       }
 
+      // Validate sale price
+      if (update.sale_price != null) {
+        if (update.sale_price <= 0) {
+          results.push({ sku: update.sku, success: false, error: "Sale price must be greater than zero" });
+          continue;
+        }
+        if (update.sale_price >= update.price) {
+          results.push({ sku: update.sku, success: false, error: "Sale price must be lower than the regular price" });
+          continue;
+        }
+        if (!update.sale_start_at || !update.sale_end_at) {
+          results.push({ sku: update.sku, success: false, error: "Sale price requires start and end dates" });
+          continue;
+        }
+        if (new Date(update.sale_end_at) <= new Date(update.sale_start_at)) {
+          results.push({ sku: update.sku, success: false, error: "Sale end date must be after start date" });
+          continue;
+        }
+      }
+
       // Only set ALL audience price — removes any B2B pricing
       // (B2B price should never be lower than standard)
-      const offerValue: Record<string, unknown>[] = [
-        {
-          currency: "USD",
-          audience: "ALL",
-          our_price: [{ schedule: [{ value_with_tax: update.price }] }],
-          marketplace_id: conn.marketplace_id,
-        },
-      ];
+      // Replace-and-omit clears any existing discounted_price unless we include it explicitly.
+      const allOffer: Record<string, unknown> = {
+        currency: "USD",
+        audience: "ALL",
+        our_price: [{ schedule: [{ value_with_tax: update.price }] }],
+        marketplace_id: conn.marketplace_id,
+      };
+      if (update.sale_price != null && update.sale_start_at && update.sale_end_at) {
+        allOffer.discounted_price = [
+          {
+            schedule: [
+              {
+                value_with_tax: update.sale_price,
+                start_at: update.sale_start_at,
+                end_at: update.sale_end_at,
+              },
+            ],
+          },
+        ];
+      }
+      const offerValue: Record<string, unknown>[] = [allOffer];
 
       const patchBody = {
         productType: "PRODUCT",
@@ -164,6 +223,13 @@ export async function POST(
             op: "delete",
             path: "/attributes/purchasable_offer",
             value: [{ audience: "B2B", marketplace_id: conn.marketplace_id }],
+          },
+          // List price (MSRP / strikethrough) — kept in sync with selling price.
+          // Note: list_price uses `value`, not `value_with_tax`.
+          {
+            op: "replace",
+            path: "/attributes/list_price",
+            value: [{ value: update.price, currency: "USD", marketplace_id: conn.marketplace_id }],
           },
         ],
       };
