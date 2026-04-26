@@ -358,10 +358,21 @@ const directActionHandlers: Record<
 
   update_line_item_price: async (ctx, p) => {
     const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
+    const { getAppstleConfig } = await import("@/lib/subscription-items");
 
-    // Resolve which variant is currently on the subscription from crisis context.
-    // Priority: tier2 swap → tier1 swap → default swap from crisis event
-    let variantId: string | undefined;
+    if (!p.contract_id) return { success: false, error: "Missing contract_id" };
+    if (p.base_price_cents == null) return { success: false, error: "Missing base_price_cents" };
+
+    // Build candidate variants in priority order:
+    //   1. Sonnet's explicit p.variant_id (most accurate when actions are chained)
+    //   2. Crisis tier2 / tier1 swap targets
+    //   3. Default swap variant from crisis event
+    //   4. Real (non-shipping-protection) items currently on the subscription
+    const candidates: string[] = [];
+    const pushUnique = (v: string | undefined | null) => {
+      if (v && !candidates.includes(String(v))) candidates.push(String(v));
+    };
+    pushUnique(p.variant_id);
 
     const { data: crisisAction } = await ctx.admin.from("crisis_customer_actions")
       .select("tier1_swapped_to, tier2_swapped_to, crisis_id")
@@ -369,34 +380,101 @@ const directActionHandlers: Record<
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
-
     if (crisisAction) {
-      const t2 = crisisAction.tier2_swapped_to as { variantId?: string } | null;
-      const t1 = crisisAction.tier1_swapped_to as { variantId?: string } | null;
-      if (t2?.variantId) {
-        variantId = t2.variantId;
-      } else if (t1?.variantId) {
-        variantId = t1.variantId;
-      } else if (crisisAction.crisis_id) {
-        // No tier response yet — use default swap from crisis event
+      pushUnique((crisisAction.tier2_swapped_to as { variantId?: string } | null)?.variantId);
+      pushUnique((crisisAction.tier1_swapped_to as { variantId?: string } | null)?.variantId);
+      if (crisisAction.crisis_id) {
         const { data: crisis } = await ctx.admin.from("crisis_events")
-          .select("default_swap_variant_id").eq("id", crisisAction.crisis_id).single();
-        if (crisis?.default_swap_variant_id) variantId = crisis.default_swap_variant_id;
+          .select("default_swap_variant_id").eq("id", crisisAction.crisis_id).maybeSingle();
+        pushUnique(crisis?.default_swap_variant_id);
       }
     }
 
-    // Final fallback: first real item on the subscription
-    if (!variantId) {
-      const { data: sub } = await ctx.admin.from("subscriptions").select("items").eq("shopify_contract_id", p.contract_id!).single();
-      const items = (sub?.items as { variant_id?: string; title?: string }[]) || [];
-      const realItems = items.filter(i => !(i.title || "").toLowerCase().includes("shipping protection"));
-      variantId = realItems[0]?.variant_id;
+    const { data: sub } = await ctx.admin.from("subscriptions").select("items").eq("shopify_contract_id", p.contract_id).single();
+    const subItems = (sub?.items as { variant_id?: string; title?: string }[]) || [];
+    const subRealItems = subItems.filter(i => !(i.title || "").toLowerCase().includes("shipping protection"));
+    for (const it of subRealItems) pushUnique(it.variant_id);
+
+    // Fetch the live contract from Appstle ONCE — source of truth for current line GIDs.
+    // After a swap, our DB items/variants may match but the customer-facing variant id
+    // changes, so we always resolve lineId from live Appstle data.
+    const config = await getAppstleConfig(ctx.workspaceId);
+    if (!config) return { success: false, error: "Appstle not configured" };
+    let liveLines: { id: string; variantId: string; title?: string }[] = [];
+    try {
+      const detailRes = await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${p.contract_id}?api_key=${config.apiKey}`,
+        { headers: { "X-API-Key": config.apiKey }, cache: "no-store" },
+      );
+      if (detailRes.ok) {
+        const detail = await detailRes.json();
+        const nodes = (detail?.lines?.nodes || []) as { id?: string; variantId?: string; title?: string }[];
+        liveLines = nodes
+          .filter(n => n.id && n.variantId)
+          .map(n => ({ id: n.id!, variantId: (n.variantId!.split("/").pop() || n.variantId!) as string, title: n.title }));
+      }
+    } catch (e) {
+      console.error("update_line_item_price: live contract fetch failed:", e);
     }
 
-    if (!variantId) return { success: false, error: "Could not determine which line item to update" };
+    // Try each candidate against the live contract.
+    for (const variantId of candidates) {
+      const match = liveLines.find(l => String(l.variantId) === String(variantId));
+      if (match) {
+        const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, variantId, p.base_price_cents, match.id);
+        if (r.success) return { ...r, summary: `Updated base price to $${((p.base_price_cents || 0) / 100).toFixed(2)} on variant ${variantId}` };
+        // Different error (not a lineId resolution issue) — surface it
+        if (!String(r.error || "").toLowerCase().includes("could not resolve lineid")) return r;
+      }
+    }
 
-    const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id!, variantId, p.base_price_cents!);
-    return { ...r, summary: `Updated base price to $${((p.base_price_cents || 0) / 100).toFixed(2)}` };
+    // Self-heal: grandfathered pricing applies to variants of the same product
+    // (e.g. all flavors of Superfood Tabs share grandfathered pricing). If no
+    // candidate variant matches the live contract, look up the product_id of
+    // a candidate and find a live line whose variant belongs to that product.
+    // Covers the case where the customer swapped back from a crisis substitute
+    // and the crisis context is now stale.
+    const liveReal = liveLines.filter(l => !(l.title || "").toLowerCase().includes("shipping protection"));
+    if (candidates.length > 0 && liveReal.length > 0) {
+      // Find the product_id for any candidate variant by scanning the products table.
+      const { data: products } = await ctx.admin.from("products")
+        .select("shopify_product_id, variants")
+        .eq("workspace_id", ctx.workspaceId);
+      let candidateProductId: string | null = null;
+      for (const candidate of candidates) {
+        for (const prod of products || []) {
+          const variants = (prod.variants || []) as { id?: string }[];
+          if (variants.some(v => String(v.id) === String(candidate))) {
+            candidateProductId = prod.shopify_product_id as string;
+            break;
+          }
+        }
+        if (candidateProductId) break;
+      }
+
+      if (candidateProductId) {
+        // Build variant_id → product_id map from our products table
+        const variantToProduct = new Map<string, string>();
+        for (const prod of products || []) {
+          for (const v of (prod.variants || []) as { id?: string }[]) {
+            if (v.id) variantToProduct.set(String(v.id), prod.shopify_product_id as string);
+          }
+        }
+        const sameProductLine = liveReal.find(l => variantToProduct.get(String(l.variantId)) === candidateProductId);
+        if (sameProductLine) {
+          const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, sameProductLine.variantId, p.base_price_cents, sameProductLine.id);
+          if (r.success) return { ...r, summary: `Updated base price to $${((p.base_price_cents || 0) / 100).toFixed(2)} on variant ${sameProductLine.variantId} (self-healed: candidate variant was stale, matched same product)` };
+          return r;
+        }
+      }
+    }
+
+    return {
+      success: false,
+      error: liveReal.length === 0
+        ? "Live contract has no real line items"
+        : `Could not match any candidate variant against ${liveReal.length} live line items, and no live line shares a product with any candidate. candidates=[${candidates.join(", ")}], live=[${liveReal.map(l => l.variantId).join(", ")}]`,
+    };
   },
 
   create_return: async (ctx, p) => {
