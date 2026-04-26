@@ -637,7 +637,7 @@ export const demographicsSnapshotBuilder = inngest.createFunction(
     id: "demographics-snapshot-builder",
     concurrency: [{ limit: 1 }],
     triggers: [
-      { cron: "0 8 * * *" },  // 3 AM Central = 8 UTC
+      { cron: "0 8 * * 0" },  // Weekly — Sundays at 3 AM Central (8 UTC)
       { event: "demographics/rebuild-snapshots" },
     ],
   },
