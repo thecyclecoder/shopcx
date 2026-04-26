@@ -46,14 +46,10 @@ export async function POST(
     .eq("id", session.customer_id)
     .single();
 
-  const { data: orders } = await admin
-    .from("orders")
-    .select("id, total_price_cents")
-    .eq("customer_id", session.customer_id)
-    .eq("workspace_id", session.workspace_id);
-
-  const totalOrders = orders?.length || 0;
-  const ltv = orders?.reduce((sum, o) => sum + (o.total_price_cents || 0), 0) || 0;
+  const { getCustomerStats } = await import("@/lib/customer-stats");
+  const stats = await getCustomerStats(session.customer_id);
+  const totalOrders = stats.total_orders;
+  const ltv = stats.ltv_cents;
 
   const { data: sub } = await admin
     .from("subscriptions")

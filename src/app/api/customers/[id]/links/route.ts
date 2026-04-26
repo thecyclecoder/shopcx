@@ -38,12 +38,23 @@ export async function GET(
     .eq("workspace_id", workspaceId)
     .eq("group_id", link.group_id);
 
-  const linked = (groupLinks || [])
+  const linked: Record<string, unknown>[] = (groupLinks || [])
     .filter((l) => l.customer_id !== customerId)
     .map((l) => ({
       ...(l.customers as unknown as Record<string, unknown>),
       is_primary: l.is_primary,
     }));
+
+  // LTV + total_orders come live from the orders table.
+  if (linked.length) {
+    const { getCustomerStatsBatch } = await import("@/lib/customer-stats");
+    const ids = linked.map(c => c.id as string).filter(Boolean);
+    const stats = await getCustomerStatsBatch(ids);
+    for (const c of linked) {
+      const s = stats.get(c.id as string);
+      if (s) { c.ltv_cents = s.ltv_cents; c.total_orders = s.total_orders; }
+    }
+  }
 
   return NextResponse.json({ linked, group_id: link.group_id });
 }

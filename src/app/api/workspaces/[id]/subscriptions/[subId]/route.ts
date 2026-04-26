@@ -90,6 +90,15 @@ export async function GET(
     }
   }
 
+  // LTV + total_orders come live from the orders table (denormalized columns drift).
+  const customer = sub.customers as { id: string } | null;
+  if (customer?.id) {
+    const { getCustomerStats } = await import("@/lib/customer-stats");
+    const stats = await getCustomerStats(customer.id);
+    (sub.customers as Record<string, unknown>).ltv_cents = stats.ltv_cents;
+    (sub.customers as Record<string, unknown>).total_orders = stats.total_orders;
+  }
+
   return NextResponse.json({
     subscription: { ...sub, recovery_status },
     dunning_cycles: dunningCycles || [],

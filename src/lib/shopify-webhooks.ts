@@ -264,6 +264,10 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
   const addresses = payload.addresses as Record<string, unknown>[] | undefined;
 
   // Upsert customer
+  // NOTE: total_orders / ltv_cents are NOT trusted from this webhook payload.
+  // They're computed live from the orders table by getCustomerStats() at read time
+  // (see src/lib/customer-stats.ts). The columns below remain for backward compat
+  // with code paths that haven't been migrated, but should not be relied on.
   const record: Record<string, unknown> = {
     workspace_id: workspaceId,
     shopify_customer_id: shopifyCustomerId,

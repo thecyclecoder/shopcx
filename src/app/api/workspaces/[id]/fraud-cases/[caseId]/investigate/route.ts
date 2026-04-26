@@ -76,11 +76,19 @@ export async function GET(
   const customerIdArray = [...allCustomerIds];
 
   // Load all customer profiles
-  const { data: customers } = await admin
+  const { data: customersBase } = await admin
     .from("customers")
-    .select("id, email, first_name, last_name, phone, retention_score, subscription_status, total_orders, ltv_cents, default_address, shopify_customer_id")
+    .select("id, email, first_name, last_name, phone, retention_score, subscription_status, default_address, shopify_customer_id")
     .eq("workspace_id", workspaceId)
     .in("id", customerIdArray.length > 0 ? customerIdArray : ["__none__"]);
+  // LTV + total_orders come live from the orders table — single batch query.
+  const { getCustomerStatsBatch } = await import("@/lib/customer-stats");
+  const statsMap = await getCustomerStatsBatch((customersBase || []).map(c => c.id));
+  const customers = (customersBase || []).map(c => ({
+    ...c,
+    total_orders: statsMap.get(c.id)?.total_orders || 0,
+    ltv_cents: statsMap.get(c.id)?.ltv_cents || 0,
+  }));
 
   // Determine which customers are linked vs just in the case
   const linkedIds = new Set(customerIdArray.filter(id => !caseCustomerIds.includes(id)));

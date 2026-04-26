@@ -31,6 +31,14 @@ export async function GET(
     return NextResponse.json({ error: "Return not found" }, { status: 404 });
   }
 
+  // LTV comes live from the orders table.
+  const customer = ret.customers as { id: string } | null;
+  if (customer?.id) {
+    const { getCustomerStats } = await import("@/lib/customer-stats");
+    const stats = await getCustomerStats(customer.id);
+    (ret.customers as Record<string, unknown>).ltv_cents = stats.ltv_cents;
+  }
+
   return NextResponse.json(ret);
 }
 

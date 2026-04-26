@@ -10,6 +10,58 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
+interface ShippingAddr {
+  address1: string;
+  city: string;
+  state: string;
+  zip: string;
+  country: string;
+  name: string | null;
+  phone: string | null;
+}
+
+/**
+ * Resolve a usable shipping address for an order. Tries (in order):
+ *   1. order.shipping_address (most reliable for synced orders)
+ *   2. fulfillments[0].destination (legacy fallback)
+ * Returns null if no usable address is found.
+ */
+async function resolveOrderShippingAddress(admin: Admin, orderId: string): Promise<ShippingAddr | null> {
+  const { data } = await admin.from("orders")
+    .select("shipping_address, fulfillments")
+    .eq("id", orderId).single();
+  if (!data) return null;
+
+  const ship = (data.shipping_address || null) as Record<string, unknown> | null;
+  if (ship?.address1 && ship.city && (ship.zip || ship.postal_code)) {
+    return {
+      address1: ship.address1 as string,
+      city: ship.city as string,
+      state: (ship.province_code || ship.provinceCode || ship.province || "") as string,
+      zip: (ship.zip || ship.postal_code) as string,
+      country: (ship.country_code || ship.countryCodeV2 || ship.country_code_v2 || ship.country || "US") as string,
+      name: (ship.name || [ship.first_name, ship.last_name].filter(Boolean).join(" ") || null) as string | null,
+      phone: (ship.phone || null) as string | null,
+    };
+  }
+
+  const fulfillments = (data.fulfillments || []) as { destination?: Record<string, unknown> }[];
+  const dest = fulfillments[0]?.destination;
+  if (dest?.address1 && dest.city && dest.zip) {
+    return {
+      address1: dest.address1 as string,
+      city: dest.city as string,
+      state: (dest.state || dest.province_code || dest.province || "") as string,
+      zip: dest.zip as string,
+      country: (dest.country || dest.country_code || "US") as string,
+      name: (dest.name || null) as string | null,
+      phone: (dest.phone || null) as string | null,
+    };
+  }
+
+  return null;
+}
+
 /** Translate raw billing intervals to customer-friendly labels */
 function translateIntervals(text: string): string {
   return text
@@ -539,19 +591,22 @@ async function fetchCustomerData(admin: Admin, wsId: string, custId: string): Pr
   }
 
   const { data: c } = await admin.from("customers")
-    .select("id, email, first_name, last_name, ltv_cents, total_orders, retention_score, subscription_status")
+    .select("id, email, first_name, last_name, retention_score, subscription_status")
     .eq("id", custId).single();
   if (!c) return null;
 
-  // Combine LTV + orders from linked profiles
-  if (linkedIds.length > 1) {
-    const { data: linked } = await admin.from("customers")
-      .select("ltv_cents, total_orders").in("id", linkedIds);
-    c.ltv_cents = (linked || []).reduce((s, l) => s + (l.ltv_cents || 0), 0);
-    c.total_orders = (linked || []).reduce((s, l) => s + (l.total_orders || 0), 0);
-  }
+  // LTV + order count come live from the orders table — the denormalized columns
+  // on `customers` keep drifting (cleared by Shopify customer/update webhooks
+  // that arrive without orders_count/total_spent). getCustomerStats covers
+  // linked accounts too.
+  const { getCustomerStats } = await import("@/lib/customer-stats");
+  const stats = await getCustomerStats(custId);
 
-  return c as CustomerData;
+  return {
+    ...c,
+    ltv_cents: stats.ltv_cents,
+    total_orders: stats.total_orders,
+  } as CustomerData;
 }
 
 async function fetchOrders(admin: Admin, wsId: string, custId: string, config: Record<string, unknown>): Promise<OrderData[]> {
@@ -1276,11 +1331,9 @@ async function handleApplyPolicy(
       try {
         const { getReturnShippingRate, isTestMode } = await import("@/lib/easypost");
         const testMode = await isTestMode(wsId);
-        const { data: dbOrder } = await admin.from("orders").select("fulfillments").eq("id", order.id).single();
-        const fulfillments = (dbOrder?.fulfillments || []) as { destination?: { address1?: string; city?: string; state?: string; zip?: string; country?: string; name?: string; phone?: string } }[];
-        const dest = fulfillments[0]?.destination;
+        const addr = await resolveOrderShippingAddress(admin, order.id);
 
-        if (dest?.address1 && dest?.city && dest?.state && dest?.zip) {
+        if (addr) {
           const lineItems = (order.line_items as { sku?: string; quantity?: number }[]) || [];
           const { data: products } = await admin.from("products").select("variants").eq("workspace_id", wsId);
           const weightItems = lineItems.map(li => {
@@ -1293,7 +1346,7 @@ async function handleApplyPolicy(
           });
 
           const rate = await getReturnShippingRate(wsId, {
-            customerAddress: { name: dest.name || "Customer", street1: dest.address1, city: dest.city, state: dest.state, zip: dest.zip, country: dest.country || "US", phone: dest.phone },
+            customerAddress: { name: addr.name || "Customer", street1: addr.address1, city: addr.city, state: addr.state, zip: addr.zip, country: addr.country, phone: addr.phone || undefined },
             lineItems: weightItems,
           });
 
@@ -1565,15 +1618,9 @@ async function offerException(
         const { getReturnShippingRate, isTestMode } = await import("@/lib/easypost");
         const testMode = await isTestMode(wsId);
 
-        // Get shipping address from order fulfillments
-        const { data: dbOrder } = await admin.from("orders")
-          .select("fulfillments")
-          .eq("id", order.id).single();
+        const addr = await resolveOrderShippingAddress(admin, order.id);
 
-        const fulfillments = (dbOrder?.fulfillments || []) as { destination?: { address1?: string; city?: string; state?: string; zip?: string; country?: string; name?: string; phone?: string } }[];
-        const dest = fulfillments[0]?.destination;
-
-        if (dest?.address1 && dest?.city && dest?.state && dest?.zip) {
+        if (addr) {
           const lineItems = (order.line_items as { sku?: string; quantity?: number }[]) || [];
           const { data: products } = await admin.from("products").select("variants").eq("workspace_id", wsId);
 
@@ -1588,13 +1635,13 @@ async function offerException(
 
           const rate = await getReturnShippingRate(wsId, {
             customerAddress: {
-              name: dest.name || "Customer",
-              street1: dest.address1,
-              city: dest.city,
-              state: dest.state,
-              zip: dest.zip,
-              country: dest.country || "US",
-              phone: dest.phone,
+              name: addr.name || "Customer",
+              street1: addr.address1,
+              city: addr.city,
+              state: addr.state,
+              zip: addr.zip,
+              country: addr.country,
+              phone: addr.phone || undefined,
             },
             lineItems: weightItems,
           });
@@ -1750,29 +1797,13 @@ async function handleInitiateReturn(
             labelUrl: label.labelUrl,
           });
 
-          // Email the label to the customer
-          try {
-            const { sendReturnLabelEmail } = await import("@/lib/easypost-email");
-            await sendReturnLabelEmail({
-              workspaceId: wsId,
-              toEmail: customer.email,
-              customerName: customer.first_name,
-              orderNumber: order.order_number,
-              labelUrl: label.labelUrl,
-              trackingNumber: label.trackingNumber,
-              carrier: label.carrier,
-              orderTotalCents: ctx.order_total_cents as number || order.total_cents,
-              labelCostCents: label.costCents,
-              netRefundCents: (ctx.order_total_cents as number || order.total_cents) - label.costCents,
-              resolutionType: resolution,
-            });
-          } catch (emailErr) {
-            console.error("Failed to send return label email:", emailErr);
-          }
-
-          labelInfo = `\nReturn label purchased: ${label.carrier} tracking ${label.trackingNumber}. Label emailed to customer. Cost: $${(label.costCents / 100).toFixed(2)}.`;
-          // Store label URL in context so AI response can include the link
+          // Label is delivered inline in this same conversation (chat or email reply).
+          // No separate label email — the customer is talking to us right now, so the
+          // link goes directly in the response below.
+          labelInfo = `\nReturn label purchased: ${label.carrier} tracking ${label.trackingNumber}. Cost: $${(label.costCents / 100).toFixed(2)}.`;
           ctx.label_url = label.labelUrl;
+          ctx.label_tracking_number = label.trackingNumber;
+          ctx.label_carrier = label.carrier;
         }
       } catch (labelErr) {
         console.error("Label purchase failed (non-fatal, return still created):", labelErr);
@@ -1799,12 +1830,12 @@ async function handleInitiateReturn(
     ? `\nApproximate breakdown: order $${((ctx.order_total_cents as number) / 100).toFixed(2)} minus ~$${(labelCostCents / 100).toFixed(2)} shipping = ~$${(netRefundCents / 100).toFixed(2)} ${resLabel}.`
     : "";
   const labelLinkInfo = labelUrl
-    ? `\nA return shipping label has been generated. Include this download link in your response: ${labelUrl}\nAlso mention that the label was sent to their email as a backup.`
-    : "\nA return shipping label has been emailed to the customer.";
+    ? `\nA return shipping label has been generated. Include this exact download link in your response so the customer can click it directly: ${labelUrl}\nDO NOT say "I emailed you the label" or "check your inbox" — the link is right here in this reply.`
+    : "\nNote: a label could not be generated automatically. Tell the customer an agent will follow up with the label shortly. Do NOT claim a label was emailed.";
 
   const response = await aiGenerate(
     basePrompt(step, pers, policyRules),
-    `Customer data:\n${dataCtx}\n\nOrders with return created: ${created.join(", ")}\n${failed.length ? `Orders that failed: ${failed.join(", ")}\n` : ""}Resolution: ${resLabel}${breakdownInfo}${labelLinkInfo}\n\nThe customer has accepted the ${resLabel} offer. Confirm the return is set up. Tell them to print the label, attach it to the package, and drop it off. Once we receive the item, their ${resLabel} will be processed. Follow the store policy rules.`,
+    `Customer data:\n${dataCtx}\n\nOrders with return created: ${created.join(", ")}\n${failed.length ? `Orders that failed: ${failed.join(", ")}\n` : ""}Resolution: ${resLabel}${breakdownInfo}${labelLinkInfo}\n\nThe customer has accepted the ${resLabel} offer. Confirm the return is set up. Provide the label link inline. Tell them to print the label, attach it to the package, and drop it off. Once we receive the item, their ${resLabel} will be processed. Follow the store policy rules.`,
   );
 
   return {

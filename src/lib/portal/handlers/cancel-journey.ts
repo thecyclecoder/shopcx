@@ -271,8 +271,10 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
     if (reasonType === "ai_conversation") {
       // Fetch real customer context for AI
       const { data: custData } = await admin.from("customers")
-        .select("ltv_cents, retention_score, total_orders")
+        .select("retention_score")
         .eq("id", customer.id).single();
+      const { getCustomerStats } = await import("@/lib/customer-stats");
+      const _stats = await getCustomerStats(customer.id);
       const { data: subData } = await admin.from("subscriptions")
         .select("items, created_at, billing_interval, billing_interval_count")
         .eq("workspace_id", auth.workspaceId)
@@ -281,10 +283,10 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       const productIds = ((subData?.items as { product_id?: string }[]) || []).map(i => i.product_id).filter(Boolean) as string[];
 
       const customerCtx = {
-        ltv_cents: custData?.ltv_cents || 0,
+        ltv_cents: _stats.ltv_cents,
         retention_score: custData?.retention_score || 0,
         subscription_age_days: subAgeDays,
-        total_orders: custData?.total_orders || 0,
+        total_orders: _stats.total_orders,
         products: productIds,
         first_renewal: false,
       };
@@ -321,9 +323,11 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
     let sessionId: string | null = null;
     try {
       const { data: custData } = await admin.from("customers")
-        .select("ltv_cents, retention_score, total_orders")
+        .select("retention_score")
         .eq("id", customer.id)
         .single();
+      const { getCustomerStats } = await import("@/lib/customer-stats");
+      const _stats = await getCustomerStats(customer.id);
 
       const { data: subData } = await admin.from("subscriptions")
         .select("items, created_at, billing_interval, billing_interval_count")
@@ -347,10 +351,10 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       }
 
       const customerCtx = {
-        ltv_cents: custData?.ltv_cents || 0,
+        ltv_cents: _stats.ltv_cents,
         retention_score: custData?.retention_score || 0,
         subscription_age_days: subAgeDays,
-        total_orders: custData?.total_orders || 0,
+        total_orders: _stats.total_orders,
         products: productIds,
         first_renewal: subAgeDays < billingDays,
         isGrandfathered,
@@ -460,8 +464,10 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
 
     // Fetch real customer context for AI
     const { data: custData } = await admin.from("customers")
-      .select("ltv_cents, retention_score, total_orders")
+      .select("retention_score")
       .eq("id", customer.id).single();
+    const { getCustomerStats } = await import("@/lib/customer-stats");
+    const _stats = await getCustomerStats(customer.id);
     const { data: subData } = await admin.from("subscriptions")
       .select("items, created_at")
       .eq("workspace_id", auth.workspaceId)
@@ -470,10 +476,10 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
     const productIds = ((subData?.items as { product_id?: string }[]) || []).map(i => i.product_id).filter(Boolean) as string[];
 
     const customerCtx = {
-      ltv_cents: custData?.ltv_cents || 0,
+      ltv_cents: _stats.ltv_cents,
       retention_score: custData?.retention_score || 0,
       subscription_age_days: subAgeDays,
-      total_orders: custData?.total_orders || 0,
+      total_orders: _stats.total_orders,
       products: productIds,
       first_renewal: false,
     };

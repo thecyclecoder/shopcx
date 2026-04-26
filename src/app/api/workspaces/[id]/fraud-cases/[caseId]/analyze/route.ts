@@ -43,12 +43,15 @@ export async function POST(
   let customerContext = "";
   if (customerIds.length) {
     const { data: customers } = await admin.from("customers")
-      .select("email, first_name, last_name, total_orders, ltv_cents, subscription_status, created_at")
+      .select("id, email, first_name, last_name, subscription_status, created_at")
       .in("id", customerIds);
     if (customers?.length) {
-      customerContext = `\nCustomers:\n${customers.map(c =>
-        `- ${c.first_name || ""} ${c.last_name || ""} (${c.email}): ${c.total_orders || 0} orders, LTV $${((c.ltv_cents || 0) / 100).toFixed(2)}, sub: ${c.subscription_status || "none"}, created: ${c.created_at}`
-      ).join("\n")}`;
+      const { getCustomerStats } = await import("@/lib/customer-stats");
+      const lines = await Promise.all(customers.map(async c => {
+        const s = await getCustomerStats(c.id);
+        return `- ${c.first_name || ""} ${c.last_name || ""} (${c.email}): ${s.total_orders} orders, LTV $${(s.ltv_cents / 100).toFixed(2)}, sub: ${c.subscription_status || "none"}, created: ${c.created_at}`;
+      }));
+      customerContext = `\nCustomers:\n${lines.join("\n")}`;
     }
   }
 

@@ -68,7 +68,14 @@ export async function POST(
     .limit(10);
 
   // Build personalization prompt
-  const customer = ticket.customers as { first_name: string | null; last_name: string | null; email: string; subscription_status: string; total_orders: number; ltv_cents: number } | null;
+  const customer = ticket.customers as { id: string; first_name: string | null; last_name: string | null; email: string; subscription_status: string; total_orders: number; ltv_cents: number } | null;
+  // Recompute LTV + total_orders live from orders table — denormalized columns drift.
+  if (customer?.id) {
+    const { getCustomerStats } = await import("@/lib/customer-stats");
+    const stats = await getCustomerStats(customer.id);
+    customer.total_orders = stats.total_orders;
+    customer.ltv_cents = stats.ltv_cents;
+  }
 
   const parts: string[] = [];
   parts.push("Personalize this macro response for the customer. Keep the core message but adapt the tone and include relevant customer details.");

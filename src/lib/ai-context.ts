@@ -148,26 +148,25 @@ export async function assembleTicketContext(
     customerParts.push(`Email: ${customer.email}`);
     if (customer.phone) customerParts.push(`Phone: ${customer.phone}`);
 
-    // Compute combined stats across linked profiles
+    // LTV + total_orders are computed live from the orders table — see customer-stats.ts.
+    // The customers row's denormalized columns drift, so we don't trust them.
+    const { getCustomerStats } = await import("@/lib/customer-stats");
+    const stats = await getCustomerStats(customer.id);
     if (linkedCustomerIds.length > 0) {
       const { data: allCusts } = await admin
         .from("customers")
-        .select("retention_score, total_orders, ltv_cents, subscription_status")
+        .select("retention_score, subscription_status")
         .in("id", allCustomerIds);
-
-      const combinedOrders = (allCusts || []).reduce((sum, c) => sum + (c.total_orders || 0), 0);
-      const combinedLtv = (allCusts || []).reduce((sum, c) => sum + (c.ltv_cents || 0), 0);
       const maxRetention = Math.max(...(allCusts || []).map(c => c.retention_score || 0));
       const hasActiveSub = (allCusts || []).some(c => c.subscription_status === "active");
-
       customerParts.push(`Retention Score: ${maxRetention}/100`);
-      customerParts.push(`Total Orders (combined): ${combinedOrders}`);
-      customerParts.push(`Lifetime Value (combined): $${(combinedLtv / 100).toFixed(2)}`);
+      customerParts.push(`Total Orders (combined): ${stats.total_orders}`);
+      customerParts.push(`Lifetime Value (combined): $${(stats.ltv_cents / 100).toFixed(2)}`);
       if (hasActiveSub) customerParts.push(`Subscription: active`);
     } else {
       customerParts.push(`Retention Score: ${customer.retention_score}/100`);
-      customerParts.push(`Total Orders: ${customer.total_orders}`);
-      customerParts.push(`Lifetime Value: $${(customer.ltv_cents / 100).toFixed(2)}`);
+      customerParts.push(`Total Orders: ${stats.total_orders}`);
+      customerParts.push(`Lifetime Value: $${(stats.ltv_cents / 100).toFixed(2)}`);
       if (customer.subscription_status !== "none") {
         customerParts.push(`Subscription: ${customer.subscription_status}`);
       }

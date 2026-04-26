@@ -93,22 +93,12 @@ export async function GET(
     .in("customer_id", linkedCustomerIds)
     .order("created_at", { ascending: false });
 
-  // Compute real LTV and order count from DB (source of truth)
-  const { count: realOrderCount } = await admin
-    .from("orders")
-    .select("id", { count: "exact", head: true })
-    .in("customer_id", linkedCustomerIds);
-
-  const { data: ltvRows } = await admin
-    .from("orders")
-    .select("total_cents")
-    .in("customer_id", linkedCustomerIds);
-
-  const realLtv = (ltvRows || []).reduce((sum, o) => sum + (o.total_cents || 0), 0);
-
-  // Override stored values with computed values
-  customer.total_orders = realOrderCount || customer.total_orders;
-  customer.ltv_cents = realLtv || customer.ltv_cents;
+  // Compute LTV and order count live from the orders table — the customers row's
+  // denormalized columns drift, so we always read via getCustomerStats.
+  const { getCustomerStats } = await import("@/lib/customer-stats");
+  const stats = await getCustomerStats(customerId);
+  customer.total_orders = stats.total_orders;
+  customer.ltv_cents = stats.ltv_cents;
 
   // Recalculate retention score with real data
   const lastOrder = orders?.[0];

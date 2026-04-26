@@ -716,9 +716,10 @@ export async function POST(
 
       // Record remedy outcome (cancelled = no remedy accepted)
       if (session.customer_id) {
-        // Get LTV + sub age for analytics
-        const { data: custOrders } = await admin.from("orders").select("total_price_cents").eq("customer_id", session.customer_id);
-        const customerLtv = custOrders?.reduce((s, o) => s + (o.total_price_cents || 0), 0) || 0;
+        // Get LTV + sub age for analytics — live from orders table.
+        const { getCustomerStats } = await import("@/lib/customer-stats");
+        const _stats = await getCustomerStats(session.customer_id);
+        const customerLtv = _stats.ltv_cents;
         const { data: subData } = selectedSub ? await admin.from("subscriptions").select("id, created_at").eq("shopify_contract_id", selectedSub.contractId).eq("workspace_id", wsId).maybeSingle() : { data: null };
         const subAgeDays = subData?.created_at ? Math.floor((Date.now() - new Date(subData.created_at).getTime()) / 86400000) : 0;
 

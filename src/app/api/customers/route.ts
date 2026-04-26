@@ -96,8 +96,21 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  // Recompute LTV / total_orders / last_order_at live from the orders table for
+  // the visible page — the customers row's denormalized columns drift. One batch
+  // query covers the whole page (no N+1).
+  let patched = customers || [];
+  if (patched.length) {
+    const { getCustomerStatsBatch } = await import("@/lib/customer-stats");
+    const stats = await getCustomerStatsBatch(patched.map(c => c.id));
+    patched = patched.map(c => {
+      const s = stats.get(c.id);
+      return s ? { ...c, ltv_cents: s.ltv_cents, total_orders: s.total_orders, last_order_at: s.last_order_at ?? c.last_order_at } : c;
+    });
+  }
+
   return NextResponse.json({
-    customers: customers || [],
+    customers: patched,
     total: count || 0,
     limit,
     offset,

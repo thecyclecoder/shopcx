@@ -185,10 +185,28 @@ Return JSON: { "lead_in": "...", "cta_text": "..." }`, "haiku", 150);
   }
 }
 
-async function generatePositiveClose(msg: string, ch: string, p: { name?: string; tone?: string; sign_off?: string | null } | null, autoCloseReply: string | null): Promise<string> {
+async function generatePositiveClose(msg: string, ch: string, p: { name?: string; tone?: string; sign_off?: string | null } | null, autoCloseReply: string | null, ticketId?: string): Promise<string> {
   const short = ["chat", "sms", "meta_dm"].includes(ch);
   const persona = p ? `Your name is ${p.name}. Tone: ${p.tone}.` : "You are a friendly support agent.";
-  const raw = await claude(`${persona} Never reveal AI. Customer sent a positive closing message: "${msg}". Write a brief, warm closing reply. ${short ? "Max 1 sentence." : "Max 2 sentences."} ${p?.sign_off ? `End with: ${p.sign_off}` : ""} Only the reply, no markdown.`, "haiku", 60);
+
+  // Detect whether this conversation involved a return / refund / cancellation
+  // so the close doesn't say "enjoy your order" when they're sending it back.
+  let contextHint = "";
+  if (ticketId) {
+    const admin = createAdminClient();
+    const { data: t } = await admin.from("tickets").select("tags").eq("id", ticketId).single();
+    const tags = (t?.tags as string[]) || [];
+    const isReturnContext = tags.some(tag =>
+      tag === "pb:refund" || tag === "pb:return_request" ||
+      tag === "j:cancel_subscription" || tag === "j:cancel" ||
+      tag === "wb"
+    );
+    if (isReturnContext) {
+      contextHint = ` IMPORTANT: this conversation involved a return / refund / cancellation — do NOT say "enjoy your order", "experience our products", or anything implying the customer is keeping/using the product. A simple "thank you, we appreciate your patience" is right.`;
+    }
+  }
+
+  const raw = await claude(`${persona} Never reveal AI. Customer sent a positive closing message: "${msg}". Write a brief, warm closing reply.${contextHint} ${short ? "Max 1 sentence." : "Max 2 sentences."} ${p?.sign_off ? `End with: ${p.sign_off}` : ""} Only the reply, no markdown.`, "haiku", 60);
   return raw || autoCloseReply || (p?.sign_off ? `You're welcome! ${p.sign_off}` : "You're welcome! Let us know if you need anything else.");
 }
 
@@ -978,7 +996,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10);
         await step.run("send-close", async () => {
           if (await newerActivity(admin, tid, t0)) return;
           const { data: ws } = await admin.from("workspaces").select("auto_close_reply").eq("id", wsId).single();
-          const closing = await generatePositiveClose(msg, st.ch, pers, ws?.auto_close_reply || null);
+          const closing = await generatePositiveClose(msg, st.ch, pers, ws?.auto_close_reply || null, tid);
           await sendWithDelay(admin, wsId, tid, st.ch, closing, cfg.sandbox);
           await setStatus(admin, tid, true);
           await sysNote(admin, tid, `[System] Positive close. Ticket closed.`);

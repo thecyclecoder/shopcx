@@ -104,11 +104,13 @@ export async function POST(
   if (ticket.customer_id) {
     const { data: cust } = await admin
       .from("customers")
-      .select("first_name, last_name, email, subscription_status, retention_score, total_orders, ltv")
+      .select("first_name, last_name, email, subscription_status, retention_score")
       .eq("id", ticket.customer_id)
       .single();
     if (cust) {
-      customerInfo = `Customer: ${cust.first_name || ""} ${cust.last_name || ""} (${cust.email}), Subscription: ${cust.subscription_status || "none"}, Retention: ${cust.retention_score || 0}, Orders: ${cust.total_orders || 0}, LTV: $${cust.ltv || 0}`;
+      const { getCustomerStats } = await import("@/lib/customer-stats");
+      const stats = await getCustomerStats(ticket.customer_id);
+      customerInfo = `Customer: ${cust.first_name || ""} ${cust.last_name || ""} (${cust.email}), Subscription: ${cust.subscription_status || "none"}, Retention: ${cust.retention_score || 0}, Orders: ${stats.total_orders}, LTV: $${(stats.ltv_cents / 100).toFixed(0)}`;
     }
   }
 

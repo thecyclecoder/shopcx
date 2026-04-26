@@ -132,11 +132,14 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
 
   if (!steps?.length) return NextResponse.json({ error: "No steps in playbook" }, { status: 400 });
 
-  // Load customer data
-  const { data: customer } = await admin.from("customers")
-    .select("id, email, first_name, last_name, ltv_cents, total_orders, retention_score, subscription_status")
+  // Load customer data — LTV/order count come live from orders table.
+  const { data: customerRow } = await admin.from("customers")
+    .select("id, email, first_name, last_name, retention_score, subscription_status")
     .eq("id", customer_id).single();
-  if (!customer) return NextResponse.json({ error: "Customer not found" }, { status: 404 });
+  if (!customerRow) return NextResponse.json({ error: "Customer not found" }, { status: 404 });
+  const { getCustomerStats } = await import("@/lib/customer-stats");
+  const stats = await getCustomerStats(customer_id);
+  const customer = { ...customerRow, ltv_cents: stats.ltv_cents, total_orders: stats.total_orders };
 
   // Load customer's orders and subscriptions
   const lookbackDays = 90;
