@@ -39,6 +39,54 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
 
   if (channel === "social_comments") return false;
 
+  // Defensive guard: if this is an account_linking journey AND we've already
+  // sent one on this ticket, AND the customer's most recent inbound message
+  // contains an email address, try linking directly via that email instead of
+  // bouncing them through the form again. Sonnet should already prefer the
+  // direct action via prompt rule, but this catches the case where it doesn't.
+  if (triggerIntent === "account_linking") {
+    const { data: prior } = await admin.from("journey_sessions")
+      .select("id").eq("ticket_id", ticketId).eq("trigger_intent", "account_linking").limit(1);
+    if (prior?.length) {
+      const { data: lastInbound } = await admin.from("ticket_messages")
+        .select("body")
+        .eq("ticket_id", ticketId).eq("direction", "inbound")
+        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      const text = (lastInbound?.body || "").replace(/<[^>]+>/g, " ");
+      const emailMatch = text.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+      if (emailMatch) {
+        const email = emailMatch[0].toLowerCase();
+        const { data: target } = await admin.from("customers")
+          .select("id, email").eq("workspace_id", workspaceId).ilike("email", email).maybeSingle();
+        if (target && target.id !== customerId) {
+          const { data: ownerLink } = await admin.from("customer_links")
+            .select("group_id, is_primary").eq("customer_id", customerId).maybeSingle();
+          const { data: targetLink } = await admin.from("customer_links")
+            .select("group_id").eq("customer_id", target.id).maybeSingle();
+          const alreadyLinked = ownerLink && targetLink && ownerLink.group_id === targetLink.group_id;
+          if (!alreadyLinked) {
+            const groupId = ownerLink?.group_id || targetLink?.group_id || crypto.randomUUID();
+            if (!ownerLink) {
+              await admin.from("customer_links").upsert({
+                customer_id: customerId, workspace_id: workspaceId, group_id: groupId, is_primary: true,
+              }, { onConflict: "customer_id" });
+            }
+            await admin.from("customer_links").upsert({
+              customer_id: target.id, workspace_id: workspaceId, group_id: groupId, is_primary: false,
+            }, { onConflict: "customer_id" });
+            await addTicketTag(ticketId, "link");
+            await admin.from("ticket_messages").insert({
+              ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system",
+              body: `[System] Auto-linked ${target.email} from customer's text instead of re-sending the account_linking form (already sent ${prior.length} time(s)).`,
+            });
+          }
+          // Skip form delivery — link is in place. Caller treats this as launched.
+          return true;
+        }
+      }
+    }
+  }
+
   // Get journey definition config
   const { data: journeyDef } = await admin
     .from("journey_definitions")
