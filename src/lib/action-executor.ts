@@ -617,6 +617,67 @@ const directActionHandlers: Record<
     return { success: true, summary: `Paused for ${p.pause_days} days (auto-resumes ${resumeLabel})` };
   },
 
+  // Alias: Sonnet sometimes emits { type: "pause" } expecting the same behavior
+  // as pause_timed. Default to 30 days if no duration specified.
+  pause: async (ctx, p) => {
+    const days = p.pause_days || 30;
+    if (days !== 30 && days !== 60) {
+      return {
+        success: false,
+        error: `pause action only supports 30 or 60 day durations (got ${days}). For longer pauses, an agent must apply manually.`,
+      };
+    }
+    return directActionHandlers.pause_timed(ctx, { ...p, pause_days: days });
+  },
+
+  // Link the ticket customer's account to another customer profile by email.
+  // Use when the customer has confirmed in text that another email belongs to
+  // them (e.g. "yes both are mine", "the other email is X@Y.com") — avoids
+  // bouncing them through the account_linking form when their text answer is clear.
+  link_account_by_email: async (ctx, p) => {
+    if (!p.code) return { success: false, error: "Missing email (pass via 'code' param)" };
+    const targetEmail = p.code.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(targetEmail)) return { success: false, error: `Invalid email: ${targetEmail}` };
+
+    // Find a customer in this workspace with the email
+    const { data: target } = await ctx.admin.from("customers")
+      .select("id, email")
+      .eq("workspace_id", ctx.workspaceId)
+      .ilike("email", targetEmail)
+      .maybeSingle();
+    if (!target) return { success: false, error: `No customer profile found for ${targetEmail}` };
+    if (target.id === ctx.customerId) return { success: false, error: "Target email is the same customer" };
+
+    // Check existing groups
+    const { data: ownerLink } = await ctx.admin.from("customer_links")
+      .select("group_id, is_primary").eq("customer_id", ctx.customerId).maybeSingle();
+    const { data: targetLink } = await ctx.admin.from("customer_links")
+      .select("group_id").eq("customer_id", target.id).maybeSingle();
+
+    if (ownerLink && targetLink && ownerLink.group_id === targetLink.group_id) {
+      return { success: true, summary: `Already linked: ${target.email}` };
+    }
+
+    const { randomUUID } = await import("crypto");
+    const groupId = ownerLink?.group_id || targetLink?.group_id || randomUUID();
+
+    // Add ticket customer to group as primary if not already linked
+    if (!ownerLink) {
+      await ctx.admin.from("customer_links").upsert({
+        customer_id: ctx.customerId, workspace_id: ctx.workspaceId, group_id: groupId, is_primary: true,
+      }, { onConflict: "customer_id" });
+    }
+    // Add target as non-primary
+    await ctx.admin.from("customer_links").upsert({
+      customer_id: target.id, workspace_id: ctx.workspaceId, group_id: groupId, is_primary: false,
+    }, { onConflict: "customer_id" });
+
+    const { addTicketTag } = await import("@/lib/ticket-tags");
+    await addTicketTag(ctx.ticketId, "link");
+
+    return { success: true, summary: `Linked ${target.email} to this account` };
+  },
+
   reactivate: async (ctx, p) => {
     const { appstleSubscriptionAction } = await import("@/lib/appstle");
     const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
