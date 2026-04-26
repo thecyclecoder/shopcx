@@ -157,38 +157,65 @@ export async function forecastCollected(params: {
     });
   }
 
-  // Create next forecast if we know the next billing date
-  if (params.nextBillingDate && params.items) {
+  // Create next forecast for the upcoming cycle.
+  // The Appstle billing-success webhook fires BEFORE the cascaded
+  // subscription.next-order-date-changed webhook updates the sub row, so
+  // params.nextBillingDate (read from sub) is often still the date we just
+  // billed. If it equals the just-collected forecast's expected_date or is
+  // missing, compute the real next date from billing_interval. Otherwise the
+  // forecast's static_date locks at today and inflates today's "static" total
+  // when the cascaded date-change webhook later moves expected_date forward.
+  if (params.items && (params.billingInterval || params.nextBillingDate)) {
     const { data: sub } = await admin.from("subscriptions")
       .select("id, customer_id")
       .eq("workspace_id", params.workspaceId)
       .eq("shopify_contract_id", params.contractId)
       .maybeSingle();
 
-    const newId = await createForecast({
-      workspaceId: params.workspaceId,
-      contractId: params.contractId,
-      subscriptionId: sub?.id,
-      customerId: sub?.customer_id,
-      expectedDate: params.nextBillingDate,
-      items: params.items,
-      billingInterval: params.billingInterval,
-      billingIntervalCount: params.billingIntervalCount,
-      createdFrom: "billing_success",
-      source: params.source || "webhook",
-    });
+    const justCollectedDate = forecast?.expected_date || null;
+    const passedNext = params.nextBillingDate ? params.nextBillingDate.slice(0, 10) : null;
+    let nextDate: string | null = passedNext;
+    if (!nextDate || (justCollectedDate && nextDate === justCollectedDate)) {
+      // Compute from interval — passed value is stale or missing.
+      const intervalRaw = (params.billingInterval || "").toUpperCase();
+      const count = params.billingIntervalCount || 1;
+      const baseDate = justCollectedDate ? new Date(justCollectedDate + "T00:00:00") : new Date();
+      let daysToAdd = 0;
+      if (intervalRaw === "DAY") daysToAdd = count;
+      else if (intervalRaw === "WEEK") daysToAdd = count * 7;
+      else if (intervalRaw === "MONTH") daysToAdd = count * 30; // approximate
+      else if (intervalRaw === "YEAR") daysToAdd = count * 365;
+      if (daysToAdd > 0) {
+        baseDate.setDate(baseDate.getDate() + daysToAdd);
+        nextDate = baseDate.toISOString().slice(0, 10);
+      }
+    }
 
-    // Log the new forecast as a new_subscription event on that date
-    if (newId) {
-      await logForecastEvent({
+    if (nextDate) {
+      const newId = await createForecast({
         workspaceId: params.workspaceId,
-        forecastId: newId,
         contractId: params.contractId,
-        forecastDate: params.nextBillingDate.slice(0, 10),
-        eventType: "new_subscription",
-        deltaCents: calculateExpectedRevenue(params.items),
-        description: "Next renewal forecast set after successful billing",
+        subscriptionId: sub?.id,
+        customerId: sub?.customer_id,
+        expectedDate: nextDate,
+        items: params.items,
+        billingInterval: params.billingInterval,
+        billingIntervalCount: params.billingIntervalCount,
+        createdFrom: "billing_success",
+        source: params.source || "webhook",
       });
+
+      if (newId) {
+        await logForecastEvent({
+          workspaceId: params.workspaceId,
+          forecastId: newId,
+          contractId: params.contractId,
+          forecastDate: nextDate,
+          eventType: "new_subscription",
+          deltaCents: calculateExpectedRevenue(params.items),
+          description: "Next renewal forecast set after successful billing",
+        });
+      }
     }
   }
 }
