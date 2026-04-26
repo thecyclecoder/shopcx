@@ -7,7 +7,7 @@ import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { inngest } from "@/lib/inngest/client";
 import { enrichItemTitles } from "@/lib/subscription-items";
-import { logPaymentFailure, trackErrorCode, isTerminalErrorCode } from "@/lib/dunning";
+import { logPaymentFailure, trackErrorCode, isTerminalErrorCode, getCustomerPaymentMethods, deduplicatePaymentMethods, cancelForTerminalNoBackup } from "@/lib/dunning";
 import {
   createForecast,
   forecastCollected,
@@ -603,9 +603,38 @@ async function handleBillingEvent(
       const { data: subForDunning } = await admin.from("subscriptions").select("shopify_customer_id")
         .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).single();
 
+      // ── Early terminal-cancel path ──
+      // If the error is terminal (admin classified) AND the customer has only
+      // 0 or 1 payment method, there's nothing to rotate to — cancel immediately
+      // and skip dunning entirely. Runs even if dunning_enabled = false, since
+      // a terminal failure with no backup card has no recovery path either way.
+      let earlyCancelled = false;
+      if (errorCode && subForDunning?.shopify_customer_id) {
+        const terminal = await isTerminalErrorCode(workspaceId, errorCode);
+        if (terminal) {
+          let methodCount = 0;
+          try {
+            const methods = await getCustomerPaymentMethods(workspaceId, subForDunning.shopify_customer_id);
+            methodCount = deduplicatePaymentMethods(methods).length;
+          } catch (e) {
+            console.error("Terminal-cancel: failed to fetch payment methods", e);
+          }
+          if (methodCount <= 1) {
+            await cancelForTerminalNoBackup({
+              workspaceId, contractId,
+              customerId: sub.customer_id,
+              errorCode, errorMessage: errorMsg,
+              paymentMethodCount: methodCount,
+            });
+            console.log(`[Dunning] Terminal+single-card: cancelled contract ${contractId} immediately (no dunning cycle).`);
+            earlyCancelled = true;
+          }
+        }
+      }
+
       // Check if dunning is enabled
       const { data: wsSettings } = await admin.from("workspaces").select("dunning_enabled").eq("id", workspaceId).single();
-      if (wsSettings?.dunning_enabled) {
+      if (!earlyCancelled && wsSettings?.dunning_enabled) {
         // Guard: if a successful order exists within the current billing cycle,
         // this is a false billing-failure from Appstle — do NOT trigger dunning.
         const { data: subBilling } = await admin.from("subscriptions")

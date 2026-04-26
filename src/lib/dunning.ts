@@ -381,3 +381,116 @@ export async function trackErrorCode(
 export function dunningInternalNote(message: string): string {
   return `[System] ${message}`;
 }
+
+/**
+ * Post an internal note on the customer's most recent open/pending ticket.
+ */
+export async function postDunningNoteOnTicket(
+  workspaceId: string,
+  customerId: string | null,
+  note: string,
+): Promise<void> {
+  if (!customerId) return;
+  const admin = createAdminClient();
+  const { data: ticket } = await admin
+    .from("tickets")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", customerId)
+    .in("status", ["open", "pending"])
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!ticket) return;
+  await admin.from("ticket_messages").insert({
+    ticket_id: ticket.id,
+    direction: "internal",
+    visibility: "internal",
+    author_type: "system",
+    body: note,
+  });
+}
+
+/**
+ * Tag all open/pending tickets for a customer with a given tag.
+ */
+export async function tagOpenTickets(
+  workspaceId: string,
+  customerId: string | null,
+  tag: string,
+): Promise<void> {
+  if (!customerId) return;
+  const admin = createAdminClient();
+  const { data: tickets } = await admin
+    .from("tickets")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", customerId)
+    .in("status", ["open", "pending"]);
+  if (!tickets?.length) return;
+  const { addTicketTag } = await import("@/lib/ticket-tags");
+  for (const t of tickets) await addTicketTag(t.id, tag);
+}
+
+/**
+ * Cancel a subscription and send a payment-update email when a billing failure
+ * carries a terminal error code AND the customer has no other payment methods
+ * to rotate to. Skips the dunning cycle entirely — there's nothing to recover.
+ *
+ * Used by:
+ *   - the billing-failure webhook handler (early path, before any cycle is created)
+ *   - the dunning Inngest function (defensive fallback if it gets called anyway)
+ */
+export async function cancelForTerminalNoBackup(params: {
+  workspaceId: string;
+  contractId: string;
+  customerId: string | null;
+  errorCode: string;
+  errorMessage: string | null;
+  paymentMethodCount: number;
+}): Promise<void> {
+  const { workspaceId, contractId, customerId, errorCode, errorMessage, paymentMethodCount } = params;
+  const admin = createAdminClient();
+  const { appstleSubscriptionAction, appstleSendPaymentUpdateEmail } = await import("@/lib/appstle");
+
+  try {
+    await appstleSubscriptionAction(
+      workspaceId, contractId, "cancel", "dunning",
+      `Cancelled by ShopCX — terminal billing error: ${errorCode} (${errorMessage || "no details"}), no other payment methods available`,
+    );
+  } catch (e) {
+    console.error("[Dunning terminal-cancel] appstle cancel failed:", e);
+  }
+
+  try {
+    await appstleSendPaymentUpdateEmail(workspaceId, contractId);
+  } catch (e) {
+    console.error("[Dunning terminal-cancel] appstle payment-update email failed:", e);
+  }
+
+  // Send our own notification email if portal payment_update_url is configured.
+  if (customerId) {
+    const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", customerId).single();
+    const { data: ws } = await admin.from("workspaces").select("name, portal_config").eq("id", workspaceId).single();
+    const portalGeneral = (ws?.portal_config as Record<string, unknown> | undefined)?.general as Record<string, unknown> | undefined;
+    const updateUrl = (portalGeneral?.payment_update_url as string) || "";
+    if (cust?.email && ws?.name && updateUrl) {
+      try {
+        const { sendDunningPausedEmail } = await import("@/lib/email");
+        await sendDunningPausedEmail({
+          workspaceId, toEmail: cust.email,
+          customerName: cust.first_name,
+          workspaceName: ws.name,
+          updateUrl,
+        });
+      } catch (e) {
+        console.error("[Dunning terminal-cancel] notification email failed:", e);
+      }
+    }
+  }
+
+  await postDunningNoteOnTicket(workspaceId, customerId, dunningInternalNote(
+    `Terminal billing error: ${errorCode}. Customer has only ${paymentMethodCount} payment method(s). Subscription cancelled — will auto-reactivate if customer adds a new payment method. (No dunning cycle created.)`
+  ));
+  await tagOpenTickets(workspaceId, customerId, "dunning:terminal");
+}
