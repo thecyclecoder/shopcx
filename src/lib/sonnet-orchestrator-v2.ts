@@ -392,16 +392,29 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
   }
 
   // Orders
+  // Per-item PER-UNIT pricing is surfaced so price comparisons across orders are
+  // accurate. Order totals fluctuate with taxes / shipping protection / quantity,
+  // so NEVER compare totals to detect price changes. Always compare per-unit
+  // prices: a customer's grandfathered "base price" = discounted_price / 0.75
+  // (subscription orders carry the standard 25% subscriber discount).
   if (orders?.length) {
     parts.push("\nRECENT ORDERS:");
     for (const o of orders) {
-      const items = (o.line_items as { title?: string; quantity?: number }[] || []).map(i => `${i.title || "?"} x${i.quantity || 1}`).join(", ");
+      const lineItems = (o.line_items as { title?: string; variant_title?: string; quantity?: number; price_cents?: number; sku?: string }[] || []);
+      const itemStr = lineItems.map(i => {
+        const qty = i.quantity || 1;
+        const unitCents = i.price_cents || 0;
+        const baseEstCents = Math.round(unitCents / 0.75);
+        const titleFull = `${i.title || "?"}${i.variant_title ? ` (${i.variant_title})` : ""}`;
+        return `${titleFull} x${qty} @ $${(unitCents / 100).toFixed(2)}/unit (base ~$${(baseEstCents / 100).toFixed(2)})`;
+      }).join(", ");
       const date = new Date(o.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
       const fulfillments = (o.fulfillments as { tracking_number?: string; status?: string }[] || []);
       const tracking = fulfillments[0]?.tracking_number ? ` | tracking: ${fulfillments[0].tracking_number}` : "";
       const coupons = (o.discount_codes as string[] | null)?.length ? ` | coupons: ${(o.discount_codes as string[]).join(", ")}` : "";
-      parts.push(`- #${o.order_number} | ${date} | $${((o.total_cents || 0) / 100).toFixed(2)} | ${o.financial_status || "?"} | ${items}${coupons}${tracking} | shopify_order_id: ${o.shopify_order_id || "?"}`);
+      parts.push(`- #${o.order_number} | ${date} | total $${((o.total_cents || 0) / 100).toFixed(2)} | ${o.financial_status || "?"} | ${itemStr}${coupons}${tracking} | shopify_order_id: ${o.shopify_order_id || "?"}`);
     }
+    parts.push("PRICE COMPARISON RULE: when judging whether a customer was overcharged on a renewal, compare the per-unit price (the @ $X.XX/unit figure) on the latest order to the per-unit price on prior orders for the same variant — NOT order totals. Order totals vary with shipping protection, taxes, and quantity. If a customer's last 3 orders all charged the same per-unit price and the most recent matches, they were NOT overcharged.");
   } else {
     parts.push("\nRECENT ORDERS: None");
   }
