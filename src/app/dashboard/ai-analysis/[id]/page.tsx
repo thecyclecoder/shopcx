@@ -15,6 +15,7 @@ interface Analysis {
     issues: { type: string; description: string; ticket_index: number }[];
     action_items: { priority: string; description: string }[];
     channel_scores: Record<string, number>;
+    ticket_ids?: string[]; // ordered — ticket_index N (1-based) → ticket_ids[N-1]
   };
 }
 
@@ -121,17 +122,29 @@ export default function AIAnalysisDetailPage() {
           <h2 className="mb-3 text-sm font-medium text-zinc-900 dark:text-zinc-100">Issues ({m.issues?.length || 0})</h2>
           {m.issues?.length ? (
             <div className="space-y-3">
-              {m.issues.map((issue, i) => (
-                <div key={i} className="rounded-md border border-zinc-100 px-3 py-2 dark:border-zinc-800">
-                  <div className="flex items-center gap-2">
-                    <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-                      {ISSUE_ICONS[issue.type] || issue.type}
-                    </span>
-                    <span className="text-[10px] text-zinc-400">Conversation {issue.ticket_index}</span>
+              {m.issues.map((issue, i) => {
+                const ticketId = m.ticket_ids?.[issue.ticket_index - 1];
+                return (
+                  <div key={i} className="rounded-md border border-zinc-100 px-3 py-2 dark:border-zinc-800">
+                    <div className="flex items-center gap-2">
+                      <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                        {ISSUE_ICONS[issue.type] || issue.type}
+                      </span>
+                      {ticketId ? (
+                        <a
+                          href={`/dashboard/tickets/${ticketId}`}
+                          className="text-[10px] text-indigo-600 hover:underline dark:text-indigo-400"
+                        >
+                          Conversation {issue.ticket_index} →
+                        </a>
+                      ) : (
+                        <span className="text-[10px] text-zinc-400">Conversation {issue.ticket_index}</span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">{issue.description}</p>
                   </div>
-                  <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">{issue.description}</p>
-                </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <p className="text-sm text-zinc-400">No issues found</p>

@@ -144,6 +144,9 @@ Return JSON:
             issues: analysis.issues,
             action_items: analysis.action_items,
             conversations_analyzed: conversations.length,
+            // Ordered ticket ids — index N (1-based) in this array maps to the
+            // "Ticket N" / "Conversation N" labels Claude returns in `issues`.
+            ticket_ids: conversations.map(c => c.ticketId),
             date: new Date().toISOString().split("T")[0],
           },
         });
