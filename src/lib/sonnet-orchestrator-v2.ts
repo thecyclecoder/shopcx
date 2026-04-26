@@ -347,7 +347,7 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       .in("status", ["active", "paused", "cancelled"])
       .order("created_at", { ascending: false }),
     admin.from("orders")
-      .select("order_number, total_cents, line_items, discount_codes, created_at, financial_status, shopify_order_id, fulfillments")
+      .select("order_number, total_cents, line_items, discount_codes, created_at, financial_status, shopify_order_id, fulfillments, source_name")
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .order("created_at", { ascending: false }).limit(5),
     admin.from("loyalty_members")
@@ -372,10 +372,20 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
     for (const s of subs) {
       const items = (s.items as { title?: string; variant_title?: string; quantity?: number; variant_id?: string; price_cents?: number }[] || []);
       const itemStr = items.map(i => {
-        const std = priceMap.get(String(i.variant_id));
-        const effectiveBase = Math.round((i.price_cents || 0) / 0.75);
-        const grandfathered = std && effectiveBase < std;
-        return `${i.title || "item"}${i.variant_title ? ` (${i.variant_title})` : ""} x${i.quantity || 1} @ $${((i.price_cents || 0) / 100).toFixed(2)}${grandfathered ? " [GRANDFATHERED PRICING]" : ""}`;
+        const msrp = priceMap.get(String(i.variant_id));
+        const realized = i.price_cents || 0;
+        const qty = i.quantity || 1;
+        const tail: string[] = [];
+        if (msrp) {
+          const standard = Math.round(msrp * 0.75);
+          const floor = Math.round(msrp * 0.5);
+          const savingsPct = Math.round((1 - realized / msrp) * 100);
+          tail.push(`MSRP $${(msrp / 100).toFixed(2)} | standard $${(standard / 100).toFixed(2)} | floor $${(floor / 100).toFixed(2)} | SAVINGS ${savingsPct}% off MSRP`);
+          if (realized < floor) tail.push("[BELOW 50% FLOOR — no longer allowed]");
+          else if (realized <= floor + 10) tail.push("[AT FLOOR]");
+          else if (realized < standard) tail.push("[grandfathered above floor]");
+        }
+        return `${i.title || "item"}${i.variant_title ? ` (${i.variant_title})` : ""} x${qty} @ $${(realized / 100).toFixed(2)} each (line $${((realized * qty) / 100).toFixed(2)})${tail.length ? ` — ${tail.join(" ")}` : ""}`;
       }).join(", ");
       const next = s.next_billing_date
         ? new Date(s.next_billing_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })
@@ -392,29 +402,68 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
   }
 
   // Orders
-  // Per-item PER-UNIT pricing is surfaced so price comparisons across orders are
-  // accurate. Order totals fluctuate with taxes / shipping protection / quantity,
-  // so NEVER compare totals to detect price changes. Always compare per-unit
-  // prices: a customer's grandfathered "base price" = discounted_price / 0.75
-  // (subscription orders carry the standard 25% subscriber discount).
+  // Per-unit pricing is the only reliable comparison signal — order totals
+  // fluctuate with taxes / shipping protection / quantity. We surface:
+  //   - realized price: what the customer actually pays per unit (the line price)
+  //   - MSRP: the variant's listed retail price (in our products table)
+  //   - 50% MSRP floor: the absolute minimum realized price we'll honor
+  //   - standard sub price: MSRP × 0.75 (the default 25% subscription discount)
   if (orders?.length) {
+    // Pre-load variant MSRPs for orders' line items (used for floor / standard refs)
+    const variantIds = new Set<string>();
+    for (const o of orders) {
+      for (const i of (o.line_items as { variant_id?: string }[] || [])) {
+        if (i.variant_id) variantIds.add(String(i.variant_id));
+      }
+    }
+    const msrpMap = new Map<string, number>(); // variant_id → MSRP cents
+    if (variantIds.size > 0) {
+      const { data: products } = await admin.from("products").select("variants").eq("workspace_id", wsId);
+      for (const p of products || []) {
+        for (const v of (p.variants as { id?: string; price_cents?: number }[] || [])) {
+          if (v.id && v.price_cents != null) msrpMap.set(String(v.id), v.price_cents);
+        }
+      }
+    }
+
     parts.push("\nRECENT ORDERS:");
     for (const o of orders) {
-      const lineItems = (o.line_items as { title?: string; variant_title?: string; quantity?: number; price_cents?: number; sku?: string }[] || []);
+      const lineItems = (o.line_items as { title?: string; variant_title?: string; quantity?: number; price_cents?: number; sku?: string; variant_id?: string }[] || []);
       const itemStr = lineItems.map(i => {
         const qty = i.quantity || 1;
-        const unitCents = i.price_cents || 0;
-        const baseEstCents = Math.round(unitCents / 0.75);
+        const realizedCents = i.price_cents || 0;
         const titleFull = `${i.title || "?"}${i.variant_title ? ` (${i.variant_title})` : ""}`;
-        return `${titleFull} x${qty} @ $${(unitCents / 100).toFixed(2)}/unit (base ~$${(baseEstCents / 100).toFixed(2)})`;
+        const msrp = i.variant_id ? msrpMap.get(String(i.variant_id)) : undefined;
+        if (msrp) {
+          const standardCents = Math.round(msrp * 0.75);
+          const floorCents = Math.round(msrp * 0.5);
+          const flag =
+            realizedCents < floorCents ? " [BELOW 50% FLOOR — not allowed anymore]" :
+            Math.abs(realizedCents - floorCents) <= 10 ? " [AT FLOOR — minimum allowed]" :
+            realizedCents < standardCents ? " [grandfathered, above floor]" :
+            "";
+          return `${titleFull} x${qty} @ $${(realizedCents / 100).toFixed(2)}/unit realized (MSRP $${(msrp / 100).toFixed(2)} | standard sub $${(standardCents / 100).toFixed(2)} | 50% floor $${(floorCents / 100).toFixed(2)})${flag}`;
+        }
+        return `${titleFull} x${qty} @ $${(realizedCents / 100).toFixed(2)}/unit realized`;
       }).join(", ");
       const date = new Date(o.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
       const fulfillments = (o.fulfillments as { tracking_number?: string; status?: string }[] || []);
       const tracking = fulfillments[0]?.tracking_number ? ` | tracking: ${fulfillments[0].tracking_number}` : "";
       const coupons = (o.discount_codes as string[] | null)?.length ? ` | coupons: ${(o.discount_codes as string[]).join(", ")}` : "";
-      parts.push(`- #${o.order_number} | ${date} | total $${((o.total_cents || 0) / 100).toFixed(2)} | ${o.financial_status || "?"} | ${itemStr}${coupons}${tracking} | shopify_order_id: ${o.shopify_order_id || "?"}`);
+      const isDraft = (o.source_name as string) === "shopify_draft_order";
+      const sourceLabel = isDraft ? " [DRAFT — not a renewal, ignore for price comparisons]" : "";
+      parts.push(`- #${o.order_number} | ${date} | total $${((o.total_cents || 0) / 100).toFixed(2)} | ${o.financial_status || "?"}${sourceLabel} | ${itemStr}${coupons}${tracking} | shopify_order_id: ${o.shopify_order_id || "?"}`);
     }
-    parts.push("PRICE COMPARISON RULE: when judging whether a customer was overcharged on a renewal, compare the per-unit price (the @ $X.XX/unit figure) on the latest order to the per-unit price on prior orders for the same variant — NOT order totals. Order totals vary with shipping protection, taxes, and quantity. If a customer's last 3 orders all charged the same per-unit price and the most recent matches, they were NOT overcharged.");
+    parts.push(`PRICING TERMINOLOGY (use customer-facing language):
+- "Realized price" = what the customer actually pays per unit (the per-unit price on the order). Use this when speaking to customers.
+- "Base price" = an internal-only concept (realized / 0.75). NEVER mention "base price" in customer messages.
+- MSRP = the variant's listed retail price.
+- Standard subscription price = MSRP × 0.75 (the default 25% subscriber discount).
+- 50% MSRP floor = the absolute minimum realized price we honor. Customers historically below this floor were raised TO the floor by a cleanup; their old price can no longer be offered.
+
+PRICE COMPARISON RULE: compare per-unit realized prices across orders, never totals. If a renewal's per-unit matches prior renewals → NOT overcharged. If the per-unit went UP from a below-floor historical price to the 50% floor, that's the cleanup raising them to our minimum — explain rather than refund. If a renewal's per-unit went up beyond the 50% floor for no reason, that's a real overcharge worth investigating.
+
+DRAFT ORDERS: orders flagged [DRAFT — not a renewal] are manual draft orders (source: shopify_draft_order). They often show MSRP-based pricing because they're not subject to subscription contract pricing. NEVER use them to argue a customer was overcharged on their actual subscription.`);
   } else {
     parts.push("\nRECENT ORDERS: None");
   }
