@@ -24,7 +24,6 @@ import {
   appstleSkipUpcomingOrder,
   appstleUnskipOrder,
   appstleSwitchPaymentMethod,
-  appstleSendPaymentUpdateEmail,
   appstleGetUpcomingOrders,
   appstleSubscriptionAction,
 } from "@/lib/appstle";
@@ -189,9 +188,6 @@ export const dunningPaymentFailed = inngest.createFunction(
           `Cancelled by ShopCX — terminal billing error: ${error_code} (${error_message || "no details"}), no other payment methods available`
         );
 
-        // Send payment update email so customer can add a new card
-        await appstleSendPaymentUpdateEmail(workspace_id, shopify_contract_id).catch(() => {});
-
         const admin = createAdminClient();
         const { data: customer } = await admin.from("customers").select("email, first_name").eq("id", customer_id).single();
         const { data: ws } = await admin.from("workspaces").select("name, portal_config").eq("id", workspace_id).single();
@@ -342,8 +338,6 @@ export const dunningPaymentFailed = inngest.createFunction(
           workspace_id, shopify_contract_id, "cancel", "dunning",
           `Cancelled by ShopCX — all ${paymentMethods.length} payment methods returned terminal errors`
         );
-
-        await appstleSendPaymentUpdateEmail(workspace_id, shopify_contract_id).catch(() => {});
 
         const admin = createAdminClient();
         const { data: customer } = await admin.from("customers").select("email, first_name").eq("id", customer_id).single();
@@ -685,8 +679,6 @@ async function handleAllCardsExhausted(
     await tagCustomerTickets(workspaceId, customerId, "dunning:cancelled");
   }
 
-  // Send payment update email via Appstle (triggers Shopify secure link)
-  await appstleSendPaymentUpdateEmail(workspaceId, shopifyContractId);
   await updateDunningCycle(cycle.id, { payment_update_sent: true, payment_update_sent_at: new Date().toISOString() });
 
   // Get customer + workspace info for our own email

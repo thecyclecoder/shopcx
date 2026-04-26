@@ -364,17 +364,17 @@ export async function sendDunningPausedEmail({
     to: toEmail,
     subject: `Your subscription has been paused — ${workspaceName}`,
     html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
-        <h2 style="color: #18181b; font-size: 20px; margin-bottom: 8px;">${greeting}</h2>
-        <p style="color: #71717a; font-size: 14px; line-height: 1.6;">
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 520px; margin: 0; padding: 32px 20px; color: #000000;">
+        <p style="font-size: 15px; margin: 0 0 16px;">${greeting}</p>
+        <p style="font-size: 15px; line-height: 1.6; margin: 0 0 24px;">
           We weren't able to process your payment after multiple attempts, so your subscription has been paused. Update your payment method below to resume your subscription — we'll get your next order on its way right away.
         </p>
-        <div style="text-align: center; margin-top: 32px;">
-          <a href="${updateUrl}" style="display: inline-block; padding: 14px 32px; background: #6366f1; color: #ffffff !important; text-decoration: none; border-radius: 10px; font-size: 15px; font-weight: 600;">
+        <div style="margin: 0 0 24px;">
+          <a href="${updateUrl}" style="display: inline-block; padding: 12px 24px; background: #6366f1; color: #ffffff !important; text-decoration: none; border-radius: 8px; font-size: 15px; font-weight: 600;">
             Update Payment Method
           </a>
         </div>
-        <p style="color: #a1a1aa; font-size: 12px; margin-top: 32px; text-align: center;">
+        <p style="font-size: 14px; margin: 0;">
           If you have questions, just reply to this email and we'll help you out.
         </p>
       </div>

@@ -451,7 +451,7 @@ export async function cancelForTerminalNoBackup(params: {
 }): Promise<void> {
   const { workspaceId, contractId, customerId, errorCode, errorMessage, paymentMethodCount } = params;
   const admin = createAdminClient();
-  const { appstleSubscriptionAction, appstleSendPaymentUpdateEmail } = await import("@/lib/appstle");
+  const { appstleSubscriptionAction } = await import("@/lib/appstle");
 
   try {
     await appstleSubscriptionAction(
@@ -462,13 +462,7 @@ export async function cancelForTerminalNoBackup(params: {
     console.error("[Dunning terminal-cancel] appstle cancel failed:", e);
   }
 
-  try {
-    await appstleSendPaymentUpdateEmail(workspaceId, contractId);
-  } catch (e) {
-    console.error("[Dunning terminal-cancel] appstle payment-update email failed:", e);
-  }
-
-  // Send our own notification email if portal payment_update_url is configured.
+  // Send our own payment-update email — Appstle's default isn't great.
   if (customerId) {
     const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", customerId).single();
     const { data: ws } = await admin.from("workspaces").select("name, portal_config").eq("id", workspaceId).single();
