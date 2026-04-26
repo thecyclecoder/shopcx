@@ -16,6 +16,7 @@ export { cancel } from "./cancel";
 export { reactivate } from "./reactivate";
 export { address } from "./address";
 export { replaceVariants } from "./replace-variants";
+export { removeLineItem } from "./remove-line-item";
 export { coupon } from "./coupon";
 export { frequency } from "./frequency";
 export { featuredReviews } from "./reviews";
@@ -40,6 +41,7 @@ import { cancel } from "./cancel";
 import { reactivate } from "./reactivate";
 import { address } from "./address";
 import { replaceVariants } from "./replace-variants";
+import { removeLineItem } from "./remove-line-item";
 import { coupon } from "./coupon";
 import { frequency } from "./frequency";
 import { featuredReviews } from "./reviews";
@@ -68,6 +70,9 @@ export const routeMap: Record<string, RouteHandler> = {
   replacevariants: replaceVariants,
   replaceVariants,
   replace_variants: replaceVariants,
+  removeLineItem,
+  removelineitem: removeLineItem,
+  remove_line_item: removeLineItem,
   coupon,
   frequency,
   featuredReviews,

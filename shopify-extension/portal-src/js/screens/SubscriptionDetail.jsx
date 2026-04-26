@@ -398,22 +398,22 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
   async function doRemove(ln) {
     setRemovingLine(ln.sku || ln.variantId);
     setMutating(true);
+    startAction();
     try {
-      const resp = await postJson('replaceVariants', {
+      const resp = await postJson('removeLineItem', {
         contractId: contract.id,
-        oldVariants: [{ variantId: ln.variantId }],
-        allowRemoveWithoutAdd: true,
+        lineId: ln.id,
+        variantId: ln.variantId,
       });
-      showToast('Item removed.', 'success');
+      completeAction('Item removed.');
       clearCaches();
       if (resp?.patch?.lines && Array.isArray(resp.patch.lines)) {
         onPatchLines(resp.patch.lines);
       } else {
-        // Re-fetch contract to get fresh state for subsequent mutations
         onUpdate();
       }
     } catch (e) {
-      showToast(e?.message || 'Could not remove item.', 'error');
+      failAction(e?.message || 'Could not remove item.');
     }
     setRemovingLine(null);
     setMutating(false);
@@ -570,7 +570,7 @@ function PaymentMethodCard({ contract }) {
   );
 }
 
-function AddressCard({ contract, showToast, onUpdate }) {
+function AddressCard({ contract, startAction, completeAction, failAction, onUpdate }) {
   const addr = contract?.deliveryMethod?.address || {};
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({
@@ -584,6 +584,7 @@ function AddressCard({ contract, showToast, onUpdate }) {
   async function save(skipVerification) {
     setBusy(true);
     setVerification(null);
+    startAction();
     try {
       const resp = await postJson('address', { contractId: contract.id, ...form, skipVerification: !!skipVerification });
       if (resp?.verification && !resp.verification.valid) {
@@ -592,9 +593,9 @@ function AddressCard({ contract, showToast, onUpdate }) {
         setBusy(false);
         return;
       }
-      showToast('Address updated!', 'success');
+      completeAction('Address updated!');
       clearCaches(); setEditing(false); onUpdate();
-    } catch { showToast('Could not update address.', 'error'); }
+    } catch { failAction('Could not update address.'); }
     setBusy(false);
   }
 
@@ -693,7 +694,7 @@ function AddressCard({ contract, showToast, onUpdate }) {
   );
 }
 
-function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
+function CouponCard({ contract, startAction, completeAction, failAction, onUpdate, onCouponStateChange }) {
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [loyalty, setLoyalty] = useState(null);
@@ -724,59 +725,62 @@ function CouponCard({ contract, showToast, onUpdate, onCouponStateChange }) {
   async function apply() {
     if (!code.trim()) return;
     setBusy(true);
+    startAction();
     try {
       await postJson('coupon', { contractId: contract.id, discountCode: code.trim(), mode: 'apply' });
-      showToast('Coupon applied!', 'success');
+      completeAction('Coupon applied!');
       setCode(''); clearCaches(); onUpdate();
-    } catch { showToast('Could not apply coupon.', 'error'); }
+    } catch { failAction('Could not apply coupon.'); }
     setBusy(false);
   }
 
   async function removeDiscount(discount) {
     setBusy(true);
+    startAction();
     try {
       await postJson('coupon', { contractId: contract.id, discountId: discount.id, mode: 'remove' });
-      showToast('Discount removed.', 'success');
+      completeAction('Discount removed.');
       setLocalApplied(null);
       if (onCouponStateChange) onCouponStateChange(false);
-      // Refresh loyalty data
       requestJson('loyaltyBalance', {}, { force: true })
         .then(resp => { if (resp?.ok && resp?.enabled) setLoyalty(resp); })
         .catch(err => console.error('[SubscriptionDetail] loyalty refresh error:', err?.message));
       clearCaches(); onUpdate();
-    } catch { showToast('Could not remove discount.', 'error'); }
+    } catch { failAction('Could not remove discount.'); }
     setBusy(false);
   }
 
   async function applyLoyaltyCoupon(redemptionId) {
     setLoyaltyBusy(redemptionId);
+    startAction();
     try {
       const resp = await postJson('loyaltyApplyToSubscription', { contractId: contract.id, redemptionId });
       if (resp?.ok) {
-        showToast(`$${resp.discount_value} loyalty coupon applied!`, 'success');
+        completeAction(`$${resp.discount_value} loyalty coupon applied!`);
         setLocalApplied({ code: resp.code, value: resp.discount_value, valueType: 'FIXED_AMOUNT' });
         if (onCouponStateChange) onCouponStateChange(true);
         clearCaches(); onUpdate();
       } else {
-        showToast(resp?.error || 'Could not apply.', 'error');
+        failAction(resp?.error || 'Could not apply.');
       }
-    } catch (e) { showToast(e?.message || 'Failed.', 'error'); }
+    } catch (e) { failAction(e?.message || 'Failed.'); }
     setLoyaltyBusy(null);
   }
 
   async function redeemAndApply(tierIndex) {
     setLoyaltyBusy('tier-' + tierIndex);
+    startAction();
     try {
       const resp = await postJson('loyaltyApplyToSubscription', { contractId: contract.id, tierId: tierIndex });
       if (resp?.ok) {
-        showToast(`$${resp.discount_value} loyalty coupon redeemed and applied!`, 'success');
+        completeAction(`$${resp.discount_value} loyalty coupon redeemed and applied!`);
         setLocalApplied({ code: resp.code, value: resp.discount_value, valueType: 'FIXED_AMOUNT' });
         if (onCouponStateChange) onCouponStateChange(true);
         clearCaches(); onUpdate();
       } else {
-        showToast(resp?.error || 'Could not redeem.', 'error');
+        failAction(resp?.error || 'Could not redeem.');
       }
-    } catch (e) { showToast(e?.message || 'Failed.', 'error'); }
+    } catch (e) { failAction(e?.message || 'Failed.'); }
     setLoyaltyBusy(null);
   }
 
@@ -1109,9 +1113,9 @@ export default function SubscriptionDetail() {
         </div>
         <div class="sp-detail__col">
           {!isCancelled && <RewardsCard contractId={shortId(contract.id)} hideRedeem={!couponAppliedLocal} showRedeemOverride={couponAppliedLocal} />}
-          {!isReadOnly && <CouponCard contract={contract} showToast={showToast} onUpdate={handleUpdate} onCouponStateChange={(v) => setCouponAppliedLocal(v)} />}
+          {!isReadOnly && <CouponCard contract={contract} startAction={startAction} completeAction={completeAction} failAction={failAction} onUpdate={handleUpdate} onCouponStateChange={(v) => setCouponAppliedLocal(v)} />}
           <PaymentMethodCard contract={contract} />
-          {!isReadOnly && <AddressCard contract={contract} showToast={showToast} onUpdate={handleUpdate} />}
+          {!isReadOnly && <AddressCard contract={contract} startAction={startAction} completeAction={completeAction} failAction={failAction} onUpdate={handleUpdate} />}
           {!isReadOnly && <ShippingProtectionCard contract={contract} shipLine={shipLine} onUpdate={handleUpdate} />}
           {!isCancelled && productIds.length > 0 && <ReviewsCard productIds={productIds} />}
           {!isReadOnly && <CancelCard router={router} contractId={shortId(contract.id)} />}

@@ -11,7 +11,7 @@ const SUBJECTS = [
 ];
 
 export default function BannedView() {
-  const { showToast } = useContext(PortalContext);
+  const { startAction, completeAction, failAction } = useContext(PortalContext);
   const [subject, setSubject] = useState(SUBJECTS[0]);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -21,12 +21,13 @@ export default function BannedView() {
     e.preventDefault();
     if (!message.trim() || busy) return;
     setBusy(true);
+    startAction();
     try {
       await postJson('submitBanRequest', { subject, message: message.trim() });
       setSubmitted(true);
-      showToast('Your request has been submitted.', 'success');
+      completeAction('Your request has been submitted.');
     } catch {
-      showToast('Could not submit your request. Please try again.', 'error');
+      failAction('Could not submit your request. Please try again.');
     }
     setBusy(false);
   }

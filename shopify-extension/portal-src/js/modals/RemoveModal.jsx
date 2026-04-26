@@ -18,10 +18,9 @@ export default function RemoveModal({ contract, line, onClose, onDone, onPatchLi
     onClose();
     startAction();
     try {
-      const resp = await postJson('replaceVariants', {
+      const resp = await postJson('removeLineItem', {
         contractId: contract.id,
-        oldLineId: safeStr(line?.id),
-        allowRemoveWithoutAdd: true,
+        lineId: safeStr(line?.id),
       });
       completeAction('Item removed.');
       clearCaches();

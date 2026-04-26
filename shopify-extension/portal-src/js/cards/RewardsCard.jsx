@@ -22,7 +22,7 @@ function StatusBadge({ status }) {
 }
 
 export default function RewardsCard({ contractId, onCouponApplied, hideRedeem, showRedeemOverride }) {
-  const { showToast } = useContext(PortalContext);
+  const { startAction, completeAction, failAction } = useContext(PortalContext);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(null); // tier index or 'redeem-{id}'
@@ -39,18 +39,18 @@ export default function RewardsCard({ contractId, onCouponApplied, hideRedeem, s
 
   async function redeemTier(tierIndex) {
     setBusy(tierIndex);
+    startAction();
     try {
       const resp = await postJson('loyaltyRedeem', { tierId: tierIndex });
       if (resp?.ok) {
-        showToast(`Coupon ${resp.code} created! $${resp.discount_value} off.`, 'success');
-        // Refresh balance
+        completeAction(`Coupon ${resp.code} created! $${resp.discount_value} off.`);
         const fresh = await requestJson('loyaltyBalance', {}, { force: true });
         if (fresh?.ok && fresh?.enabled) setData(fresh);
       } else {
-        showToast(resp?.error || 'Could not redeem.', 'error');
+        failAction(resp?.error || 'Could not redeem.');
       }
     } catch (e) {
-      showToast(e?.message || 'Redemption failed.', 'error');
+      failAction(e?.message || 'Redemption failed.');
     }
     setBusy(null);
   }

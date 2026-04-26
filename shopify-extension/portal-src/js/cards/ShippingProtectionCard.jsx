@@ -31,10 +31,10 @@ export default function ShippingProtectionCard({ contract, shipLine, onUpdate })
           newVariants: [{ variantId: String(variantIds[0]), quantity: 1 }],
         });
       } else {
-        await postJson('replaceVariants', {
+        await postJson('removeLineItem', {
           contractId: contract.id,
-          oldVariants: [{ variantId: safeStr(shipLine?.variantId) }],
-          allowRemoveWithoutAdd: true,
+          lineId: safeStr(shipLine?.id),
+          variantId: safeStr(shipLine?.variantId),
         });
       }
       completeAction(nextOn ? 'Shipping protection added!' : 'Shipping protection removed.');

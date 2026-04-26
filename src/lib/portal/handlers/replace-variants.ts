@@ -2,7 +2,7 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { enrichItemTitles, appstleRemoveLineItem } from "@/lib/subscription-items";
+import { enrichItemTitles } from "@/lib/subscription-items";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -116,30 +116,13 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   if (carryForwardDiscount) body.carryForwardDiscount = carryForwardDiscount;
   if (oldLineId) body.oldLineId = oldLineId.startsWith("gid://") ? oldLineId : `gid://shopify/SubscriptionLine/${oldLineId}`;
 
-  // For removals without replacement, use the dedicated remove-line-item endpoint
+  // Pure removals (without replacement) belong in the dedicated removeLineItem
+  // route — separate Appstle endpoint, separate handler. Reject here.
   if (oldVariants.length && !newVariants && allowRemoveWithoutAdd) {
-    for (const variantId of oldVariants) {
-      const result = await appstleRemoveLineItem(auth.workspaceId, String(contractId), String(variantId));
-      if (!result.success) {
-        return handleAppstleError(
-          Object.assign(new Error(result.error || "Remove failed"), { details: "" }),
-          { route: "replaceVariants", payload: { contractId, variantId, action: "remove" } },
-        );
-      }
-    }
-
-    const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
-    if (customer) {
-      await logPortalAction({
-        workspaceId: auth.workspaceId, customerId: customer.id,
-        eventType: "portal.items.swapped",
-        summary: "Customer removed item(s) from subscription via portal",
-        properties: { shopify_contract_id: String(contractId), removed_variants: oldVariants },
-        createNote: true,
-      });
-    }
-
-    return jsonOk({ ok: true, route, contractId });
+    return jsonErr({
+      error: "use_remove_line_item_route",
+      detail: "Pure removals must call the removeLineItem portal route, not replaceVariants.",
+    }, 400);
   }
 
   if (oldVariants.length) body.oldVariants = oldVariants;

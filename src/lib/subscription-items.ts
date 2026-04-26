@@ -56,44 +56,75 @@ export async function getAppstleConfig(workspaceId: string): Promise<{ apiKey: s
 }
 
 /**
- * Remove a line item from a subscription via Appstle's dedicated endpoint.
- * Use this instead of replaceVariants when removing without replacement.
+ * Remove a single line item from a subscription via Appstle's dedicated endpoint.
+ *
+ *   PUT /api/external/v2/subscription-contracts-remove-line-item
+ *   body: { contractId: "123", lineId: "gid://shopify/SubscriptionLine/...", removeDiscount: true }
+ *
+ * Requirements (per Appstle docs):
+ *   - contractId: numeric ID, no "gid://" prefix
+ *   - lineId: full Shopify GID (gid://shopify/SubscriptionLine/...)
+ *   - At least one recurring product must remain after removal
+ *   - Products with unfulfilled minimum cycle commitments cannot be removed
+ *   - removeDiscount: true (default) deletes line-only discounts; shared discounts kept
+ *
+ * NOTE: this is a separate operation from replaceVariants — they hit different endpoints.
+ * Pass either lineGid (preferred — saves a contract fetch) or variantId (we'll resolve).
  */
 export async function appstleRemoveLineItem(
   workspaceId: string,
   contractId: string,
-  variantId: string,
+  variantOrLine: { variantId?: string; lineGid?: string },
 ): Promise<{ success: boolean; error?: string }> {
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
   try {
-    // Fetch contract to get the line GID for this variant
-    const contractRes = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
+    let lineGid = variantOrLine.lineGid || null;
+
+    // Resolve lineGid from variantId if needed by fetching the contract
+    if (!lineGid && variantOrLine.variantId) {
+      const contractRes = await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
+        { cache: "no-store" },
+      );
+      if (!contractRes.ok) return { success: false, error: `Contract fetch failed: ${contractRes.status}` };
+      const contractData = await contractRes.json();
+      const lines = contractData.lines?.nodes || [];
+      const line = lines.find((l: Record<string, unknown>) => {
+        const vid = String(l.variantId || "").split("/").pop();
+        return vid === String(variantOrLine.variantId);
+      });
+      if (!line?.id) return { success: false, error: `Variant ${variantOrLine.variantId} not found on contract` };
+      lineGid = String(line.id);
+    }
+
+    if (!lineGid) return { success: false, error: "Missing lineGid or variantId" };
+    // Ensure lineGid has the full GID prefix (Appstle requires it)
+    if (!lineGid.startsWith("gid://")) lineGid = `gid://shopify/SubscriptionLine/${lineGid}`;
+
+    // Despite Appstle's docs example showing JSON body, the endpoint expects
+    // contractId + lineId as query parameters (Spring @RequestParam). Confirmed
+    // by trial: body-based requests return "Required request parameter X not present".
+    // We omit removeDiscount (it's optional, not desired here).
+    const numericContractId = String(contractId).replace(/^gid:\/\/.*\//, "");
+    const qs = new URLSearchParams({
+      contractId: numericContractId,
+      lineId: lineGid,
+    });
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-line-item?${qs.toString()}`,
+      {
+        method: "PUT",
+        headers: { "X-API-Key": config.apiKey },
+        cache: "no-store",
+      },
     );
-    if (!contractRes.ok) return { success: false, error: `Contract fetch failed: ${contractRes.status}` };
-    const contractData = await contractRes.json();
-
-    const lines = contractData.lines?.nodes || [];
-    const line = lines.find((l: Record<string, unknown>) => {
-      const vid = String(l.variantId || "").split("/").pop();
-      return vid === String(variantId);
-    });
-
-    if (!line?.id) return { success: false, error: `Variant ${variantId} not found on contract` };
-
-    const removeUrl = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-line-item?contractId=${contractId}&lineId=${encodeURIComponent(line.id)}`;
-    const res = await fetch(removeUrl, {
-      method: "PUT",
-      headers: { "X-API-Key": config.apiKey },
-      cache: "no-store",
-    });
 
     if (!res.ok) {
       const text = await res.text();
-      console.error("[appstleRemoveLineItem] error:", text);
-      return { success: false, error: `Appstle API error: ${res.status}` };
+      console.error("[appstleRemoveLineItem] error:", res.status, text);
+      return { success: false, error: `Appstle API error: ${res.status} — ${text.slice(0, 200)}` };
     }
 
     // Update local DB
@@ -213,10 +244,11 @@ export async function subAddItem(
 export async function subRemoveItem(
   workspaceId: string,
   contractId: string,
-  variantId: string,
+  variantOrLine: string | { variantId?: string; lineGid?: string },
 ): Promise<{ success: boolean; error?: string }> {
   // Use dedicated remove-line-item endpoint (not replaceVariants)
-  return appstleRemoveLineItem(workspaceId, contractId, variantId);
+  const arg = typeof variantOrLine === "string" ? { variantId: variantOrLine } : variantOrLine;
+  return appstleRemoveLineItem(workspaceId, contractId, arg);
 }
 
 /** Change quantity of a variant on a subscription (remove + re-add with new qty) */
