@@ -33,6 +33,7 @@ interface Product {
   target_customer: string | null;
   certifications: string[] | null;
   intelligence_status: string | null;
+  is_bestseller: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -131,6 +132,8 @@ export default function StorefrontProductDetailPage() {
           Product Intelligence Engine &rarr;
         </Link>
       </div>
+
+      <BestsellerToggle product={product} workspaceId={workspace.id} onUpdate={(p) => setProduct(p)} />
 
       <div className="grid gap-4 lg:grid-cols-3">
         <Card title="Identifiers">
@@ -419,6 +422,72 @@ function MediaSlot({
           Remove image
         </button>
       )}
+    </div>
+  );
+}
+
+function BestsellerToggle({
+  product,
+  workspaceId,
+  onUpdate,
+}: {
+  product: Product;
+  workspaceId: string;
+  onUpdate: (p: Product) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const checked = !!product.is_bestseller;
+
+  async function toggle(next: boolean) {
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`/api/workspaces/${workspaceId}/products/${product.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_bestseller: next }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      onUpdate(data.product as Product);
+    } else {
+      const body = await res.json().catch(() => ({}));
+      setError(body.error || "Could not update.");
+    }
+    setBusy(false);
+  }
+
+  return (
+    <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <div>
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Best Seller</span>
+          {checked && (
+            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+              ACTIVE
+            </span>
+          )}
+        </div>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          When on, a green &quot;Best Seller!&quot; badge appears on the storefront product page hero image.
+        </p>
+        {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
+      </div>
+      <button
+        type="button"
+        onClick={() => toggle(!checked)}
+        disabled={busy}
+        aria-pressed={checked}
+        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-50 ${
+          checked ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-700"
+        }`}
+      >
+        <span
+          className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+            checked ? "translate-x-5" : "translate-x-0.5"
+          }`}
+        />
+      </button>
     </div>
   );
 }

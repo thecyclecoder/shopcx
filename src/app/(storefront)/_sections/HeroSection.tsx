@@ -59,6 +59,14 @@ export function HeroSection({ data }: { data: PageData }) {
                 height={900}
               />
             </div>
+            {data.product.is_bestseller && (
+              <span
+                className="absolute right-3 top-3 z-10 inline-flex items-center rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white shadow-md md:right-4 md:top-4 md:px-4 md:py-2 md:text-sm"
+                aria-label="Best Seller"
+              >
+                Best Seller!
+              </span>
+            )}
           </div>
         </div>
 

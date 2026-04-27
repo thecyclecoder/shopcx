@@ -21,6 +21,7 @@ export interface Product {
   target_customer: string | null;
   certifications: string[] | null;
   intelligence_status: string | null;
+  is_bestseller: boolean;
   variants: Array<{
     id?: string;
     title?: string;
@@ -223,7 +224,7 @@ export async function getPageData(
   const { data: product } = await admin
     .from("products")
     .select(
-      "id, workspace_id, handle, title, image_url, description, rating, rating_count, target_customer, certifications, intelligence_status, variants",
+      "id, workspace_id, handle, title, image_url, description, rating, rating_count, target_customer, certifications, intelligence_status, is_bestseller, variants",
     )
     .eq("workspace_id", workspace.id)
     .eq("handle", productHandle)
