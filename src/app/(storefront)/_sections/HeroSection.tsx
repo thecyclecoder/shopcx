@@ -96,11 +96,14 @@ export function HeroSection({ data }: { data: PageData }) {
           )}
 
           {benefitBar.length > 0 && (
-            <div className="mt-5 flex flex-wrap gap-2">
-              {benefitBar.slice(0, 6).map((b, i) => (
-                <BenefitChip key={i} label={b.text} />
-              ))}
-            </div>
+            <>
+              <div className="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                {benefitBar.slice(0, 4).map((b, i) => (
+                  <BenefitChip key={i} label={b.text} index={i} />
+                ))}
+              </div>
+              <ResearchCredibility data={data} />
+            </>
           )}
 
           <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -121,5 +124,41 @@ export function HeroSection({ data }: { data: PageData }) {
         </div>
       </div>
     </section>
+  );
+}
+
+/**
+ * "Backed by N studies on M ingredients in {product}" — the credibility
+ * tag that sits under the benefit cards. Numbers come straight from the
+ * ingredient_research rows we already loaded for this page; rendering
+ * is suppressed when there's nothing meaningful to claim.
+ */
+function ResearchCredibility({ data }: { data: PageData }) {
+  // Count total citations across every ingredient's research rows.
+  const studyCount = data.ingredient_research.reduce((sum, r) => {
+    return sum + (Array.isArray(r.citations) ? r.citations.length : 0);
+  }, 0);
+
+  // Distinct ingredients that actually have research attached — not the
+  // raw ingredient list, since some may be supporting / unstudied.
+  const ingredientCount = new Set(
+    data.ingredient_research.map((r) => r.ingredient_id),
+  ).size;
+
+  if (studyCount < 2 || ingredientCount < 2) return null;
+
+  return (
+    <p className="mt-4 flex items-center gap-2 text-sm font-medium text-zinc-700">
+      <span className="inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" className="h-3 w-3">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      </span>
+      <span>
+        Backed by{" "}
+        <span className="font-bold text-zinc-900">{studyCount} clinical studies</span> on{" "}
+        <span className="font-bold text-zinc-900">{ingredientCount} ingredients</span> in {data.product.title}
+      </span>
+    </p>
   );
 }
