@@ -33,7 +33,7 @@ export async function GET(
   const { data } = await admin
     .from("workspaces")
     .select(
-      "storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_slug",
+      "storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_slug, storefront_off_platform_review_count",
     )
     .eq("id", workspaceId)
     .single();
@@ -44,6 +44,7 @@ export async function GET(
     accent_color: data?.storefront_accent_color || null,
     logo_url: data?.storefront_logo_url || null,
     storefront_slug: data?.storefront_slug || null,
+    off_platform_review_count: data?.storefront_off_platform_review_count ?? 0,
   });
 }
 
@@ -70,7 +71,7 @@ export async function PATCH(
   }
 
   const body = await request.json().catch(() => ({}));
-  const update: Record<string, string | null> = {};
+  const update: Record<string, string | number | null> = {};
 
   if ("font_key" in body) {
     if (body.font_key === null || body.font_key === "") {
@@ -103,6 +104,14 @@ export async function PATCH(
   if ("logo_url" in body) {
     update.storefront_logo_url =
       typeof body.logo_url === "string" && body.logo_url.trim() ? body.logo_url.trim() : null;
+  }
+
+  if ("off_platform_review_count" in body) {
+    const n = Number(body.off_platform_review_count);
+    if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
+      return NextResponse.json({ error: "off_platform_review_count must be a non-negative integer" }, { status: 400 });
+    }
+    update.storefront_off_platform_review_count = n;
   }
 
   if (Object.keys(update).length === 0) {

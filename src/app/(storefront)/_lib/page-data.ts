@@ -202,7 +202,7 @@ export async function getWorkspaceBySlug(slug: string) {
   const { data } = await admin
     .from("workspaces")
     .select(
-      "id, storefront_slug, storefront_domain, shopify_myshopify_domain, support_email, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url",
+      "id, storefront_slug, storefront_domain, shopify_myshopify_domain, support_email, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_off_platform_review_count",
     )
     .eq("storefront_slug", slug)
     .maybeSingle();
@@ -374,17 +374,17 @@ export async function getPageData(
   }
   void reviewCountRes;
 
-  // Reviews-elsewhere bump: we have ~10K reviews on Amazon and other channels
-  // that aren't synced into product_reviews. Add the bump to the customer-
-  // facing counts (hero "X reviews", ReviewsSection header) so social proof
-  // reflects total volume, not just what we mirror locally. Per-product
-  // rating values themselves aren't touched — only the count.
-  const REVIEWS_ELSEWHERE_BUMP = 10000;
+  // Reviews-elsewhere bump: we have reviews on Amazon and other channels
+  // that aren't synced into product_reviews. The offset (configurable per
+  // workspace via storefront_off_platform_review_count) is added to the
+  // customer-facing counts so social proof reflects total volume. Per-product
+  // star ratings themselves aren't touched — only counts.
+  const reviewsBump = (workspace as { storefront_off_platform_review_count?: number | null }).storefront_off_platform_review_count || 0;
   const productWithBump = {
     ...(product as Product),
-    rating_count: ((product as Product).rating_count ?? 0) + REVIEWS_ELSEWHERE_BUMP,
+    rating_count: ((product as Product).rating_count ?? 0) + reviewsBump,
   };
-  const totalCountWithBump = (reviewTotalCount || 0) + REVIEWS_ELSEWHERE_BUMP;
+  const totalCountWithBump = (reviewTotalCount || 0) + reviewsBump;
 
   return {
     product: productWithBump as Product,

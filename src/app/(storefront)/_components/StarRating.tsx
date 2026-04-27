@@ -1,6 +1,10 @@
 /**
  * Inline SVG star rating. Server component — zero JS.
- * `rating` is 0-5 (supports halves via fractional values).
+ * `rating` is 0-5 (supports fractional values).
+ *
+ * Fractional stars render as 75% filled rather than 50%. A half-star
+ * reads as "missing something" and plants doubt; a 3/4 star feels more
+ * like "almost full" — closer to how a 4.7 rating actually looks (94%).
  */
 export function StarRating({
   rating,
@@ -13,7 +17,7 @@ export function StarRating({
 }) {
   const clamped = Math.max(0, Math.min(5, rating));
   const full = Math.floor(clamped);
-  const half = clamped - full >= 0.5;
+  const partial = clamped - full >= 0.25;
 
   return (
     <span
@@ -22,7 +26,7 @@ export function StarRating({
     >
       {Array.from({ length: 5 }).map((_, i) => {
         if (i < full) return <FilledStar key={i} size={size} />;
-        if (i === full && half) return <HalfStar key={i} size={size} />;
+        if (i === full && partial) return <PartialStar key={i} size={size} />;
         return <EmptyStar key={i} size={size} />;
       })}
     </span>
@@ -53,14 +57,14 @@ function EmptyStar({ size }: { size: number }) {
   );
 }
 
-function HalfStar({ size }: { size: number }) {
-  const id = `half-${size}`;
+function PartialStar({ size }: { size: number }) {
+  const id = `partial-${size}`;
   return (
     <svg width={size} height={size} viewBox="0 0 20 20" aria-hidden="true">
       <defs>
         <linearGradient id={id} x1="0" x2="1">
-          <stop offset="50%" stopColor="currentColor" />
-          <stop offset="50%" stopColor="transparent" />
+          <stop offset="75%" stopColor="currentColor" />
+          <stop offset="75%" stopColor="transparent" />
         </linearGradient>
       </defs>
       <path

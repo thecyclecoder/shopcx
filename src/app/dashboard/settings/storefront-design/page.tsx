@@ -8,6 +8,7 @@ interface DesignSettings {
   primary_color: string | null;
   accent_color: string | null;
   logo_url: string | null;
+  off_platform_review_count: number;
 }
 
 const FONT_OPTIONS: Array<{ key: string; label: string; sample: string }> = [
@@ -225,6 +226,20 @@ export default function StorefrontDesignPage() {
         </div>
       </section>
 
+      {/* Off-platform reviews */}
+      <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-1 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Off-platform reviews</h2>
+        <p className="mb-4 text-xs text-zinc-500">
+          Bump every product&apos;s review count by this amount to account for reviews collected on Amazon, Klaviyo, etc.
+          Added to both the per-product star count and the all-reviews page total.
+        </p>
+        <ReviewCountField
+          value={settings.off_platform_review_count}
+          onSave={(n) => update({ off_platform_review_count: n })}
+          saving={saving}
+        />
+      </section>
+
       {/* Preview */}
       <section className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
         <h2 className="mb-4 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Preview</h2>
@@ -312,6 +327,47 @@ function ColorField({
           className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 font-mono text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
         />
       </div>
+    </div>
+  );
+}
+
+function ReviewCountField({
+  value,
+  onSave,
+  saving,
+}: {
+  value: number;
+  onSave: (n: number) => void;
+  saving: boolean;
+}) {
+  const [local, setLocal] = useState(String(value));
+  useEffect(() => setLocal(String(value)), [value]);
+
+  const commit = () => {
+    const n = parseInt(local, 10);
+    if (!Number.isFinite(n) || n < 0) {
+      setLocal(String(value));
+      return;
+    }
+    if (n !== value) onSave(n);
+  };
+
+  return (
+    <div className="flex items-center gap-3">
+      <input
+        type="number"
+        min={0}
+        step={1}
+        value={local}
+        onChange={(e) => setLocal(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        disabled={saving}
+        className="w-40 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+      />
+      <span className="text-xs text-zinc-500">reviews added to every product</span>
     </div>
   );
 }
