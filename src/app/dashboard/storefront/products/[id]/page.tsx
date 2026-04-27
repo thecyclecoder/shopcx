@@ -14,6 +14,19 @@ interface Variant {
   [key: string]: unknown;
 }
 
+interface TableVariant {
+  id: string;                        // internal UUID
+  shopify_variant_id: string | null;
+  sku: string | null;
+  title: string | null;
+  price_cents: number;
+  compare_at_price_cents: number | null;
+  image_url: string | null;
+  position: number;
+  inventory_quantity: number | null;
+  available: boolean;
+}
+
 interface Product {
   id: string;
   workspace_id: string;
@@ -56,16 +69,24 @@ export default function StorefrontProductDetailPage() {
   const workspace = useWorkspace();
   const { id: productId } = useParams<{ id: string }>();
   const [product, setProduct] = useState<Product | null>(null);
+  const [tableVariants, setTableVariants] = useState<TableVariant[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const res = await fetch(`/api/workspaces/${workspace.id}/products/${productId}`);
-    if (res.ok) {
-      const data = await res.json();
+    const [pRes, vRes] = await Promise.all([
+      fetch(`/api/workspaces/${workspace.id}/products/${productId}`),
+      fetch(`/api/workspaces/${workspace.id}/products/${productId}/variants`),
+    ]);
+    if (pRes.ok) {
+      const data = await pRes.json();
       setProduct(data.product as Product);
     } else {
       setError("Product not found.");
+    }
+    if (vRes.ok) {
+      const data = await vRes.json();
+      setTableVariants((data.variants || []) as TableVariant[]);
     }
     setLoading(false);
   }, [workspace.id, productId]);
@@ -207,8 +228,8 @@ export default function StorefrontProductDetailPage() {
           </Card>
         )}
 
-        <Card title={`Variants (${variants.length})`} className="lg:col-span-3">
-          {variants.length === 0 ? (
+        <Card title={`Variants (${tableVariants.length})`} className="lg:col-span-3">
+          {tableVariants.length === 0 ? (
             <p className="text-xs text-zinc-400">No variants.</p>
           ) : (
             <table className="w-full text-sm">
@@ -217,12 +238,13 @@ export default function StorefrontProductDetailPage() {
                   <th className="py-2 pr-2">Title</th>
                   <th className="py-2 pr-2">SKU</th>
                   <th className="py-2 pr-2">Price</th>
-                  <th className="py-2 pr-2">Variant ID</th>
+                  <th className="py-2 pr-2">Internal UUID</th>
+                  <th className="py-2 pr-2">Shopify ID</th>
                 </tr>
               </thead>
               <tbody>
-                {variants.map((v, i) => (
-                  <tr key={v.id || i} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                {tableVariants.map((v) => (
+                  <tr key={v.id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
                     <td className="py-2 pr-2">
                       <div className="flex items-center gap-2">
                         {v.image_url && (
@@ -233,23 +255,30 @@ export default function StorefrontProductDetailPage() {
                     </td>
                     <td className="py-2 pr-2 font-mono text-xs text-zinc-600 dark:text-zinc-400">{v.sku || "—"}</td>
                     <td className="py-2 pr-2 text-xs text-zinc-600 dark:text-zinc-400">{formatPrice(v.price_cents)}</td>
-                    <td className="py-2 pr-2 font-mono text-[10px] text-zinc-400">{v.id || "—"}</td>
+                    <td className="py-2 pr-2 font-mono text-[10px] text-zinc-500" title={v.id}>{v.id.slice(0, 8)}…</td>
+                    <td className="py-2 pr-2 font-mono text-[10px] text-zinc-400">{v.shopify_variant_id || "—"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           )}
+          <p className="mt-3 text-[10px] text-zinc-400">
+            Source: <span className="font-mono">product_variants</span> table. Internal UUIDs are the source of truth — Shopify IDs are kept for sync only.
+          </p>
         </Card>
 
         <Card title="Image Management" className="lg:col-span-3">
           <ImageManagement workspaceId={workspace.id} productId={product.id} />
         </Card>
 
-        <Card title="Raw variant JSON" className="lg:col-span-3">
-          <pre className="max-h-80 overflow-auto rounded bg-zinc-900 p-3 text-[11px] text-zinc-200">
+        <details className="lg:col-span-3 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+          <summary className="cursor-pointer select-none text-xs font-medium text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
+            Legacy variant JSONB blob (mirror — for reference only)
+          </summary>
+          <pre className="mt-3 max-h-80 overflow-auto rounded bg-zinc-900 p-3 text-[11px] text-zinc-200">
             {JSON.stringify(variants, null, 2)}
           </pre>
-        </Card>
+        </details>
       </div>
     </div>
   );
