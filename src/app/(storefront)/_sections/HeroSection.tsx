@@ -90,7 +90,7 @@ export function HeroSection({ data }: { data: PageData }) {
           </p>
 
           {subhead && (
-            <p className="mt-3 max-w-xl text-base text-zinc-600 sm:text-lg">
+            <p className="mt-3 max-w-xl text-lg leading-relaxed text-zinc-800 sm:text-xl">
               {subhead}
             </p>
           )}
