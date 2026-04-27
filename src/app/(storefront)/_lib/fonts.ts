@@ -45,6 +45,12 @@ export interface StorefrontFontOption {
   variable: string;
   className: string;
   stack: string;
+  /**
+   * Weights actually preloaded for this font. Restricting weight selectors
+   * (e.g. the per-product header weight) to this list prevents the browser
+   * from synthesizing a weight that wasn't shipped.
+   */
+  weights: string[];
 }
 
 export const FONTS: Record<string, StorefrontFontOption> = {
@@ -54,6 +60,7 @@ export const FONTS: Record<string, StorefrontFontOption> = {
     variable: montserrat.variable,
     className: montserrat.variable,
     stack: "var(--font-montserrat), system-ui, sans-serif",
+    weights: ["400", "600", "700"],
   },
   inter: {
     key: "inter",
@@ -61,6 +68,7 @@ export const FONTS: Record<string, StorefrontFontOption> = {
     variable: inter.variable,
     className: inter.variable,
     stack: "var(--font-inter), system-ui, sans-serif",
+    weights: ["400", "500", "600", "700"], // Inter is a variable font — all weights free
   },
   poppins: {
     key: "poppins",
@@ -68,6 +76,7 @@ export const FONTS: Record<string, StorefrontFontOption> = {
     variable: poppins.variable,
     className: poppins.variable,
     stack: "var(--font-poppins), system-ui, sans-serif",
+    weights: ["400", "600", "700"],
   },
   lato: {
     key: "lato",
@@ -75,6 +84,7 @@ export const FONTS: Record<string, StorefrontFontOption> = {
     variable: lato.variable,
     className: lato.variable,
     stack: "var(--font-lato), system-ui, sans-serif",
+    weights: ["400", "700"],
   },
   "open-sans": {
     key: "open-sans",
@@ -82,6 +92,7 @@ export const FONTS: Record<string, StorefrontFontOption> = {
     variable: openSans.variable,
     className: openSans.variable,
     stack: "var(--font-open-sans), system-ui, sans-serif",
+    weights: ["400", "500", "600", "700"], // variable
   },
   "work-sans": {
     key: "work-sans",
@@ -89,6 +100,7 @@ export const FONTS: Record<string, StorefrontFontOption> = {
     variable: workSans.variable,
     className: workSans.variable,
     stack: "var(--font-work-sans), system-ui, sans-serif",
+    weights: ["400", "500", "600", "700"], // variable
   },
   "nunito-sans": {
     key: "nunito-sans",
@@ -96,6 +108,7 @@ export const FONTS: Record<string, StorefrontFontOption> = {
     variable: nunitoSans.variable,
     className: nunitoSans.variable,
     stack: "var(--font-nunito-sans), system-ui, sans-serif",
+    weights: ["400", "600", "700"],
   },
   playfair: {
     key: "playfair",
@@ -103,6 +116,7 @@ export const FONTS: Record<string, StorefrontFontOption> = {
     variable: playfair.variable,
     className: playfair.variable,
     stack: "var(--font-playfair), Georgia, serif",
+    weights: ["400", "600", "700"], // variable
   },
 };
 

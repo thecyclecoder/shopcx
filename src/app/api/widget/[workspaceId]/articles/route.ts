@@ -8,12 +8,27 @@ export async function GET(
 ) {
   const { workspaceId } = await params;
   const url = new URL(request.url);
-  const productId = url.searchParams.get("pid") || "";
+  const productIdRaw = url.searchParams.get("pid") || "";
   const productHandle = url.searchParams.get("handle") || "";
   const search = url.searchParams.get("search") || "";
   const pagePath = url.searchParams.get("path") || "";
 
   const admin = createAdminClient();
+
+  // Resolve `pid` — accepts either our internal UUID or Shopify product ID.
+  // Storefront passes the internal UUID (Shopify-deprecation-friendly); legacy
+  // embeds pass the Shopify ID. Normalize to shopify_product_id for the rest of
+  // this route since knowledge_base.product_id matches against shopify ids.
+  let productId = productIdRaw;
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(productIdRaw);
+  if (isUuid) {
+    const { data: prod } = await admin.from("products")
+      .select("shopify_product_id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", productIdRaw)
+      .maybeSingle();
+    productId = prod?.shopify_product_id || "";
+  }
 
   // Verify workspace exists
   const { data: ws } = await admin
@@ -110,37 +125,64 @@ export async function GET(
   }
 
   if (productId || productHandle) {
-    // Find product
+    // Find product (also fetch the merchant's hand-picked featured articles)
     let dbProductId: string | null = null;
+    let featuredIds: string[] = [];
     if (productId) {
       const { data: product } = await admin
         .from("products")
-        .select("id")
+        .select("id, featured_widget_article_ids")
         .eq("workspace_id", workspaceId)
         .eq("shopify_product_id", productId)
         .single();
       dbProductId = product?.id || null;
+      featuredIds = (product?.featured_widget_article_ids as string[]) || [];
     } else if (productHandle) {
       const { data: product } = await admin
         .from("products")
-        .select("id")
+        .select("id, featured_widget_article_ids")
         .eq("workspace_id", workspaceId)
         .eq("handle", productHandle)
         .single();
       dbProductId = product?.id || null;
+      featuredIds = (product?.featured_widget_article_ids as string[]) || [];
     }
 
     if (dbProductId) {
-      const { data } = await admin
-        .from("knowledge_base")
-        .select("id, title, slug, excerpt, category, product_id, product_name, view_count, helpful_yes")
-        .eq("workspace_id", workspaceId)
-        .eq("published", true)
-        .eq("active", true)
-        .eq("product_id", dbProductId)
-        .order("view_count", { ascending: false })
-        .limit(5);
-      productArticles = data || [];
+      // 1. Pinned/featured articles (merchant-curated, sales-focused) — order preserved
+      let featured: typeof articles = [];
+      if (featuredIds.length) {
+        const { data: f } = await admin
+          .from("knowledge_base")
+          .select("id, title, slug, excerpt, category, product_id, product_name, view_count, helpful_yes")
+          .eq("workspace_id", workspaceId)
+          .eq("published", true)
+          .eq("active", true)
+          .in("id", featuredIds);
+        // Preserve admin-defined order
+        featured = featuredIds
+          .map(id => (f || []).find(a => a.id === id))
+          .filter((a): a is NonNullable<typeof a> => !!a);
+      }
+
+      // 2. Other product-tagged articles to fill out
+      const need = Math.max(0, 5 - featured.length);
+      let other: typeof articles = [];
+      if (need > 0) {
+        const { data: o } = await admin
+          .from("knowledge_base")
+          .select("id, title, slug, excerpt, category, product_id, product_name, view_count, helpful_yes")
+          .eq("workspace_id", workspaceId)
+          .eq("published", true)
+          .eq("active", true)
+          .eq("product_id", dbProductId)
+          .not("id", "in", `(${featured.map(a => `"${a.id}"`).join(",") || `""`})`)
+          .order("view_count", { ascending: false })
+          .limit(need);
+        other = o || [];
+      }
+
+      productArticles = [...featured, ...other];
     }
   }
 

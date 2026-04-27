@@ -8,13 +8,14 @@ export async function POST(
 ) {
   const { workspaceId } = await params;
   const body = await req.json();
-  const { email, name, first_name, last_name, message, session_id } = body as {
+  const { email, name, first_name, last_name, message, session_id, page_context } = body as {
     email: string;
     name?: string;
     first_name?: string;
     last_name?: string;
     message: string;
     session_id?: string;
+    page_context?: { product_id?: string; product_handle?: string; product_title?: string; page_path?: string };
   };
 
   if (!email || !message) {
@@ -124,6 +125,33 @@ export async function POST(
 
   // Create new ticket if needed
   if (!ticketId) {
+    // Resolve page_context.product_id — accept UUID or Shopify ID, normalize
+    // to { id, shopify_product_id, handle, title } for downstream consumers.
+    let resolvedContext: Record<string, unknown> | null = null;
+    if (page_context && (page_context.product_id || page_context.product_handle || page_context.page_path)) {
+      resolvedContext = { ...page_context };
+      if (page_context.product_id || page_context.product_handle) {
+        const isUuid = page_context.product_id
+          ? /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(page_context.product_id)
+          : false;
+        const lookup = isUuid
+          ? admin.from("products").select("id, shopify_product_id, handle, title").eq("workspace_id", workspaceId).eq("id", page_context.product_id!).maybeSingle()
+          : page_context.product_handle
+            ? admin.from("products").select("id, shopify_product_id, handle, title").eq("workspace_id", workspaceId).eq("handle", page_context.product_handle).maybeSingle()
+            : admin.from("products").select("id, shopify_product_id, handle, title").eq("workspace_id", workspaceId).eq("shopify_product_id", page_context.product_id!).maybeSingle();
+        const { data: prod } = await lookup;
+        if (prod) {
+          resolvedContext = {
+            ...resolvedContext,
+            product_id: prod.id,
+            shopify_product_id: prod.shopify_product_id,
+            product_handle: prod.handle,
+            product_title: page_context.product_title || prod.title,
+          };
+        }
+      }
+    }
+
     const { data: ticket } = await admin
       .from("tickets")
       .insert({
@@ -133,6 +161,7 @@ export async function POST(
         status: "open",
         subject: message.slice(0, 80) || "Live Chat",
         last_customer_reply_at: new Date().toISOString(),
+        page_context: resolvedContext,
       })
       .select("id")
       .single();

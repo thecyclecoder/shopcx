@@ -34,6 +34,10 @@ interface Product {
   certifications: string[] | null;
   intelligence_status: string | null;
   is_bestseller: boolean;
+  featured_widget_article_ids: string[] | null;
+  header_text: string | null;
+  header_text_color: string | null;
+  header_text_weight: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -125,15 +129,22 @@ export default function StorefrontProductDetailPage() {
             </div>
           </div>
         </div>
-        <Link
-          href={`/dashboard/products/${product.id}/intelligence`}
-          className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600"
-        >
-          Product Intelligence Engine &rarr;
-        </Link>
+        <div className="flex items-center gap-2">
+          <PurgeCacheButton workspaceId={workspace.id} productId={product.id} />
+          <Link
+            href={`/dashboard/products/${product.id}/intelligence`}
+            className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600"
+          >
+            Product Intelligence Engine &rarr;
+          </Link>
+        </div>
       </div>
 
       <BestsellerToggle product={product} workspaceId={workspace.id} onUpdate={(p) => setProduct(p)} />
+
+      <HeaderSettingsCard product={product} workspaceId={workspace.id} onUpdate={(p) => setProduct(p)} />
+
+      <FeaturedArticlesCard product={product} workspaceId={workspace.id} onUpdate={(p) => setProduct(p)} />
 
       <div className="grid gap-4 lg:grid-cols-3">
         <Card title="Identifiers">
@@ -422,6 +433,311 @@ function MediaSlot({
           Remove image
         </button>
       )}
+    </div>
+  );
+}
+
+function PurgeCacheButton({
+  workspaceId,
+  productId,
+}: {
+  workspaceId: string;
+  productId: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [flash, setFlash] = useState<"ok" | "err" | null>(null);
+
+  async function purge() {
+    setBusy(true);
+    setFlash(null);
+    const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/revalidate`, { method: "POST" });
+    setFlash(res.ok ? "ok" : "err");
+    setBusy(false);
+    setTimeout(() => setFlash(null), 2500);
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={purge}
+      disabled={busy}
+      title="Force the storefront page for this product to rebuild on next visit"
+      className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+    >
+      {busy ? "Purging..." : flash === "ok" ? "Purged ✓" : flash === "err" ? "Failed" : "Purge cache"}
+    </button>
+  );
+}
+
+// Workspace fonts and their preloaded weights — must match
+// src/app/(storefront)/_lib/fonts.ts so we don't show the merchant a
+// weight option that wasn't shipped.
+const FONT_WEIGHTS: Record<string, string[]> = {
+  montserrat: ["400", "600", "700"],
+  inter: ["400", "500", "600", "700"],
+  poppins: ["400", "600", "700"],
+  lato: ["400", "700"],
+  "open-sans": ["400", "500", "600", "700"],
+  "work-sans": ["400", "500", "600", "700"],
+  "nunito-sans": ["400", "600", "700"],
+  playfair: ["400", "600", "700"],
+};
+const WEIGHT_LABELS: Record<string, string> = {
+  "400": "Regular",
+  "500": "Medium",
+  "600": "Semibold",
+  "700": "Bold",
+};
+
+function HeaderSettingsCard({
+  product,
+  workspaceId,
+  onUpdate,
+}: {
+  product: Product;
+  workspaceId: string;
+  onUpdate: (p: Product) => void;
+}) {
+  const [text, setText] = useState(product.header_text || "");
+  const [color, setColor] = useState(product.header_text_color || "#18181b");
+  const [weight, setWeight] = useState(product.header_text_weight || "700");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [fontKey, setFontKey] = useState<string>("montserrat");
+
+  // Load workspace's storefront font so we can offer only loaded weights.
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspaceId}/storefront-design`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.font_key) setFontKey(d.font_key); })
+      .catch(() => {});
+  }, [workspaceId]);
+
+  const availableWeights = FONT_WEIGHTS[fontKey] || ["400", "600", "700"];
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`/api/workspaces/${workspaceId}/products/${product.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        header_text: text.trim() || null,
+        header_text_color: color || null,
+        header_text_weight: weight || null,
+      }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      onUpdate(data.product as Product);
+      setSavedFlash(true);
+      setTimeout(() => setSavedFlash(false), 2000);
+    } else {
+      const body = await res.json().catch(() => ({}));
+      setError(body.error || "Could not save.");
+    }
+    setBusy(false);
+  }
+
+  return (
+    <div className="mb-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3">
+        <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Storefront header</span>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          Custom wordmark shown in the fixed header on this product&apos;s page. Defaults to product title.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <label className="flex flex-col gap-1 md:col-span-3">
+          <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Header text</span>
+          <input
+            type="text"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={product.title}
+            className="rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Color</span>
+          <div className="flex items-center gap-2">
+            <input
+              type="color"
+              value={color}
+              onChange={(e) => setColor(e.target.value)}
+              className="h-9 w-10 cursor-pointer rounded border border-zinc-300 bg-transparent dark:border-zinc-700"
+            />
+            <input
+              type="text"
+              value={color}
+              onChange={(e) => setColor(e.target.value)}
+              className="flex-1 rounded border border-zinc-300 bg-white px-2 py-1.5 font-mono text-xs uppercase dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+            />
+          </div>
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Weight</span>
+          <select
+            value={weight}
+            onChange={(e) => setWeight(e.target.value)}
+            className="h-9 rounded border border-zinc-300 bg-white px-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+          >
+            {availableWeights.map(w => (
+              <option key={w} value={w}>{WEIGHT_LABELS[w] || w} ({w})</option>
+            ))}
+          </select>
+          <span className="text-[10px] text-zinc-400">Only weights preloaded for the storefront font ({fontKey}) are listed.</span>
+        </label>
+
+        <div className="flex flex-col gap-1">
+          <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Preview</span>
+          <div
+            className="flex h-9 items-center rounded border border-zinc-200 bg-zinc-50 px-3 dark:border-zinc-700 dark:bg-zinc-800"
+            style={{ color, fontWeight: Number(weight), letterSpacing: 0 }}
+          >
+            {text.trim() || product.title}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center gap-3">
+        <button
+          type="button"
+          onClick={save}
+          disabled={busy}
+          className="rounded-md bg-emerald-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-60"
+        >
+          {busy ? "Saving..." : "Save header"}
+        </button>
+        {savedFlash && <span className="text-xs text-emerald-600">Saved.</span>}
+        {error && <span className="text-xs text-red-500">{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+function FeaturedArticlesCard({
+  product,
+  workspaceId,
+  onUpdate,
+}: {
+  product: Product;
+  workspaceId: string;
+  onUpdate: (p: Product) => void;
+}) {
+  const [allArticles, setAllArticles] = useState<{ id: string; title: string; published: boolean }[]>([]);
+  const [search, setSearch] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const selectedIds = product.featured_widget_article_ids || [];
+  const selectedSet = new Set(selectedIds);
+
+  useEffect(() => {
+    fetch(`/api/workspaces/${workspaceId}/knowledge-base`)
+      .then(r => r.json())
+      .then((data: { articles?: { id: string; title: string; published: boolean }[] } | { id: string; title: string; published: boolean }[]) => {
+        const list = Array.isArray(data) ? data : data?.articles || [];
+        setAllArticles(list.filter(a => a.published));
+      })
+      .catch(() => {});
+  }, [workspaceId]);
+
+  async function save(nextIds: string[]) {
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`/api/workspaces/${workspaceId}/products/${product.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ featured_widget_article_ids: nextIds }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      onUpdate(data.product as Product);
+    } else {
+      const body = await res.json().catch(() => ({}));
+      setError(body.error || "Could not save.");
+    }
+    setBusy(false);
+  }
+
+  const selectedArticles = selectedIds
+    .map(id => allArticles.find(a => a.id === id))
+    .filter((a): a is { id: string; title: string; published: boolean } => !!a);
+
+  const searchLower = search.trim().toLowerCase();
+  const candidates = searchLower
+    ? allArticles.filter(a => !selectedSet.has(a.id) && a.title.toLowerCase().includes(searchLower)).slice(0, 8)
+    : [];
+
+  function move(id: string, dir: -1 | 1) {
+    const i = selectedIds.indexOf(id);
+    if (i < 0) return;
+    const next = [...selectedIds];
+    const swap = i + dir;
+    if (swap < 0 || swap >= next.length) return;
+    [next[i], next[swap]] = [next[swap], next[i]];
+    save(next);
+  }
+
+  return (
+    <div className="mb-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-2">
+        <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+          Featured KB articles in widget ({selectedIds.length}/5)
+        </span>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          Up to 5 articles shown first when a customer opens chat from this product&apos;s page. Order is preserved — pick the ones that sell.
+        </p>
+      </div>
+
+      {selectedArticles.length > 0 && (
+        <ul className="mb-3 space-y-1">
+          {selectedArticles.map((a, idx) => (
+            <li key={a.id} className="flex items-center gap-2 rounded border border-zinc-100 px-2 py-1.5 text-sm dark:border-zinc-800">
+              <span className="w-5 text-xs text-zinc-400">{idx + 1}.</span>
+              <span className="flex-1 text-zinc-700 dark:text-zinc-300">{a.title}</span>
+              <button disabled={busy || idx === 0} onClick={() => move(a.id, -1)} className="text-zinc-400 hover:text-zinc-700 disabled:opacity-30">↑</button>
+              <button disabled={busy || idx === selectedArticles.length - 1} onClick={() => move(a.id, 1)} className="text-zinc-400 hover:text-zinc-700 disabled:opacity-30">↓</button>
+              <button disabled={busy} onClick={() => save(selectedIds.filter(id => id !== a.id))} className="text-red-400 hover:text-red-600 disabled:opacity-30">✕</button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {selectedIds.length < 5 && (
+        <div className="relative">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search KB articles to add..."
+            className="w-full rounded border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+          />
+          {candidates.length > 0 && (
+            <ul className="absolute left-0 right-0 top-full z-10 mt-1 max-h-60 overflow-auto rounded border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+              {candidates.map(c => (
+                <li key={c.id}>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => { save([...selectedIds, c.id]); setSearch(""); }}
+                    className="block w-full px-3 py-2 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  >
+                    {c.title}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
     </div>
   );
 }

@@ -167,7 +167,7 @@ async function buildPreContext(
     customerId
       ? admin.from("customers").select("first_name, last_name, email").eq("id", customerId).single()
       : Promise.resolve({ data: null }),
-    admin.from("tickets").select("tags, active_playbook_id").eq("id", ticketId).single(),
+    admin.from("tickets").select("tags, active_playbook_id, page_context").eq("id", ticketId).single(),
     admin.from("ticket_messages")
       .select("direction, body_clean, body, visibility, author_type")
       .eq("ticket_id", ticketId)
@@ -256,7 +256,17 @@ async function buildPreContext(
 You have tools to look up data. Use them to gather what you need before making your decision.
 
 CUSTOMER: ${cName} (${cEmail})
-TICKET TAGS: ${tags}${activePlaybookNote}${agentContext?.assigned ? `
+TICKET TAGS: ${tags}${activePlaybookNote}${(() => {
+  const pc = ticket?.page_context as { product_title?: string; product_handle?: string; page_path?: string } | null;
+  if (!pc) return "";
+  const parts: string[] = [];
+  if (pc.product_title) parts.push(`viewing the ${pc.product_title} product page`);
+  else if (pc.product_handle) parts.push(`viewing /products/${pc.product_handle}`);
+  else if (pc.page_path) parts.push(`viewing ${pc.page_path}`);
+  return parts.length
+    ? `\nPAGE CONTEXT: Customer started this chat while ${parts.join(", ")}. If their question is product-related, prioritize that product in your answer.`
+    : "";
+})()}${agentContext?.assigned ? `
 AGENT CONTEXT: This ticket has been handled by a human agent. You should still respond to the customer, but limit your scope: handle positive closures (thank you, goodbye → close ticket with warm response), and for new requests say "We're reviewing your ticket and an agent will be back with you shortly!" Do NOT take direct actions or provide detailed information — just acknowledge and hold.` : ""}
 
 CONVERSATION:

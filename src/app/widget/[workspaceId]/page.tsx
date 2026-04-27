@@ -309,6 +309,22 @@ export default function ChatWidgetPage() {
     setMessages((prev) => [...prev, tempMsg]);
 
     try {
+      // Include page_context so Sonnet sees what page the customer started chat from.
+      // Backend ignores it on existing sessions — only stamped on new ticket creation.
+      const ctxParams = new URLSearchParams(window.location.search);
+      const ctx_pid = ctxParams.get("pid") || "";
+      const ctx_handle = ctxParams.get("handle") || "";
+      const ctx_title = ctxParams.get("title") || "";
+      const ctx_path = ctxParams.get("path") || "";
+      const page_context = (ctx_pid || ctx_handle || ctx_path)
+        ? {
+            product_id: ctx_pid || undefined,
+            product_handle: ctx_handle || undefined,
+            product_title: ctx_title || undefined,
+            page_path: ctx_path || undefined,
+          }
+        : undefined;
+
       const res = await fetch(`/api/widget/${workspaceId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -319,6 +335,7 @@ export default function ChatWidgetPage() {
           last_name: lastName.trim() || undefined,
           message: msg,
           session_id: sessionId || undefined,
+          page_context,
         }),
       });
       const data = await res.json();

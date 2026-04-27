@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -32,7 +33,13 @@ export async function GET(
  * PATCH editable storefront fields on a product. Allowlisted columns only —
  * the rest of the row is Shopify-synced and shouldn't be edited from the dashboard.
  */
-const EDITABLE_FIELDS = new Set(["is_bestseller"]);
+const EDITABLE_FIELDS = new Set([
+  "is_bestseller",
+  "featured_widget_article_ids",
+  "header_text",
+  "header_text_color",
+  "header_text_weight",
+]);
 
 export async function PATCH(
   request: Request,
@@ -71,5 +78,17 @@ export async function PATCH(
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Revalidate the storefront PDP so the change shows up on next visit.
+  // Storefront pages are SSG, otherwise cached changes never reach the user.
+  if (product?.handle) {
+    const { data: ws } = await admin.from("workspaces")
+      .select("storefront_slug").eq("id", workspaceId).single();
+    if (ws?.storefront_slug) {
+      revalidatePath(`/store/${ws.storefront_slug}/${product.handle}`);
+      revalidatePath(`/${product.handle}`);
+    }
+  }
+
   return NextResponse.json({ product });
 }

@@ -18,6 +18,7 @@ import { UGCSection } from "../_sections/UGCSection";
 import { ComparisonSection } from "../_sections/ComparisonSection";
 import { IngredientsSection } from "../_sections/IngredientsSection";
 import { FinalCTASection } from "../_sections/FinalCTASection";
+import { StorefrontHeader } from "../_components/StorefrontHeader";
 
 // PriceTable is mid-page but interactive on first scroll — load its
 // JS with the page but in a separate chunk so it doesn't inflate the
@@ -99,6 +100,16 @@ export function StorefrontPage({
       )}
       <ProductSchema data={data} canonicalPath={canonicalPath} />
       <FAQSchema data={data} />
+
+      <StorefrontHeader
+        workspaceId={data.product.workspace_id}
+        productId={data.product.id}
+        productHandle={data.product.handle}
+        productTitle={data.product.title}
+        headerText={data.product.header_text}
+        headerColor={data.product.header_text_color}
+        headerWeight={data.product.header_text_weight}
+      />
 
       <main className="flex w-full flex-col">
         <HeroSection data={data} />
