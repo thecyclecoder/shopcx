@@ -374,8 +374,20 @@ export async function getPageData(
   }
   void reviewCountRes;
 
+  // Reviews-elsewhere bump: we have ~10K reviews on Amazon and other channels
+  // that aren't synced into product_reviews. Add the bump to the customer-
+  // facing counts (hero "X reviews", ReviewsSection header) so social proof
+  // reflects total volume, not just what we mirror locally. Per-product
+  // rating values themselves aren't touched — only the count.
+  const REVIEWS_ELSEWHERE_BUMP = 10000;
+  const productWithBump = {
+    ...(product as Product),
+    rating_count: ((product as Product).rating_count ?? 0) + REVIEWS_ELSEWHERE_BUMP,
+  };
+  const totalCountWithBump = (reviewTotalCount || 0) + REVIEWS_ELSEWHERE_BUMP;
+
   return {
-    product: product as Product,
+    product: productWithBump as Product,
     page_content: (pageContentRes.data as PageContent | null) || null,
     ingredients: (ingredientsRes.data || []) as Ingredient[],
     ingredient_research: (researchRes.data || []) as IngredientResearch[],
@@ -385,7 +397,7 @@ export async function getPageData(
     media_by_slot: mediaBySlot,
     reviews: (reviews || []) as Review[],
     review_analysis: (reviewAnalysisRes.data as ReviewAnalysis | null) || null,
-    review_total_count: reviewTotalCount || 0,
+    review_total_count: totalCountWithBump,
     benefit_angle: (benefitAngleRes.data as BenefitAngleOverride | null) || null,
     workspace: {
       id: workspace.id,
