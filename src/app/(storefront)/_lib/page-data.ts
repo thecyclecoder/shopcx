@@ -189,6 +189,7 @@ export interface PageData {
       primary_color: string | null;
       accent_color: string | null;
       logo_url: string | null;
+      favicon_url: string | null;
     };
   };
 }
@@ -202,7 +203,7 @@ export async function getWorkspaceBySlug(slug: string) {
   const { data } = await admin
     .from("workspaces")
     .select(
-      "id, storefront_slug, storefront_domain, shopify_myshopify_domain, support_email, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_off_platform_review_count",
+      "id, storefront_slug, storefront_domain, shopify_myshopify_domain, support_email, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_favicon_url, storefront_off_platform_review_count",
     )
     .eq("storefront_slug", slug)
     .maybeSingle();
@@ -410,6 +411,8 @@ export async function getPageData(
         primary_color: workspace.storefront_primary_color || null,
         accent_color: workspace.storefront_accent_color || null,
         logo_url: workspace.storefront_logo_url || null,
+        favicon_url:
+          (workspace as { storefront_favicon_url?: string | null }).storefront_favicon_url || null,
       },
     },
   };

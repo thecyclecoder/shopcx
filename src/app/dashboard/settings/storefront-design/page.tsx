@@ -8,6 +8,7 @@ interface DesignSettings {
   primary_color: string | null;
   accent_color: string | null;
   logo_url: string | null;
+  favicon_url: string | null;
   off_platform_review_count: number;
 }
 
@@ -41,9 +42,11 @@ export default function StorefrontDesignPage() {
   const [settings, setSettings] = useState<DesignSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadingFavicon, setUploadingFavicon] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const faviconInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/storefront-design`);
@@ -72,6 +75,25 @@ export default function StorefrontDesignPage() {
       await load();
     }
     setSaving(false);
+  };
+
+  const uploadFavicon = async (file: File) => {
+    setUploadingFavicon(true);
+    setError(null);
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch(
+      `/api/workspaces/${workspace.id}/storefront-design/favicon`,
+      { method: "POST", body: fd },
+    );
+    if (res.ok) {
+      const body = await res.json();
+      await update({ favicon_url: body.url });
+    } else {
+      const err = await res.json().catch(() => ({}));
+      setError(err.error || "Upload failed");
+    }
+    setUploadingFavicon(false);
   };
 
   const uploadLogo = async (file: File) => {
@@ -220,6 +242,54 @@ export default function StorefrontDesignPage() {
                 disabled={saving}
               >
                 Remove logo
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* Favicon */}
+      <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-1 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Favicon</h2>
+        <p className="mb-4 text-xs text-zinc-500">
+          Browser tab icon. Square works best — we crop and resize to 256×256 PNG. Browsers downscale to 32×32 / 16×16.
+        </p>
+
+        <div className="flex items-center gap-4">
+          <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-md border border-dashed border-zinc-300 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800">
+            {settings.favicon_url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={settings.favicon_url} alt="Favicon" className="max-h-full max-w-full object-contain" />
+            ) : (
+              <span className="text-[10px] text-zinc-400">No favicon</span>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <input
+              ref={faviconInputRef}
+              type="file"
+              accept="image/*"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) uploadFavicon(f);
+              }}
+            />
+            <button
+              onClick={() => faviconInputRef.current?.click()}
+              disabled={uploadingFavicon}
+              className="rounded-md bg-indigo-500 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-600 disabled:opacity-50"
+            >
+              {uploadingFavicon ? "Uploading..." : "Upload favicon"}
+            </button>
+            {settings.favicon_url && (
+              <button
+                onClick={() => update({ favicon_url: null })}
+                className="text-xs text-red-500 hover:text-red-700"
+                disabled={saving}
+              >
+                Remove favicon
               </button>
             )}
           </div>

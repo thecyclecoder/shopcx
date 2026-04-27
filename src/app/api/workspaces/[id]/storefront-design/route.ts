@@ -33,7 +33,7 @@ export async function GET(
   const { data } = await admin
     .from("workspaces")
     .select(
-      "storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_slug, storefront_off_platform_review_count",
+      "storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_favicon_url, storefront_slug, storefront_off_platform_review_count",
     )
     .eq("id", workspaceId)
     .single();
@@ -43,6 +43,7 @@ export async function GET(
     primary_color: data?.storefront_primary_color || null,
     accent_color: data?.storefront_accent_color || null,
     logo_url: data?.storefront_logo_url || null,
+    favicon_url: data?.storefront_favicon_url || null,
     storefront_slug: data?.storefront_slug || null,
     off_platform_review_count: data?.storefront_off_platform_review_count ?? 0,
   });
@@ -104,6 +105,11 @@ export async function PATCH(
   if ("logo_url" in body) {
     update.storefront_logo_url =
       typeof body.logo_url === "string" && body.logo_url.trim() ? body.logo_url.trim() : null;
+  }
+
+  if ("favicon_url" in body) {
+    update.storefront_favicon_url =
+      typeof body.favicon_url === "string" && body.favicon_url.trim() ? body.favicon_url.trim() : null;
   }
 
   if ("off_platform_review_count" in body) {

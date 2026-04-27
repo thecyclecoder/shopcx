@@ -49,10 +49,16 @@ export async function generateMetadata({
     ? `https://${canonicalDomain}/${slug}`
     : `/store/${workspace}/${slug}`;
 
+  // Favicon: workspace-specific so a Superfoods customer never sees the
+  // ShopCX logo in their tab. Falls back to the workspace logo, then to
+  // the root /favicon.ico.
+  const faviconUrl = data.workspace.design.favicon_url || data.workspace.design.logo_url || null;
+
   return {
     title,
     description,
     alternates: { canonical },
+    icons: faviconUrl ? { icon: faviconUrl, apple: faviconUrl } : undefined,
     openGraph: {
       type: "website",
       title,
