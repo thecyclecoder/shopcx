@@ -56,13 +56,11 @@ export function StorefrontHeader({
   return (
     <>
       <header
-        // pt-[env(safe-area-inset-top)] keeps the header below the iOS
-        // status bar / dynamic island when the URL bar collapses on scroll.
-        className={`fixed inset-x-0 top-0 z-40 pt-[env(safe-area-inset-top)] transition-colors duration-200 ${
+        className={`fixed inset-x-0 top-0 z-40 transition-colors duration-200 ${
           scrolled ? "bg-white/95 backdrop-blur shadow-sm" : "bg-transparent"
         }`}
       >
-        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 md:h-20 md:px-8">
+        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4 md:h-16 md:px-8">
           {/* Hamburger */}
           <button
             type="button"
@@ -102,7 +100,7 @@ export function StorefrontHeader({
       </header>
 
       {/* Spacer so hero content doesn't sit underneath the header */}
-      <div aria-hidden className="h-16 md:h-20" />
+      <div aria-hidden className="h-14 md:h-16" />
 
       {/* Hamburger drawer (placeholder content for now — menu wiring later) */}
       {menuOpen && (
