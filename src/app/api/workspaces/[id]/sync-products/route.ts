@@ -84,13 +84,15 @@ export async function POST(
       if (seen.has(shopifyId)) continue;
       seen.add(shopifyId);
 
-      const variants = (p.variants?.edges || []).map((v: { node: { id: string; title: string; sku: string; price: string; image?: { url?: string } } }) => ({
-        id: v.node.id.split("/").pop(),
-        title: v.node.title,
-        sku: v.node.sku,
-        price_cents: Math.round(parseFloat(v.node.price || "0") * 100),
-        image_url: v.node.image?.url || null,
-      }));
+      const variants: Array<{ id: string | undefined; position: number; title: string; sku: string; price_cents: number; image_url: string | null }> =
+        (p.variants?.edges || []).map((v: { node: { id: string; title: string; sku: string; price: string; image?: { url?: string } } }, position: number) => ({
+          id: v.node.id.split("/").pop(),
+          position,
+          title: v.node.title,
+          sku: v.node.sku,
+          price_cents: Math.round(parseFloat(v.node.price || "0") * 100),
+          image_url: v.node.image?.url || null,
+        }));
 
       const imageUrl = p.images?.edges?.[0]?.node?.url || null;
 
@@ -110,7 +112,8 @@ export async function POST(
       }
       const ratingCount = ratingCountMeta?.value ? parseInt(ratingCountMeta.value) || null : null;
 
-      await admin.from("products").upsert({
+      // Upsert the product row first so we have its UUID for the variants table
+      const { data: productRow } = await admin.from("products").upsert({
         workspace_id: workspaceId,
         shopify_product_id: shopifyId,
         title: p.title,
@@ -120,11 +123,43 @@ export async function POST(
         status: (p.status || "active").toLowerCase(),
         tags: p.tags || [],
         image_url: imageUrl,
-        variants,
+        variants, // legacy mirror — internal_id stamped after variant upsert
         rating: ratingValue,
         rating_count: ratingCount,
         updated_at: new Date().toISOString(),
-      }, { onConflict: "workspace_id,shopify_product_id" });
+      }, { onConflict: "workspace_id,shopify_product_id" })
+        .select("id")
+        .single();
+
+      // Mirror variants to the first-class table. Each gets a stable UUID;
+      // shopify_variant_id is the upsert match key. Then stamp internal_id
+      // back into the JSONB mirror so legacy readers see the UUID.
+      if (productRow?.id && variants.length) {
+        const internalIdByShopifyId: Record<string, string> = {};
+        for (const v of variants) {
+          if (!v.id) continue;
+          const { data: vrow } = await admin.from("product_variants").upsert({
+            workspace_id: workspaceId,
+            product_id: productRow.id,
+            shopify_variant_id: v.id,
+            sku: v.sku ?? null,
+            title: v.title ?? null,
+            price_cents: v.price_cents ?? 0,
+            image_url: v.image_url ?? null,
+            position: v.position ?? 0,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: "workspace_id,shopify_variant_id" })
+            .select("id")
+            .single();
+          if (vrow?.id) internalIdByShopifyId[v.id] = vrow.id;
+        }
+        if (Object.keys(internalIdByShopifyId).length) {
+          const stamped = variants.map(v => v.id && internalIdByShopifyId[v.id]
+            ? { ...v, internal_id: internalIdByShopifyId[v.id] }
+            : v);
+          await admin.from("products").update({ variants: stamped }).eq("id", productRow.id);
+        }
+      }
 
       synced++;
     }

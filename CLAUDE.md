@@ -347,7 +347,8 @@ Sonnet's behavior is configured via `sonnet_prompts` table (Settings → AI → 
 - `customers` — Synced from Shopify. Email, retention_score, subscription_status, LTV, email_marketing_status, sms_marketing_status
 - `orders` — Synced from Shopify. Line items, fulfillments JSONB, source_name
 - `subscriptions` — From Appstle. Items JSONB, billing interval, next billing date
-- `products` — Synced from Shopify Online Store channel
+- `products` — Synced from Shopify Online Store channel. `variants` JSONB is a legacy mirror — the source of truth for variants is `product_variants`. Each JSONB element gets `internal_id` stamped on it so legacy readers can still resolve the UUID.
+- `product_variants` — First-class variant rows (UUID PK). Has `shopify_variant_id` (nullable for future internal-only variants) and price/sku/title/option columns. Read via `src/lib/product-variants.ts` helpers (`getProductVariants`, `findVariant`, `getVariantIndex`). New code should reference variants by their internal UUID, not the Shopify ID — this is what unblocks the Shopify deprecation.
 - `tickets` — Status, tags, channel, handled_by, ai_turn_count, ai_turn_limit, escalation_reason, agent_intervened, journey_id, journey_step, journey_data, journey_nudge_count, profile_link_completed
 - `ticket_messages` — Direction, visibility, author_type (customer/agent/ai/system), macro_id
 - `ticket_views` — Saved filter combos with parent_id for nesting
