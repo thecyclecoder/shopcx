@@ -478,8 +478,10 @@ export const unifiedTicketHandler = inngest.createFunction(
     });
 
     // Agent-involved tickets still get AI processing, but Sonnet limits scope
-    // (positive closure OK, new requests get "an agent will be back with you shortly")
-    const agentAssigned = !!(st.assignedTo || st.escalatedTo || st.intervened);
+    // (positive closure OK, new requests get "an agent will be back with you shortly").
+    // `let` because the auto-merge below may pull a parent ticket's agent
+    // state into this ticket — we re-derive after the merge.
+    let agentAssigned = !!(st.assignedTo || st.escalatedTo || st.intervened);
 
     // ── 1b. Banned customer check ──
     if (st.custId) {
@@ -572,6 +574,33 @@ Respond with EXACTLY the ticket subject that matches, or "NONE" if no match. Onl
             await sysNote(admin, tid, `[System] Auto-merged related ticket — ${result.messagesMoved} messages brought forward for context.`);
           }
         });
+
+        // mergeTickets carries forward agent_intervened / assigned_to from
+        // the source onto this ticket. Re-read so the rest of the pipeline
+        // (Sonnet scope limiter, escalation handling) sees the inherited
+        // state — without this, every new email reply opens a fresh ticket
+        // that looks AI-clean and Sonnet keeps acting on a thread the agent
+        // is already handling.
+        const inherited = await step.run("re-read-agent-state", async () => {
+          const { data: t } = await admin.from("tickets")
+            .select("agent_intervened, assigned_to, escalated_to")
+            .eq("id", tid)
+            .single();
+          return {
+            intervened: !!t?.agent_intervened,
+            assignedTo: t?.assigned_to || null,
+            escalatedTo: t?.escalated_to || null,
+          };
+        });
+        if (inherited.intervened !== st.intervened || inherited.assignedTo !== st.assignedTo || inherited.escalatedTo !== st.escalatedTo) {
+          st.intervened = inherited.intervened;
+          st.assignedTo = inherited.assignedTo;
+          st.escalatedTo = inherited.escalatedTo;
+          agentAssigned = !!(st.assignedTo || st.escalatedTo || st.intervened);
+          if (agentAssigned) {
+            await sysNote(admin, tid, "[System] Inherited agent assignment from merged-in ticket — Sonnet will defer to agent.");
+          }
+        }
       }
     }
 

@@ -33,7 +33,7 @@ export async function mergeTickets(
 
   // Fetch all tickets
   const { data: allTickets } = await admin.from("tickets")
-    .select("id, customer_id, status, subject, tags, created_at, active_playbook_id, playbook_step, playbook_context, playbook_queue, playbook_exceptions_used, journey_id, journey_step, journey_data, merged_into")
+    .select("id, customer_id, status, subject, tags, created_at, active_playbook_id, playbook_step, playbook_context, playbook_queue, playbook_exceptions_used, journey_id, journey_step, journey_data, merged_into, agent_intervened, assigned_to")
     .eq("workspace_id", workspaceId)
     .in("id", ticketIds)
     .order("created_at", { ascending: false }); // Newest first
@@ -107,6 +107,25 @@ export async function mergeTickets(
         journey_step: source.journey_step,
         journey_data: source.journey_data,
       }).eq("id", target.id);
+    }
+
+    // Carry forward agent intervention. If a human has touched any source
+    // ticket in the merge, the new combined ticket inherits that state —
+    // otherwise Sonnet keeps acting on a brand-new ticket as if no agent
+    // had ever weighed in.
+    const targetAgentState = (target as { agent_intervened?: boolean; assigned_to?: string | null });
+    const sourceAgentState = (source as { agent_intervened?: boolean; assigned_to?: string | null });
+    const updates: Record<string, unknown> = {};
+    if (!targetAgentState.agent_intervened && sourceAgentState.agent_intervened) {
+      updates.agent_intervened = true;
+      targetAgentState.agent_intervened = true;
+    }
+    if (!targetAgentState.assigned_to && sourceAgentState.assigned_to) {
+      updates.assigned_to = sourceAgentState.assigned_to;
+      targetAgentState.assigned_to = sourceAgentState.assigned_to;
+    }
+    if (Object.keys(updates).length > 0) {
+      await admin.from("tickets").update(updates).eq("id", target.id);
     }
 
     // Add system note on target
