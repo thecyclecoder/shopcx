@@ -68,6 +68,49 @@ interface ActionResult {
   success: boolean;
   error?: string;
   summary?: string;
+  // Optional customer-facing fields that may appear in response_message
+  // via substitution. Set by handlers that produce data the customer
+  // needs to see verbatim (return labels, refund amounts, tracking).
+  labelUrl?: string;
+  trackingNumber?: string;
+  carrier?: string;
+  refundAmountCents?: number;
+}
+
+/**
+ * Substitute customer-facing values from a successful ActionResult into
+ * a Sonnet-generated response_message. Sonnet cannot know the actual
+ * label URL, tracking number, etc. when it builds the response_message
+ * (response is generated at the same time as actions, before they run),
+ * so it should write the message with placeholder tokens. We fill them
+ * in here, after the action completes.
+ *
+ * Supports both `{{snake_case}}` (the canonical form Sonnet is taught
+ * via prompts) and `[UPPER_CASE]` (a bracket form Sonnet sometimes
+ * hallucinates without a prompt). Both substitute the same value.
+ */
+function substituteActionPlaceholders(
+  message: string,
+  results: { action: ActionParams; result: ActionResult }[],
+): string {
+  const map: Record<string, string> = {};
+  for (const { result } of results) {
+    if (!result.success) continue;
+    if (result.labelUrl) map.label_url = result.labelUrl;
+    if (result.trackingNumber) map.tracking_number = result.trackingNumber;
+    if (result.carrier) map.carrier = result.carrier;
+    if (result.refundAmountCents != null) {
+      map.refund_amount = `$${(result.refundAmountCents / 100).toFixed(2)}`;
+    }
+  }
+  let out = message;
+  for (const [key, value] of Object.entries(map)) {
+    const lower = `{{\\s*${key}\\s*}}`;
+    const upper = `\\[\\s*${key.toUpperCase()}\\s*\\]`;
+    out = out.replace(new RegExp(lower, "g"), value);
+    out = out.replace(new RegExp(upper, "g"), value);
+  }
+  return out;
 }
 
 // ── Direct Action Handler Registry ──
@@ -519,7 +562,13 @@ const directActionHandlers: Record<
     });
 
     if (r.success && r.labelUrl) {
-      return { ...r, summary: `Return created for ${order.order_number}. Label: ${r.labelUrl} | Tracking: ${r.trackingNumber}` };
+      return {
+        success: true,
+        summary: `Return created for ${order.order_number}. Label: ${r.labelUrl} | Tracking: ${r.trackingNumber}`,
+        labelUrl: r.labelUrl,
+        trackingNumber: r.trackingNumber,
+        carrier: r.carrier,
+      };
     }
     return { ...r, summary: r.success ? `Return created for ${order.order_number}` : undefined };
   },
@@ -946,9 +995,12 @@ async function handleDirectAction(
   }
 
   if (failures.length === 0) {
-    // All succeeded — send confirmation
+    // All succeeded — send confirmation, with placeholder substitution
+    // for action-generated data (label URLs, tracking numbers, etc.)
+    // that Sonnet couldn't know at response_message generation time.
     if (decision.response_message) {
-      await send(decision.response_message, ctx.sandbox);
+      const filled = substituteActionPlaceholders(decision.response_message, results);
+      await send(filled, ctx.sandbox);
     }
 
     // Self-healing: verify actions actually took effect in the DB
