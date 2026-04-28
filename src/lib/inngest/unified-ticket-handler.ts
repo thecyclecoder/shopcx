@@ -1060,8 +1060,14 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10);
           async (m, sb) => sendWithDelay(admin, wsId, tid, st.ch, m, sb),
           async (m) => { await sysNote(admin, tid, m); },
         );
-        // Only auto-close if a customer-facing message was sent
-        if (execResult.messageSent) {
+        // Only auto-close if a customer-facing message was sent AND
+        // the run didn't escalate. Escalation already set status=open
+        // and assigned an agent — we must not flip it back to closed
+        // underneath them just because we sent the customer a holding
+        // message ("I ran into an issue, I'll look into this shortly").
+        if (execResult.escalated) {
+          await sysNote(admin, tid, "[System] Ticket escalated this run — leaving open for agent.");
+        } else if (execResult.messageSent) {
           await setStatus(admin, tid, cfg.auto_resolve);
         } else {
           // No message sent — keep ticket open so an agent can handle it

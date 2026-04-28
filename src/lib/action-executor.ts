@@ -59,6 +59,11 @@ export interface ActionContext {
   customerId: string;
   channel: string;
   sandbox: boolean;
+  // Internal: set by escalateTicket() when this run hands the ticket to
+  // an agent. The post-execute auto-close in unified-ticket-handler
+  // honors this flag so a ticket that was just escalated doesn't get
+  // auto-closed underneath the agent.
+  _escalatedThisRun?: boolean;
 }
 
 type SendFn = (msg: string, sandbox: boolean) => Promise<void>;
@@ -861,11 +866,11 @@ export async function executeSonnetDecision(
   personality: { name?: string; tone?: string; sign_off?: string | null } | null,
   send: SendFn,
   sysNote: SysNoteFn,
-): Promise<{ messageSent: boolean }> {
+): Promise<{ messageSent: boolean; escalated: boolean }> {
   // Handle clarification first — applies regardless of action_type
   if (decision.needs_clarification && decision.clarification_question) {
     await send(decision.clarification_question, ctx.sandbox);
-    return { messageSent: true };
+    return { messageSent: true, escalated: false };
   }
 
   // Track whether a customer-facing message was sent
@@ -911,7 +916,7 @@ export async function executeSonnetDecision(
       await sysNote(`Unknown action_type: ${decision.action_type}`);
   }
 
-  return { messageSent };
+  return { messageSent, escalated: ctx._escalatedThisRun === true };
 }
 
 // ── Handler: Direct Actions ──
@@ -1367,4 +1372,8 @@ async function escalateTicket(ctx: ActionContext, reason: string): Promise<void>
       escalation_reason: reason,
     })
     .eq("id", ctx.ticketId);
+
+  // Mark on the context so executeSonnetDecision returns escalated=true
+  // and the post-execute auto-close in unified-ticket-handler skips.
+  ctx._escalatedThisRun = true;
 }
