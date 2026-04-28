@@ -77,11 +77,21 @@ export const crisisDailyCampaign = inngest.createFunction(
         const leadDays = crisis.lead_time_days || 7;
         const cutoffDate = new Date(Date.now() + leadDays * 24 * 60 * 60 * 1000).toISOString();
 
-        // Get crisis records that haven't been emailed yet
+        // Get crisis records that haven't been emailed yet AND haven't
+        // already engaged with a Tier 3 outcome via another path (e.g.
+        // Sonnet's crisis_pause / crisis_remove direct actions, which
+        // set tier3_response without ever going through the tier1 email
+        // flow). Re-pitching customers who already accepted a save is
+        // noisy and can re-trigger cancel intent — see Kristin Goldate's
+        // ticket on 2026-04-26 where a Tier 1 email landed on a
+        // customer who'd been pause+auto-resumed five days earlier.
         const { data: unemailed } = await admin.from("crisis_customer_actions")
           .select("id, subscription_id, customer_id, segment, original_item")
           .eq("crisis_id", crisis.id)
           .is("tier1_sent_at", null)
+          .is("tier3_response", null)
+          .is("paused_at", null)
+          .is("removed_item_at", null)
           .eq("cancelled", false);
 
         if (!unemailed?.length) return [];
