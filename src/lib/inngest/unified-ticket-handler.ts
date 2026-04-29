@@ -206,7 +206,11 @@ async function generatePositiveClose(msg: string, ch: string, p: { name?: string
     }
   }
 
-  const raw = await claude(`${persona} Never reveal AI. Customer sent a positive closing message: "${msg}". Write a brief, warm closing reply.${contextHint} ${short ? "Max 1 sentence." : "Max 2 sentences."} ${p?.sign_off ? `End with: ${p.sign_off}` : ""} Only the reply, no markdown.`, "haiku", 60);
+  // 150 tokens leaves comfortable headroom for "max 2 sentences" + a
+  // sign-off without truncation. Earlier 60 was right on the edge —
+  // Gail DeRisi's 2026-04-28 close cut at "we look forward to serving"
+  // because Haiku ran out of tokens mid-sign-off.
+  const raw = await claude(`${persona} Never reveal AI. Customer sent a positive closing message: "${msg}". Write a brief, warm closing reply.${contextHint} ${short ? "Max 1 sentence." : "Max 2 sentences."} ${p?.sign_off ? `End with: ${p.sign_off}` : ""} Only the reply, no markdown.`, "haiku", 150);
   return raw || autoCloseReply || (p?.sign_off ? `You're welcome! ${p.sign_off}` : "You're welcome! Let us know if you need anything else.");
 }
 

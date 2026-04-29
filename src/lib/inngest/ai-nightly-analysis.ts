@@ -88,15 +88,25 @@ export const aiNightlyAnalysis = inngest.createFunction(
             // AI persona-signed messages ("Julie", "Suzie") from real
             // human agents. Otherwise the "only grade AI" instruction
             // makes Claude skip everything signed with a name.
-            messages: msgs.slice(-30).map(m => ({
-              role:
-                m.direction === "inbound" ? "customer"
-                : m.author_type === "ai" ? "ai"
-                : m.author_type === "agent" ? "human_agent"
-                : m.author_type === "system" ? "system"
-                : "agent",
-              body: (m.body || "").replace(/<[^>]+>/g, " ").trim().slice(0, 300),
-            })),
+            //
+            // Bodies clipped to 1500 chars with a [trimmed] marker so
+            // Claude can tell prompt-side truncation from a genuinely
+            // cut-off AI response. (The previous 300-char hard cut
+            // generated false positives like "Each code gives you $1"
+            // from "Each code gives you $15 off!".)
+            messages: msgs.slice(-30).map(m => {
+              const cleaned = (m.body || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+              const body = cleaned.length > 1500 ? cleaned.slice(0, 1500) + " […trimmed]" : cleaned;
+              return {
+                role:
+                  m.direction === "inbound" ? "customer"
+                  : m.author_type === "ai" ? "ai"
+                  : m.author_type === "agent" ? "human_agent"
+                  : m.author_type === "system" ? "system"
+                  : "agent",
+                body,
+              };
+            }),
           });
         }
 
@@ -133,6 +143,8 @@ ROLE LABELS:
   system       — internal status notes (skip these)
 
 Only grade AI agent messages (role=ai). Do NOT grade human_agent or system messages. If a ticket has no role=ai messages in this window, skip it — do not include it in scoring.
+
+A trailing "[…trimmed]" marker on a message means the prompt was clipped for length — the actual sent message was longer and was NOT cut off in production. Do NOT report "[…trimmed]" or any apparent end-of-message-text as an "incomplete response" or "truncation" issue. Only flag truncation if the AI's intent is clearly cut off mid-thought WITHOUT a "[…trimmed]" marker.
 
 Analyze each conversation and provide:
 1. Overall score (1-10) for the batch — based ONLY on the AI messages shown
