@@ -41,6 +41,10 @@ interface ActionParams {
   interval_count?: number;
   date?: string;
   code?: string;
+  // Sonnet sometimes emits `coupon_code` for apply_coupon /
+  // apply_loyalty_coupon despite the prompt specifying `code`. Accept
+  // both — handlers normalize on `code`.
+  coupon_code?: string;
   reason?: string;
   tier_index?: number;
   shopify_order_id?: string;
@@ -184,8 +188,10 @@ const directActionHandlers: Record<
     const { getAppstleConfig } = await import("@/lib/subscription-items");
     const config = await getAppstleConfig(ctx.workspaceId);
     if (!config) return { success: false, error: "Appstle not configured" };
-    const r = await applyDiscountWithReplace(config.apiKey, p.contract_id!, p.code!);
-    return { ...r, summary: `Applied coupon ${p.code}` };
+    const code = p.code || p.coupon_code;
+    if (!code) return { success: false, error: "Missing coupon code (pass via 'code')" };
+    const r = await applyDiscountWithReplace(config.apiKey, p.contract_id!, code);
+    return { ...r, summary: `Applied coupon ${code}` };
   },
 
   remove_coupon: async (ctx, p) => {
@@ -310,12 +316,15 @@ const directActionHandlers: Record<
     const config = await getAppstleConfig(ctx.workspaceId);
     if (!config) return { success: false, error: "Appstle not configured" };
 
+    const code = p.code || p.coupon_code;
+    if (!code) return { success: false, error: "Missing coupon code (pass via 'code')" };
+
     // Brief delay — coupon may have just been created in Shopify and needs a moment to propagate
     await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Try applying the existing coupon first
-    const r = await applyDiscountWithReplace(config.apiKey, p.contract_id!, p.code!);
-    if (r.success) return { ...r, summary: `Applied loyalty coupon ${p.code}` };
+    const r = await applyDiscountWithReplace(config.apiKey, p.contract_id!, code);
+    if (r.success) return { ...r, summary: `Applied loyalty coupon ${code}` };
 
     // Coupon failed — may be stale/deleted in Shopify. Generate a fresh one.
     try {
@@ -326,7 +335,7 @@ const directActionHandlers: Record<
       // Find the original redemption to get tier info
       const { data: orig } = await ctx.admin.from("loyalty_redemptions")
         .select("id, member_id, discount_value, points_spent")
-        .eq("discount_code", p.code!).eq("workspace_id", ctx.workspaceId).single();
+        .eq("discount_code", code).eq("workspace_id", ctx.workspaceId).single();
       if (!orig) return { success: false, error: `Original coupon not found and apply failed: ${r.error}` };
 
       // Get member
