@@ -178,9 +178,13 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
   const channelSwitched = effectiveChannel !== channel;
 
   if (effectiveChannel === "email" || effectiveChannel === "help_center") {
-    // HTML CTA email
+    // HTML CTA email — sendJourneyCTA returns the rendered HTML and
+    // Resend message ID so we store the exact email body in
+    // ticket_messages and wire up the same email tracking as any
+    // other outbound. Agent sees in the dashboard exactly what the
+    // customer got — no "separate email" / lead-in-only mismatch.
     if (!customer?.email) return false;
-    await sendJourneyCTA({
+    const ctaResult = await sendJourneyCTA({
       workspaceId,
       toEmail: customer.email,
       customerName: customer.first_name || "",
@@ -193,12 +197,41 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
       inReplyTo,
     });
 
-    // Post external message record (visible in ticket conversation)
     const emailLabel = channelSwitched ? `<p style="font-size:12px;color:#6b7280;">📧 Sent via email (customer left chat)</p>` : "";
+    const ticketMsgBody = `${emailLabel}${ctaResult.html || `<p>${leadIn}</p>`}`;
+
     await admin.from("ticket_messages").insert({
-      ticket_id: ticketId, direction: "outbound", visibility: "external",
-      author_type: "system", body: `${emailLabel}<p>${leadIn}</p>`,
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "external",
+      author_type: "system",
+      body: ticketMsgBody,
+      sent_at: new Date().toISOString(),
+      resend_email_id: ctaResult.messageId || null,
+      email_status: ctaResult.messageId ? "sent" : null,
+      email_message_id: ctaResult.messageId ? `<${ctaResult.messageId}@resend.dev>` : null,
     });
+
+    // Future inbound replies thread back here: set the ticket's
+    // email_message_id to this CTA's Message-ID if not already set.
+    if (ctaResult.messageId && !ticket?.email_message_id) {
+      await admin.from("tickets")
+        .update({ email_message_id: `<${ctaResult.messageId}@resend.dev>` })
+        .eq("id", ticketId);
+    }
+
+    // Universal email tracking — same telemetry as a normal sendTicketReply
+    if (ctaResult.messageId) {
+      const { logEmailSent } = await import("@/lib/email-tracking");
+      await logEmailSent({
+        workspaceId,
+        resendEmailId: ctaResult.messageId,
+        recipientEmail: customer.email,
+        subject: `Re: ${ticket?.subject || "Your request"}`,
+        ticketId,
+        customerId,
+      });
+    }
 
   } else if (effectiveChannel === "chat") {
     // Build inline form steps for the chat widget

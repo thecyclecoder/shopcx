@@ -214,14 +214,15 @@ export async function sendJourneyCTA({
   subject?: string;
   buttonLabel?: string;
   inReplyTo?: string | null;
-}): Promise<{ error?: string }> {
+}): Promise<{ messageId?: string; html?: string; error?: string }> {
   const client = await getResendClient(workspaceId, toEmail);
   if (!client) return { error: "Resend not configured" };
 
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
   const journeyUrl = `${siteUrl}/journey/${journeyToken}`;
   const color = primaryColor || "#4f46e5";
-  const greeting = customerName ? `Hi ${customerName},` : "Hi there,";
+  // greeting reserved for future personalization in CTA template
+  void (customerName ? `Hi ${customerName},` : "Hi there,");
   const btn = buttonLabel || "Continue &rarr;";
   // Unique subject per email to prevent Gmail clipping in threads
   const emailSubject = subject || `Action needed — ${workspaceName}`;
@@ -232,12 +233,11 @@ export async function sendJourneyCTA({
     headers["References"] = inReplyTo;
   }
 
-  const { error } = await client.resend.emails.send({
-    from: `${workspaceName} <support@${client.domain}>`,
-    to: toEmail,
-    subject: emailSubject,
-    headers: Object.keys(headers).length > 0 ? headers : undefined,
-    html: `
+  // Build the HTML once — used both for the Resend send AND for the
+  // ticket_messages row, so the agent sees in the dashboard exactly
+  // what the customer received in their inbox. No "separate email"
+  // mismatch.
+  const html = `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 540px; padding: 20px 0;">
         <p style="color: #18181b; font-size: 15px; line-height: 1.6; margin: 0 0 16px 0;">
           ${contextMessage || "We'd love to help you with your request. Please click the button below to continue."}
@@ -251,11 +251,18 @@ export async function sendJourneyCTA({
           This link expires in 24 hours.
         </p>
       </div>
-    `,
+    `;
+
+  const { data, error } = await client.resend.emails.send({
+    from: `${workspaceName} <support@${client.domain}>`,
+    to: toEmail,
+    subject: emailSubject,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
+    html,
   });
 
   if (error) return { error: error.message };
-  return {};
+  return { messageId: data?.id, html };
 }
 
 // ── Dunning Emails ──
