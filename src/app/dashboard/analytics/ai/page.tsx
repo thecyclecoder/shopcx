@@ -36,6 +36,22 @@ interface Data {
   decisions: Record<string, number>;
   actions: Record<string, number>;
   tags: Record<string, number>;
+  cost?: {
+    total_cents: number;
+    total_tokens: number;
+    tickets_with_usage: number;
+    avg_per_ticket_cents: number;
+    by_model: Record<string, { tokens: number; cost_cents: number; calls: number }>;
+    by_purpose: Record<string, { tokens: number; cost_cents: number; calls: number }>;
+    daily: { date: string; cost_cents: number; tokens: number }[];
+    orchestrator_split: {
+      opus_calls: number;
+      sonnet_calls: number;
+      opus_tickets: number;
+      sonnet_tickets: number;
+      opus_pct: number;
+    };
+  };
 }
 
 const DECISION_LABELS: Record<string, string> = {
@@ -109,6 +125,51 @@ export default function AiAnalyticsPage() {
         <Stat label="AI tickets" value={data.totals.ai_tickets.toLocaleString()} hint={`${data.totals.email} email · ${data.totals.chat} chat`} />
         <Stat label="Escalation rate" value={`${data.totals.escalation_rate_pct}%`} hint={`${data.totals.escalated} of ${data.totals.ai_tickets}`} />
       </div>
+
+      {/* Cost / token usage */}
+      {data.cost && data.cost.total_tokens > 0 && (
+        <Section
+          title="Token usage & cost"
+          subtitle={`${data.cost.total_tokens.toLocaleString()} tokens over ${data.days}d · ${data.cost.tickets_with_usage} ticket${data.cost.tickets_with_usage === 1 ? "" : "s"} attributed`}
+        >
+          <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <Stat label={`Total ${data.days}d`} value={fmtCost(data.cost.total_cents)} hint={`~${fmtCost(data.cost.total_cents / Math.max(1, data.days))}/day`} />
+            <Stat label="Per ticket" value={fmtCost(data.cost.avg_per_ticket_cents)} hint="avg cost / ticket" />
+            <Stat
+              label="Opus share"
+              value={`${data.cost.orchestrator_split.opus_pct}%`}
+              hint={`${data.cost.orchestrator_split.opus_tickets} opus · ${data.cost.orchestrator_split.sonnet_tickets} sonnet`}
+            />
+            <Stat
+              label="Monthly run-rate"
+              value={fmtCost((data.cost.total_cents / Math.max(1, data.days)) * 30)}
+              hint="extrapolated"
+            />
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <div className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500">By model</div>
+              <BarList
+                items={Object.entries(data.cost.by_model)
+                  .map(([m, v]) => ({ label: `${shortenModel(m)} — ${fmtCost(v.cost_cents)} (${v.calls} calls)`, value: v.tokens }))
+                  .sort((a, b) => b.value - a.value)}
+                compact
+              />
+            </div>
+            <div>
+              <div className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500">By purpose</div>
+              <BarList
+                items={Object.entries(data.cost.by_purpose)
+                  .map(([p, v]) => ({ label: `${p} — ${fmtCost(v.cost_cents)}`, value: v.tokens }))
+                  .sort((a, b) => b.value - a.value)
+                  .slice(0, 8)}
+                compact
+              />
+            </div>
+          </div>
+        </Section>
+      )}
 
       {/* Score chart */}
       <Section title="Daily score" subtitle={`${recentScores.length} report${recentScores.length === 1 ? "" : "s"} in window`}>
@@ -307,6 +368,18 @@ function BarList({ items, compact = false }: { items: { label: string; value: nu
  * Group raw tag counts into useful display buckets — journeys,
  * playbooks, and "other notable" (link, wb, dunning, crisis, etc.)
  */
+function fmtCost(cents: number): string {
+  if (cents < 100) return `${cents.toFixed(2)}¢`;
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+function shortenModel(m: string): string {
+  if (m.includes("opus")) return "Opus 4.7";
+  if (m.includes("sonnet")) return "Sonnet 4";
+  if (m.includes("haiku")) return "Haiku 4.5";
+  return m;
+}
+
 function bucketTags(tags: Record<string, number>) {
   const journeys: { label: string; value: number }[] = [];
   const playbooks: { label: string; value: number }[] = [];

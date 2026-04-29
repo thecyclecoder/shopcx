@@ -789,6 +789,123 @@ const directActionHandlers: Record<
     return { ...r, summary: "Removed item (will auto-add when back in stock)" };
   },
 
+  // Retroactively enroll a customer into an active crisis. Used when a
+  // customer reports a "wrong item / wrong order" complaint and the
+  // workspace has an active crisis whose swap variant matches what they
+  // received. Sets auto_readd=true so when the crisis resolves the
+  // customer's subscription gets switched back to their original item.
+  crisis_enroll: async (ctx, p) => {
+    const admin = ctx.admin;
+
+    // 1. Find the active crisis (use param if provided, else first active)
+    let crisis: {
+      id: string;
+      affected_variant_id: string | null;
+      affected_sku: string | null;
+      affected_product_title: string | null;
+      default_swap_variant_id: string | null;
+      default_swap_title: string | null;
+    } | null = null;
+    if (p.crisis_action_id) {
+      // Param naming overload — Sonnet may pass crisis_id here
+      const { data } = await admin.from("crisis_events")
+        .select("id, affected_variant_id, affected_sku, affected_product_title, default_swap_variant_id, default_swap_title")
+        .eq("id", p.crisis_action_id).maybeSingle();
+      crisis = data;
+    }
+    if (!crisis) {
+      const { data } = await admin.from("crisis_events")
+        .select("id, affected_variant_id, affected_sku, affected_product_title, default_swap_variant_id, default_swap_title")
+        .eq("workspace_id", ctx.workspaceId).eq("status", "active")
+        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      crisis = data;
+    }
+    if (!crisis) return { success: false, error: "No active crisis found for workspace" };
+    if (!crisis.affected_variant_id) return { success: false, error: "Crisis has no affected_variant_id" };
+
+    // 2. Find the customer's subscription containing either the affected
+    // variant (auto-swap hasn't run yet) or the swap variant (auto-swap
+    // already applied — this is the common case for "wrong item" complaints)
+    let subRow: { id: string; shopify_contract_id: string | null; items: unknown } | null = null;
+    if (p.contract_id) {
+      const { data } = await admin.from("subscriptions")
+        .select("id, shopify_contract_id, items")
+        .eq("workspace_id", ctx.workspaceId).eq("shopify_contract_id", p.contract_id)
+        .maybeSingle();
+      subRow = data;
+    }
+    if (!subRow) {
+      const { data: subs } = await admin.from("subscriptions")
+        .select("id, shopify_contract_id, items, status")
+        .eq("workspace_id", ctx.workspaceId).eq("customer_id", ctx.customerId)
+        .in("status", ["active", "paused"]);
+      const matchVariants = new Set([crisis.affected_variant_id, crisis.default_swap_variant_id].filter(Boolean) as string[]);
+      subRow = (subs || []).find(s =>
+        ((s.items as { variant_id?: string; variantId?: string }[]) || []).some(i =>
+          matchVariants.has(String(i.variant_id || i.variantId || ""))
+        ),
+      ) || null;
+    }
+    if (!subRow) return { success: false, error: "No subscription found containing the affected or swap variant" };
+
+    // 3. Already enrolled? Don't double-enroll
+    const { data: existing } = await admin.from("crisis_customer_actions")
+      .select("id").eq("crisis_id", crisis.id).eq("subscription_id", subRow.id).maybeSingle();
+    if (existing) return { success: true, summary: `Already enrolled in crisis (action ${existing.id})` };
+
+    // 4. Determine segment + original item snapshot
+    const items = (subRow.items as { variant_id?: string; variantId?: string; title?: string; sku?: string; quantity?: number }[]) || [];
+    const affectedItem = items.find(i =>
+      String(i.variant_id || i.variantId || "") === crisis.affected_variant_id ||
+      String(i.variant_id || i.variantId || "") === crisis.default_swap_variant_id,
+    );
+    const otherItems = items.filter(i => i !== affectedItem);
+    const segment = otherItems.length > 0 ? "berry_plus" : "berry_only";
+
+    // original_item must point to the AFFECTED variant (not the swap) —
+    // that's what auto_readd uses to swap back when crisis resolves.
+    const originalItem = {
+      variantId: crisis.affected_variant_id,
+      sku: crisis.affected_sku || affectedItem?.sku || null,
+      title: crisis.affected_product_title || affectedItem?.title || null,
+      quantity: affectedItem?.quantity || 1,
+    };
+
+    // 5. Insert enrollment row. tier1_response='accepted_swap' marks this
+    // as an after-the-fact enrollment — the swap already happened
+    // physically. auto_readd=true is the critical bit: when the crisis is
+    // marked resolved, the resolution job will switch the subscription
+    // back to original_item.
+    const nowIso = new Date().toISOString();
+    const { data: inserted, error: insertErr } = await admin.from("crisis_customer_actions").insert({
+      workspace_id: ctx.workspaceId,
+      crisis_id: crisis.id,
+      customer_id: ctx.customerId,
+      subscription_id: subRow.id,
+      segment,
+      current_tier: 1,
+      tier1_sent_at: nowIso,
+      tier1_response: "accepted_swap",
+      tier1_swapped_to: crisis.default_swap_variant_id ? {
+        variantId: crisis.default_swap_variant_id,
+        title: crisis.default_swap_title,
+      } : null,
+      original_item: originalItem,
+      auto_readd: true,
+    }).select("id").single();
+
+    if (insertErr || !inserted) {
+      return { success: false, error: `Failed to insert enrollment: ${insertErr?.message || "unknown"}` };
+    }
+
+    // 6. Tag the ticket so analytics + the next inbound message see crisis state
+    const { addTicketTag } = await import("@/lib/ticket-tags");
+    await addTicketTag(ctx.ticketId, "crisis");
+    await addTicketTag(ctx.ticketId, `crisis:${crisis.id}`);
+
+    return { success: true, summary: `Enrolled in crisis "${crisis.affected_product_title}" (auto_readd=true — will swap back to original on resolve)` };
+  },
+
   create_replacement_order: async (ctx, p) => {
     const { getShopifyCredentials } = await import("@/lib/shopify-sync");
     const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");

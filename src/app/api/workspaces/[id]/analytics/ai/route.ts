@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { usageCostCents } from "@/lib/ai-usage";
 
 /**
  * AI agent analytics: ratings over time, action breakdown, and the
@@ -120,6 +121,77 @@ export async function GET(
     }
   }
 
+  // ── 4. Token usage / cost ──
+  // Group by model + day. Compute total cost, per-ticket cost, and the
+  // Opus-vs-Sonnet split via the `purpose` prefix written by the orchestrator.
+  const { data: usageRows } = await admin
+    .from("ai_token_usage")
+    .select("model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, purpose, ticket_id, created_at")
+    .eq("workspace_id", workspaceId)
+    .gte("created_at", since);
+
+  const byModel: Record<string, { tokens: number; cost_cents: number; calls: number }> = {};
+  const byDay: Record<string, { cost_cents: number; tokens: number }> = {};
+  const byPurpose: Record<string, { cost_cents: number; tokens: number; calls: number }> = {};
+  let totalCostCents = 0;
+  let totalTokens = 0;
+  const ticketCostMap = new Map<string, number>();
+  let opusCalls = 0;
+  let sonnetOrchestratorCalls = 0;
+  let opusTickets = 0;
+  let sonnetTickets = 0;
+  const ticketModelMap = new Map<string, "opus" | "sonnet">();
+
+  for (const r of usageRows || []) {
+    const tokens = (r.input_tokens || 0) + (r.output_tokens || 0) + (r.cache_creation_tokens || 0) + (r.cache_read_tokens || 0);
+    const cost = usageCostCents(r.model, {
+      input_tokens: r.input_tokens || 0,
+      output_tokens: r.output_tokens || 0,
+      cache_creation_tokens: r.cache_creation_tokens || 0,
+      cache_read_tokens: r.cache_read_tokens || 0,
+    });
+    totalCostCents += cost;
+    totalTokens += tokens;
+
+    const m = byModel[r.model] || { tokens: 0, cost_cents: 0, calls: 0 };
+    m.tokens += tokens; m.cost_cents += cost; m.calls += 1;
+    byModel[r.model] = m;
+
+    const day = r.created_at?.slice(0, 10) || "unknown";
+    const d = byDay[day] || { cost_cents: 0, tokens: 0 };
+    d.cost_cents += cost; d.tokens += tokens;
+    byDay[day] = d;
+
+    // Bucket purpose down to its first segment (e.g. "orchestrator-decision")
+    const pBucket = (r.purpose || "other").split(":")[0];
+    const p = byPurpose[pBucket] || { cost_cents: 0, tokens: 0, calls: 0 };
+    p.cost_cents += cost; p.tokens += tokens; p.calls += 1;
+    byPurpose[pBucket] = p;
+
+    if (r.ticket_id) {
+      ticketCostMap.set(r.ticket_id, (ticketCostMap.get(r.ticket_id) || 0) + cost);
+    }
+
+    // Opus / Sonnet orchestrator split — only count orchestrator-decision rows
+    if (r.purpose?.startsWith("orchestrator-decision:")) {
+      const isOpus = r.purpose.startsWith("orchestrator-decision:opus");
+      if (isOpus) opusCalls += 1;
+      else sonnetOrchestratorCalls += 1;
+      if (r.ticket_id && !ticketModelMap.has(r.ticket_id)) {
+        ticketModelMap.set(r.ticket_id, isOpus ? "opus" : "sonnet");
+      }
+    }
+  }
+  for (const m of ticketModelMap.values()) {
+    if (m === "opus") opusTickets += 1; else sonnetTickets += 1;
+  }
+
+  const ticketCount = ticketCostMap.size;
+  const avgPerTicketCents = ticketCount ? totalCostCents / ticketCount : 0;
+  const dailyCosts = Object.entries(byDay)
+    .map(([date, v]) => ({ date, cost_cents: Math.round(v.cost_cents * 100) / 100, tokens: v.tokens }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
   return NextResponse.json({
     days,
     scores,
@@ -140,5 +212,21 @@ export async function GET(
     decisions: decisionCounts,
     actions: actionCounts,
     tags: tagBuckets,
+    cost: {
+      total_cents: Math.round(totalCostCents * 100) / 100,
+      total_tokens: totalTokens,
+      tickets_with_usage: ticketCount,
+      avg_per_ticket_cents: Math.round(avgPerTicketCents * 100) / 100,
+      by_model: Object.fromEntries(Object.entries(byModel).map(([k, v]) => [k, { ...v, cost_cents: Math.round(v.cost_cents * 100) / 100 }])),
+      by_purpose: Object.fromEntries(Object.entries(byPurpose).map(([k, v]) => [k, { ...v, cost_cents: Math.round(v.cost_cents * 100) / 100 }])),
+      daily: dailyCosts,
+      orchestrator_split: {
+        opus_calls: opusCalls,
+        sonnet_calls: sonnetOrchestratorCalls,
+        opus_tickets: opusTickets,
+        sonnet_tickets: sonnetTickets,
+        opus_pct: (opusTickets + sonnetTickets) ? Math.round((opusTickets / (opusTickets + sonnetTickets)) * 100) : 0,
+      },
+    },
   });
 }

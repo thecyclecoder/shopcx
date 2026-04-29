@@ -10,6 +10,13 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { retrieveContext } from "@/lib/rag";
+import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
+
+const MODEL_IDS = {
+  sonnet: "claude-sonnet-4-20250514",
+  opus: "claude-opus-4-7",
+} as const;
+export type OrchestratorModelKey = keyof typeof MODEL_IDS;
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -86,7 +93,7 @@ function buildToolDefinitions() {
     },
     {
       name: "get_crisis_status",
-      description: "Get crisis/out-of-stock actions for this customer including tier responses, swap options, and pause/remove status. Use when ticket has crisis tags or customer mentions out-of-stock products.",
+      description: "Get crisis/out-of-stock context. Returns BOTH (a) any active workspace-level crisis events with affected/swap variants and coupon, and (b) this customer's enrollment status if they have one. CALL THIS whenever the customer mentions getting the wrong order/wrong item, an out-of-stock product, or anything that could be a crisis-related complaint — even if no crisis tags are on the ticket.",
       input_schema: { type: "object" as const, properties: {}, required: [] as string[] },
     },
     {
@@ -647,16 +654,48 @@ async function getFraudCases(admin: Admin, wsId: string, custId: string): Promis
   return parts.join("\n");
 }
 
-async function getCrisisStatus(admin: Admin, _wsId: string, custId: string): Promise<string> {
-  const { data: actions } = await admin.from("crisis_customer_actions")
-    .select("id, crisis_id, subscription_id, segment, current_tier, tier1_response, tier1_swapped_to, tier2_response, tier2_swapped_to, tier3_response, paused_at, removed_item_at, auto_resume, auto_readd, cancelled, exhausted_at, preserved_base_price_cents, original_item")
-    .eq("customer_id", custId)
-    .order("created_at", { ascending: false })
-    .limit(3);
+async function getCrisisStatus(admin: Admin, wsId: string, custId: string): Promise<string> {
+  const [{ data: actions }, { data: workspaceCrises }] = await Promise.all([
+    admin.from("crisis_customer_actions")
+      .select("id, crisis_id, subscription_id, segment, current_tier, tier1_response, tier1_swapped_to, tier2_response, tier2_swapped_to, tier3_response, paused_at, removed_item_at, auto_resume, auto_readd, cancelled, exhausted_at, preserved_base_price_cents, original_item")
+      .eq("customer_id", custId)
+      .order("created_at", { ascending: false })
+      .limit(3),
+    admin.from("crisis_events")
+      .select("id, name, status, affected_product_title, affected_variant_id, affected_sku, default_swap_title, default_swap_variant_id, tier2_coupon_code, tier2_coupon_percent, expected_restock_date")
+      .eq("workspace_id", wsId)
+      .eq("status", "active"),
+  ]);
 
-  if (!actions?.length) return "No active crisis actions for this customer.";
+  const out: string[] = [];
 
-  const parts = ["CRISIS STATUS:"];
+  // Workspace-level active crises — Sonnet needs to see these even if the
+  // customer isn't enrolled, so it can detect "wrong item" complaints
+  // caused by an auto-swap and route them to crisis_enroll.
+  if (workspaceCrises?.length) {
+    out.push("ACTIVE WORKSPACE CRISES:");
+    for (const c of workspaceCrises) {
+      out.push(`- Crisis "${c.name}" (id ${c.id}) — ${c.affected_product_title || "?"}`);
+      out.push(`  Affected variant: ${c.affected_variant_id} (sku ${c.affected_sku || "?"})`);
+      if (c.default_swap_variant_id) out.push(`  Customers were auto-swapped to: ${c.default_swap_title} (${c.default_swap_variant_id})`);
+      if (c.expected_restock_date) out.push(`  Expected restock: ${c.expected_restock_date}`);
+      if (c.tier2_coupon_code) out.push(`  Apology coupon available: ${c.tier2_coupon_code} (${c.tier2_coupon_percent}% off)`);
+    }
+    out.push("");
+  } else {
+    out.push("No active workspace crises.");
+    out.push("");
+  }
+
+  if (!actions?.length) {
+    out.push("This customer has no crisis enrollment.");
+    if (workspaceCrises?.length) {
+      out.push("→ If their recent order shows the swap variant above and they're complaining about a wrong item, enroll them via crisis_enroll direct action (sets auto_readd=true so they get the original product back when crisis resolves).");
+    }
+    return out.join("\n");
+  }
+
+  out.push("CRISIS STATUS (this customer):");
   for (const a of actions) {
     // Get crisis event details
     const { data: crisis } = await admin.from("crisis_events")
@@ -665,29 +704,29 @@ async function getCrisisStatus(admin: Admin, _wsId: string, custId: string): Pro
 
     if (!crisis) continue;
 
-    parts.push(`Crisis: ${crisis.affected_product_title || "Unknown product"} (${crisis.status})`);
-    parts.push(`  Expected restock: ${crisis.expected_restock_date || "TBD"}`);
-    parts.push(`  Segment: ${a.segment} | Current tier: ${a.current_tier} | Crisis action ID: ${a.id}`);
-    parts.push(`  Subscription ID: ${a.subscription_id}`);
-    if (a.original_item) parts.push(`  Original item: ${JSON.stringify(a.original_item)}`);
-    if (a.tier1_response) parts.push(`  Tier 1: ${a.tier1_response}${a.tier1_swapped_to ? ` → ${JSON.stringify(a.tier1_swapped_to)}` : ""}`);
-    if (a.tier2_response) parts.push(`  Tier 2: ${a.tier2_response}${a.tier2_swapped_to ? ` → ${JSON.stringify(a.tier2_swapped_to)}` : ""}`);
-    if (a.tier3_response) parts.push(`  Tier 3: ${a.tier3_response}`);
-    if (a.paused_at) parts.push(`  PAUSED at ${new Date(a.paused_at).toLocaleDateString()} (auto_resume: ${a.auto_resume})`);
-    if (a.removed_item_at) parts.push(`  REMOVED at ${new Date(a.removed_item_at).toLocaleDateString()} (auto_readd: ${a.auto_readd})`);
-    if (a.cancelled) parts.push("  CANCELLED");
-    if (a.exhausted_at) parts.push("  All tiers exhausted");
+    out.push(`Crisis: ${crisis.affected_product_title || "Unknown product"} (${crisis.status})`);
+    out.push(`  Expected restock: ${crisis.expected_restock_date || "TBD"}`);
+    out.push(`  Segment: ${a.segment} | Current tier: ${a.current_tier} | Crisis action ID: ${a.id}`);
+    out.push(`  Subscription ID: ${a.subscription_id}`);
+    if (a.original_item) out.push(`  Original item: ${JSON.stringify(a.original_item)}`);
+    if (a.tier1_response) out.push(`  Tier 1: ${a.tier1_response}${a.tier1_swapped_to ? ` → ${JSON.stringify(a.tier1_swapped_to)}` : ""}`);
+    if (a.tier2_response) out.push(`  Tier 2: ${a.tier2_response}${a.tier2_swapped_to ? ` → ${JSON.stringify(a.tier2_swapped_to)}` : ""}`);
+    if (a.tier3_response) out.push(`  Tier 3: ${a.tier3_response}`);
+    if (a.paused_at) out.push(`  PAUSED at ${new Date(a.paused_at).toLocaleDateString()} (auto_resume: ${a.auto_resume})`);
+    if (a.removed_item_at) out.push(`  REMOVED at ${new Date(a.removed_item_at).toLocaleDateString()} (auto_readd: ${a.auto_readd})`);
+    if (a.cancelled) out.push("  CANCELLED");
+    if (a.exhausted_at) out.push("  All tiers exhausted");
 
     // Available swaps
-    if (crisis.default_swap_title) parts.push(`  Default swap: ${crisis.default_swap_title} (${crisis.default_swap_variant_id})`);
+    if (crisis.default_swap_title) out.push(`  Default swap: ${crisis.default_swap_title} (${crisis.default_swap_variant_id})`);
     const flavors = (crisis.available_flavor_swaps as { title: string; variantId: string }[] || []);
-    if (flavors.length) parts.push(`  Flavor swaps: ${flavors.map(f => `${f.title} (${f.variantId})`).join(", ")}`);
+    if (flavors.length) out.push(`  Flavor swaps: ${flavors.map(f => `${f.title} (${f.variantId})`).join(", ")}`);
     const products = (crisis.available_product_swaps as { productTitle: string; variants: { title: string; variantId: string }[] }[] || []);
-    if (products.length) parts.push(`  Product swaps: ${products.map(p => `${p.productTitle}: ${p.variants.map(v => v.title).join(", ")}`).join("; ")}`);
-    if (crisis.tier2_coupon_code) parts.push(`  Coupon: ${crisis.tier2_coupon_code} (${crisis.tier2_coupon_percent}% off)`);
+    if (products.length) out.push(`  Product swaps: ${products.map(p => `${p.productTitle}: ${p.variants.map(v => v.title).join(", ")}`).join("; ")}`);
+    if (crisis.tier2_coupon_code) out.push(`  Coupon: ${crisis.tier2_coupon_code} (${crisis.tier2_coupon_percent}% off)`);
   }
 
-  return parts.join("\n");
+  return out.join("\n");
 }
 
 async function getChargebacks(admin: Admin, wsId: string, custId: string): Promise<string> {
@@ -765,12 +804,19 @@ export async function callSonnetOrchestratorV2(
   channel: string,
   personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
   agentContext?: { assigned: boolean; intervened: boolean } | null,
+  modelChoice?: { model: OrchestratorModelKey; reason: string } | null,
 ): Promise<SonnetDecision> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     console.error("ANTHROPIC_API_KEY not set");
     return FALLBACK_DECISION;
   }
+  const modelKey: OrchestratorModelKey = modelChoice?.model || "sonnet";
+  const modelId = MODEL_IDS[modelKey];
+  const purpose = `orchestrator-decision:${modelKey}(${modelChoice?.reason || "default"})`;
+  const logUsage = (usage: ClaudeUsage | undefined, tag: string) => {
+    void logAiUsage({ workspaceId, model: modelId, usage, purpose: `${purpose}:${tag}`, ticketId });
+  };
 
   try {
     const preContext = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext);
@@ -792,7 +838,7 @@ export async function callSonnetOrchestratorV2(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          model: modelId,
           max_tokens: 2000,
           tools,
           messages,
@@ -803,15 +849,16 @@ export async function callSonnetOrchestratorV2(
         const errBody = await res.text().catch(() => "");
         // Retry once on 529 (overloaded) after 2s delay
         if (res.status === 529) {
-          console.warn("Sonnet v2: 529 overloaded, retrying in 2s...");
+          console.warn(`Orchestrator (${modelKey}): 529 overloaded, retrying in 2s...`);
           await new Promise(r => setTimeout(r, 2000));
           const retry = await fetch("https://api.anthropic.com/v1/messages", {
             method: "POST",
             headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
-            body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 2000, tools, messages }),
+            body: JSON.stringify({ model: modelId, max_tokens: 2000, tools, messages }),
           });
           if (retry.ok) {
             const retryData = await retry.json();
+            logUsage(retryData.usage, `round${round}-retry529`);
             // Replace content blocks and continue processing this round
             const retryContent = retryData.content || [];
             const retryToolUse = retryContent.filter((b: { type: string }) => b.type === "tool_use");
@@ -830,11 +877,12 @@ export async function callSonnetOrchestratorV2(
             continue;
           }
         }
-        console.error(`Sonnet v2 API error: ${res.status}`, errBody.slice(0, 300));
-        return { ...FALLBACK_DECISION, reasoning: `Sonnet API error ${res.status}: ${errBody.slice(0, 100)}` };
+        console.error(`Orchestrator (${modelKey}) API error: ${res.status}`, errBody.slice(0, 300));
+        return { ...FALLBACK_DECISION, reasoning: `${modelKey} API error ${res.status}: ${errBody.slice(0, 100)}` };
       }
 
       const data = await res.json();
+      logUsage(data.usage, `round${round}`);
       const content = data.content || [];
 
       // Check for tool_use blocks
@@ -873,13 +921,13 @@ export async function callSonnetOrchestratorV2(
     }
 
     // Max rounds exceeded — force a final response without tools
-    console.warn("Sonnet v2: max tool rounds exceeded, forcing final response");
+    console.warn(`Orchestrator (${modelKey}): max tool rounds exceeded, forcing final response`);
     try {
       const forceRes = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          model: modelId,
           max_tokens: 2000,
           messages: [...messages, { role: "user", content: "You have gathered enough data. Based on what you know, provide your decision NOW as JSON. Do not call any more tools." }],
           // No tools — forces text response
@@ -887,14 +935,15 @@ export async function callSonnetOrchestratorV2(
       });
       if (forceRes.ok) {
         const forceData = await forceRes.json();
+        logUsage(forceData.usage, "force-decision");
         const text = (forceData.content || []).filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => b.text).join("");
         if (text) return parseSonnetDecision(text);
       }
     } catch { /* fall through to fallback */ }
     return FALLBACK_DECISION;
   } catch (err) {
-    console.error("Sonnet v2 error:", err);
-    return { ...FALLBACK_DECISION, reasoning: `Sonnet error: ${err instanceof Error ? err.message : String(err)}` };
+    console.error(`Orchestrator (${modelKey}) error:`, err);
+    return { ...FALLBACK_DECISION, reasoning: `${modelKey} error: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 

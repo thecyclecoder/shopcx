@@ -26,6 +26,7 @@ import { addTicketTag } from "@/lib/ticket-tags";
 import { markFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
 import { matchPlaybook, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
+import { logAiUsage } from "@/lib/ai-usage";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -102,7 +103,7 @@ async function newerActivity(admin: Admin, tid: string, since: string): Promise<
 
 // ── AI ──
 
-async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max = 200): Promise<string> {
+async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max = 200, ctx?: { workspaceId?: string; ticketId?: string; purpose?: string }): Promise<string> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return "";
   const mid = model === "sonnet" ? "claude-sonnet-4-20250514" : "claude-haiku-4-5-20251001";
@@ -112,6 +113,9 @@ async function claude(prompt: string, model: "haiku" | "sonnet" = "haiku", max =
   });
   if (!r.ok) return "";
   const d = await r.json();
+  if (ctx?.workspaceId) {
+    void logAiUsage({ workspaceId: ctx.workspaceId, model: mid, usage: d.usage, purpose: ctx.purpose || "claude-helper", ticketId: ctx.ticketId });
+  }
   return (d.content?.[0] as { text: string })?.text?.trim() || "";
 }
 
@@ -185,7 +189,7 @@ Return JSON: { "lead_in": "...", "cta_text": "..." }`, "haiku", 150);
   }
 }
 
-async function generatePositiveClose(msg: string, ch: string, p: { name?: string; tone?: string; sign_off?: string | null } | null, autoCloseReply: string | null, ticketId?: string): Promise<string> {
+async function generatePositiveClose(msg: string, ch: string, p: { name?: string; tone?: string; sign_off?: string | null } | null, autoCloseReply: string | null, ticketId?: string, workspaceId?: string): Promise<string> {
   const short = ["chat", "sms", "meta_dm"].includes(ch);
   const persona = p ? `Your name is ${p.name}. Tone: ${p.tone}.` : "You are a friendly support agent.";
 
@@ -210,7 +214,7 @@ async function generatePositiveClose(msg: string, ch: string, p: { name?: string
   // sign-off without truncation. Earlier 60 was right on the edge —
   // Gail DeRisi's 2026-04-28 close cut at "we look forward to serving"
   // because Haiku ran out of tokens mid-sign-off.
-  const raw = await claude(`${persona} Never reveal AI. Customer sent a positive closing message: "${msg}". Write a brief, warm closing reply.${contextHint} ${short ? "Max 1 sentence." : "Max 2 sentences."} ${p?.sign_off ? `End with: ${p.sign_off}` : ""} Only the reply, no markdown.`, "haiku", 150);
+  const raw = await claude(`${persona} Never reveal AI. Customer sent a positive closing message: "${msg}". Write a brief, warm closing reply.${contextHint} ${short ? "Max 1 sentence." : "Max 2 sentences."} ${p?.sign_off ? `End with: ${p.sign_off}` : ""} Only the reply, no markdown.`, "haiku", 150, workspaceId ? { workspaceId, ticketId, purpose: "positive-close" } : undefined);
   return raw || autoCloseReply || (p?.sign_off ? `You're welcome! ${p.sign_off}` : "You're welcome! Let us know if you need anything else.");
 }
 
@@ -566,7 +570,7 @@ ${candidateList}
 
 Is the new ticket clearly about the SAME issue as any of the other tickets? Consider: same topic (return, cancel, billing, etc.), continuation of a prior conversation, follow-up on an unresolved issue.
 
-Respond with EXACTLY the ticket subject that matches, or "NONE" if no match. Only match if you're confident it's the same issue.`, "haiku", 50);
+Respond with EXACTLY the ticket subject that matches, or "NONE" if no match. Only match if you're confident it's the same issue.`, "haiku", 50, { workspaceId: wsId, ticketId: tid, purpose: "auto-merge-check" });
 
         if (!check || check.trim().toUpperCase() === "NONE") return null;
 
@@ -912,7 +916,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
 
 Is this message related to their ${pbName.toLowerCase()} case (e.g. answering a question, providing info, following up, confirming, requesting to proceed), or is it about a completely DIFFERENT topic?
 
-Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10);
+Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: wsId, ticketId: tid, purpose: "playbook-drift-check" });
           return (result || "").trim().toUpperCase().includes("PLAYBOOK");
         });
 
@@ -1037,7 +1041,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10);
         await step.run("send-close", async () => {
           if (await newerActivity(admin, tid, t0)) return;
           const { data: ws } = await admin.from("workspaces").select("auto_close_reply").eq("id", wsId).single();
-          const closing = await generatePositiveClose(msg, st.ch, pers, ws?.auto_close_reply || null, tid);
+          const closing = await generatePositiveClose(msg, st.ch, pers, ws?.auto_close_reply || null, tid, wsId);
           await sendWithDelay(admin, wsId, tid, st.ch, closing, cfg.sandbox);
           await setStatus(admin, tid, true);
           await sysNote(admin, tid, `[System] Positive close. Ticket closed.`);
@@ -1052,11 +1056,15 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10);
     {
       const { callSonnetOrchestratorV2 } = await import("@/lib/sonnet-orchestrator-v2");
       const { executeSonnetDecision } = await import("@/lib/action-executor");
+      const { pickOrchestratorModel } = await import("@/lib/model-picker");
 
       const sonnetDecision = await step.run("sonnet-orchestrate", async () => {
+        const pick = await pickOrchestratorModel({ workspaceId: wsId, ticketId: tid, customerId: st.custId || null });
+        await sysNote(admin, tid, `[System] Orchestrator model: ${pick.model} (${pick.reason})`);
         const decision = await callSonnetOrchestratorV2(wsId, tid, st.custId || "", msg, st.ch, pers,
-          agentAssigned ? { assigned: true, intervened: st.intervened } : null);
-        await sysNote(admin, tid, `[System] Sonnet: ${decision.action_type} — ${decision.reasoning}`);
+          agentAssigned ? { assigned: true, intervened: st.intervened } : null,
+          pick);
+        await sysNote(admin, tid, `[System] ${pick.model === "opus" ? "Opus" : "Sonnet"}: ${decision.action_type} — ${decision.reasoning}`);
         return decision;
       });
 
