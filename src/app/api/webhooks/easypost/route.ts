@@ -6,10 +6,50 @@ import crypto from "crypto";
 // EasyPost sends tracker.updated events when tracking status changes.
 // We match by easypost_shipment_id or tracking_number to update our returns table.
 
-function verifyEasyPostHmac(body: string, signature: string | null, secret: string): boolean {
-  if (!signature) return false;
-  const expected = crypto.createHmac("sha256", secret).update(body).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+/**
+ * EasyPost signature format. Real headers look like:
+ *   X-Hmac-Signature:    hmac-sha256-hex=c829e211b0ad...
+ *   X-Hmac-Signature-V2: hmac-sha256-hex=f73bb65d14e9...
+ *   X-Timestamp:         Tue, 28 Apr 2026 13:37:29 -0000
+ *
+ * V1 = HMAC-SHA256(body, secret).hex()
+ * V2 = HMAC-SHA256(timestamp + body, secret).hex()  ← preferred
+ *
+ * Compare against the hex AFTER stripping the "hmac-sha256-hex=" prefix.
+ * timingSafeEqual on equal-length Buffers won't throw.
+ */
+function verifyEasyPostHmac(
+  rawBody: string,
+  v1Signature: string | null,
+  v2Signature: string | null,
+  timestamp: string | null,
+  secret: string,
+): boolean {
+  const stripPrefix = (s: string | null) => s?.replace(/^hmac-sha256-hex=/i, "").trim() || null;
+  const v1Hex = stripPrefix(v1Signature);
+  const v2Hex = stripPrefix(v2Signature);
+
+  // Try V2 first (preferred — includes timestamp for replay protection)
+  if (v2Hex && timestamp) {
+    const expected = crypto.createHmac("sha256", secret).update(timestamp + rawBody).digest("hex");
+    if (expected.length === v2Hex.length) {
+      try {
+        if (crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(v2Hex, "hex"))) return true;
+      } catch { /* fall through to V1 */ }
+    }
+  }
+
+  // Fall back to V1
+  if (v1Hex) {
+    const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+    if (expected.length === v1Hex.length) {
+      try {
+        if (crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(v1Hex, "hex"))) return true;
+      } catch { /* falsy below */ }
+    }
+  }
+
+  return false;
 }
 
 export async function POST(request: Request) {
@@ -22,10 +62,11 @@ export async function POST(request: Request) {
   }
 
   // Verify HMAC signature if we have a webhook secret
-  const hmacSignature = request.headers.get("x-hmac-signature");
-  if (hmacSignature) {
+  const v1Sig = request.headers.get("x-hmac-signature");
+  const v2Sig = request.headers.get("x-hmac-signature-v2");
+  const tsHeader = request.headers.get("x-timestamp");
+  if (v1Sig || v2Sig) {
     const admin = createAdminClient();
-    // Find the workspace with an EasyPost webhook secret — check all workspaces
     const { data: workspaces } = await admin.from("workspaces")
       .select("id, easypost_webhook_secret")
       .not("easypost_webhook_secret", "is", null);
@@ -34,15 +75,15 @@ export async function POST(request: Request) {
     for (const ws of workspaces || []) {
       try {
         const secret = decrypt(ws.easypost_webhook_secret);
-        if (verifyEasyPostHmac(rawBody, hmacSignature, secret)) {
+        if (verifyEasyPostHmac(rawBody, v1Sig, v2Sig, tsHeader, secret)) {
           verified = true;
           break;
         }
-      } catch {}
+      } catch { /* try next workspace */ }
     }
 
     if (!verified) {
-      console.error("[easypost-webhook] HMAC verification failed");
+      console.error("[easypost-webhook] HMAC verification failed", { hasV1: !!v1Sig, hasV2: !!v2Sig, hasTs: !!tsHeader });
       return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
     }
   }
