@@ -99,13 +99,13 @@ export const returnsIssueRefund = inngest.createFunction(
 
     const admin = createAdminClient();
 
-    // Load the return with customer info
+    // Load the return with customer info + the Shopify order for refund
     const ret = await step.run("load-return", async () => {
       const { data } = await admin
         .from("returns")
         .select(`
-          id, status, resolution_type, order_number, net_refund_cents, order_total_cents,
-          label_cost_cents, easypost_shipment_id, shopify_return_gid, customer_id,
+          id, status, resolution_type, order_number, order_id, net_refund_cents, order_total_cents,
+          label_cost_cents, easypost_shipment_id, shopify_return_gid, customer_id, refund_id,
           customers(email, first_name)
         `)
         .eq("id", return_id)
@@ -154,7 +154,47 @@ export const returnsIssueRefund = inngest.createFunction(
       }).eq("id", return_id);
     });
 
-    // Close the return in Shopify
+    // Issue the actual refund via Shopify refundCreate. closeReturn
+    // alone only closes the return record — it does NOT move money.
+    // Skip if resolution_type is store_credit (different flow), or if
+    // we already have a refund_id on the row (replay safety).
+    const isStoreCredit = (ret.resolution_type || "").includes("store_credit");
+    let refundIssued = !!ret.refund_id;
+    if (!isStoreCredit && !refundIssued) {
+      const refundResult = await step.run("issue-refund", async () => {
+        // Get the Shopify order ID from our orders row
+        const { data: order } = await admin
+          .from("orders")
+          .select("shopify_order_id")
+          .eq("id", ret.order_id)
+          .single();
+        if (!order?.shopify_order_id) return { success: false, error: "Order not found" };
+        const { refundOrder } = await import("@/lib/shopify-order-actions");
+        const r = await refundOrder(workspace_id, order.shopify_order_id, {
+          full: true,
+          reason: `Return ${ret.order_number} delivered back to warehouse`,
+          notify: false, // we send our own confirmation email below
+        });
+        return r;
+      });
+      if (refundResult.success) {
+        refundIssued = true;
+      } else {
+        console.error(`Failed to issue refund for return ${return_id}:`, refundResult.error);
+        // Surface to the dashboard so an agent can manually intervene
+        await step.run("notify-refund-failed", async () => {
+          await admin.from("dashboard_notifications").insert({
+            workspace_id,
+            type: "system",
+            title: `Return refund failed — manual action needed`,
+            body: `Return ${return_id} (${ret.order_number}) was delivered but Shopify refundCreate failed: ${refundResult.error}`,
+            metadata: { type: "return_refund_failed", return_id, error: refundResult.error },
+          });
+        });
+      }
+    }
+
+    // Close the return in Shopify (marks it as fully resolved)
     const closeResult = await step.run("close-return", async () => {
       return closeReturn(workspace_id, return_id);
     });
@@ -163,20 +203,20 @@ export const returnsIssueRefund = inngest.createFunction(
       console.error(`Failed to close return ${return_id}:`, closeResult.error);
     }
 
-    // Update return status
+    // Update return status — only mark refunded if the money actually moved
     await step.run("update-status", async () => {
-      await admin
-        .from("returns")
-        .update({
-          status: "refunded",
-          refunded_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", return_id);
+      const updates: Record<string, string> = {
+        status: refundIssued || isStoreCredit ? "refunded" : "delivered",
+        updated_at: new Date().toISOString(),
+      };
+      if (refundIssued) updates.refunded_at = new Date().toISOString();
+      await admin.from("returns").update(updates).eq("id", return_id);
     });
 
-    // Send confirmation email
-    if (customer?.email) {
+    // Send confirmation email — only if refund actually went through
+    // (or store credit). If refund failed, skip the email so we don't
+    // tell the customer their money is back when it isn't.
+    if (customer?.email && (refundIssued || isStoreCredit)) {
       await step.run("send-confirmation", async () => {
         const { sendReturnConfirmationEmail } = await import("@/lib/email");
         await sendReturnConfirmationEmail({
