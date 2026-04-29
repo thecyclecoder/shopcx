@@ -321,8 +321,16 @@ async function sendWithDelay(admin: Admin, wsId: string, tid: string, ch: string
   await send(admin, wsId, tid, ch, msg, sandbox, delay > 0, delay);
 }
 
-const setStatus = (admin: Admin, tid: string, autoResolve: boolean) =>
-  admin.from("tickets").update({ status: autoResolve ? "closed" : "pending" }).eq("id", tid);
+// Policy: any outbound customer message closes the ticket. The
+// ticket auto-reopens when the customer replies (inbound webhook
+// flips status back to open). The autoResolve param is kept for call
+// signature compatibility but no longer differentiates pending vs
+// closed — escalations are the only path that should leave a ticket
+// open, and those are handled by their own status update at
+// escalation time. This avoids tickets sitting in "pending" forever
+// when the customer doesn't reply.
+const setStatus = (admin: Admin, tid: string, _autoResolve: boolean) =>
+  admin.from("tickets").update({ status: "closed", closed_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", tid);
 
 // ── Handler names for AI context ──
 
