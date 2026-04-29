@@ -84,8 +84,17 @@ export const aiNightlyAnalysis = inngest.createFunction(
             turns: ticket.ai_turn_count || 0,
             escalated: !!ticket.escalation_reason,
             hasPriorHistory: (priorCount || 0) > 0,
-            messages: msgs.slice(-30).map(m => ({ // also cap to last 30 msgs in window
-              role: m.direction === "inbound" ? "customer" : "agent",
+            // Use author_type as role so the analyzer can distinguish
+            // AI persona-signed messages ("Julie", "Suzie") from real
+            // human agents. Otherwise the "only grade AI" instruction
+            // makes Claude skip everything signed with a name.
+            messages: msgs.slice(-30).map(m => ({
+              role:
+                m.direction === "inbound" ? "customer"
+                : m.author_type === "ai" ? "ai"
+                : m.author_type === "agent" ? "human_agent"
+                : m.author_type === "system" ? "system"
+                : "agent",
               body: (m.body || "").replace(/<[^>]+>/g, " ").trim().slice(0, 300),
             })),
           });
@@ -117,13 +126,19 @@ export const aiNightlyAnalysis = inngest.createFunction(
 
 You will be shown only the messages from the last 24 hours of each ticket. Tickets marked "HAS PRIOR HISTORY" had earlier conversation that was intentionally excluded from this prompt — do NOT penalize the AI for not acknowledging context you can't see, do NOT score those tickets based on assumed prior failures, and do NOT count loops/repetition that may have happened before this window. Only grade what's in front of you.
 
-Analyze each conversation and provide:
-1. Overall score (1-10) for the batch — based ONLY on the messages shown
-2. Per-channel breakdown (email, chat, etc.)
-3. Issues found: inaccurate responses, robotic tone, customer frustration, missed opportunities — only when visible in the messages shown
-4. Action items: specific improvements needed
+ROLE LABELS:
+  customer     — inbound from the customer
+  ai           — the AI agent (signed with personas like "Julie" or "Suzie" — these are AI personas, NOT human agents)
+  human_agent  — actual human team member (e.g. an assigned agent)
+  system       — internal status notes (skip these)
 
-Only grade AI agent messages, not human agent messages. If a ticket has no AI agent messages in this window (e.g. only customer messages or only human agent messages), skip it — do not include it in scoring.
+Only grade AI agent messages (role=ai). Do NOT grade human_agent or system messages. If a ticket has no role=ai messages in this window, skip it — do not include it in scoring.
+
+Analyze each conversation and provide:
+1. Overall score (1-10) for the batch — based ONLY on the AI messages shown
+2. Per-channel breakdown (email, chat, etc.)
+3. Issues found: inaccurate responses, robotic tone, customer frustration, missed opportunities — only when visible in AI messages
+4. Action items: specific improvements needed
 
 Return JSON:
 {
