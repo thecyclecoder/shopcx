@@ -40,15 +40,39 @@ export const aiNightlyAnalysis = inngest.createFunction(
 
         if (!tickets?.length) return { analyzed: 0 };
 
-        // For each ticket, get the conversation
-        const conversations: { ticketId: string; channel: string; subject: string; turns: number; escalated: boolean; messages: { role: string; body: string }[] }[] = [];
+        // For each ticket, get the conversation. Critically, restrict
+        // messages to the last 24h: long-history tickets and auto-merged
+        // chains (Sarah Young's had 194 messages pulled forward across
+        // 17 days) would otherwise dominate the prompt and let Claude
+        // grade the AI on pre-fix conversations from days earlier.
+        const conversations: {
+          ticketId: string;
+          channel: string;
+          subject: string;
+          turns: number;
+          escalated: boolean;
+          hasPriorHistory: boolean;
+          messages: { role: string; body: string }[];
+        }[] = [];
 
         for (const ticket of tickets.slice(0, 50)) { // Cap at 50 per workspace
-          const { data: msgs } = await admin
+          // Quick check: does this ticket have ANY external messages
+          // before the analysis window? Used to flag tickets where we're
+          // intentionally only showing Claude a slice of the thread.
+          const { count: priorCount } = await admin
             .from("ticket_messages")
-            .select("direction, author_type, body, visibility")
+            .select("id", { count: "exact", head: true })
             .eq("ticket_id", ticket.id)
             .eq("visibility", "external")
+            .lt("created_at", yesterday);
+
+          // Only the messages from the last 24 hours
+          const { data: msgs } = await admin
+            .from("ticket_messages")
+            .select("direction, author_type, body, visibility, created_at")
+            .eq("ticket_id", ticket.id)
+            .eq("visibility", "external")
+            .gte("created_at", yesterday)
             .order("created_at", { ascending: true });
 
           if (!msgs?.length) continue;
@@ -59,7 +83,8 @@ export const aiNightlyAnalysis = inngest.createFunction(
             subject: ticket.subject || "",
             turns: ticket.ai_turn_count || 0,
             escalated: !!ticket.escalation_reason,
-            messages: msgs.map(m => ({
+            hasPriorHistory: (priorCount || 0) > 0,
+            messages: msgs.slice(-30).map(m => ({ // also cap to last 30 msgs in window
               role: m.direction === "inbound" ? "customer" : "agent",
               body: (m.body || "").replace(/<[^>]+>/g, " ").trim().slice(0, 300),
             })),
@@ -74,7 +99,8 @@ export const aiNightlyAnalysis = inngest.createFunction(
 
         const analysisPrompt = conversations.map((c, i) => {
           const thread = c.messages.map(m => `${m.role}: ${m.body}`).join("\n");
-          return `--- Ticket ${i + 1} (${c.channel}, ${c.turns} AI turns${c.escalated ? ", ESCALATED" : ""}) ---\nSubject: ${c.subject}\n${thread}`;
+          const priorTag = c.hasPriorHistory ? ", HAS PRIOR HISTORY (older messages intentionally excluded)" : "";
+          return `--- Ticket ${i + 1} (${c.channel}, ${c.turns} AI turns${c.escalated ? ", ESCALATED" : ""}${priorTag}) ---\nSubject: ${c.subject}\n${thread}`;
         }).join("\n\n");
 
         const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -89,13 +115,15 @@ export const aiNightlyAnalysis = inngest.createFunction(
             max_tokens: 2000,
             system: `You are an AI quality analyst reviewing customer support conversations handled by an AI agent.
 
+You will be shown only the messages from the last 24 hours of each ticket. Tickets marked "HAS PRIOR HISTORY" had earlier conversation that was intentionally excluded from this prompt — do NOT penalize the AI for not acknowledging context you can't see, do NOT score those tickets based on assumed prior failures, and do NOT count loops/repetition that may have happened before this window. Only grade what's in front of you.
+
 Analyze each conversation and provide:
-1. Overall score (1-10) for the batch
+1. Overall score (1-10) for the batch — based ONLY on the messages shown
 2. Per-channel breakdown (email, chat, etc.)
-3. Issues found: inaccurate responses, robotic tone, customer frustration, missed opportunities
+3. Issues found: inaccurate responses, robotic tone, customer frustration, missed opportunities — only when visible in the messages shown
 4. Action items: specific improvements needed
 
-Only grade AI agent messages, not human agent messages.
+Only grade AI agent messages, not human agent messages. If a ticket has no AI agent messages in this window (e.g. only customer messages or only human agent messages), skip it — do not include it in scoring.
 
 Return JSON:
 {
