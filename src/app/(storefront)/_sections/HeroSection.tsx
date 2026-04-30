@@ -46,11 +46,13 @@ export function HeroSection({ data }: { data: PageData }) {
       <div className="mx-auto flex w-full max-w-6xl flex-col md:flex-row md:items-center md:gap-12 md:px-8 md:pt-16 md:pb-16">
         {/* Hero image — native <picture>, no optimizer round trip.
             Chromium fetchpriority=high starts the download during
-            HTML parse. Width/height lock layout; object-fit covers
-            the mobile 4:3 and desktop 1:1 containers. */}
-        <div className="relative w-full overflow-hidden md:order-2 md:flex-1 md:rounded-2xl">
+            HTML parse. Mobile uses object-cover on a 4:3 to keep
+            the section visually full; desktop uses object-contain
+            on a square so the full product shot (bag + latte +
+            powder splash) is visible without right-side cropping. */}
+        <div className="relative w-full md:order-2 md:flex-1">
           <div className="relative w-full aspect-[4/3] md:aspect-square">
-            <div className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover">
+            <div className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover md:[&_img]:object-contain">
               <PictureHero
                 media={heroMedia}
                 altFallback={heroAlt}
