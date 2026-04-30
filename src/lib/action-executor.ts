@@ -741,6 +741,31 @@ const directActionHandlers: Record<
     return { success: true, summary: `Linked ${target.email} to this account` };
   },
 
+  // Persist a customer's free-text rejection of an account-linking suggestion.
+  // Use when the customer explicitly says an unlinked candidate isn't theirs
+  // (e.g. "that's not my email", "I don't have another account") so the
+  // suggestion never re-fires on future tickets. Pair this with the
+  // customer's actual ask in the same actions array — the rejection is a
+  // bookkeeping step, not a stand-alone resolution.
+  reject_account_link: async (ctx, p) => {
+    if (!p.code) return { success: false, error: "Missing email (pass via 'code' param)" };
+    const rejectedEmail = p.code.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(rejectedEmail)) return { success: false, error: `Invalid email: ${rejectedEmail}` };
+
+    const { data: target } = await ctx.admin.from("customers")
+      .select("id").eq("workspace_id", ctx.workspaceId).ilike("email", rejectedEmail).maybeSingle();
+    if (!target) return { success: false, error: `No customer profile found for ${rejectedEmail}` };
+    if (target.id === ctx.customerId) return { success: false, error: "Cannot reject self-link" };
+
+    await ctx.admin.from("customer_link_rejections").upsert({
+      workspace_id: ctx.workspaceId,
+      customer_id: ctx.customerId,
+      rejected_customer_id: target.id,
+    }, { onConflict: "customer_id,rejected_customer_id" });
+
+    return { success: true, summary: `Rejected link suggestion for ${rejectedEmail} (won't re-suggest)` };
+  },
+
   reactivate: async (ctx, p) => {
     const { appstleSubscriptionAction } = await import("@/lib/appstle");
     const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
@@ -911,16 +936,49 @@ const directActionHandlers: Record<
     const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
     const { shop, accessToken } = await getShopifyCredentials(ctx.workspaceId);
 
-    // Get customer's Shopify ID and shipping address from their subscription
+    // Get customer's Shopify ID
     const { data: cust } = await ctx.admin.from("customers")
       .select("shopify_customer_id").eq("id", ctx.customerId).single();
     if (!cust?.shopify_customer_id) return { success: false, error: "No Shopify customer ID" };
 
-    // Get shipping address from any active sub
-    const { data: subs } = await ctx.admin.from("subscriptions")
-      .select("shipping_address").eq("customer_id", ctx.customerId).eq("status", "active").limit(1);
-    const addr = (subs?.[0]?.shipping_address || {}) as Record<string, string>;
-    if (!addr.address1) return { success: false, error: "No shipping address found" };
+    // Resolve shipping address — prefer the specific order if order_number
+    // was passed (most accurate; replacement should ship where the
+    // original went), then any subscription regardless of status, then
+    // the most recent order. The original code only looked at active
+    // subs, which broke replacements for one-time-purchase customers
+    // and anyone whose sub was paused/cancelled.
+    let addr: Record<string, string> = {};
+    if (p.order_number) {
+      const { data: order } = await ctx.admin.from("orders")
+        .select("shipping_address")
+        .eq("workspace_id", ctx.workspaceId)
+        .eq("order_number", p.order_number)
+        .maybeSingle();
+      if (order?.shipping_address) addr = order.shipping_address as Record<string, string>;
+    }
+    if (!addr.address1) {
+      const { data: subs } = await ctx.admin.from("subscriptions")
+        .select("shipping_address, status")
+        .eq("customer_id", ctx.customerId)
+        .order("status", { ascending: true })
+        .limit(5);
+      for (const s of subs || []) {
+        const sa = s.shipping_address as Record<string, string> | null;
+        if (sa?.address1) { addr = sa; break; }
+      }
+    }
+    if (!addr.address1) {
+      const { data: orders } = await ctx.admin.from("orders")
+        .select("shipping_address")
+        .eq("customer_id", ctx.customerId)
+        .order("created_at", { ascending: false })
+        .limit(5);
+      for (const o of orders || []) {
+        const oa = o.shipping_address as Record<string, string> | null;
+        if (oa?.address1) { addr = oa; break; }
+      }
+    }
+    if (!addr.address1) return { success: false, error: "No shipping address found on any subscription or order" };
 
     const variantId = p.variant_id || "42614433513645"; // default Peach Mango
     const quantity = p.quantity || 1;
@@ -1020,7 +1078,7 @@ export async function executeSonnetDecision(
       break;
 
     case "workflow":
-      await handleWorkflow(ctx, decision, sysNote);
+      await handleWorkflow(ctx, decision, send, sysNote);
       break;
 
     case "macro":
@@ -1270,21 +1328,31 @@ async function handleJourney(
     .limit(1)
     .single();
 
-  // Fallback: case-insensitive name match
+  // Fallback: case-insensitive AND space↔underscore-tolerant match. The
+  // model commonly snake-cases handler names ("Cancel Subscription" →
+  // "cancel_subscription") which wouldn't otherwise match.
   if (!journey) {
+    const norm = (s: string) => s.toLowerCase().replace(/[\s_-]+/g, "_").trim();
+    const target = norm(handlerName);
     const { data: all } = await ctx.admin
       .from("journey_definitions")
       .select("id, name, trigger_intent")
       .eq("workspace_id", ctx.workspaceId)
       .eq("is_active", true);
     journey = (all || []).find(j =>
-      j.name.toLowerCase() === handlerName.toLowerCase() ||
-      j.trigger_intent?.toLowerCase() === handlerName.toLowerCase()
+      norm(j.name) === target ||
+      (j.trigger_intent && norm(j.trigger_intent) === target)
     ) || null;
   }
 
   if (!journey) {
-    await sysNote(`Journey not found: ${decision.handler_name}`);
+    // Don't leave the customer hanging — escalate to an agent so the
+    // ticket lands in someone's queue with context. The model often
+    // gets the handler name slightly wrong; this is the safety net.
+    const reason = `Journey not found: "${decision.handler_name}". Sonnet's intent was: ${decision.reasoning || "unknown"}`;
+    await sysNote(reason);
+    await escalateTicket(ctx, reason);
+    await send(decision.response_message || "I need a little time to work on this and I'll get back to you.", ctx.sandbox);
     return;
   }
 
@@ -1324,20 +1392,28 @@ async function handlePlaybook(
     return;
   }
 
-  // Look up playbook by name or trigger_intents (case-insensitive)
+  // Look up playbook by name or trigger_intents — case-insensitive AND
+  // tolerant of space↔underscore swaps. The model frequently snake-cases
+  // a handler ("Replacement Order" → "replacement_order") that wouldn't
+  // otherwise match. Normalize both sides before comparing.
+  const norm = (s: string) => s.toLowerCase().replace(/[\s_-]+/g, "_").trim();
   const pbName = decision.handler_name!;
+  const target = norm(pbName);
   const { data: allPlaybooks } = await ctx.admin
     .from("playbooks")
     .select("id, name, trigger_intents")
     .eq("workspace_id", ctx.workspaceId)
     .eq("is_active", true);
   const playbook = (allPlaybooks || []).find(p =>
-    p.name.toLowerCase() === pbName.toLowerCase() ||
-    ((p.trigger_intents as string[]) || []).some(i => i.toLowerCase() === pbName.toLowerCase())
+    norm(p.name) === target ||
+    ((p.trigger_intents as string[]) || []).some(i => norm(i) === target)
   ) || null;
 
   if (!playbook) {
-    await sysNote(`Playbook not found: ${decision.handler_name}`);
+    const reason = `Playbook not found: "${decision.handler_name}". Sonnet's intent was: ${decision.reasoning || "unknown"}`;
+    await sysNote(reason);
+    await escalateTicket(ctx, reason);
+    await send(decision.response_message || "I need a little time to work on this and I'll get back to you.", ctx.sandbox);
     return;
   }
 
@@ -1398,6 +1474,7 @@ async function handlePlaybook(
 async function handleWorkflow(
   ctx: ActionContext,
   decision: SonnetDecision,
+  send: SendFn,
   sysNote: SysNoteFn,
 ): Promise<void> {
   if (!decision.handler_name) {
@@ -1405,21 +1482,27 @@ async function handleWorkflow(
     return;
   }
 
-  // Look up workflow by name or trigger_tag (case-insensitive)
+  // Look up workflow by name, trigger_tag, or template — case-insensitive
+  // and tolerant of space↔underscore variants from the model.
+  const norm = (s: string) => s.toLowerCase().replace(/[\s_-]+/g, "_").trim();
   const wfName = decision.handler_name!;
+  const target = norm(wfName);
   const { data: allWorkflows } = await ctx.admin
     .from("workflows")
     .select("id, name, trigger_tag, template")
     .eq("workspace_id", ctx.workspaceId)
     .eq("enabled", true);
   const workflow = (allWorkflows || []).find(w =>
-    w.name.toLowerCase() === wfName.toLowerCase() ||
-    w.trigger_tag?.toLowerCase() === wfName.toLowerCase() ||
-    (w.template as string)?.toLowerCase() === wfName.toLowerCase()
+    norm(w.name) === target ||
+    (w.trigger_tag && norm(w.trigger_tag) === target) ||
+    (w.template && norm(w.template as string) === target)
   ) || null;
 
   if (!workflow) {
-    await sysNote(`Workflow not found: ${decision.handler_name}`);
+    const reason = `Workflow not found: "${decision.handler_name}". Sonnet's intent was: ${decision.reasoning || "unknown"}`;
+    await sysNote(reason);
+    await escalateTicket(ctx, reason);
+    await send(decision.response_message || "I need a little time to work on this and I'll get back to you.", ctx.sandbox);
     return;
   }
 

@@ -2559,7 +2559,42 @@ async function handleConfirmShippingAddress(
     return { action: "advance", newStep: step.step_order + 1, context: ctx };
   }
 
-  // Always launch the address journey — replacements cost money, never assume address
+  // For damaged / missing items: the original order arrived at the
+  // customer's address — we know it works. Pull the address straight
+  // from the original order and skip the form. Asking would be
+  // unnecessary friction.
+  // For NOT_RECEIVED (lost in shipping): the original address may have
+  // been wrong, so we DO ask via the journey form below.
+  const reason = ctx.replacement_reason as string | undefined;
+  if (reason === "damaged_items" || reason === "missing_items") {
+    const orderId = ctx.identified_order_id as string | undefined;
+    if (orderId) {
+      const { data: order } = await admin.from("orders")
+        .select("shipping_address").eq("id", orderId).maybeSingle();
+      const addr = order?.shipping_address as Record<string, string> | null;
+      if (addr?.address1) {
+        ctx.validated_address = addr;
+        return { action: "advance", newStep: step.step_order + 1, context: ctx };
+      }
+    }
+    // Fallback: most recent order with an address
+    const { data: orders } = await admin.from("orders")
+      .select("shipping_address")
+      .eq("workspace_id", wsId)
+      .eq("customer_id", customer.id)
+      .order("created_at", { ascending: false })
+      .limit(5);
+    for (const o of orders || []) {
+      const a = o.shipping_address as Record<string, string> | null;
+      if (a?.address1) {
+        ctx.validated_address = a;
+        return { action: "advance", newStep: step.step_order + 1, context: ctx };
+      }
+    }
+    // No address anywhere — fall through to the form as a last resort
+  }
+
+  // Lost-in-shipping or no order address found → ask via journey
   if (!ctx.address_question_asked) {
     ctx.address_question_asked = true;
 

@@ -457,6 +457,21 @@ export const unifiedTicketHandler = inngest.createFunction(
     const t0 = new Date().toISOString();
     const admin = createAdminClient();
 
+    // ── 0. Empty-inbound short-circuit ──
+    // Some email clients send replies whose body is just a quoted thread,
+    // a signature, or literally nothing. After stripping HTML/whitespace
+    // those land here as empty strings. Treat them as no-op:
+    //   • do NOT cancel pending sends already queued from a prior turn
+    //   • do NOT re-run the orchestrator / playbook on empty context
+    // Without this guard, an empty reply mid-playbook cancels the next
+    // beat we already scheduled, and re-running the playbook with empty
+    // `msg` makes the AI generate empty responses.
+    const stripped = (msg || "").replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
+    if (!isNew && stripped.length === 0) {
+      await sysNote(admin, tid, "[System] Empty inbound message — skipping pipeline (would have cancelled in-flight send).");
+      return { status: "skipped", reason: "empty_inbound" };
+    }
+
     // ── 1. Resolve ──
     const st = await step.run("resolve", async () => {
       const { data: ticket } = await admin.from("tickets")

@@ -154,15 +154,55 @@ export const returnsIssueRefund = inngest.createFunction(
       }).eq("id", return_id);
     });
 
-    // Issue the actual refund via Shopify refundCreate. closeReturn
-    // alone only closes the return record — it does NOT move money.
-    // Skip if resolution_type is store_credit (different flow), or if
-    // we already have a refund_id on the row (replay safety).
+    // Branch on resolution_type — refund and store credit are
+    // separate Shopify mutations. closeReturn alone only closes the
+    // return record; it does NOT move money or issue credit. We must
+    // call the right API for what the playbook actually offered.
     const isStoreCredit = (ret.resolution_type || "").includes("store_credit");
     let refundIssued = !!ret.refund_id;
-    if (!isStoreCredit && !refundIssued) {
+    let creditIssued = false;
+
+    if (isStoreCredit && !refundIssued) {
+      // Store credit branch — issue via Shopify storeCreditAccountCredit
+      // mutation. Amount is the net (order total minus label cost).
+      const creditResult = await step.run("issue-store-credit", async (): Promise<{ ok: boolean; balance: number; transactionId: string | null; error?: string }> => {
+        const { data: cust } = await admin.from("customers")
+          .select("shopify_customer_id").eq("id", ret.customer_id).maybeSingle();
+        if (!cust?.shopify_customer_id) return { ok: false, balance: 0, transactionId: null, error: "Customer has no Shopify ID" };
+        const amountDollars = (finalNetRefundCents || 0) / 100;
+        if (amountDollars <= 0) return { ok: false, balance: 0, transactionId: null, error: `Net amount is ${amountDollars}` };
+        const { issueStoreCredit } = await import("@/lib/store-credit");
+        return issueStoreCredit({
+          workspaceId: workspace_id,
+          customerId: ret.customer_id,
+          shopifyCustomerId: cust.shopify_customer_id,
+          amount: amountDollars,
+          reason: `Return ${ret.order_number} delivered — store credit issued`,
+          issuedBy: "system",
+          issuedByName: "ShopCX (auto)",
+        });
+      });
+      if (creditResult.ok) {
+        creditIssued = true;
+        await admin.from("returns").update({
+          refund_id: creditResult.transactionId,
+          updated_at: new Date().toISOString(),
+        }).eq("id", return_id);
+      } else {
+        console.error(`Failed to issue store credit for return ${return_id}:`, creditResult.error);
+        await step.run("notify-credit-failed", async () => {
+          await admin.from("dashboard_notifications").insert({
+            workspace_id,
+            type: "system",
+            title: `Store credit issuance failed — manual action needed`,
+            body: `Return ${return_id} (${ret.order_number}) was delivered but storeCreditAccountCredit failed: ${creditResult.error}`,
+            metadata: { type: "return_credit_failed", return_id, error: creditResult.error },
+          });
+        });
+      }
+    } else if (!isStoreCredit && !refundIssued) {
+      // Refund branch — issue via Shopify refundCreate
       const refundResult = await step.run("issue-refund", async () => {
-        // Get the Shopify order ID from our orders row
         const { data: order } = await admin
           .from("orders")
           .select("shopify_order_id")
@@ -181,7 +221,6 @@ export const returnsIssueRefund = inngest.createFunction(
         refundIssued = true;
       } else {
         console.error(`Failed to issue refund for return ${return_id}:`, refundResult.error);
-        // Surface to the dashboard so an agent can manually intervene
         await step.run("notify-refund-failed", async () => {
           await admin.from("dashboard_notifications").insert({
             workspace_id,
@@ -203,20 +242,24 @@ export const returnsIssueRefund = inngest.createFunction(
       console.error(`Failed to close return ${return_id}:`, closeResult.error);
     }
 
-    // Update return status — only mark refunded if the money actually moved
+    // Update return status — only mark refunded if the value actually
+    // moved (either Shopify refund OR store credit). If neither
+    // succeeded, leave as "delivered" so an agent can intervene.
+    const valueIssued = refundIssued || creditIssued;
     await step.run("update-status", async () => {
       const updates: Record<string, string> = {
-        status: refundIssued || isStoreCredit ? "refunded" : "delivered",
+        status: valueIssued ? "refunded" : "delivered",
         updated_at: new Date().toISOString(),
       };
-      if (refundIssued) updates.refunded_at = new Date().toISOString();
+      if (valueIssued) updates.refunded_at = new Date().toISOString();
       await admin.from("returns").update(updates).eq("id", return_id);
     });
 
-    // Send confirmation email — only if refund actually went through
-    // (or store credit). If refund failed, skip the email so we don't
-    // tell the customer their money is back when it isn't.
-    if (customer?.email && (refundIssued || isStoreCredit)) {
+    // Send confirmation email — only if value actually moved. The email
+    // helper already differentiates store credit vs refund wording based
+    // on resolution_type. Skipping when neither succeeded prevents
+    // telling the customer their money is back when it isn't.
+    if (customer?.email && valueIssued) {
       await step.run("send-confirmation", async () => {
         const { sendReturnConfirmationEmail } = await import("@/lib/email");
         await sendReturnConfirmationEmail({
