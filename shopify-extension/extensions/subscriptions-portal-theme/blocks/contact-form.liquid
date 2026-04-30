@@ -83,7 +83,7 @@
     <p class="shopcx-contact__error" data-shopcx-error hidden></p>
   </form>
 
-  <div class="shopcx-contact__success" data-shopcx-success hidden>
+  <div class="shopcx-contact__success" data-shopcx-success style="display:none;">
     <strong>{{ block.settings.success_heading | default: 'Thanks!' | escape }}</strong>
     <p>{{ block.settings.success_message | default: "We've received your message and will get back to you shortly." | escape }}</p>
   </div>
@@ -200,8 +200,12 @@
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
         .then(function (res) {
           if (!res.ok) throw new Error(res.body && res.body.error ? res.body.error : "Failed to send");
-          form.hidden = true;
-          successEl.hidden = false;
+          // Use inline style instead of [hidden] attr — Shopify themes
+          // commonly override [hidden] via CSS with display:block !important
+          // on form elements, leaving the submitted form visible alongside
+          // the success card. style.display="none" is unforgeable.
+          form.style.display = "none";
+          successEl.style.display = "block";
           successEl.scrollIntoView({ behavior: "smooth", block: "center" });
         })
         .catch(function (err) {
