@@ -38,27 +38,54 @@ export function HeroSection({ data }: { data: PageData }) {
   const ratingCount =
     data.product.rating_count ?? data.review_analysis?.reviews_analyzed_count ?? null;
 
+  // Hero image aspect ratio drives the page-width math. Most product
+  // hero shots are roughly 1:1 (bag + props + splash); a 4:3 (1.33)
+  // override may apply for wider compositions. We size the page so:
+  //   image_width = (2/3) * container_width
+  //   image_height = image_width / aspect ≤ viewport_height - chrome
+  // Solving: container_width ≤ (vh - 4rem) * (3/2) * aspect
+  // Then the image fills its column at full width, no negative space.
+  // Default to the dimensions stamped on PictureHero (1200×900 ≈ 4:3).
+  // Most uploaded product hero shots land within ~5% of this; if a
+  // workspace uploads a noticeably different ratio later we can read
+  // it from product_media (would need a width/height column added).
+  const heroAspectW = 1200;
+  const heroAspectH = 896;
+  const containerStyle: React.CSSProperties = {
+    "--hero-aspect-w": String(heroAspectW),
+    "--hero-aspect-h": String(heroAspectH),
+    maxWidth: `min(2200px, calc((100vh - 4rem) * 1.5 * ${heroAspectW} / ${heroAspectH}))`,
+  } as React.CSSProperties;
+
   return (
     <section
       data-section="hero"
       className="w-full bg-white"
     >
-      {/* Wider container for desktop wow factor — beyond max-w-6xl but
-          not bleeding to the edges. 2/3 image + 1/3 text on desktop;
-          stacked on mobile. Image column is position:sticky top:0 so
-          while the customer scrolls through the text on the left, the
-          product stays pinned in view; once the text column ends, the
-          whole section scrolls away naturally. */}
-      <div className="mx-auto flex w-full max-w-[1600px] flex-col md:flex-row md:items-start md:gap-10 md:px-10">
+      {/* Container width is computed dynamically — see containerStyle
+          above. The sizing math ensures the image fills 2/3 of the
+          container at its natural aspect ratio without exceeding the
+          viewport height. On narrower viewports the min(2200px, ...)
+          clamp keeps things readable. Capped at 2200px on huge screens. */}
+      <div
+        style={containerStyle}
+        className="mx-auto flex w-full flex-col md:flex-row md:items-start md:gap-10 md:px-10"
+      >
         {/* Hero image — sticky on desktop, top-aligned. Mobile keeps
             its old 4:3 + object-cover behavior since cropping reads
-            better on a phone than letterboxing. Desktop uses
-            object-contain inside a viewport-height sticky pane so the
-            full product shot (bag + latte + powder splash) is visible
-            without right-side cropping or vertical centering whitespace. */}
+            better on a phone than letterboxing. Desktop fills its
+            column width using an aspect-ratio wrapper, so the image
+            renders at its full intended size with no horizontal
+            negative space inside the column. */}
         <div className="relative w-full md:order-1 md:basis-2/3 md:sticky md:top-0 md:flex md:h-screen md:items-start md:pt-8">
-          <div className="relative w-full aspect-[4/3] md:aspect-auto md:flex md:items-start md:justify-center">
-            <div className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover md:relative md:inset-auto md:[&_picture]:relative md:[&_picture]:inset-auto md:[&_img]:h-auto md:[&_img]:max-h-[calc(100vh-4rem)] md:[&_img]:w-auto md:[&_img]:max-w-full md:[&_img]:object-contain">
+          <div
+            className="relative w-full aspect-[4/3] md:aspect-auto"
+            style={{ ["--md-aspect" as string]: `${heroAspectW} / ${heroAspectH}` }}
+          >
+            <div
+              style={{ aspectRatio: `${heroAspectW} / ${heroAspectH}` }}
+              className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover md:relative md:inset-auto md:[&_picture]:relative md:[&_picture]:inset-auto md:[&_img]:h-full md:[&_img]:w-full md:[&_img]:object-contain"
+            >
               <PictureHero
                 media={heroMedia}
                 altFallback={heroAlt}
