@@ -51,10 +51,19 @@ export function HeroSection({ data }: { data: PageData }) {
   // there's a backfill script if needed.
   const heroAspectW = heroMedia?.width || 1200;
   const heroAspectH = heroMedia?.height || 900;
+  // Container sizing math (image is 3/5, text is 2/5):
+  //   image_width  = 3/5 × container_width
+  //   image_height = image_width × (h/w)
+  //   image_height ≤ vh - 4rem
+  // Solving: container_width ≤ (vh - 4rem) × (5/3) × (w/h)
+  // Three caps applied via min():
+  //   • 2400px hard ceiling for very wide displays
+  //   • 80vw so there are 10% gutters on each side, even on giant screens
+  //   • aspect-driven so the image height fits the viewport
   const containerStyle: React.CSSProperties = {
     "--hero-aspect-w": String(heroAspectW),
     "--hero-aspect-h": String(heroAspectH),
-    maxWidth: `min(2200px, calc((100vh - 4rem) * 1.5 * ${heroAspectW} / ${heroAspectH}))`,
+    maxWidth: `min(2400px, 80vw, calc((100vh - 4rem) * (5 / 3) * ${heroAspectW} / ${heroAspectH}))`,
   } as React.CSSProperties;
 
   return (
@@ -77,7 +86,7 @@ export function HeroSection({ data }: { data: PageData }) {
             column width using an aspect-ratio wrapper, so the image
             renders at its full intended size with no horizontal
             negative space inside the column. */}
-        <div className="relative w-full md:order-1 md:basis-2/3 md:sticky md:top-0 md:flex md:h-screen md:items-start md:pt-8">
+        <div className="relative w-full md:order-1 md:basis-3/5 md:sticky md:top-0 md:flex md:h-screen md:items-start md:pt-8">
           <div
             className="relative w-full aspect-[4/3] md:aspect-auto"
             style={{ ["--md-aspect" as string]: `${heroAspectW} / ${heroAspectH}` }}
@@ -89,7 +98,7 @@ export function HeroSection({ data }: { data: PageData }) {
               <PictureHero
                 media={heroMedia}
                 altFallback={heroAlt}
-                sizes="(min-width: 768px) 66vw, 100vw"
+                sizes="(min-width: 768px) 60vw, 100vw"
                 width={heroAspectW}
                 height={heroAspectH}
               />
@@ -108,7 +117,7 @@ export function HeroSection({ data }: { data: PageData }) {
         {/* Text column — 1/3 on desktop, full width on mobile. The
             section's overall height is driven by this column; the
             sticky image pins until this column scrolls past. */}
-        <div className="order-2 flex min-h-[280px] flex-col px-5 pt-6 pb-8 md:order-2 md:basis-1/3 md:px-0 md:pt-16 md:pb-16">
+        <div className="order-2 flex min-h-[280px] flex-col px-5 pt-6 pb-8 md:order-2 md:basis-2/5 md:px-0 md:pt-16 md:pb-16">
           {ratingValue != null && (
             <div className="mb-3 flex items-center gap-2">
               <StarRating rating={ratingValue} size={18} />
