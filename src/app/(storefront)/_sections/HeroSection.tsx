@@ -60,7 +60,7 @@ export function HeroSection({ data }: { data: PageData }) {
   const containerStyle: React.CSSProperties = {
     "--hero-aspect-w": String(heroAspectW),
     "--hero-aspect-h": String(heroAspectH),
-    maxWidth: "min(2400px, 80vw)",
+    maxWidth: "min(2400px, 90vw)",
   } as React.CSSProperties;
 
   return (
