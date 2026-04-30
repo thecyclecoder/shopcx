@@ -1,0 +1,251 @@
+{%- comment -%}
+  ShopCX Contact Form
+  --------------------
+  Drops a contact form anywhere a merchant can place a section/block.
+  Submissions POST to https://shopcx.ai/api/help/{help_slug}/tickets
+  which creates a ticket on the workspace identified by help_slug.
+
+  Setup: paste the help_slug from Settings → Help Center in ShopCX
+  (e.g. "superfoods"). The endpoint is public — same one the help
+  center website uses — so no API keys to manage.
+
+  When a customer is logged in we pre-fill their email/name. Anonymous
+  visitors get a blank form.
+{%- endcomment -%}
+
+<div class="shopcx-contact" data-shopcx-contact data-help-slug="{{ block.settings.help_slug | escape }}">
+  {% if block.settings.heading != blank %}
+    <h2 class="shopcx-contact__title">{{ block.settings.heading | escape }}</h2>
+  {% endif %}
+  {% if block.settings.subheading != blank %}
+    <p class="shopcx-contact__sub">{{ block.settings.subheading | escape }}</p>
+  {% endif %}
+
+  <form class="shopcx-contact__form" novalidate>
+    <div class="shopcx-contact__row">
+      <label class="shopcx-contact__label" for="shopcx-contact-name">{{ block.settings.label_name | default: 'Your name' | escape }}</label>
+      <input
+        id="shopcx-contact-name"
+        name="name"
+        type="text"
+        autocomplete="name"
+        value="{% if customer %}{{ customer.first_name }}{% if customer.last_name != blank %} {{ customer.last_name }}{% endif %}{% endif %}"
+        class="shopcx-contact__input"
+      >
+    </div>
+
+    <div class="shopcx-contact__row">
+      <label class="shopcx-contact__label" for="shopcx-contact-email">{{ block.settings.label_email | default: 'Email' | escape }} *</label>
+      <input
+        id="shopcx-contact-email"
+        name="email"
+        type="email"
+        autocomplete="email"
+        required
+        value="{% if customer %}{{ customer.email }}{% endif %}"
+        class="shopcx-contact__input"
+      >
+    </div>
+
+    {% if block.settings.show_subject %}
+      <div class="shopcx-contact__row">
+        <label class="shopcx-contact__label" for="shopcx-contact-subject">{{ block.settings.label_subject | default: 'Subject' | escape }}</label>
+        <input id="shopcx-contact-subject" name="subject" type="text" class="shopcx-contact__input">
+      </div>
+    {% endif %}
+
+    {% if block.settings.show_category and block.settings.category_options != blank %}
+      <div class="shopcx-contact__row">
+        <label class="shopcx-contact__label" for="shopcx-contact-category">{{ block.settings.label_category | default: 'Topic' | escape }}</label>
+        <select id="shopcx-contact-category" name="category" class="shopcx-contact__input">
+          <option value="">—</option>
+          {%- assign cats = block.settings.category_options | split: ',' -%}
+          {%- for c in cats -%}
+            {%- assign opt = c | strip -%}
+            {%- if opt != blank -%}
+              <option value="{{ opt | downcase | replace: ' ', '_' | escape }}">{{ opt | escape }}</option>
+            {%- endif -%}
+          {%- endfor -%}
+        </select>
+      </div>
+    {% endif %}
+
+    <div class="shopcx-contact__row">
+      <label class="shopcx-contact__label" for="shopcx-contact-message">{{ block.settings.label_message | default: 'How can we help?' | escape }} *</label>
+      <textarea id="shopcx-contact-message" name="message" rows="6" required class="shopcx-contact__input shopcx-contact__textarea"></textarea>
+    </div>
+
+    <button type="submit" class="shopcx-contact__submit">
+      <span class="shopcx-contact__submit-label">{{ block.settings.submit_text | default: 'Send message' | escape }}</span>
+      <span class="shopcx-contact__submit-loading" hidden>Sending…</span>
+    </button>
+
+    <p class="shopcx-contact__error" data-shopcx-error hidden></p>
+  </form>
+
+  <div class="shopcx-contact__success" data-shopcx-success hidden>
+    <strong>{{ block.settings.success_heading | default: 'Thanks!' | escape }}</strong>
+    <p>{{ block.settings.success_message | default: "We've received your message and will get back to you shortly." | escape }}</p>
+  </div>
+</div>
+
+<style>
+  .shopcx-contact {
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 24px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #18181b;
+  }
+  .shopcx-contact__title { font-size: 28px; font-weight: 700; margin: 0 0 8px; line-height: 1.2; }
+  .shopcx-contact__sub { font-size: 16px; color: #52525b; margin: 0 0 24px; line-height: 1.5; }
+  .shopcx-contact__form { display: flex; flex-direction: column; gap: 16px; }
+  .shopcx-contact__row { display: flex; flex-direction: column; gap: 6px; }
+  .shopcx-contact__label { font-size: 14px; font-weight: 600; color: #27272a; }
+  .shopcx-contact__input {
+    width: 100%;
+    padding: 12px 14px;
+    border: 1px solid #d4d4d8;
+    border-radius: 8px;
+    background: #fff;
+    font-size: 16px;
+    color: #18181b;
+    box-sizing: border-box;
+    font-family: inherit;
+  }
+  .shopcx-contact__input:focus {
+    outline: 2px solid #18181b;
+    outline-offset: 1px;
+    border-color: transparent;
+  }
+  .shopcx-contact__textarea { resize: vertical; min-height: 120px; }
+  .shopcx-contact__submit {
+    margin-top: 4px;
+    padding: 14px 24px;
+    background: #18181b;
+    color: #fff;
+    border: 0;
+    border-radius: 999px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.15s;
+  }
+  .shopcx-contact__submit:hover:not(:disabled) { background: #27272a; }
+  .shopcx-contact__submit:disabled { opacity: 0.6; cursor: not-allowed; }
+  .shopcx-contact__error { color: #b91c1c; font-size: 14px; margin: 4px 0 0; }
+  .shopcx-contact__success {
+    padding: 24px;
+    background: #ecfdf5;
+    border: 1px solid #a7f3d0;
+    border-radius: 12px;
+    color: #065f46;
+  }
+  .shopcx-contact__success strong { display: block; font-size: 18px; margin-bottom: 4px; }
+  .shopcx-contact__success p { margin: 0; font-size: 15px; line-height: 1.5; }
+</style>
+
+<script>
+(function () {
+  var roots = document.querySelectorAll("[data-shopcx-contact]");
+  roots.forEach(function (root) {
+    var slug = root.getAttribute("data-help-slug");
+    if (!slug) {
+      console.warn("[shopcx-contact] No help_slug configured");
+      return;
+    }
+    var form = root.querySelector("form");
+    var btn = root.querySelector(".shopcx-contact__submit");
+    var btnLabel = root.querySelector(".shopcx-contact__submit-label");
+    var btnLoading = root.querySelector(".shopcx-contact__submit-loading");
+    var errEl = root.querySelector("[data-shopcx-error]");
+    var successEl = root.querySelector("[data-shopcx-success]");
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      errEl.hidden = true;
+      errEl.textContent = "";
+
+      var data = new FormData(form);
+      var name = (data.get("name") || "").toString().trim();
+      var email = (data.get("email") || "").toString().trim();
+      var subject = (data.get("subject") || "").toString().trim();
+      var category = (data.get("category") || "").toString().trim();
+      var message = (data.get("message") || "").toString().trim();
+
+      if (!email || !message) {
+        errEl.textContent = "Please fill in your email and message.";
+        errEl.hidden = false;
+        return;
+      }
+
+      var bodyText = message;
+      if (name) bodyText = "From: " + name + "\n\n" + bodyText;
+
+      btn.disabled = true;
+      btnLabel.hidden = true;
+      btnLoading.hidden = false;
+
+      fetch("https://shopcx.ai/api/help/" + encodeURIComponent(slug) + "/tickets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: email,
+          subject: subject || (name ? "Contact form — " + name : "Contact form submission"),
+          message: bodyText,
+          category: category || null,
+        }),
+      })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+        .then(function (res) {
+          if (!res.ok) throw new Error(res.body && res.body.error ? res.body.error : "Failed to send");
+          form.hidden = true;
+          successEl.hidden = false;
+          successEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        })
+        .catch(function (err) {
+          errEl.textContent = "Sorry, something went wrong. Please try again or email us directly.";
+          errEl.hidden = false;
+          console.error("[shopcx-contact]", err);
+        })
+        .finally(function () {
+          btn.disabled = false;
+          btnLabel.hidden = false;
+          btnLoading.hidden = true;
+        });
+    });
+  });
+})();
+</script>
+
+{% schema %}
+{
+  "name": "ShopCX Contact Form",
+  "target": "section",
+  "settings": [
+    {
+      "type": "text",
+      "id": "help_slug",
+      "label": "ShopCX Help Slug",
+      "info": "From Settings → Help Center in ShopCX (e.g. \"superfoods\"). Routes submissions to your workspace."
+    },
+    { "type": "header", "content": "Heading" },
+    { "type": "text", "id": "heading", "label": "Heading", "default": "Get in touch" },
+    { "type": "text", "id": "subheading", "label": "Subheading", "default": "Send us a message and we'll get back to you within a few hours." },
+    { "type": "header", "content": "Form fields" },
+    { "type": "text", "id": "label_name", "label": "Name field label", "default": "Your name" },
+    { "type": "text", "id": "label_email", "label": "Email field label", "default": "Email" },
+    { "type": "checkbox", "id": "show_subject", "label": "Show subject field", "default": true },
+    { "type": "text", "id": "label_subject", "label": "Subject field label", "default": "Subject" },
+    { "type": "checkbox", "id": "show_category", "label": "Show topic dropdown", "default": false },
+    { "type": "text", "id": "label_category", "label": "Topic dropdown label", "default": "Topic" },
+    { "type": "text", "id": "category_options", "label": "Topic options (comma-separated)", "info": "e.g. Order, Subscription, Refund, Other" },
+    { "type": "text", "id": "label_message", "label": "Message field label", "default": "How can we help?" },
+    { "type": "text", "id": "submit_text", "label": "Submit button text", "default": "Send message" },
+    { "type": "header", "content": "Success state" },
+    { "type": "text", "id": "success_heading", "label": "Success heading", "default": "Thanks!" },
+    { "type": "textarea", "id": "success_message", "label": "Success message", "default": "We've received your message and will get back to you shortly." }
+  ]
+}
+{% endschema %}

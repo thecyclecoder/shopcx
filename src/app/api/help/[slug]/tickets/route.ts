@@ -2,6 +2,22 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 
+// CORS — this endpoint is meant to be embedded on Shopify storefronts
+// (via the contact-form theme block) and on the help-center subdomain.
+// Both are cross-origin from shopcx.ai, so allow * — the endpoint
+// requires a valid help_slug anyway, and creates tickets which is the
+// intended public surface.
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Max-Age": "86400",
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
+}
+
 // POST: Create a ticket from the public help center — no auth required
 export async function POST(
   request: Request,
@@ -17,13 +33,13 @@ export async function POST(
     .eq("help_slug", slug)
     .single();
 
-  if (!workspace) return NextResponse.json({ error: "Help center not found" }, { status: 404 });
+  if (!workspace) return NextResponse.json({ error: "Help center not found" }, { status: 404, headers: CORS_HEADERS });
 
   const body = await request.json();
   const { email, subject, message, category } = body;
 
   if (!email || !message) {
-    return NextResponse.json({ error: "Email and message required" }, { status: 400 });
+    return NextResponse.json({ error: "Email and message required" }, { status: 400, headers: CORS_HEADERS });
   }
 
   // Find or create customer
@@ -64,7 +80,7 @@ export async function POST(
     .select("id")
     .single();
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return NextResponse.json({ error: error.message }, { status: 500, headers: CORS_HEADERS });
 
   // Add the message
   if (ticket) {
@@ -83,5 +99,8 @@ export async function POST(
     });
   }
 
-  return NextResponse.json({ ticket_id: ticket?.id, message: "Your request has been submitted! We'll get back to you shortly." });
+  return NextResponse.json(
+    { ticket_id: ticket?.id, message: "Your request has been submitted! We'll get back to you shortly." },
+    { headers: CORS_HEADERS },
+  );
 }
