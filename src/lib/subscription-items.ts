@@ -174,8 +174,11 @@ async function callReplaceVariants(
     );
     if (!res.ok) {
       const text = await res.text();
-      console.error("Appstle replaceVariants error:", text);
-      return { success: false, error: `Appstle API error: ${res.status}` };
+      console.error("Appstle replaceVariants error:", text, "body sent:", JSON.stringify(body));
+      // Surface the actual Appstle message in the returned error so
+      // dashboard + analyzer logs reveal WHY it failed, not just "400".
+      const snippet = text.slice(0, 400).replace(/\s+/g, " ").trim();
+      return { success: false, error: `Appstle ${res.status}: ${snippet || "no body"}` };
     }
     return { success: true };
   } catch (err) {

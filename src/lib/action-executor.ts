@@ -84,11 +84,13 @@ interface ActionResult {
   summary?: string;
   // Optional customer-facing fields that may appear in response_message
   // via substitution. Set by handlers that produce data the customer
-  // needs to see verbatim (return labels, refund amounts, tracking).
+  // needs to see verbatim (return labels, refund amounts, tracking,
+  // newly-generated coupon codes).
   labelUrl?: string;
   trackingNumber?: string;
   carrier?: string;
   refundAmountCents?: number;
+  couponCode?: string;
 }
 
 /**
@@ -116,6 +118,7 @@ function substituteActionPlaceholders(
     if (result.refundAmountCents != null) {
       map.refund_amount = `$${(result.refundAmountCents / 100).toFixed(2)}`;
     }
+    if (result.couponCode) map.coupon_code = result.couponCode;
   }
   let out = message;
   for (const [key, value] of Object.entries(map)) {
@@ -173,10 +176,20 @@ const directActionHandlers: Record<
 
   swap_variant: async (ctx, p) => {
     const { subSwapVariant } = await import("@/lib/subscription-items");
+    // Accept both naming styles — the prompts catalog used "old_id"/
+    // "new_id" historically; the action interface is "old_variant_id"/
+    // "new_variant_id". When Opus follows the catalog literally we'd
+    // get `undefined` and ship NaN to Appstle (400). Alias both.
+    const pe = p as { old_id?: string; new_id?: string; old_variant?: string; new_variant?: string };
+    const oldVid = p.old_variant_id || pe.old_id || pe.old_variant;
+    const newVid = p.new_variant_id || pe.new_id || pe.new_variant;
+    if (!oldVid || !newVid) {
+      return { success: false, error: `swap_variant missing variant ids — got old=${oldVid} new=${newVid}` };
+    }
     const r = await subSwapVariant(
-      ctx.workspaceId, p.contract_id!, p.old_variant_id!, p.new_variant_id!, p.quantity || 1,
+      ctx.workspaceId, p.contract_id!, oldVid, newVid, p.quantity || 1,
     );
-    return { ...r, summary: "Swapped item" };
+    return { ...r, summary: `Swapped variant ${oldVid} → ${newVid}` };
   },
 
   change_quantity: async (ctx, p) => {
@@ -312,6 +325,7 @@ const directActionHandlers: Record<
     return {
       success: true,
       summary: `Redeemed ${tier.points_cost} points for $${tier.discount_value} off (code: ${code})`,
+      couponCode: code,
     };
   },
 
@@ -410,7 +424,7 @@ const directActionHandlers: Record<
       // Now apply the fresh coupon
       const r2 = await applyDiscountWithReplace(config.apiKey, p.contract_id!, newCode);
       if (r2.success) {
-        return { success: true, summary: `Applied loyalty coupon $${orig.discount_value} off (regenerated: ${newCode})` };
+        return { success: true, summary: `Applied loyalty coupon $${orig.discount_value} off (regenerated: ${newCode})`, couponCode: newCode };
       }
       return { success: false, error: `Regenerated coupon also failed: ${r2.error}` };
     } catch (e) {
