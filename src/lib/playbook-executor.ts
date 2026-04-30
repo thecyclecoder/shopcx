@@ -2258,9 +2258,25 @@ Respond with EXACTLY one word:
     return { action: "advance", newStep: step.step_order + 1, context: ctx };
   }
 
-  // AI couldn't determine — ask again more specifically
+  // AI couldn't determine — ask again more specifically. But cap the
+  // number of clarify retries: after 2 unsuccessful asks, escalate
+  // instead of looping. Without this, the same clarifying question can
+  // fire 5+ times back-to-back when the customer keeps responding with
+  // free-text that the classifier can't bucket — this surfaced on
+  // Alelie's chat ticket where the AI repeated the same question across
+  // multiple customer messages over hours, ending with the customer
+  // pleading "Are you still there?" while the AI kept asking.
+  const retries = Number(ctx.clarify_retries || 0);
+  if (retries >= 2) {
+    return {
+      action: "escalate_api_failure" as const,
+      systemNote: `[Playbook] clarify_issue stuck — ${retries + 1} unsuccessful asks, escalating instead of looping.`,
+    };
+  }
+  ctx.clarify_retries = retries + 1;
   return {
     action: "respond",
+    context: ctx,
     response: "Just to make sure I understand — did the package arrive and something inside was missing or damaged? Or did the package itself not arrive?",
   };
 }

@@ -342,16 +342,28 @@ export async function executeToolCall(
 
 // ── Data Fetcher Functions ──
 
-async function getCustomerAccount(admin: Admin, wsId: string, custId: string): Promise<string> {
-  // Resolve all customer IDs (primary + linked)
+/**
+ * Expand a customer_id to include any linked accounts in the same group.
+ * Returns [custId] if not linked, or all sibling customer_ids otherwise.
+ *
+ * Apply this in EVERY data tool that filters by customer_id — Roxana's
+ * ticket revealed that returns/chargebacks/etc. on the linked side
+ * become invisible if you only query the primary, leading Sonnet to
+ * tell the customer "no return on file" while the return is right
+ * there on their other email.
+ */
+async function resolveLinkedCustomerIds(admin: Admin, custId: string): Promise<string[]> {
   const { data: linkData } = await admin.from("customer_links")
     .select("group_id").eq("customer_id", custId).maybeSingle();
-  let allCustIds = [custId];
-  if (linkData?.group_id) {
-    const { data: grp } = await admin.from("customer_links")
-      .select("customer_id").eq("group_id", linkData.group_id);
-    allCustIds = (grp || []).map(g => g.customer_id);
-  }
+  if (!linkData?.group_id) return [custId];
+  const { data: grp } = await admin.from("customer_links")
+    .select("customer_id").eq("group_id", linkData.group_id);
+  const ids = (grp || []).map(g => g.customer_id);
+  return ids.length ? ids : [custId];
+}
+
+async function getCustomerAccount(admin: Admin, wsId: string, custId: string): Promise<string> {
+  const allCustIds = await resolveLinkedCustomerIds(admin, custId);
 
   const [
     { data: subs },
@@ -597,12 +609,13 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
 }
 
 async function getReturns(admin: Admin, wsId: string, custId: string): Promise<string> {
+  const allCustIds = await resolveLinkedCustomerIds(admin, custId);
   const parts: string[] = [];
 
   // Returns
   const { data: returns } = await admin.from("returns")
     .select("id, status, order_number, return_line_items, net_refund_cents, tracking_number, carrier, shipped_at, delivered_at, refunded_at, created_at")
-    .eq("workspace_id", wsId).eq("customer_id", custId)
+    .eq("workspace_id", wsId).in("customer_id", allCustIds)
     .order("created_at", { ascending: false }).limit(5);
 
   if (returns?.length) {
@@ -617,10 +630,10 @@ async function getReturns(admin: Admin, wsId: string, custId: string): Promise<s
     parts.push("RETURNS: No return requests found for this customer.");
   }
 
-  // Replacements
+  // Replacements (also fan out across linked accounts)
   const { data: replacements } = await admin.from("replacements")
     .select("id, status, original_order_number, items, reason, shopify_replacement_order_name, created_at")
-    .eq("workspace_id", wsId).eq("customer_id", custId)
+    .eq("workspace_id", wsId).in("customer_id", allCustIds)
     .order("created_at", { ascending: false }).limit(5);
 
   if (replacements?.length) {
@@ -638,9 +651,10 @@ async function getReturns(admin: Admin, wsId: string, custId: string): Promise<s
 }
 
 async function getFraudCases(admin: Admin, wsId: string, custId: string): Promise<string> {
+  const allCustIds = await resolveLinkedCustomerIds(admin, custId);
   const { data: cases } = await admin.from("fraud_cases")
     .select("id, severity, status, rules_matched, created_at")
-    .eq("workspace_id", wsId).eq("customer_id", custId)
+    .eq("workspace_id", wsId).in("customer_id", allCustIds)
     .order("created_at", { ascending: false }).limit(5);
 
   if (!cases?.length) return "No fraud cases for this customer.";
@@ -655,10 +669,11 @@ async function getFraudCases(admin: Admin, wsId: string, custId: string): Promis
 }
 
 async function getCrisisStatus(admin: Admin, wsId: string, custId: string): Promise<string> {
+  const allCustIds = await resolveLinkedCustomerIds(admin, custId);
   const [{ data: actions }, { data: workspaceCrises }] = await Promise.all([
     admin.from("crisis_customer_actions")
       .select("id, crisis_id, subscription_id, segment, current_tier, tier1_response, tier1_swapped_to, tier2_response, tier2_swapped_to, tier3_response, paused_at, removed_item_at, auto_resume, auto_readd, cancelled, exhausted_at, preserved_base_price_cents, original_item")
-      .eq("customer_id", custId)
+      .in("customer_id", allCustIds)
       .order("created_at", { ascending: false })
       .limit(3),
     admin.from("crisis_events")
@@ -730,9 +745,10 @@ async function getCrisisStatus(admin: Admin, wsId: string, custId: string): Prom
 }
 
 async function getChargebacks(admin: Admin, wsId: string, custId: string): Promise<string> {
+  const allCustIds = await resolveLinkedCustomerIds(admin, custId);
   const { data: events } = await admin.from("chargeback_events")
     .select("id, reason, status, amount_cents, created_at, shopify_order_id")
-    .eq("workspace_id", wsId).eq("customer_id", custId)
+    .eq("workspace_id", wsId).in("customer_id", allCustIds)
     .order("created_at", { ascending: false }).limit(5);
 
   if (!events?.length) return "No chargeback events for this customer.";
@@ -746,9 +762,10 @@ async function getChargebacks(admin: Admin, wsId: string, custId: string): Promi
 }
 
 async function getEmailHistory(admin: Admin, wsId: string, custId: string): Promise<string> {
+  const allCustIds = await resolveLinkedCustomerIds(admin, custId);
   const { data: events } = await admin.from("email_events")
     .select("event_type, subject, occurred_at, metadata")
-    .eq("workspace_id", wsId).eq("customer_id", custId)
+    .eq("workspace_id", wsId).in("customer_id", allCustIds)
     .order("occurred_at", { ascending: false }).limit(10);
 
   if (!events?.length) return "No email history for this customer.";
@@ -762,17 +779,18 @@ async function getEmailHistory(admin: Admin, wsId: string, custId: string): Prom
 }
 
 async function getDunningStatus(admin: Admin, wsId: string, custId: string): Promise<string> {
+  const allCustIds = await resolveLinkedCustomerIds(admin, custId);
   const [
     { data: cycles },
     { data: failures },
   ] = await Promise.all([
     admin.from("dunning_cycles")
       .select("id, subscription_id, status, cycle_number, created_at")
-      .eq("workspace_id", wsId).eq("customer_id", custId)
+      .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .order("created_at", { ascending: false }).limit(3),
     admin.from("payment_failures")
       .select("id, attempt_type, result, card_last4, created_at")
-      .eq("workspace_id", wsId).eq("customer_id", custId)
+      .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .order("created_at", { ascending: false }).limit(5),
   ]);
 

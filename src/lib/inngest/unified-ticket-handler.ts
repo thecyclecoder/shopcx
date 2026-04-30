@@ -49,9 +49,30 @@ const sysNote = (admin: Admin, tid: string, msg: string) =>
   admin.from("ticket_messages").insert({ ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "system", body: msg });
 
 function isPositive(body: string): boolean {
-  const c = body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").toLowerCase()
-    .split(/(?:sent from|get outlook|on .+ wrote:|from:|----)/)[0].trim();
-  return c.split(/\s+/).length <= 50 && POSITIVE_PHRASES.some(p => c.includes(p));
+  // Strip HTML, normalize whitespace, lowercase
+  const stripped = body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").toLowerCase().trim();
+  // Strip quoted threads / "Sent from" tails first
+  const beforeQuote = stripped.split(/(?:sent from|get outlook|on .+ wrote:|from:|----)/)[0].trim();
+  // Strip common email-signature openers — "thanks- your friend in real estate, …"
+  // and "best, name", "regards, name", "warmly, name". Without this, the word
+  // "thanks" inside a signature trips positive-close on substantive replies.
+  const beforeSig = beforeQuote.split(/(?:^|[\.\!\?\n\s])(?:thanks[-,\s]+(?:your\s+|warmly|cheers)|warmly,|best,|regards,|sincerely,|kind regards,|cheers,|--\s)/i)[0].trim();
+  const c = beforeSig || beforeQuote;
+
+  // Reject obvious data-only replies — short messages whose meaningful
+  // content is nothing more than an order/SKU/tracking ID. Sherri's
+  // "And SC127037" tripped positive-close because the signature contained
+  // "thanks". A reply that boils down to an ID isn't a closure, it's the
+  // customer feeding us more data.
+  const orderIdPattern = /\b(SC\d{4,}|[A-Z]{2,}-?\w+-?\d+|#?\d{6,}|trk_\w+)\b/i;
+  const wordCount = c.split(/\s+/).filter(Boolean).length;
+  const stripped_of_ids = c.replace(orderIdPattern, "").replace(/[\s,.!?]+/g, " ").trim();
+  const meaningfulWords = stripped_of_ids.split(/\s+/).filter(w => w.length > 1).length;
+  if (wordCount <= 8 && orderIdPattern.test(c) && meaningfulWords <= 2) {
+    return false;
+  }
+
+  return wordCount <= 50 && POSITIVE_PHRASES.some(p => c.includes(p));
 }
 
 function isAccountRelated(intent: string): boolean {
@@ -958,7 +979,17 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
 
 "${cleanMsg}"
 
-Is this message related to their ${pbName.toLowerCase()} case (e.g. answering a question, providing info, following up, confirming, requesting to proceed), or is it about a completely DIFFERENT topic?
+Is this message a continuation of the ${pbName.toLowerCase()} flow, or is the customer asking for something DIFFERENT?
+
+PLAYBOOK = the customer is answering the playbook's prompt, providing requested info (an order #, a yes/no, a specific item they want returned/refunded), confirming, asking a clarifying question about the same issue, or pushing back on an offer in the same flow.
+
+NEW_TOPIC = the customer is switching intent. Examples (any of these → NEW_TOPIC, even if the surrounding flow is similar):
+  • Requesting a different action: "please pause my subscription" while in a refund flow → NEW_TOPIC
+  • Asking about a different subscription / order
+  • Adding a new question on top of the active case ("also, how do I use my points?")
+  • Crisis mention ("I got the wrong flavor") while in a generic return flow
+
+When in doubt, lean NEW_TOPIC — Sonnet has full context to decide if it actually IS the playbook. Calling NEW_TOPIC is cheap (the playbook resumes if Sonnet says so). Calling PLAYBOOK incorrectly buries new asks under stand-firm rounds.
 
 Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: wsId, ticketId: tid, purpose: "playbook-drift-check" });
           return (result || "").trim().toUpperCase().includes("PLAYBOOK");
@@ -988,8 +1019,22 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         // Handle API failure escalation
         if (pbResult.action === "escalate_api_failure") {
           await step.run("pb-api-fail", async () => {
-            await sysNote(admin, tid, `[System] Playbook API failure: ${pbResult.error}. Escalating to agent.`);
-            await admin.from("tickets").update({ status: "open" }).eq("id", tid);
+            const reason = pbResult.error || pbResult.systemNote || "playbook step could not progress";
+            await sysNote(admin, tid, `[System] Playbook API failure: ${reason}. Escalating to agent.`);
+            // Find an agent to assign so the ticket lands in their queue
+            const { data: agents } = await admin.from("workspace_members")
+              .select("user_id").eq("workspace_id", wsId)
+              .in("role", ["admin", "agent", "owner"]).order("user_id");
+            const assignee = agents?.[0]?.user_id || null;
+            await admin.from("tickets").update({
+              status: "open",
+              assigned_to: assignee, escalated_to: assignee,
+              escalated_at: new Date().toISOString(),
+              escalation_reason: reason,
+            }).eq("id", tid);
+            // Send the customer a holding message so they don't sit in silence
+            await sendWithDelay(admin, wsId, tid, st.ch,
+              "I need a little time to work on this and I'll get back to you.", cfg.sandbox);
             // Slack notification
             try {
               const { data: ws } = await admin.from("workspaces").select("slack_webhook_url").eq("id", wsId).single();
@@ -999,7 +1044,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
                 await fetch(ws.slack_webhook_url, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ text: `🚨 *Playbook Action Failed*\nPlaybook: ${pb?.name || "Unknown"}\nCustomer: ${cust?.first_name || ""} (${cust?.email || ""})\nError: ${pbResult.error}\nTicket: https://shopcx.ai/dashboard/tickets/${tid}` }),
+                  body: JSON.stringify({ text: `🚨 *Playbook Action Failed*\nPlaybook: ${pb?.name || "Unknown"}\nCustomer: ${cust?.first_name || ""} (${cust?.email || ""})\nError: ${reason}\nTicket: https://shopcx.ai/dashboard/tickets/${tid}` }),
                 });
               }
             } catch {}
