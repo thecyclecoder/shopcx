@@ -639,32 +639,56 @@ Respond with EXACTLY the ticket subject that matches, or "NONE" if no match. Onl
     if (!cfg.enabled) return { status: "skipped", reason: "ai_disabled" };
     const pers = await step.run("personality", () => loadPersonality(admin, cfg.personality_id));
 
-    // ── 1b. General vs Account classification — skipped, Sonnet handles routing ──
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-    const msgType = "account" as string; /* Sonnet orchestrator replaces Haiku classification */
-    if (false) await step.run("classify-general-account", async () => {
-      const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
-      // Check if this is a system re-trigger (from journey completion, playbook resume, etc.)
-      if (["address_confirmed", "items_selected", "playbook-apply"].includes(cleanMsg)) return "account";
+    // ── 1b. Three-bucket classification: account / general / outreach ──
+    // - account = needs customer data (refund, cancel, order status, etc.)
+    // - general = product/policy info questions answerable without account data
+    // - outreach = brand collaboration / UGC / partnership / sales pitch /
+    //   any inbound from a non-customer with a business proposal we don't
+    //   want to engage with as customer service. Bucketing this up front
+    //   lets us (a) skip the inline email lookup (no point asking a UGC
+    //   creator for the email they used to place an order) and (b) tag
+    //   the ticket for analytics filtering.
+    let msgType: "account" | "general" | "outreach" = "account";
+    if (isNew) {
+      msgType = await step.run("classify-bucket", async (): Promise<"account" | "general" | "outreach"> => {
+        const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
+        // System re-triggers always count as account
+        if (["address_confirmed", "items_selected", "playbook-apply"].includes(cleanMsg)) return "account";
 
-      const check = await claude(
-        `Classify this customer message as either "account" or "general".
-- "account" = needs customer account data: refund, cancel, order status, subscription, billing, shipping, missing order, exchange, return, address change, payment issues, login, account access, coupon check, delivery status
-- "general" = can be answered without account data: product questions, ingredients, how to use, pricing, availability, store hours, general company info, do you have discounts/coupons
+        const check = await claude(
+          `Classify this customer message into ONE of three buckets.
+- "account" = needs customer account data: refund, cancel, order status, subscription, billing, shipping, missing order, exchange, return, address change, payment issues, login, account access, coupon check, delivery status, complaint about a product they bought
+- "general" = product/policy info answerable without account data: ingredients, how to use, pricing, availability, store hours, general company info, do you have X discount
+- "outreach" = NOT a customer service request. Brand collaboration, UGC creator pitch, influencer partnership, marketing/PR/business pitch, vendor solicitation, SEO services pitch, link-building outreach, "we'd love to work together" cold email. Signs: portfolio/IG/TikTok links, "collab", "creator", "partnership", "UGC", "we represent", "help your brand grow", "I noticed your website".
 
-Customer message: "${cleanMsg}"
+Message: "${cleanMsg}"
 
-Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
-      return (check || "").toLowerCase().trim().includes("general") ? "general" : "account";
-    });
+Respond with EXACTLY one word: "account" or "general" or "outreach".`,
+          "haiku", 10, { workspaceId: wsId, ticketId: tid, purpose: "classify-bucket" },
+        );
+        const lower = (check || "").toLowerCase().trim();
+        if (lower.includes("outreach")) return "outreach";
+        if (lower.includes("general")) return "general";
+        return "account";
+      });
+      await sysNote(admin, tid, `[System] Classification: ${msgType}`);
+    }
 
-    if (isNew) await sysNote(admin, tid, `[System] Classification: ${msgType}`);
+    // Tag the bucket so analytics can filter. Outreach gets the bare
+    // "outreach" tag too (used by dashboards / queue filtering as a
+    // simple "hide noise" toggle).
+    if (isNew) {
+      await addTicketTag(tid, `cls:${msgType}`);
+      if (msgType === "outreach") await addTicketTag(tid, "outreach");
+    }
 
     let pendingAccountLink: { journeyId: string; journeyName: string } | null = null;
 
     // ── 2. Account path: inline email lookup (stateful conversation) ──
-    // Account linking decision moved to Sonnet orchestrator — it decides when linking is needed
-    if (st.hasCust && isNew) {
+    // Account linking decision moved to Sonnet orchestrator — it decides when linking is needed.
+    // Skip the email lookup entirely for general/outreach buckets — asking a
+    // UGC creator for the email they used to place an order makes no sense.
+    if (st.hasCust && isNew && msgType === "account") {
       // 2b. No Shopify customer → conversational inline flow (keep — stateful)
       if (!st.hasShopifyCustomer) {
         // Check if we're in the inline linking conversation
@@ -708,6 +732,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
             await admin.from("tickets").update({
               playbook_context: { awaiting_alternate_email: true, original_message: ctx.original_message || msg },
             }).eq("id", tid);
+            await setStatus(admin, tid, cfg.auto_resolve);
             return { status: "awaiting_alternate_email" };
           }
         }
@@ -734,17 +759,20 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
                   original_message: ctx.original_message || msg,
                 },
               }).eq("id", tid);
+              await setStatus(admin, tid, cfg.auto_resolve);
               return { status: "awaiting_email_confirm" };
             } else {
               // Email found but no Shopify customer
               await sendWithDelay(admin, wsId, tid, st.ch,
                 "I found that email but don't see any orders associated with it. Could you try the email you used when placing your order?", cfg.sandbox);
+              await setStatus(admin, tid, cfg.auto_resolve);
               return { status: "awaiting_alternate_email" };
             }
           } else {
             // No email found in message
             await sendWithDelay(admin, wsId, tid, st.ch,
               "I didn't catch an email address. Could you share the email you used when placing your order?", cfg.sandbox);
+            await setStatus(admin, tid, cfg.auto_resolve);
             return { status: "awaiting_alternate_email" };
           }
         }
@@ -756,6 +784,7 @@ Respond with EXACTLY one word: "account" or "general"`, "haiku", 10);
         await admin.from("tickets").update({
           playbook_context: { awaiting_alternate_email: true, original_message: msg },
         }).eq("id", tid);
+        await setStatus(admin, tid, cfg.auto_resolve);
         return { status: "no_shopify_customer" };
       }
     }
