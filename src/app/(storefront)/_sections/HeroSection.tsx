@@ -56,7 +56,7 @@ export function HeroSection({ data }: { data: PageData }) {
             object-contain inside a viewport-height sticky pane so the
             full product shot (bag + latte + powder splash) is visible
             without right-side cropping or vertical centering whitespace. */}
-        <div className="relative w-full md:order-2 md:basis-2/3 md:sticky md:top-0 md:flex md:h-screen md:items-start md:pt-8">
+        <div className="relative w-full md:order-1 md:basis-2/3 md:sticky md:top-0 md:flex md:h-screen md:items-start md:pt-8">
           <div className="relative w-full aspect-[4/3] md:aspect-auto md:flex md:items-start md:justify-center">
             <div className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover md:relative md:inset-auto md:[&_picture]:relative md:[&_picture]:inset-auto md:[&_img]:h-auto md:[&_img]:max-h-[calc(100vh-4rem)] md:[&_img]:w-auto md:[&_img]:max-w-full md:[&_img]:object-contain">
               <PictureHero
@@ -81,7 +81,7 @@ export function HeroSection({ data }: { data: PageData }) {
         {/* Text column — 1/3 on desktop, full width on mobile. The
             section's overall height is driven by this column; the
             sticky image pins until this column scrolls past. */}
-        <div className="order-2 flex min-h-[280px] flex-col px-5 pt-6 pb-8 md:order-1 md:basis-1/3 md:px-0 md:pt-16 md:pb-16">
+        <div className="order-2 flex min-h-[280px] flex-col px-5 pt-6 pb-8 md:order-2 md:basis-1/3 md:px-0 md:pt-16 md:pb-16">
           {ratingValue != null && (
             <div className="mb-3 flex items-center gap-2">
               <StarRating rating={ratingValue} size={18} />
