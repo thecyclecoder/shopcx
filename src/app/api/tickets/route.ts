@@ -176,14 +176,19 @@ export async function POST(request: Request) {
   }
 
   // Create ticket
+  const effectiveChannel = channel || "email";
   const { data: ticket, error: ticketError } = await admin
     .from("tickets")
     .insert({
       workspace_id: workspaceId,
       customer_id: resolvedCustomerId || null,
-      channel: channel || "email",
+      channel: effectiveChannel,
       status: "open",
       subject,
+      // The agent is initiating contact — flag the ticket as agent-handled
+      // so AI doesn't try to take over a thread the agent owns.
+      agent_intervened: true,
+      assigned_to: user.id,
     })
     .select()
     .single();
@@ -192,14 +197,74 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Failed to create ticket" }, { status: 500 });
   }
 
-  // Create initial message
-  await admin.from("ticket_messages").insert({
+  // Look up customer email + agent display name for the outbound send
+  let customerEmail: string | null = null;
+  if (resolvedCustomerId) {
+    const { data: c } = await admin.from("customers")
+      .select("email").eq("id", resolvedCustomerId).single();
+    customerEmail = c?.email || null;
+  }
+  if (!customerEmail && customer_email) customerEmail = customer_email;
+
+  const { data: member } = await admin.from("workspace_members")
+    .select("display_name").eq("workspace_id", workspaceId).eq("user_id", user.id).maybeSingle();
+  const agentName = member?.display_name || "Support";
+
+  // Insert as OUTBOUND from the agent (the previous behavior recorded
+  // the agent's composed message as inbound/customer, which both
+  // displayed wrong in the UI AND silently dropped the email — the
+  // customer never received what the agent typed).
+  const { data: insertedMsg } = await admin.from("ticket_messages").insert({
     ticket_id: ticket.id,
-    direction: "inbound",
+    direction: "outbound",
     visibility: "external",
-    author_type: "customer",
+    author_type: "agent",
+    author_id: user.id,
     body: message,
-  });
+    sent_at: new Date().toISOString(),
+  }).select("id").single();
+
+  // Send the email via Resend if this is an email-channel ticket and we
+  // have the customer's email. Threading is fresh (no In-Reply-To) since
+  // this is a brand-new conversation initiated by the agent.
+  if (effectiveChannel === "email" && customerEmail) {
+    try {
+      const { data: ws } = await admin.from("workspaces").select("name").eq("id", workspaceId).single();
+      const { sendTicketReply } = await import("@/lib/email");
+      const { logEmailSent } = await import("@/lib/email-tracking");
+      const result = await sendTicketReply({
+        workspaceId,
+        toEmail: customerEmail,
+        subject,
+        body: message,
+        inReplyTo: null,
+        agentName,
+        workspaceName: ws?.name || "Support",
+      });
+      if (result.messageId && insertedMsg?.id) {
+        await admin.from("ticket_messages").update({
+          resend_email_id: result.messageId,
+          email_status: "sent",
+          email_message_id: `<${result.messageId}@resend.dev>`,
+        }).eq("id", insertedMsg.id);
+        // Anchor email_message_id on the ticket so customer replies thread back
+        await admin.from("tickets").update({
+          email_message_id: `<${result.messageId}@resend.dev>`,
+        }).eq("id", ticket.id);
+        await logEmailSent({
+          workspaceId,
+          resendEmailId: result.messageId,
+          recipientEmail: customerEmail,
+          subject,
+          ticketId: ticket.id,
+          customerId: resolvedCustomerId || null,
+        });
+      }
+    } catch (err) {
+      console.error("[tickets/create] Email send failed:", err);
+      // Non-fatal — ticket is still created, agent can manually retry
+    }
+  }
 
   return NextResponse.json(ticket, { status: 201 });
 }
