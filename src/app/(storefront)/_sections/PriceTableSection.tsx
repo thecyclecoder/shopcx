@@ -42,10 +42,9 @@ export function PriceTableSection({ data }: { data: PageData }) {
               type="button"
               aria-pressed={mode === "subscribe"}
               onClick={() => setMode("subscribe")}
+              style={mode === "subscribe" ? { backgroundColor: "var(--storefront-primary)" } : undefined}
               className={`flex-1 rounded-full px-4 py-2.5 text-sm font-semibold transition-colors ${
-                mode === "subscribe"
-                  ? "bg-zinc-900 text-white"
-                  : "text-zinc-700"
+                mode === "subscribe" ? "text-white" : "text-zinc-700"
               }`}
             >
               Subscribe · Save
@@ -54,8 +53,9 @@ export function PriceTableSection({ data }: { data: PageData }) {
               type="button"
               aria-pressed={mode === "onetime"}
               onClick={() => setMode("onetime")}
+              style={mode === "onetime" ? { backgroundColor: "var(--storefront-primary)" } : undefined}
               className={`flex-1 rounded-full px-4 py-2.5 text-sm font-semibold transition-colors ${
-                mode === "onetime" ? "bg-zinc-900 text-white" : "text-zinc-700"
+                mode === "onetime" ? "text-white" : "text-zinc-700"
               }`}
             >
               One-time
@@ -82,14 +82,18 @@ function PriceCard({ tier, mode }: { tier: PricingTier; mode: "subscribe" | "one
 
   return (
     <div
+      style={tier.is_highlighted ? { borderColor: "var(--storefront-primary)" } : undefined}
       className={`relative flex flex-col rounded-2xl border p-6 transition-all ${
         tier.is_highlighted
-          ? "border-zinc-900 bg-white shadow-lg md:-mt-4 md:mb-4"
+          ? "bg-white shadow-lg md:-mt-4 md:mb-4"
           : "border-zinc-200 bg-white"
       }`}
     >
       {tier.badge && (
-        <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-zinc-900 px-3 py-1 text-xs font-semibold uppercase tracking-wider text-white">
+        <span
+          style={{ backgroundColor: "var(--storefront-primary)" }}
+          className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wider text-white"
+        >
           {tier.badge}
         </span>
       )}
@@ -135,9 +139,10 @@ function PriceCard({ tier, mode }: { tier: PricingTier; mode: "subscribe" | "one
         href={`#buy-${tier.variant_id}`}
         data-variant-id={tier.variant_id}
         data-mode={mode}
-        className={`mt-6 inline-flex h-12 w-full items-center justify-center rounded-full text-sm font-semibold transition-colors ${
+        style={tier.is_highlighted ? { backgroundColor: "var(--storefront-primary)" } : undefined}
+        className={`mt-6 inline-flex h-12 w-full items-center justify-center rounded-full text-sm font-semibold transition-[filter,colors] ${
           tier.is_highlighted
-            ? "bg-zinc-900 text-white hover:bg-zinc-800"
+            ? "text-white hover:brightness-90"
             : "border border-zinc-300 bg-white text-zinc-900 hover:border-zinc-900"
         }`}
       >

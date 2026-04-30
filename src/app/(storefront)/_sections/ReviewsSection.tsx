@@ -88,10 +88,9 @@ export function ReviewsSection({
             <button
               type="button"
               onClick={() => setFilter(null)}
+              style={filter === null ? { backgroundColor: "var(--storefront-primary)", borderColor: "var(--storefront-primary)" } : undefined}
               className={`inline-flex min-h-[36px] items-center rounded-full border px-3 py-1.5 text-sm font-medium transition-colors ${
-                filter === null
-                  ? "border-zinc-900 bg-zinc-900 text-white"
-                  : "border-zinc-200 bg-white text-zinc-700"
+                filter === null ? "text-white" : "border-zinc-200 bg-white text-zinc-700"
               }`}
             >
               All reviews
@@ -101,10 +100,9 @@ export function ReviewsSection({
                 key={f}
                 type="button"
                 onClick={() => setFilter(filter === f ? null : f)}
+                style={filter === f ? { backgroundColor: "var(--storefront-primary)", borderColor: "var(--storefront-primary)" } : undefined}
                 className={`inline-flex min-h-[36px] items-center rounded-full border px-3 py-1.5 text-sm font-medium transition-colors ${
-                  filter === f
-                    ? "border-zinc-900 bg-zinc-900 text-white"
-                    : "border-zinc-200 bg-white text-zinc-700"
+                  filter === f ? "text-white" : "border-zinc-200 bg-white text-zinc-700"
                 }`}
               >
                 {f}

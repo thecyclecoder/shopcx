@@ -62,7 +62,8 @@ export function StickyMobileCTA({ data }: { data: PageData }) {
         </div>
         <a
           href="#pricing"
-          className="inline-flex h-11 flex-shrink-0 items-center justify-center rounded-full bg-zinc-900 px-5 text-sm font-semibold text-white"
+          style={{ backgroundColor: "var(--storefront-primary)" }}
+          className="inline-flex h-11 flex-shrink-0 items-center justify-center rounded-full px-5 text-sm font-semibold text-white"
         >
           Order now
         </a>

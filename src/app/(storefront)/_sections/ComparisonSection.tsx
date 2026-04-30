@@ -12,7 +12,10 @@ export function ComparisonSection({ data }: { data: PageData }) {
         </h2>
         <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white">
           <table className="w-full text-left text-sm">
-            <thead className="sticky top-0 bg-zinc-900 text-white">
+            <thead
+              style={{ backgroundColor: "var(--storefront-primary)" }}
+              className="sticky top-0 text-white"
+            >
               <tr>
                 <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wider">
                   Feature

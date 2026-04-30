@@ -12,7 +12,11 @@ export function FinalCTASection({ data }: { data: PageData }) {
     : null;
 
   return (
-    <section data-section="final-cta" className="w-full bg-zinc-900 py-14 sm:py-20">
+    <section
+      data-section="final-cta"
+      style={{ backgroundColor: "var(--storefront-primary)" }}
+      className="w-full py-14 sm:py-20"
+    >
       <div className="mx-auto max-w-3xl px-5 text-center md:px-8">
         <h2 className="text-2xl font-bold tracking-tight text-white sm:text-3xl md:text-4xl">
           Ready to feel the difference?

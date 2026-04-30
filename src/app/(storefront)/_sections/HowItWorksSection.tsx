@@ -16,7 +16,10 @@ export function HowItWorksSection({ data }: { data: PageData }) {
               key={step.id}
               className="relative flex flex-1 flex-col items-start text-left md:items-center md:text-center"
             >
-              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-zinc-900 text-lg font-bold text-white">
+              <div
+                style={{ backgroundColor: "var(--storefront-primary)" }}
+                className="mb-4 flex h-12 w-12 items-center justify-center rounded-full text-lg font-bold text-white"
+              >
                 {idx + 1}
               </div>
               <h3 className="mb-2 text-lg font-semibold text-zinc-900 sm:text-xl">

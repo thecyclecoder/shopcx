@@ -119,7 +119,8 @@ export function HeroSection({ data }: { data: PageData }) {
           <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
             <a
               href="#pricing"
-              className="inline-flex h-14 w-full items-center justify-center rounded-full bg-zinc-900 px-8 text-base font-semibold text-white shadow-sm transition-colors hover:bg-zinc-800 sm:w-auto"
+              style={{ backgroundColor: "var(--storefront-primary)" }}
+              className="inline-flex h-14 w-full items-center justify-center rounded-full px-8 text-base font-semibold text-white shadow-sm transition-[filter] hover:brightness-90 sm:w-auto"
             >
               {lowestPrice != null
                 ? `Try it now — from $${(lowestPrice / 100).toFixed(2)}`
