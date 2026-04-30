@@ -51,19 +51,16 @@ export function HeroSection({ data }: { data: PageData }) {
   // there's a backfill script if needed.
   const heroAspectW = heroMedia?.width || 1200;
   const heroAspectH = heroMedia?.height || 900;
-  // Container sizing math (image is 3/5, text is 2/5):
-  //   image_width  = 3/5 × container_width
-  //   image_height = image_width × (h/w)
-  //   image_height ≤ vh - 4rem
-  // Solving: container_width ≤ (vh - 4rem) × (5/3) × (w/h)
-  // Three caps applied via min():
-  //   • 2400px hard ceiling for very wide displays
-  //   • 80vw so there are 10% gutters on each side, even on giant screens
-  //   • aspect-driven so the image height fits the viewport
+  // Container is purely viewport-WIDTH driven. Earlier we coupled
+  // width to vh ("scale container so image fits viewport vertically")
+  // but that caused the hero to shrink horizontally on short windows
+  // — bad UX. The image's max-height is already capped by the sticky
+  // h-screen container + object-contain, so we don't need width math
+  // to enforce vertical fit.
   const containerStyle: React.CSSProperties = {
     "--hero-aspect-w": String(heroAspectW),
     "--hero-aspect-h": String(heroAspectH),
-    maxWidth: `min(2400px, 80vw, calc((100vh - 4rem) * (5 / 3) * ${heroAspectW} / ${heroAspectH}))`,
+    maxWidth: "min(2400px, 80vw)",
   } as React.CSSProperties;
 
   return (
