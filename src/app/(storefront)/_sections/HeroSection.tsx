@@ -41,29 +41,35 @@ export function HeroSection({ data }: { data: PageData }) {
   return (
     <section
       data-section="hero"
-      className="flex min-h-[600px] w-full flex-col bg-white"
+      className="w-full bg-white"
     >
-      <div className="mx-auto flex w-full max-w-6xl flex-col md:flex-row md:items-center md:gap-12 md:px-8 md:pt-16 md:pb-16">
-        {/* Hero image — native <picture>, no optimizer round trip.
-            Chromium fetchpriority=high starts the download during
-            HTML parse. Mobile uses object-cover on a 4:3 to keep
-            the section visually full; desktop uses object-contain
-            on a square so the full product shot (bag + latte +
-            powder splash) is visible without right-side cropping. */}
-        <div className="relative w-full md:order-2 md:flex-1">
-          <div className="relative w-full aspect-[4/3] md:aspect-square">
-            <div className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover md:[&_img]:object-contain">
+      {/* Wider container for desktop wow factor — beyond max-w-6xl but
+          not bleeding to the edges. 2/3 image + 1/3 text on desktop;
+          stacked on mobile. Image column is position:sticky top:0 so
+          while the customer scrolls through the text on the left, the
+          product stays pinned in view; once the text column ends, the
+          whole section scrolls away naturally. */}
+      <div className="mx-auto flex w-full max-w-[1600px] flex-col md:flex-row md:items-start md:gap-10 md:px-10">
+        {/* Hero image — sticky on desktop, top-aligned. Mobile keeps
+            its old 4:3 + object-cover behavior since cropping reads
+            better on a phone than letterboxing. Desktop uses
+            object-contain inside a viewport-height sticky pane so the
+            full product shot (bag + latte + powder splash) is visible
+            without right-side cropping or vertical centering whitespace. */}
+        <div className="relative w-full md:order-2 md:basis-2/3 md:sticky md:top-0 md:flex md:h-screen md:items-start md:pt-8">
+          <div className="relative w-full aspect-[4/3] md:aspect-auto md:flex md:items-start md:justify-center">
+            <div className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover md:relative md:inset-auto md:[&_picture]:relative md:[&_picture]:inset-auto md:[&_img]:h-auto md:[&_img]:max-h-[calc(100vh-4rem)] md:[&_img]:w-auto md:[&_img]:max-w-full md:[&_img]:object-contain">
               <PictureHero
                 media={heroMedia}
                 altFallback={heroAlt}
-                sizes="(min-width: 768px) 50vw, 100vw"
+                sizes="(min-width: 768px) 66vw, 100vw"
                 width={1200}
                 height={900}
               />
             </div>
             {data.product.is_bestseller && (
               <span
-                className="absolute right-3 top-3 z-10 inline-flex items-center rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white shadow-md md:right-4 md:top-4 md:px-4 md:py-2 md:text-sm"
+                className="absolute right-3 top-3 z-10 inline-flex items-center rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white shadow-md md:right-4 md:top-12 md:px-4 md:py-2 md:text-sm"
                 aria-label="Best Seller"
               >
                 Best Seller!
@@ -72,8 +78,10 @@ export function HeroSection({ data }: { data: PageData }) {
           </div>
         </div>
 
-        {/* Text column */}
-        <div className="order-2 flex min-h-[280px] flex-col px-5 pt-6 pb-8 md:order-1 md:flex-1 md:px-0 md:pt-0 md:pb-0">
+        {/* Text column — 1/3 on desktop, full width on mobile. The
+            section's overall height is driven by this column; the
+            sticky image pins until this column scrolls past. */}
+        <div className="order-2 flex min-h-[280px] flex-col px-5 pt-6 pb-8 md:order-1 md:basis-1/3 md:px-0 md:pt-16 md:pb-16">
           {ratingValue != null && (
             <div className="mb-3 flex items-center gap-2">
               <StarRating rating={ratingValue} size={18} />
