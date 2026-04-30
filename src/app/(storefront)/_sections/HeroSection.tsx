@@ -3,7 +3,7 @@ import { StarRating } from "../_components/StarRating";
 import { BenefitChip } from "../_components/BenefitChip";
 import { ShieldIcon, TrustBadge } from "../_components/TrustBadge";
 import { PressLogos } from "../_components/PressLogos";
-import { PictureHero } from "../_components/PictureHero";
+import { HeroGallery } from "../_components/HeroGallery";
 
 /**
  * Hero — the LCP section. Server component. Pure HTML + CSS.
@@ -16,6 +16,7 @@ import { PictureHero } from "../_components/PictureHero";
  */
 export function HeroSection({ data }: { data: PageData }) {
   const heroMedia = data.media_by_slot["hero"] || null;
+  const heroGallery = data.media_gallery_by_slot["hero"] || (heroMedia ? [heroMedia] : []);
   const heroAlt = heroMedia?.alt_text || data.product.title;
 
   const headline =
@@ -83,31 +84,14 @@ export function HeroSection({ data }: { data: PageData }) {
             ~1280px. Side-by-side kicks in at xl: (1280px+) where
             there's room for the image to have wow factor without
             squeezing the headline. */}
-        <div className="relative w-full xl:order-1 xl:basis-3/5 xl:sticky xl:top-0 xl:flex xl:h-screen xl:items-start xl:pt-8">
-          <div
-            className="relative w-full aspect-[4/3] xl:aspect-auto"
-          >
-            <div
-              style={{ aspectRatio: `${heroAspectW} / ${heroAspectH}` }}
-              className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover xl:relative xl:inset-auto xl:[&_picture]:relative xl:[&_picture]:inset-auto xl:[&_img]:h-full xl:[&_img]:w-full xl:[&_img]:object-contain"
-            >
-              <PictureHero
-                media={heroMedia}
-                altFallback={heroAlt}
-                sizes="(min-width: 1280px) 60vw, 100vw"
-                width={heroAspectW}
-                height={heroAspectH}
-              />
-            </div>
-            {data.product.is_bestseller && (
-              <span
-                className="absolute right-3 top-3 z-10 inline-flex items-center rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white shadow-md xl:right-4 xl:top-12 xl:px-4 xl:py-2 xl:text-sm"
-                aria-label="Best Seller"
-              >
-                Best Seller!
-              </span>
-            )}
-          </div>
+        <div className="relative w-full xl:order-1 xl:basis-3/5 xl:sticky xl:top-0 xl:flex xl:h-screen xl:flex-col xl:items-stretch xl:pt-8">
+          <HeroGallery
+            items={heroGallery}
+            altFallback={heroAlt}
+            isBestseller={!!data.product.is_bestseller}
+            aspectW={heroAspectW}
+            aspectH={heroAspectH}
+          />
         </div>
 
         {/* Text column — 2/5 on desktop (xl+), full width on mobile +

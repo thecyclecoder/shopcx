@@ -179,6 +179,15 @@ export async function POST(
     variantColumns[`webp_${w}_storage_path`] = paths.webp;
   }
 
+  // display_order: 0 = main image; 1+ = additional gallery slots.
+  // If not specified (or 0), upsert at display_order=0 (single-image
+  // backward-compat path used by every non-gallery slot). If specified,
+  // we treat each (slot, display_order) as its own row — supports the
+  // hero gallery use case where the same product can have multiple
+  // hero images.
+  const requestedOrder = parseInt((formData.get("display_order") as string) || "0", 10);
+  const displayOrder = Number.isFinite(requestedOrder) && requestedOrder >= 0 ? requestedOrder : 0;
+
   const { data: row, error } = await admin
     .from("product_media")
     .upsert(
@@ -186,6 +195,7 @@ export async function POST(
         workspace_id: workspaceId,
         product_id: productId,
         slot,
+        display_order: displayOrder,
         url: publicUrl,
         storage_path: originalPath,
         webp_url: webpUrl,
@@ -201,7 +211,7 @@ export async function POST(
         uploaded_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       },
-      { onConflict: "workspace_id,product_id,slot" },
+      { onConflict: "workspace_id,product_id,slot,display_order" },
     )
     .select("*")
     .single();

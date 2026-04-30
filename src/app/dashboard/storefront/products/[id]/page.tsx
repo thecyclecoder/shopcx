@@ -356,17 +356,177 @@ function ImageManagement({ workspaceId, productId }: { workspaceId: string; prod
   if (!loaded) return <p className="text-xs text-zinc-400">Loading...</p>;
 
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      {slots.map((slot) => (
-        <MediaSlot
-          key={slot}
-          slot={slot}
-          media={mediaBySlot.get(slot)}
-          workspaceId={workspaceId}
-          productId={productId}
-          onChange={load}
-        />
-      ))}
+    <div className="space-y-6">
+      {/* Hero is special — supports a gallery (multiple images, thumbnail
+          strip on the storefront). Every other slot is single-image. */}
+      <HeroGallerySlot workspaceId={workspaceId} productId={productId} onChange={load} />
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {slots.filter(s => s !== "hero").map((slot) => (
+          <MediaSlot
+            key={slot}
+            slot={slot}
+            media={mediaBySlot.get(slot)}
+            workspaceId={workspaceId}
+            productId={productId}
+            onChange={load}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface GalleryItem {
+  id: string;
+  display_order: number;
+  url: string | null;
+  alt_text: string | null;
+}
+
+function HeroGallerySlot({
+  workspaceId,
+  productId,
+  onChange,
+}: {
+  workspaceId: string;
+  productId: string;
+  onChange: () => void;
+}) {
+  const [items, setItems] = useState<GalleryItem[]>([]);
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const load = useCallback(async () => {
+    const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/media/hero/gallery`);
+    if (res.ok) {
+      const data = await res.json();
+      setItems(data.items || []);
+    }
+  }, [workspaceId, productId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const upload = async (file: File) => {
+    setBusy(true);
+    const fd = new FormData();
+    fd.append("file", file);
+    // Append to the end of the gallery
+    fd.append("display_order", String(items.length));
+    await fetch(`/api/workspaces/${workspaceId}/products/${productId}/media/hero`, {
+      method: "POST",
+      body: fd,
+    });
+    setBusy(false);
+    await load();
+    onChange();
+  };
+
+  const removeItem = async (id: string) => {
+    if (!confirm("Remove this image?")) return;
+    await fetch(`/api/workspaces/${workspaceId}/products/${productId}/media/hero/gallery?id=${id}`, {
+      method: "DELETE",
+    });
+    await load();
+    onChange();
+  };
+
+  const move = async (id: string, dir: -1 | 1) => {
+    const idx = items.findIndex(it => it.id === id);
+    if (idx < 0) return;
+    const newIdx = idx + dir;
+    if (newIdx < 0 || newIdx >= items.length) return;
+    const next = [...items];
+    [next[idx], next[newIdx]] = [next[newIdx], next[idx]];
+    setItems(next); // optimistic
+    await fetch(`/api/workspaces/${workspaceId}/products/${productId}/media/hero/gallery`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ordered_ids: next.map(i => i.id) }),
+    });
+    await load();
+    onChange();
+  };
+
+  return (
+    <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-800">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Hero gallery</div>
+          <div className="mt-0.5 text-xs text-zinc-500">First image is the main display. Add more for clickable thumbnails on the storefront.</div>
+        </div>
+        <button
+          onClick={() => inputRef.current?.click()}
+          disabled={busy}
+          className="rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+        >
+          {busy ? "Uploading…" : "+ Add image"}
+        </button>
+      </div>
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) upload(f);
+          if (e.target) e.target.value = "";
+        }}
+      />
+
+      {items.length === 0 ? (
+        <div
+          onClick={() => inputRef.current?.click()}
+          className="flex h-32 cursor-pointer items-center justify-center rounded border border-dashed border-zinc-300 bg-zinc-50 text-xs text-zinc-500 hover:border-indigo-400 dark:border-zinc-700 dark:bg-zinc-800"
+        >
+          Click to upload the main hero image
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+          {items.map((item, i) => (
+            <div key={item.id} className="relative">
+              <div className="relative aspect-square overflow-hidden rounded border border-zinc-200 bg-white dark:border-zinc-700">
+                {item.url && (
+                  <img src={item.url} alt={item.alt_text || `Hero ${i + 1}`} className="h-full w-full object-cover" />
+                )}
+                {i === 0 && (
+                  <span className="absolute left-1 top-1 rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                    Main
+                  </span>
+                )}
+              </div>
+              <div className="mt-1.5 flex items-center justify-between">
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => move(item.id, -1)}
+                    disabled={i === 0}
+                    className="rounded border border-zinc-300 px-1.5 text-[10px] text-zinc-600 hover:border-zinc-400 disabled:opacity-30 dark:border-zinc-700"
+                    title="Move left"
+                  >
+                    ←
+                  </button>
+                  <button
+                    onClick={() => move(item.id, 1)}
+                    disabled={i === items.length - 1}
+                    className="rounded border border-zinc-300 px-1.5 text-[10px] text-zinc-600 hover:border-zinc-400 disabled:opacity-30 dark:border-zinc-700"
+                    title="Move right"
+                  >
+                    →
+                  </button>
+                </div>
+                <button
+                  onClick={() => removeItem(item.id)}
+                  className="text-[10px] text-rose-500 hover:text-rose-700"
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

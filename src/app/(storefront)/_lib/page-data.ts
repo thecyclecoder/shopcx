@@ -176,6 +176,10 @@ export interface PageData {
   pricing_tiers: PricingTier[];
   how_it_works: HowItWorksStep[];
   media_by_slot: Record<string, MediaItem>;
+  // For slots that support multiple images (currently the hero), all
+  // items in display_order. The first item also lives in
+  // media_by_slot[slot] for backward-compat with single-image slots.
+  media_gallery_by_slot: Record<string, MediaItem[]>;
   reviews: Review[];
   review_analysis: ReviewAnalysis | null;
   review_total_count: number;
@@ -299,10 +303,11 @@ export async function getPageData(
     admin
       .from("product_media")
       .select(
-        "slot, url, webp_url, avif_url, avif_480_url, webp_480_url, avif_750_url, webp_750_url, avif_1080_url, webp_1080_url, avif_1500_url, webp_1500_url, avif_1920_url, webp_1920_url, alt_text, width, height",
+        "slot, display_order, url, webp_url, avif_url, avif_480_url, webp_480_url, avif_750_url, webp_750_url, avif_1080_url, webp_1080_url, avif_1500_url, webp_1500_url, avif_1920_url, webp_1920_url, alt_text, width, height",
       )
       .eq("workspace_id", workspace.id)
-      .eq("product_id", product.id),
+      .eq("product_id", product.id)
+      .order("display_order"),
     admin
       .from("product_review_analysis")
       .select(
@@ -355,9 +360,10 @@ export async function getPageData(
     .in("status", ["published", "featured"]);
 
   const mediaBySlot: Record<string, MediaItem> = {};
+  const mediaGalleryBySlot: Record<string, MediaItem[]> = {};
   for (const m of mediaRes.data || []) {
     const row = m as Record<string, string | number | null>;
-    mediaBySlot[m.slot] = {
+    const item: MediaItem = {
       slot: m.slot,
       url: (row.url as string | null) ?? null,
       webp_url: (row.webp_url as string | null) ?? null,
@@ -376,6 +382,10 @@ export async function getPageData(
       width: (row.width as number | null) ?? null,
       height: (row.height as number | null) ?? null,
     };
+    // First row per slot wins for the singular media_by_slot map
+    // (display_order=0). Append every row to the gallery list.
+    if (!mediaBySlot[m.slot]) mediaBySlot[m.slot] = item;
+    (mediaGalleryBySlot[m.slot] ??= []).push(item);
   }
   void reviewCountRes;
 
@@ -400,6 +410,7 @@ export async function getPageData(
     pricing_tiers: (pricingTiersRes.data || []) as PricingTier[],
     how_it_works: (howItWorksRes.data || []) as HowItWorksStep[],
     media_by_slot: mediaBySlot,
+    media_gallery_by_slot: mediaGalleryBySlot,
     reviews: (reviews || []) as Review[],
     review_analysis: (reviewAnalysisRes.data as ReviewAnalysis | null) || null,
     review_total_count: totalCountWithBump,
