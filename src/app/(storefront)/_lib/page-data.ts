@@ -123,6 +123,8 @@ export interface MediaItem {
   avif_1920_url: string | null;
   webp_1920_url: string | null;
   alt_text: string | null;
+  width: number | null;
+  height: number | null;
 }
 
 /**
@@ -297,7 +299,7 @@ export async function getPageData(
     admin
       .from("product_media")
       .select(
-        "slot, url, webp_url, avif_url, avif_480_url, webp_480_url, avif_750_url, webp_750_url, avif_1080_url, webp_1080_url, avif_1500_url, webp_1500_url, avif_1920_url, webp_1920_url, alt_text",
+        "slot, url, webp_url, avif_url, avif_480_url, webp_480_url, avif_750_url, webp_750_url, avif_1080_url, webp_1080_url, avif_1500_url, webp_1500_url, avif_1920_url, webp_1920_url, alt_text, width, height",
       )
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id),
@@ -354,23 +356,25 @@ export async function getPageData(
 
   const mediaBySlot: Record<string, MediaItem> = {};
   for (const m of mediaRes.data || []) {
-    const row = m as Record<string, string | null>;
+    const row = m as Record<string, string | number | null>;
     mediaBySlot[m.slot] = {
       slot: m.slot,
-      url: m.url,
-      webp_url: row.webp_url ?? null,
-      avif_url: row.avif_url ?? null,
-      avif_480_url: row.avif_480_url ?? null,
-      webp_480_url: row.webp_480_url ?? null,
-      avif_750_url: row.avif_750_url ?? null,
-      webp_750_url: row.webp_750_url ?? null,
-      avif_1080_url: row.avif_1080_url ?? null,
-      webp_1080_url: row.webp_1080_url ?? null,
-      avif_1500_url: row.avif_1500_url ?? null,
-      webp_1500_url: row.webp_1500_url ?? null,
-      avif_1920_url: row.avif_1920_url ?? null,
-      webp_1920_url: row.webp_1920_url ?? null,
-      alt_text: m.alt_text,
+      url: (row.url as string | null) ?? null,
+      webp_url: (row.webp_url as string | null) ?? null,
+      avif_url: (row.avif_url as string | null) ?? null,
+      avif_480_url: (row.avif_480_url as string | null) ?? null,
+      webp_480_url: (row.webp_480_url as string | null) ?? null,
+      avif_750_url: (row.avif_750_url as string | null) ?? null,
+      webp_750_url: (row.webp_750_url as string | null) ?? null,
+      avif_1080_url: (row.avif_1080_url as string | null) ?? null,
+      webp_1080_url: (row.webp_1080_url as string | null) ?? null,
+      avif_1500_url: (row.avif_1500_url as string | null) ?? null,
+      webp_1500_url: (row.webp_1500_url as string | null) ?? null,
+      avif_1920_url: (row.avif_1920_url as string | null) ?? null,
+      webp_1920_url: (row.webp_1920_url as string | null) ?? null,
+      alt_text: (row.alt_text as string | null) ?? null,
+      width: (row.width as number | null) ?? null,
+      height: (row.height as number | null) ?? null,
     };
   }
   void reviewCountRes;

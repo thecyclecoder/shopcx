@@ -45,12 +45,12 @@ export function HeroSection({ data }: { data: PageData }) {
   //   image_height = image_width / aspect ≤ viewport_height - chrome
   // Solving: container_width ≤ (vh - 4rem) * (3/2) * aspect
   // Then the image fills its column at full width, no negative space.
-  // Default to the dimensions stamped on PictureHero (1200×900 ≈ 4:3).
-  // Most uploaded product hero shots land within ~5% of this; if a
-  // workspace uploads a noticeably different ratio later we can read
-  // it from product_media (would need a width/height column added).
-  const heroAspectW = 1200;
-  const heroAspectH = 896;
+  // Hero image aspect — pulled from the actual uploaded asset's
+  // width/height (stamped at upload time by the transcoder). Falls
+  // back to 4:3 for legacy rows that don't have dimensions yet —
+  // there's a backfill script if needed.
+  const heroAspectW = heroMedia?.width || 1200;
+  const heroAspectH = heroMedia?.height || 900;
   const containerStyle: React.CSSProperties = {
     "--hero-aspect-w": String(heroAspectW),
     "--hero-aspect-h": String(heroAspectH),
@@ -90,8 +90,8 @@ export function HeroSection({ data }: { data: PageData }) {
                 media={heroMedia}
                 altFallback={heroAlt}
                 sizes="(min-width: 768px) 66vw, 100vw"
-                width={1200}
-                height={900}
+                width={heroAspectW}
+                height={heroAspectH}
               />
             </div>
             {data.product.is_bestseller && (
