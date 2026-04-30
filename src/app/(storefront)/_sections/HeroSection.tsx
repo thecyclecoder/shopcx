@@ -75,34 +75,33 @@ export function HeroSection({ data }: { data: PageData }) {
           clamp keeps things readable. Capped at 2200px on huge screens. */}
       <div
         style={containerStyle}
-        className="mx-auto flex w-full flex-col md:flex-row md:items-start md:gap-10 md:px-10"
+        className="mx-auto flex w-full flex-col xl:flex-row xl:items-start xl:gap-10 xl:px-10"
       >
-        {/* Hero image — sticky on desktop, top-aligned. Mobile keeps
-            its old 4:3 + object-cover behavior since cropping reads
-            better on a phone than letterboxing. Desktop fills its
-            column width using an aspect-ratio wrapper, so the image
-            renders at its full intended size with no horizontal
-            negative space inside the column. */}
-        <div className="relative w-full md:order-1 md:basis-3/5 md:sticky md:top-0 md:flex md:h-screen md:items-start md:pt-8">
+        {/* Hero image — sticky on desktop, top-aligned. Mobile + tablet
+            (incl. iPad Pro portrait) keep stacked 4:3 + object-cover
+            since the side-by-side layout cramps the text column below
+            ~1280px. Side-by-side kicks in at xl: (1280px+) where
+            there's room for the image to have wow factor without
+            squeezing the headline. */}
+        <div className="relative w-full xl:order-1 xl:basis-3/5 xl:sticky xl:top-0 xl:flex xl:h-screen xl:items-start xl:pt-8">
           <div
-            className="relative w-full aspect-[4/3] md:aspect-auto"
-            style={{ ["--md-aspect" as string]: `${heroAspectW} / ${heroAspectH}` }}
+            className="relative w-full aspect-[4/3] xl:aspect-auto"
           >
             <div
               style={{ aspectRatio: `${heroAspectW} / ${heroAspectH}` }}
-              className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover md:relative md:inset-auto md:[&_picture]:relative md:[&_picture]:inset-auto md:[&_img]:h-full md:[&_img]:w-full md:[&_img]:object-contain"
+              className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover xl:relative xl:inset-auto xl:[&_picture]:relative xl:[&_picture]:inset-auto xl:[&_img]:h-full xl:[&_img]:w-full xl:[&_img]:object-contain"
             >
               <PictureHero
                 media={heroMedia}
                 altFallback={heroAlt}
-                sizes="(min-width: 768px) 60vw, 100vw"
+                sizes="(min-width: 1280px) 60vw, 100vw"
                 width={heroAspectW}
                 height={heroAspectH}
               />
             </div>
             {data.product.is_bestseller && (
               <span
-                className="absolute right-3 top-3 z-10 inline-flex items-center rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white shadow-md md:right-4 md:top-12 md:px-4 md:py-2 md:text-sm"
+                className="absolute right-3 top-3 z-10 inline-flex items-center rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white shadow-md xl:right-4 xl:top-12 xl:px-4 xl:py-2 xl:text-sm"
                 aria-label="Best Seller"
               >
                 Best Seller!
@@ -111,10 +110,10 @@ export function HeroSection({ data }: { data: PageData }) {
           </div>
         </div>
 
-        {/* Text column — 1/3 on desktop, full width on mobile. The
-            section's overall height is driven by this column; the
-            sticky image pins until this column scrolls past. */}
-        <div className="order-2 flex min-h-[280px] flex-col px-5 pt-6 pb-8 md:order-2 md:basis-2/5 md:px-0 md:pt-16 md:pb-16">
+        {/* Text column — 2/5 on desktop (xl+), full width on mobile +
+            tablet. The section's overall height is driven by this
+            column; the sticky image pins until this column scrolls past. */}
+        <div className="order-2 flex min-h-[280px] flex-col px-5 pt-6 pb-8 xl:order-2 xl:basis-2/5 xl:px-0 xl:pt-16 xl:pb-16">
           {ratingValue != null && (
             <div className="mb-3 flex items-center gap-2">
               <StarRating rating={ratingValue} size={18} />
