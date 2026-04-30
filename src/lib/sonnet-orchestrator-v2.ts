@@ -174,7 +174,7 @@ async function buildPreContext(
     customerId
       ? admin.from("customers").select("first_name, last_name, email").eq("id", customerId).single()
       : Promise.resolve({ data: null }),
-    admin.from("tickets").select("tags, active_playbook_id, page_context").eq("id", ticketId).single(),
+    admin.from("tickets").select("tags, active_playbook_id, page_context, subject").eq("id", ticketId).single(),
     admin.from("ticket_messages")
       .select("direction, body_clean, body, visibility, author_type")
       .eq("ticket_id", ticketId)
@@ -199,6 +199,11 @@ async function buildPreContext(
   const cName = [customer?.first_name, customer?.last_name].filter(Boolean).join(" ") || "Customer";
   const cEmail = customer?.email || "unknown";
   const tags = ((ticket?.tags as string[]) || []).join(", ") || "none";
+  // Customers often put the actual topic in the subject and only short
+  // context in the body ("is there caffeine in amazing creamer" / body:
+  // "I can't tolerate caffeine"). Surface the subject explicitly so
+  // Sonnet doesn't miss product names mentioned only there.
+  const ticketSubject = (ticket?.subject as string | null) || "";
   const activePlaybookId = ticket?.active_playbook_id || null;
 
   // If active playbook, get its name
@@ -263,6 +268,7 @@ async function buildPreContext(
 You have tools to look up data. Use them to gather what you need before making your decision.
 
 CUSTOMER: ${cName} (${cEmail})
+TICKET SUBJECT: ${ticketSubject || "(none)"}
 TICKET TAGS: ${tags}${activePlaybookNote}${(() => {
   const pc = ticket?.page_context as { product_title?: string; product_handle?: string; page_path?: string } | null;
   if (!pc) return "";

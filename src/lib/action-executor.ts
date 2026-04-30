@@ -68,6 +68,11 @@ export interface ActionContext {
   // honors this flag so a ticket that was just escalated doesn't get
   // auto-closed underneath the agent.
   _escalatedThisRun?: boolean;
+  // Internal: set by close_ticket direct action. Tells the post-execute
+  // logic in unified-ticket-handler that the close was intentional —
+  // without this flag the "no message sent → reopen" branch would flip
+  // the just-closed ticket back to open.
+  _closedThisRun?: boolean;
 }
 
 type SendFn = (msg: string, sandbox: boolean) => Promise<void>;
@@ -741,6 +746,22 @@ const directActionHandlers: Record<
     return { success: true, summary: `Linked ${target.email} to this account` };
   },
 
+  // Close the ticket without sending a customer message. Use for
+  // out-of-office auto-replies, bounce notifications, "vacation mode"
+  // emails, and anything else where the inbound is automated/spam and
+  // a reply would just bounce again. Pair with NO response_message —
+  // the executor knows to skip sending when actions succeed AND no
+  // response_message is set.
+  close_ticket: async (ctx, p) => {
+    await ctx.admin.from("tickets").update({
+      status: "closed",
+      closed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }).eq("id", ctx.ticketId);
+    ctx._closedThisRun = true;
+    return { success: true, summary: `Closed ticket${p.reason ? ` — ${p.reason}` : ""}` };
+  },
+
   // Persist a customer's free-text rejection of an account-linking suggestion.
   // Use when the customer explicitly says an unlinked candidate isn't theirs
   // (e.g. "that's not my email", "I don't have another account") so the
@@ -1050,11 +1071,11 @@ export async function executeSonnetDecision(
   personality: { name?: string; tone?: string; sign_off?: string | null } | null,
   send: SendFn,
   sysNote: SysNoteFn,
-): Promise<{ messageSent: boolean; escalated: boolean }> {
+): Promise<{ messageSent: boolean; escalated: boolean; closed: boolean }> {
   // Handle clarification first — applies regardless of action_type
   if (decision.needs_clarification && decision.clarification_question) {
     await send(decision.clarification_question, ctx.sandbox);
-    return { messageSent: true, escalated: false };
+    return { messageSent: true, escalated: false, closed: false };
   }
 
   // Track whether a customer-facing message was sent
@@ -1100,7 +1121,11 @@ export async function executeSonnetDecision(
       await sysNote(`Unknown action_type: ${decision.action_type}`);
   }
 
-  return { messageSent, escalated: ctx._escalatedThisRun === true };
+  return {
+    messageSent,
+    escalated: ctx._escalatedThisRun === true,
+    closed: ctx._closedThisRun === true,
+  };
 }
 
 // ── Handler: Direct Actions ──

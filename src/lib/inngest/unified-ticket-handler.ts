@@ -88,7 +88,12 @@ async function channelCfg(admin: Admin, wsId: string, ch: string) {
   return {
     enabled: data?.enabled ?? true,
     threshold: (data?.confidence_threshold ?? 0.7) <= 1 ? Math.round((data?.confidence_threshold ?? 0.7) * 100) : (data?.confidence_threshold ?? 70),
-    auto_resolve: data?.auto_resolve ?? false, sandbox: data?.sandbox ?? true,
+    auto_resolve: data?.auto_resolve ?? false,
+    // Sandbox should be opt-in — defaulting to true silently drafts AI
+    // replies instead of sending. Discovered when the new help-center
+    // contact-form block never sent replies (no help_center config row
+    // existed, fallback defaulted to sandbox=true).
+    sandbox: data?.sandbox ?? false,
     personality_id: data?.personality_id || null,
   };
 }
@@ -1169,17 +1174,20 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           async (m, sb) => sendWithDelay(admin, wsId, tid, st.ch, m, sb),
           async (m) => { await sysNote(admin, tid, m); },
         );
-        // Only auto-close if a customer-facing message was sent AND
-        // the run didn't escalate. Escalation already set status=open
-        // and assigned an agent — we must not flip it back to closed
-        // underneath them just because we sent the customer a holding
-        // message ("I ran into an issue, I'll look into this shortly").
+        // Post-execute status. Three branches:
+        //   • Escalated → leave open for the agent (they'll handle it).
+        //   • Closed via close_ticket direct action (e.g. OOO auto-reply
+        //     handling) → leave closed; no message expected.
+        //   • Message sent → close the ticket; the next inbound reopens.
+        //   • Neither → no message and no intentional close, so something
+        //     went sideways — keep open for agent review.
         if (execResult.escalated) {
           await sysNote(admin, tid, "[System] Ticket escalated this run — leaving open for agent.");
+        } else if (execResult.closed) {
+          await sysNote(admin, tid, "[System] Ticket closed via close_ticket action — no customer reply expected.");
         } else if (execResult.messageSent) {
           await setStatus(admin, tid, cfg.auto_resolve);
         } else {
-          // No message sent — keep ticket open so an agent can handle it
           await admin.from("tickets").update({ status: "open" }).eq("id", tid);
           await sysNote(admin, tid, "[System] No customer message sent — ticket kept open for agent review.");
         }

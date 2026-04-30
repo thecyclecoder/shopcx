@@ -62,8 +62,11 @@ export async function POST(
     customerId = created?.id || null;
   }
 
-  // Create ticket
-  const tags: string[] = [];
+  // Create ticket — channel is "email" since the only contact info we
+  // have is email and that's how we'll reply. The "contact-form" tag
+  // marks the source (vs a customer who emailed us directly), and
+  // smart:{category} preserves any topic dropdown selection.
+  const tags: string[] = ["contact-form"];
   if (category) tags.push(`smart:${category}`);
 
   const { data: ticket, error } = await admin
@@ -71,7 +74,7 @@ export async function POST(
     .insert({
       workspace_id: workspace.id,
       customer_id: customerId,
-      channel: "help_center",
+      channel: "email",
       status: "open",
       subject: subject || `Help request from ${email}`,
       tags,
@@ -95,7 +98,7 @@ export async function POST(
     // Unified handler handles routing
     await inngest.send({
       name: "ticket/inbound-message",
-      data: { workspace_id: workspace.id, ticket_id: ticket.id, message_body: message, channel: "help_center", is_new_ticket: true },
+      data: { workspace_id: workspace.id, ticket_id: ticket.id, message_body: message, channel: "email", is_new_ticket: true },
     });
   }
 
