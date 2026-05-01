@@ -484,7 +484,12 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       const date = new Date(o.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
       const fulfillments = (o.fulfillments as { tracking_number?: string; status?: string }[] || []);
       const tracking = fulfillments[0]?.tracking_number ? ` | tracking: ${fulfillments[0].tracking_number}` : "";
-      const coupons = (o.discount_codes as string[] | null)?.length ? ` | coupons: ${(o.discount_codes as string[]).join(", ")}` : "";
+      // Always emit the coupons field — never silently omit on empty.
+      // If we leave it off, the LLM cannot tell "this order had no
+      // coupon codes" from "this tool doesn't expose coupons", and
+      // we've seen Opus mis-frame it as a tool limitation.
+      const couponsList = (o.discount_codes as string[] | null) || [];
+      const coupons = couponsList.length ? ` | coupons: ${couponsList.join(", ")}` : ` | coupons: none`;
       const isDraft = (o.source_name as string) === "shopify_draft_order";
       const sourceLabel = isDraft ? " [DRAFT — not a renewal, ignore for price comparisons]" : "";
       parts.push(`- #${o.order_number} | ${date} | total $${((o.total_cents || 0) / 100).toFixed(2)} | ${o.financial_status || "?"}${sourceLabel} | ${itemStr}${coupons}${tracking} | shopify_order_id: ${o.shopify_order_id || "?"}`);
@@ -503,8 +508,15 @@ DRAFT ORDERS: orders flagged [DRAFT — not a renewal] are manual draft orders (
     parts.push("\nRECENT ORDERS: None");
   }
 
-  // Loyalty
-  if (loyaltyMember) {
+  // Loyalty — explicit empty state so the LLM doesn't mis-frame a
+  // missing record as "the tool doesn't expose loyalty". Always emit
+  // a LOYALTY line. If no loyalty_members row exists for any linked
+  // profile, that means the customer has never participated in the
+  // program (expected for older subs, manual orders, or accounts that
+  // pre-date loyalty).
+  if (!loyaltyMember) {
+    parts.push(`\nLOYALTY: no record (this customer has never had a loyalty_members row across any linked profile — they've never accrued points)`);
+  } else {
     parts.push(`\nLOYALTY: ${loyaltyMember.points_balance || 0} points`);
 
     // Show available redemption tiers so AI only offers real options
