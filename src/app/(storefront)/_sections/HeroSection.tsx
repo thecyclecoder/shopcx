@@ -138,7 +138,7 @@ export function HeroSection({ data }: { data: PageData }) {
             </>
           )}
 
-          <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="mt-6 flex flex-col items-center gap-3 sm:flex-row sm:items-center">
             <a
               href="#pricing"
               style={{ backgroundColor: "var(--storefront-primary)" }}
