@@ -396,13 +396,16 @@ export async function getPageData(
   const { data: reviews } = await admin
     .from("product_reviews")
     .select(
-      "id, reviewer_name, rating, title, body, images, smart_quote, created_at, status, product_id",
+      "id, reviewer_name, rating, title, body, images, smart_quote, created_at, status, featured, product_id",
     )
     .eq("workspace_id", workspace.id)
     .in("product_id", reviewProductIds)
     .in("status", ["published", "featured"])
     .not("body", "is", null)
-    .order("status", { ascending: false }) // 'featured' > 'published'
+    // Featured first (true > false), then highest rating, then newest.
+    // The `featured` boolean is the canonical "this is hand-picked" flag
+    // — sorting on `status` would sort alphabetically and bury them.
+    .order("featured", { ascending: false })
     .order("rating", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(24);

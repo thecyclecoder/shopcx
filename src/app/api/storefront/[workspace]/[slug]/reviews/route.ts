@@ -37,12 +37,13 @@ export async function GET(
     admin
       .from("product_reviews")
       .select(
-        "id, reviewer_name, rating, title, body, images, smart_quote, created_at, status",
+        "id, reviewer_name, rating, title, body, images, smart_quote, created_at, status, featured",
       )
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id)
       .in("status", ["published", "featured"])
       .not("body", "is", null)
+      .order("featured", { ascending: false })
       .order("rating", { ascending: false })
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1),
