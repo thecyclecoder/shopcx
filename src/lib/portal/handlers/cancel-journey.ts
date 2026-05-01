@@ -183,20 +183,31 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       .eq("enabled", true)
       .order("priority", { ascending: true });
 
-    // Load reviews for subscription products
-    const productIds = (sub.items as { product_id?: string }[] || [])
+    // Load reviews for subscription products. items[].product_id may be
+    // either an internal UUID or a Shopify ID depending on which sync
+    // wrote the row, so resolve to internal UUIDs first — that's what
+    // product_reviews.product_id keys off.
+    const rawItemIds = (sub.items as { product_id?: string }[] || [])
       .map(i => i.product_id).filter(Boolean) as string[];
 
     let reviews: unknown[] = [];
-    if (productIds.length) {
-      const { data: revs } = await admin.from("product_reviews")
-        .select("shopify_product_id, author, rating, title, body, summary, smart_featured")
+    if (rawItemIds.length) {
+      const { data: products } = await admin.from("products")
+        .select("id, shopify_product_id")
         .eq("workspace_id", auth.workspaceId)
-        .in("shopify_product_id", productIds)
-        .gte("rating", 4)
-        .eq("smart_featured", true)
-        .limit(6);
-      reviews = revs || [];
+        .or(rawItemIds.map(id => `id.eq.${id},shopify_product_id.eq.${id}`).join(","));
+      const internalIds = [...new Set((products || []).map(p => p.id).filter(Boolean) as string[])];
+
+      if (internalIds.length) {
+        const { data: revs } = await admin.from("product_reviews")
+          .select("product_id, reviewer_name, rating, title, body, summary, featured")
+          .eq("workspace_id", auth.workspaceId)
+          .in("product_id", internalIds)
+          .gte("rating", 4)
+          .eq("featured", true)
+          .limit(6);
+        reviews = revs || [];
+      }
     }
 
     // Load cancel reasons from workspace portal_config

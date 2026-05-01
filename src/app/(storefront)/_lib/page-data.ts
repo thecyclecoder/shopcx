@@ -183,7 +183,7 @@ export interface Review {
   smart_quote: string | null;
   created_at: string;
   status: string;
-  shopify_product_id?: string | null;
+  product_id?: string | null;
 }
 
 export interface ReviewAnalysis {
@@ -380,32 +380,26 @@ export async function getPageData(
     loadLinkGroup(workspace.id, product.id),
   ]);
 
-  // Product reviews are keyed by shopify_product_id. The placeholder query
-  // above returns nothing — re-fetch with the proper key now that we have
-  // the product loaded. Kept inline (not in the parallel block) so we can
-  // reference product fields.
-  //
-  // For linked products (e.g. Instant ↔ K-Cups), pool reviews across
-  // every member of the link group. The featured-review carousel in the
-  // hero shows the strongest social proof regardless of which member
-  // page the customer landed on. Featured/highest-rated bubble up via
-  // the order clauses below.
-  const linkedShopifyIds = linkGroup
-    ? linkGroup.members
-        .map(m => (m.shopify_product_id || "").trim())
-        .filter((s): s is string => !!s)
+  // Product reviews now key off the internal product UUID (the
+  // shopify_product_id column is sync-only metadata). For linked
+  // products (e.g. Instant ↔ K-Cups), pool reviews across every member
+  // of the link group so the featured-review carousel can serve the
+  // strongest social proof regardless of which page the customer
+  // landed on. Featured > rating > recency via the order clauses.
+  const linkedProductIds = linkGroup
+    ? linkGroup.members.map(m => m.product_id).filter(Boolean)
     : [];
-  const reviewShopifyIds = linkedShopifyIds.length
-    ? Array.from(new Set([extractShopifyProductId(product), ...linkedShopifyIds].filter(Boolean)))
-    : [extractShopifyProductId(product)];
+  const reviewProductIds = Array.from(
+    new Set(linkedProductIds.length ? [product.id, ...linkedProductIds] : [product.id]),
+  );
 
   const { data: reviews } = await admin
     .from("product_reviews")
     .select(
-      "id, reviewer_name, rating, title, body, images, smart_quote, created_at, status, shopify_product_id",
+      "id, reviewer_name, rating, title, body, images, smart_quote, created_at, status, product_id",
     )
     .eq("workspace_id", workspace.id)
-    .in("shopify_product_id", reviewShopifyIds)
+    .in("product_id", reviewProductIds)
     .in("status", ["published", "featured"])
     .not("body", "is", null)
     .order("status", { ascending: false }) // 'featured' > 'published'
@@ -417,7 +411,7 @@ export async function getPageData(
     .from("product_reviews")
     .select("id", { count: "exact", head: true })
     .eq("workspace_id", workspace.id)
-    .in("shopify_product_id", reviewShopifyIds)
+    .in("product_id", reviewProductIds)
     .in("status", ["published", "featured"]);
 
   const mediaBySlot: Record<string, MediaItem> = {};
@@ -623,14 +617,15 @@ async function loadLinkGroup(
   }
   const combinedRating = totalCount > 0 ? weightedSum / totalCount : null;
 
-  // 6. Combined published-review row count across members' shopify ids
-  const shopifyIds = (products || []).map(p => (p as { shopify_product_id?: string }).shopify_product_id).filter((s): s is string => !!s);
+  // 6. Combined published-review row count across members. Joins on
+  // the internal product UUID — see feedback_no_shopify_id_for_relationships.
+  const memberProductIdsForCount = members.map(m => m.product_id).filter(Boolean);
   let combinedReviewTotalCount = 0;
-  if (shopifyIds.length) {
+  if (memberProductIdsForCount.length) {
     const { count } = await admin.from("product_reviews")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
-      .in("shopify_product_id", shopifyIds)
+      .in("product_id", memberProductIdsForCount)
       .in("status", ["published", "featured"]);
     combinedReviewTotalCount = count || 0;
   }

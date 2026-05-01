@@ -24,12 +24,12 @@ export async function GET(
   const admin = createAdminClient();
   const { data: product } = await admin
     .from("products")
-    .select("shopify_product_id")
+    .select("id")
     .eq("workspace_id", workspace.id)
     .eq("handle", slug)
     .maybeSingle();
 
-  if (!product?.shopify_product_id) {
+  if (!product?.id) {
     return NextResponse.json({ reviews: [], total: 0, has_more: false });
   }
 
@@ -40,7 +40,7 @@ export async function GET(
         "id, reviewer_name, rating, title, body, images, smart_quote, created_at, status",
       )
       .eq("workspace_id", workspace.id)
-      .eq("shopify_product_id", product.shopify_product_id)
+      .eq("product_id", product.id)
       .in("status", ["published", "featured"])
       .not("body", "is", null)
       .order("rating", { ascending: false })
@@ -50,7 +50,7 @@ export async function GET(
       .from("product_reviews")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspace.id)
-      .eq("shopify_product_id", product.shopify_product_id)
+      .eq("product_id", product.id)
       .in("status", ["published", "featured"])
       .not("body", "is", null),
   ]);

@@ -282,20 +282,11 @@ export const analyzeReviews = inngest.createFunction(
 
     const reviews = await step.run("fetch-reviews", async () => {
       const admin = createAdminClient();
-      const { data: product } = await admin
-        .from("products")
-        .select("id, shopify_product_id")
-        .eq("id", product_id)
-        .eq("workspace_id", workspace_id)
-        .single();
-
-      if (!product) return [];
-
       const { data } = await admin
         .from("product_reviews")
         .select("id, reviewer_name, rating, title, body")
         .eq("workspace_id", workspace_id)
-        .eq("shopify_product_id", product.shopify_product_id)
+        .eq("product_id", product_id)
         .in("status", ["published", "featured"])
         .not("body", "is", null)
         .limit(500);

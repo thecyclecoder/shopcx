@@ -173,6 +173,25 @@ export async function syncReviewPage(
     }
   }
 
+  // Step 2b: Resolve internal product UUIDs from the Shopify IDs Klaviyo
+  // gives us. Reviews join on `products.id`; `shopify_product_id` is
+  // sync-only metadata.
+  const shopifyProductIds = [...new Set(
+    batch.map(r => extractShopifyProductId(r) || r.attributes.product?.external_id || "")
+      .filter(s => s && s !== "unknown"),
+  )];
+  const productIdMap = new Map<string, string>();
+  if (shopifyProductIds.length > 0) {
+    const { data: products } = await admin
+      .from("products")
+      .select("id, shopify_product_id")
+      .eq("workspace_id", workspaceId)
+      .in("shopify_product_id", shopifyProductIds);
+    for (const p of products || []) {
+      if (p.shopify_product_id && p.id) productIdMap.set(p.shopify_product_id, p.id);
+    }
+  }
+
   // Step 3: Build rows for batch upsert
   let errors = 0;
   const rows: Record<string, unknown>[] = [];
@@ -182,10 +201,16 @@ export async function syncReviewPage(
       const statusValue = attrs.status?.value || "published";
       const isFeatured = statusValue === "featured";
 
+      const shopifyProductId = extractShopifyProductId(review) || attrs.product?.external_id || "unknown";
+      const internalProductId = productIdMap.get(shopifyProductId) || null;
+
       const row: Record<string, unknown> = {
         workspace_id: workspaceId,
         klaviyo_review_id: review.id,
-        shopify_product_id: extractShopifyProductId(review) || attrs.product?.external_id || "unknown",
+        // shopify_product_id stays as sync-side metadata; product_id is
+        // the internal UUID used by every read path.
+        shopify_product_id: shopifyProductId,
+        product_id: internalProductId,
         reviewer_name: attrs.author || null,
         rating: attrs.rating,
         title: attrs.title || null,
@@ -450,16 +475,30 @@ export async function generateMissingSummaries(workspaceId: string) {
 }
 
 // ── Retrieval for cancel journey social proof ──
-
+//
+// Reviews join on the internal `product_id` UUID. Callers may still
+// pass Shopify product IDs (legacy) or internal UUIDs — we resolve both.
 export async function getReviewsForProducts(
   workspaceId: string,
-  shopifyProductIds: string[],
-): Promise<{ id: string; shopify_product_id: string; reviewer_name: string; rating: number; title: string; body: string; summary: string; featured: boolean }[]> {
+  productIds: string[],
+): Promise<{ id: string; product_id: string | null; reviewer_name: string; rating: number; title: string; body: string; summary: string; featured: boolean }[]> {
   const admin = createAdminClient();
+
+  // Resolve mixed Shopify/internal IDs to internal product UUIDs.
+  let internalIds: string[] = [];
+  if (productIds.length) {
+    const { data: products } = await admin
+      .from("products")
+      .select("id, shopify_product_id")
+      .eq("workspace_id", workspaceId)
+      .or(productIds.map(id => `id.eq.${id},shopify_product_id.eq.${id}`).join(","));
+    internalIds = [...new Set((products || []).map(p => p.id).filter(Boolean) as string[])];
+    if (!internalIds.length) return [];
+  }
 
   const query = admin
     .from("product_reviews")
-    .select("id, shopify_product_id, reviewer_name, rating, title, body, summary, featured")
+    .select("id, product_id, reviewer_name, rating, title, body, summary, featured")
     .eq("workspace_id", workspaceId)
     .in("status", ["published", "featured"])
     .gte("rating", 4)
@@ -467,8 +506,8 @@ export async function getReviewsForProducts(
     .order("rating", { ascending: false })
     .limit(20);
 
-  if (shopifyProductIds.length > 0) {
-    query.in("shopify_product_id", shopifyProductIds);
+  if (internalIds.length > 0) {
+    query.in("product_id", internalIds);
   }
 
   const { data: reviews } = await query;

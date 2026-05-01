@@ -148,7 +148,7 @@ export async function selectRemedies(
   const reviewList = reviews.slice(0, 3).map(r => ({
     rating: r.rating,
     summary: r.summary,
-    product: r.shopify_product_id,
+    product: r.product_id,
   }));
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -293,7 +293,7 @@ export async function generateOpenEndedResponse(
     .join("\n");
 
   // Fetch reviews for the customer's subscription products
-  let reviews: { summary: string; rating: number; body: string; reviewer_name: string; shopify_product_id: string }[] = [];
+  let reviews: { summary: string; rating: number; body: string; reviewer_name: string; product_id: string | null }[] = [];
   try {
     reviews = await getReviewsForProducts(workspaceId, products);
   } catch (err) {

@@ -34,14 +34,19 @@ export async function GET(
 
   let query = admin
     .from("product_reviews")
-    .select("id, klaviyo_review_id, shopify_product_id, product_name, reviewer_name, email, rating, title, body, summary, smart_quote, review_type, status, featured, verified_purchase, images, customer_id, published_at, updated_at, created_at", { count: "exact" })
+    .select("id, klaviyo_review_id, product_id, shopify_product_id, product_name, reviewer_name, email, rating, title, body, summary, smart_quote, review_type, status, featured, verified_purchase, images, customer_id, published_at, updated_at, created_at", { count: "exact" })
     .eq("workspace_id", workspaceId)
     .order("published_at", { ascending: false })
     .range(offset, offset + limit - 1);
 
   if (status) query = query.eq("status", status);
   if (reviewType) query = query.eq("review_type", reviewType);
-  if (productId) query = query.eq("shopify_product_id", productId);
+  // product_id filter accepts both internal UUIDs (preferred) and
+  // Shopify IDs (legacy callers). Detect format and route accordingly.
+  if (productId) {
+    const isUuid = productId.includes("-") && productId.length >= 32;
+    query = isUuid ? query.eq("product_id", productId) : query.eq("shopify_product_id", productId);
+  }
   if (customerId) query = query.eq("customer_id", customerId);
   if (search) query = query.or(`title.ilike.%${search}%,body.ilike.%${search}%,reviewer_name.ilike.%${search}%`);
   if (featured === "true") query = query.eq("featured", true);
