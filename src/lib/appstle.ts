@@ -187,21 +187,28 @@ async function verifyBillingInterval(
 export async function appstleUpdateNextBillingDate(
   workspaceId: string,
   contractId: string,
-  nextBillingDate: string, // YYYY-MM-DD
+  nextBillingDate: string, // YYYY-MM-DD or full ISO datetime
 ): Promise<{ success: boolean; error?: string }> {
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
+  // Appstle expects ZonedDateTime (e.g. 2026-07-30T00:00:00Z). Date-only
+  // YYYY-MM-DD strings get rejected with a Java parse error. Normalize.
+  const isoDateTime = /^\d{4}-\d{2}-\d{2}$/.test(nextBillingDate)
+    ? `${nextBillingDate}T00:00:00Z`
+    : nextBillingDate;
+
   try {
     const res = await loggedAppstleFetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-date?contractId=${contractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(nextBillingDate)}`,
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-date?contractId=${contractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(isoDateTime)}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey }, cache: "no-store" },
     );
 
     if (!res.ok && res.status !== 204) {
       const text = await res.text();
       console.error(`Appstle next billing date update error for contract ${contractId}:`, text);
-      return { success: false, error: `Appstle API error: ${res.status}` };
+      const snippet = text.slice(0, 300).replace(/\s+/g, " ").trim();
+      return { success: false, error: `Appstle ${res.status}: ${snippet}` };
     }
 
     return { success: true };
