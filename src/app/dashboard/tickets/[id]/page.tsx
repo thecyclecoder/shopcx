@@ -214,7 +214,22 @@ export default function TicketDetailPage() {
   const [replyMode, setReplyMode] = useState<"external" | "internal">("external");
   const [sending, setSending] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"messages" | "history" | "improve">("messages");
+  const [activeTab, setActiveTab] = useState<"messages" | "history" | "improve" | "api_logs">("messages");
+  const [apiLogs, setApiLogs] = useState<{
+    id: string;
+    action_type: string;
+    endpoint: string | null;
+    request_method: string | null;
+    request_url: string;
+    request_body: unknown;
+    response_status: number | null;
+    response_body: string | null;
+    success: boolean;
+    error_summary: string | null;
+    duration_ms: number | null;
+    created_at: string;
+  }[]>([]);
+  const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
   const [mobileSection, setMobileSection] = useState<"conversation" | "details" | "customer" | "subscriptions" | "orders" | "returns" | "replacements" | "chargebacks" | "fraud" | "loyalty" | "reviews" | "actions">("conversation");
   const [customerEvents, setCustomerEvents] = useState<{ id: string; event_type: string; source: string; summary: string; created_at: string }[]>([]);
   const [closeWithReply, setCloseWithReply] = useState(true);
@@ -1094,6 +1109,25 @@ export default function TicketDetailPage() {
                 Improve
               </button>
             )}
+            {["owner", "admin"].includes(workspace.role) && (
+              <button
+                onClick={async () => {
+                  setActiveTab("api_logs");
+                  const res = await fetch(`/api/tickets/${id}/api-logs`);
+                  if (res.ok) {
+                    const data = await res.json();
+                    setApiLogs(data.calls || []);
+                  }
+                }}
+                className={`pb-2 text-sm font-medium transition-colors ${
+                  activeTab === "api_logs"
+                    ? "border-b-2 border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400"
+                    : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+                }`}
+              >
+                API Logs
+              </button>
+            )}
           </div>
 
           {/* Messages tab */}
@@ -1597,6 +1631,94 @@ export default function TicketDetailPage() {
                   Send
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* API Logs tab — every Appstle (etc.) call triggered by direct
+              actions on this ticket. Collapsed rows; click to expand
+              the request/response code blocks. Owner/admin only. */}
+          {activeTab === "api_logs" && ["owner", "admin"].includes(workspace.role) && (
+            <div className="mt-4 space-y-2">
+              {apiLogs.length === 0 ? (
+                <p className="py-8 text-center text-sm text-zinc-400">
+                  No API calls logged for this ticket yet.
+                </p>
+              ) : (
+                apiLogs.map((log) => {
+                  const expanded = expandedLogId === log.id;
+                  const time = new Date(log.created_at).toLocaleString();
+                  return (
+                    <div
+                      key={log.id}
+                      className="rounded-md border border-zinc-200 dark:border-zinc-800"
+                    >
+                      <button
+                        onClick={() => setExpandedLogId(expanded ? null : log.id)}
+                        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-zinc-50 dark:hover:bg-zinc-900"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className={`inline-block h-2 w-2 flex-shrink-0 rounded-full ${log.success ? "bg-emerald-500" : "bg-rose-500"}`} />
+                          <span className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                            {log.action_type}
+                          </span>
+                          {log.endpoint && (
+                            <span className="text-xs text-zinc-500 truncate">
+                              · {log.endpoint}
+                            </span>
+                          )}
+                          {log.response_status != null && (
+                            <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                              log.success
+                                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400"
+                                : "bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-400"
+                            }`}>
+                              {log.response_status}
+                            </span>
+                          )}
+                          {!log.success && log.error_summary && (
+                            <span className="truncate text-xs text-rose-600 dark:text-rose-400">
+                              {log.error_summary}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex flex-shrink-0 items-center gap-2 text-xs text-zinc-500">
+                          {log.duration_ms != null && <span>{log.duration_ms}ms</span>}
+                          <span>{time}</span>
+                          <span>{expanded ? "▴" : "▾"}</span>
+                        </div>
+                      </button>
+                      {expanded && (
+                        <div className="border-t border-zinc-200 dark:border-zinc-800 space-y-2 p-3">
+                          <div>
+                            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+                              Request
+                            </div>
+                            <pre className="overflow-x-auto rounded bg-zinc-50 p-2 text-[11px] dark:bg-zinc-900">
+                              <code className="font-mono">
+                                {log.request_method} {log.request_url}
+                                {log.request_body
+                                  ? "\n\n" + JSON.stringify(log.request_body, null, 2)
+                                  : ""}
+                              </code>
+                            </pre>
+                          </div>
+                          <div>
+                            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+                              Response
+                            </div>
+                            <pre className="overflow-x-auto rounded bg-zinc-50 p-2 text-[11px] dark:bg-zinc-900">
+                              <code className="font-mono">
+                                {log.response_status} {log.success ? "OK" : "FAILED"}
+                                {log.response_body ? "\n\n" + log.response_body : "\n\n(no body)"}
+                              </code>
+                            </pre>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
             </div>
           )}
         </div>

@@ -167,22 +167,33 @@ async function callReplaceVariants(
   apiKey: string,
   body: Record<string, unknown>,
 ): Promise<{ success: boolean; error?: string }> {
+  const url = "https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details/replace-variants-v3";
+  const t0 = Date.now();
+  const { logAppstleCall } = await import("@/lib/appstle-call-log");
   try {
-    const res = await fetch(
-      "https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details/replace-variants-v3",
-      { method: "POST", headers: { "X-API-Key": apiKey, "Content-Type": "application/json" }, body: JSON.stringify(body), cache: "no-store" },
-    );
+    const res = await fetch(url, {
+      method: "POST", headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify(body), cache: "no-store",
+    });
+    const text = await res.text();
+    await logAppstleCall({
+      url, method: "POST", body, endpoint: "replace-variants-v3",
+      status: res.status, responseBody: text, success: res.ok,
+      durationMs: Date.now() - t0,
+    });
     if (!res.ok) {
-      const text = await res.text();
       console.error("Appstle replaceVariants error:", text, "body sent:", JSON.stringify(body));
-      // Surface the actual Appstle message in the returned error so
-      // dashboard + analyzer logs reveal WHY it failed, not just "400".
       const snippet = text.slice(0, 400).replace(/\s+/g, " ").trim();
       return { success: false, error: `Appstle ${res.status}: ${snippet || "no body"}` };
     }
     return { success: true };
   } catch (err) {
     console.error("Appstle replaceVariants failed:", err);
+    await logAppstleCall({
+      url, method: "POST", body, endpoint: "replace-variants-v3",
+      status: 0, responseBody: String(err), success: false,
+      durationMs: Date.now() - t0,
+    });
     return { success: false, error: String(err) };
   }
 }

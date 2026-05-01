@@ -37,15 +37,25 @@ export async function removeExistingDiscounts(
 
   const discounts = (sub?.applied_discounts as StoredDiscount[]) || [];
 
+  const { logAppstleCall } = await import("@/lib/appstle-call-log");
   for (const disc of discounts) {
     if (disc.id) {
+      const url = `${APPSTLE_BASE}/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}&discountId=${encodeURIComponent(disc.id)}&api_key=${apiKey}`;
+      const t0 = Date.now();
       try {
-        await fetch(
-          `${APPSTLE_BASE}/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}&discountId=${encodeURIComponent(disc.id)}&api_key=${apiKey}`,
-          { method: "PUT", headers: { "X-API-Key": apiKey } },
-        );
+        const res = await fetch(url, { method: "PUT", headers: { "X-API-Key": apiKey } });
+        const text = await res.text().catch(() => "");
+        await logAppstleCall({
+          url, method: "PUT", body: { contractId, discountId: disc.id }, endpoint: "remove-discount",
+          status: res.status, responseBody: text, success: res.ok, durationMs: Date.now() - t0,
+        });
         removed.push(disc.id);
-      } catch {}
+      } catch (err) {
+        await logAppstleCall({
+          url, method: "PUT", body: { contractId, discountId: disc.id }, endpoint: "remove-discount",
+          status: 0, responseBody: String(err), success: false, durationMs: Date.now() - t0,
+        });
+      }
     }
   }
 
@@ -69,14 +79,20 @@ export async function applyDiscountWithReplace(
   contractId: string,
   discountCode: string,
 ): Promise<{ success: boolean; removed: string[]; error?: string; status?: number }> {
+  const { logAppstleCall } = await import("@/lib/appstle-call-log");
   // Step 1: Remove existing discounts
   const { removed } = await removeExistingDiscounts(apiKey, contractId);
 
   // Step 2: Apply new discount
-  const res = await fetch(
-    `${APPSTLE_BASE}/api/external/v2/subscription-contracts-apply-discount?contractId=${contractId}&discountCode=${encodeURIComponent(discountCode)}&api_key=${apiKey}`,
-    { method: "PUT", headers: { "X-API-Key": apiKey } },
-  );
+  const applyUrl = `${APPSTLE_BASE}/api/external/v2/subscription-contracts-apply-discount?contractId=${contractId}&discountCode=${encodeURIComponent(discountCode)}&api_key=${apiKey}`;
+  const t0 = Date.now();
+  const res = await fetch(applyUrl, { method: "PUT", headers: { "X-API-Key": apiKey } });
+  const text = await res.clone().text().catch(() => "");
+  await logAppstleCall({
+    url: applyUrl, method: "PUT", body: { contractId, discountCode },
+    endpoint: "apply-discount", status: res.status, responseBody: text,
+    success: res.ok || res.status === 204, durationMs: Date.now() - t0,
+  });
 
   if (!res.ok && res.status !== 204) {
     return { success: false, removed, error: `Appstle API error: ${res.status}`, status: res.status };

@@ -1,5 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { loggedAppstleFetch } from "@/lib/appstle-call-log";
 
 async function getAppstleCredentials(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
   const admin = createAdminClient();
@@ -39,7 +40,7 @@ export async function appstleSubscriptionAction(
       const byLine = cancelledBy ? `by ${cancelledBy} on ShopCX.ai` : "via ShopCX.ai";
       params.set("cancellationNote", `Cancelled ${byLine} — ${cancelReason || "manual"}`);
       const endpoint = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/${contractId}?${params}`;
-      res = await fetch(endpoint, {
+      res = await loggedAppstleFetch(endpoint, {
         method: "DELETE",
         headers: { "X-API-Key": creds.apiKey },
       });
@@ -47,7 +48,7 @@ export async function appstleSubscriptionAction(
       // Pause / Resume use the update-status PUT endpoint
       const statusMap: Record<string, string> = { pause: "PAUSED", resume: "ACTIVE" };
       const endpoint = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-status?contractId=${contractId}&status=${statusMap[action]}`;
-      res = await fetch(endpoint, {
+      res = await loggedAppstleFetch(endpoint, {
         method: "PUT",
         headers: { "X-API-Key": creds.apiKey },
       });
@@ -102,7 +103,7 @@ export async function appstleSkipNextOrder(
   if (!creds) return { success: false, error: "Appstle not configured" };
 
   try {
-    const res = await fetch(
+    const res = await loggedAppstleFetch(
       `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-skip?contractId=${contractId}&api_key=${creds.apiKey}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
@@ -130,7 +131,7 @@ export async function appstleUpdateBillingInterval(
   if (!creds) return { success: false, error: "Appstle not configured" };
 
   try {
-    const res = await fetch(
+    const res = await loggedAppstleFetch(
       `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-interval?contractId=${contractId}&interval=${interval}&intervalCount=${intervalCount}&api_key=${creds.apiKey}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
@@ -169,7 +170,7 @@ async function verifyBillingInterval(
   apiKey: string, contractId: string, expectedInterval: string, expectedCount: number,
 ): Promise<boolean> {
   try {
-    const res = await fetch(
+    const res = await loggedAppstleFetch(
       `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${apiKey}`,
       { headers: { "X-API-Key": apiKey } }
     );
@@ -192,7 +193,7 @@ export async function appstleUpdateNextBillingDate(
   if (!creds) return { success: false, error: "Appstle not configured" };
 
   try {
-    const res = await fetch(
+    const res = await loggedAppstleFetch(
       `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-date?contractId=${contractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(nextBillingDate)}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey }, cache: "no-store" },
     );
@@ -220,7 +221,7 @@ export async function appstleGetUpcomingOrders(
   if (!creds) return { success: false, error: "Appstle not configured" };
 
   try {
-    const res = await fetch(
+    const res = await loggedAppstleFetch(
       `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/top-orders?contractId=${contractId}`,
       { method: "GET", headers: { "X-API-Key": creds.apiKey } }
     );
@@ -247,7 +248,7 @@ export async function appstleAttemptBilling(
   if (!creds) return { success: false, error: "Appstle not configured" };
 
   try {
-    const res = await fetch(
+    const res = await loggedAppstleFetch(
       `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/attempt-billing/${billingAttemptId}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
@@ -273,7 +274,7 @@ export async function appstleSkipUpcomingOrder(
   if (!creds) return { success: false, error: "Appstle not configured" };
 
   try {
-    const res = await fetch(
+    const res = await loggedAppstleFetch(
       `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/skip-upcoming-order?subscriptionContractId=${contractId}&shop=${creds.shop}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
@@ -299,7 +300,7 @@ export async function appstleUnskipOrder(
   if (!creds) return { success: false, error: "Appstle not configured" };
 
   try {
-    const res = await fetch(
+    const res = await loggedAppstleFetch(
       `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/unskip-order/${billingAttemptId}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
@@ -326,7 +327,7 @@ export async function appstleSwitchPaymentMethod(
   if (!creds) return { success: false, error: "Appstle not configured" };
 
   try {
-    const res = await fetch(
+    const res = await loggedAppstleFetch(
       `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-existing-payment-method?contractId=${contractId}&paymentMethodId=${encodeURIComponent(paymentMethodId)}`,
       {
         method: "PUT",
@@ -355,7 +356,7 @@ export async function appstleSendPaymentUpdateEmail(
   if (!creds) return { success: false, error: "Appstle not configured" };
 
   try {
-    const res = await fetch(
+    const res = await loggedAppstleFetch(
       `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-payment-method?contractId=${contractId}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
@@ -390,7 +391,7 @@ export async function appstleAddFreeProduct(
       price: "0",
       isOneTimeProduct: "true",
     });
-    const res = await fetch(
+    const res = await loggedAppstleFetch(
       `https://subscription-admin.appstle.com/api/external/v2/subscription-contract-add-line-item?${params}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
@@ -418,7 +419,7 @@ export async function appstleSwapProduct(
   if (!creds) return { success: false, error: "Appstle not configured" };
 
   try {
-    const res = await fetch(
+    const res = await loggedAppstleFetch(
       `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-swap?contractId=${contractId}&oldVariantId=${oldVariantId}&newVariantId=${newVariantId}&api_key=${creds.apiKey}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );

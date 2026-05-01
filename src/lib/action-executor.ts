@@ -1190,6 +1190,11 @@ async function handleDirectAction(
   // Execute each action and collect results
   const results: { action: ActionParams; result: ActionResult }[] = [];
 
+  // Per-action call logging — wrap each handler in an AsyncLocalStorage
+  // context so any Appstle fetch deep in the call chain auto-logs its
+  // request/response back to appstle_api_calls with the ticket reference.
+  const { withActionContext } = await import("@/lib/appstle-call-log");
+
   for (const action of actions) {
     const handler = directActionHandlers[action.type];
     if (!handler) {
@@ -1201,7 +1206,15 @@ async function handleDirectAction(
     }
 
     try {
-      const result = await handler(ctx, action);
+      const result = await withActionContext(
+        {
+          workspaceId: ctx.workspaceId,
+          ticketId: ctx.ticketId,
+          customerId: ctx.customerId,
+          actionType: action.type,
+        },
+        () => handler(ctx, action),
+      );
       results.push({ action, result });
     } catch (err) {
       results.push({
