@@ -8,6 +8,7 @@ import { BenefitChip } from "../_components/BenefitChip";
 import { ShieldIcon, TrustBadge } from "../_components/TrustBadge";
 import { PressLogos } from "../_components/PressLogos";
 import { HeroGallery } from "../_components/HeroGallery";
+import { HeroFeaturedReviews } from "../_components/HeroFeaturedReviews";
 
 /**
  * Hero — the LCP section. Client component (the format toggle for
@@ -241,6 +242,12 @@ export function HeroSection({ data }: { data: PageData }) {
               </div>
               <ResearchCredibility data={data} />
             </>
+          )}
+
+          {data.reviews.length > 0 && (
+            <div className="mt-6">
+              <HeroFeaturedReviews reviews={data.reviews} />
+            </div>
           )}
 
           <div className="mt-6 flex flex-col items-center gap-3 sm:flex-row sm:items-center">

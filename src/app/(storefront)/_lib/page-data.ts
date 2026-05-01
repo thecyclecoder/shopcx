@@ -117,6 +117,7 @@ export interface LinkMember {
   product_id: string;
   product_handle: string;
   product_title: string;
+  shopify_product_id: string | null;      // for cross-member review pooling
   value: string;                          // toggle pill label, e.g. "Instant"
   display_order: number;
   is_current: boolean;
@@ -182,6 +183,7 @@ export interface Review {
   smart_quote: string | null;
   created_at: string;
   status: string;
+  shopify_product_id?: string | null;
 }
 
 export interface ReviewAnalysis {
@@ -292,6 +294,7 @@ export async function getPageData(
     reviewAnalysisRes,
     reviewCountRes,
     benefitAngleRes,
+    linkGroup,
   ] = await Promise.all([
     admin
       .from("product_page_content")
@@ -371,21 +374,41 @@ export async function getPageData(
           .eq("is_active", true)
           .maybeSingle()
       : Promise.resolve({ data: null }),
+    // Linked products (e.g. Instant ↔ K-Cups format toggle). Run in
+    // parallel so we can pool reviews/ratings across members in the
+    // same round trip rather than serializing two queries.
+    loadLinkGroup(workspace.id, product.id),
   ]);
 
   // Product reviews are keyed by shopify_product_id. The placeholder query
   // above returns nothing — re-fetch with the proper key now that we have
   // the product loaded. Kept inline (not in the parallel block) so we can
   // reference product fields.
+  //
+  // For linked products (e.g. Instant ↔ K-Cups), pool reviews across
+  // every member of the link group. The featured-review carousel in the
+  // hero shows the strongest social proof regardless of which member
+  // page the customer landed on. Featured/highest-rated bubble up via
+  // the order clauses below.
+  const linkedShopifyIds = linkGroup
+    ? linkGroup.members
+        .map(m => (m.shopify_product_id || "").trim())
+        .filter((s): s is string => !!s)
+    : [];
+  const reviewShopifyIds = linkedShopifyIds.length
+    ? Array.from(new Set([extractShopifyProductId(product), ...linkedShopifyIds].filter(Boolean)))
+    : [extractShopifyProductId(product)];
+
   const { data: reviews } = await admin
     .from("product_reviews")
     .select(
-      "id, reviewer_name, rating, title, body, images, smart_quote, created_at, status",
+      "id, reviewer_name, rating, title, body, images, smart_quote, created_at, status, shopify_product_id",
     )
     .eq("workspace_id", workspace.id)
-    .eq("shopify_product_id", extractShopifyProductId(product))
+    .in("shopify_product_id", reviewShopifyIds)
     .in("status", ["published", "featured"])
     .not("body", "is", null)
+    .order("status", { ascending: false }) // 'featured' > 'published'
     .order("rating", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(24);
@@ -394,7 +417,7 @@ export async function getPageData(
     .from("product_reviews")
     .select("id", { count: "exact", head: true })
     .eq("workspace_id", workspace.id)
-    .eq("shopify_product_id", extractShopifyProductId(product))
+    .in("shopify_product_id", reviewShopifyIds)
     .in("status", ["published", "featured"]);
 
   const mediaBySlot: Record<string, MediaItem> = {};
@@ -434,9 +457,8 @@ export async function getPageData(
   // star ratings themselves aren't touched — only counts.
   // Linked products (e.g. Instant ↔ K-Cups format toggle). When a
   // product is in a group, the customer-facing rating + count combines
-  // across all members so the linked products read as one product.
-  const linkGroup = await loadLinkGroup(workspace.id, product.id);
-
+  // across all members so the linked products read as one product. The
+  // group itself was loaded in parallel above; this is just the bump.
   const reviewsBump = (workspace as { storefront_off_platform_review_count?: number | null }).storefront_off_platform_review_count || 0;
   const productWithBump = {
     ...(product as Product),
@@ -573,6 +595,7 @@ async function loadLinkGroup(
       product_id: m.product_id,
       product_handle: (p as { handle?: string } | undefined)?.handle || "",
       product_title: (p as { title?: string } | undefined)?.title || "",
+      shopify_product_id: (p as { shopify_product_id?: string } | undefined)?.shopify_product_id || null,
       value: m.value,
       display_order: m.display_order,
       is_current: m.product_id === productId,

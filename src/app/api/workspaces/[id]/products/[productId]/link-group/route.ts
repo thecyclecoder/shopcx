@@ -1,6 +1,30 @@
 import { NextResponse } from "next/server";
+import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+/**
+ * Revalidate the storefront PDP for every product in `productIds`.
+ * Both URL shapes (admin preview and public custom domain) are
+ * revalidated so the toggle appears immediately on either side.
+ */
+async function revalidateMembers(
+  admin: SupabaseClient,
+  workspaceId: string,
+  productIds: string[],
+) {
+  if (!productIds.length) return;
+  const [{ data: products }, { data: ws }] = await Promise.all([
+    admin.from("products").select("handle").in("id", productIds).eq("workspace_id", workspaceId),
+    admin.from("workspaces").select("storefront_slug").eq("id", workspaceId).single(),
+  ]);
+  for (const p of products || []) {
+    if (!p.handle) continue;
+    if (ws?.storefront_slug) revalidatePath(`/store/${ws.storefront_slug}/${p.handle}`);
+    revalidatePath(`/${p.handle}`);
+  }
+}
 
 /**
  * Linked-products worksheet API. One link group per product (a product
@@ -187,6 +211,10 @@ export async function PUT(
     return NextResponse.json({ error: insertErr.message }, { status: 500 });
   }
 
+  // Revalidate every member's storefront PDP so the toggle appears
+  // (and updates) immediately rather than waiting on the 1-hour ISR.
+  await revalidateMembers(admin, workspaceId, memberIds);
+
   return NextResponse.json({ group_id: groupId, ok: true });
 }
 
@@ -207,6 +235,15 @@ export async function DELETE(
 
   if (!membership) return NextResponse.json({ ok: true });
 
+  // Capture every member's product_id BEFORE the cascade so we know
+  // which storefront pages need their cache invalidated (the toggle
+  // disappears, the rating reverts to per-product, etc.).
+  const { data: priorMembers } = await admin
+    .from("product_link_members")
+    .select("product_id")
+    .eq("group_id", membership.group_id);
+  const priorProductIds = (priorMembers || []).map(m => m.product_id);
+
   // Cascade: members FK has ON DELETE CASCADE on groups; deleting the
   // group wipes every member row. This is the right call since a group
   // with one member has nothing to toggle.
@@ -215,6 +252,8 @@ export async function DELETE(
     .delete()
     .eq("id", membership.group_id)
     .eq("workspace_id", workspaceId);
+
+  await revalidateMembers(admin, workspaceId, priorProductIds);
 
   return NextResponse.json({ ok: true });
 }
