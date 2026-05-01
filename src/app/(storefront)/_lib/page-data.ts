@@ -107,6 +107,40 @@ export interface HowItWorksStep {
   display_order: number;
 }
 
+/**
+ * Linked-products group surfaced to the storefront. The current product
+ * is one of the members; `is_current=true` marks it. The hero format
+ * toggle uses this directly — no extra fetches.
+ */
+export interface LinkMember {
+  member_id: string;
+  product_id: string;
+  product_handle: string;
+  product_title: string;
+  value: string;                          // toggle pill label, e.g. "Instant"
+  display_order: number;
+  is_current: boolean;
+  hero_url: string | null;
+  hero_avif_url: string | null;
+  hero_webp_url: string | null;
+  hero_width: number | null;
+  hero_height: number | null;
+  primary_variant_shopify_id: string | null;
+  primary_variant_servings: number | null;
+  primary_variant_servings_unit: string | null;
+  rating: number | null;
+  rating_count: number | null;
+}
+export interface LinkGroup {
+  id: string;
+  link_type: string;                       // "format" — could later be size, flavor, etc.
+  name: string;                            // display label, e.g. "Coffee Format"
+  members: LinkMember[];
+  combined_rating: number | null;          // weighted avg across members
+  combined_rating_count: number;           // sum across members
+  combined_review_total_count: number;     // published+featured review row count, summed
+}
+
 export interface MediaItem {
   slot: string;
   url: string | null;
@@ -180,6 +214,10 @@ export interface PageData {
   // items in display_order. The first item also lives in
   // media_by_slot[slot] for backward-compat with single-image slots.
   media_gallery_by_slot: Record<string, MediaItem[]>;
+  // If this product is in a link group (e.g. format toggle: Instant ↔
+  // K-Cups), the group's members + visual + variant data so the hero
+  // toggle can swap inline without re-fetching.
+  link_group: LinkGroup | null;
   reviews: Review[];
   review_analysis: ReviewAnalysis | null;
   review_total_count: number;
@@ -394,15 +432,25 @@ export async function getPageData(
   // workspace via storefront_off_platform_review_count) is added to the
   // customer-facing counts so social proof reflects total volume. Per-product
   // star ratings themselves aren't touched — only counts.
+  // Linked products (e.g. Instant ↔ K-Cups format toggle). When a
+  // product is in a group, the customer-facing rating + count combines
+  // across all members so the linked products read as one product.
+  const linkGroup = await loadLinkGroup(workspace.id, product.id);
+
   const reviewsBump = (workspace as { storefront_off_platform_review_count?: number | null }).storefront_off_platform_review_count || 0;
   const productWithBump = {
     ...(product as Product),
-    rating_count: ((product as Product).rating_count ?? 0) + reviewsBump,
+    // Apply link-group combined rating before the off-platform bump so
+    // the bump still adds on top, just once per workspace.
+    rating: linkGroup?.combined_rating ?? (product as Product).rating ?? null,
+    rating_count: (linkGroup?.combined_rating_count ?? (product as Product).rating_count ?? 0) + reviewsBump,
   };
-  const totalCountWithBump = (reviewTotalCount || 0) + reviewsBump;
+  const baseReviewTotal = linkGroup?.combined_review_total_count ?? (reviewTotalCount || 0);
+  const totalCountWithBump = baseReviewTotal + reviewsBump;
 
   return {
     product: productWithBump as Product,
+    link_group: linkGroup,
     page_content: (pageContentRes.data as PageContent | null) || null,
     ingredients: (ingredientsRes.data || []) as Ingredient[],
     ingredient_research: (researchRes.data || []) as IngredientResearch[],
@@ -437,6 +485,142 @@ export async function getPageData(
 // (added in Phase 2 sync). Local variable helps Typescript narrow.
 function extractShopifyProductId(p: Product & { shopify_product_id?: string }): string {
   return (p as { shopify_product_id?: string }).shopify_product_id || "";
+}
+
+/**
+ * Load the link group this product belongs to (if any). Returns the
+ * group + every member with their hero image, primary variant, and
+ * combined rating math. The current product is marked is_current=true.
+ *
+ * Returns null when the product isn't a link member, or when the group
+ * has only this single product (no toggle to render).
+ */
+async function loadLinkGroup(
+  workspaceId: string,
+  productId: string,
+): Promise<LinkGroup | null> {
+  const admin = await import("@/lib/supabase/admin").then(m => m.createAdminClient());
+
+  // 1. Find the group(s) this product is a member of. We only render
+  // one group at a time on the storefront; if a product is in multiple
+  // groups (rare), use the first by created_at.
+  const { data: myMembership } = await admin
+    .from("product_link_members")
+    .select("group_id, product_link_groups!inner(id, link_type, name, workspace_id, created_at)")
+    .eq("product_id", productId)
+    .order("group_id");
+  if (!myMembership?.length) return null;
+
+  const group = (myMembership[0] as unknown as {
+    group_id: string;
+    product_link_groups: { id: string; link_type: string; name: string; workspace_id: string };
+  }).product_link_groups;
+  if (!group || group.workspace_id !== workspaceId) return null;
+
+  // 2. Fetch all members of this group + their basic product data
+  const { data: rows } = await admin
+    .from("product_link_members")
+    .select("id, product_id, value, display_order")
+    .eq("group_id", group.id)
+    .order("display_order");
+  const memberRows = rows || [];
+  if (memberRows.length < 2) return null; // no toggle for single-product groups
+
+  const memberProductIds = memberRows.map(m => m.product_id);
+
+  // 3. Pull product data, hero media, primary variant in parallel
+  const [{ data: products }, { data: media }, { data: variants }] = await Promise.all([
+    admin.from("products")
+      .select("id, handle, title, rating, rating_count, shopify_product_id")
+      .in("id", memberProductIds),
+    admin.from("product_media")
+      .select("product_id, slot, display_order, url, webp_url, avif_url, avif_750_url, webp_750_url, width, height")
+      .in("product_id", memberProductIds)
+      .eq("slot", "hero")
+      .order("display_order"),
+    admin.from("product_variants")
+      .select("product_id, shopify_variant_id, servings, servings_unit, position")
+      .in("product_id", memberProductIds)
+      .order("position"),
+  ]);
+
+  // 4. Build the per-member shape — pick the lowest-display_order hero +
+  // the first (position 0) variant's servings as the "primary" for the
+  // toggle's display.
+  const productsById = new Map((products || []).map(p => [p.id, p]));
+  type HeroRow = { product_id: string; url: string | null; avif_url: string | null; webp_url: string | null; width: number | null; height: number | null };
+  const heroByProduct = new Map<string, HeroRow>();
+  for (const m of (media || []) as HeroRow[]) {
+    if (!heroByProduct.has(m.product_id)) heroByProduct.set(m.product_id, m);
+  }
+  const variantsByProduct = new Map<string, { shopify_variant_id: string | null; servings: number | null; servings_unit: string | null }>();
+  for (const v of variants || []) {
+    if (!variantsByProduct.has(v.product_id)) {
+      variantsByProduct.set(v.product_id, {
+        shopify_variant_id: v.shopify_variant_id,
+        servings: v.servings,
+        servings_unit: v.servings_unit,
+      });
+    }
+  }
+
+  const members: LinkMember[] = memberRows.map(m => {
+    const p = productsById.get(m.product_id);
+    const heroRow = heroByProduct.get(m.product_id);
+    const variant = variantsByProduct.get(m.product_id);
+    return {
+      member_id: m.id,
+      product_id: m.product_id,
+      product_handle: (p as { handle?: string } | undefined)?.handle || "",
+      product_title: (p as { title?: string } | undefined)?.title || "",
+      value: m.value,
+      display_order: m.display_order,
+      is_current: m.product_id === productId,
+      hero_url: heroRow?.url ?? null,
+      hero_avif_url: heroRow?.avif_url ?? null,
+      hero_webp_url: heroRow?.webp_url ?? null,
+      hero_width: heroRow?.width ?? null,
+      hero_height: heroRow?.height ?? null,
+      primary_variant_shopify_id: variant?.shopify_variant_id || null,
+      primary_variant_servings: variant?.servings ?? null,
+      primary_variant_servings_unit: variant?.servings_unit ?? null,
+      rating: (p as { rating?: number } | undefined)?.rating ?? null,
+      rating_count: (p as { rating_count?: number } | undefined)?.rating_count ?? null,
+    };
+  });
+
+  // 5. Combined rating math — weighted avg by rating_count
+  let totalCount = 0;
+  let weightedSum = 0;
+  for (const m of members) {
+    if (m.rating != null && m.rating_count != null && m.rating_count > 0) {
+      weightedSum += m.rating * m.rating_count;
+      totalCount += m.rating_count;
+    }
+  }
+  const combinedRating = totalCount > 0 ? weightedSum / totalCount : null;
+
+  // 6. Combined published-review row count across members' shopify ids
+  const shopifyIds = (products || []).map(p => (p as { shopify_product_id?: string }).shopify_product_id).filter((s): s is string => !!s);
+  let combinedReviewTotalCount = 0;
+  if (shopifyIds.length) {
+    const { count } = await admin.from("product_reviews")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .in("shopify_product_id", shopifyIds)
+      .in("status", ["published", "featured"]);
+    combinedReviewTotalCount = count || 0;
+  }
+
+  return {
+    id: group.id,
+    link_type: group.link_type,
+    name: group.name,
+    members,
+    combined_rating: combinedRating,
+    combined_rating_count: totalCount,
+    combined_review_total_count: combinedReviewTotalCount,
+  };
 }
 
 /**

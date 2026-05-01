@@ -25,6 +25,8 @@ interface ProductNode {
   images?: { nodes: { url: string }[] };
   variants: { nodes: VariantNode[] };
   metafields?: { nodes: MetafieldNode[] };
+  servings?: { value: string } | null;
+  servingsUnit?: { value: string } | null;
 }
 
 async function fetchInventory(shop: string, accessToken: string): Promise<ProductNode[]> {
@@ -46,6 +48,8 @@ async function fetchInventory(shop: string, accessToken: string): Promise<Produc
             metafields(keys: ["reviews.rating", "reviews.rating_count"], first: 2) {
               nodes { key value }
             }
+            servings: metafield(namespace: "custom", key: "servings") { value }
+            servingsUnit: metafield(namespace: "custom", key: "servings_unit") { value }
           }
         }
         pageInfo { hasNextPage }
@@ -167,6 +171,22 @@ export const syncInventory = inngest.createFunction(
           if (Object.keys(updatePayload).length > 0) {
             await admin.from("products").update(updatePayload).eq("id", dbProduct.id);
             if (changed) totalUpdated++;
+          }
+
+          // Servings fan-out: write the product-level metafield down to
+          // every variant in product_variants. Variant-level lets future
+          // price-per-serving math live entirely on the variant row,
+          // and per-pack overrides become possible without touching the
+          // Shopify metafield.
+          const servingsRaw = product.servings?.value;
+          const servingsUnit = product.servingsUnit?.value || null;
+          const servings = servingsRaw ? parseInt(servingsRaw, 10) : null;
+          if (servings != null) {
+            await admin.from("product_variants").update({
+              servings,
+              servings_unit: servingsUnit,
+              updated_at: new Date().toISOString(),
+            }).eq("workspace_id", ws.id).eq("product_id", dbProduct.id);
           }
         }
       });

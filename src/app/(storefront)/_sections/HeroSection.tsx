@@ -1,4 +1,8 @@
-import type { PageData } from "../_lib/page-data";
+"use client";
+
+import { useState } from "react";
+import { usePathname } from "next/navigation";
+import type { PageData, LinkMember, MediaItem } from "../_lib/page-data";
 import { StarRating } from "../_components/StarRating";
 import { BenefitChip } from "../_components/BenefitChip";
 import { ShieldIcon, TrustBadge } from "../_components/TrustBadge";
@@ -6,18 +10,61 @@ import { PressLogos } from "../_components/PressLogos";
 import { HeroGallery } from "../_components/HeroGallery";
 
 /**
- * Hero — the LCP section. Server component. Pure HTML + CSS.
+ * Hero — the LCP section. Client component (the format toggle for
+ * linked products needs useState; the rest of the markup is otherwise
+ * pure HTML + CSS so hydration cost stays low).
  *
  * Mobile (default): image on top, headline + CTA below.
  * md+: two-column side-by-side, headline left, image right.
  *
- * The CTA is a native <a href="#pricing"> — native anchor scroll means
- * zero JS to jump to the price table.
+ * The CTA is a native <a href="#pricing"> on the current product —
+ * native anchor scroll means zero JS to jump to the price table. When
+ * a linked member is selected, href flips to that member's product
+ * page since this page's price table is for the wrong format.
  */
 export function HeroSection({ data }: { data: PageData }) {
+  const pathname = usePathname() || "";
   const heroMedia = data.media_by_slot["hero"] || null;
   const heroGallery = data.media_gallery_by_slot["hero"] || (heroMedia ? [heroMedia] : []);
   const heroAlt = heroMedia?.alt_text || data.product.title;
+
+  // Format toggle (linked products). When the customer toggles to a
+  // linked member (e.g. K-Cups on the Amazing Coffee page), the hero
+  // image swaps to that member's hero and the servings chip updates.
+  // Default selection = the current product (is_current=true). This
+  // intentionally does NOT change the price-table / pricing tiers
+  // shown below the hero in phase 1; that wiring comes in phase 3.
+  const linkGroup = data.link_group;
+  const sortedMembers = linkGroup ? [...linkGroup.members].sort((a, b) => a.display_order - b.display_order) : [];
+  const defaultMemberId = sortedMembers.find(m => m.is_current)?.member_id || sortedMembers[0]?.member_id || null;
+  const [activeMemberId, setActiveMemberId] = useState<string | null>(defaultMemberId);
+  const activeMember: LinkMember | null = sortedMembers.find(m => m.member_id === activeMemberId) || null;
+  const isViewingCurrent = !!activeMember?.is_current;
+
+  // When viewing the CURRENT product, use its full multi-image gallery.
+  // When viewing a linked member, fall back to that member's single hero
+  // (we don't pre-load every linked product's whole gallery — phase 1).
+  const visibleGallery: MediaItem[] = isViewingCurrent || !activeMember
+    ? heroGallery
+    : [{
+        slot: "hero",
+        url: activeMember.hero_url,
+        webp_url: activeMember.hero_webp_url,
+        avif_url: activeMember.hero_avif_url,
+        avif_480_url: null, webp_480_url: null,
+        avif_750_url: null, webp_750_url: null,
+        avif_1080_url: null, webp_1080_url: null,
+        avif_1500_url: null, webp_1500_url: null,
+        avif_1920_url: null, webp_1920_url: null,
+        alt_text: activeMember.product_title,
+        width: activeMember.hero_width,
+        height: activeMember.hero_height,
+      }];
+
+  // Servings chip text for the active member (e.g. "30 Servings", "24 Pods")
+  const servings = activeMember?.primary_variant_servings;
+  const servingsUnit = activeMember?.primary_variant_servings_unit;
+  const servingsLabel = servings != null ? `${servings} ${servingsUnit || "Servings"}` : null;
 
   const headline =
     data.benefit_angle?.hero_headline ||
@@ -34,6 +81,21 @@ export function HeroSection({ data }: { data: PageData }) {
         ),
       )
     : null;
+
+  // CTA href: when viewing a linked member that ISN'T the current
+  // product, the price table on this page is for the WRONG format —
+  // route Shop now to that member's own page so the customer sees its
+  // price table. Pathname has the current product's handle as the last
+  // segment (admin: /store/{ws}/{handle}, public: /{handle}). Swap that
+  // segment for the active member's handle.
+  const ctaHref = isViewingCurrent || !activeMember
+    ? "#pricing"
+    : (() => {
+        const segs = pathname.split("/").filter(Boolean);
+        if (segs.length === 0) return `/${activeMember.product_handle}`;
+        segs[segs.length - 1] = activeMember.product_handle;
+        return "/" + segs.join("/");
+      })();
 
   const ratingValue = data.product.rating ?? null;
   const ratingCount =
@@ -92,8 +154,8 @@ export function HeroSection({ data }: { data: PageData }) {
             squeezing the headline. */}
         <div className="relative w-full xl:order-1 xl:basis-3/5 xl:sticky xl:top-0 xl:flex xl:h-screen xl:flex-col xl:items-stretch xl:pt-8">
           <HeroGallery
-            items={heroGallery}
-            altFallback={heroAlt}
+            items={visibleGallery}
+            altFallback={activeMember?.product_title || heroAlt}
             isBestseller={!!data.product.is_bestseller}
             aspectW={heroAspectW}
             aspectH={heroAspectH}
@@ -127,6 +189,49 @@ export function HeroSection({ data }: { data: PageData }) {
             </p>
           )}
 
+          {linkGroup && sortedMembers.length > 1 && (
+            <div className="mt-5">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
+                  {linkGroup.name}
+                </span>
+                {servingsLabel && (
+                  <span className="rounded-full bg-zinc-100 px-3 py-1 text-xs font-semibold text-zinc-700">
+                    {servingsLabel}
+                  </span>
+                )}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {sortedMembers.map((m) => {
+                  const isActive = m.member_id === activeMemberId;
+                  return (
+                    <button
+                      key={m.member_id}
+                      type="button"
+                      onClick={() => setActiveMemberId(m.member_id)}
+                      aria-pressed={isActive}
+                      style={
+                        isActive
+                          ? {
+                              backgroundColor: "var(--storefront-primary)",
+                              borderColor: "var(--storefront-primary)",
+                            }
+                          : undefined
+                      }
+                      className={`rounded-full border-2 px-4 py-2 text-sm font-semibold transition-colors ${
+                        isActive
+                          ? "text-white"
+                          : "border-zinc-200 bg-white text-zinc-700 hover:border-zinc-400"
+                      }`}
+                    >
+                      {m.value}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {benefitBar.length > 0 && (
             <>
               <div className="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
@@ -140,13 +245,15 @@ export function HeroSection({ data }: { data: PageData }) {
 
           <div className="mt-6 flex flex-col items-center gap-3 sm:flex-row sm:items-center">
             <a
-              href="#pricing"
+              href={ctaHref}
               style={{ backgroundColor: "var(--storefront-primary)" }}
               className="inline-flex h-14 w-full items-center justify-center rounded-full px-8 text-base font-semibold text-white shadow-sm transition-[filter] hover:brightness-90 sm:w-auto"
             >
-              {lowestPrice != null
-                ? `Try it now — from $${(lowestPrice / 100).toFixed(2)}`
-                : "Shop now"}
+              {!isViewingCurrent && activeMember
+                ? `Shop ${activeMember.value}`
+                : lowestPrice != null
+                  ? `Try it now — from $${(lowestPrice / 100).toFixed(2)}`
+                  : "Shop now"}
             </a>
             <TrustBadge icon={<ShieldIcon />} label="30-day money-back" />
           </div>

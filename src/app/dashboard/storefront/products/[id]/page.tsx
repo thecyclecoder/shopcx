@@ -163,6 +163,8 @@ export default function StorefrontProductDetailPage() {
 
       <BestsellerToggle product={product} workspaceId={workspace.id} onUpdate={(p) => setProduct(p)} />
 
+      <LinkedProductsCard workspaceId={workspace.id} productId={product.id} productTitle={product.title} />
+
       <HeaderSettingsCard product={product} workspaceId={workspace.id} onUpdate={(p) => setProduct(p)} />
 
       <FeaturedArticlesCard product={product} workspaceId={workspace.id} onUpdate={(p) => setProduct(p)} />
@@ -993,6 +995,385 @@ function BestsellerToggle({
           }`}
         />
       </button>
+    </div>
+  );
+}
+
+/**
+ * Linked Products worksheet. A product can join one link group (e.g.
+ * "Coffee Format" linking Instant ↔ K-Cups). On the storefront PDP,
+ * a toggle swaps the hero image, servings chip, and CTA between
+ * members. Bidirectional — the linked product page sees the same
+ * group automatically.
+ *
+ * Phase 1: link_type is just "format". Future link_types ("size",
+ * "flavor") use the same UI.
+ */
+type LinkMemberRow = {
+  id?: string;
+  product_id: string;
+  value: string;
+  display_order: number;
+  product_title: string;
+  product_handle: string;
+  image_url: string | null;
+};
+
+type LinkGroupState = {
+  id: string | null;
+  link_type: string;
+  name: string;
+  members: LinkMemberRow[];
+};
+
+type ProductOption = { id: string; title: string; handle: string; image_url: string | null };
+
+const LINK_TYPE_OPTIONS = [
+  { value: "format", label: "Format (e.g. Instant vs K-Cups)" },
+];
+
+function LinkedProductsCard({
+  workspaceId,
+  productId,
+  productTitle,
+}: {
+  workspaceId: string;
+  productId: string;
+  productTitle: string;
+}) {
+  const [group, setGroup] = useState<LinkGroupState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [products, setProducts] = useState<ProductOption[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/link-group`);
+    if (res.ok) {
+      const data = await res.json();
+      setGroup(data.group);
+    }
+    setLoading(false);
+  }, [workspaceId, productId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const loadProducts = useCallback(async () => {
+    const res = await fetch(`/api/workspaces/${workspaceId}/products?status=all`);
+    if (res.ok) {
+      const data = await res.json();
+      setProducts((data || []).map((p: ProductOption) => ({
+        id: p.id, title: p.title, handle: p.handle, image_url: p.image_url,
+      })));
+    }
+  }, [workspaceId]);
+
+  function startCreate() {
+    setGroup({
+      id: null,
+      link_type: "format",
+      name: "",
+      members: [{
+        product_id: productId,
+        value: "",
+        display_order: 0,
+        product_title: productTitle,
+        product_handle: "",
+        image_url: null,
+      }],
+    });
+    setEditing(true);
+    loadProducts();
+  }
+
+  function startEdit() {
+    setEditing(true);
+    loadProducts();
+  }
+
+  function cancel() {
+    setEditing(false);
+    setError(null);
+    load();
+  }
+
+  async function save() {
+    if (!group) return;
+    setError(null);
+    if (!group.name.trim()) { setError("Name is required."); return; }
+    if (group.members.length < 2) { setError("Add at least one linked product."); return; }
+    if (group.members.some(m => !m.value.trim())) { setError("Every product needs a value (e.g. \"Instant\", \"K-Cups\")."); return; }
+
+    setBusy(true);
+    const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/link-group`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        link_type: group.link_type,
+        name: group.name,
+        members: group.members.map((m, i) => ({
+          product_id: m.product_id,
+          value: m.value,
+          display_order: i,
+        })),
+      }),
+    });
+    setBusy(false);
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      setError(j.error || "Failed to save.");
+      return;
+    }
+    setEditing(false);
+    load();
+  }
+
+  async function deleteGroup() {
+    if (!confirm("Delete this link group? Both products will stop showing the toggle.")) return;
+    setBusy(true);
+    const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/link-group`, {
+      method: "DELETE",
+    });
+    setBusy(false);
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      setError(j.error || "Failed to delete.");
+      return;
+    }
+    setEditing(false);
+    setGroup(null);
+  }
+
+  function addMember(p: ProductOption) {
+    if (!group) return;
+    if (group.members.some(m => m.product_id === p.id)) {
+      setPickerOpen(false);
+      return;
+    }
+    setGroup({
+      ...group,
+      members: [...group.members, {
+        product_id: p.id,
+        value: "",
+        display_order: group.members.length,
+        product_title: p.title,
+        product_handle: p.handle,
+        image_url: p.image_url,
+      }],
+    });
+    setPickerOpen(false);
+  }
+
+  function removeMember(productIdToRemove: string) {
+    if (!group) return;
+    if (productIdToRemove === productId) return; // can't remove the current product
+    setGroup({ ...group, members: group.members.filter(m => m.product_id !== productIdToRemove) });
+  }
+
+  function updateMemberValue(productIdToUpdate: string, value: string) {
+    if (!group) return;
+    setGroup({
+      ...group,
+      members: group.members.map(m => m.product_id === productIdToUpdate ? { ...m, value } : m),
+    });
+  }
+
+  const eligibleProducts = useMemo(() => {
+    const taken = new Set((group?.members || []).map(m => m.product_id));
+    return products.filter(p => !taken.has(p.id));
+  }, [products, group]);
+
+  return (
+    <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Linked Products</h3>
+        {!loading && !editing && group && (
+          <button
+            onClick={startEdit}
+            className="text-xs font-medium text-emerald-600 hover:text-emerald-700"
+          >
+            Edit
+          </button>
+        )}
+      </div>
+
+      {loading ? (
+        <p className="text-xs text-zinc-400">Loading…</p>
+      ) : !group && !editing ? (
+        <div className="space-y-3">
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            Link this product to others (e.g. different formats of the same coffee)
+            so the storefront PDP can show a toggle. Pricing stays on each product&apos;s
+            own page; only the hero image and servings chip swap inline.
+          </p>
+          <button
+            onClick={startCreate}
+            className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600"
+          >
+            Create link group
+          </button>
+        </div>
+      ) : group && !editing ? (
+        <div className="space-y-3">
+          <div className="flex items-center gap-3 text-sm">
+            <span className="text-zinc-500">Link type:</span>
+            <span className="font-medium text-zinc-900 dark:text-zinc-100">{group.link_type}</span>
+            <span className="text-zinc-300">·</span>
+            <span className="text-zinc-500">Name:</span>
+            <span className="font-medium text-zinc-900 dark:text-zinc-100">{group.name}</span>
+          </div>
+          <div className="space-y-1.5">
+            {group.members.map((m) => (
+              <div key={m.product_id} className="flex items-center gap-3 rounded-md border border-zinc-200 px-3 py-2 dark:border-zinc-800">
+                {m.image_url ? (
+                  <img src={m.image_url} alt="" className="h-8 w-8 rounded object-cover" />
+                ) : (
+                  <div className="h-8 w-8 rounded bg-zinc-100 dark:bg-zinc-800" />
+                )}
+                <span className="flex-1 text-sm text-zinc-900 dark:text-zinc-100">{m.product_title}</span>
+                <span className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs font-semibold text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                  {m.value}
+                </span>
+                {m.product_id === productId && (
+                  <span className="text-[10px] uppercase tracking-wider text-emerald-600">This product</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Link type</span>
+              <select
+                value={group?.link_type || "format"}
+                onChange={(e) => setGroup(g => g ? { ...g, link_type: e.target.value } : g)}
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+              >
+                {LINK_TYPE_OPTIONS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Name (shown on storefront)</span>
+              <input
+                type="text"
+                value={group?.name || ""}
+                onChange={(e) => setGroup(g => g ? { ...g, name: e.target.value } : g)}
+                placeholder="Coffee Format"
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+              />
+            </label>
+          </div>
+
+          <div>
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+              Members — value is what appears on the toggle pill
+            </div>
+            <div className="space-y-1.5">
+              {(group?.members || []).map((m) => (
+                <div key={m.product_id} className="flex items-center gap-3 rounded-md border border-zinc-200 px-3 py-2 dark:border-zinc-800">
+                  {m.image_url ? (
+                    <img src={m.image_url} alt="" className="h-8 w-8 rounded object-cover" />
+                  ) : (
+                    <div className="h-8 w-8 rounded bg-zinc-100 dark:bg-zinc-800" />
+                  )}
+                  <span className="flex-1 text-sm text-zinc-900 dark:text-zinc-100">
+                    {m.product_title}
+                    {m.product_id === productId && (
+                      <span className="ml-2 text-[10px] uppercase tracking-wider text-emerald-600">This product</span>
+                    )}
+                  </span>
+                  <input
+                    type="text"
+                    value={m.value}
+                    onChange={(e) => updateMemberValue(m.product_id, e.target.value)}
+                    placeholder="e.g. Instant"
+                    className="w-32 rounded-md border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+                  />
+                  {m.product_id !== productId && (
+                    <button
+                      onClick={() => removeMember(m.product_id)}
+                      className="text-zinc-400 hover:text-red-600"
+                      aria-label="Remove"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="relative mt-2">
+              <button
+                onClick={() => setPickerOpen(o => !o)}
+                className="rounded-md border border-dashed border-zinc-300 px-3 py-2 text-sm text-zinc-600 hover:border-zinc-500 dark:border-zinc-700 dark:text-zinc-400"
+              >
+                + Add product
+              </button>
+              {pickerOpen && (
+                <div className="absolute z-10 mt-1 max-h-72 w-80 overflow-auto rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+                  {eligibleProducts.length === 0 ? (
+                    <div className="px-3 py-2 text-xs text-zinc-500">No more products to link.</div>
+                  ) : (
+                    eligibleProducts.map(p => (
+                      <button
+                        key={p.id}
+                        onClick={() => addMember(p)}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                      >
+                        {p.image_url ? (
+                          <img src={p.image_url} alt="" className="h-6 w-6 rounded object-cover" />
+                        ) : (
+                          <div className="h-6 w-6 rounded bg-zinc-100 dark:bg-zinc-800" />
+                        )}
+                        <span className="text-zinc-900 dark:text-zinc-100">{p.title}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {error && (
+            <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-400">
+              {error}
+            </p>
+          )}
+
+          <div className="flex items-center gap-2 pt-2">
+            <button
+              onClick={save}
+              disabled={busy}
+              className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+            >
+              {busy ? "Saving…" : "Save"}
+            </button>
+            <button
+              onClick={cancel}
+              disabled={busy}
+              className="rounded-md border border-zinc-300 px-4 py-2 text-sm text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              Cancel
+            </button>
+            {group?.id && (
+              <button
+                onClick={deleteGroup}
+                disabled={busy}
+                className="ml-auto text-sm text-red-600 hover:text-red-700 disabled:opacity-50"
+              >
+                Delete group
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
