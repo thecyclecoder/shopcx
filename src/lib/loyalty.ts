@@ -90,17 +90,66 @@ export async function getLoyaltySettings(workspaceId: string): Promise<LoyaltySe
 
 // ── Member lookup ──
 
+/**
+ * Expand a customer_id to all linked profile IDs in the same group.
+ * Loyalty records may live on any sibling profile (e.g. tbaxtel@me.com
+ * has the record but tbaxtel@hotmail.com / @gmail.com don't), so every
+ * lookup goes through the link group.
+ */
+async function expandLinkedCustomerIds(
+  workspaceId: string,
+  customerId: string,
+): Promise<string[]> {
+  const admin = createAdminClient();
+  const { data: link } = await admin
+    .from("customer_links")
+    .select("group_id")
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", customerId)
+    .maybeSingle();
+  if (!link?.group_id) return [customerId];
+  const { data: peers } = await admin
+    .from("customer_links")
+    .select("customer_id")
+    .eq("workspace_id", workspaceId)
+    .eq("group_id", link.group_id);
+  const ids = new Set<string>([customerId]);
+  for (const p of peers || []) if (p.customer_id) ids.add(p.customer_id);
+  return [...ids];
+}
+
 export async function getMember(
   workspaceId: string,
   shopifyCustomerId: string,
 ): Promise<LoyaltyMember | null> {
   const admin = createAdminClient();
-  const { data } = await admin
+  // First try direct match on this Shopify ID (fast path)
+  const direct = await admin
     .from("loyalty_members")
     .select("*")
     .eq("workspace_id", workspaceId)
     .eq("shopify_customer_id", shopifyCustomerId)
-    .single();
+    .maybeSingle();
+  if (direct.data) return direct.data;
+
+  // Fallback: resolve the customer record for this Shopify ID and walk
+  // linked profiles. Loyalty record might live on a sibling.
+  const { data: cust } = await admin
+    .from("customers")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_customer_id", shopifyCustomerId)
+    .maybeSingle();
+  if (!cust?.id) return null;
+  const linkedIds = await expandLinkedCustomerIds(workspaceId, cust.id);
+  const { data } = await admin
+    .from("loyalty_members")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", linkedIds)
+    .order("points_balance", { ascending: false })
+    .limit(1)
+    .maybeSingle();
   return data;
 }
 
@@ -109,12 +158,15 @@ export async function getMemberByCustomerId(
   customerId: string,
 ): Promise<LoyaltyMember | null> {
   const admin = createAdminClient();
+  const linkedIds = await expandLinkedCustomerIds(workspaceId, customerId);
   const { data } = await admin
     .from("loyalty_members")
     .select("*")
     .eq("workspace_id", workspaceId)
-    .eq("customer_id", customerId)
-    .single();
+    .in("customer_id", linkedIds)
+    .order("points_balance", { ascending: false })
+    .limit(1)
+    .maybeSingle();
   return data;
 }
 

@@ -385,9 +385,17 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       .select("order_number, total_cents, line_items, discount_codes, created_at, financial_status, shopify_order_id, fulfillments, source_name")
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .order("created_at", { ascending: false }).limit(5),
+    // Loyalty record may live on ANY of the linked customer profiles.
+    // Bug we fixed: previously this used .eq("customer_id", custId)
+    // and missed records belonging to a sibling profile (e.g. ticket
+    // from tbaxtel@hotmail.com but loyalty on tbaxtel@me.com).
     admin.from("loyalty_members")
       .select("id, points_balance")
-      .eq("workspace_id", wsId).eq("customer_id", custId).maybeSingle(),
+      .eq("workspace_id", wsId)
+      .in("customer_id", allCustIds)
+      .order("points_balance", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
   ]);
 
   const parts: string[] = [];

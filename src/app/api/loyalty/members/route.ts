@@ -35,7 +35,21 @@ export async function GET(request: Request) {
     .eq("workspace_id", workspaceId);
 
   if (customerId) {
-    query = query.eq("customer_id", customerId);
+    // Loyalty record may live on any of the linked customer profiles —
+    // expand customer_id to the full link group so the ticket / customer
+    // detail UIs surface the record regardless of which sibling profile
+    // they're viewing.
+    const linkedIds = new Set<string>([customerId]);
+    const { data: link } = await admin
+      .from("customer_links").select("group_id")
+      .eq("workspace_id", workspaceId).eq("customer_id", customerId).maybeSingle();
+    if (link?.group_id) {
+      const { data: peers } = await admin
+        .from("customer_links").select("customer_id")
+        .eq("workspace_id", workspaceId).eq("group_id", link.group_id);
+      for (const p of peers || []) if (p.customer_id) linkedIds.add(p.customer_id);
+    }
+    query = query.in("customer_id", [...linkedIds]);
   }
 
   if (search) {
