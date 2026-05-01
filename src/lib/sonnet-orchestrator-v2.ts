@@ -60,7 +60,7 @@ export interface SonnetDecision {
 const FALLBACK_DECISION: SonnetDecision = {
   reasoning: "Orchestrator error — falling back to escalation",
   action_type: "escalate",
-  response_message: "I'm going to look into this and send you an email shortly.",
+  response_message: "Someone on my team is working on this and will send you an email shortly!",
 };
 
 // ── Tool Definitions (Anthropic format) ──

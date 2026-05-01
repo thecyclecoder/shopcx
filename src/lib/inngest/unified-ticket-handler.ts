@@ -451,9 +451,11 @@ async function escalate(admin: Admin, wsId: string, tid: string, ch: string, int
     await sysNote(admin, tid, `[System] Escalated to ${assignedName}.`);
   }
 
-  // Always send a customer-facing message on escalation
-  // Must contain "send you an email" to trigger chatEnded in the widget
-  const escalationMsg = "I'm going to look into this and send you an email shortly.";
+  // Always send a customer-facing message on escalation.
+  // Must contain "send you an email" to trigger chatEnded in the widget —
+  // we keep that phrase but frame it as a team handoff so it doesn't
+  // read as AI-speak ("I ran into an issue / I'll look into it").
+  const escalationMsg = "Someone on my team is working on this and will send you an email shortly!";
 
   await sendWithDelay(admin, wsId, tid, ch, escalationMsg, false);
 

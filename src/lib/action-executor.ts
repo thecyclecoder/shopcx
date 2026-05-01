@@ -1401,15 +1401,10 @@ async function handleDirectAction(
   }
 
   if (failures.length === 0) {
-    // All succeeded — send confirmation, with placeholder substitution
-    // for action-generated data (label URLs, tracking numbers, etc.)
-    // that Sonnet couldn't know at response_message generation time.
-    if (decision.response_message) {
-      const filled = substituteActionPlaceholders(decision.response_message, results);
-      await send(filled, ctx.sandbox);
-    }
-
-    // Self-healing: verify actions actually took effect in the DB
+    // Self-heal: verify each action actually took effect BEFORE we send
+    // the AI's prefab "I did it" message. Earlier flow sent the message
+    // optimistically and then verified — the customer would see a fake
+    // success even when the action silently didn't stick.
     await new Promise(resolve => setTimeout(resolve, 3000));
     const verifyFailures: string[] = [];
 
@@ -1420,7 +1415,6 @@ async function handleDirectAction(
         await addTicketTag(ctx.ticketId, "ai:fix");
         await sysNote(`[Self-heal] Verification failed for ${s.action.type} — retrying...`);
 
-        // Retry the action once
         const handler = directActionHandlers[s.action.type];
         if (handler) {
           try {
@@ -1440,6 +1434,14 @@ async function handleDirectAction(
       }
     }
 
+    // Send the customer-facing confirmation only AFTER verify+retry have
+    // resolved cleanly. If verify still failed, fall through to the
+    // verify-failure escalation block below — no response_message goes out.
+    if (verifyFailures.length === 0 && decision.response_message) {
+      const filled = substituteActionPlaceholders(decision.response_message, results);
+      await send(filled, ctx.sandbox);
+    }
+
     if (verifyFailures.length > 0) {
       const { addTicketTag } = await import("@/lib/ticket-tags");
       await addTicketTag(ctx.ticketId, "ai:fix");
@@ -1454,9 +1456,13 @@ async function handleDirectAction(
       await escalateTicket(ctx, `Self-heal verification failures: ${verifyFailures.join("; ")}`);
     }
   } else {
-    // Some failed — send error + escalate
+    // Some failed — escalate with a human-sounding holding message.
+    // Avoid "I ran into an issue" / "I'll look into it" wording —
+    // those read as AI-speak and undermine trust. The pre-authored
+    // response_message is intentionally NOT sent here, since it
+    // typically claims success that didn't happen.
     const errorMsg =
-      "I ran into an issue processing your request. I'm going to look into this and send you an email shortly.";
+      "Someone on my team is working on this and we'll get back to you shortly!";
     await send(errorMsg, ctx.sandbox);
     await escalateTicket(ctx, `Direct action failures: ${failures.map((f) => `${f.action.type}: ${f.result.error}`).join("; ")}`);
   }
@@ -1767,10 +1773,12 @@ async function handleEscalate(
   const reason = decision.reasoning || "Sonnet orchestrator escalated";
   await escalateTicket(ctx, reason);
 
-  // Send holding message to customer
+  // Send holding message to customer. Sonnet's pre-authored
+  // response_message is preferred for context-specific framing; fall
+  // back to a generic team-handoff line that doesn't sound AI-y.
   const holdingMsg =
     decision.response_message ||
-    "I'm going to look into this and send you an email shortly.";
+    "Someone on my team is working on this and we'll get back to you shortly!";
   await send(holdingMsg, ctx.sandbox);
   await sysNote(`Escalated: ${reason}`);
 }

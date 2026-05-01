@@ -176,7 +176,9 @@ export async function POST(
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          // Improve is used infrequently and is the deepest investigation
+          // surface — always use the strongest model available.
+          model: "claude-opus-4-7",
           max_tokens: 2000,
           tools,
           system: `${SYSTEM_PROMPT}\n\n--- TICKET CONTEXT ---\n${ticketContext}`,
