@@ -2,6 +2,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { addOrderTags } from "@/lib/shopify-order-tags";
 import { zipDistance, extractZip } from "@/lib/geo-distance";
+import { normalizeReseller } from "@/lib/known-resellers";
 
 // ── Types ──
 
@@ -551,6 +552,10 @@ export async function checkOrderForFraud(
         const result = await checkNameMismatch(rule, workspaceId, order, customer);
         if (result) flagged = true;
       }
+      if (rule.rule_type === "amazon_reseller") {
+        const result = await checkAmazonResellerMatch(rule, workspaceId, order, effectiveCustomerId);
+        if (result) flagged = true;
+      }
     } catch (err) {
       console.error(`Real-time fraud check error for rule ${rule.id}:`, err);
     }
@@ -1063,6 +1068,188 @@ async function checkNameMismatch(
     .single();
 
   if (newCase) {
+    await inngest.send({
+      name: "fraud/case.created",
+      data: { caseId: newCase.id, workspaceId },
+    });
+  }
+
+  return true;
+}
+
+// ── Amazon Reseller Address Match ──
+//
+// Compares the order's shipping AND billing addresses to every active
+// known_resellers row. Two-pass match:
+//   1. Fast path: SQL-equality on the normalized form (handles
+//      "10083 Lynden Oval, 44130" vs "10083 lynden ovl|44130" — same
+//      after normalize).
+//   2. Slow path: when zip matches and the street starts with the same
+//      number, ask Haiku whether the addresses are the same physical
+//      location (handles deliberate obfuscation like "010083 Lynden
+//      Ova.l, Apt1").
+//
+// On match we create a fraud_case with rule_type='amazon_reseller'.
+// That signal is what the Sonnet/Opus orchestrator reads to refuse all
+// actions for the customer once the case status is 'confirmed_fraud'.
+
+interface AddressLite {
+  address1?: string | null;
+  address2?: string | null;
+  city?: string | null;
+  state?: string | null;
+  province?: string | null;
+  province_code?: string | null;
+  zip?: string | null;
+}
+
+function pickAddressFromOrder(
+  order: { shipping_address: unknown; billing_address: unknown }
+): { ship: AddressLite | null; bill: AddressLite | null } {
+  const ship = (order.shipping_address as AddressLite | null) || null;
+  const bill = (order.billing_address as AddressLite | null) || null;
+  return { ship, bill };
+}
+
+async function haikuAddressesMatch(a: AddressLite, b: AddressLite): Promise<boolean> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return false;
+  const fmt = (x: AddressLite) =>
+    [x.address1, x.address2, x.city, x.state || x.province, x.zip].filter(Boolean).join(", ");
+  const prompt = `Two addresses. Reply EXACTLY "MATCH" or "DIFFERENT" — no other text.
+
+Address A: ${fmt(a)}
+Address B: ${fmt(b)}
+
+Same physical location if: same street number, same street name (allowing typos/punctuation/abbreviation differences like "St" vs "Street"), same city, same zip. Different unit/apt within the same building counts as MATCH.`;
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 5,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) return false;
+    const j = await res.json();
+    const ans = ((j.content?.[0] as { text: string })?.text || "").trim().toUpperCase();
+    return ans.startsWith("MATCH");
+  } catch {
+    return false;
+  }
+}
+
+async function checkAmazonResellerMatch(
+  rule: FraudRule,
+  workspaceId: string,
+  order: { id: string; shopify_order_id: string; shipping_address: unknown; billing_address: unknown; order_number?: string | null; email?: string | null },
+  customerId: string | null,
+): Promise<boolean> {
+  const admin = createAdminClient();
+
+  const { data: resellers } = await admin
+    .from("known_resellers")
+    .select("id, business_name, address1, address2, city, state, zip, normalized_address, amazon_seller_id")
+    .eq("workspace_id", workspaceId)
+    .eq("status", "active");
+
+  if (!resellers?.length) return false;
+
+  const { ship, bill } = pickAddressFromOrder(order);
+  type Hit = { reseller: typeof resellers[number]; matchedOn: "shipping" | "billing"; method: "exact" | "haiku" };
+  const hits: Hit[] = [];
+
+  for (const addr of [
+    ship ? { side: "shipping" as const, addr: ship } : null,
+    bill ? { side: "billing" as const, addr: bill } : null,
+  ].filter((x): x is { side: "shipping" | "billing"; addr: AddressLite } => !!x)) {
+    const orderNorm = normalizeReseller({ address1: addr.addr.address1, zip: addr.addr.zip });
+    for (const r of resellers) {
+      // Fast path
+      if (r.normalized_address && r.normalized_address === orderNorm) {
+        hits.push({ reseller: r, matchedOn: addr.side, method: "exact" });
+        continue;
+      }
+      // Slow path: same zip + plausibly similar street → ask Haiku
+      const orderZip = (addr.addr.zip || "").slice(0, 5);
+      const resellerZip = (r.zip || "").slice(0, 5);
+      if (!orderZip || orderZip !== resellerZip) continue;
+      const orderNum = (addr.addr.address1 || "").match(/\d+/)?.[0] || "";
+      const resellerNum = (r.address1 || "").match(/\d+/)?.[0] || "";
+      if (!orderNum || orderNum.replace(/^0+/, "") !== resellerNum.replace(/^0+/, "")) continue;
+      // Worth asking Haiku — same zip + same street number
+      const matched = await haikuAddressesMatch(addr.addr, {
+        address1: r.address1, address2: r.address2, city: r.city, state: r.state, zip: r.zip,
+      });
+      if (matched) hits.push({ reseller: r, matchedOn: addr.side, method: "haiku" });
+    }
+  }
+
+  if (!hits.length) return false;
+
+  // Dedupe (same reseller may match on both ship + bill)
+  const uniqueResellers = new Map<string, Hit>();
+  for (const h of hits) if (!uniqueResellers.has(h.reseller.id)) uniqueResellers.set(h.reseller.id, h);
+  const primary = [...uniqueResellers.values()][0];
+
+  // Avoid duplicate cases for the same order + reseller
+  const { data: existing } = await admin
+    .from("fraud_cases")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("rule_type", "amazon_reseller")
+    .filter("evidence->>order_id", "eq", order.shopify_order_id)
+    .limit(1)
+    .maybeSingle();
+  if (existing) return true;
+
+  const evidence = {
+    order_id: order.shopify_order_id,
+    order_number: order.order_number || null,
+    matched_resellers: [...uniqueResellers.values()].map(h => ({
+      reseller_id: h.reseller.id,
+      business_name: h.reseller.business_name,
+      amazon_seller_id: h.reseller.amazon_seller_id,
+      matched_on: h.matchedOn,
+      method: h.method,
+    })),
+    shipping_address: ship,
+    billing_address: bill,
+    email: order.email || null,
+  };
+
+  const title = `Amazon reseller address match: ${primary.reseller.business_name || primary.reseller.amazon_seller_id} on order ${order.order_number || order.shopify_order_id}`;
+
+  const { data: newCase } = await admin
+    .from("fraud_cases")
+    .insert({
+      workspace_id: workspaceId,
+      rule_id: rule.id,
+      rule_type: "amazon_reseller",
+      status: "open",
+      severity: rule.severity || "high",
+      title,
+      evidence,
+      customer_ids: customerId ? [customerId] : [],
+      order_ids: [order.shopify_order_id],
+      orders_held: true,
+      first_detected_at: new Date().toISOString(),
+      last_seen_at: new Date().toISOString(),
+    })
+    .select("id")
+    .single();
+
+  if (newCase) {
+    await admin.from("fraud_action_log").insert({
+      workspace_id: workspaceId,
+      fraud_case_id: newCase.id,
+      customer_id: customerId,
+      reseller_id: primary.reseller.id,
+      action: "address_match_flagged",
+      metadata: { order_number: order.order_number, matched_on: primary.matchedOn, method: primary.method },
+    });
     await inngest.send({
       name: "fraud/case.created",
       data: { caseId: newCase.id, workspaceId },

@@ -64,6 +64,8 @@ import {
   enrichSingle as demographicsEnrichSingle,
   demographicsSnapshotBuilder,
 } from "@/lib/inngest/customer-demographics";
+import { orderAddressFallback } from "@/lib/inngest/order-address-fallback";
+import { resellerDiscoveryWeeklyCron } from "@/lib/inngest/reseller-discovery";
 
 export const maxDuration = 300;
 
@@ -130,5 +132,7 @@ export const { GET, POST, PUT } = serve({
     demographicsEnrichBatch,
     demographicsEnrichSingle,
     demographicsSnapshotBuilder,
+    orderAddressFallback,
+    resellerDiscoveryWeeklyCron,
   ],
 });

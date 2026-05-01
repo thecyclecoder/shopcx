@@ -420,6 +420,25 @@ Use `addTicketTag()` from `src/lib/ticket-tags.ts` (idempotent). Use `markFirstT
 | `LOYALTY-SPEC.md` | Loyalty points, redemption tiers, coupon generation |
 | `UNIFIED-HANDLER.md` | Unified ticket handler pipeline documentation |
 
+## Reseller Defense System (May 2026)
+
+A multi-layer defense against people who buy from our store with coupons and resell on Amazon.
+
+- **`known_resellers` table** — populated from Amazon SP-API. For every ASIN we sell, we list competitor offers, dedupe sellerIds, scrape each storefront page (`amazon.com/sp?seller=X`) for the registered business name + address, and upsert. New entries get `status='unverified'` (admin review before fraud rule activates).
+- **Discovery** — one-shot via `npx tsx scripts/discover-resellers.ts`; weekly via `resellerDiscoveryWeeklyCron` (Mondays 6 AM CT).
+- **Fraud rule `amazon_reseller`** — at order creation, compares ship+bill addresses against active resellers. Two-pass: (1) exact match on normalized form, (2) Haiku fuzzy match when zip + street number agree but text differs (catches obfuscated variants like "010083 Lynden Ova.l, Apt1"). On match: creates `fraud_cases` with `rule_type='amazon_reseller'`, `severity='high'`, `orders_held=true`. Logs to `fraud_action_log`.
+- **Confirmed-fraud orchestrator gate** — In `unified-ticket-handler.ts` step 3.5, before Sonnet runs, we check `getCustomerFraudStatus()`. If the customer (or any linked profile) has any `fraud_cases.status='confirmed_fraud'`, the orchestrator is short-circuited: send `CONFIRMED_FRAUD_REPLY` ("We're sorry but your account has been flagged for potential fraud.") and close the ticket. No tools, no actions, no escalation.
+- **Address fallback chain on order ingestion** (see `feedback_address_mirror_rule` memory):
+  1. `Order.shippingAddress` and `Order.billingAddress` from Shopify GraphQL/webhook
+  2. If only one populated → mirror into both columns
+  3. If both null → fall back to `Customer.defaultAddress` via async Inngest job (`orders/address-fallback`)
+- **Customer ban flag** — `customers.banned`, `banned_at`, `banned_reason`.
+- **Operational scripts**:
+  - `scripts/discover-resellers.ts` — populate `known_resellers`
+  - `scripts/reseller-impact-report.ts` — find every order shipped to a reseller address + their active subs (output → `/tmp/reseller-impact-report.json`)
+  - `scripts/cancel-and-ban-resellers.ts --dry-run | --confirm` — for each reseller in the report: cancel every active/paused sub via Appstle (`cancellationFeedback="fraud"`), ban every linked customer, flip related fraud_cases `open`/`reviewing` → `confirmed_fraud`
+  - `scripts/backfill-1yr-addresses.ts` — backfill 365 days of orders missing ship/bill via the fallback chain
+
 ## Conventions
 - Always run `npx tsc --noEmit` before committing to catch type errors
 - Migrations: `supabase/migrations/YYYYMMDDNNNNNN_description.sql`

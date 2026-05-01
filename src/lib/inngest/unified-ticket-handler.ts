@@ -1168,6 +1168,31 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       }
     }
 
+    // ── 3.5 CONFIRMED-FRAUD GATE ──
+    // If this customer (or any linked profile) has any fraud_case in
+    // status='confirmed_fraud', the orchestrator is short-circuited.
+    // We send a single canonical refusal and close the ticket — no
+    // tools, no journeys, no actions, no escalation. Covers Amazon
+    // reseller cases plus any other confirmed-fraud rule type.
+    if (st.custId) {
+      const { getCustomerFraudStatus, CONFIRMED_FRAUD_REPLY } = await import("@/lib/customer-fraud-status");
+      const fraudGate = await step.run("fraud-gate", async () => {
+        return await getCustomerFraudStatus(admin, wsId, st.custId);
+      });
+      if (fraudGate.isConfirmedFraud) {
+        await step.run("fraud-gate-reply", async () => {
+          if (await newerActivity(admin, tid, t0)) return;
+          await sendWithDelay(admin, wsId, tid, st.ch, CONFIRMED_FRAUD_REPLY, cfg.sandbox);
+          await setStatus(admin, tid, true);
+          const ruleTypes = [...new Set(fraudGate.confirmedCases.map(c => c.rule_type))].join(", ");
+          await sysNote(admin, tid,
+            `[System] Confirmed-fraud gate: ${fraudGate.confirmedCases.length} confirmed case(s) (${ruleTypes}). ` +
+            `Sent canonical refusal and closed ticket. Orchestrator skipped.`);
+        });
+        return { status: "fraud_blocked" };
+      }
+    }
+
     // ── 4. SONNET ORCHESTRATOR ──
     // Sonnet analyzes the full request and decides the best action. Replaces pattern matching,
     // AI classification, confidence gate, and routeExec cascading lookup.

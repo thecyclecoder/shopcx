@@ -5,7 +5,7 @@ import { calculateRetentionScore } from "@/lib/retention-score";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
-import { normalizeShopifyShippingAddress } from "@/lib/address-normalize";
+import { normalizeShopifyShippingAddress, resolveOrderAddresses } from "@/lib/address-normalize";
 import { inngest } from "@/lib/inngest/client";
 import { getMemberByCustomerId, deductPoints } from "@/lib/loyalty";
 
@@ -483,8 +483,17 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
     }
   }
 
-  // Upsert order
-  const shippingAddr = payload.shipping_address as Record<string, unknown> | null;
+  // Address fallback chain (see feedback_address_mirror_rule):
+  //   1. shipping_address as-is if present, billing_address as-is if present
+  //   2. if only one is populated, mirror it into both
+  //   3. if both null, leave null here — a follow-up Inngest job (fired
+  //      below) will fetch customer.defaultAddress and backfill async,
+  //      keeping the webhook response fast.
+  const rawShipping = (payload.shipping_address as Record<string, unknown> | null) || null;
+  const rawBilling = (payload.billing_address as Record<string, unknown> | null) || null;
+  const { shipping_address: shippingAddr, billing_address: billingAddr } = resolveOrderAddresses(rawShipping, rawBilling);
+  const needsCustomerDefaultFallback = !rawShipping && !rawBilling;
+
   const { error: orderError } = await admin.from("orders").upsert(
     {
       workspace_id: workspaceId,
@@ -510,7 +519,8 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
         shipmentStatus: f.shipment_status || null,
         createdAt: f.created_at || null,
       })),
-      shipping_address: shippingAddr || null,
+      shipping_address: shippingAddr,
+      billing_address: billingAddr,
       normalized_shipping_address: normalizeShopifyShippingAddress(shippingAddr),
       discount_codes: ((payload.discount_codes as { code: string; amount: string; type: string }[]) || []).map((dc) => dc.code),
       created_at: (payload.created_at as string) || new Date().toISOString(),
@@ -618,6 +628,17 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
         name: "fraud/order.check",
         data: { orderId: savedOrder.id, customerId, workspaceId },
       }).catch(() => {}); // fire and forget
+
+      // Address fallback step 3: if the webhook payload had neither
+      // shipping nor billing (subscription renewal where Shopify only
+      // stores them on the contract / customer), schedule a follow-up
+      // job to pull customer.defaultAddress and backfill the order.
+      if (needsCustomerDefaultFallback) {
+        inngest.send({
+          name: "orders/address-fallback",
+          data: { orderId: savedOrder.id, workspaceId },
+        }).catch(() => {});
+      }
     }
 
     // Kick off demographic enrichment for this customer. The handler

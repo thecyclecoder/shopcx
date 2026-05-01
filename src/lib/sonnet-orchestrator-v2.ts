@@ -658,18 +658,35 @@ async function getReturns(admin: Admin, wsId: string, custId: string): Promise<s
 
 async function getFraudCases(admin: Admin, wsId: string, custId: string): Promise<string> {
   const allCustIds = await resolveLinkedCustomerIds(admin, custId);
+  // fraud_cases.customer_ids is a uuid[] — overlap finds any case with
+  // any of the linked customer IDs. Project enough to tell the
+  // orchestrator how serious the situation is.
   const { data: cases } = await admin.from("fraud_cases")
-    .select("id, severity, status, rules_matched, created_at")
-    .eq("workspace_id", wsId).in("customer_id", allCustIds)
-    .order("created_at", { ascending: false }).limit(5);
+    .select("id, rule_type, severity, status, title, first_detected_at, last_seen_at, evidence")
+    .eq("workspace_id", wsId)
+    .overlaps("customer_ids", allCustIds)
+    .order("first_detected_at", { ascending: false })
+    .limit(8);
 
   if (!cases?.length) return "No fraud cases for this customer.";
 
-  const parts = ["FRAUD CASES:"];
-  for (const c of cases) {
-    const date = new Date(c.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
-    const rules = (c.rules_matched as string[] || []).join(", ");
-    parts.push(`- ${date} | ${c.severity} | ${c.status} | Rules: ${rules || "none"}`);
+  const confirmed = cases.filter(c => c.status === "confirmed_fraud");
+  const open = cases.filter(c => c.status === "open" || c.status === "reviewing");
+
+  const parts: string[] = [];
+  if (confirmed.length) {
+    parts.push("⚠️  CONFIRMED FRAUD — orchestrator is gated for this customer; the unified handler will short-circuit and refuse all actions:");
+    for (const c of confirmed) {
+      const date = new Date(c.first_detected_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+      parts.push(`  - ${date} | ${c.rule_type} | ${c.severity} | ${c.title}`);
+    }
+  }
+  if (open.length) {
+    parts.push(`OPEN FRAUD CASES (${open.length}) — under investigation, not yet confirmed:`);
+    for (const c of open) {
+      const date = new Date(c.first_detected_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      parts.push(`  - ${date} | ${c.rule_type} | ${c.severity} | ${c.title}`);
+    }
   }
   return parts.join("\n");
 }
