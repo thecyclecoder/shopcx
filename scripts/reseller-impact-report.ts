@@ -101,12 +101,13 @@ async function main() {
 
     const allOrders: Order[] = [];
     let cursor: string | null = null;
+    const PAGE = 1000; // Supabase default db.max_rows cap
     for (;;) {
       let q = admin.from("orders")
         .select("id, customer_id, order_number, total_cents, discount_codes, shipping_address, billing_address, created_at, email")
         .eq("workspace_id", ws.id)
         .order("created_at", { ascending: false })
-        .limit(2000);
+        .limit(PAGE);
       if (cursor) q = q.lt("created_at", cursor);
       const { data, error } = await q;
       if (error) { console.error(error.message); break; }
@@ -115,8 +116,8 @@ async function main() {
         if (o.shipping_address || o.billing_address) allOrders.push(o);
       }
       cursor = data[data.length - 1].created_at;
-      if (data.length < 2000) break;
       process.stdout.write(`\r  loading orders… ${allOrders.length}`);
+      if (data.length < PAGE) break;
     }
     console.log(`\n  ${allOrders.length} orders with addresses loaded.`);
 

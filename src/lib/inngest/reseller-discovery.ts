@@ -11,6 +11,37 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { discoverResellers } from "@/lib/known-resellers";
 
+/**
+ * Manual on-demand trigger fired from the dashboard "Run discovery now"
+ * button. Identical work to the cron, but for one specific workspace.
+ */
+export const resellerDiscoveryManual = inngest.createFunction(
+  {
+    id: "reseller-discovery-manual",
+    retries: 1,
+    concurrency: [{ limit: 1, key: "event.data.workspaceId" }],
+    triggers: [{ event: "resellers/discover.run" }],
+  },
+  async ({ event, step }) => {
+    const { workspaceId } = event.data as { workspaceId: string };
+    const result = await step.run("discover", async () => discoverResellers(workspaceId));
+    if (result.sellersDiscovered > 0) {
+      await step.run("notify", async () => {
+        const admin = createAdminClient();
+        await admin.from("dashboard_notifications").insert({
+          workspace_id: workspaceId,
+          kind: "fraud_alert",
+          title: `${result.sellersDiscovered} new Amazon reseller${result.sellersDiscovered === 1 ? "" : "s"} added to fraud list`,
+          body: `Discovery run complete. View at /dashboard/resellers.`,
+          link: "/dashboard/resellers",
+          severity: "info",
+        });
+      });
+    }
+    return result;
+  },
+);
+
 export const resellerDiscoveryWeeklyCron = inngest.createFunction(
   {
     id: "reseller-discovery-weekly",

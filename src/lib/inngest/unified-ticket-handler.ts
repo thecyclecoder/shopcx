@@ -1168,28 +1168,36 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       }
     }
 
-    // ── 3.5 CONFIRMED-FRAUD GATE ──
-    // If this customer (or any linked profile) has any fraud_case in
-    // status='confirmed_fraud', the orchestrator is short-circuited.
-    // We send a single canonical refusal and close the ticket — no
-    // tools, no journeys, no actions, no escalation. Covers Amazon
-    // reseller cases plus any other confirmed-fraud rule type.
+    // ── 3.5 FRAUD GATE ──
+    // Pre-flight check before the orchestrator runs. Bails on ANY of:
+    //   - confirmed fraud_case (any rule_type)
+    //   - amazon_reseller fraud_case (any status — even unconfirmed)
+    //   - any of the customer's order ship/bill addresses matches an
+    //     active known_resellers row
+    // On hit: send the canonical refusal, escalate to a human agent
+    // (so an admin can review), skip the orchestrator entirely.
     if (st.custId) {
-      const { getCustomerFraudStatus, CONFIRMED_FRAUD_REPLY } = await import("@/lib/customer-fraud-status");
+      const { getCustomerFraudStatus, shouldBlockOrchestrator, describeBlockReason, CONFIRMED_FRAUD_REPLY }
+        = await import("@/lib/customer-fraud-status");
       const fraudGate = await step.run("fraud-gate", async () => {
         return await getCustomerFraudStatus(admin, wsId, st.custId);
       });
-      if (fraudGate.isConfirmedFraud) {
-        await step.run("fraud-gate-reply", async () => {
+      if (shouldBlockOrchestrator(fraudGate)) {
+        const reason = describeBlockReason(fraudGate);
+        await step.run("fraud-gate-block", async () => {
           if (await newerActivity(admin, tid, t0)) return;
+          // Send the canonical refusal first, then escalate. The
+          // escalate() helper sends its own holding message, so we
+          // skip its message-sending behavior by sending ours up front
+          // and using sysNote for the agent context.
           await sendWithDelay(admin, wsId, tid, st.ch, CONFIRMED_FRAUD_REPLY, cfg.sandbox);
-          await setStatus(admin, tid, true);
-          const ruleTypes = [...new Set(fraudGate.confirmedCases.map(c => c.rule_type))].join(", ");
-          await sysNote(admin, tid,
-            `[System] Confirmed-fraud gate: ${fraudGate.confirmedCases.length} confirmed case(s) (${ruleTypes}). ` +
-            `Sent canonical refusal and closed ticket. Orchestrator skipped.`);
+          await sysNote(admin, tid, `[System] FRAUD GATE: ${reason}. Sent canonical refusal. Escalating for agent review.`);
+          // Use a fraud-specific escalation reason so analytics +
+          // routing rules can act on it. Mirrors what escalate() does:
+          // assigns to a human, leaves ticket open.
+          await escalate(admin, wsId, tid, st.ch, "fraud_blocked", 1.0, msg, reason);
         });
-        return { status: "fraud_blocked" };
+        return { status: "fraud_blocked", reason };
       }
     }
 

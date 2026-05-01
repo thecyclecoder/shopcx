@@ -79,6 +79,7 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
     items: [
       { href: "/dashboard/chargebacks", label: "Chargebacks", icon: ICONS.chargebacks },
       { href: "/dashboard/fraud", label: "Fraud", icon: ICONS.fraud },
+      { href: "/dashboard/resellers", label: "Resellers", icon: "M3 6l3 12h12l3-12M9 6V4a3 3 0 016 0v2" },
     ],
   },
   {

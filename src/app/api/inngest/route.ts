@@ -65,7 +65,7 @@ import {
   demographicsSnapshotBuilder,
 } from "@/lib/inngest/customer-demographics";
 import { orderAddressFallback } from "@/lib/inngest/order-address-fallback";
-import { resellerDiscoveryWeeklyCron } from "@/lib/inngest/reseller-discovery";
+import { resellerDiscoveryWeeklyCron, resellerDiscoveryManual } from "@/lib/inngest/reseller-discovery";
 
 export const maxDuration = 300;
 
@@ -134,5 +134,6 @@ export const { GET, POST, PUT } = serve({
     demographicsSnapshotBuilder,
     orderAddressFallback,
     resellerDiscoveryWeeklyCron,
+    resellerDiscoveryManual,
   ],
 });
