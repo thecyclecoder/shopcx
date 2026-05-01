@@ -54,6 +54,23 @@ interface ActionParams {
   order_number?: string;
   free_label?: boolean;
   pause_days?: number;
+  // Shipping address — used by update_shipping_address (and as an
+  // override on create_replacement_order when the customer wants the
+  // replacement sent to a different address than the original order).
+  address?: {
+    address1?: string;
+    address2?: string;
+    city?: string;
+    province?: string;        // 2-letter state/province code (US/CA)
+    state?: string;           // alias accepted from prompt catalog
+    zip?: string;
+    postal_code?: string;     // alias
+    country?: string;         // 2-letter country code, default US
+    country_code?: string;    // alias
+    first_name?: string;
+    last_name?: string;
+    phone?: string;
+  };
 }
 
 export interface ActionContext {
@@ -966,6 +983,141 @@ const directActionHandlers: Record<
     return { success: true, summary: `Enrolled in crisis "${crisis.affected_product_title}" (auto_readd=true — will swap back to original on resolve)` };
   },
 
+  /**
+   * update_shipping_address — change the shipping address on an order
+   * and/or subscription. Implements the full address-change logic tree:
+   *
+   *   • Order not yet in Amplifier (amplifier_order_id is null)
+   *     → Shopify orderUpdate works; address is captured before
+   *       Amplifier imports the order. Returns success.
+   *
+   *   • Order already in Amplifier
+   *     → Amplifier exposes no update endpoint; the order will ship
+   *       with the wrong address. Returns success: false with
+   *       error: "in_amplifier" so Sonnet can ask the customer
+   *       whether to send a replacement to the new address.
+   *
+   *   • Subscription contract — Appstle update endpoint works regardless
+   *     of order state. Always succeeds when contract_id is provided.
+   *
+   *   • Customer profile default address — always written so future
+   *     orders pick up the corrected address.
+   *
+   * Pass any subset:
+   *   { order_number, contract_id, address }
+   */
+  update_shipping_address: async (ctx, p) => {
+    const a = p.address;
+    if (!a || !a.address1 || !a.city || !(a.province || a.state) || !(a.zip || a.postal_code)) {
+      return { success: false, error: "address.address1, city, province (or state), and zip (or postal_code) are required" };
+    }
+    const province = (a.province || a.state || "").toUpperCase().slice(0, 2);
+    const zip = a.zip || a.postal_code || "";
+    const country = (a.country || a.country_code || "US").toUpperCase().slice(0, 2);
+
+    const summaries: string[] = [];
+    let anySuccess = false;
+    let inAmplifier = false;
+
+    // Order branch
+    if (p.order_number || p.shopify_order_id) {
+      const { data: order } = await ctx.admin.from("orders")
+        .select("id, order_number, shopify_order_id, amplifier_order_id, amplifier_status")
+        .eq("workspace_id", ctx.workspaceId)
+        .or([
+          p.order_number ? `order_number.eq.${p.order_number}` : "",
+          p.shopify_order_id ? `shopify_order_id.eq.${p.shopify_order_id}` : "",
+        ].filter(Boolean).join(","))
+        .maybeSingle();
+      if (!order) return { success: false, error: `Order not found: ${p.order_number || p.shopify_order_id}` };
+
+      if (order.amplifier_order_id) {
+        // Already in Amplifier — no update path. Caller (Sonnet) decides
+        // whether to offer a replacement based on this signal.
+        inAmplifier = true;
+        summaries.push(`Order ${order.order_number} already in Amplifier (status: ${order.amplifier_status || "unknown"}); no update path`);
+      } else if (order.shopify_order_id) {
+        const { updateShippingAddress } = await import("@/lib/shopify-order-actions");
+        const r = await updateShippingAddress(ctx.workspaceId, order.shopify_order_id, {
+          address1: a.address1, address2: a.address2 || "",
+          city: a.city, province, zip, country,
+        });
+        if (!r.success) return { success: false, error: `Shopify orderUpdate: ${r.error}` };
+        // Sync local DB
+        await ctx.admin.from("orders").update({
+          shipping_address: {
+            first_name: a.first_name, last_name: a.last_name, phone: a.phone,
+            address1: a.address1, address2: a.address2 || null,
+            city: a.city, province_code: province, zip, country_code: country,
+          },
+          updated_at: new Date().toISOString(),
+        }).eq("id", order.id);
+        anySuccess = true;
+        summaries.push(`Shopify order ${order.order_number} updated`);
+      }
+    }
+
+    // Subscription branch — Appstle endpoint
+    if (p.contract_id) {
+      try {
+        const { data: ws } = await ctx.admin.from("workspaces")
+          .select("appstle_api_key_encrypted").eq("id", ctx.workspaceId).single();
+        if (ws?.appstle_api_key_encrypted) {
+          const { decrypt } = await import("@/lib/crypto");
+          const apiKey = decrypt(ws.appstle_api_key_encrypted);
+          const { loggedAppstleFetch } = await import("@/lib/appstle-call-log");
+          const res = await loggedAppstleFetch(
+            `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-shipping-address?contractId=${p.contract_id}`,
+            {
+              method: "PUT",
+              headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+              body: JSON.stringify({
+                address1: a.address1, address2: a.address2 || "",
+                city: a.city, province, zip, country,
+                firstName: a.first_name, lastName: a.last_name, phone: a.phone,
+              }),
+            },
+            "update-shipping-address",
+          );
+          if (res.ok) {
+            await ctx.admin.from("subscriptions").update({
+              shipping_address: {
+                first_name: a.first_name, last_name: a.last_name, phone: a.phone,
+                address1: a.address1, address2: a.address2 || null,
+                city: a.city, province_code: province, zip, country_code: country,
+              },
+              updated_at: new Date().toISOString(),
+            }).eq("shopify_contract_id", p.contract_id);
+            anySuccess = true;
+            summaries.push(`Subscription ${p.contract_id} address updated`);
+          } else {
+            return { success: false, error: `Appstle ${res.status}` };
+          }
+        }
+      } catch (err) {
+        return { success: false, error: `Subscription update failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    }
+
+    // Customer default address — always sync so future orders get it
+    if (ctx.customerId) {
+      await ctx.admin.from("customers").update({
+        default_address: {
+          first_name: a.first_name, last_name: a.last_name, phone: a.phone,
+          address1: a.address1, address2: a.address2 || null,
+          city: a.city, province_code: province, zip, country_code: country,
+        },
+        updated_at: new Date().toISOString(),
+      }).eq("id", ctx.customerId);
+      summaries.push("Customer default address synced");
+    }
+
+    if (inAmplifier && !anySuccess) {
+      return { success: false, error: "in_amplifier", summary: summaries.join("; ") };
+    }
+    return { success: true, summary: summaries.join("; ") || "No changes" };
+  },
+
   create_replacement_order: async (ctx, p) => {
     const { getShopifyCredentials } = await import("@/lib/shopify-sync");
     const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
@@ -976,14 +1128,27 @@ const directActionHandlers: Record<
       .select("shopify_customer_id").eq("id", ctx.customerId).single();
     if (!cust?.shopify_customer_id) return { success: false, error: "No Shopify customer ID" };
 
-    // Resolve shipping address — prefer the specific order if order_number
-    // was passed (most accurate; replacement should ship where the
-    // original went), then any subscription regardless of status, then
-    // the most recent order. The original code only looked at active
-    // subs, which broke replacements for one-time-purchase customers
-    // and anyone whose sub was paused/cancelled.
+    // Resolve shipping address — explicit override wins (used when the
+    // original order is in Amplifier with a wrong address; we ship the
+    // replacement to a different address). Otherwise: order match →
+    // any subscription → most recent order. The original code only
+    // looked at active subs, which broke replacements for one-time
+    // customers and anyone with paused/cancelled subs.
     let addr: Record<string, string> = {};
-    if (p.order_number) {
+    if (p.address?.address1) {
+      const a = p.address;
+      addr = {
+        firstName: a.first_name || "",
+        lastName: a.last_name || "",
+        address1: a.address1 || "",
+        address2: a.address2 || "",
+        city: a.city || "",
+        provinceCode: (a.province || a.state || "").toUpperCase().slice(0, 2),
+        zip: a.zip || a.postal_code || "",
+        countryCode: (a.country || a.country_code || "US").toUpperCase().slice(0, 2),
+      };
+    }
+    if (!addr.address1 && p.order_number) {
       const { data: order } = await ctx.admin.from("orders")
         .select("shipping_address")
         .eq("workspace_id", ctx.workspaceId)

@@ -158,12 +158,67 @@ export async function POST(
             // Non-fatal — proceed with unverified address
           }
 
-          // Write to playbook context
+          // Write to playbook context (kept for the not-received-replacement
+          // playbook flow which reads validated_address out of here).
           const { data: ticket } = await admin.from("tickets")
-            .select("playbook_context").eq("id", session.ticket_id).single();
+            .select("playbook_context, customer_id, active_playbook_id").eq("id", session.ticket_id).single();
           const ctx = (ticket?.playbook_context || {}) as Record<string, unknown>;
           ctx.validated_address = newAddr;
           await admin.from("tickets").update({ playbook_context: ctx }).eq("id", session.ticket_id);
+
+          // Standalone address-change tickets (no active playbook): the
+          // playbook_context write goes nowhere. Call the
+          // update_shipping_address direct action so the change actually
+          // propagates to Shopify / Amplifier / Appstle. Picks the most
+          // recent order in the last 24h as the target — same logic
+          // tree the Sonnet rule uses for ad-hoc cases.
+          if (!ticket?.active_playbook_id && ticket?.customer_id) {
+            try {
+              const { data: recentOrder } = await admin.from("orders")
+                .select("order_number, amplifier_order_id, created_at, shopify_order_id")
+                .eq("workspace_id", wsId).eq("customer_id", ticket.customer_id)
+                .order("created_at", { ascending: false }).limit(1).maybeSingle();
+              const ageMs = recentOrder?.created_at ? Date.now() - new Date(recentOrder.created_at).getTime() : Infinity;
+              const within24h = ageMs < 24 * 60 * 60 * 1000;
+              const inAmplifier = !!recentOrder?.amplifier_order_id;
+
+              const { data: activeSub } = await admin.from("subscriptions")
+                .select("shopify_contract_id").eq("customer_id", ticket.customer_id).eq("status", "active")
+                .order("updated_at", { ascending: false }).limit(1).maybeSingle();
+
+              const { executeSonnetDecision } = await import("@/lib/action-executor");
+              await executeSonnetDecision(
+                { admin, workspaceId: wsId, ticketId: session.ticket_id, customerId: ticket.customer_id, channel: "email", sandbox: false },
+                {
+                  reasoning: "Journey-driven address change: push validated address to Shopify/Appstle/customer.",
+                  action_type: "direct_action",
+                  actions: [{
+                    type: "update_shipping_address",
+                    order_number: within24h && !inAmplifier ? recentOrder?.order_number : undefined,
+                    contract_id: activeSub?.shopify_contract_id || undefined,
+                    address: {
+                      address1: newAddr.street1, address2: newAddr.street2,
+                      city: newAddr.city, province: newAddr.state,
+                      zip: newAddr.zip, country: newAddr.country,
+                    },
+                  }],
+                },
+                null,
+                async () => { /* no customer-facing message — wraps via the journey completion confirmation below */ },
+                async (m) => {
+                  await admin.from("ticket_messages").insert({
+                    ticket_id: session.ticket_id!, direction: "outbound", visibility: "internal",
+                    author_type: "system", body: m,
+                  });
+                },
+              );
+              if (recentOrder && within24h && inAmplifier) {
+                actionLog.push("Order already in Amplifier — operator should offer replacement");
+              }
+            } catch (err) {
+              console.error("[journey/shipping_address] update_shipping_address call failed:", err);
+            }
+          }
 
           // Update replacement record if exists
           const replacementId = metadata.replacementId as string | null;

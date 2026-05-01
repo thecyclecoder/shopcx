@@ -483,6 +483,28 @@ export const unifiedTicketHandler = inngest.createFunction(
     const t0 = new Date().toISOString();
     const admin = createAdminClient();
 
+    // ── 0a. System-sentinel short-circuit ──
+    // Journey completion paths fire ticket/inbound-message with synthetic
+    // body strings ("address_confirmed", "items_selected", "playbook-apply")
+    // to wake up an active PLAYBOOK that's waiting for journey output.
+    // When no playbook is active, the sentinel has no consumer — running
+    // the orchestrator on it just makes Sonnet treat the literal string
+    // as a customer message and re-route to the same journey we just
+    // completed. Lee Summers' shipping_address ticket showed this:
+    // the form was sent twice, the second send was confusing the customer.
+    {
+      const SENTINEL_MESSAGES = new Set(["address_confirmed", "items_selected", "playbook-apply"]);
+      const trimmed = (msg || "").trim().toLowerCase();
+      if (!isNew && SENTINEL_MESSAGES.has(trimmed)) {
+        const { data: ticket } = await admin.from("tickets")
+          .select("active_playbook_id").eq("id", tid).maybeSingle();
+        if (!ticket?.active_playbook_id) {
+          await sysNote(admin, tid, `[System] Sentinel "${trimmed}" — no active playbook; skipping orchestrator.`);
+          return { status: "skipped", reason: "sentinel_no_playbook" };
+        }
+      }
+    }
+
     // ── 0. Empty-inbound short-circuit ──
     // Some email clients send replies whose body is just a quoted thread,
     // a signature, or literally nothing. After stripping HTML/whitespace
