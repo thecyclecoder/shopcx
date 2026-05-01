@@ -248,11 +248,15 @@ export async function discoverResellers(workspaceId: string): Promise<{
         .eq("id", existing.id);
       updated++;
     } else {
-      // New: status='unverified' so admins review before fraud rule
-      // starts blocking. The CLI script can flip first batch to active.
+      // New: status='active' immediately. The previous design was to
+      // hold at 'unverified' until an admin reviewed, but in practice
+      // anyone competing on our exact ASINs IS reselling our product
+      // (we don't wholesale to anyone), so the discovery signal is
+      // sufficient on its own. Whitelisting a legitimate B2B partner
+      // happens manually after the fact.
       const { data: inserted } = await admin
         .from("known_resellers")
-        .insert({ ...row, status: "unverified" })
+        .insert({ ...row, status: "active" })
         .select("id")
         .single();
       if (inserted) {

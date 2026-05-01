@@ -1116,12 +1116,26 @@ async function haikuAddressesMatch(a: AddressLite, b: AddressLite): Promise<bool
   if (!apiKey) return false;
   const fmt = (x: AddressLite) =>
     [x.address1, x.address2, x.city, x.state || x.province, x.zip].filter(Boolean).join(", ");
-  const prompt = `Two addresses. Reply EXACTLY "MATCH" or "DIFFERENT" — no other text.
+  const prompt = `You are detecting whether two addresses point to the same physical mailbox. Resellers deliberately mangle their address to evade filters — your job is to see through the obfuscation.
 
-Address A: ${fmt(a)}
-Address B: ${fmt(b)}
+Address A (incoming order): ${fmt(a)}
+Address B (known reseller):  ${fmt(b)}
 
-Same physical location if: same street number, same street name (allowing typos/punctuation/abbreviation differences like "St" vs "Street"), same city, same zip. Different unit/apt within the same building counts as MATCH.`;
+Reply EXACTLY one word: "MATCH" or "DIFFERENT".
+
+These count as MATCH (same physical location):
+- Different formatting: "St" vs "Street", "Ave" vs "Avenue", "Apt 1" vs "Unit 1"
+- Extra leading zeros on the street number: "010083" vs "10083"
+- Punctuation injected mid-word: "Ova.l" vs "Oval", "Roma.ine" vs "Romaine"
+- Missing or extra street type: "7704 Romaine" vs "7704 Romaine St"
+- Random trailing tokens: "7040 N Olin Ave ave44" vs "7040 N Olin Ave"
+- Different unit/apt numbers within the same building (still same building)
+- Capitalization, extra spaces, comma vs no-comma
+
+These count as DIFFERENT:
+- Different street number (after removing leading zeros)
+- Different zip code
+- Different street name (when not just a typo/obfuscation of the same name)`;
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",

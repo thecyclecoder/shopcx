@@ -48,15 +48,17 @@ export const resellerDiscoveryWeeklyCron = inngest.createFunction(
         updated: result.sellersUpdated,
       });
 
-      // Notify admins when new resellers are discovered so they can
-      // review + promote to status='active'.
+      // Notify admins when new resellers are discovered. They're
+      // inserted as status='active' immediately (we have no
+      // distributors, so anyone selling our product is unauthorized);
+      // the notification is heads-up, not approval gate.
       if (result.sellersDiscovered > 0) {
         await step.run(`notify-${ws.id.slice(0, 8)}`, async () => {
           await admin.from("dashboard_notifications").insert({
             workspace_id: ws.id,
             kind: "fraud_alert",
-            title: `${result.sellersDiscovered} new Amazon reseller${result.sellersDiscovered === 1 ? "" : "s"} discovered`,
-            body: `Review at /dashboard/settings/fraud-detection/resellers and flip to "active" to start blocking their addresses.`,
+            title: `${result.sellersDiscovered} new Amazon reseller${result.sellersDiscovered === 1 ? "" : "s"} added to fraud list`,
+            body: `Their addresses are now blocked by the amazon_reseller fraud rule. View at /dashboard/settings/fraud-detection/resellers.`,
             link: "/dashboard/settings/fraud-detection/resellers",
             severity: "info",
           });
