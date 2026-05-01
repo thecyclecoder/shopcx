@@ -58,10 +58,16 @@ export function HeroSection({ data }: { data: PageData }) {
   // — bad UX. The image's max-height is already capped by the sticky
   // h-screen container + object-contain, so we don't need width math
   // to enforce vertical fit.
+  //
+  // The 90vw cap is applied via Tailwind arbitrary value at xl: only —
+  // on mobile/tablet, gutters come from `px-5` on the container so they
+  // match the rest of the page (e.g. "Why this works" section also at
+  // px-5). Without the xl: scope, mobile gutters would compound: 5vw
+  // from the cap + 20px from the text column's own px-5 = ~40px gutter
+  // for text but ~20px for the image, which read as inconsistent.
   const containerStyle: React.CSSProperties = {
     "--hero-aspect-w": String(heroAspectW),
     "--hero-aspect-h": String(heroAspectH),
-    maxWidth: "min(2400px, 90vw)",
   } as React.CSSProperties;
 
   return (
@@ -76,7 +82,7 @@ export function HeroSection({ data }: { data: PageData }) {
           clamp keeps things readable. Capped at 2200px on huge screens. */}
       <div
         style={containerStyle}
-        className="mx-auto flex w-full flex-col xl:flex-row xl:items-start xl:gap-10 xl:px-10"
+        className="mx-auto flex w-full flex-col px-5 xl:flex-row xl:items-start xl:gap-10 xl:px-10 xl:[max-width:min(2400px,90vw)]"
       >
         {/* Hero image — sticky on desktop, top-aligned. Mobile + tablet
             (incl. iPad Pro portrait) keep stacked 4:3 + object-cover
@@ -97,7 +103,7 @@ export function HeroSection({ data }: { data: PageData }) {
         {/* Text column — 2/5 on desktop (xl+), full width on mobile +
             tablet. The section's overall height is driven by this
             column; the sticky image pins until this column scrolls past. */}
-        <div className="order-2 flex min-h-[280px] flex-col px-5 pt-6 pb-8 xl:order-2 xl:basis-2/5 xl:px-0 xl:pt-16 xl:pb-16">
+        <div className="order-2 flex min-h-[280px] flex-col pt-6 pb-8 xl:order-2 xl:basis-2/5 xl:pt-16 xl:pb-16">
           {ratingValue != null && (
             <div className="mb-3 flex items-center gap-2">
               <StarRating rating={ratingValue} size={18} />
