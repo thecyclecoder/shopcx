@@ -247,6 +247,11 @@ export async function POST(
                   if (wsCreds?.appstle_api_key_encrypted) {
                     const { decrypt } = await import("@/lib/crypto");
                     const appstleKey = decrypt(wsCreds.appstle_api_key_encrypted);
+                    // Appstle's GraphQL validator requires countryCode +
+                    // provinceCode (the bare `country`/`province` fields
+                    // alone return a 400 "deliveryMethod.shipping.address.
+                    // countryCode was provided invalid value $UNKNOWN"
+                    // error). See action-executor for the same pattern.
                     await fetch(
                       `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-shipping-address?contractId=${sub.shopify_contract_id}`,
                       {
@@ -256,9 +261,9 @@ export async function POST(
                           address1: newAddr.street1,
                           address2: newAddr.street2 || "",
                           city: newAddr.city,
-                          province: newAddr.state,
                           zip: newAddr.zip,
-                          country: newAddr.country,
+                          country: newAddr.country, countryCode: newAddr.country,
+                          province: newAddr.state, provinceCode: newAddr.state,
                         }),
                       },
                     );

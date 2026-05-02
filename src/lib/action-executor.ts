@@ -1071,9 +1071,17 @@ const directActionHandlers: Record<
             {
               method: "PUT",
               headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+              // Appstle's GraphQL validation reads countryCode + provinceCode
+              // specifically (the bare `country`/`province` fields aren't
+              // wired to the SubscriptionDraftInput → deliveryMethod.shipping
+              // path). Sending both keeps the REST shape happy while
+              // satisfying the GraphQL validator. The portal handler sends
+              // the same shape — keep them in sync.
               body: JSON.stringify({
                 address1: a.address1, address2: a.address2 || "",
-                city: a.city, province, zip, country,
+                city: a.city, zip,
+                country, countryCode: country,
+                province, provinceCode: province,
                 firstName: a.first_name, lastName: a.last_name, phone: a.phone,
               }),
             },
