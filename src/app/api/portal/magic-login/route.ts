@@ -28,7 +28,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Customer not found" }, { status: 404 });
     }
 
-    // Set portal session cookie (24hr, same as token expiry)
+    // Set portal session cookie (24hr, same as token expiry).
+    // Don't set `domain` — the cookie scopes to whatever host served
+    // the page (e.g. portal.superfoodscompany.com or help.shopcx.ai).
+    // A hardcoded ".shopcx.ai" domain caused the cookie to be silently
+    // dropped on custom-domain mini-sites — the customer would see the
+    // login redirect "succeed" and then bounce back to /login because
+    // no session cookie ever materialized.
     const cookieStore = await cookies();
     const cookieOpts = {
       httpOnly: true,
@@ -36,7 +42,6 @@ export async function POST(request: Request) {
       sameSite: "lax" as const,
       maxAge: 24 * 60 * 60,
       path: "/",
-      domain: ".shopcx.ai",
     };
     cookieStore.set("portal_customer_id", customer.id, cookieOpts);
     cookieStore.set("portal_workspace_id", payload.workspaceId, cookieOpts);

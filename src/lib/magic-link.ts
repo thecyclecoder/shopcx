@@ -74,14 +74,24 @@ export async function generateMagicLinkURL(
 ): Promise<string> {
   const token = generateMagicToken(customerId, shopifyCustomerId, email, workspaceId);
 
-  // Try to get workspace slug for subdomain URL
+  // Resolve the best host to put in the magic link URL. Priority order:
+  //   1. portal_config.minisite.domain     (e.g. portal.example.com — bare /login path, no /portal prefix; middleware does the rewrite)
+  //   2. help_custom_domain                (e.g. help.example.com — legacy, paths still carry /portal/ prefix)
+  //   3. help_slug.shopcx.ai               (multi-tenant subdomain on the primary domain)
+  //   4. shopcx.ai                         (last-resort fallback)
   try {
     const { createAdminClient } = await import("@/lib/supabase/admin");
     const admin = createAdminClient();
     const { data: ws } = await admin.from("workspaces")
-      .select("help_slug, help_custom_domain")
+      .select("help_slug, help_custom_domain, portal_config")
       .eq("id", workspaceId).single();
 
+    const portalDomain = (ws?.portal_config as { minisite?: { custom_domain?: string } } | null)?.minisite?.custom_domain;
+    if (portalDomain) {
+      // Dedicated portal subdomain — middleware rewrites /login →
+      // /portal/{slug}/login internally, customer never sees /portal/.
+      return `https://${portalDomain}/login?token=${token}`;
+    }
     if (ws?.help_custom_domain) {
       return `https://${ws.help_custom_domain}/portal/login?token=${token}`;
     }

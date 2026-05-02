@@ -279,7 +279,18 @@ export default function PortalSettingsPage() {
               <Field label="Custom domain" value={config.minisite.custom_domain}
                 onChange={(v) => updateMinisite("custom_domain", v)}
                 placeholder="portal.yourdomain.com"
-                description="Point a CNAME to cname.vercel-dns.com, then enter it here." />
+                description="Enter the subdomain you want to use, then save. We'll register it with Vercel automatically — you only need to add the CNAME record below." />
+              {config.minisite.custom_domain && (
+                <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-800 dark:bg-emerald-950">
+                  <p className="text-xs font-medium text-emerald-700 dark:text-emerald-400">Add this DNS record at your domain provider:</p>
+                  <p className="mt-1 font-mono text-xs text-zinc-700 dark:text-zinc-300">
+                    CNAME {config.minisite.custom_domain} → cname.vercel-dns.com
+                  </p>
+                  <p className="mt-2 text-[11px] text-emerald-700/70 dark:text-emerald-400/70">
+                    SSL provisions automatically once the CNAME resolves (usually within a few minutes).
+                  </p>
+                </div>
+              )}
               <div>
                 <div className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Authentication method</div>
                 <p className="mt-0.5 text-xs text-zinc-400">How customers log in to the mini-site.</p>

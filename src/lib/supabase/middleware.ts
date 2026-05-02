@@ -105,25 +105,45 @@ export async function updateSession(request: NextRequest) {
     // Skip fully internal paths (already rewritten or system routes)
     if (!pathname.startsWith("/help/") && !pathname.startsWith("/api/") && !pathname.startsWith("/_next")) {
 
-      // Resolve slug from hostname
+      // Resolve { slug, purpose } from hostname.
+      //   purpose = "help" → host serves the help-center mini-site;
+      //                       every path rewrites to /help/{slug}/...
+      //   purpose = "portal" → host serves the customer portal mini-site;
+      //                        every path rewrites to /portal/{slug}/...
+      //   purpose = "either" → fallback for shopcx.ai subdomains where
+      //                        the user-facing URL still includes the
+      //                        /kb or /portal prefix.
       let slug: string | null = null;
+      let purpose: "help" | "portal" | "either" = "either";
 
       if (!isPrimaryDomain) {
-        // Custom domain — look up workspace by domain
+        // Custom domain — try BOTH portal_config.minisite.domain and
+        // help_custom_domain in one query, pick whichever matches.
         const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
         const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
         if (supabaseUrl && serviceKey) {
           try {
+            const orFilter = `or=(help_custom_domain.eq.${encodeURIComponent(hostname)},portal_config->minisite->>custom_domain.eq.${encodeURIComponent(hostname)})`;
             const res = await fetch(
-              `${supabaseUrl}/rest/v1/workspaces?help_custom_domain=eq.${encodeURIComponent(hostname)}&select=help_slug&limit=1`,
+              `${supabaseUrl}/rest/v1/workspaces?${orFilter}&select=help_slug,help_custom_domain,portal_config&limit=1`,
               { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
             );
             const data = await res.json();
-            if (data?.[0]?.help_slug) slug = data[0].help_slug;
+            const ws = data?.[0];
+            if (ws?.help_slug) {
+              slug = ws.help_slug;
+              const portalDomain = ws?.portal_config?.minisite?.custom_domain || null;
+              if (portalDomain && portalDomain.toLowerCase() === hostname.toLowerCase()) {
+                purpose = "portal";
+              } else if (ws.help_custom_domain && ws.help_custom_domain.toLowerCase() === hostname.toLowerCase()) {
+                purpose = "help";
+              }
+            }
           } catch {}
         }
       } else {
-        // shopcx.ai subdomain (e.g. superfoods.shopcx.ai)
+        // shopcx.ai subdomain (e.g. superfoods.shopcx.ai) — purpose is
+        // "either"; the user-facing path still carries /kb or /portal.
         const parts = hostname.split(".");
         if (parts.length >= 3) {
           const sub = parts[0];
@@ -134,6 +154,32 @@ export async function updateSession(request: NextRequest) {
       if (slug) {
         const url = request.nextUrl.clone();
 
+        // ── Purpose-bound rewrite — host alone determines route prefix
+        // so the customer never sees /kb or /portal in the URL.
+        if (purpose === "portal") {
+          // Portal mini-site on its own subdomain (portal.example.com).
+          // Map / → /portal/{slug}, /login → /portal/{slug}/login (real
+          // server route), everything else → /portal/{slug} (the SPA
+          // handles its own sub-routing client-side).
+          const isServerRoute = pathname === "/login" || pathname === "/callback"
+            || pathname.endsWith("/login") || pathname.endsWith("/callback");
+          url.pathname = isServerRoute
+            ? `/portal/${slug}${pathname}`
+            : `/portal/${slug}`;
+          return NextResponse.rewrite(url);
+        }
+        if (purpose === "help") {
+          // Help center on its own subdomain (help.example.com).
+          // Map every path 1:1 under /help/{slug}.
+          if (pathname === "/") {
+            url.pathname = `/help/${slug}`;
+          } else {
+            url.pathname = `/help/${slug}${pathname}`;
+          }
+          return NextResponse.rewrite(url);
+        }
+
+        // ── Fallback path-prefix routing (shopcx.ai subdomain pattern) ──
         // /kb/* → help center
         if (pathname.startsWith("/kb/")) {
           url.pathname = `/help/${slug}${pathname.slice(3)}`;
@@ -146,11 +192,9 @@ export async function updateSession(request: NextRequest) {
 
         // /portal/* → portal minisite (client-side router handles sub-paths)
         if (pathname.startsWith("/portal/") || pathname === "/portal") {
-          // Only pass through /login and /callback as server routes
           const portalPath = pathname === "/portal" ? "" : pathname.slice(7);
           const isServerRoute = portalPath.endsWith("/login") || portalPath.endsWith("/callback");
           url.pathname = isServerRoute ? `/portal/${slug}${portalPath}` : `/portal/${slug}`;
-          // Preserve query params (e.g. ?id=123, ?status=active)
           return NextResponse.rewrite(url);
         }
 
