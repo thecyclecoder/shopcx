@@ -92,13 +92,20 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
     }
   }
 
-  // Get the Shopify store domain for product link
+  // Get the Shopify store domain for product link. Use the
+  // myshopify_domain — Shopify auto-redirects it to the primary
+  // customer-facing domain (e.g. 2c6b02-3.myshopify.com →
+  // superfoodscompany.com), so the link always lands at the right
+  // store regardless of how the merchant has their primary domain
+  // configured. The legacy `shopify_domain` field on workspaces is
+  // sometimes a bare slug (e.g. "superfoodsco") and produces
+  // unresolvable URLs.
   const { data: wsStore } = await admin
     .from("workspaces")
-    .select("shopify_domain")
+    .select("shopify_myshopify_domain")
     .eq("id", workspace.id)
     .single();
-  const shopDomain = wsStore?.shopify_domain || "";
+  const shopDomain = wsStore?.shopify_myshopify_domain || "";
 
   // Get related articles — same product first, then same category
   let related: { id: string; title: string; slug: string; excerpt: string | null }[] | null = null;
