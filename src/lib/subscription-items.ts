@@ -71,6 +71,62 @@ export async function getAppstleConfig(workspaceId: string): Promise<{ apiKey: s
  * NOTE: this is a separate operation from replaceVariants — they hit different endpoints.
  * Pass either lineGid (preferred — saves a contract fetch) or variantId (we'll resolve).
  */
+
+/**
+ * Resolve an "id-or-title" string to the numeric variant id on a
+ * specific contract. The orchestrator occasionally passes a
+ * human-readable title (e.g. "ACV Gummies (Apple)") into actions
+ * that expect a numeric variant id; this helper rescues those calls
+ * by matching against the live Appstle contract's lines.
+ *
+ * Returns null when no match — callers should error with a useful
+ * message that lists what IS on the contract.
+ */
+export async function resolveContractVariantId(
+  workspaceId: string,
+  contractId: string,
+  idOrTitle: string,
+): Promise<{ numericId: string | null; available: string[]; titles: string[] }> {
+  const config = await getAppstleConfig(workspaceId);
+  if (!config) return { numericId: null, available: [], titles: [] };
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
+      { cache: "no-store" },
+    );
+    if (!res.ok) return { numericId: null, available: [], titles: [] };
+    const data = await res.json();
+    const lines = (data.lines?.nodes || []) as Array<Record<string, unknown>>;
+    const isNumeric = /^\d+$/.test(String(idOrTitle));
+    const target = String(idOrTitle).toLowerCase().trim();
+    const available: string[] = [];
+    const titles: string[] = [];
+    for (const l of lines) {
+      const vid = String(l.variantId || "").split("/").pop();
+      const title = String(l.title || l.productTitle || "");
+      if (vid) available.push(vid);
+      if (title) titles.push(title);
+    }
+    // Primary: exact numeric variant id match
+    let line = lines.find((l) => {
+      const vid = String(l.variantId || "").split("/").pop();
+      return vid === String(idOrTitle);
+    });
+    // Fallback: title match (only when the caller passed text)
+    if (!line && !isNumeric) {
+      line = lines.find((l) => {
+        const t = String((l.title || l.productTitle || "")).toLowerCase().trim();
+        if (!t) return false;
+        return t === target || t.includes(target) || target.includes(t);
+      });
+    }
+    const numericId = line ? String(line.variantId || "").split("/").pop() || null : null;
+    return { numericId, available, titles };
+  } catch {
+    return { numericId: null, available: [], titles: [] };
+  }
+}
+
 export async function appstleRemoveLineItem(
   workspaceId: string,
   contractId: string,
@@ -82,7 +138,11 @@ export async function appstleRemoveLineItem(
   try {
     let lineGid = variantOrLine.lineGid || null;
 
-    // Resolve lineGid from variantId if needed by fetching the contract
+    // Resolve lineGid from variantId if needed by fetching the contract.
+    // The orchestrator sometimes passes a human-readable title
+    // ("ACV Gummies (Apple)") instead of the numeric ID — when that
+    // happens we fall back to matching against line title /
+    // productTitle so the remove still goes through.
     if (!lineGid && variantOrLine.variantId) {
       const contractRes = await fetch(
         `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
@@ -90,12 +150,32 @@ export async function appstleRemoveLineItem(
       );
       if (!contractRes.ok) return { success: false, error: `Contract fetch failed: ${contractRes.status}` };
       const contractData = await contractRes.json();
-      const lines = contractData.lines?.nodes || [];
-      const line = lines.find((l: Record<string, unknown>) => {
+      const lines = (contractData.lines?.nodes || []) as Array<Record<string, unknown>>;
+      const isNumeric = /^\d+$/.test(String(variantOrLine.variantId));
+      const target = String(variantOrLine.variantId).toLowerCase().trim();
+
+      // Primary: exact numeric variant id match
+      let line = lines.find((l) => {
         const vid = String(l.variantId || "").split("/").pop();
         return vid === String(variantOrLine.variantId);
       });
-      if (!line?.id) return { success: false, error: `Variant ${variantOrLine.variantId} not found on contract` };
+
+      // Fallback: title match (only when the caller passed text, not a number)
+      if (!line && !isNumeric) {
+        line = lines.find((l) => {
+          const t = String((l.title || l.productTitle || "")).toLowerCase().trim();
+          if (!t) return false;
+          // Match if the passed text matches title, productTitle, or
+          // either contains the other (handles "ACV Gummies" vs "ACV
+          // Gummies (Apple)" cases).
+          return t === target || t.includes(target) || target.includes(t);
+        });
+      }
+
+      if (!line?.id) {
+        const available = lines.map((l) => String(l.variantId || "").split("/").pop()).join(", ");
+        return { success: false, error: `Variant "${variantOrLine.variantId}" not found on contract. Available variants: ${available || "(none)"}` };
+      }
       lineGid = String(line.id);
     }
 
@@ -275,12 +355,22 @@ export async function subChangeQuantity(
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
+  // If the caller passed a title instead of a numeric id, resolve it.
+  let resolvedId = variantId;
+  if (!/^\d+$/.test(String(variantId))) {
+    const r = await resolveContractVariantId(workspaceId, contractId, variantId);
+    if (!r.numericId) {
+      return { success: false, error: `Variant "${variantId}" not found on contract. Available variants: ${r.available.join(", ") || "(none)"}` };
+    }
+    resolvedId = r.numericId;
+  }
+
   const result = await callReplaceVariants(config.apiKey, {
     shop: config.shop,
     contractId: Number(contractId),
     eventSource: "CUSTOMER_PORTAL",
-    oldVariants: [Number(variantId)],
-    newVariants: { [variantId]: quantity },
+    oldVariants: [Number(resolvedId)],
+    newVariants: { [resolvedId]: quantity },
     carryForwardDiscount: "EXISTING_PLAN",
     stopSwapEmails: true,
   });
@@ -288,7 +378,7 @@ export async function subChangeQuantity(
   if (result.success) {
     await syncItemsAfterMutation(workspaceId, contractId, (items) =>
       items.map((item) =>
-        String(item.variant_id) === variantId ? { ...item, quantity } : item,
+        String(item.variant_id) === resolvedId ? { ...item, quantity } : item,
       ),
     );
   }
@@ -425,11 +515,24 @@ export async function subSwapVariant(
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
+  // Old variant id might come in as a title (orchestrator hallucination
+  // protection) — resolve to numeric. The NEW variant id is expected
+  // to be numeric since it's a fresh variant Opus picks from the
+  // catalog, but we accept either form via the same helper for safety.
+  let resolvedOld = oldVariantId;
+  if (!/^\d+$/.test(String(oldVariantId))) {
+    const r = await resolveContractVariantId(workspaceId, contractId, oldVariantId);
+    if (!r.numericId) {
+      return { success: false, error: `Old variant "${oldVariantId}" not found on contract. Available: ${r.available.join(", ") || "(none)"}` };
+    }
+    resolvedOld = r.numericId;
+  }
+
   const result = await callReplaceVariants(config.apiKey, {
     shop: config.shop,
     contractId: Number(contractId),
     eventSource: "CUSTOMER_PORTAL",
-    oldVariants: [Number(oldVariantId)],
+    oldVariants: [Number(resolvedOld)],
     newVariants: { [newVariantId]: quantity },
     carryForwardDiscount: "EXISTING_PLAN",
     stopSwapEmails: true,
@@ -440,7 +543,7 @@ export async function subSwapVariant(
   if (result.success) {
     await syncItemsAfterMutation(workspaceId, contractId, (items) =>
       items.map((item) =>
-        String(item.variant_id) === oldVariantId
+        String(item.variant_id) === resolvedOld
           ? { ...item, variant_id: newVariantId, quantity }
           : item,
       ),

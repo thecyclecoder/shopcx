@@ -428,7 +428,15 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
           else if (realized <= floor + 10) tail.push("[AT FLOOR]");
           else if (realized < standard) tail.push("[grandfathered above floor]");
         }
-        return `${i.title || "item"}${i.variant_title ? ` (${i.variant_title})` : ""} x${qty} @ $${(realized / 100).toFixed(2)} each (line $${((realized * qty) / 100).toFixed(2)})${tail.length ? ` — ${tail.join(" ")}` : ""}`;
+        // Always emit variant_id literally so the LLM can pass it
+        // verbatim into remove_item / swap_variant / change_quantity.
+        // Without this, Opus reasons from text alone and stuffs the
+        // human-readable title into the action call, which fails as
+        // "Variant <title> not found on contract". Single-variant
+        // products like ACV Gummies still have a numeric Default
+        // Title variant id — render it the same way.
+        const vidTag = i.variant_id ? ` [variant_id: ${i.variant_id}]` : "";
+        return `${i.title || "item"}${i.variant_title ? ` (${i.variant_title})` : ""} x${qty}${vidTag} @ $${(realized / 100).toFixed(2)} each (line $${((realized * qty) / 100).toFixed(2)})${tail.length ? ` — ${tail.join(" ")}` : ""}`;
       }).join(", ");
       const next = s.next_billing_date
         ? new Date(s.next_billing_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })
@@ -516,6 +524,41 @@ DRAFT ORDERS: orders flagged [DRAFT — not a renewal] are manual draft orders (
     parts.push("\nRECENT ORDERS: None");
   }
 
+  // Store credit — pulled live from Shopify (customer.storeCreditAccounts).
+  // Always emit so the LLM can answer "apply my store credit" requests
+  // accurately and distinguish "no store credit" from "no field exposed"
+  // (same pattern as the loyalty empty-state fix). Try every linked
+  // profile so a credit issued to one email surfaces on a ticket from
+  // another linked profile.
+  try {
+    const { getStoreCreditBalance } = await import("@/lib/store-credit");
+    const { data: linkedShopifyIds } = await admin.from("customers")
+      .select("shopify_customer_id, email")
+      .in("id", allCustIds)
+      .not("shopify_customer_id", "is", null);
+    let totalCredit = 0;
+    let currency = "USD";
+    const perProfile: string[] = [];
+    for (const c of linkedShopifyIds || []) {
+      try {
+        const r = await getStoreCreditBalance(wsId, c.shopify_customer_id as string);
+        if (r.balance > 0) {
+          totalCredit += r.balance;
+          currency = r.currency || currency;
+          perProfile.push(`${c.email || c.shopify_customer_id}: $${r.balance.toFixed(2)}`);
+        }
+      } catch { /* one profile failing shouldn't break the rest */ }
+    }
+    if (totalCredit > 0) {
+      const detail = perProfile.length > 1 ? ` (across linked profiles: ${perProfile.join("; ")})` : "";
+      parts.push(`\nSTORE CREDIT: $${totalCredit.toFixed(2)} ${currency}${detail}`);
+    } else {
+      parts.push(`\nSTORE CREDIT: $0 (no store credit balance on this customer or any linked profile)`);
+    }
+  } catch {
+    parts.push(`\nSTORE CREDIT: lookup failed`);
+  }
+
   // Loyalty — explicit empty state so the LLM doesn't mis-frame a
   // missing record as "the tool doesn't expose loyalty". Always emit
   // a LOYALTY line. If no loyalty_members row exists for any linked
@@ -590,23 +633,54 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
   const searchQuery = query || "general product information";
   const [
     { data: products },
+    { data: variantRows },
     ragResults,
   ] = await Promise.all([
-    admin.from("products").select("title, description, variants").eq("workspace_id", wsId).eq("status", "active"),
+    admin.from("products").select("id, title, description").eq("workspace_id", wsId).eq("status", "active"),
+    admin.from("product_variants")
+      .select("product_id, title, option1, option2, sku, inventory_quantity, available, position")
+      .eq("workspace_id", wsId)
+      .order("position"),
     retrieveContext(wsId, searchQuery, 10),
   ]);
 
   const parts: string[] = [];
 
-  // Products with inventory
+  // Group variants by product_id (source of truth — legacy products.variants
+  // JSONB is a mirror that doesn't always include freshly-added flavors).
+  const variantsByProduct = new Map<string, Array<{ name: string; sku: string | null; qty: number | null; available: boolean }>>();
+  for (const v of variantRows || []) {
+    const list = variantsByProduct.get(v.product_id) || [];
+    list.push({
+      name: (v.title || v.option1 || "Default") as string,
+      sku: v.sku as string | null,
+      qty: v.inventory_quantity as number | null,
+      available: v.available !== false && (v.inventory_quantity == null || v.inventory_quantity > 0),
+    });
+    variantsByProduct.set(v.product_id, list);
+  }
+
+  // Products with their full flavor / variant list. Opus needs to see
+  // every available flavor so it can answer "what flavors do you have?"
+  // accurately. Previously we only emitted an OUT OF STOCK note and
+  // left available flavors invisible — Opus then guessed from macros
+  // and missed flavors that weren't in any macro (e.g. Cinnamon Roll).
   parts.push("PRODUCT CATALOG:");
   for (const p of products || []) {
-    const variants = (p.variants as { title?: string; inventory_quantity?: number }[] || []);
-    const oosVariants = variants.filter(v => v.inventory_quantity != null && v.inventory_quantity <= 0);
-    const stockNote = oosVariants.length > 0
-      ? ` [OUT OF STOCK: ${oosVariants.map(v => v.title || "Default").join(", ")}]`
-      : "";
-    parts.push(`- ${p.title}${p.description ? `: ${p.description.slice(0, 150)}` : ""}${stockNote}`);
+    const variants = variantsByProduct.get(p.id) || [];
+    const desc = p.description ? `: ${p.description.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 150)}` : "";
+    parts.push(`- ${p.title}${desc}`);
+    // Skip variant list if there's only one default variant — most
+    // products with a single SKU don't have a meaningful "flavor".
+    if (variants.length <= 1) continue;
+    const inStock = variants.filter(v => v.available);
+    const oos = variants.filter(v => !v.available);
+    if (inStock.length) {
+      parts.push(`    available: ${inStock.map(v => v.name).join(", ")}`);
+    }
+    if (oos.length) {
+      parts.push(`    OUT OF STOCK: ${oos.map(v => v.name).join(", ")}`);
+    }
   }
 
   // Macros from RAG (semantically matched, not brute-force)
