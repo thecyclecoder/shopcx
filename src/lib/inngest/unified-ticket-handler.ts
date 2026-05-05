@@ -773,6 +773,56 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
     if (st.hasCust && isNew && msgType === "account") {
       // 2b. No Shopify customer → conversational inline flow (keep — stateful)
       if (!st.hasShopifyCustomer) {
+        // ── 2b-pre. Order-number short-circuit ──
+        // Customer replies to a shipping/order email from a different
+        // address than the one on file (Gmail dot-aliasing, work vs.
+        // personal, etc.). The order number is right there in the
+        // subject/body — extract it, resolve the customer, link the
+        // profiles, re-process. Beats asking "what's your email?"
+        // when we already know which order they're talking about.
+        const subjAndBody = `${st.subject || ""}\n${stripped}`;
+        const orderNumbers = Array.from(new Set(
+          (subjAndBody.match(/\bSC\d{4,7}\b/gi) || []).map(s => s.toUpperCase())
+        ));
+        if (orderNumbers.length > 0) {
+          const { data: orderMatches } = await admin.from("orders")
+            .select("order_number, customer_id, customers!inner(id, email, shopify_customer_id)")
+            .eq("workspace_id", wsId)
+            .in("order_number", orderNumbers);
+          const target = (orderMatches || []).find(o => {
+            const c = o.customers as unknown as { id: string; shopify_customer_id: string | null } | null;
+            return c?.shopify_customer_id && c.id !== st.custId;
+          });
+          if (target) {
+            const targetCust = target.customers as unknown as { id: string; email: string };
+            const { randomUUID } = await import("crypto");
+            const { data: existingLink } = await admin.from("customer_links")
+              .select("group_id").eq("customer_id", st.custId!).maybeSingle();
+            const { data: targetLink } = await admin.from("customer_links")
+              .select("group_id").eq("customer_id", targetCust.id).maybeSingle();
+            const groupId = existingLink?.group_id || targetLink?.group_id || randomUUID();
+
+            if (!existingLink) {
+              await admin.from("customer_links").upsert({
+                customer_id: st.custId!, workspace_id: wsId, group_id: groupId, is_primary: false,
+              }, { onConflict: "customer_id" });
+            }
+            if (!targetLink) {
+              await admin.from("customer_links").upsert({
+                customer_id: targetCust.id, workspace_id: wsId, group_id: groupId, is_primary: true,
+              }, { onConflict: "customer_id" });
+            }
+            await addTicketTag(tid, "link");
+            await sysNote(admin, tid, `[System] Resolved customer via order number ${target.order_number}: linked to ${targetCust.email}. Re-processing with full context.`);
+
+            await inngest.send({
+              name: "ticket/inbound-message",
+              data: { workspace_id: wsId, ticket_id: tid, message_body: msg, channel: st.ch, is_new_ticket: false },
+            });
+            return { status: "linked_via_order_number", order_number: target.order_number };
+          }
+        }
+
         // Check if we're in the inline linking conversation
         const { data: ticketData } = await admin.from("tickets")
           .select("playbook_context").eq("id", tid).single();

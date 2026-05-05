@@ -121,15 +121,26 @@ interface ActionResult {
  * Supports both `{{snake_case}}` (the canonical form Sonnet is taught
  * via prompts) and `[UPPER_CASE]` (a bracket form Sonnet sometimes
  * hallucinates without a prompt). Both substitute the same value.
+ *
+ * `{{label_url}}` is special: it renders as a styled CTA button (not a
+ * raw URL) because non-tech-savvy customers don't know to copy/paste a
+ * long S3 link into a browser. Same pattern works in both email
+ * (table-based for Outlook compat) and the chat widget (which uses
+ * dangerouslySetInnerHTML).
  */
+function ctaButton(url: string, label: string): string {
+  return `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:8px 0 16px 0;"><tr><td bgcolor="#0f766e" style="background-color:#0f766e;border-radius:8px;"><a href="${url}" style="display:inline-block;padding:14px 24px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">${label}</a></td></tr></table>`;
+}
+
 function substituteActionPlaceholders(
   message: string,
   results: { action: ActionParams; result: ActionResult }[],
 ): string {
+  let labelUrl: string | undefined;
   const map: Record<string, string> = {};
   for (const { result } of results) {
     if (!result.success) continue;
-    if (result.labelUrl) map.label_url = result.labelUrl;
+    if (result.labelUrl) labelUrl = result.labelUrl; // handled separately as a CTA button
     if (result.trackingNumber) map.tracking_number = result.trackingNumber;
     if (result.carrier) map.carrier = result.carrier;
     if (result.refundAmountCents != null) {
@@ -138,6 +149,16 @@ function substituteActionPlaceholders(
     if (result.couponCode) map.coupon_code = result.couponCode;
   }
   let out = message;
+
+  // Render label_url as a CTA button, not as raw URL text. This stops
+  // the long "https://easypost-files.s3..." link from landing in the
+  // body where customers don't know what to do with it.
+  if (labelUrl) {
+    const button = ctaButton(labelUrl, "Download your prepaid return label →");
+    out = out.replace(/\{\{\s*label_url\s*\}\}/g, button);
+    out = out.replace(/\[\s*LABEL_URL\s*\]/g, button);
+  }
+
   for (const [key, value] of Object.entries(map)) {
     const lower = `{{\\s*${key}\\s*}}`;
     const upper = `\\[\\s*${key.toUpperCase()}\\s*\\]`;
