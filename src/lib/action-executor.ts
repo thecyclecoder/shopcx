@@ -302,8 +302,8 @@ const directActionHandlers: Record<
               orderDiscounts: settings.coupon_combines_order,
             },
             customerGets: {
-              appliesOnOneTimePurchase: false,
-              appliesOnSubscription: true,
+              appliesOnOneTimePurchase: settings.coupon_applies_to !== "subscription",
+              appliesOnSubscription: settings.coupon_applies_to !== "one_time",
               items: { all: true },
               value: {
                 discountAmount: {
@@ -402,7 +402,7 @@ const directActionHandlers: Record<
             usageLimit: 1, appliesOncePerCustomer: true,
             customerSelection: { customers: { add: [`gid://shopify/Customer/${member.shopify_customer_id}`] } },
             combinesWith: { productDiscounts: settings.coupon_combines_product, shippingDiscounts: settings.coupon_combines_shipping, orderDiscounts: settings.coupon_combines_order },
-            customerGets: { appliesOnOneTimePurchase: false, appliesOnSubscription: true, items: { all: true }, value: { discountAmount: { amount: orig.discount_value, appliesOnEachItem: false } } },
+            customerGets: { appliesOnOneTimePurchase: settings.coupon_applies_to !== "subscription", appliesOnSubscription: settings.coupon_applies_to !== "one_time", items: { all: true }, value: { discountAmount: { amount: orig.discount_value, appliesOnEachItem: false } } },
           }},
         }),
       });

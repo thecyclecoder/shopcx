@@ -522,6 +522,38 @@ export const unifiedTicketHandler = inngest.createFunction(
       return { status: "skipped", reason: "empty_inbound" };
     }
 
+    // ── 0b. Bot / contact-form spam short-circuit ──
+    // Captcha-bypass bots drop random alphanumeric tokens into both
+    // subject AND body of the contact form (e.g. subject
+    // "teBoCbeWHnedYfLZBTi" + body "yKORLjDqrriQblpTKc"). Real customers
+    // never write a 16-char mixed-case token as their entire email body.
+    // Pre-screen with a regex; confirm with Haiku to guard against the
+    // edge case (a single-word reply like "Anywhere" that happens to
+    // satisfy the alphanumeric pattern).
+    //
+    // On confirmed spam: tag spam:bot, close, return. No AI reply,
+    // no escalation, no agent slot consumed.
+    const isBotToken = (s: string) =>
+      /^[a-zA-Z0-9]{8,30}$/.test(s) && /[A-Z]/.test(s) && /[a-z]/.test(s);
+    if (isNew && isBotToken(stripped)) {
+      const { data: ticket } = await admin.from("tickets")
+        .select("subject").eq("id", tid).maybeSingle();
+      const subj = (ticket?.subject || "").trim();
+      if (isBotToken(subj)) {
+        const verdict = await claude(
+          `Subject: ${subj}\nBody: ${stripped}\n\nIs this a bot/spam contact-form submission with no real customer intent? Both fields contain random alphanumeric tokens with no meaning — that's a bot signature. Reply with ONLY one word: YES or NO.`,
+          "haiku", 10, { workspaceId: wsId, ticketId: tid, purpose: "spam-check" }
+        );
+        if (/^YES/i.test(verdict.trim())) {
+          await addTicketTag(tid, "spam:bot");
+          await admin.from("tickets").update({ status: "closed" }).eq("id", tid);
+          await sysNote(admin, tid, `[System] Bot/spam contact-form drop detected — closed silently. (Subject + body both match alphanumeric token pattern; Haiku confirmed.)`);
+          return { status: "skipped", reason: "spam_bot" };
+        }
+        await sysNote(admin, tid, `[System] Subject + body matched bot regex but Haiku said NO ("${verdict.trim().slice(0, 30)}") — proceeding with normal pipeline.`);
+      }
+    }
+
     // ── 1. Resolve ──
     const st = await step.run("resolve", async () => {
       const { data: ticket } = await admin.from("tickets")

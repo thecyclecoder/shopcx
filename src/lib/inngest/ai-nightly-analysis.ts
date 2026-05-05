@@ -119,7 +119,10 @@ export const aiNightlyAnalysis = inngest.createFunction(
         const analysisPrompt = conversations.map((c, i) => {
           const thread = c.messages.map(m => `${m.role}: ${m.body}`).join("\n");
           const priorTag = c.hasPriorHistory ? ", HAS PRIOR HISTORY (older messages intentionally excluded)" : "";
-          return `--- Ticket ${i + 1} (${c.channel}, ${c.turns} AI turns${c.escalated ? ", ESCALATED" : ""}${priorTag}) ---\nSubject: ${c.subject}\n${thread}`;
+          // Embed the real ticket UUID alongside the ordinal so Claude can
+          // return ticket_id directly — eliminates off-by-one and 0-vs-1
+          // indexing ambiguity that bit us in the May reports.
+          return `--- Ticket ${i + 1} [id=${c.ticketId}] (${c.channel}, ${c.turns} AI turns${c.escalated ? ", ESCALATED" : ""}${priorTag}) ---\nSubject: ${c.subject}\n${thread}`;
         }).join("\n\n");
 
         const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -152,12 +155,14 @@ Analyze each conversation and provide:
 3. Issues found: inaccurate responses, robotic tone, customer frustration, missed opportunities — only when visible in AI messages
 4. Action items: specific improvements needed
 
+When you reference a specific ticket in "issues", you MUST copy the UUID from the [id=...] label of that ticket EXACTLY into the "ticket_id" field. Do not paraphrase, do not abbreviate, do not invent. Also include the 1-based "ticket_index" matching the "Ticket N" label.
+
 Return JSON:
 {
   "overall_score": number,
   "total_conversations": number,
   "channel_scores": { "email": number, "chat": number, ... },
-  "issues": [{ "ticket_index": number, "type": "inaccuracy"|"robotic"|"frustration"|"missed_opportunity"|"kb_gap", "description": string }],
+  "issues": [{ "ticket_index": number, "ticket_id": string, "type": "inaccuracy"|"robotic"|"frustration"|"missed_opportunity"|"kb_gap", "description": string }],
   "action_items": [{ "priority": "high"|"medium"|"low", "description": string }],
   "summary": string
 }`,

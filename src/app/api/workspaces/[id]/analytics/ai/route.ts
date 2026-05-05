@@ -52,7 +52,7 @@ export async function GET(
   const latest = reports?.[reports.length - 1];
   const latestMeta = (latest?.metadata as {
     overall_score?: number;
-    issues?: { ticket_index: number; type: string; description: string }[];
+    issues?: { ticket_index: number; ticket_id?: string; type: string; description: string }[];
     action_items?: { priority: string; description: string }[];
     ticket_ids?: string[];
     summary?: string;
@@ -60,7 +60,9 @@ export async function GET(
   const latestIssues = (latestMeta.issues || []).map(i => ({
     type: i.type,
     description: i.description,
-    ticket_id: latestMeta.ticket_ids?.[i.ticket_index - 1] || null,
+    // New reports embed ticket_id directly. Older reports only have
+    // ticket_index — fall back to the ordered array.
+    ticket_id: i.ticket_id || latestMeta.ticket_ids?.[i.ticket_index - 1] || null,
   }));
 
   // ── 2. AI-handled tickets in window ──

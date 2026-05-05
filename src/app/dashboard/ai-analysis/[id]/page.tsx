@@ -12,10 +12,10 @@ interface Analysis {
     date: string;
     overall_score: number;
     conversations_analyzed: number;
-    issues: { type: string; description: string; ticket_index: number }[];
+    issues: { type: string; description: string; ticket_index: number; ticket_id?: string }[];
     action_items: { priority: string; description: string }[];
     channel_scores: Record<string, number>;
-    ticket_ids?: string[]; // ordered — ticket_index N (1-based) → ticket_ids[N-1]
+    ticket_ids?: string[]; // legacy — used as fallback when issue.ticket_id absent
   };
 }
 
@@ -123,7 +123,9 @@ export default function AIAnalysisDetailPage() {
           {m.issues?.length ? (
             <div className="space-y-3">
               {m.issues.map((issue, i) => {
-                const ticketId = m.ticket_ids?.[issue.ticket_index - 1];
+                // New reports embed ticket_id directly. Old reports only
+                // had ticket_index — fall back to the ordered array.
+                const ticketId = issue.ticket_id || m.ticket_ids?.[issue.ticket_index - 1];
                 return (
                   <div key={i} className="rounded-md border border-zinc-100 px-3 py-2 dark:border-zinc-800">
                     <div className="flex items-center gap-2">
