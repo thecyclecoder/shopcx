@@ -125,8 +125,9 @@ export async function PATCH(
     .select("portal_config")
     .eq("id", workspaceId)
     .single();
+  const existingConfig = (existing?.portal_config as Record<string, unknown>) || {};
   const oldDomain = (
-    (existing?.portal_config as { minisite?: { custom_domain?: string } } | null)?.minisite?.custom_domain || ""
+    (existingConfig as { minisite?: { custom_domain?: string } } | null)?.minisite?.custom_domain || ""
   ).toLowerCase().trim();
   const newDomain = (config.minisite.custom_domain || "").toLowerCase().trim();
   config.minisite.custom_domain = newDomain;
@@ -156,9 +157,16 @@ export async function PATCH(
     }
   }
 
+  // CRITICAL: preserve any unknown top-level keys that mergeWithDefaults
+  // doesn't know about (cancel_flow, etc.). Without this spread, every save
+  // here clobbers fields owned by other surfaces like Settings → Cancel Flow.
+  // (Bug 2026-05-06: cancel_flow.reasons got wiped when the portal page
+  //  saved custom_domain.)
+  const merged = { ...existingConfig, ...config };
+
   const { data, error } = await admin
     .from("workspaces")
-    .update({ portal_config: config })
+    .update({ portal_config: merged })
     .eq("id", workspaceId)
     .select("portal_config")
     .single();
