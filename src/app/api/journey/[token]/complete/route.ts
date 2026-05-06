@@ -186,6 +186,14 @@ export async function POST(
                 .select("shopify_contract_id").eq("customer_id", ticket.customer_id).eq("status", "active")
                 .order("updated_at", { ascending: false }).limit(1).maybeSingle();
 
+              // Appstle's update-shipping-address requires firstName + lastName
+              // — without them the call returns 400 and the address change
+              // silently fails. Pull the customer's name from the DB.
+              // (Bug 2026-05-06: every shipping_address journey was failing
+              // on this; Dawn McClary surfaced it.)
+              const { data: cust } = await admin.from("customers")
+                .select("first_name, last_name, phone").eq("id", ticket.customer_id).maybeSingle();
+
               const { executeSonnetDecision } = await import("@/lib/action-executor");
               await executeSonnetDecision(
                 { admin, workspaceId: wsId, ticketId: session.ticket_id, customerId: ticket.customer_id, channel: "email", sandbox: false },
@@ -200,6 +208,9 @@ export async function POST(
                       address1: newAddr.street1, address2: newAddr.street2,
                       city: newAddr.city, province: newAddr.state,
                       zip: newAddr.zip, country: newAddr.country,
+                      first_name: cust?.first_name || undefined,
+                      last_name: cust?.last_name || undefined,
+                      phone: cust?.phone || undefined,
                     },
                   }],
                 },
