@@ -407,7 +407,31 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       } catch {}
     }
 
-    return jsonOk({ ok: true, step: "reason", reason, remedies: selectedRemedies, reviews: reasonReviews, sessionId });
+    // Opus-generated contextual lead-in (acknowledge × appreciate × save).
+    // Same source as the journey mini-site — both use generateCancelLeadIn.
+    let leadIn: string | null = null;
+    try {
+      const { data: subDataForLead } = await admin.from("subscriptions")
+        .select("items, created_at")
+        .eq("workspace_id", auth.workspaceId)
+        .eq("shopify_contract_id", contractId).single();
+      const ageDays = subDataForLead?.created_at
+        ? Math.floor((Date.now() - new Date(subDataForLead.created_at).getTime()) / 86400000)
+        : 0;
+      const productNames = ((subDataForLead?.items as { title?: string }[]) || [])
+        .map(i => i.title).filter((s): s is string => !!s);
+      const reasonLabel = String(payload?.reasonLabel || reason);
+      const { generateCancelLeadIn } = await import("@/lib/cancel-lead-in");
+      leadIn = await generateCancelLeadIn({
+        workspaceId: auth.workspaceId,
+        customerId: customer.id,
+        reasonLabel,
+        ageMonths: Math.floor(ageDays / 30),
+        products: productNames,
+      });
+    } catch { /* fall through — frontend has a static fallback */ }
+
+    return jsonOk({ ok: true, step: "reason", reason, remedies: selectedRemedies, reviews: reasonReviews, sessionId, lead_in: leadIn });
   }
 
   if (step === "chat") {

@@ -415,6 +415,7 @@ export default function Cancel() {
   const [reviews, setReviews] = useState([]);
   const [busy, setBusy] = useState(false);
   const [sessionId, setSessionId] = useState(null);
+  const [remedyLeadIn, setRemedyLeadIn] = useState(null);
 
   // Chat state
   const [chatMessages, setChatMessages] = useState([]);
@@ -520,11 +521,13 @@ export default function Cancel() {
       try {
         const resp = await postJson('cancelJourney', {
           step: 'reason', reason: reasonId, reasonType: 'remedy',
+          reasonLabel: reasonConfig?.label || reasonId,
           suggested_remedy_id: suggestedRemedyId,
         }, { contractId });
         if (resp?.remedies) setRemedies(resp.remedies);
         if (resp?.reviews) setReviews(resp.reviews);
         if (resp?.sessionId) setSessionId(resp.sessionId);
+        if (typeof resp?.lead_in === 'string') setRemedyLeadIn(resp.lead_in);
       } catch {
         setRemedies(journey?.remedies || []);
       }
@@ -676,12 +679,11 @@ export default function Cancel() {
 
   // ---- REMEDIES STEP ----
   if (phase === 'remedies') {
-    const ageMonths = Math.floor(subscriptionAgeDays / 28);
-    const isVip = ageMonths >= 3;
     const name = customerFirstName || 'there';
-    const personalHeader = isVip
-      ? `Hey ${name}, you're a VIP customer with us. Thanks for being with us for ${ageMonths} month${ageMonths !== 1 ? 's' : ''}. We've put together a special group of options for you because we'd hate to lose you!`
-      : `Hey ${name}, most people see the best results with at least 3 months of consistent use. Here are some options to keep you on track:`;
+    // Opus-generated lead-in (acknowledge × appreciate × save) from the
+    // backend response. Static fallback only if the API call failed.
+    const personalHeader = remedyLeadIn
+      || `Hey ${name}, here are some options before you cancel:`;
 
     if (busy && !remedies.length) {
       return (
