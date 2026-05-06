@@ -28,14 +28,26 @@ export async function generateCancelLeadIn(args: CancelLeadInArgs): Promise<stri
   const admin = createAdminClient();
   const { data: customer } = await admin
     .from("customers")
-    .select("first_name")
+    .select("first_name, first_order_at, total_orders")
     .eq("id", args.customerId)
     .single();
   const firstName = customer?.first_name || "there";
 
-  const tenureLine = args.ageMonths >= 1
-    ? `${args.ageMonths} month${args.ageMonths === 1 ? "" : "s"} of subscription tenure`
-    : "first month with us (less than 30 days)";
+  // Customer tenure (months as a customer) is often more meaningful than the
+  // current subscription's age — long-time customers who re-subscribed after
+  // a pause have a 1-month sub but years of relationship. Pass both signals
+  // and let Opus use the more meaningful one.
+  const customerMonths = customer?.first_order_at
+    ? Math.floor((Date.now() - new Date(customer.first_order_at).getTime()) / (1000 * 60 * 60 * 24 * 30))
+    : 0;
+  const totalOrders = customer?.total_orders ?? 0;
+
+  const subTenureLine = args.ageMonths >= 1
+    ? `${args.ageMonths} month${args.ageMonths === 1 ? "" : "s"}`
+    : "less than 30 days";
+  const customerTenureLine = customerMonths >= 1
+    ? `${customerMonths} month${customerMonths === 1 ? "" : "s"} (${totalOrders} total orders)`
+    : "less than 30 days as a customer";
 
   const productLine = args.products.length ? args.products.join(", ") : "their subscription";
 
@@ -47,8 +59,11 @@ export async function generateCancelLeadIn(args: CancelLeadInArgs): Promise<stri
 
 Customer: ${firstName}
 Reason: "${args.reasonLabel}"
-Tenure: ${tenureLine}
+Current subscription age: ${subTenureLine}
+Customer relationship age: ${customerTenureLine}
 Product(s): ${productLine}
+
+TENURE GUIDANCE: Use the SHORTER tenure value only when it accurately reflects the customer's experience with the product. For long-time customers on a newer subscription (e.g. customer relationship: 24 months, current sub: 1 month — they likely re-subscribed after a pause), reference the LONGER customer relationship age — that's what feels accurate. Don't say "in just a month" to someone who's been with us for years.
 
 Save-pivots by reason (study, don't copy):
   • "Already reached my goals" → time to MAINTAIN those results, not lose them
