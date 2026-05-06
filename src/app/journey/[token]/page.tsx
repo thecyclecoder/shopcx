@@ -520,15 +520,21 @@ function CancelJourney({
   const steps = ((config as { steps?: { key: string; type: string; question: string; options?: { value: string; label: string; emoji?: string }[] }[] }).steps || []);
   const reasonStep = steps.find(s => s.key === "cancel_reason");
 
-  // Auto-select if single subscription
+  // Auto-select if single subscription, or if orchestrator pre-selected one.
+  // The pre-selected case happens when Sonnet emits a journey action with a
+  // contract_id — we resolve it to subscription_id at launch time and the API
+  // loader stamps it onto metadata so the picker step is skipped.
   useEffect(() => {
-    if (subscriptions.length === 1) {
+    if (metadata.selectedSubscriptionId && subscriptions.some(s => s.id === metadata.selectedSubscriptionId)) {
+      setSelectedSubId(metadata.selectedSubscriptionId);
+      setPhase("reason");
+    } else if (subscriptions.length === 1) {
       setSelectedSubId(subscriptions[0].id);
       setPhase("reason");
     } else if (subscriptions.length === 0) {
       setPhase("reason");
     }
-  }, [subscriptions.length]);
+  }, [subscriptions.length, metadata.selectedSubscriptionId]);
 
   const submitStep = async (stepKey: string, value: string, label: string) => {
     setResponses(prev => ({ ...prev, [stepKey]: { value, label } }));

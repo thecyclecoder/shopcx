@@ -27,14 +27,26 @@ interface LaunchParams {
   leadIn: string;       // AI-generated, tone-aware
   ctaText: string;      // AI-generated, action-specific
   prependAccountLinking?: boolean;
+  subscriptionId?: string;  // Optional — orchestrator can pass this when it knows
+                            // which sub the customer is referencing. Mini-site
+                            // skips the picker step when set.
 }
+
+// Cancel journey is fully live-rendered by the mini-site. The orchestrator's
+// only job is to pick the right ids and insert a session row; the API loader
+// at /api/journey/[token] handles all data fetching, step-building, and
+// rendering. See feedback_orchestrator_minimal_payload memory entry.
+const LIVE_RENDERED_INTENTS = new Set([
+  "cancel_subscription",
+  "cancel",
+]);
 
 /**
  * Launch a journey for a ticket via the appropriate channel delivery.
  * Returns true if launched, false if channel doesn't support journeys.
  */
 export async function launchJourneyForTicket(params: LaunchParams): Promise<boolean> {
-  const { workspaceId, ticketId, customerId, journeyId, journeyName, triggerIntent, channel, leadIn, ctaText, prependAccountLinking } = params;
+  const { workspaceId, ticketId, customerId, journeyId, journeyName, triggerIntent, channel, leadIn, ctaText, prependAccountLinking, subscriptionId } = params;
   const admin = createAdminClient();
 
   if (channel === "social_comments") return false;
@@ -100,27 +112,29 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
   const rawConfig = journeyDef.config;
   const isEmptyConfig = !rawConfig || (Array.isArray(rawConfig) && rawConfig.length === 0) || (typeof rawConfig === "object" && !Array.isArray(rawConfig) && Object.keys(rawConfig as Record<string, unknown>).length === 0);
 
+  const isLiveRendered = LIVE_RENDERED_INTENTS.has(triggerIntent);
+
   let configSnapshot: Record<string, unknown>;
-  if (isEmptyConfig) {
-    // Code-driven journey — include metadata from the builder so the
-    // complete endpoint has subscription data, customer context, etc.
+  if (isLiveRendered) {
+    // Live-rendered journey — orchestrator's job is to pick ids; the
+    // mini-site loader does all data fetching and step building at
+    // click time. No builder call here, no snapshot to go stale.
+    configSnapshot = {
+      codeDriven: true,
+      liveRendered: true,
+      journeyType: triggerIntent,
+      ticketId,
+      workspaceId,
+    };
+  } else if (isEmptyConfig) {
+    // Code-driven journey (legacy snapshot path) — kept for journeys
+    // that haven't migrated to live-rendered yet.
     configSnapshot = {
       codeDriven: true,
       journeyType: triggerIntent,
       ticketId,
       workspaceId,
     };
-
-    // For cancel journeys, call the builder to populate subscription metadata
-    if (triggerIntent === "cancel_subscription" || triggerIntent === "cancel") {
-      try {
-        const { buildCancelJourneySteps: buildCancelJourney } = await import("@/lib/cancel-journey-builder");
-        const cancelData = await buildCancelJourney(workspaceId, customerId, ticketId);
-        if (cancelData?.metadata) {
-          configSnapshot.metadata = cancelData.metadata;
-        }
-      } catch { /* non-fatal — complete handler will work without metadata but can't cancel */ }
-    }
   } else {
     configSnapshot = rawConfig as Record<string, unknown>;
   }
@@ -138,6 +152,7 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
     journey_id: journeyId,
     customer_id: customerId,
     ticket_id: ticketId,
+    subscription_id: subscriptionId || null,
     token,
     token_expires_at: expiresAt,
     status: "pending",
@@ -234,25 +249,35 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
     }
 
   } else if (effectiveChannel === "chat") {
-    // Build inline form steps for the chat widget
-    const { buildJourneySteps } = await import("@/lib/journey-step-builder");
-    const built = await buildJourneySteps(workspaceId, triggerIntent, customerId, ticketId);
-
-    if (built.steps.length > 0) {
-      // Embed journey form as hidden comment — widget parses and renders InlineJourneyForm
-      const journeyPayload = JSON.stringify({ token, steps: built.steps, ctaText });
-      const body = `${leadIn}<!--JOURNEY:${journeyPayload}-->`;
-      await admin.from("ticket_messages").insert({
-        ticket_id: ticketId, direction: "outbound", visibility: "external",
-        author_type: "system", body,
-      });
-    } else {
-      // No steps (e.g. no unlinked accounts found) — fall back to CTA link
+    // Live-rendered journeys (cancel) always use a CTA link in chat —
+    // mini-site is the single rendering path. Drops the inline embed
+    // and its associated bug surface (out-of-sync snapshot, half-built
+    // steps, etc.). See feedback_orchestrator_minimal_payload.
+    if (isLiveRendered) {
       const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
       await admin.from("ticket_messages").insert({
         ticket_id: ticketId, direction: "outbound", visibility: "external",
         author_type: "system", body: ctaHtml,
       });
+    } else {
+      // Legacy snapshot-based journeys still embed inline in chat.
+      const { buildJourneySteps } = await import("@/lib/journey-step-builder");
+      const built = await buildJourneySteps(workspaceId, triggerIntent, customerId, ticketId);
+
+      if (built.steps.length > 0) {
+        const journeyPayload = JSON.stringify({ token, steps: built.steps, ctaText });
+        const body = `${leadIn}<!--JOURNEY:${journeyPayload}-->`;
+        await admin.from("ticket_messages").insert({
+          ticket_id: ticketId, direction: "outbound", visibility: "external",
+          author_type: "system", body,
+        });
+      } else {
+        const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
+        await admin.from("ticket_messages").insert({
+          ticket_id: ticketId, direction: "outbound", visibility: "external",
+          author_type: "system", body: ctaHtml,
+        });
+      }
     }
 
   } else if (effectiveChannel === "sms") {

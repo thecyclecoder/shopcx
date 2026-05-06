@@ -160,6 +160,25 @@ export async function partialRefundByAmount(
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const amountDecimal = (amountCents / 100).toFixed(2);
 
+  // Defensive: if caller passed an order_number ("SC129695") instead of
+  // the numeric shopify_order_id, resolve it. Opus has done this before
+  // (Bryan Daguiar 2026-05-05) — the model grabs the human-readable
+  // order # from the customer's message instead of the underlying ID,
+  // and the REST endpoint silently returns no transactions for "SC###".
+  if (!/^\d+$/.test(shopifyOrderId)) {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const admin = createAdminClient();
+    const { data: order } = await admin.from("orders")
+      .select("shopify_order_id")
+      .eq("workspace_id", workspaceId)
+      .eq("order_number", shopifyOrderId)
+      .maybeSingle();
+    if (!order?.shopify_order_id) {
+      return { success: false, error: `Could not resolve order: "${shopifyOrderId}" (not a numeric Shopify ID, and no matching order_number found in workspace)` };
+    }
+    shopifyOrderId = order.shopify_order_id as string;
+  }
+
   try {
     // Step 1: Get order transactions to find the gateway
     const txRes = await fetch(

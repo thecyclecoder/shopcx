@@ -240,12 +240,22 @@ const directActionHandlers: Record<
   },
 
   apply_coupon: async (ctx, p) => {
+    const code = p.code || p.coupon_code;
+    if (!code) return { success: false, error: "Missing coupon code (pass via 'code')" };
+
+    // Defensive routing: any LOYALTY-* code transparently goes through
+    // apply_loyalty_coupon, which has self-heal (regenerate-on-fail). Sonnet
+    // sometimes emits apply_coupon for loyalty codes despite the prompt rule;
+    // the wrong-action choice would otherwise leak Appstle 400s straight to
+    // escalation (Gawain Wood, 2026-05-05).
+    if (/^LOYALTY-/i.test(code)) {
+      return directActionHandlers.apply_loyalty_coupon(ctx, p);
+    }
+
     const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
     const { getAppstleConfig } = await import("@/lib/subscription-items");
     const config = await getAppstleConfig(ctx.workspaceId);
     if (!config) return { success: false, error: "Appstle not configured" };
-    const code = p.code || p.coupon_code;
-    if (!code) return { success: false, error: "Missing coupon code (pass via 'code')" };
     const r = await applyDiscountWithReplace(config.apiKey, p.contract_id!, code);
     return { ...r, summary: `Applied coupon ${code}` };
   },
@@ -1608,6 +1618,20 @@ async function handleJourney(
     return;
   }
 
+  // Resolve subscription_id from any of the actions Sonnet emitted that
+  // reference a contract (cancel, pause, etc.). Sonnet emits the Shopify
+  // contract id in `contract_id`; we need our internal subscription UUID
+  // for the journey_session row. If Sonnet didn't reference a contract,
+  // pass null and the mini-site picker handles the choice.
+  let subscriptionId: string | undefined;
+  const contractId = decision.actions?.find(a => a.contract_id)?.contract_id;
+  if (contractId) {
+    const { data: sub } = await ctx.admin.from("subscriptions")
+      .select("id").eq("workspace_id", ctx.workspaceId)
+      .eq("shopify_contract_id", contractId).maybeSingle();
+    if (sub?.id) subscriptionId = sub.id;
+  }
+
   const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
   const launched = await launchJourneyForTicket({
     workspaceId: ctx.workspaceId,
@@ -1619,6 +1643,7 @@ async function handleJourney(
     channel: ctx.channel,
     leadIn: decision.response_message || "",
     ctaText: `${journey.name} →`,
+    subscriptionId,
   });
 
   if (!launched) {

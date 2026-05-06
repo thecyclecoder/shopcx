@@ -13,7 +13,7 @@ export async function GET(
 
   const { data: session } = await admin
     .from("journey_sessions")
-    .select("*, journey_definitions(name, config), customers(first_name), workspaces(name, help_logo_url, help_primary_color)")
+    .select("*, journey_definitions(name, config, trigger_intent), customers(first_name), workspaces(name, help_logo_url, help_primary_color)")
     .eq("token", token)
     .single();
 
@@ -51,25 +51,42 @@ export async function GET(
   // Use config_snapshot (frozen at session creation) or fall back to definition
   let config = session.config_snapshot || (session.journey_definitions as { config: unknown })?.config || {};
 
-  // For code-driven journeys, dynamically build steps if not already built
   const configObj = config as Record<string, unknown>;
+  const triggerIntent = (session.journey_definitions as { trigger_intent?: string })?.trigger_intent
+    || (configObj.journeyType as string)
+    || "";
+  const isCancel = triggerIntent === "cancel_subscription" || triggerIntent === "cancel" || configObj.cancelJourney === true;
 
-  // Rebuild cancel journey config if metadata or cancel reasons are missing/empty
-  const cancelReasonStep = ((configObj.steps as { key?: string; options?: unknown[] }[]) || []).find(s => s.key === "cancel_reason");
-  const hasReasons = cancelReasonStep && (cancelReasonStep.options?.length ?? 0) > 0;
-  if (configObj.codeDriven && configObj.cancelJourney && (!(configObj.metadata as Record<string, unknown>)?.subscriptions || !hasReasons)) {
+  // ── Live-rendered cancel journey ──
+  // Orchestrator only inserted ids; we build the full config here from
+  // current data. Always overrides the snapshot — even old sessions get
+  // fresh data, which fixes the "subs went stale between send and click"
+  // class of bug. Mini-site reads metadata.subscriptions + steps just
+  // like before; only the source has changed.
+  if (isCancel) {
     const { buildJourneySteps } = await import("@/lib/journey-step-builder");
     const built = await buildJourneySteps(
       session.workspace_id,
-      (configObj.journeyType as string) || "cancel_subscription",
+      "cancel_subscription",
       session.customer_id,
       session.ticket_id || "",
     );
-    config = { ...configObj, ...built };
-    await admin.from("journey_sessions").update({ config_snapshot: config }).eq("id", session.id);
-  }
-
-  if (configObj.codeDriven && configObj.journeyType && !(configObj.steps as unknown[])?.length && !configObj.cancelJourney) {
+    // If the orchestrator passed a subscription_id, pre-select it so the
+    // picker step is auto-completed.
+    if (session.subscription_id && built.metadata) {
+      const meta = built.metadata as Record<string, unknown>;
+      meta.selectedSubscriptionId = session.subscription_id;
+    }
+    config = {
+      ...configObj,
+      ...built,
+      codeDriven: true,
+      cancelJourney: true,
+      journeyType: "cancel_subscription",
+    };
+  } else if (configObj.codeDriven && configObj.journeyType && !(configObj.steps as unknown[])?.length) {
+    // Legacy code-driven journeys (non-cancel) still build steps once
+    // and cache to config_snapshot.
     const { buildJourneySteps } = await import("@/lib/journey-step-builder");
     const built = await buildJourneySteps(
       session.workspace_id,
@@ -78,8 +95,6 @@ export async function GET(
       session.ticket_id || "",
     );
     config = { ...configObj, ...built };
-
-    // Cache the built steps back to the session so subsequent loads are instant
     await admin.from("journey_sessions").update({ config_snapshot: config }).eq("id", session.id);
   }
 
