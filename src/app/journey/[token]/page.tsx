@@ -507,6 +507,7 @@ function CancelJourney({
   const [remedies, setRemedies] = useState<RemedyOption[]>([]);
   const [review, setReview] = useState<ReviewData | null>(null);
   const [reviewExpanded, setReviewExpanded] = useState(false);
+  const [remedyLeadIn, setRemedyLeadIn] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [chatHistory, setChatHistory] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
   const [chatInput, setChatInput] = useState("");
@@ -562,7 +563,7 @@ function CancelJourney({
     const res = await fetch(`/api/journey/${token}/remedies`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cancel_reason: value, subscription_id: selectedSubId }),
+      body: JSON.stringify({ cancel_reason: value, cancel_reason_label: label, subscription_id: selectedSubId }),
     });
     const data = await res.json();
     setLoading(false);
@@ -570,6 +571,7 @@ function CancelJourney({
     if (data.type === "remedies") {
       setRemedies(data.remedies || []);
       setReview(data.review || null);
+      setRemedyLeadIn(typeof data.lead_in === "string" ? data.lead_in : null);
       setPhase("remedies");
     } else {
       setPhase("ai_chat");
@@ -583,6 +585,7 @@ function CancelJourney({
     setRemedies([]);
     setReview(null);
     setReviewExpanded(false);
+    setRemedyLeadIn(null);
     setSelectedRemedyAction(null);
     setChatHistory([]);
     setChatInput("");
@@ -764,14 +767,11 @@ function CancelJourney({
 
       {/* Phase: Remedies */}
       {phase === "remedies" && (() => {
-        const selectedSub = subscriptions.find(s => s.id === selectedSubId);
-        const ageDays = selectedSub?.subscriptionAgeDays || 0;
-        const ageMonths = Math.floor(ageDays / 28);
-        const isVip = ageMonths >= 3;
-
-        const headerText = isVip
-          ? `Hey ${customerName}, you're a VIP customer with us. Thanks for being with us for ${ageMonths} month${ageMonths !== 1 ? "s" : ""}. We've put together a special group of options for you because we'd hate to lose you!`
-          : `Hey ${customerName}, most people see the best results with at least 3 months of consistent use. Here are some options to keep you on track:`;
+        // Lead-in is Opus-generated server-side based on reason + tenure +
+        // product (acknowledge, appreciate, save). Static fallback only if
+        // the API call failed.
+        const headerText = remedyLeadIn
+          || `Hey ${customerName || "there"}, here are some options before you cancel:`;
 
         return (
         <div>

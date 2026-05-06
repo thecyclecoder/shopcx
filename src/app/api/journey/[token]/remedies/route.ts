@@ -3,6 +3,86 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { selectRemedies, isConcreteReason } from "@/lib/remedy-selector";
 
 /**
+ * Generate a contextual 1-2 sentence lead-in for the remedies step.
+ * Tailors the message to the customer's specific cancel reason + tenure
+ * so we don't say "best results with 3 months" to someone who's been
+ * around 6 months and cancelled because they reached their goals.
+ *
+ * Returns null on any failure — caller should fall back to a generic
+ * static line.
+ */
+async function generateRemedyLeadIn(args: {
+  workspaceId: string;
+  customerId: string;
+  reasonLabel: string;
+  ageMonths: number;
+  products: string[];
+}): Promise<string | null> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+
+  const admin = createAdminClient();
+  const { data: customer } = await admin
+    .from("customers")
+    .select("first_name")
+    .eq("id", args.customerId)
+    .single();
+  const firstName = customer?.first_name || "there";
+
+  const tenureLine = args.ageMonths >= 1
+    ? `${args.ageMonths} month${args.ageMonths === 1 ? "" : "s"} of subscription tenure`
+    : "first month with us (less than 30 days)";
+
+  const productLine = args.products.length ? args.products.join(", ") : "their subscription";
+
+  const prompt = `Write a 1-2 sentence lead-in for a cancel-flow page. We are always working on the save. Three pillars (compress all three into 1-2 sentences):
+
+  1. ACKNOWLEDGE — name their reason in their own framing, briefly
+  2. APPRECIATE — when meaningful, reference their tenure (1+ months) as something you genuinely value
+  3. SAVE — pivot to a soft rebuttal that flips the reason into a reason to stay
+
+Customer: ${firstName}
+Reason: "${args.reasonLabel}"
+Tenure: ${tenureLine}
+Product(s): ${productLine}
+
+Save-pivots by reason (study, don't copy):
+  • "Already reached my goals" → time to MAINTAIN those results, not lose them
+  • "Too expensive" → discount so you can continue your progress
+  • "Too much product" → a pause lets you work through what you have without losing your locked-in price
+  • "Not seeing results" → most people see best results with consistent use over 3 months
+  • "Just need a break" → pause keeps your spot + your price
+  • "Tired of the flavor" → swap to a different flavor and keep going
+  • "Shipping issues" → let's make it right with a replacement
+
+Output: 1-2 sentences, plain text only, no quotes/markdown/emoji. End with a short bridge ("here's what we can do" / "here are some options") if it fits naturally.`;
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        // Opus for the lead-in — this is the customer's first save touch
+        // and warrants the strongest reasoning over reason × tenure × product.
+        model: "claude-opus-4-7",
+        max_tokens: 200,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const text = (data.content?.[0] as { text?: string })?.text?.trim();
+    return text || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * POST: Get AI-selected remedies for a cancel journey.
  * Called after customer selects their cancel reason.
  */
@@ -23,7 +103,7 @@ export async function POST(
   if (session.status === "completed") return NextResponse.json({ error: "already_completed" }, { status: 400 });
 
   const body = await request.json();
-  const { cancel_reason, subscription_id } = body as { cancel_reason: string; subscription_id?: string };
+  const { cancel_reason, cancel_reason_label, subscription_id } = body as { cancel_reason: string; cancel_reason_label?: string; subscription_id?: string };
 
   if (!cancel_reason) return NextResponse.json({ error: "cancel_reason required" }, { status: 400 });
 
@@ -101,10 +181,19 @@ export async function POST(
       matchingProductIds,
     );
 
+    const lead_in = await generateRemedyLeadIn({
+      workspaceId: session.workspace_id,
+      customerId: session.customer_id,
+      reasonLabel: cancel_reason_label || cancel_reason,
+      ageMonths: Math.floor(subAge / 30),
+      products,
+    });
+
     return NextResponse.json({
       type: "remedies",
       remedies,
       review,
+      lead_in,
     });
   }
 
