@@ -723,6 +723,21 @@ function CancelJourney({
         </div>
       )}
 
+      {/* Empty state: no active subs to cancel. Live-fetch returned 0 — */}
+      {/* customer has nothing currently billing. Show a friendly message  */}
+      {/* instead of a blank step. Common when sub was already cancelled   */}
+      {/* between when the link was sent and when it was clicked.          */}
+      {phase === "reason" && !reasonStep && subscriptions.length === 0 && (
+        <div className="py-4 text-center">
+          <h2 style={{ fontSize: "17px" }} className="font-semibold text-zinc-900">
+            You don&apos;t have any active subscriptions
+          </h2>
+          <p style={{ fontSize: "15px" }} className="mt-3 text-zinc-600">
+            There&apos;s nothing currently set to renew. If you think this is a mistake or you need help with something else, just reply to the email and we&apos;ll take a look.
+          </p>
+        </div>
+      )}
+
       {/* Loading AI */}
       {loading && (
         <div className="flex items-center justify-center py-8">
