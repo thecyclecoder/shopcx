@@ -10,6 +10,9 @@ interface Prompt {
   content: string;
   enabled: boolean;
   sort_order: number;
+  status?: "proposed" | "approved" | "rejected" | "archived";
+  derived_from_ticket_id?: string | null;
+  proposed_at?: string | null;
 }
 
 const CATEGORIES = [
@@ -26,6 +29,7 @@ export default function SonnetPromptsPage() {
   const [editing, setEditing] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [newPrompt, setNewPrompt] = useState({ category: "rule", title: "", content: "" });
+  const [statusFilter, setStatusFilter] = useState<"approved" | "proposed" | "rejected">("approved");
 
   const fetch_ = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/sonnet-prompts`);
@@ -69,11 +73,25 @@ export default function SonnetPromptsPage() {
 
   const handleToggle = (id: string, enabled: boolean) => handleUpdate(id, { enabled: !enabled });
 
+  // Approve a proposed rule → status=approved + enabled=true so the
+  // orchestrator picks it up immediately. Reject = status=rejected.
+  const handleApprove = (id: string) => handleUpdate(id, { status: "approved", enabled: true });
+  const handleReject = (id: string) => handleUpdate(id, { status: "rejected", enabled: false });
+
   if (loading) return <div className="p-8"><p className="text-zinc-500">Loading...</p></div>;
+
+  // For backward compat: rows missing `status` are treated as "approved"
+  // (existing rules pre-migration). New rules from Improve start as
+  // "proposed".
+  const visibleStatus = (p: Prompt) => p.status || "approved";
+  const visiblePrompts = prompts.filter(p => visibleStatus(p) === statusFilter);
+
+  const proposedCount = prompts.filter(p => visibleStatus(p) === "proposed").length;
+  const rejectedCount = prompts.filter(p => visibleStatus(p) === "rejected").length;
 
   const grouped = CATEGORIES.map(cat => ({
     ...cat,
-    prompts: prompts.filter(p => p.category === cat.value),
+    prompts: visiblePrompts.filter(p => p.category === cat.value),
   }));
 
   return (
@@ -81,7 +99,7 @@ export default function SonnetPromptsPage() {
       <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">AI Agent Prompts</h1>
-          <p className="mt-1 text-sm text-zinc-500">Train the Sonnet orchestrator with custom rules, approaches, and knowledge. Changes take effect immediately.</p>
+          <p className="mt-1 text-sm text-zinc-500">Train the Sonnet orchestrator with custom rules, approaches, and knowledge. Approved changes take effect immediately.</p>
         </div>
         <button
           onClick={() => setAdding(true)}
@@ -89,6 +107,31 @@ export default function SonnetPromptsPage() {
         >
           Add Prompt
         </button>
+      </div>
+
+      {/* Status filter — proposed rules from the Improve tab land in
+          "Proposed" until an admin approves them. */}
+      <div className="mb-6 flex gap-1 rounded-lg border border-zinc-200 bg-zinc-100 p-1 dark:border-zinc-800 dark:bg-zinc-900">
+        {([
+          { key: "approved", label: "Approved" },
+          { key: "proposed", label: "Proposed", count: proposedCount },
+          { key: "rejected", label: "Rejected", count: rejectedCount },
+        ] as const).map(t => (
+          <button
+            key={t.key}
+            onClick={() => setStatusFilter(t.key)}
+            className={`flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+              statusFilter === t.key
+                ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100"
+                : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+            }`}
+          >
+            {t.label}
+            {("count" in t && t.count) ? (
+              <span className={`rounded-full px-1.5 py-0 text-[10px] font-bold ${t.key === "proposed" ? "bg-amber-100 text-amber-700" : "bg-zinc-200 text-zinc-600"}`}>{t.count}</span>
+            ) : null}
+          </button>
+        ))}
       </div>
 
       {adding && (
@@ -148,17 +191,37 @@ export default function SonnetPromptsPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1">
                       <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{p.title}</p>
-                      <p className="mt-0.5 text-xs text-zinc-500 line-clamp-2">{p.content}</p>
+                      <p className="mt-0.5 whitespace-pre-wrap text-xs text-zinc-500">{p.content}</p>
+                      {p.derived_from_ticket_id && (
+                        <a href={`/dashboard/tickets/${p.derived_from_ticket_id}`} className="mt-1 inline-block text-[10px] text-indigo-600 hover:underline dark:text-indigo-400">
+                          From ticket {p.derived_from_ticket_id.slice(0, 8)} →
+                        </a>
+                      )}
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
-                      <button
-                        onClick={() => handleToggle(p.id, p.enabled)}
-                        className={`rounded px-2 py-0.5 text-xs font-medium ${p.enabled ? "bg-green-100 text-green-700" : "bg-zinc-100 text-zinc-500"}`}
-                      >
-                        {p.enabled ? "On" : "Off"}
-                      </button>
-                      <button onClick={() => setEditing(p.id)} className="text-xs text-indigo-600 hover:underline">Edit</button>
-                      <button onClick={() => handleDelete(p.id)} className="text-xs text-red-500 hover:underline">Delete</button>
+                      {visibleStatus(p) === "proposed" ? (
+                        <>
+                          <button onClick={() => handleApprove(p.id)} className="rounded bg-emerald-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-emerald-700">Approve</button>
+                          <button onClick={() => handleReject(p.id)} className="rounded bg-zinc-200 px-2 py-0.5 text-xs font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-800 dark:text-zinc-300">Reject</button>
+                          <button onClick={() => setEditing(p.id)} className="text-xs text-indigo-600 hover:underline">Edit</button>
+                        </>
+                      ) : visibleStatus(p) === "rejected" ? (
+                        <>
+                          <button onClick={() => handleApprove(p.id)} className="text-xs text-emerald-600 hover:underline">Re-approve</button>
+                          <button onClick={() => handleDelete(p.id)} className="text-xs text-red-500 hover:underline">Delete</button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => handleToggle(p.id, p.enabled)}
+                            className={`rounded px-2 py-0.5 text-xs font-medium ${p.enabled ? "bg-green-100 text-green-700" : "bg-zinc-100 text-zinc-500"}`}
+                          >
+                            {p.enabled ? "On" : "Off"}
+                          </button>
+                          <button onClick={() => setEditing(p.id)} className="text-xs text-indigo-600 hover:underline">Edit</button>
+                          <button onClick={() => handleDelete(p.id)} className="text-xs text-red-500 hover:underline">Delete</button>
+                        </>
+                      )}
                     </div>
                   </div>
                 )}

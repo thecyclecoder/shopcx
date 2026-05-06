@@ -5,37 +5,63 @@ import { cookies } from "next/headers";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-const SYSTEM_PROMPT = `You are a support AI assistant for admins. You can do TWO things:
+const SYSTEM_PROMPT = `You are a support AI assistant for admins (Customer Experience managers). Your job is to help them:
+  1. UNDERSTAND why a ticket was handled poorly (use get_ticket_analysis + get_customer_account)
+  2. FIX the ticket NOW (execute remediation actions)
+  3. PROPOSE prompt rules so the AI doesn't make the same mistake again
 
-1. **COACH** — When the admin tells you how a ticket was handled wrong, propose a prompt rule to fix it for the future.
-2. **ACT** — When the admin tells you to DO something on this ticket (refund, send message, cancel, pause, reactivate, apply coupon, etc.), propose the specific actions. ALWAYS verify before executing.
+You can chain multiple actions in a single approval cycle. Example admin request:
+  "Create a return for her latest order. Add prompts so this doesn't happen again. Then send her the label."
+You should propose: [create_return, propose_sonnet_prompt, send_message] in one batch.
 
-## For coaching (future improvement):
-- Determine if it's a PROMPT RULE (text instruction for AI) or ARCHITECTURE CHANGE (code)
-- Propose the rule, ask admin to verify before saving
-- Category: rule, approach, knowledge, or tool_hint
+## Workflow:
+1. ALWAYS verify before executing — propose the actions, wait for admin's "yes" / "do it" / approve.
+2. After approval, return the SAME proposed_actions as type:"action_execute".
+3. Action results flow into chained actions automatically — e.g. {{label_url}} in a send_message body becomes the actual label URL after create_return runs.
 
-## For actions (fix this ticket now):
-- Propose specific actions you'll take (e.g. "I'll issue a $30 partial refund on order #SC127585 and send the customer a message")
-- List each action clearly
-- Wait for admin to say "yes" / "do it" / approve before executing
-- After approval, execute and report results
+## Available action types:
+
+REMEDIATION (fix the ticket):
+  • create_return(shopify_order_id, reason?, free_label?)
+       — Creates EasyPost return label. Result includes label_url + tracking_number.
+  • partial_refund(shopify_order_id, amount_cents, reason?)
+  • update_line_item_price(contract_id, variant_id, base_price_cents)
+  • swap_variant(contract_id, old_variant_id, new_variant_id, quantity?)
+  • change_next_date(contract_id, date)        — date format: 2026-05-15
+  • change_frequency(contract_id, interval, interval_count)
+  • update_shipping_address(contract_id, address: {address1, city, province, zip, country, first_name, last_name})
+  • apply_coupon(contract_id, code)
+  • reactivate(contract_id)
+  • crisis_pause(contract_id, crisis_action_id)
+  • skip_next_order(contract_id)
+  • close_ticket
+  • reopen_ticket
+
+CUSTOMER COMMUNICATION:
+  • send_message(body)
+       — HTML body. For return labels, use the placeholder {{label_url}} on its own line — it renders as a clickable CTA button after create_return runs.
+
+CALIBRATION (so this doesn't happen again):
+  • propose_sonnet_prompt(title, content, category?)
+       — Drafts a NEW conversation-AI rule for admin review. category: rule | approach | knowledge | tool_hint.
+       — Status defaults to 'proposed' — admin must approve in Settings → AI → Prompts before it takes effect.
+  • propose_grader_rule(title, content)
+       — Drafts a calibration rule for the AI quality grader (rare; usually surfaced via score override flow).
+
+## Tools (read-only, call freely):
+  • get_customer_account, get_product_knowledge, get_returns, get_chargebacks
+  • get_email_history, get_crisis_status, get_dunning_status
+  • get_ticket_analysis — pulls the latest ticket_analyses row + score + issues + analyst's reasoning so you can answer "why was this graded N/10?"
 
 ## Response format:
-Return JSON:
+Return JSON. Only include fields relevant to the type:
 {
   "type": "prompt" | "architecture" | "question" | "action_proposal" | "action_execute",
-  "message": "your conversational response to the admin",
+  "message": "conversational response to the admin",
   "proposed_rule": { "title": "...", "content": "...", "category": "rule" },
   "architecture_description": "...",
-  "proposed_actions": [{ "type": "partial_refund", "shopify_order_id": "...", "amount_cents": 3000, "reason": "..." }, { "type": "send_message", "body": "..." }]
-}
-
-Only include the fields relevant to the type. For action_execute, include the same proposed_actions that were approved.
-
-Available action types: partial_refund(shopify_order_id, amount_cents, reason), send_message(body), update_line_item_price(contract_id, base_price_cents), reactivate(contract_id), apply_coupon(contract_id, code), crisis_pause(contract_id, crisis_action_id), skip_next_order(contract_id), change_frequency(contract_id, interval, interval_count), close_ticket, reopen_ticket.
-
-Category for proposed_rule should be one of: rule, approach, knowledge, tool_hint.`;
+  "proposed_actions": [{ "type": "create_return", "shopify_order_id": "..." }, { "type": "send_message", "body": "Here's your label: {{label_url}}" }]
+}`;
 
 export async function POST(
   request: Request,
@@ -159,6 +185,7 @@ export async function POST(
     { name: "get_email_history", description: "Get email delivery history (sent, opened, clicked, bounced).", input_schema: { type: "object" as const, properties: {}, required: [] as string[] } },
     { name: "get_crisis_status", description: "Get crisis/out-of-stock actions for this customer.", input_schema: { type: "object" as const, properties: {}, required: [] as string[] } },
     { name: "get_dunning_status", description: "Get payment failure and recovery status.", input_schema: { type: "object" as const, properties: {}, required: [] as string[] } },
+    { name: "get_ticket_analysis", description: "Get the latest AI quality analysis for this ticket — score, issues, summary, and analyst's reasoning. Use this when the admin asks 'why was this graded low?' or wants to see what the grader flagged.", input_schema: { type: "object" as const, properties: {}, required: [] as string[] } },
   ];
 
   try {
@@ -224,6 +251,17 @@ export async function POST(
         // Execute actions if type is action_execute
         if (parsed.type === "action_execute" && parsed.proposed_actions?.length) {
           const results: string[] = [];
+          // Action context — accumulates outputs (label_url, tracking_number,
+          // refund_amount, etc.) so chained send_message can reference them
+          // via {{placeholder}} substitution. Same shape as action-executor.
+          const actionContext: Record<string, string> = {};
+
+          // CTA button HTML for {{label_url}} substitution. Mirrors the
+          // shared ctaButton() in action-executor.ts so customers see the
+          // same teal button whether the AI or an admin issued the label.
+          const ctaButton = (url: string, label: string): string =>
+            `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:8px 0 16px 0;"><tr><td bgcolor="#0f766e" style="background-color:#0f766e;border-radius:8px;"><a href="${url}" style="display:inline-block;padding:14px 24px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">${label}</a></td></tr></table>`;
+
           for (const action of parsed.proposed_actions) {
             try {
               switch (action.type) {
@@ -231,21 +269,156 @@ export async function POST(
                   const { partialRefundByAmount } = await import("@/lib/shopify-order-actions");
                   const r = await partialRefundByAmount(workspaceId, action.shopify_order_id, action.amount_cents, action.reason);
                   results.push(r.success ? `Refund of $${(action.amount_cents / 100).toFixed(2)} issued` : `Refund failed: ${r.error}`);
+                  if (r.success) actionContext.refund_amount = `$${(action.amount_cents / 100).toFixed(2)}`;
+                  break;
+                }
+                case "create_return": {
+                  // Create EasyPost return label for the order. Pulls customer
+                  // address from the order, return address from workspace.
+                  // After success, label_url + tracking_number flow into any
+                  // chained send_message via placeholder substitution.
+                  const { data: order } = await admin.from("orders")
+                    .select("order_number, shopify_order_id, shipping_address, line_items")
+                    .or(`shopify_order_id.eq.${action.shopify_order_id},order_number.eq.${action.shopify_order_id}`)
+                    .single();
+                  if (!order) { results.push(`create_return: order not found (${action.shopify_order_id})`); break; }
+                  const ship = order.shipping_address as Record<string, string> | null;
+                  if (!ship?.address1) { results.push(`create_return: order has no shipping address`); break; }
+                  const { data: ws } = await admin.from("workspaces")
+                    .select("return_address, default_return_parcel").eq("id", workspaceId).single();
+                  const returnAddr = ws?.return_address as Record<string, string> | null;
+                  const parcel = (ws?.default_return_parcel as { length: number; width: number; height: number; weight: number } | null) || { length: 12, width: 10, height: 6, weight: 16 };
+                  if (!returnAddr) { results.push(`create_return: no return_address configured`); break; }
+
+                  const { getEasyPostClient } = await import("@/lib/easypost");
+                  const client = await getEasyPostClient(workspaceId);
+                  const shipment = await client.Shipment.create({
+                    from_address: {
+                      name: ship.name || `${ship.first_name || ""} ${ship.last_name || ""}`.trim(),
+                      street1: ship.address1, street2: ship.address2 || "",
+                      city: ship.city, state: ship.province_code || ship.province,
+                      zip: ship.zip, country: ship.country_code || "US",
+                      phone: ship.phone || undefined,
+                    },
+                    to_address: {
+                      name: returnAddr.name, street1: returnAddr.street1, street2: returnAddr.street2 || "",
+                      city: returnAddr.city, state: returnAddr.state, zip: returnAddr.zip,
+                      country: returnAddr.country || "US", phone: returnAddr.phone || undefined,
+                    },
+                    parcel,
+                    is_return: true,
+                  });
+                  const rates = (shipment.rates || []) as Array<{id: string; carrier: string; service: string; rate: string}>;
+                  const usps = rates.filter(r => r.carrier === "USPS").sort((a, b) => parseFloat(a.rate) - parseFloat(b.rate))[0];
+                  if (!usps) { results.push(`create_return: no USPS rates`); break; }
+                  const bought = await client.Shipment.buy(shipment.id, usps.id);
+                  const labelUrl = bought.postage_label?.label_url || "";
+                  const tracking = bought.tracking_code || "";
+                  actionContext.label_url = labelUrl;
+                  actionContext.tracking_number = tracking;
+                  actionContext.carrier = "USPS";
+                  results.push(`Return label created (${order.order_number}) — tracking ${tracking}, $${parseFloat(usps.rate).toFixed(2)}`);
+                  break;
+                }
+                case "swap_variant": {
+                  const { subSwapVariant } = await import("@/lib/subscription-items");
+                  const r = await subSwapVariant(workspaceId, action.contract_id, action.old_variant_id, action.new_variant_id, action.quantity || 1);
+                  results.push(r.success ? `Variant swapped (${action.old_variant_id} → ${action.new_variant_id})` : `Swap failed: ${r.error}`);
+                  break;
+                }
+                case "change_next_date": {
+                  const { appstleUpdateNextBillingDate } = await import("@/lib/appstle");
+                  const r = await appstleUpdateNextBillingDate(workspaceId, action.contract_id, action.date);
+                  results.push(r.success ? `Next billing date set to ${action.date}` : `Date change failed: ${r.error}`);
+                  break;
+                }
+                case "change_frequency": {
+                  const { appstleUpdateBillingInterval } = await import("@/lib/appstle");
+                  const r = await appstleUpdateBillingInterval(workspaceId, action.contract_id, action.interval, Number(action.interval_count));
+                  results.push(r.success ? `Frequency: every ${action.interval_count} ${action.interval}` : `Frequency failed: ${r.error}`);
+                  break;
+                }
+                case "update_shipping_address": {
+                  // Reuses the orchestrator's update_shipping_address action so
+                  // the same Shopify+Appstle+Amplifier propagation runs.
+                  const { executeSonnetDecision } = await import("@/lib/action-executor");
+                  const { data: t } = await admin.from("tickets").select("customer_id, channel").eq("id", ticketId).single();
+                  if (!t?.customer_id) { results.push(`update_shipping_address: no customer on ticket`); break; }
+                  await executeSonnetDecision(
+                    { admin, workspaceId, ticketId, customerId: t.customer_id, channel: t.channel || "email", sandbox: false },
+                    {
+                      reasoning: "Admin improve: update shipping address",
+                      action_type: "direct_action",
+                      actions: [{ type: "update_shipping_address", contract_id: action.contract_id, address: action.address }],
+                    },
+                    null,
+                    async () => { /* no customer-facing message — admin's send_message handles it */ },
+                    async (m) => {
+                      await admin.from("ticket_messages").insert({
+                        ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system", body: m,
+                      });
+                    },
+                  );
+                  results.push(`Shipping address updated`);
+                  break;
+                }
+                case "propose_sonnet_prompt": {
+                  const { data: ins, error } = await admin.from("sonnet_prompts").insert({
+                    workspace_id: workspaceId,
+                    title: action.title,
+                    content: action.content,
+                    category: action.category || "rule",
+                    enabled: false,        // not loaded into orchestrator until approved
+                    status: "proposed",
+                    derived_from_ticket_id: ticketId,
+                    proposed_at: new Date().toISOString(),
+                    sort_order: 200,
+                  }).select("id").single();
+                  if (error) { results.push(`propose_sonnet_prompt failed: ${error.message}`); break; }
+                  results.push(`Proposed sonnet_prompt rule "${action.title}" — review at /dashboard/settings/ai/prompts (id ${ins.id})`);
+                  break;
+                }
+                case "propose_grader_rule": {
+                  const { data: ins, error } = await admin.from("grader_prompts").insert({
+                    workspace_id: workspaceId,
+                    title: action.title,
+                    content: action.content,
+                    status: "proposed",
+                    derived_from_ticket_id: ticketId,
+                  }).select("id").single();
+                  if (error) { results.push(`propose_grader_rule failed: ${error.message}`); break; }
+                  results.push(`Proposed grader rule "${action.title}" — review at /dashboard/settings/ai/grader-rules (id ${ins.id})`);
                   break;
                 }
                 case "send_message": {
+                  // Substitute action-result placeholders before sending.
+                  // Uses the same {{label_url}} → CTA button pattern as the
+                  // conversation orchestrator.
+                  let body = String(action.body || "");
+                  if (actionContext.label_url) {
+                    const button = ctaButton(actionContext.label_url, "Download your prepaid return label →");
+                    body = body.replace(/\{\{\s*label_url\s*\}\}/g, button)
+                               .replace(/\[\s*LABEL_URL\s*\]/g, button);
+                  }
+                  for (const [key, val] of Object.entries(actionContext)) {
+                    if (key === "label_url") continue;
+                    const lower = `{{\\s*${key}\\s*}}`;
+                    const upper = `\\[\\s*${key.toUpperCase()}\\s*\\]`;
+                    body = body.replace(new RegExp(lower, "g"), val);
+                    body = body.replace(new RegExp(upper, "g"), val);
+                  }
+
                   const { data: wsInfo } = await admin.from("workspaces").select("name, sandbox_mode").eq("id", workspaceId).single();
-                  // Get customer email for email channel
                   const { data: t } = await admin.from("tickets").select("channel, customer_id, subject, email_message_id").eq("id", ticketId).single();
                   await admin.from("ticket_messages").insert({
                     ticket_id: ticketId, direction: "outbound", visibility: "external",
-                    author_type: "system", body: action.body, sent_at: new Date().toISOString(),
+                    author_type: "system", body, sent_at: new Date().toISOString(),
                   });
                   if (t?.channel === "email" && t.customer_id) {
                     const { data: cust2 } = await admin.from("customers").select("email").eq("id", t.customer_id).single();
                     if (cust2?.email && !wsInfo?.sandbox_mode) {
                       const { sendTicketReply } = await import("@/lib/email");
-                      await sendTicketReply({ workspaceId, toEmail: cust2.email, subject: `Re: ${t.subject || "Your request"}`, body: action.body, inReplyTo: t.email_message_id, agentName: "Support", workspaceName: wsInfo?.name || "" });
+                      await sendTicketReply({ workspaceId, toEmail: cust2.email, subject: `Re: ${t.subject || "Your request"}`, body, inReplyTo: t.email_message_id, agentName: "Support", workspaceName: wsInfo?.name || "" });
                     }
                   }
                   results.push("Message sent to customer");

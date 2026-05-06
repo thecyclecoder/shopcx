@@ -25,6 +25,40 @@ export default async function executeToolCallImprove(
   workspaceId: string,
   ticket: Ticket,
 ): Promise<string> {
+  // Admin-side tool: latest ticket analysis. Doesn't need a customer
+  // resolved (some analyses run on tickets without customers).
+  if (name === "get_ticket_analysis") {
+    const admin = createAdminClient();
+    const { data: latest } = await admin.from("ticket_analyses")
+      .select("score, admin_score, issues, action_items, summary, model, cost_cents, ai_message_count, window_start, window_end, created_at, trigger")
+      .eq("ticket_id", ticket.id)
+      .eq("workspace_id", workspaceId)
+      .order("window_end", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!latest) return "No analysis yet for this ticket.";
+
+    const lines: string[] = [];
+    const eff = latest.admin_score ?? latest.score;
+    lines.push(`Score: ${eff}/10${latest.admin_score != null ? ` (admin overrode auto score of ${latest.score})` : ""}`);
+    lines.push(`Window: ${latest.window_start} → ${latest.window_end}`);
+    lines.push(`Trigger: ${latest.trigger || "—"}`);
+    lines.push(`AI messages graded: ${latest.ai_message_count}`);
+    lines.push(`Cost: $${(((latest.cost_cents as number) || 0) / 100).toFixed(4)}`);
+    if (latest.summary) lines.push(`\nSummary: ${latest.summary}`);
+    const issues = (latest.issues as Array<{type?: string; description?: string}>) || [];
+    if (issues.length) {
+      lines.push(`\nIssues:`);
+      for (const i of issues) lines.push(`  - [${i.type}] ${i.description}`);
+    }
+    const actions = (latest.action_items as Array<{priority?: string; description?: string}>) || [];
+    if (actions.length) {
+      lines.push(`\nAction items:`);
+      for (const a of actions) lines.push(`  [${a.priority}] ${a.description}`);
+    }
+    return lines.join("\n");
+  }
+
   const custId = await resolveCustomerId(workspaceId, ticket);
   if (!custId && name !== "get_product_knowledge") {
     return "No customer found for this ticket.";

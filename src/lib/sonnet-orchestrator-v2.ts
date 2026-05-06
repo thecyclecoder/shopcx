@@ -192,6 +192,7 @@ async function buildPreContext(
     admin.from("sonnet_prompts")
       .select("category, title, content")
       .eq("workspace_id", workspaceId).eq("enabled", true)
+      .eq("status", "approved")  // never load proposed/rejected prompts
       .order("category").order("sort_order"),
   ]);
 
