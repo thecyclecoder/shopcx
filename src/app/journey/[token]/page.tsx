@@ -576,6 +576,22 @@ function CancelJourney({
     }
   };
 
+  const handleChangeReason = () => {
+    // Customer wants to revisit reason selection. Clear all post-reason
+    // state so they get a fresh start when they pick again.
+    setCancelReason(null);
+    setRemedies([]);
+    setReview(null);
+    setReviewExpanded(false);
+    setSelectedRemedyAction(null);
+    setChatHistory([]);
+    setChatInput("");
+    setChatSending(false);
+    setPhase("reason");
+  };
+
+  const selectedReasonLabel = (reasonStep?.options || []).find(o => o.value === cancelReason)?.label || cancelReason || "";
+
   const handleSelectRemedy = async (remedy: RemedyOption) => {
     setSelectedRemedyAction(remedy.remedy_id);
     await submitStep("remedy_selection", remedy.remedy_id, remedy.pitch);
@@ -759,6 +775,22 @@ function CancelJourney({
 
         return (
         <div>
+          {/* Reason badge — shows what they picked + lets them change it */}
+          {selectedReasonLabel && (
+            <div className="mb-4 flex items-center justify-between rounded-lg bg-zinc-50 px-3 py-2">
+              <div style={{ fontSize: "14px" }} className="text-zinc-600">
+                <span className="text-zinc-400">Reason:</span> <span className="font-medium text-zinc-800">{selectedReasonLabel}</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleChangeReason}
+                style={{ fontSize: "14px" }}
+                className="font-medium text-indigo-600 hover:text-indigo-700"
+              >
+                Change
+              </button>
+            </div>
+          )}
           <p style={{ fontSize: "17px" }} className="text-zinc-700">{headerText}</p>
           <div className="mt-4 space-y-3">
             {remedies.map((remedy, idx) => (
@@ -818,6 +850,22 @@ function CancelJourney({
       {/* Phase: AI Chat */}
       {phase === "ai_chat" && (
         <div>
+          {/* Reason badge — shows what they picked + lets them change it */}
+          {selectedReasonLabel && (
+            <div className="mb-4 flex items-center justify-between rounded-lg bg-zinc-50 px-3 py-2">
+              <div style={{ fontSize: "14px" }} className="text-zinc-600">
+                <span className="text-zinc-400">Reason:</span> <span className="font-medium text-zinc-800">{selectedReasonLabel}</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleChangeReason}
+                style={{ fontSize: "14px" }}
+                className="font-medium text-indigo-600 hover:text-indigo-700"
+              >
+                Change
+              </button>
+            </div>
+          )}
           <h2 style={{ fontSize: "17px" }} className="mb-4 font-semibold text-zinc-900">Tell us more</h2>
           <div className="space-y-3">
             {chatHistory.map((msg, idx) => (
