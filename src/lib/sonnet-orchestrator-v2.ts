@@ -639,7 +639,7 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
   ] = await Promise.all([
     admin.from("products").select("id, title, description").eq("workspace_id", wsId).eq("status", "active"),
     admin.from("product_variants")
-      .select("product_id, title, option1, option2, sku, inventory_quantity, available, position")
+      .select("product_id, title, option1, option2, sku, inventory_quantity, available, position, shopify_variant_id")
       .eq("workspace_id", wsId)
       .order("position"),
     retrieveContext(wsId, searchQuery, 10),
@@ -649,7 +649,7 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
 
   // Group variants by product_id (source of truth — legacy products.variants
   // JSONB is a mirror that doesn't always include freshly-added flavors).
-  const variantsByProduct = new Map<string, Array<{ name: string; sku: string | null; qty: number | null; available: boolean }>>();
+  const variantsByProduct = new Map<string, Array<{ name: string; sku: string | null; qty: number | null; available: boolean; shopify_variant_id: string | null }>>();
   for (const v of variantRows || []) {
     const list = variantsByProduct.get(v.product_id) || [];
     list.push({
@@ -657,6 +657,7 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
       sku: v.sku as string | null,
       qty: v.inventory_quantity as number | null,
       available: v.available !== false && (v.inventory_quantity == null || v.inventory_quantity > 0),
+      shopify_variant_id: (v.shopify_variant_id as string | null) || null,
     });
     variantsByProduct.set(v.product_id, list);
   }
@@ -676,11 +677,16 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
     if (variants.length <= 1) continue;
     const inStock = variants.filter(v => v.available);
     const oos = variants.filter(v => !v.available);
+    // Always emit variant_id alongside the flavor name. swap_variant /
+    // add_item / remove_item all need the numeric ID — names alone make
+    // Opus ask the admin for the ID instead of executing the action.
+    const fmt = (v: { name: string; shopify_variant_id: string | null }) =>
+      v.shopify_variant_id ? `${v.name} [variant_id: ${v.shopify_variant_id}]` : v.name;
     if (inStock.length) {
-      parts.push(`    available: ${inStock.map(v => v.name).join(", ")}`);
+      parts.push(`    available: ${inStock.map(fmt).join(", ")}`);
     }
     if (oos.length) {
-      parts.push(`    OUT OF STOCK: ${oos.map(v => v.name).join(", ")}`);
+      parts.push(`    OUT OF STOCK: ${oos.map(fmt).join(", ")}`);
     }
   }
 
