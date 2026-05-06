@@ -224,6 +224,45 @@ export async function runImproveActions(
           results.push(r.success ? "Subscription paused (crisis)" : `Pause failed: ${r.error}`);
           break;
         }
+        case "pause_timed": {
+          // Timed pause — pauses now and schedules auto-resume in N days.
+          // Reuses the conversation orchestrator's pause_timed handler so
+          // the same Appstle + scheduling machinery runs.
+          const { executeSonnetDecision } = await import("@/lib/action-executor");
+          const { data: t } = await admin.from("tickets").select("customer_id, channel").eq("id", ticketId).single();
+          if (!t?.customer_id) { results.push(`pause_timed: no customer on ticket`); break; }
+          await executeSonnetDecision(
+            { admin, workspaceId, ticketId, customerId: t.customer_id, channel: t.channel || "email", sandbox: false },
+            {
+              reasoning: "Admin improve: timed pause",
+              action_type: "direct_action",
+              actions: [{ type: "pause_timed", contract_id: a.contract_id, pause_days: a.pause_days || 30 }],
+            },
+            null,
+            async () => { /* no customer-facing message — admin's send_message handles it */ },
+            async (m) => {
+              await admin.from("ticket_messages").insert({
+                ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system", body: m,
+              });
+            },
+          );
+          results.push(`Subscription paused for ${a.pause_days || 30} days (${a.contract_id})`);
+          break;
+        }
+        case "pause": {
+          // Indefinite pause (no auto-resume). Use pause_timed when you
+          // want a specific resume date.
+          const { appstleSubscriptionAction } = await import("@/lib/appstle");
+          const r = await appstleSubscriptionAction(workspaceId, a.contract_id, "pause");
+          results.push(r.success ? "Subscription paused" : `Pause failed: ${r.error}`);
+          break;
+        }
+        case "cancel": {
+          const { appstleSubscriptionAction } = await import("@/lib/appstle");
+          const r = await appstleSubscriptionAction(workspaceId, a.contract_id, "cancel", a.reason);
+          results.push(r.success ? "Subscription cancelled" : `Cancel failed: ${r.error}`);
+          break;
+        }
         case "close_ticket": {
           await admin.from("tickets").update({ status: "closed", closed_at: new Date().toISOString() }).eq("id", ticketId);
           results.push("Ticket closed");
