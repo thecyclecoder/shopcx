@@ -21,6 +21,7 @@ import ChargebacksList from "@/components/shared/ChargebacksList";
 import type { ChargebackItem } from "@/components/shared/ChargebacksList";
 import FraudCasesList from "@/components/shared/FraudCasesList";
 import type { FraudCaseItem } from "@/components/shared/FraudCasesList";
+import { TicketAnalysisPanel } from "@/components/TicketAnalysisPanel";
 
 interface Member {
   user_id: string;
@@ -3246,6 +3247,11 @@ export default function TicketDetailPage() {
             </div>
           </div>
         )}
+        </div>
+
+        {/* ═══ AI ANALYSIS ═══ */}
+        <div className={`${mobileSection !== "conversation" ? "hidden md:block" : ""} mt-4`}>
+          <TicketAnalysisPanel ticketId={id as string} />
         </div>
 
         {/* ═══ FRAUD ═══ */}

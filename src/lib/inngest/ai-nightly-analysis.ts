@@ -1,7 +1,13 @@
-// Nightly AI Agent Performance Analysis
-// Analyzes all AI-handled tickets from the past 24 hours
-// Scores accuracy, detects frustration, identifies issues
-// Creates action items for low-scoring conversations
+// DEPRECATED 2026-05-06: replaced by ticket-analysis-cron.ts which
+// grades each closed AI ticket within 30 minutes of close. The nightly
+// batch is kept as a no-op for now to avoid disturbing existing
+// notification archives, but the cron is disabled and the function
+// returns immediately. Once the new system is validated for ~1 week,
+// this file + the route registration can be removed entirely.
+//
+// Old behavior: Analyzed all AI-handled tickets from the past 24 hours
+// in one batch, scored accuracy, etc.
+// New behavior: see src/lib/ticket-analyzer.ts + ticket-analysis-cron.ts
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -10,9 +16,14 @@ export const aiNightlyAnalysis = inngest.createFunction(
   {
     id: "ai-nightly-analysis",
     retries: 1,
-    triggers: [{ cron: "0 6 * * *" }], // 6am UTC daily
+    // No triggers — superseded by ticket-analysis-cron. Function stays
+    // registered so old historical runs remain visible in Inngest UI.
   },
   async ({ step }) => {
+    return { deprecated: true };
+
+    // Original implementation kept below for reference until removal.
+    // eslint-disable-next-line no-unreachable
     const admin = createAdminClient();
 
     // Step 1: Find all workspaces with nightly analysis enabled
