@@ -2545,6 +2545,11 @@ export default function TicketDetailPage() {
 
         </div>
 
+        {/* ═══ AI ANALYSIS ═══ */}
+        <div className={`${mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
+          <TicketAnalysisPanel ticketId={id as string} />
+        </div>
+
         {/* ═══ CUSTOMER CARD ═══ */}
         <div className={`${mobileSection !== "customer" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
         {customer && (
@@ -3247,11 +3252,6 @@ export default function TicketDetailPage() {
             </div>
           </div>
         )}
-        </div>
-
-        {/* ═══ AI ANALYSIS ═══ */}
-        <div className={`${mobileSection !== "conversation" ? "hidden md:block" : ""} mt-4`}>
-          <TicketAnalysisPanel ticketId={id as string} />
         </div>
 
         {/* ═══ FRAUD ═══ */}
