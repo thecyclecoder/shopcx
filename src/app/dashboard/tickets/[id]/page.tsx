@@ -1489,12 +1489,14 @@ export default function TicketDetailPage() {
                         setImproveLoading(true);
                         setImproveMessages(prev => [...prev, { role: "user", content: "Yes, execute those actions." }]);
                         try {
+                          // Fast-path: send the previously-proposed actions
+                          // directly. Skips Opus to avoid losing context.
                           const res = await fetch(`/api/tickets/${id}/improve`, {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({
                               message: "Yes, execute those actions.",
-                              conversationHistory: [...improveMessages, { role: "user", content: "Yes, execute those actions." }],
+                              execute_actions: proposedActions,
                             }),
                           });
                           if (res.ok) {
@@ -1545,14 +1547,22 @@ export default function TicketDetailPage() {
                       setImproveMessages((prev) => [...prev, { role: "user", content: msg }]);
                       setImproveLoading(true);
                       setPromptSaved(false);
+
+                      // If the user typed an approval word AND we have
+                      // proposed actions waiting, route to the fast-path
+                      // — skip Opus, dispatch the actions directly.
+                      const isApproval = /^(yes|approve|approved|do it|go ahead|execute|run( it)?|confirm)\b/i.test(msg);
+                      const useFastPath = isApproval && proposedActions && proposedActions.length > 0;
+
                       try {
                         const res = await fetch(`/api/tickets/${id}/improve`, {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            message: msg,
-                            conversationHistory: improveMessages,
-                          }),
+                          body: JSON.stringify(
+                            useFastPath
+                              ? { message: msg, execute_actions: proposedActions }
+                              : { message: msg, conversationHistory: improveMessages }
+                          ),
                         });
                         if (res.ok) {
                           const data = await res.json();
