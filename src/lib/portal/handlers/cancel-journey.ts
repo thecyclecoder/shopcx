@@ -216,25 +216,22 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
       .eq("id", auth.workspaceId)
       .single();
 
+    // Cancel reasons come EXCLUSIVELY from portal_config.cancel_flow.reasons
+    // (Settings → Cancel Flow). No hardcoded fallbacks — those mask config
+    // loss and drift from what's actually configured. If the array is empty,
+    // the frontend will show an empty state and we'll know to fix the config.
+    // (The old fallback at this site is what hid the cancel_flow.reasons
+    //  wipe on 2026-05-06 from portal users.)
     const portalConfig = (ws?.portal_config || {}) as Record<string, unknown>;
     const cancelConfig = (portalConfig.cancel_flow || {}) as Record<string, unknown>;
     const configuredReasons = Array.isArray(cancelConfig.reasons) ? cancelConfig.reasons : [];
 
-    const cancelReasons = configuredReasons.length > 0
-      ? configuredReasons
-          .filter((r: { enabled?: boolean }) => r.enabled !== false)
-          .sort((a: { sort_order?: number }, b: { sort_order?: number }) => (a.sort_order ?? 99) - (b.sort_order ?? 99))
-          .map((r: { slug?: string; label?: string; type?: string; suggested_remedy_id?: string }) => ({
-            id: r.slug, label: r.label, type: r.type || "remedy", suggested_remedy_id: r.suggested_remedy_id || null,
-          }))
-      : [
-          { id: "too_expensive", label: "Too expensive", type: "remedy", suggested_remedy_id: null },
-          { id: "too_much_product", label: "I have too much product", type: "remedy", suggested_remedy_id: null },
-          { id: "not_seeing_results", label: "Not seeing results", type: "remedy", suggested_remedy_id: null },
-          { id: "reached_goals", label: "I've reached my goals", type: "ai_conversation", suggested_remedy_id: null },
-          { id: "just_need_a_break", label: "Just need a break", type: "ai_conversation", suggested_remedy_id: null },
-          { id: "something_else", label: "Something else", type: "ai_conversation", suggested_remedy_id: null },
-        ];
+    const cancelReasons = configuredReasons
+      .filter((r: { enabled?: boolean }) => r.enabled !== false)
+      .sort((a: { sort_order?: number }, b: { sort_order?: number }) => (a.sort_order ?? 99) - (b.sort_order ?? 99))
+      .map((r: { slug?: string; label?: string; type?: string; suggested_remedy_id?: string }) => ({
+        id: r.slug, label: r.label, type: r.type || "remedy", suggested_remedy_id: r.suggested_remedy_id || null,
+      }));
 
     const subAgeDays = sub.created_at
       ? Math.floor((Date.now() - new Date(sub.created_at).getTime()) / 86400000)

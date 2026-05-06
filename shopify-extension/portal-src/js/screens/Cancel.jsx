@@ -12,19 +12,10 @@ import ReviewsCard from '../cards/ReviewsCard.jsx';
 import { fireConfetti } from '../core/confetti.js';
 
 // Reason type is now driven by backend config (type: "remedy" | "ai_conversation")
-// Fallback for old configs that don't have types yet
-const OPEN_ENDED_FALLBACK = ['just_need_a_break', 'something_else', 'reached_goals'];
-
-const DEFAULT_REASONS = [
-  { id: 'too_expensive', label: "It's too expensive" },
-  { id: 'too_much_product', label: 'I have too much product' },
-  { id: 'not_seeing_results', label: "I'm not seeing results" },
-  { id: 'reached_goals', label: 'I already reached my goals' },
-  { id: 'just_need_a_break', label: 'I just need a break' },
-  { id: 'tired_of_flavor', label: "I'm tired of the flavors" },
-  { id: 'shipping_issues', label: 'Shipping or delivery issues' },
-  { id: 'something_else', label: 'Something else' },
-];
+// No hardcoded fallback for cancel reasons — they come exclusively from
+// the workspace's portal_config.cancel_flow.reasons (Settings → Cancel
+// Flow). Hardcoded defaults previously masked config loss and drifted
+// from what was actually configured. Empty config → empty state UX.
 
 // ---- Sub-components ----
 
@@ -488,9 +479,10 @@ export default function Cancel() {
   async function selectReason(reasonId) {
     setReason(reasonId);
 
-    // Check reason type from backend config, fall back to hardcoded list
+    // Reason type comes from backend config (Settings → Cancel Flow).
+    // Default to 'remedy' if unset — admin should pick the right type.
     const reasonConfig = reasons.find(r => r.id === reasonId);
-    const reasonType = reasonConfig?.type || (OPEN_ENDED_FALLBACK.includes(reasonId) ? 'ai_conversation' : 'remedy');
+    const reasonType = reasonConfig?.type || 'remedy';
     const suggestedRemedyId = reasonConfig?.suggested_remedy_id || null;
 
     if (reasonType === 'ai_conversation') {
@@ -620,10 +612,29 @@ export default function Cancel() {
     );
   }
 
-  const reasons = journey?.cancel_reasons?.length ? journey.cancel_reasons : DEFAULT_REASONS;
+  const reasons = journey?.cancel_reasons || [];
 
   // ---- REASON STEP ----
   if (phase === 'reason') {
+    // Empty-state when no reasons are configured. Better than rendering
+    // a blank step or showing stale defaults that don't match settings.
+    if (reasons.length === 0) {
+      return (
+        <div class="sp-cancel">
+          <CancelHeader onBack={goBack} title="Cancel subscription" />
+          <div class="sp-cancel__required">
+            <div class="sp-cancel__required-title">Cancellation unavailable right now</div>
+            <div class="sp-cancel__required-sub sp-muted">Please contact support and we'll take care of this for you.</div>
+          </div>
+          <div class="sp-cancel__footer">
+            <a class="sp-cancel__exit sp-muted" href={detailUrl} onClick={(e) => { e.preventDefault(); goBack(); }}>
+              Back to subscription details
+            </a>
+          </div>
+        </div>
+      );
+    }
+
     const reasonTiles = reasons.map(r => (
       <button key={r.id} type="button" class="sp-btn sp-btn--ghost sp-cancel-reason" onClick={() => selectReason(r.id)}>
         <div class="sp-cancel-reason__label">{r.label}</div>
