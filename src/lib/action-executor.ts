@@ -165,6 +165,17 @@ function substituteActionPlaceholders(
     out = out.replace(new RegExp(lower, "g"), value);
     out = out.replace(new RegExp(upper, "g"), value);
   }
+
+  // Last-resort guard: strip any unsubstituted action-result placeholders
+  // so customers never see literal "{{label_url}}" text. Happens when an
+  // action reports success but didn't produce the URL (e.g. EasyPost step
+  // failed but Shopify return part succeeded — see ticket 29d6787d, May 6).
+  // Anything still wrapped in {{ }} or [UPPER] gets silently removed.
+  if (/\{\{\s*\w+\s*\}\}|\[\s*[A-Z_]+\s*\]/.test(out)) {
+    console.warn("[substituteActionPlaceholders] Unsubstituted token in message, stripping:", out.match(/\{\{\s*\w+\s*\}\}|\[\s*[A-Z_]+\s*\]/g));
+    out = out.replace(/\{\{\s*\w+\s*\}\}/g, "").replace(/\[\s*[A-Z_]+\s*\]/g, "");
+    out = out.replace(/<p>\s*<\/p>/g, "");
+  }
   return out;
 }
 
