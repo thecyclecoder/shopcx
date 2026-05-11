@@ -1236,6 +1236,55 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       });
 
       if (isClose) {
+        // Guard: if there's a prior customer message that we haven't
+        // responded to yet, a "thanks" is pre-emptive — not closure.
+        // Customers commonly type "Please cancel my subscription" then
+        // "Thank you" within seconds, before we've even started
+        // processing. If we treat the second as closure we never act on
+        // the first. Surfaced on ticket 789ebbc5 (Maryann, May 8):
+        // "Please cancel my subscription" at 10:14:38 → "Thank you" at
+        // 10:14:44 → AI sent positive close before the cancel journey
+        // could fire. Agent had to manually re-send.
+        const priorUnanswered = await step.run("check-prior-unanswered", async () => {
+          const { data: recent } = await admin.from("ticket_messages")
+            .select("direction, visibility, author_type, body, created_at")
+            .eq("ticket_id", tid)
+            .lt("created_at", new Date(t0).toISOString())
+            .order("created_at", { ascending: false })
+            .limit(10);
+          // Walk backward: find the most recent INBOUND customer message
+          // before this one. If nothing outbound+external came after it
+          // (and before now), it's unanswered.
+          let lastInboundAt: string | null = null;
+          let lastReplyAt: string | null = null;
+          for (const m of recent || []) {
+            if (m.direction === "inbound" && !lastInboundAt) lastInboundAt = m.created_at as string;
+            if (m.direction === "outbound" && m.visibility === "external" && !lastReplyAt) lastReplyAt = m.created_at as string;
+            if (lastInboundAt && lastReplyAt) break;
+          }
+          if (!lastInboundAt) return null;
+          // No reply since the prior inbound — and the prior inbound
+          // contains an actionable request? Suppress positive-close.
+          if (!lastReplyAt || new Date(lastReplyAt) < new Date(lastInboundAt)) {
+            const priorBody = (recent?.find(m =>
+              m.direction === "inbound" && m.created_at === lastInboundAt
+            )?.body || "").replace(/<[^>]+>/g, " ").toLowerCase();
+            // Cheap keyword sniff — these are the requests we should NEVER
+            // let a pre-emptive "thanks" close.
+            if (/cancel|refund|return|stop|wrong|missing|damaged|pause|skip|change|update|swap|charge|dispute/.test(priorBody)) {
+              return { lastInboundAt };
+            }
+          }
+          return null;
+        });
+
+        if (priorUnanswered) {
+          await sysNote(admin, tid, `[System] Positive close suppressed — prior customer message at ${priorUnanswered.lastInboundAt} contains an actionable request and hasn't been responded to. "${msg.slice(0, 80)}" looks pre-emptive. Letting the orchestrator run normally on the prior message.`);
+          // Don't close, don't reply. The original message's orchestrator
+          // run is already in flight (or will run on next inbound).
+          return { status: "positive_close_suppressed_prior_unanswered" };
+        }
+
         // Guard: if a journey form was just delivered and the customer
         // never completed it, "thanks" almost always means they didn't
         // realize they needed to click. Don't close the ticket — send a

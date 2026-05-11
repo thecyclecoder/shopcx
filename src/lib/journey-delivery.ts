@@ -143,9 +143,14 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
     configSnapshot = { ...configSnapshot, prependAccountLinking: true };
   }
 
-  // Create session
+  // Create session. Live-rendered journeys (cancel, etc.) pull fresh
+  // data on every click, so a 24h expiry adds zero security value and
+  // a lot of "I tried to use your link, it expired" friction. Use 30
+  // days for those. Snapshot-based journeys still expire in 24h because
+  // their config_snapshot can drift from live state.
   const token = crypto.randomBytes(24).toString("hex");
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const expiryHours = isLiveRendered ? 24 * 30 : 24;
+  const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000).toISOString();
 
   await admin.from("journey_sessions").insert({
     workspace_id: workspaceId,
@@ -210,10 +215,28 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
       subject: `Re: ${ticket?.subject || "Your request"}`,
       buttonLabel: ctaText,
       inReplyTo,
+      // Live-rendered journeys: suppress the "expires in 24 hours"
+      // line in the email since the link is good for 30 days and pulls
+      // fresh data on every click.
+      expiryHours: isLiveRendered ? null : 24,
     });
 
-    const emailLabel = channelSwitched ? `<p style="font-size:12px;color:#6b7280;">📧 Sent via email (customer left chat)</p>` : "";
-    const ticketMsgBody = `${emailLabel}${ctaResult.html || `<p>${leadIn}</p>`}`;
+    // Use a CLEAN HTML for the dashboard display — no inline colors,
+    // no fixed background. The dashboard's prose-invert + bubble bg
+    // handles theming. The rich email HTML (ctaResult.html) is what
+    // the customer actually receives via Resend; the dashboard preview
+    // just needs to be readable in both light and dark dashboard themes.
+    // Surfaced on ticket 789ebbc5: the email's #18181b dark-text-on-
+    // light-bg styling rendered as unreadable dark text on the
+    // dashboard's purple message bubble.
+    const journeyUrlForPreview = `${process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai"}/journey/${token}`;
+    const emailLabel = channelSwitched
+      ? `<p><em>Sent via email (customer left chat)</em></p>`
+      : "";
+    const expiryNote = isLiveRendered
+      ? "" // live-rendered links last 30 days, don't bother mentioning
+      : `<p><small>This link expires in 24 hours.</small></p>`;
+    const ticketMsgBody = `${emailLabel}<p>${leadIn}</p><p><a href="${journeyUrlForPreview}">${ctaText} →</a></p>${expiryNote}`;
 
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId,

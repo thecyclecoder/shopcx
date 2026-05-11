@@ -203,6 +203,7 @@ export async function sendJourneyCTA({
   subject,
   buttonLabel,
   inReplyTo,
+  expiryHours,
 }: {
   workspaceId: string;
   toEmail: string;
@@ -214,6 +215,10 @@ export async function sendJourneyCTA({
   subject?: string;
   buttonLabel?: string;
   inReplyTo?: string | null;
+  // 24 (default) shows the expiry line; pass a larger number or null
+  // to suppress it. Live-rendered journeys (cancel) pass null since
+  // their effective expiry is weeks and they pull fresh data on click.
+  expiryHours?: number | null;
 }): Promise<{ messageId?: string; html?: string; error?: string }> {
   const client = await getResendClient(workspaceId, toEmail);
   if (!client) return { error: "Resend not configured" };
@@ -247,9 +252,7 @@ export async function sendJourneyCTA({
             ${btn}
           </a>
         </div>
-        <p style="color: #a1a1aa; font-size: 12px; margin-top: 24px;">
-          This link expires in 24 hours.
-        </p>
+        ${expiryHours === null ? "" : `<p style="color: #a1a1aa; font-size: 12px; margin-top: 24px;">This link expires in ${expiryHours || 24} hours.</p>`}
       </div>
     `;
 
