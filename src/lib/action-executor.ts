@@ -674,7 +674,14 @@ const directActionHandlers: Record<
     if (r.success) {
       await notifySlack(ctx, p, amountDecimal);
     }
-    return { ...r, summary: r.success ? `Partial refund of $${amountDecimal} issued (${reason})` : undefined };
+    return {
+      ...r,
+      summary: r.success ? `Partial refund of $${amountDecimal} issued (${reason})` : undefined,
+      // Drives {{refund_amount}} substitution in response_message. Without
+      // this, the placeholder leaked through verbatim — see ticket
+      // 8203dfe0 (May 5), Amanda Lederman's $6.95 shipping refund.
+      refundAmountCents: r.success ? (p.amount_cents || 0) : undefined,
+    };
   },
 
   redeem_points_as_refund: async (ctx, p) => {
@@ -730,6 +737,7 @@ const directActionHandlers: Record<
     return {
       success: true,
       summary: `Redeemed ${tier.points_cost} points for $${tier.discount_value} partial refund on order #${order.order_number} (balance: ${newBalance} pts)`,
+      refundAmountCents: amountCents,
     };
   },
 
