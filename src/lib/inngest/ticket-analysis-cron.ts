@@ -27,15 +27,22 @@ export const ticketAnalysisCron = inngest.createFunction(
     const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
     const tickets = await step.run("find-tickets", async () => {
+      // NB: PostgREST doesn't support column-to-column comparison in .or
+      // (`lt.updated_at` reads "updated_at" as a literal string, not a
+      // column reference, and the whole query errors). Fetch the window
+      // and filter in JS instead. Volume is small (~tens to a few
+      // hundred per 30-min window) so this is fine.
       const { data } = await admin.from("tickets")
         .select("id, workspace_id, last_analyzed_at, updated_at, tags")
         .eq("status", "closed")
         .contains("tags", ["ai"])
         .gte("updated_at", cutoff)
-        .or("last_analyzed_at.is.null,last_analyzed_at.lt.updated_at")
         .order("updated_at", { ascending: false })
-        .limit(100); // cap per run — next cycle picks up the rest
-      return data || [];
+        .limit(300);
+      const needs = (data || []).filter(t =>
+        !t.last_analyzed_at || new Date(t.last_analyzed_at) < new Date(t.updated_at as string)
+      );
+      return needs.slice(0, 100); // cap per run — next cycle picks up the rest
     });
 
     if (!tickets.length) {
