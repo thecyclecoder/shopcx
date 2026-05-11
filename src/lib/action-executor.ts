@@ -1033,6 +1033,47 @@ const directActionHandlers: Record<
     return { success: true, summary: `Enrolled in crisis "${crisis.affected_product_title}" (auto_readd=true — will swap back to original on resolve)` };
   },
 
+  // Flip auto_readd=true on an existing crisis_customer_actions row.
+  // Used when a swap-accept customer (who chose "Keep <swap flavor>" at
+  // tier1) later asks "will my original flavor come back automatically?"
+  // — that question is a signal they're changing their mind. Sonnet
+  // should call this in the same turn as the customer-facing promise so
+  // the promise is backed by data, not fabrication. Surfaced on ticket
+  // b0b2dee1 (Liz, May 6).
+  crisis_set_auto_readd: async (ctx, p) => {
+    const admin = ctx.admin;
+    if (!ctx.customerId) return { success: false, error: "no customer on ticket" };
+
+    // Find the most recent crisis_customer_actions row for this customer
+    // (allow override via crisis_action_id param if Sonnet passed one).
+    const targetId = p.crisis_action_id as string | undefined;
+    let row: { id: string; auto_readd: boolean; original_item: Record<string, unknown> | null } | null = null;
+    if (targetId) {
+      const { data } = await admin.from("crisis_customer_actions")
+        .select("id, auto_readd, original_item").eq("id", targetId).maybeSingle();
+      row = data;
+    } else {
+      const { data } = await admin.from("crisis_customer_actions")
+        .select("id, auto_readd, original_item")
+        .eq("customer_id", ctx.customerId)
+        .order("created_at", { ascending: false })
+        .limit(1).maybeSingle();
+      row = data;
+    }
+    if (!row) return { success: false, error: "no crisis_customer_actions row for this customer" };
+    if (row.auto_readd) {
+      return { success: true, summary: "auto_readd was already true — no change needed" };
+    }
+
+    await admin.from("crisis_customer_actions").update({
+      auto_readd: true,
+      updated_at: new Date().toISOString(),
+    }).eq("id", row.id);
+
+    const originalTitle = (row.original_item as { title?: string } | null)?.title || "the original item";
+    return { success: true, summary: `Flipped auto_readd=true on crisis action — will switch back to ${originalTitle} when crisis resolves` };
+  },
+
   /**
    * update_shipping_address — change the shipping address on an order
    * and/or subscription. Implements the full address-change logic tree:
