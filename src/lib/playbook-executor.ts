@@ -610,7 +610,13 @@ async function fetchCustomerData(admin: Admin, wsId: string, custId: string): Pr
 }
 
 async function fetchOrders(admin: Admin, wsId: string, custId: string, config: Record<string, unknown>): Promise<OrderData[]> {
-  const lookbackDays = Number(config.lookback_days) || 90;
+  // Floor at 60 days so we never under-fetch below the longest active
+  // return policy (currently 30 days). Surfaced on ticket 9e643299
+  // (Tiffany, May 4) — refund playbook had lookback_days=21, missed her
+  // in-policy April 6 first order, and incorrectly told her nothing was
+  // returnable. The DB config was bumped to 60 too; the floor is belt
+  // and suspenders so a future config edit can't silently shrink it.
+  const lookbackDays = Math.max(Number(config.lookback_days) || 90, 60);
   const since = new Date(Date.now() - lookbackDays * 86400000).toISOString();
 
   // Include linked customer orders
