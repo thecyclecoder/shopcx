@@ -17,6 +17,7 @@ import { journeySessionCompleted, journeySessionAbandoned } from "@/lib/inngest/
 import { scrapeHelpCenter } from "@/lib/inngest/scrape-help-center";
 import { aiNightlyAnalysis } from "@/lib/inngest/ai-nightly-analysis";
 import { ticketAnalysisCron } from "@/lib/inngest/ticket-analysis-cron";
+import { dailyAnalysisReportCron } from "@/lib/inngest/daily-analysis-report-cron";
 import {
   fraudNightlyScan,
   fraudGenerateSummary,
@@ -88,6 +89,7 @@ export const { GET, POST, PUT } = serve({
     scrapeHelpCenter,
     aiNightlyAnalysis,
     ticketAnalysisCron,
+    dailyAnalysisReportCron,
     fraudNightlyScan,
     fraudGenerateSummary,
     fraudCheckOrder,
