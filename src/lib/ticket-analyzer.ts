@@ -173,14 +173,20 @@ export async function analyzeTicket(
   const windowEnd = new Date().toISOString();
 
   // Pull messages in the window
-  const { data: msgs } = await admin.from("ticket_messages")
+  const { data: msgsRaw } = await admin.from("ticket_messages")
     .select("direction, author_type, body, visibility, created_at")
     .eq("ticket_id", ticketId)
     .gte("created_at", windowStart)
     .lte("created_at", windowEnd)
     .order("created_at", { ascending: true });
 
-  if (!msgs?.length) return { ok: false, reason: "no_messages_in_window" };
+  // Strip out our own holding-message replies. The auto-analyzer inserts
+  // a "we're taking another look" message tagged with an HTML sentinel
+  // when it re-opens a ticket — grading that as if it were an AI turn
+  // double-counts our own intervention.
+  const msgs = (msgsRaw || []).filter(m => !(m.body || "").includes("AUTO_ANALYSIS_HOLDING"));
+
+  if (!msgs.length) return { ok: false, reason: "no_messages_in_window" };
 
   // Don't grade if there are no AI messages — nothing to analyze
   const aiMessageCount = msgs.filter(m =>
@@ -355,7 +361,11 @@ async function applySeverityActions(
       .select("email, first_name").eq("id", customerId).maybeSingle();
     const firstName = cust?.first_name || "there";
 
-    const html = `<p style="margin:0 0 16px 0;">Hi ${firstName},</p>
+    // Sentinel comment so the analyzer's next window doesn't grade our
+    // own holding message as if it were an AI reply. Surfaced on ticket
+    // 0ef4a608 (Jill, May 11) where this message landed in the scoring
+    // window. AUTO_ANALYSIS_HOLDING is filtered out in pullMessagesForGrading.
+    const html = `<!--AUTO_ANALYSIS_HOLDING--><p style="margin:0 0 16px 0;">Hi ${firstName},</p>
 
 <p style="margin:0 0 16px 0;">Our team is taking another look at your last message to make sure we got it right — we'll follow up shortly.</p>
 
