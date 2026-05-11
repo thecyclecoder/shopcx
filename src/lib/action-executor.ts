@@ -1279,8 +1279,24 @@ const directActionHandlers: Record<
     }
     if (!addr.address1) return { success: false, error: "No shipping address found on any subscription or order" };
 
-    const variantId = p.variant_id || "42614433513645"; // default Peach Mango
+    const variantId = p.variant_id || "42614433513645"; // fallback variant (Peach Mango)
     const quantity = p.quantity || 1;
+
+    // Resolve variant title for the summary string. Without this the
+    // summary always claimed "Peach Mango" regardless of what variant_id
+    // Sonnet actually passed — surfaced on ticket ffd28680 (Dean, May 7)
+    // where Strawberry Lemonade shipped correctly but the analyzer was
+    // misled by a "2x Peach Mango shipped free" log line.
+    let variantTitle = "item";
+    try {
+      const { data: pv } = await ctx.admin.from("product_variants")
+        .select("title, products(title)")
+        .eq("shopify_variant_id", variantId).maybeSingle();
+      if (pv) {
+        const productTitle = (pv.products as { title?: string } | null)?.title;
+        variantTitle = pv.title && productTitle ? `${productTitle} (${pv.title})` : (pv.title || productTitle || "item");
+      }
+    } catch { /* fall back to "item" */ }
 
     const draftRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
       method: "POST",
@@ -1322,7 +1338,7 @@ const directActionHandlers: Record<
     const completeData = await completeRes.json();
     const orderName = completeData.data?.draftOrderComplete?.draftOrder?.order?.name;
 
-    return { success: true, summary: `Replacement order ${orderName || "created"} — ${quantity}x Peach Mango shipped free` };
+    return { success: true, summary: `Replacement order ${orderName || "created"} — ${quantity}x ${variantTitle} shipped free` };
   },
 };
 
