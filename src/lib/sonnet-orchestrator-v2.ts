@@ -382,10 +382,17 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .in("status", ["active", "paused", "cancelled"])
       .order("created_at", { ascending: false }),
+    // 180 days of order history so Sonnet has full visibility — old
+    // 5-order cap missed customers' relevant history. Surfaced on ticket
+    // 6e732303 (Veronica) where the playbook kept saying "no orders
+    // found" while the customer was citing 25-and-53-day-old order
+    // numbers. We also include subscription_id so each order can be
+    // labeled with which sub it belongs to (or "one-time" if null).
     admin.from("orders")
-      .select("order_number, total_cents, line_items, discount_codes, created_at, financial_status, shopify_order_id, fulfillments, source_name")
+      .select("order_number, total_cents, line_items, discount_codes, created_at, financial_status, shopify_order_id, fulfillments, source_name, subscription_id")
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
-      .order("created_at", { ascending: false }).limit(5),
+      .gte("created_at", new Date(Date.now() - 180 * 86400000).toISOString())
+      .order("created_at", { ascending: false }).limit(25),
     // Loyalty record may live on ANY of the linked customer profiles.
     // Bug we fixed: previously this used .eq("customer_id", custId)
     // and missed records belonging to a sibling profile (e.g. ticket
@@ -478,7 +485,16 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       }
     }
 
-    parts.push("\nRECENT ORDERS:");
+    // Build short labels for each subscription so per-order lines can
+    // say "sub: 33237008557 (active)" instead of just a UUID. Helps
+    // Sonnet reason about which sub an order belongs to when the
+    // customer has multiple subs over time.
+    const subLabel: Record<string, string> = {};
+    for (const s of subs || []) {
+      subLabel[s.id] = `${s.shopify_contract_id || s.id.slice(0, 8)} (${s.status})`;
+    }
+
+    parts.push("\nRECENT ORDERS (last 180 days):");
     for (const o of orders) {
       const lineItems = (o.line_items as { title?: string; variant_title?: string; quantity?: number; price_cents?: number; sku?: string; variant_id?: string }[] || []);
       const itemStr = lineItems.map(i => {
@@ -509,7 +525,10 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       const coupons = couponsList.length ? ` | coupons: ${couponsList.join(", ")}` : ` | coupons: none`;
       const isDraft = (o.source_name as string) === "shopify_draft_order";
       const sourceLabel = isDraft ? " [DRAFT — not a renewal, ignore for price comparisons]" : "";
-      parts.push(`- #${o.order_number} | ${date} | total $${((o.total_cents || 0) / 100).toFixed(2)} | ${o.financial_status || "?"}${sourceLabel} | ${itemStr}${coupons}${tracking} | shopify_order_id: ${o.shopify_order_id || "?"}`);
+      const subTag = o.subscription_id
+        ? ` | sub: ${subLabel[o.subscription_id as string] || (o.subscription_id as string).slice(0, 8)}`
+        : " | sub: one-time/web";
+      parts.push(`- #${o.order_number} | ${date} | total $${((o.total_cents || 0) / 100).toFixed(2)} | ${o.financial_status || "?"}${sourceLabel}${subTag} | ${itemStr}${coupons}${tracking} | shopify_order_id: ${o.shopify_order_id || "?"}`);
     }
     parts.push(`PRICING TERMINOLOGY (use customer-facing language):
 - "Realized price" = what the customer actually pays per unit (the per-unit price on the order). Use this when speaking to customers.

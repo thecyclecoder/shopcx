@@ -1289,24 +1289,52 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // On hit: send the canonical refusal, escalate to a human agent
     // (so an admin can review), skip the orchestrator entirely.
     if (st.custId) {
-      const { getCustomerFraudStatus, shouldBlockOrchestrator, describeBlockReason, CONFIRMED_FRAUD_REPLY }
+      const { getCustomerFraudStatus, shouldBlockOrchestrator, describeBlockReason, pickBlockReply }
         = await import("@/lib/customer-fraud-status");
       const fraudGate = await step.run("fraud-gate", async () => {
         return await getCustomerFraudStatus(admin, wsId, st.custId);
       });
       if (shouldBlockOrchestrator(fraudGate)) {
         const reason = describeBlockReason(fraudGate);
+        const reply = pickBlockReply(fraudGate);
+
+        // Chargeback path is "send one reply, then silence." If we've
+        // already sent the canonical chargeback notice (reply === null),
+        // close the ticket silently — no agent escalation, no further
+        // engagement. Otherwise send the notice once, mark
+        // chargeback_notice_sent_at, and close.
+        if (fraudGate.hasChargeback) {
+          await step.run("chargeback-gate-block", async () => {
+            if (await newerActivity(admin, tid, t0)) return;
+            if (reply) {
+              await sendWithDelay(admin, wsId, tid, st.ch, reply, cfg.sandbox);
+              // Mark notice as sent on the customer + every linked profile
+              // so future tickets from any of them are silent-close.
+              const { data: linkRow } = await admin.from("customer_links")
+                .select("group_id").eq("customer_id", st.custId).maybeSingle();
+              const ids: string[] = [st.custId!];
+              if (linkRow) {
+                const { data: grp } = await admin.from("customer_links")
+                  .select("customer_id").eq("group_id", linkRow.group_id);
+                for (const g of grp || []) if (!ids.includes(g.customer_id)) ids.push(g.customer_id);
+              }
+              await admin.from("customers")
+                .update({ chargeback_notice_sent_at: new Date().toISOString() })
+                .in("id", ids);
+              await sysNote(admin, tid, `[System] CHARGEBACK GATE: ${reason}. Sent canonical notice. Closing silently.`);
+            } else {
+              await sysNote(admin, tid, `[System] CHARGEBACK GATE: ${reason}. Notice already sent — closing silently with no reply.`);
+            }
+            await setStatus(admin, tid, true);  // close
+          });
+          return { status: "chargeback_blocked", reason };
+        }
+
+        // Fraud / banned path — same canonical refusal + escalate flow.
         await step.run("fraud-gate-block", async () => {
           if (await newerActivity(admin, tid, t0)) return;
-          // Send the canonical refusal first, then escalate. The
-          // escalate() helper sends its own holding message, so we
-          // skip its message-sending behavior by sending ours up front
-          // and using sysNote for the agent context.
-          await sendWithDelay(admin, wsId, tid, st.ch, CONFIRMED_FRAUD_REPLY, cfg.sandbox);
+          if (reply) await sendWithDelay(admin, wsId, tid, st.ch, reply, cfg.sandbox);
           await sysNote(admin, tid, `[System] FRAUD GATE: ${reason}. Sent canonical refusal. Escalating for agent review.`);
-          // Use a fraud-specific escalation reason so analytics +
-          // routing rules can act on it. Mirrors what escalate() does:
-          // assigns to a human, leaves ticket open.
           await escalate(admin, wsId, tid, st.ch, "fraud_blocked", 1.0, msg, reason);
         });
         return { status: "fraud_blocked", reason };

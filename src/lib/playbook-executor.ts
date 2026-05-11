@@ -610,14 +610,16 @@ async function fetchCustomerData(admin: Admin, wsId: string, custId: string): Pr
 }
 
 async function fetchOrders(admin: Admin, wsId: string, custId: string, config: Record<string, unknown>): Promise<OrderData[]> {
-  // Floor at 35 days so we never under-fetch below the longest active
-  // return policy (currently 30 days, +5 for slack). Surfaced on ticket
-  // 9e643299 (Tiffany, May 4) — refund playbook had lookback_days=21,
-  // missed her in-policy April 6 first order, and incorrectly told her
-  // nothing was returnable. The DB config was bumped to 35 too; the
-  // floor is belt-and-suspenders so a future config edit can't silently
-  // shrink below the policy window.
-  const lookbackDays = Math.max(Number(config.lookback_days) || 35, 35);
+  // Floor at 180 days so the orchestrator has full visibility into the
+  // customer's order history — not just the policy window. Surfaced on
+  // ticket 6e732303 (Veronica, May 8): customer's two orders were 25
+  // and 53 days old; the old 21-day lookback hid both and the playbook
+  // kept saying "no recent orders found" while the customer kept giving
+  // us order numbers. Even with a 35-day floor we'd still miss anything
+  // older. The policy check later correctly classifies each order as
+  // in/out of policy, so fetching more is safe — we just want Sonnet
+  // to see the full picture.
+  const lookbackDays = Math.max(Number(config.lookback_days) || 180, 180);
   const since = new Date(Date.now() - lookbackDays * 86400000).toISOString();
 
   // Include linked customer orders

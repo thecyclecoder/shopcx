@@ -18,6 +18,10 @@ export interface FraudStatus {
   isConfirmedFraud: boolean;
   isResellerFlagged: boolean;          // any amazon_reseller fraud_case (any status)
   hasResellerAddressMatch: boolean;    // an order ships to / is billed to a known_resellers address
+  isBanned: boolean;                   // customer (or any linked profile) has banned=true
+  bannedReason: string | null;
+  hasChargeback: boolean;              // any chargeback_events row in active state (open/under_review/lost)
+  chargebackNoticeSentAt: string | null;  // when (if ever) we sent the one-and-done chargeback reply
   confirmedCases: Array<{
     id: string;
     rule_type: string;
@@ -100,6 +104,10 @@ export async function getCustomerFraudStatus(
     isConfirmedFraud: false,
     isResellerFlagged: false,
     hasResellerAddressMatch: false,
+    isBanned: false,
+    bannedReason: null,
+    hasChargeback: false,
+    chargebackNoticeSentAt: null,
     confirmedCases: [],
     openCases: [],
     matchedResellers: [],
@@ -181,10 +189,46 @@ export async function getCustomerFraudStatus(
     }
   }
 
+  // 4. banned flag — across the customer + linked profiles. Set when a
+  //    chargeback fires (auto-ban in chargeback-processing.ts) or an
+  //    admin manually flags the customer. ANY banned row in the linked
+  //    set blocks the orchestrator for everyone.
+  const { data: custs } = await admin
+    .from("customers")
+    .select("banned, banned_reason, chargeback_notice_sent_at")
+    .in("id", ids);
+  let isBanned = false;
+  let bannedReason: string | null = null;
+  let chargebackNoticeSentAt: string | null = null;
+  for (const c of custs || []) {
+    if (c.banned) {
+      isBanned = true;
+      if (!bannedReason && c.banned_reason) bannedReason = c.banned_reason as string;
+    }
+    if (c.chargeback_notice_sent_at && !chargebackNoticeSentAt) {
+      chargebackNoticeSentAt = c.chargeback_notice_sent_at as string;
+    }
+  }
+
+  // 5. chargebacks — any chargeback_events row in an active state
+  //    (open, under_review, lost) on the customer or any linked profile.
+  //    "won" disputes (we kept the money) don't trigger the gate.
+  const { data: cbs } = await admin
+    .from("chargeback_events")
+    .select("status")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", ids)
+    .in("status", ["open", "under_review", "lost", "pending"]);
+  const hasChargeback = (cbs?.length || 0) > 0;
+
   return {
     isConfirmedFraud: confirmedCases.length > 0,
     isResellerFlagged,
     hasResellerAddressMatch,
+    isBanned,
+    bannedReason,
+    hasChargeback,
+    chargebackNoticeSentAt,
     confirmedCases,
     openCases,
     matchedResellers,
@@ -194,13 +238,35 @@ export async function getCustomerFraudStatus(
 /**
  * Should the orchestrator bail on this customer entirely?
  *
- * True when ANY fraud signal is present: a confirmed case, an
- * amazon_reseller flag (any status), or an order whose address
- * matches a known reseller. Caller should send the canonical refusal
- * + escalate the ticket.
+ * True when ANY block signal is present: a confirmed fraud case,
+ * an amazon_reseller flag (any status), an order whose address
+ * matches a known reseller, a banned customer (e.g. post-chargeback),
+ * or an active chargeback on the account. Caller should send the
+ * appropriate canonical message and close/escalate.
  */
 export function shouldBlockOrchestrator(s: FraudStatus): boolean {
-  return s.isConfirmedFraud || s.isResellerFlagged || s.hasResellerAddressMatch;
+  return s.isConfirmedFraud
+    || s.isResellerFlagged
+    || s.hasResellerAddressMatch
+    || s.isBanned
+    || s.hasChargeback;
+}
+
+/**
+ * Pick the canonical reply for a gated customer.
+ *
+ * Returns null if we've already sent the chargeback notice once —
+ * the user's policy is one reply per chargeback, then silence. Caller
+ * should close the ticket without replying in that case.
+ */
+export function pickBlockReply(s: FraudStatus): string | null {
+  // Chargeback takes priority over generic fraud framing — it's a more
+  // specific and actionable explanation for the customer.
+  if (s.hasChargeback) {
+    if (s.chargebackNoticeSentAt) return null;  // already notified — silent close
+    return CHARGEBACK_REPLY;
+  }
+  return CONFIRMED_FRAUD_REPLY;
 }
 
 /**
@@ -219,6 +285,14 @@ export function describeBlockReason(s: FraudStatus): string {
     const names = [...new Set(s.matchedResellers.map(m => m.business_name || "(unnamed)"))];
     parts.push(`order address matches reseller(s): ${names.join(", ")}`);
   }
+  if (s.isBanned) {
+    parts.push(`customer banned${s.bannedReason ? ` (${s.bannedReason})` : ""}`);
+  }
+  if (s.hasChargeback) {
+    parts.push(s.chargebackNoticeSentAt
+      ? `active chargeback (notice already sent ${s.chargebackNoticeSentAt})`
+      : "active chargeback (will send canonical notice)");
+  }
   return parts.join("; ");
 }
 
@@ -229,3 +303,11 @@ export function describeBlockReason(s: FraudStatus): string {
  */
 export const CONFIRMED_FRAUD_REPLY =
   "We're sorry but your account has been flagged for potential fraud.";
+
+/**
+ * Canonical one-and-done reply when a chargeback has been filed on
+ * the customer's account. After this is sent, the customer is left
+ * to resolve via their bank — we stop engaging on every channel.
+ */
+export const CHARGEBACK_REPLY =
+  "A chargeback has been filed on your account, so this matter is now in the hands of your bank to resolve. We can't process additional changes or refunds while the dispute is active.";

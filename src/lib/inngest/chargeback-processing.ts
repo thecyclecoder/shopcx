@@ -121,6 +121,29 @@ export const chargebackReceived = inngest.createFunction(
       await unsubscribeFromAllMarketing(workspaceId, customerId);
     });
 
+    // Step 3c: Auto-ban the customer + every linked profile. Once a
+    // chargeback is filed we stop engaging — the orchestrator's gate
+    // (customer-fraud-status.ts) sees the ban and short-circuits future
+    // tickets with the one-and-done CHARGEBACK_REPLY before going silent.
+    await step.run("auto-ban-customer-and-linked", async () => {
+      const ids: string[] = [customerId];
+      const { data: linkRow } = await admin
+        .from("customer_links").select("group_id")
+        .eq("customer_id", customerId).maybeSingle();
+      if (linkRow) {
+        const { data: grp } = await admin
+          .from("customer_links").select("customer_id")
+          .eq("group_id", linkRow.group_id);
+        for (const g of grp || []) if (!ids.includes(g.customer_id)) ids.push(g.customer_id);
+      }
+      const { error } = await admin.from("customers").update({
+        banned: true,
+        banned_at: new Date().toISOString(),
+        banned_reason: `chargeback_filed:${chargebackEventId}`,
+      }).in("id", ids);
+      if (error) console.error("[chargeback] auto-ban failed:", error.message);
+    });
+
     // Step 4: Execute action
     if (route === "auto_cancel") {
       const cancelResult = await step.run("auto-cancel-subscriptions", async () => {
