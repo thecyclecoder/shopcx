@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PageData, PricingRule, PricingTier } from "../_lib/page-data";
 import { TrustChipRow } from "../_components/TrustChipRow";
 import { ShopCTA } from "../_components/ShopCTA";
@@ -63,57 +63,19 @@ export function PriceTableSection({ data }: { data: PageData }) {
           Choose your pack
         </h2>
 
-        {hasAnySubscribe && (
-          <div className="mx-auto mb-8 flex max-w-xs items-center rounded-full border border-zinc-200 bg-white p-1 shadow-sm">
-            <button
-              type="button"
-              aria-pressed={mode === "subscribe"}
-              onClick={() => setMode("subscribe")}
-              style={mode === "subscribe" ? { backgroundColor: "var(--storefront-primary)" } : undefined}
-              className={`flex-1 rounded-full px-4 py-2.5 text-sm font-semibold transition-colors ${
-                mode === "subscribe" ? "text-white" : "text-zinc-700"
-              }`}
-            >
-              Subscribe · Save
-            </button>
-            <button
-              type="button"
-              aria-pressed={mode === "onetime"}
-              onClick={() => setMode("onetime")}
-              style={mode === "onetime" ? { backgroundColor: "var(--storefront-primary)" } : undefined}
-              className={`flex-1 rounded-full px-4 py-2.5 text-sm font-semibold transition-colors ${
-                mode === "onetime" ? "text-white" : "text-zinc-700"
-              }`}
-            >
-              One-time
-            </button>
-          </div>
-        )}
+        {hasAnySubscribe && <SubscribeToggle mode={mode} setMode={setMode} />}
 
         {/* Frequency picker — only when subscribing AND the rule
-            defines available frequencies. Compact pill-radio strip. */}
+            defines available frequencies. Subtle inline dropdown
+            (selected label + chevron) keeps friction low; the other
+            options live a click away. */}
         {mode === "subscribe" && frequencies.length > 1 && (
-          <div className="mx-auto mb-8 flex max-w-xl flex-wrap items-center justify-center gap-2">
-            <span className="text-sm font-semibold text-zinc-600">Deliver</span>
-            {frequencies.map((f) => {
-              const active = freqDays === f.interval_days;
-              return (
-                <button
-                  key={f.interval_days}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => setFreqDays(f.interval_days)}
-                  style={active ? { backgroundColor: "var(--storefront-primary)", borderColor: "var(--storefront-primary)" } : undefined}
-                  className={`rounded-full border px-3 py-1.5 text-sm font-medium transition-colors ${
-                    active
-                      ? "text-white"
-                      : "border-zinc-200 bg-white text-zinc-700 hover:border-zinc-400"
-                  }`}
-                >
-                  {f.label}
-                </button>
-              );
-            })}
+          <div className="mb-12 flex justify-center">
+            <FrequencyPicker
+              frequencies={frequencies}
+              value={freqDays}
+              onChange={setFreqDays}
+            />
           </div>
         )}
 
@@ -323,6 +285,193 @@ function PriceCard({
           }}
         />
       </div>
+    </div>
+  );
+}
+
+function SubscribeToggle({
+  mode,
+  setMode,
+}: {
+  mode: "subscribe" | "onetime";
+  setMode: (m: "subscribe" | "onetime") => void;
+}) {
+  const [helperOpen, setHelperOpen] = useState(false);
+
+  return (
+    <div className="mx-auto mb-8 max-w-md">
+      <div className="relative mx-auto flex max-w-xs items-center rounded-full border border-zinc-200 bg-white p-1 shadow-sm">
+        {/* Most-popular badge floats above the Subscribe segment so
+            it's clearly framed as the recommended default without
+            overflowing the toggle itself. */}
+        <span
+          style={{ backgroundColor: "var(--storefront-primary)" }}
+          className="absolute -top-3 left-1/4 -translate-x-1/2 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white shadow"
+        >
+          Most Popular
+        </span>
+        <button
+          type="button"
+          aria-pressed={mode === "subscribe"}
+          onClick={() => setMode("subscribe")}
+          style={mode === "subscribe" ? { backgroundColor: "var(--storefront-primary)" } : undefined}
+          className={`flex-1 rounded-full px-4 py-2.5 text-sm font-semibold transition-colors ${
+            mode === "subscribe" ? "text-white" : "text-zinc-700"
+          }`}
+        >
+          Subscribe &amp; Save
+        </button>
+        <button
+          type="button"
+          aria-pressed={mode === "onetime"}
+          onClick={() => setMode("onetime")}
+          style={mode === "onetime" ? { backgroundColor: "var(--storefront-primary)" } : undefined}
+          className={`flex-1 rounded-full px-4 py-2.5 text-sm font-semibold transition-colors ${
+            mode === "onetime" ? "text-white" : "text-zinc-700"
+          }`}
+        >
+          One-time
+        </button>
+      </div>
+
+      {/* Collapsible explainer — closed by default, click to reveal
+          why subscribe-save is framed as the recommended choice. */}
+      <button
+        type="button"
+        onClick={() => setHelperOpen(!helperOpen)}
+        aria-expanded={helperOpen}
+        className="mx-auto mt-4 flex w-full items-center justify-center gap-1.5 text-center text-sm font-medium text-zinc-700 hover:text-zinc-900"
+      >
+        <span>80% of customers choose Subscribe &amp; Save</span>
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          className={`flex-shrink-0 text-zinc-500 transition-transform ${helperOpen ? "rotate-180" : ""}`}
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {helperOpen && (
+        <p className="mx-auto mt-3 max-w-md text-center text-sm leading-relaxed text-zinc-700 sm:text-base">
+          The best results come with at least 2-3 months of use, so Subscribe
+          &amp; Save helps you save money while you reach your goals. Your
+          first order comes with a 30-day money-back guarantee, so there&apos;s
+          no risk in trying it.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function FrequencyPicker({
+  frequencies,
+  value,
+  onChange,
+}: {
+  frequencies: Array<{ interval_days: number; label: string; default?: boolean }>;
+  value: number | null;
+  onChange: (days: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = frequencies.find((f) => f.interval_days === value) || frequencies[0];
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Close on outside click / Escape so the menu doesn't sit open if
+  // the user moves on without picking. No portal needed since the
+  // menu only ever floats over the row directly beneath the toggle.
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative inline-block text-sm">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        onClick={() => setOpen(!open)}
+        className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 font-medium text-zinc-700 transition-colors hover:bg-zinc-100"
+      >
+        <span className="text-zinc-500">Deliver</span>
+        <span className="font-semibold text-zinc-900">{selected?.label || "Monthly"}</span>
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          className={`text-zinc-500 transition-transform ${open ? "rotate-180" : ""}`}
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && (
+        <ul
+          role="listbox"
+          className="absolute left-1/2 top-full z-10 mt-2 min-w-[180px] -translate-x-1/2 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-lg"
+        >
+          {frequencies.map((f) => {
+            const active = f.interval_days === value;
+            return (
+              <li key={f.interval_days}>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  onClick={() => {
+                    onChange(f.interval_days);
+                    setOpen(false);
+                  }}
+                  className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-zinc-50 ${
+                    active ? "font-semibold text-zinc-900" : "text-zinc-700"
+                  }`}
+                >
+                  <span>{f.label}</span>
+                  {active && (
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="3"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                      className="text-emerald-600"
+                    >
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  )}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
