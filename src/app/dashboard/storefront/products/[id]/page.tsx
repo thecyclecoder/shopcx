@@ -331,6 +331,7 @@ interface MediaItem {
 
 function ImageManagement({ workspaceId, productId }: { workspaceId: string; productId: string }) {
   const [media, setMedia] = useState<MediaItem[]>([]);
+  const [ingredients, setIngredients] = useState<Array<{ name: string }>>([]);
   const [loaded, setLoaded] = useState(false);
 
   const load = useCallback(async () => {
@@ -338,6 +339,7 @@ function ImageManagement({ workspaceId, productId }: { workspaceId: string; prod
     if (res.ok) {
       const data = await res.json();
       setMedia(data.media || []);
+      setIngredients(data.ingredients || []);
     }
     setLoaded(true);
   }, [workspaceId, productId]);
@@ -346,8 +348,16 @@ function ImageManagement({ workspaceId, productId }: { workspaceId: string; prod
 
   const slots = useMemo(() => {
     const base = ["hero", "lifestyle_1", "lifestyle_2", "packaging", "before", "after", "ugc_1", "ugc_2", "ugc_3", "ugc_4", "ugc_5", "ugc_6", "comparison"];
-    return base;
-  }, []);
+    // Per-product ingredient slots. Slug must match the storefront's
+    // IngredientsSection key derivation (lowercase, spaces → _, strip
+    // anything that's not a-z0-9_). Without this list the upload UI
+    // had no surface for ingredient images, and the storefront fell
+    // back to gray squares.
+    const ingredientSlots = ingredients
+      .map((i) => `ingredient_${i.name.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "")}`)
+      .filter((s) => s !== "ingredient_");
+    return [...base, ...ingredientSlots];
+  }, [ingredients]);
 
   const mediaBySlot = useMemo(() => {
     const map = new Map<string, MediaItem>();
