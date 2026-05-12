@@ -591,6 +591,13 @@ RULES:
     { "title": "string", "body_text": "string", "body_html": "string", "question_type": "benefits" },
     { "title": "string", "body_text": "string", "body_html": "string", "question_type": "side_effects" },
     { "title": "string", "body_text": "string", "body_html": "string", "question_type": "usage" }
+  ],
+  "endorsement_name": "string (e.g. 'Dr. Jane Doe, RD' — fictional plausible nutritionist if no real one provided)",
+  "endorsement_title": "string (e.g. 'Registered Dietitian')",
+  "endorsement_quote": "string (1-3 plain-language sentences from the nutritionist's perspective — why they'd recommend this)",
+  "endorsement_bullets": ["string (3-5 short reasons, each <= 12 words, why this product earns the recommendation)"],
+  "expectation_timeline": [
+    { "time_label": "string (e.g. 'Day 1', 'Week 2', 'Month 1')", "headline": "string (short, 3-6 words)", "body": "string (1 sentence, plain language)" }
   ]
 }
 

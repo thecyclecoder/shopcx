@@ -96,6 +96,11 @@ interface PageContent {
   knowledge_base_article: string | null;
   kb_what_it_doesnt_do: string | null;
   support_macros: SupportMacro[];
+  endorsement_name: string | null;
+  endorsement_title: string | null;
+  endorsement_quote: string | null;
+  endorsement_bullets: string[];
+  expectation_timeline: Array<{ time_label: string; headline: string; body: string }>;
   status: "draft" | "approved" | "published";
   generated_at: string;
   approved_at: string | null;
@@ -1540,6 +1545,69 @@ function ContentStage({
           rows={3}
           className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
         />
+      </ContentField>
+
+      <ContentField label="Nutritionist — Name" editable={editable}>
+        <input
+          type="text"
+          value={fieldValue("endorsement_name") || ""}
+          onChange={(e) => setField("endorsement_name", e.target.value)}
+          disabled={!editable}
+          placeholder="Dr. Jane Doe, RD"
+          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+        />
+      </ContentField>
+
+      <ContentField label="Nutritionist — Title" editable={editable}>
+        <input
+          type="text"
+          value={fieldValue("endorsement_title") || ""}
+          onChange={(e) => setField("endorsement_title", e.target.value)}
+          disabled={!editable}
+          placeholder="Registered Dietitian"
+          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+        />
+      </ContentField>
+
+      <ContentField label="Nutritionist — Quote" editable={editable}>
+        <textarea
+          value={fieldValue("endorsement_quote") || ""}
+          onChange={(e) => setField("endorsement_quote", e.target.value)}
+          disabled={!editable}
+          rows={4}
+          placeholder="Why they recommend this product, in their words…"
+          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+        />
+        <p className="mt-1.5 text-[11px] text-zinc-500">Upload their photo at the &quot;endorsement_avatar&quot; slot in the Storefront product page.</p>
+      </ContentField>
+
+      <ContentField label="Nutritionist — Bullets" editable={editable}>
+        <textarea
+          value={((fieldValue("endorsement_bullets") as unknown as string[]) || []).join("\n")}
+          onChange={(e) => setField(
+            "endorsement_bullets",
+            e.target.value.split("\n").map(s => s.trim()).filter(Boolean) as unknown as PageContent["endorsement_bullets"]
+          )}
+          disabled={!editable}
+          rows={5}
+          placeholder={"One bullet per line\nClinically dosed ingredients\nWhole-food sourcing"}
+          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+        />
+        <p className="mt-1.5 text-[11px] text-zinc-500">One bullet per line. Rendered as a checkmark list on the storefront.</p>
+      </ContentField>
+
+      <ContentField label="What to Expect — Timeline" editable={editable}>
+        <ArrayEditor
+          items={fieldValue("expectation_timeline") as unknown as ArrayItem[]}
+          fields={[
+            { key: "time_label", label: "Time label (e.g. 'Week 1')" },
+            { key: "headline", label: "Headline" },
+            { key: "body", label: "Body" },
+          ]}
+          onChange={(v) => setField("expectation_timeline", v as unknown as PageContent["expectation_timeline"])}
+          editable={editable}
+        />
+        <p className="mt-1.5 text-[11px] text-zinc-500">3-6 milestones. Mobile renders vertically, desktop horizontally across up to 5 columns.</p>
       </ContentField>
 
       <ContentField label="Knowledge Base Article (markdown)" editable={editable}>

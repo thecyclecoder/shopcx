@@ -7,6 +7,8 @@ import { pictureSources } from "./image-urls";
 // main JS bundle (or zero JS, for server components).
 import { HeroSection } from "../_sections/HeroSection";
 import { HowItWorksSection } from "../_sections/HowItWorksSection";
+import { NutritionistEndorsementSection } from "../_sections/NutritionistEndorsementSection";
+import { WhatToExpectTimeline } from "../_sections/WhatToExpectTimeline";
 
 // Below-the-fold: server components still render into the initial
 // HTML (no interactive JS anyway), but client components — Reviews,
@@ -128,6 +130,8 @@ export function StorefrontPage({
         <UGCSection data={data} />
         <ComparisonSection data={data} />
         <IngredientsSection data={data} />
+        <NutritionistEndorsementSection data={data} />
+        <WhatToExpectTimeline data={data} />
         <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
         <FAQSection data={data} />
         <FinalCTASection data={data} />

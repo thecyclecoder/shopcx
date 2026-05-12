@@ -68,7 +68,7 @@ export function ReviewsSection({
   return (
     <section data-section="reviews" className="w-full bg-zinc-50 py-12 sm:py-16">
       <div className="mx-auto w-full max-w-5xl px-5 md:px-8">
-        <h2 className="mb-4 text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:text-4xl">
+        <h2 className="mb-4 text-center text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:text-left md:text-4xl">
           What customers are saying
         </h2>
 

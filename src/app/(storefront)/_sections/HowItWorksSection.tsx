@@ -34,7 +34,7 @@ export function HowItWorksSection({ data }: { data: PageData }) {
       <div className="mx-auto max-w-6xl px-5 md:px-8">
         <div className="flex flex-col gap-8 md:grid md:grid-cols-2 md:items-center md:gap-12">
           {/* Title (mobile only — appears first per spec) */}
-          <h2 className="text-2xl font-bold leading-tight tracking-tight text-zinc-900 sm:text-3xl md:hidden">
+          <h2 className="text-center text-2xl font-bold leading-tight tracking-tight text-zinc-900 sm:text-3xl md:hidden">
             Why this works
           </h2>
 

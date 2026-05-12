@@ -38,7 +38,7 @@ export function UGCSection({ data }: { data: PageData }) {
   return (
     <section data-section="ugc" className="w-full bg-white py-12 sm:py-16">
       <div className="mx-auto w-full max-w-6xl px-5 md:px-8">
-        <h2 className="mb-8 text-center text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:mb-10 md:text-left md:text-4xl">
+        <h2 className="mb-8 text-center text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:mb-10 md:text-4xl">
           Real people, real results
         </h2>
 

@@ -347,7 +347,7 @@ function ImageManagement({ workspaceId, productId }: { workspaceId: string; prod
   useEffect(() => { load(); }, [load]);
 
   const slots = useMemo(() => {
-    const base = ["hero", "lifestyle_1", "lifestyle_2", "packaging", "before", "after", "ugc_1", "ugc_2", "ugc_3", "ugc_4", "ugc_5", "ugc_6", "comparison"];
+    const base = ["hero", "lifestyle_1", "lifestyle_2", "packaging", "before", "after", "endorsement_avatar", "timeline_1", "timeline_2", "timeline_3", "timeline_4", "timeline_5", "ugc_1", "ugc_2", "ugc_3", "ugc_4", "ugc_5", "ugc_6", "comparison"];
     // Per-product ingredient slots. Slug must match the storefront's
     // IngredientsSection key derivation (lowercase, spaces → _, strip
     // anything that's not a-z0-9_). Without this list the upload UI
