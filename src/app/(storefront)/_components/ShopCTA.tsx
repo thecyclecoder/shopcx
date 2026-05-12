@@ -50,9 +50,12 @@ export function ShopCTA({
         textShadow: "0 1px 2px rgba(0, 0, 0, 0.30), 0 0 1px rgba(0, 0, 0, 0.15)",
       }
     : { fontFamily: "var(--storefront-heading-font)" };
+  // Button hugs the copy (with min-width floor so it never gets too
+  // tiny). Reads as an actual button-you-press, not a full-bleed bar.
+  // The wrapper centers/aligns it; we don't size it to its parent.
   const buttonClasses = isPrimary
-    ? "group inline-flex h-16 w-full items-center justify-center gap-2 rounded-full px-8 text-xl font-extrabold uppercase tracking-wide text-white shadow-lg shadow-black/10 ring-1 ring-inset ring-white/10 transition-[transform,filter,box-shadow] hover:scale-[1.02] hover:brightness-110 active:scale-[0.98] sm:w-auto sm:min-w-[300px]"
-    : "group inline-flex h-16 w-full items-center justify-center gap-2 rounded-full bg-white px-8 text-xl font-extrabold uppercase tracking-wide shadow-lg shadow-black/10 transition-[transform,colors] hover:scale-[1.02] hover:bg-zinc-50 active:scale-[0.98] sm:w-auto sm:min-w-[300px]";
+    ? "group inline-flex h-16 min-w-[280px] items-center justify-center gap-2 rounded-full px-10 text-xl font-extrabold uppercase tracking-wide text-white shadow-lg shadow-black/10 ring-1 ring-inset ring-white/10 transition-[transform,filter,box-shadow] hover:scale-[1.02] hover:brightness-110 active:scale-[0.98] sm:min-w-[320px]"
+    : "group inline-flex h-16 min-w-[280px] items-center justify-center gap-2 rounded-full bg-white px-10 text-xl font-extrabold uppercase tracking-wide shadow-lg shadow-black/10 transition-[transform,colors] hover:scale-[1.02] hover:bg-zinc-50 active:scale-[0.98] sm:min-w-[320px]";
   const inverseColorStyle = !isPrimary
     ? { color: "var(--storefront-primary)", fontFamily: "var(--storefront-heading-font)" }
     : undefined;
