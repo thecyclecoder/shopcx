@@ -1,6 +1,7 @@
 import type { PageData } from "../_lib/page-data";
 import { StarRating } from "../_components/StarRating";
 import { BeforeAfterPair } from "../_components/BeforeAfterPair";
+import { ExpandableReviewBody } from "../_components/ExpandableReviewBody";
 
 /**
  * Real people, real results — featured reviews + before/after pair.
@@ -65,6 +66,11 @@ export function UGCSection({ data }: { data: PageData }) {
 }
 
 function ReviewCard({ review: r }: { review: PageData["reviews"][number] }) {
+  // Prefer the full body for the in-place expand. smart_quote is a
+  // shortened pull-quote used when we have no length constraint to
+  // play with; here the body is line-clamped on render and the
+  // ExpandableReviewBody handles the rest.
+  const text = r.body || r.smart_quote || "";
   return (
     <blockquote className="rounded-2xl border border-zinc-200 bg-zinc-50 p-5">
       <StarRating rating={r.rating ?? 5} size={16} />
@@ -73,11 +79,7 @@ function ReviewCard({ review: r }: { review: PageData["reviews"][number] }) {
           {r.title}
         </div>
       )}
-      {r.body && (
-        <p className="mt-2 line-clamp-5 text-sm leading-relaxed text-zinc-700">
-          {r.smart_quote || r.body}
-        </p>
-      )}
+      {text && <ExpandableReviewBody text={text} />}
       <footer className="mt-3 text-xs font-medium text-zinc-500">
         — {r.reviewer_name || "Verified buyer"}
       </footer>
