@@ -377,6 +377,14 @@ function PriceCard({
             <div className="mt-0.5 text-sm font-bold leading-tight text-zinc-900 sm:text-base">
               {stripDefaultTitle(rule.free_gift_product_title)}
             </div>
+            {rule.free_gift_price_cents && rule.free_gift_price_cents > 0 && (
+              <div className="mt-1 inline-flex items-baseline gap-1 text-xs font-semibold text-amber-700 sm:text-sm">
+                <span className="text-zinc-500 line-through">
+                  ${(rule.free_gift_price_cents / 100).toFixed(2)}
+                </span>
+                <span>value · yours free</span>
+              </div>
+            )}
           </div>
         </div>
       )}

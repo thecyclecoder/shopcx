@@ -133,6 +133,14 @@ export interface PricingRule {
   free_gift_image_url: string | null;
   free_gift_min_quantity: number;
   free_gift_subscription_only: boolean;
+  /**
+   * "Value" of the free gift in cents — the higher of the gift
+   * variant's compare_at_price and price. Rendered as a "$X.XX value"
+   * badge on the gift callout to anchor the perceived bonus.
+   * Resolved at SSG/ISR time by joining product_variants on
+   * free_gift_variant_id.
+   */
+  free_gift_price_cents: number | null;
   subscribe_discount_pct: number;
   available_frequencies: Array<{
     interval_days: number;
@@ -913,7 +921,27 @@ async function loadPricingRule(
     .eq("workspace_id", workspaceId)
     .eq("is_active", true)
     .maybeSingle();
-  return (rule as PricingRule | null) || null;
+  if (!rule) return null;
+
+  // Look up the gift variant's price so the storefront can render
+  // "$X.XX value" on the gift callout. Prefer compare_at_price (MSRP)
+  // when it's higher than the sell price — anchors the perceived
+  // value at the retail figure, not the discounted one.
+  let free_gift_price_cents: number | null = null;
+  if (rule.free_gift_variant_id) {
+    const { data: giftVariant } = await admin
+      .from("product_variants")
+      .select("price_cents, compare_at_price_cents")
+      .eq("id", rule.free_gift_variant_id)
+      .maybeSingle();
+    if (giftVariant) {
+      const price = giftVariant.price_cents ?? 0;
+      const compare = giftVariant.compare_at_price_cents ?? 0;
+      free_gift_price_cents = Math.max(price, compare) || null;
+    }
+  }
+
+  return { ...rule, free_gift_price_cents } as PricingRule;
 }
 
 /**
