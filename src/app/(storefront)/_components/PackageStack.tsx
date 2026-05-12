@@ -40,7 +40,7 @@ export function PackageStack({
   // Overlap is a percentage of the CONTAINER width (not the bag
   // width) so the layout stays predictable even though each bag's
   // width is auto-derived from the container height + aspect ratio.
-  const overlapPct = visible <= 1 ? 0 : visible === 2 ? 22 : 28;
+  const overlapPct = visible <= 1 ? 0 : visible === 2 ? 32 : 28;
 
   return (
     <div

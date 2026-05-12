@@ -89,6 +89,8 @@ export function PriceTableSection({ data }: { data: PageData }) {
               rule={rule}
               freqDays={freqDays}
               variantImageUrl={data.base_variant?.image_url || null}
+              servingsPerPack={data.base_variant?.servings || null}
+              servingsUnit={data.base_variant?.servings_unit || null}
             />
           ))}
         </div>
@@ -199,12 +201,16 @@ function PriceCard({
   rule,
   freqDays,
   variantImageUrl,
+  servingsPerPack,
+  servingsUnit,
 }: {
   tier: DisplayTier;
   mode: "subscribe" | "onetime";
   rule: PricingRule | null;
   freqDays: number | null;
   variantImageUrl: string | null;
+  servingsPerPack: number | null;
+  servingsUnit: string | null;
 }) {
   const showSubscribe = mode === "subscribe" && tier.subscribe_price_cents != null;
   const price = showSubscribe ? tier.subscribe_price_cents! : tier.price_cents;
@@ -288,6 +294,22 @@ function PriceCard({
 
       <div className="mt-1 text-sm text-zinc-600">
         ${(perUnit / 100).toFixed(2)} each · {tier.quantity} pack
+        {servingsPerPack && servingsPerPack > 0 && (() => {
+          // Per-serving breakdown: divide the current displayed total
+          // by total servings (servings/pack × pack count). Helps the
+          // customer compare against $/cup of regular coffee.
+          const totalServings = servingsPerPack * tier.quantity;
+          const perServing = price / totalServings;
+          const unit = (servingsUnit || "serving").trim() || "serving";
+          return (
+            <>
+              {" · "}
+              <span className="whitespace-nowrap">
+                ${(perServing / 100).toFixed(2)}/{unit}
+              </span>
+            </>
+          );
+        })()}
       </div>
 
       {showSavings && (

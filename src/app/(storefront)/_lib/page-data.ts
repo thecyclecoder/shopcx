@@ -275,6 +275,8 @@ export interface PageData {
     shopify_variant_id: string | null;
     price_cents: number;
     image_url: string | null;
+    servings: number | null;
+    servings_unit: string | null;
   } | null;
   how_it_works: HowItWorksStep[];
   recent_orders_for_proof: RecentOrderForProof[];
@@ -459,7 +461,7 @@ export async function getPageData(
     // variant of this product.
     admin
       .from("product_variants")
-      .select("shopify_variant_id, price_cents, image_url")
+      .select("shopify_variant_id, price_cents, image_url, servings, servings_unit")
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id)
       .order("position", { ascending: true })
@@ -678,6 +680,8 @@ export async function getPageData(
           shopify_variant_id: baseVariantRes.data.shopify_variant_id,
           price_cents: baseVariantRes.data.price_cents,
           image_url: baseVariantRes.data.image_url,
+          servings: baseVariantRes.data.servings,
+          servings_unit: baseVariantRes.data.servings_unit,
         }
       : null,
     how_it_works: (howItWorksRes.data || []) as HowItWorksStep[],
