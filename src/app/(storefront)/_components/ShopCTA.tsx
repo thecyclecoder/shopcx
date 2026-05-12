@@ -67,16 +67,27 @@ export function ShopCTA({
     <div className={`flex flex-col items-center gap-3 ${desktopItemsClass} ${className}`}>
       <a href={href} style={isPrimary ? buttonStyle : inverseColorStyle} className={buttonClasses}>
         <span>{resolvedLabel}</span>
-        {/* The » glyph has an optical baseline higher than uppercase
-            letters in Montserrat — nudge it down so it visually centers
-            against the text cap-height. Inline-flex on the parent
-            handles horizontal alignment. */}
-        <span
+        {/* Inline SVG double-chevron — using a Unicode » never aligned
+            cleanly against uppercase Montserrat caps because that
+            glyph anchors to x-height. SVG lets us size to font
+            cap-height and position it pixel-perfect at the center
+            of the line-box. */}
+        <svg
           aria-hidden="true"
-          className="-ml-0.5 inline-block translate-y-[0.06em] text-[1.15em] transition-transform duration-200 group-hover:translate-x-1"
+          viewBox="0 0 24 24"
+          width="1em"
+          height="1em"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="inline-block flex-shrink-0 transition-transform duration-200 group-hover:translate-x-1"
+          style={{ marginTop: "0.05em" }}
         >
-          »
-        </span>
+          <polyline points="6,5 14,12 6,19" />
+          <polyline points="13,5 21,12 13,19" />
+        </svg>
       </a>
       {showTrust && (
         <TrustBadge icon={<ShieldIcon />} label="30-day money-back" />
