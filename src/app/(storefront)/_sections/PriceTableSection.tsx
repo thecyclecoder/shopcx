@@ -57,7 +57,7 @@ export function PriceTableSection({ data }: { data: PageData }) {
       id="pricing"
       data-section="pricing"
       data-mode={mode}
-      className="w-full scroll-mt-6 bg-zinc-50 py-12 sm:py-16"
+      className="w-full scroll-mt-6 overflow-x-clip bg-zinc-50 py-12 sm:py-16"
     >
       <div className="mx-auto max-w-6xl px-5 md:px-8">
         <h2 className="mb-4 text-center text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:text-4xl">
@@ -258,7 +258,7 @@ function PriceCard({
   return (
     <div
       style={tier.is_highlighted ? { borderColor: "var(--storefront-primary)" } : undefined}
-      className={`relative flex flex-col rounded-2xl border p-6 transition-all ${
+      className={`relative flex min-w-0 flex-col overflow-hidden rounded-2xl border p-6 transition-all ${
         tier.is_highlighted
           ? "bg-white shadow-lg md:-mt-4 md:mb-4"
           : "border-zinc-200 bg-white"
