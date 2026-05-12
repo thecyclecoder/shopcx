@@ -24,10 +24,14 @@ import {
 
 // Preload=true on the default only — other fonts load lazily when
 // their className is applied (workspace-specific selection).
+// Body text uses system fonts now (see globals.css), so Montserrat
+// never renders at 400 — dropped to shave one woff2 off the wire.
+// 600 = small uppercase eyebrow h1s, 700 = section headings (font-bold),
+// 800 = CTA + main wordmark.
 const montserrat = Montserrat({
   subsets: ["latin"],
   display: "swap",
-  weight: ["400", "600", "700", "800"],
+  weight: ["600", "700", "800"],
   variable: "--font-montserrat",
   preload: true,
 });
@@ -60,7 +64,7 @@ export const FONTS: Record<string, StorefrontFontOption> = {
     variable: montserrat.variable,
     className: montserrat.variable,
     stack: "var(--font-montserrat), system-ui, sans-serif",
-    weights: ["400", "600", "700", "800"],
+    weights: ["600", "700", "800"],
   },
   inter: {
     key: "inter",
