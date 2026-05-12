@@ -35,12 +35,12 @@ const FAQSection = dynamic(
   () => import("../_sections/FAQSection").then((m) => m.FAQSection),
 );
 
-const StickyMobileCTA = dynamic(
-  () => import("../_sections/StickyMobileCTA").then((m) => m.StickyMobileCTA),
-  // ssr stays on — the SSR'd HTML renders the bar in its initial
-  // hidden state (visible=false in useState), and the scroll listener
-  // attaches on hydration. Can't disable SSR in a server-component
-  // context anyway.
+// Replaced StickyMobileCTA (sticky 'Order now' bar) with a recent-orders
+// social-proof toast. The page already has prominent CTAs in the hero,
+// why-this-works, and final-CTA sections — this small toast reinforces
+// 'real people are buying this' without adding a redundant button.
+const RecentOrdersToast = dynamic(
+  () => import("../_components/RecentOrdersToast").then((m) => m.RecentOrdersToast),
 );
 
 /**
@@ -126,7 +126,7 @@ export function StorefrontPage({
         <FinalCTASection data={data} />
       </main>
 
-      <StickyMobileCTA data={data} />
+      <RecentOrdersToast orders={data.recent_orders_for_proof} />
     </div>
   );
 }

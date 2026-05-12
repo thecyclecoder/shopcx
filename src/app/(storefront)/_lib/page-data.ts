@@ -203,6 +203,14 @@ export interface BenefitAngleOverride {
   faq_priority_ids: string[] | null;
 }
 
+export interface RecentOrderForProof {
+  first_name: string;
+  last_initial: string;
+  state: string;
+  product_title: string;
+  image_url: string | null;
+}
+
 export interface PageData {
   product: Product;
   page_content: PageContent | null;
@@ -211,6 +219,7 @@ export interface PageData {
   benefit_selections: BenefitSelection[];
   pricing_tiers: PricingTier[];
   how_it_works: HowItWorksStep[];
+  recent_orders_for_proof: RecentOrderForProof[];
   media_by_slot: Record<string, MediaItem>;
   // For slots that support multiple images (currently the hero), all
   // items in display_order. The first item also lives in
@@ -467,6 +476,103 @@ export async function getPageData(
   const baseReviewTotal = linkGroup?.combined_review_total_count ?? (reviewTotalCount || 0);
   const totalCountWithBump = baseReviewTotal + reviewsBump;
 
+  // Recent-orders social-proof toast data. Pull the last ~200 orders
+  // in the workspace within 7 days, filter to those whose line_items
+  // contain a variant from THIS product or any linked sibling product,
+  // dedupe by customer, format names + state. SSG-time only — never
+  // sent to the client beyond the formatted array.
+  const recentOrdersForProof: RecentOrderForProof[] = [];
+  try {
+    const allProductIds = Array.from(new Set([product.id, ...linkedProductIds]));
+    const { data: variants } = await admin
+      .from("product_variants")
+      .select("shopify_variant_id, product_id")
+      .in("product_id", allProductIds);
+    const variantToProduct = new Map<string, string>();
+    const variantIds = new Set<string>();
+    for (const v of variants || []) {
+      if (v.shopify_variant_id) {
+        variantIds.add(String(v.shopify_variant_id));
+        variantToProduct.set(String(v.shopify_variant_id), String(v.product_id));
+      }
+    }
+
+    // Build a per-product image map. Current product uses its own hero
+    // (mediaBySlot["hero"]). Linked members carry their hero in
+    // linkGroup.members[].hero_url.
+    const productImageMap = new Map<string, string | null>();
+    productImageMap.set(product.id, mediaBySlot["hero"]?.webp_480_url || mediaBySlot["hero"]?.url || null);
+    const productTitleMap = new Map<string, string>();
+    productTitleMap.set(product.id, product.title);
+    if (linkGroup) {
+      for (const m of linkGroup.members) {
+        productImageMap.set(m.product_id, m.hero_webp_url || m.hero_url || null);
+        productTitleMap.set(m.product_id, m.product_title || product.title);
+      }
+    }
+
+    if (variantIds.size > 0) {
+      const since = new Date(Date.now() - 7 * 86400000).toISOString();
+      const { data: orders } = await admin
+        .from("orders")
+        .select("id, created_at, line_items, shipping_address, customer_id")
+        .eq("workspace_id", workspace.id)
+        .gte("created_at", since)
+        .order("created_at", { ascending: false })
+        .limit(200);
+
+      // First-pass: find matching orders + collect customer IDs
+      type Match = { orderId: string; customerId: string; productId: string; ship: Record<string, string | null> | null };
+      const matched: Match[] = [];
+      for (const o of orders || []) {
+        const items = (o.line_items as Array<{ variant_id?: string | number }>) || [];
+        const hit = items.find((i) => i.variant_id != null && variantIds.has(String(i.variant_id)));
+        if (!hit || !o.customer_id) continue;
+        matched.push({
+          orderId: String(o.id),
+          customerId: String(o.customer_id),
+          productId: variantToProduct.get(String(hit.variant_id)) || product.id,
+          ship: (o.shipping_address as Record<string, string | null> | null) || null,
+        });
+        if (matched.length >= 60) break;
+      }
+
+      if (matched.length) {
+        const { data: custs } = await admin
+          .from("customers")
+          .select("id, first_name, last_name")
+          .in("id", Array.from(new Set(matched.map((m) => m.customerId))));
+        const custMap = new Map((custs || []).map((c) => [String(c.id), c]));
+
+        const seenCustomers = new Set<string>();
+        for (const m of matched) {
+          if (seenCustomers.has(m.customerId)) continue;
+          const cust = custMap.get(m.customerId);
+          if (!cust?.first_name) continue;
+          const ship = m.ship || {};
+          // Prefer the full state name. Shopify normally serves province as
+          // the human-readable name and province_code as the 2-letter, but
+          // older synced rows occasionally only have the code.
+          const province = (ship.province as string | null) || null;
+          const provinceCode = (ship.province_code as string | null) || null;
+          const state = province || expandStateCode(provinceCode) || provinceCode || "";
+          if (!state) continue;
+          seenCustomers.add(m.customerId);
+          recentOrdersForProof.push({
+            first_name: String(cust.first_name).trim(),
+            last_initial: ((cust.last_name as string | null) || "").trim().charAt(0).toUpperCase(),
+            state,
+            product_title: productTitleMap.get(m.productId) || product.title,
+            image_url: productImageMap.get(m.productId) || null,
+          });
+          if (recentOrdersForProof.length >= 10) break;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[page-data] recent_orders_for_proof load failed:", err);
+  }
+
   return {
     product: productWithBump as Product,
     link_group: linkGroup,
@@ -476,6 +582,7 @@ export async function getPageData(
     benefit_selections: (benefitSelectionsRes.data || []) as BenefitSelection[],
     pricing_tiers: (pricingTiersRes.data || []) as PricingTier[],
     how_it_works: (howItWorksRes.data || []) as HowItWorksStep[],
+    recent_orders_for_proof: recentOrdersForProof,
     media_by_slot: mediaBySlot,
     media_gallery_by_slot: mediaGalleryBySlot,
     reviews: (reviews || []) as Review[],
@@ -672,4 +779,30 @@ export async function listPublishedProducts(): Promise<
     }
   }
   return params;
+}
+
+/**
+ * Expand a US/CA 2-letter state/province code to a human-readable
+ * name. Returns null for codes we don't recognize (caller falls back
+ * to the raw code).
+ */
+function expandStateCode(code: string | null | undefined): string | null {
+  if (!code) return null;
+  const map: Record<string, string> = {
+    AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California",
+    CO: "Colorado", CT: "Connecticut", DE: "Delaware", FL: "Florida", GA: "Georgia",
+    HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa",
+    KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine", MD: "Maryland",
+    MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi",
+    MO: "Missouri", MT: "Montana", NE: "Nebraska", NV: "Nevada", NH: "New Hampshire",
+    NJ: "New Jersey", NM: "New Mexico", NY: "New York", NC: "North Carolina",
+    ND: "North Dakota", OH: "Ohio", OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania",
+    RI: "Rhode Island", SC: "South Carolina", SD: "South Dakota", TN: "Tennessee",
+    TX: "Texas", UT: "Utah", VT: "Vermont", VA: "Virginia", WA: "Washington",
+    WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming", DC: "Washington, DC",
+    AB: "Alberta", BC: "British Columbia", MB: "Manitoba", NB: "New Brunswick",
+    NL: "Newfoundland", NS: "Nova Scotia", ON: "Ontario", PE: "Prince Edward Island",
+    QC: "Quebec", SK: "Saskatchewan",
+  };
+  return map[code.toUpperCase()] || null;
 }
