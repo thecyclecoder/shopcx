@@ -1236,6 +1236,21 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       });
 
       if (isClose) {
+        // Guard: never auto-close a ticket where a human agent has
+        // weighed in. If agent_intervened=true, the AI's job is to
+        // hold and acknowledge — not to decide the conversation is
+        // over. The agent might still have follow-up work pending.
+        // Surfaced on ticket 417cf9eb (Sandy, May 11/12): outreach
+        // ticket explicitly marked agent_intervened, customer reacted
+        // with a 😊 emoji, positive-close fired and closed the ticket
+        // even though 9 sub cancellations still needed to happen.
+        const { data: tForGate } = await admin.from("tickets")
+          .select("agent_intervened, assigned_to").eq("id", tid).maybeSingle();
+        if (tForGate?.agent_intervened || tForGate?.assigned_to) {
+          await sysNote(admin, tid, `[System] Positive close suppressed — ticket is agent-handled (agent_intervened=${!!tForGate.agent_intervened}, assigned=${tForGate.assigned_to ? "yes" : "no"}). AI should not close on the customer's behalf.`);
+          return { status: "positive_close_suppressed_agent_handled" };
+        }
+
         // Guard: if the CURRENT inbound message arrived within a few
         // minutes of a PRIOR inbound that we haven't responded to yet,
         // the "thanks" is pre-emptive — not real closure. Customers
