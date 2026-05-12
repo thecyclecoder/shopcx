@@ -267,10 +267,14 @@ export interface PageData {
   // in that case to keep older products rendering.
   pricing_rule: PricingRule | null;
   // Base variant for rule-driven pricing. The lowest-position active
-  // variant on the product; quantity-break math multiplies this price.
+  // variant on the product; quantity-break math multiplies this price
+  // and the price table renders this variant's image stacked N times
+  // to visualize each tier's quantity. Future flavor selection will
+  // swap the active variant client-side.
   base_variant: {
     shopify_variant_id: string | null;
     price_cents: number;
+    image_url: string | null;
   } | null;
   how_it_works: HowItWorksStep[];
   recent_orders_for_proof: RecentOrderForProof[];
@@ -455,7 +459,7 @@ export async function getPageData(
     // variant of this product.
     admin
       .from("product_variants")
-      .select("shopify_variant_id, price_cents")
+      .select("shopify_variant_id, price_cents, image_url")
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id)
       .order("position", { ascending: true })
@@ -673,6 +677,7 @@ export async function getPageData(
       ? {
           shopify_variant_id: baseVariantRes.data.shopify_variant_id,
           price_cents: baseVariantRes.data.price_cents,
+          image_url: baseVariantRes.data.image_url,
         }
       : null,
     how_it_works: (howItWorksRes.data || []) as HowItWorksStep[],

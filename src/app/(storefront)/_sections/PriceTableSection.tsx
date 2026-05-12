@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { PageData, PricingRule, PricingTier } from "../_lib/page-data";
 import { TrustChipRow } from "../_components/TrustChipRow";
 import { ShopCTA } from "../_components/ShopCTA";
+import { PackageStack } from "../_components/PackageStack";
 
 /**
  * Price table — rule-driven.
@@ -87,6 +88,7 @@ export function PriceTableSection({ data }: { data: PageData }) {
               mode={mode}
               rule={rule}
               freqDays={freqDays}
+              variantImageUrl={data.base_variant?.image_url || null}
             />
           ))}
         </div>
@@ -184,11 +186,13 @@ function PriceCard({
   mode,
   rule,
   freqDays,
+  variantImageUrl,
 }: {
   tier: DisplayTier;
   mode: "subscribe" | "onetime";
   rule: PricingRule | null;
   freqDays: number | null;
+  variantImageUrl: string | null;
 }) {
   const showSubscribe = mode === "subscribe" && tier.subscribe_price_cents != null;
   const price = showSubscribe ? tier.subscribe_price_cents! : tier.price_cents;
@@ -249,6 +253,12 @@ function PriceCard({
         >
           {tier.badge}
         </span>
+      )}
+
+      {variantImageUrl && (
+        <div className="mb-4 flex h-40 items-end justify-center sm:h-44">
+          <PackageStack imageUrl={variantImageUrl} count={tier.quantity} />
+        </div>
       )}
 
       <div className="text-lg font-semibold text-zinc-900">{tier.tier_name}</div>
