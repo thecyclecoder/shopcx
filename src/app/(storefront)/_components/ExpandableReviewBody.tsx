@@ -34,7 +34,7 @@ export function ExpandableReviewBody({ text }: { text: string }) {
     <div className="mt-2">
       <p
         ref={ref}
-        className={`text-sm leading-relaxed text-zinc-700 ${expanded ? "" : "line-clamp-5"}`}
+        className={`text-base leading-relaxed text-zinc-800 sm:text-lg ${expanded ? "" : "line-clamp-5"}`}
       >
         {text}
       </p>
@@ -43,7 +43,7 @@ export function ExpandableReviewBody({ text }: { text: string }) {
           type="button"
           onClick={() => setExpanded((v) => !v)}
           style={{ color: "var(--storefront-primary)" }}
-          className="mt-2 inline-flex items-center text-sm font-semibold hover:underline"
+          className="mt-2 inline-flex items-center text-base font-semibold hover:underline"
         >
           {expanded ? "Show less" : "See full review →"}
         </button>

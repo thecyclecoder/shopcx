@@ -75,15 +75,15 @@ function ReviewCard({ review: r }: { review: PageData["reviews"][number] }) {
   // ExpandableReviewBody handles the rest.
   const text = r.body || r.smart_quote || "";
   return (
-    <blockquote className="rounded-2xl border border-zinc-200 bg-zinc-50 p-5">
-      <StarRating rating={r.rating ?? 5} size={16} />
+    <blockquote className="rounded-2xl border border-zinc-200 bg-zinc-50 p-5 sm:p-6">
+      <StarRating rating={r.rating ?? 5} size={18} />
       {r.title && (
-        <div className="mt-2 text-base font-semibold text-zinc-900">
+        <div className="mt-3 text-lg font-bold text-zinc-900 sm:text-xl">
           {r.title}
         </div>
       )}
       {text && <ExpandableReviewBody text={text} />}
-      <footer className="mt-3 text-xs font-medium text-zinc-500">
+      <footer className="mt-4 text-sm font-medium text-zinc-600">
         — {r.reviewer_name || "Verified buyer"}
       </footer>
     </blockquote>
