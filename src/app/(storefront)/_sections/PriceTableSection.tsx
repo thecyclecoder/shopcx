@@ -337,14 +337,6 @@ function PriceCard({
         {(giftApplies || giftSubLocked) && rule?.free_gift_product_title && (
           <li className="flex items-start gap-2">
             {giftApplies ? <CheckIcon /> : <XIcon />}
-            {rule.free_gift_image_url && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={rule.free_gift_image_url}
-                alt=""
-                className="h-8 w-8 flex-shrink-0 rounded-md object-cover"
-              />
-            )}
             <span className="flex-1">
               Free {stripDefaultTitle(rule.free_gift_product_title)}
               {giftSubLocked && (
@@ -364,6 +356,30 @@ function PriceCard({
           </li>
         )}
       </ul>
+
+      {/* Big free-gift callout — only renders when the gift actually
+          applies for this tier+mode. The line above already lists the
+          gift among the perks; this is the visual punch beneath. */}
+      {giftApplies && rule?.free_gift_product_title && (
+        <div className="mt-5 flex items-center gap-3 rounded-xl bg-amber-100 p-3 ring-1 ring-amber-200">
+          {rule.free_gift_image_url && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={rule.free_gift_image_url}
+              alt=""
+              className="h-16 w-16 flex-shrink-0 rounded-lg bg-white object-contain p-1.5 shadow-sm sm:h-20 sm:w-20"
+            />
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] font-extrabold uppercase tracking-wider text-amber-700 sm:text-xs">
+              Plus a free gift
+            </div>
+            <div className="mt-0.5 text-sm font-bold leading-tight text-zinc-900 sm:text-base">
+              {stripDefaultTitle(rule.free_gift_product_title)}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="mt-6">
         <ShopCTA
