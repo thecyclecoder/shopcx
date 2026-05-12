@@ -38,36 +38,36 @@ export function IngredientsSection({ data }: { data: PageData }) {
                 className="group rounded-2xl border border-zinc-200 bg-white p-5 [&_summary::-webkit-details-marker]:hidden"
               >
                 <summary className="flex cursor-pointer list-none items-start justify-between gap-4">
-                  <div className="flex flex-1 items-start gap-4">
+                  <div className="flex flex-1 items-start gap-4 sm:gap-5">
                     <div
-                      className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-xl [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover"
+                      className="relative h-20 w-20 flex-shrink-0 overflow-hidden rounded-xl sm:h-24 sm:w-24 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover"
                       style={{ aspectRatio: "1 / 1" }}
                     >
                       <Picture
                         media={image}
                         altFallback={ing.name}
-                        sizes="64px"
-                        width={128}
-                        height={128}
+                        sizes="(min-width: 640px) 96px, 80px"
+                        width={192}
+                        height={192}
                         className="object-cover"
                       />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-baseline gap-2">
-                        <h3 className="text-base font-semibold text-zinc-900 sm:text-lg">
+                      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                        <h3 className="text-lg font-bold text-zinc-900 sm:text-xl">
                           {ing.name}
                         </h3>
                         {ing.dosage_display && (
-                          <span className="text-sm text-zinc-500">{ing.dosage_display}</span>
+                          <span className="text-base text-zinc-500 sm:text-lg">{ing.dosage_display}</span>
                         )}
                       </div>
                       {topBenefit && (
-                        <p className="mt-1 text-sm font-medium text-emerald-700">
+                        <p className="mt-1.5 text-base font-semibold leading-snug text-emerald-700 sm:text-lg">
                           {topBenefit.benefit_headline}
                         </p>
                       )}
                       {topBenefit?.mechanism_explanation && (
-                        <p className="mt-1 line-clamp-2 text-sm text-zinc-600 group-open:hidden">
+                        <p className="mt-1.5 line-clamp-2 text-base leading-relaxed text-zinc-700 group-open:hidden sm:text-lg">
                           {topBenefit.mechanism_explanation}
                         </p>
                       )}
@@ -82,18 +82,18 @@ export function IngredientsSection({ data }: { data: PageData }) {
                 </summary>
 
                 {research.length > 0 && (
-                  <div className="mt-4 space-y-4 border-t border-zinc-100 pt-4 text-sm text-zinc-700">
+                  <div className="mt-5 space-y-5 border-t border-zinc-100 pt-5 text-base leading-relaxed text-zinc-800 sm:text-lg">
                     {research.map((r) => (
                       <div key={r.id}>
-                        <p className="font-semibold text-zinc-900">{r.benefit_headline}</p>
-                        <p className="mt-1">{r.mechanism_explanation}</p>
+                        <p className="font-bold text-zinc-900">{r.benefit_headline}</p>
+                        <p className="mt-1.5">{r.mechanism_explanation}</p>
                         {r.dosage_comparison && (
-                          <p className="mt-1 text-xs text-zinc-500">
+                          <p className="mt-1.5 text-sm text-zinc-500 sm:text-base">
                             <strong>Dosage:</strong> {r.dosage_comparison}
                           </p>
                         )}
                         {Array.isArray(r.citations) && r.citations.length > 0 && (
-                          <p className="mt-1 text-xs text-zinc-500">
+                          <p className="mt-1.5 text-sm text-zinc-500 sm:text-base">
                             Supported by {r.citations.length} study{r.citations.length === 1 ? "" : "ies"}
                           </p>
                         )}
