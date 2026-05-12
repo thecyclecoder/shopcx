@@ -542,11 +542,22 @@ RULES:
     This block renders as the 'Why this works' section right below the
     hero, so the copy has to make the customer feel that the benefit
     chips on the hero are real. Open with one connective sentence, then
-    explain (in plain outcome language) HOW the formulation produces
-    each benefit chip — in the same order as benefit_bar. Reference
-    ingredients/mechanisms only when they tie directly to a chip; never
-    introduce unrelated science. 4-6 short sentences total, no
-    paragraph longer than 2 sentences.
+    explain HOW the formulation produces each benefit chip — in the
+    same order as benefit_bar.
+    READING LEVEL: 8th grade. Target Flesch-Kincaid grade ≤ 8.
+      * Short sentences. 12-15 words max. One idea per sentence.
+      * Use everyday words. Say "calms the brain" not "reduces
+        neuroinflammation"; "burns fat" not "boosts fat oxidation";
+        "keeps blood sugar steady" not "modulates glucose absorption";
+        "feels smooth" not "without jitters or vasoconstriction."
+      * Never use: blood-brain barrier, chlorogenic acids,
+        cardiovascular, glucose absorption, neuroinflammation,
+        vasodilation, bioavailability, antioxidant-rich, modulates,
+        upregulates, mechanism, pathway. If a term needs jargon, find
+        another way to say it.
+      * No semicolons. No "while X, Y" pairs.
+      * Ingredients OK to name, but tie each to a plain-language effect.
+      * Never invent customer quotes.
 - FAQ: 5-8 items.
 - Compare to generic alternatives — never name competitor brands.
 - Never invent customer quotes.

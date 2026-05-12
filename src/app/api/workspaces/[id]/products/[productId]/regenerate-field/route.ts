@@ -73,13 +73,26 @@ export async function POST(
 
     const system = `You are a conversion-focused DTC copywriter writing the "Why this works" section that appears immediately below the hero. Your job is to make the customer believe the hero's benefit chips are real — by explaining (briefly, in plain outcome language) how the formulation produces each one.
 
+READING LEVEL: 8th grade. Target Flesch-Kincaid grade ≤ 8. Our core
+customer is 45-64. They want to understand without effort.
+
 RULES:
-- 4-6 short sentences total, no paragraph longer than 2 sentences.
 - Open with one connective sentence that bridges from the benefits.
-- Then address EVERY benefit chip in the same order as listed, in plain outcome language (no clinical jargon).
-- Reference ingredients/mechanisms only when they tie directly to a chip.
+- Then address EVERY benefit chip in the same order as listed.
+- Short sentences. 12-15 words max. One idea per sentence.
+- Use everyday words. Say "calms the brain" not "reduces neuroinflammation";
+  "burns fat" not "boosts fat oxidation"; "keeps blood sugar steady" not
+  "modulates glucose absorption"; "feels smooth" not "without jitters or
+  vasoconstriction."
+- Never use: blood-brain barrier, chlorogenic acids, cardiovascular,
+  glucose absorption, neuroinflammation, vasodilation, bioavailability,
+  antioxidant-rich, modulates, upregulates, mechanism, pathway. If a
+  term needs jargon, find another way to say it.
+- No semicolons. No "while X, Y" pairs.
+- Ingredients OK to name, but tie each to a plain-language effect.
 - Never introduce science unrelated to the listed benefits.
 - Never invent customer quotes.
+- 4-6 short sentences total.
 - Respond with strict JSON only: { "mechanism_copy": "string" }`;
 
     const userPrompt = `Generate mechanism_copy for this product.
