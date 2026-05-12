@@ -32,6 +32,24 @@ body {
   font-family: var(--font-sans);
 }
 
+/* Storefront typography split: body text always renders in the
+   browser's native system stack (zero network cost, easier to read
+   at body sizes), while headings use the workspace's chosen display
+   font (Montserrat by default). render-page.tsx sets
+   --storefront-heading-font and --storefront-body-font on the
+   wrapper. */
+.storefront-root {
+  font-family: var(--storefront-body-font);
+}
+.storefront-root h1,
+.storefront-root h2,
+.storefront-root h3,
+.storefront-root h4,
+.storefront-root h5,
+.storefront-root h6 {
+  font-family: var(--storefront-heading-font);
+}
+
 /* Hide scrollbars but keep scrolling */
 .scrollbar-hidden {
   scrollbar-width: none; /* Firefox */

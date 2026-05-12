@@ -64,8 +64,15 @@ export function StorefrontPage({
   // inline styles on buttons.
   const design = data.workspace.design || {};
   const font = storefrontFont(design.font_key || null);
+  // Body text uses the OS-native system font (faster to render, more
+  // legible at paragraph sizes). Only headings (h1–h6) inherit the
+  // workspace's chosen display font — see globals.css for the
+  // `.storefront-root` rules that key off these two CSS vars.
+  const SYSTEM_BODY_STACK =
+    "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif";
   const themeStyle = {
-    fontFamily: font.stack,
+    "--storefront-heading-font": font.stack,
+    "--storefront-body-font": SYSTEM_BODY_STACK,
     "--storefront-primary": design.primary_color || "#18181b",
     "--storefront-accent": design.accent_color || "#10b981",
   } as React.CSSProperties;
