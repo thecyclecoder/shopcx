@@ -345,7 +345,7 @@ function ImageManagement({ workspaceId, productId }: { workspaceId: string; prod
   useEffect(() => { load(); }, [load]);
 
   const slots = useMemo(() => {
-    const base = ["hero", "lifestyle_1", "lifestyle_2", "packaging", "ugc_1", "ugc_2", "ugc_3", "ugc_4", "ugc_5", "ugc_6", "comparison"];
+    const base = ["hero", "lifestyle_1", "lifestyle_2", "packaging", "before", "after", "ugc_1", "ugc_2", "ugc_3", "ugc_4", "ugc_5", "ugc_6", "comparison"];
     return base;
   }, []);
 

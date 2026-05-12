@@ -183,6 +183,7 @@ export interface Review {
   smart_quote: string | null;
   created_at: string;
   status: string;
+  featured?: boolean | null;
   product_id?: string | null;
 }
 

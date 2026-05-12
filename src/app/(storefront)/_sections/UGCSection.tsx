@@ -1,85 +1,86 @@
-import type { PageData, MediaItem } from "../_lib/page-data";
+import type { PageData } from "../_lib/page-data";
 import { StarRating } from "../_components/StarRating";
-import { Picture } from "../_components/PictureHero";
+import { BeforeAfterPair } from "../_components/BeforeAfterPair";
 
 /**
- * Real-people UGC — photo reviews first, then featured reviews. Mobile
- * uses horizontal scroll-snap; md+ grid.
+ * Real people, real results — featured reviews + before/after pair.
+ *
+ * Pulls EXCLUSIVELY from hand-picked featured reviews (these are the
+ * strongest weight-loss stories). If you add a before image + after
+ * image in the dashboard, they render side-by-side as a transformation
+ * pair above the reviews (mobile) or beside them (desktop).
+ *
+ * Mobile layout: title → before/after → reviews stacked.
+ * Desktop layout: title → 2-col grid: before/after on the left,
+ *                 first 2-3 featured reviews stacked on the right.
+ *                 If more featured reviews exist, a 3-col grid below.
  */
 export function UGCSection({ data }: { data: PageData }) {
-  const ugcSlots = ["ugc_1", "ugc_2", "ugc_3", "ugc_4", "ugc_5", "ugc_6"];
-  const ugcPhotos: MediaItem[] = ugcSlots
-    .map((slot) => data.media_by_slot[slot])
-    .filter((m): m is MediaItem => !!m && !!m.url);
+  const beforeImg = data.media_by_slot["before"] || null;
+  const afterImg = data.media_by_slot["after"] || null;
+  const hasPair = !!(beforeImg && afterImg);
 
-  // Reviews with their own photos get priority; fall back to text-only
-  // featured reviews.
-  const photoReviews = data.reviews.filter(
-    (r) => Array.isArray(r.images) && r.images.length > 0,
-  );
-  const featuredReviews = data.reviews
-    .filter((r) => r.status === "featured" || (r.rating ?? 0) >= 5)
-    .slice(0, 4);
-  const picks = (photoReviews.length > 0 ? photoReviews : featuredReviews).slice(0, 6);
+  // Featured-only — the admin-curated transformation stories.
+  const featured = data.reviews.filter((r) => r.status === "featured" || r.featured === true);
 
-  if (ugcPhotos.length === 0 && picks.length === 0) return null;
+  if (!hasPair && featured.length === 0) return null;
+
+  // Split: first 2-3 sit alongside the before/after on desktop, the
+  // remainder flow into a grid below.
+  const sideBySideCount = hasPair ? 2 : 0;  // 2 reviews next to the pair
+  const sideReviews = featured.slice(0, sideBySideCount);
+  const restReviews = featured.slice(sideBySideCount);
 
   return (
     <section data-section="ugc" className="w-full bg-white py-12 sm:py-16">
       <div className="mx-auto w-full max-w-6xl px-5 md:px-8">
-        <h2 className="mb-8 text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:text-4xl">
+        <h2 className="mb-8 text-center text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:mb-10 md:text-left md:text-4xl">
           Real people, real results
         </h2>
-      </div>
 
-      {ugcPhotos.length > 0 && (
-        <div className="mb-8 flex w-full snap-x snap-mandatory gap-3 overflow-x-auto px-5 pb-3 md:mx-auto md:max-w-6xl md:grid md:grid-cols-3 md:gap-4 md:overflow-visible md:px-8 lg:grid-cols-6">
-          {ugcPhotos.map((photo) => (
-            <div
-              key={photo.slot}
-              className="relative h-52 w-44 flex-shrink-0 snap-center overflow-hidden rounded-2xl md:h-auto md:w-auto [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover"
-              style={{ aspectRatio: "3 / 4" }}
-            >
-              <Picture
-                media={photo}
-                altFallback="Customer photo"
-                sizes="(min-width: 768px) 200px, 180px"
-                width={300}
-                height={400}
-                className="object-cover"
-              />
+        {hasPair ? (
+          <div className="grid gap-8 md:grid-cols-2 md:items-start md:gap-10">
+            <div>
+              <BeforeAfterPair before={beforeImg} after={afterImg} />
             </div>
-          ))}
-        </div>
-      )}
+            <div className="grid gap-4">
+              {sideReviews.length > 0
+                ? sideReviews.map((r) => <ReviewCard key={r.id} review={r} />)
+                : restReviews.slice(0, 2).map((r) => <ReviewCard key={r.id} review={r} />)
+              }
+            </div>
+          </div>
+        ) : null}
 
-      {picks.length > 0 && (
-        <div className="mx-auto w-full max-w-6xl px-5 md:px-8">
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {picks.map((r) => (
-              <blockquote
-                key={r.id}
-                className="rounded-2xl border border-zinc-200 bg-zinc-50 p-5"
-              >
-                <StarRating rating={r.rating ?? 5} size={16} />
-                {r.title && (
-                  <div className="mt-2 text-base font-semibold text-zinc-900">
-                    {r.title}
-                  </div>
-                )}
-                {r.body && (
-                  <p className="mt-2 line-clamp-5 text-sm leading-relaxed text-zinc-700">
-                    {r.smart_quote || r.body}
-                  </p>
-                )}
-                <footer className="mt-3 text-xs font-medium text-zinc-500">
-                  — {r.reviewer_name || "Verified buyer"}
-                </footer>
-              </blockquote>
+        {restReviews.length > 0 && (
+          <div className={`grid gap-4 sm:grid-cols-2 lg:grid-cols-3 ${hasPair ? "mt-8 md:mt-12" : ""}`}>
+            {(hasPair ? restReviews : featured).map((r) => (
+              <ReviewCard key={r.id} review={r} />
             ))}
           </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ReviewCard({ review: r }: { review: PageData["reviews"][number] }) {
+  return (
+    <blockquote className="rounded-2xl border border-zinc-200 bg-zinc-50 p-5">
+      <StarRating rating={r.rating ?? 5} size={16} />
+      {r.title && (
+        <div className="mt-2 text-base font-semibold text-zinc-900">
+          {r.title}
         </div>
       )}
-    </section>
+      {r.body && (
+        <p className="mt-2 line-clamp-5 text-sm leading-relaxed text-zinc-700">
+          {r.smart_quote || r.body}
+        </p>
+      )}
+      <footer className="mt-3 text-xs font-medium text-zinc-500">
+        — {r.reviewer_name || "Verified buyer"}
+      </footer>
+    </blockquote>
   );
 }
