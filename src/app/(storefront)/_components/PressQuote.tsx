@@ -57,7 +57,14 @@ export function PressQuote({
       <span className="text-base font-medium leading-snug sm:text-lg">
         <span className="italic">&ldquo;{quote}&rdquo;</span>
         {source && (
-          <span className={`ml-2 text-sm font-semibold uppercase tracking-wide sm:text-base ${sourceColor}`}>
+          <span
+            className={`ml-2 whitespace-nowrap text-sm font-semibold uppercase tracking-wide sm:text-base ${sourceColor}`}
+          >
+            {/* whitespace-nowrap keeps the dash bonded to the source so
+                they wrap together onto the next line — otherwise mobile
+                breaks "—" onto the end of the quote line and orphans
+                the attribution underneath. Short attributions (Forbes,
+                Gourmet Magazine, Vogue) easily fit on one line. */}
             — {source}
           </span>
         )}
