@@ -20,6 +20,14 @@ export interface Product {
   rating_count: number | null;
   target_customer: string | null;
   certifications: string[] | null;
+  // What's NOT in the product — direct-response objection removal
+  // ("Gluten Free", "Dairy Free", "Soy Free", "Sugar Free"). Stored
+  // as a plain string array on `products.allergen_free`.
+  allergen_free: string[] | null;
+  // Press / awards / endorsements ("Best Tasting Superfood Coffee —
+  // Gourmet Magazine"). Plain strings; the storefront renders one as
+  // a pull-quote and the rest as a press strip.
+  awards: string[] | null;
   intelligence_status: string | null;
   is_bestseller: boolean;
   header_text: string | null;
@@ -297,7 +305,7 @@ export async function getPageData(
   const { data: product } = await admin
     .from("products")
     .select(
-      "id, workspace_id, handle, title, image_url, description, rating, rating_count, target_customer, certifications, intelligence_status, is_bestseller, header_text, header_text_color, header_text_weight, variants",
+      "id, workspace_id, handle, title, image_url, description, rating, rating_count, target_customer, certifications, allergen_free, awards, intelligence_status, is_bestseller, header_text, header_text_color, header_text_weight, variants",
     )
     .eq("workspace_id", workspace.id)
     .eq("handle", productHandle)

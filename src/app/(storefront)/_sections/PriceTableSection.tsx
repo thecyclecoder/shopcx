@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type { PageData, PricingTier } from "../_lib/page-data";
+import { TrustChipRow } from "../_components/TrustChipRow";
 
 /**
  * Price table — the only section that needs user interaction.
@@ -68,6 +69,17 @@ export function PriceTableSection({ data }: { data: PageData }) {
             <PriceCard key={tier.id} tier={tier} mode={mode} />
           ))}
         </div>
+
+        {((data.product.certifications || []).length > 0 ||
+          (data.product.allergen_free || []).length > 0) && (
+          <div className="mt-10">
+            <TrustChipRow
+              certifications={data.product.certifications}
+              allergenFree={data.product.allergen_free}
+              align="center"
+            />
+          </div>
+        )}
       </div>
     </section>
   );

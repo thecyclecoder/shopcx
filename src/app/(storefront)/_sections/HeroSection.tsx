@@ -9,6 +9,8 @@ import { ShopCTA } from "../_components/ShopCTA";
 import { PressLogos } from "../_components/PressLogos";
 import { HeroGallery } from "../_components/HeroGallery";
 import { HeroFeaturedReviews } from "../_components/HeroFeaturedReviews";
+import { PressQuote } from "../_components/PressQuote";
+import { TrustChipRow } from "../_components/TrustChipRow";
 
 /**
  * Hero — the LCP section. Client component (the format toggle for
@@ -192,6 +194,12 @@ export function HeroSection({ data }: { data: PageData }) {
             </p>
           )}
 
+          {(data.product.awards || []).length > 0 && (
+            <div className="mt-4">
+              <PressQuote items={data.product.awards} variant="light" />
+            </div>
+          )}
+
           {linkGroup && sortedMembers.length > 1 && (
             <div className="mt-5">
               <div className="flex items-center justify-between gap-3">
@@ -264,6 +272,17 @@ export function HeroSection({ data }: { data: PageData }) {
               align="center"
             />
           </div>
+
+          {((data.product.certifications || []).length > 0 ||
+            (data.product.allergen_free || []).length > 0) && (
+            <div className="mt-5">
+              <TrustChipRow
+                certifications={data.product.certifications}
+                allergenFree={data.product.allergen_free}
+                align="center"
+              />
+            </div>
+          )}
 
           <div className="mt-6">
             <PressLogos media={data.media_by_slot} />
