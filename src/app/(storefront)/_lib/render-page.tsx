@@ -126,12 +126,12 @@ export function StorefrontPage({
             hero with image + CTA. MechanismSection still exists in
             the codebase but is no longer in the flow. */}
         <HowItWorksSection data={data} />
-        <PriceTableSection data={data} />
         <UGCSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
         <ComparisonSection data={data} />
         <IngredientsSection data={data} />
         <NutritionistEndorsementSection data={data} />
         <WhatToExpectTimeline data={data} />
+        <PriceTableSection data={data} />
         <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
         <FAQSection data={data} />
         <FinalCTASection data={data} />
