@@ -258,7 +258,7 @@ function PriceCard({
   return (
     <div
       style={tier.is_highlighted ? { borderColor: "var(--storefront-primary)" } : undefined}
-      className={`relative flex min-w-0 flex-col overflow-hidden rounded-2xl border p-6 transition-all ${
+      className={`relative flex min-w-0 flex-col overflow-x-clip rounded-2xl border p-6 transition-all ${
         tier.is_highlighted
           ? "bg-white shadow-lg md:-mt-4 md:mb-4"
           : "border-zinc-200 bg-white"
