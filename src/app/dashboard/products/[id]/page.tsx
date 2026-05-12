@@ -132,11 +132,11 @@ export default function ProductIntelligenceDetailPage() {
     router.push("/dashboard/products");
   };
 
-  if (loading) return <div className="mx-auto max-w-4xl px-4 py-6"><p className="text-sm text-zinc-400">Loading...</p></div>;
-  if (!data) return <div className="mx-auto max-w-4xl px-4 py-6"><p className="text-sm text-red-500">Not found</p></div>;
+  if (loading) return <div className="mx-auto max-w-screen-2xl px-4 py-6"><p className="text-sm text-zinc-400">Loading...</p></div>;
+  if (!data) return <div className="mx-auto max-w-screen-2xl px-4 py-6"><p className="text-sm text-red-500">Not found</p></div>;
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       <Link href="/dashboard/products" className="mb-4 inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-700">
         &larr; Back to Products
       </Link>

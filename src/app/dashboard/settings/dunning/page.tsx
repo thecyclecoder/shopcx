@@ -94,7 +94,7 @@ export default function DunningSettingsPage() {
 
   if (loading || !settings) {
     return (
-      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
         <p className="text-sm text-zinc-400">Loading dunning settings...</p>
       </div>
     );
@@ -104,7 +104,7 @@ export default function DunningSettingsPage() {
   const retryableCount = errorCodes.filter(c => !isTerminal(c)).length;
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Recovery</h1>
         <p className="mt-1 text-sm text-zinc-500">

@@ -222,7 +222,7 @@ export default function ProductIntelligenceEnginePage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-6xl px-4 py-6">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6">
         <p className="text-sm text-zinc-400">Loading intelligence engine...</p>
       </div>
     );
@@ -230,7 +230,7 @@ export default function ProductIntelligenceEnginePage() {
 
   if (!overview) {
     return (
-      <div className="mx-auto max-w-6xl px-4 py-6">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6">
         <p className="text-sm text-red-500">Product not found.</p>
       </div>
     );
@@ -239,7 +239,7 @@ export default function ProductIntelligenceEnginePage() {
   const stage = STATUS_STAGES[overview.product.intelligence_status];
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       <Link
         href="/dashboard/products"
         className="mb-4 inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-700"

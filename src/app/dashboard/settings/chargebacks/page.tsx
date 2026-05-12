@@ -68,7 +68,7 @@ export default function ChargebackSettingsPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6 overflow-x-hidden">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6 overflow-x-hidden">
         <p className="text-sm text-zinc-400">Loading...</p>
       </div>
     );
@@ -76,14 +76,14 @@ export default function ChargebackSettingsPage() {
 
   if (!settings) {
     return (
-      <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6 overflow-x-hidden">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6 overflow-x-hidden">
         <p className="text-sm text-red-500">Failed to load chargeback settings.</p>
       </div>
     );
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-8 px-4 py-6 sm:px-6 overflow-x-hidden">
+    <div className="mx-auto max-w-screen-2xl space-y-8 px-4 py-6 sm:px-6 overflow-x-hidden">
       <div>
         <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-100">Chargeback Automation</h1>
         <p className="mt-1 text-sm text-zinc-500">

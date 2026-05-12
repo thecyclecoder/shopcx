@@ -71,10 +71,10 @@ export default function SubscriptionSettingsPage() {
     }
   };
 
-  if (loading) return <div className="mx-auto max-w-5xl px-4 py-6"><p className="text-sm text-zinc-400">Loading...</p></div>;
+  if (loading) return <div className="mx-auto max-w-screen-2xl px-4 py-6"><p className="text-sm text-zinc-400">Loading...</p></div>;
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       <h1 className="mb-1 text-2xl font-bold text-zinc-900 dark:text-zinc-100">Subscription Settings</h1>
       <p className="mb-6 text-sm text-zinc-500">Configure subscribe & save discount, delivery frequencies, and subscription perks.</p>
 

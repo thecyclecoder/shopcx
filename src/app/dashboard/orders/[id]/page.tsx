@@ -129,7 +129,7 @@ export default function OrderDetailPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
         <p className="text-sm text-zinc-400">Loading...</p>
       </div>
     );
@@ -137,7 +137,7 @@ export default function OrderDetailPage() {
 
   if (!order) {
     return (
-      <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
         <p className="text-sm text-zinc-400">Order not found.</p>
       </div>
     );
@@ -149,7 +149,7 @@ export default function OrderDetailPage() {
   const items = order.line_items || [];
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       {/* Header */}
       <div className="mb-6">
         <button onClick={() => router.push("/dashboard/orders")} className="mb-2 text-sm text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300">

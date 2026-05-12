@@ -101,10 +101,10 @@ export default function GoogleSEOPage() {
     setSaving(false);
   };
 
-  if (loading) return <div className="mx-auto max-w-3xl px-4 py-6"><p className="text-sm text-zinc-400">Loading...</p></div>;
+  if (loading) return <div className="mx-auto max-w-screen-2xl px-4 py-6"><p className="text-sm text-zinc-400">Loading...</p></div>;
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       <h1 className="mb-1 text-2xl font-bold text-zinc-900 dark:text-zinc-100">Google SEO Tools</h1>
       <p className="mb-6 text-sm text-zinc-500">
         Connect Google Ads Keyword Planner for search volume data and Search Console for existing rankings.

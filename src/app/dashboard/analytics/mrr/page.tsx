@@ -111,7 +111,7 @@ export default function MRRDashboard() {
 
   if (loading || !data) {
     return (
-      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
         <p className="text-sm text-zinc-400">Loading MRR forecast...</p>
       </div>
     );
@@ -127,7 +127,7 @@ export default function MRRDashboard() {
     .sort((a, b) => a[1] - b[1]); // negatives first
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
         <div>

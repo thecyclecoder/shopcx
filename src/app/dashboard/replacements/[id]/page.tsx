@@ -117,7 +117,7 @@ export default function ReplacementDetailPage() {
   const r = replacement;
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
         <div>

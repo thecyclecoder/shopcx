@@ -138,7 +138,7 @@ export default function DashboardPage() {
   const prev = prevLabel(range);
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       {/* Header + Range Selector */}
       <div className="mb-8 flex flex-wrap items-center justify-between gap-4">
         <div>

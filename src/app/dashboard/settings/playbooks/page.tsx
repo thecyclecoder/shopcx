@@ -699,7 +699,7 @@ export default function PlaybooksSettingsPage() {
   };
 
   if (loading) {
-    return <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6"><p className="text-sm text-zinc-400">Loading playbooks...</p></div>;
+    return <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6"><p className="text-sm text-zinc-400">Loading playbooks...</p></div>;
   }
 
   const isEditing = editing !== null;
@@ -708,7 +708,7 @@ export default function PlaybooksSettingsPage() {
     : playbooks;
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Playbooks</h1>

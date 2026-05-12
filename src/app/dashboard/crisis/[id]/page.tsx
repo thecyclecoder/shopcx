@@ -270,11 +270,11 @@ export default function CrisisDetailPage() {
   };
 
   if (loading) {
-    return <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6"><p className="text-zinc-400">Loading...</p></div>;
+    return <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6"><p className="text-zinc-400">Loading...</p></div>;
   }
 
   if (!crisis) {
-    return <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6"><p className="text-zinc-400">Crisis event not found.</p></div>;
+    return <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6"><p className="text-zinc-400">Crisis event not found.</p></div>;
   }
 
   const inputClass = "w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100";
@@ -286,7 +286,7 @@ export default function CrisisDetailPage() {
     : 0;
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       {/* Header */}
       <div className="mb-6">
         <Link href="/dashboard/crisis" className="text-sm text-indigo-600 hover:text-indigo-700 dark:text-indigo-400">

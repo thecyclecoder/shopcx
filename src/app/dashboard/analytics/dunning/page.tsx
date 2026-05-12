@@ -82,7 +82,7 @@ export default function DunningAnalyticsPage() {
 
   if (loading || !data) {
     return (
-      <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
         <p className="text-sm text-zinc-400">Loading dunning analytics...</p>
       </div>
     );
@@ -108,7 +108,7 @@ export default function DunningAnalyticsPage() {
   const yTicks = [0, Math.ceil(maxFailures / 2), maxFailures];
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Dunning Analytics</h1>
         <p className="mt-1 text-sm text-zinc-500">Payment failure recovery performance over the last 90 days.</p>

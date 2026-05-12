@@ -84,7 +84,7 @@ export default function ResellersPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-7xl px-4 py-6">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6">
         <p className="text-sm text-zinc-400">Loading resellers…</p>
       </div>
     );
@@ -96,7 +96,7 @@ export default function ResellersPage() {
   const lastRun = recentRuns[0];
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Known Resellers</h1>

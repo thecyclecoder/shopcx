@@ -155,7 +155,7 @@ export default function ChargebacksPage() {
   const totalPages = Math.ceil(total / limit);
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 p-4 sm:p-6">
+    <div className="mx-auto max-w-screen-2xl space-y-6 p-4 sm:p-6">
       {/* Header */}
       <div>
         <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-100">Chargebacks</h1>

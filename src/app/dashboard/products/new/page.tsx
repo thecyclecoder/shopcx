@@ -98,7 +98,7 @@ export default function NewProductIntelligencePage() {
   };
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       <Link href="/dashboard/products" className="mb-4 inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-700">
         &larr; Back to Products
       </Link>

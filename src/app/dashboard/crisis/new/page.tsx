@@ -76,7 +76,7 @@ export default function NewCrisisPage() {
 
   if (!isAdmin) {
     return (
-      <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
         <p className="text-zinc-400">Only admins and owners can create crisis events.</p>
         <Link href="/dashboard/crisis" className="mt-2 inline-block text-sm text-indigo-600 hover:text-indigo-700 dark:text-indigo-400">
           &larr; Back to Crisis Management
@@ -213,14 +213,14 @@ export default function NewCrisisPage() {
 
   if (loadingProducts) {
     return (
-      <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
         <p className="text-zinc-400">Loading products...</p>
       </div>
     );
   }
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       <div className="mb-6">
         <Link href="/dashboard/crisis" className="text-sm text-indigo-600 hover:text-indigo-700 dark:text-indigo-400">
           &larr; Back to Crisis Management

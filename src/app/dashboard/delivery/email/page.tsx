@@ -94,7 +94,7 @@ export default function EmailDeliveryPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
+      <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
         <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Email Delivery</h1>
         <div className="mt-6 animate-pulse space-y-4">
           <div className="h-32 rounded-xl bg-zinc-100 dark:bg-zinc-800" />
@@ -121,7 +121,7 @@ export default function EmailDeliveryPage() {
   };
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Email Delivery</h1>

@@ -25,7 +25,7 @@ export default function IntegrationDetailPage() {
 
   return (
     <div>
-      <div className="mx-auto max-w-5xl px-4 pt-6 sm:px-6">
+      <div className="mx-auto max-w-screen-2xl px-4 pt-6 sm:px-6">
         <button
           onClick={() => router.push("/dashboard/settings/integrations")}
           className="mb-4 text-sm text-indigo-600 hover:text-indigo-500 dark:text-indigo-400"
