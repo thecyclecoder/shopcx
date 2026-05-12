@@ -66,7 +66,7 @@ export function HeroGallery({
       </div>
 
       {showStrip && (
-        <div className="mt-4 flex w-full justify-center gap-2 xl:mt-6">
+        <div className="mt-4 flex w-full justify-center gap-2 px-5 xl:mt-6 xl:px-0">
           {items.map((item, i) => {
             const url = item.webp_480_url || item.avif_480_url || item.url || "";
             const isActive = i === activeIdx;

@@ -145,14 +145,16 @@ export function HeroSection({ data }: { data: PageData }) {
           clamp keeps things readable. Capped at 2200px on huge screens. */}
       <div
         style={containerStyle}
-        className="mx-auto flex w-full flex-col px-5 xl:flex-row xl:items-start xl:gap-10 xl:px-10 xl:[max-width:min(2400px,90vw)]"
+        className="mx-auto flex w-full flex-col xl:flex-row xl:items-start xl:gap-10 xl:px-10 xl:[max-width:min(2400px,90vw)]"
       >
         {/* Hero image — sticky on desktop, top-aligned. Mobile + tablet
             (incl. iPad Pro portrait) keep stacked 4:3 + object-cover
             since the side-by-side layout cramps the text column below
             ~1280px. Side-by-side kicks in at xl: (1280px+) where
             there's room for the image to have wow factor without
-            squeezing the headline. */}
+            squeezing the headline.
+            Edge-to-edge on mobile/tablet (no px-5 here) for dramatic
+            effect — the text column adds its own px-5 below. */}
         <div className="relative w-full xl:order-1 xl:basis-3/5 xl:sticky xl:top-0 xl:flex xl:h-screen xl:flex-col xl:items-stretch xl:pt-8">
           <HeroGallery
             items={visibleGallery}
@@ -166,7 +168,7 @@ export function HeroSection({ data }: { data: PageData }) {
         {/* Text column — 2/5 on desktop (xl+), full width on mobile +
             tablet. The section's overall height is driven by this
             column; the sticky image pins until this column scrolls past. */}
-        <div className="order-2 flex min-h-[280px] flex-col pt-6 pb-8 xl:order-2 xl:basis-2/5 xl:pt-16 xl:pb-16">
+        <div className="order-2 flex min-h-[280px] flex-col px-5 pt-6 pb-8 xl:order-2 xl:basis-2/5 xl:px-0 xl:pt-16 xl:pb-16">
           {ratingValue != null && (
             <div className="mb-3 flex items-center gap-2">
               <StarRating rating={ratingValue} size={18} />
