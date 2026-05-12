@@ -167,8 +167,6 @@ export function ReviewsSection({
             <StarRating rating={data.product.rating} size={20} />
             <span className="text-base text-zinc-700">
               <strong className="text-zinc-900">{data.product.rating.toFixed(1)}</strong>
-              {" · "}
-              {total.toLocaleString()} reviews
             </span>
           </div>
         )}
