@@ -15,10 +15,7 @@ const EDITABLE_FIELDS = new Set([
   "knowledge_base_article",
   "kb_what_it_doesnt_do",
   "support_macros",
-  "endorsement_name",
-  "endorsement_title",
-  "endorsement_quote",
-  "endorsement_bullets",
+  "endorsements",
   "expectation_timeline",
 ]);
 

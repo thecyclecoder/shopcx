@@ -96,10 +96,12 @@ interface PageContent {
   knowledge_base_article: string | null;
   kb_what_it_doesnt_do: string | null;
   support_macros: SupportMacro[];
-  endorsement_name: string | null;
-  endorsement_title: string | null;
-  endorsement_quote: string | null;
-  endorsement_bullets: string[];
+  endorsements: Array<{
+    name: string;
+    title: string;
+    quote: string;
+    bullets: string[];
+  }>;
   expectation_timeline: Array<{ time_label: string; headline: string; body: string }>;
   status: "draft" | "approved" | "published";
   generated_at: string;
@@ -1547,53 +1549,13 @@ function ContentStage({
         />
       </ContentField>
 
-      <ContentField label="Nutritionist — Name" editable={editable}>
-        <input
-          type="text"
-          value={fieldValue("endorsement_name") || ""}
-          onChange={(e) => setField("endorsement_name", e.target.value)}
-          disabled={!editable}
-          placeholder="Dr. Jane Doe, RD"
-          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+      <ContentField label="Nutritionist Endorsements" editable={editable}>
+        <NutritionistsEditor
+          items={(fieldValue("endorsements") as unknown as PageContent["endorsements"]) || []}
+          onChange={(v) => setField("endorsements", v as unknown as PageContent["endorsements"])}
+          editable={editable}
         />
-      </ContentField>
-
-      <ContentField label="Nutritionist — Title" editable={editable}>
-        <input
-          type="text"
-          value={fieldValue("endorsement_title") || ""}
-          onChange={(e) => setField("endorsement_title", e.target.value)}
-          disabled={!editable}
-          placeholder="Registered Dietitian"
-          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-        />
-      </ContentField>
-
-      <ContentField label="Nutritionist — Quote" editable={editable}>
-        <textarea
-          value={fieldValue("endorsement_quote") || ""}
-          onChange={(e) => setField("endorsement_quote", e.target.value)}
-          disabled={!editable}
-          rows={4}
-          placeholder="Why they recommend this product, in their words…"
-          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-        />
-        <p className="mt-1.5 text-[11px] text-zinc-500">Upload their photo at the &quot;endorsement_avatar&quot; slot in the Storefront product page.</p>
-      </ContentField>
-
-      <ContentField label="Nutritionist — Bullets" editable={editable}>
-        <textarea
-          value={((fieldValue("endorsement_bullets") as unknown as string[]) || []).join("\n")}
-          onChange={(e) => setField(
-            "endorsement_bullets",
-            e.target.value.split("\n").map(s => s.trim()).filter(Boolean) as unknown as PageContent["endorsement_bullets"]
-          )}
-          disabled={!editable}
-          rows={5}
-          placeholder={"One bullet per line\nClinically dosed ingredients\nWhole-food sourcing"}
-          className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-        />
-        <p className="mt-1.5 text-[11px] text-zinc-500">One bullet per line. Rendered as a checkmark list on the storefront.</p>
+        <p className="mt-1.5 text-[11px] text-zinc-500">Up to 3 nutritionists. Upload each photo at the &quot;endorsement_1_avatar&quot;, &quot;endorsement_2_avatar&quot;, &quot;endorsement_3_avatar&quot; slots in the Storefront product page.</p>
       </ContentField>
 
       <ContentField label="What to Expect — Timeline" editable={editable}>
@@ -1725,6 +1687,120 @@ function ArrayEditor({
       {editable && (
         <button onClick={add} className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300">
           + Add item
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Multi-nutritionist editor. Each card edits name/title/quote +
+// newline-separated bullets, plus a slot-label hint so admins know
+// which media slot to upload the photo into. Capped at 3 because the
+// storefront grid renders 3 columns; "+ Add" hides once full.
+function NutritionistsEditor({
+  items,
+  onChange,
+  editable,
+}: {
+  items: PageContent["endorsements"];
+  onChange: (v: PageContent["endorsements"]) => void;
+  editable: boolean;
+}) {
+  const list = items || [];
+  const update = (
+    i: number,
+    key: "name" | "title" | "quote" | "bullets",
+    value: string | string[],
+  ) => {
+    const next = [...list];
+    next[i] = { ...next[i], [key]: value } as PageContent["endorsements"][number];
+    onChange(next);
+  };
+  const remove = (i: number) => onChange(list.filter((_, j) => j !== i));
+  const add = () => onChange([...list, { name: "", title: "", quote: "", bullets: [] }]);
+
+  return (
+    <div className="space-y-3">
+      {list.map((item, i) => (
+        <div
+          key={i}
+          className="rounded-md border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900/50"
+        >
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+              Nutritionist #{i + 1} · photo slot: endorsement_{i + 1}_avatar
+            </span>
+            {editable && (
+              <button
+                onClick={() => remove(i)}
+                className="text-[10px] text-red-400 hover:text-red-600"
+              >
+                Remove
+              </button>
+            )}
+          </div>
+          <div className="space-y-2">
+            <div>
+              <label className="mb-0.5 block text-[10px] text-zinc-500">Name</label>
+              <input
+                type="text"
+                value={item.name || ""}
+                disabled={!editable}
+                onChange={(e) => update(i, "name", e.target.value)}
+                placeholder="Dr. Jane Doe, RD"
+                className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              />
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] text-zinc-500">Title</label>
+              <input
+                type="text"
+                value={item.title || ""}
+                disabled={!editable}
+                onChange={(e) => update(i, "title", e.target.value)}
+                placeholder="Registered Dietitian"
+                className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              />
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] text-zinc-500">Quote</label>
+              <textarea
+                value={item.quote || ""}
+                disabled={!editable}
+                onChange={(e) => update(i, "quote", e.target.value)}
+                rows={3}
+                placeholder="Why they recommend this product, in their words…"
+                className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              />
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] text-zinc-500">
+                Bullets (one per line)
+              </label>
+              <textarea
+                value={(item.bullets || []).join("\n")}
+                disabled={!editable}
+                onChange={(e) =>
+                  update(
+                    i,
+                    "bullets",
+                    e.target.value.split("\n").map((s) => s.trim()).filter(Boolean),
+                  )
+                }
+                rows={4}
+                placeholder={"Clinically dosed ingredients\nWhole-food sourcing"}
+                className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              />
+            </div>
+          </div>
+        </div>
+      ))}
+      {editable && list.length < 3 && (
+        <button
+          onClick={add}
+          className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300"
+        >
+          + Add nutritionist
         </button>
       )}
     </div>

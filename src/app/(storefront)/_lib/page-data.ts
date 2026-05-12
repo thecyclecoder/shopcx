@@ -57,10 +57,12 @@ export interface PageContent {
   fda_disclaimer: string;
   knowledge_base_article: string | null;
   kb_what_it_doesnt_do: string | null;
-  endorsement_name: string | null;
-  endorsement_title: string | null;
-  endorsement_quote: string | null;
-  endorsement_bullets: string[];
+  endorsements: Array<{
+    name: string;
+    title: string;
+    quote: string;
+    bullets: string[];
+  }>;
   expectation_timeline: Array<{ time_label: string; headline: string; body: string }>;
 }
 
@@ -314,7 +316,7 @@ export async function getPageData(
     admin
       .from("product_page_content")
       .select(
-        "id, hero_headline, hero_subheadline, benefit_bar, mechanism_copy, ingredient_cards, comparison_table_rows, faq_items, guarantee_copy, fda_disclaimer, knowledge_base_article, kb_what_it_doesnt_do, endorsement_name, endorsement_title, endorsement_quote, endorsement_bullets, expectation_timeline, status, version",
+        "id, hero_headline, hero_subheadline, benefit_bar, mechanism_copy, ingredient_cards, comparison_table_rows, faq_items, guarantee_copy, fda_disclaimer, knowledge_base_article, kb_what_it_doesnt_do, endorsements, expectation_timeline, status, version",
       )
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id)

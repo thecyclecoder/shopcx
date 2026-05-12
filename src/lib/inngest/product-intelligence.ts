@@ -558,6 +558,8 @@ RULES:
       * No semicolons. No "while X, Y" pairs.
       * Ingredients OK to name, but tie each to a plain-language effect.
       * Never invent customer quotes.
+- endorsements: exactly 3 distinct nutritionists. Vary their
+  credentials, voices, and angles so no two cards read the same.
 - FAQ: 5-8 items.
 - Compare to generic alternatives — never name competitor brands.
 - comparison_table_rows: the storefront renders only the 'us' vs
@@ -592,10 +594,14 @@ RULES:
     { "title": "string", "body_text": "string", "body_html": "string", "question_type": "side_effects" },
     { "title": "string", "body_text": "string", "body_html": "string", "question_type": "usage" }
   ],
-  "endorsement_name": "string (e.g. 'Dr. Jane Doe, RD' — fictional plausible nutritionist if no real one provided)",
-  "endorsement_title": "string (e.g. 'Registered Dietitian')",
-  "endorsement_quote": "string (1-3 plain-language sentences from the nutritionist's perspective — why they'd recommend this)",
-  "endorsement_bullets": ["string (3-5 short reasons, each <= 12 words, why this product earns the recommendation)"],
+  "endorsements": [
+    {
+      "name": "string (e.g. 'Dr. Jane Doe, RD' — three distinct fictional but plausible nutritionists/dietitians/clinicians; vary credentials across the three: RD, RDN, CN, PhD, MS, etc.)",
+      "title": "string (e.g. 'Registered Dietitian', 'Clinical Nutritionist', 'Sports Dietitian')",
+      "quote": "string (1-3 plain-language sentences from this person's perspective — why they'd recommend this. Each of the three quotes must hit a different angle: e.g. ingredient quality, daily habit fit, real-world client results.)",
+      "bullets": ["string (3-5 short reasons, each <= 12 words, why this product earns the recommendation)"]
+    }
+  ],
   "expectation_timeline": [
     { "time_label": "string (e.g. 'Day 1', 'Week 2', 'Month 1')", "headline": "string (short, 3-6 words)", "body": "string (1 sentence, plain language)" }
   ]
