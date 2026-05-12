@@ -1,17 +1,23 @@
 /**
- * Visualize a tier's quantity by rendering the variant's transparent
- * PNG N times with overlap + a subtle tilt. One image drives all the
- * pack visuals (1-pack, 2-pack, 3-pack) without needing separate
- * stacked-render assets.
+ * Visualize a tier's quantity by stacking the variant's transparent
+ * PNG. Bag size stays constant across 1/2/3-pack — only the overlap
+ * changes. The cream-tinted box clips any spillover so the cluster
+ * reads as a curated "display" rather than a row of perfectly framed
+ * thumbnails. One image drives all the pack visuals; no separate
+ * stacked-render assets needed.
  *
- * Sizing is math-driven so the cluster always fits inside its price
- * card column at any breakpoint:
- *   - bag widths are PERCENTAGES of the container width (not fixed
- *     pixels) so a narrow mobile card scales the bags down with it.
- *   - As count goes up, each bag shrinks AND the overlap grows so
- *     the total visible width stays at most the container width.
- *   - Container is `overflow-hidden` as a safety net for the slight
- *     extra width the outer-bag tilts add.
+ * Math:
+ *   - bag width is a fixed 65% of the container at every count, so a
+ *     2-bag pack and a 3-bag pack both feature life-size bags.
+ *   - overlap percentage grows with count so the cluster compresses
+ *     into the box; for the 3-pack, outer bags crop ~10% on each
+ *     side — intentional, communicates "fully stocked" rather than
+ *     "this is too small to fit".
+ *
+ *  1: 65% centered, no overlap.
+ *  2: 65% + 65% with 20% overlap = 110% (mild bleed, ~5% per side).
+ *  3: 65% + 65% + 65% with 30% overlap = 135% (clear bleed, ~17% per
+ *     side — bags peek off the edges like product on a shelf).
  *
  * Caps the visible count at 3 — beyond that the cluster looks busy
  * and the tier label already communicates the exact pack count.
@@ -31,30 +37,20 @@ export function PackageStack({
   const items = Array.from({ length: visible });
   const center = Math.floor((visible - 1) / 2);
 
-  // Per-count layout (percentages of container width). Picked so the
-  // total visible width — first bag plus the visible portion of each
-  // subsequent bag (bagWidth - overlap) — sums to ≤ 100%.
-  //   1: 60%
-  //   2: 50 + (50 - 15) = 85%
-  //   3: 40 + 2 × (40 - 10) = 100%
-  const layouts: Record<number, { bagWidthPct: number; overlapPct: number }> = {
-    1: { bagWidthPct: 60, overlapPct: 0 },
-    2: { bagWidthPct: 50, overlapPct: 15 },
-    3: { bagWidthPct: 40, overlapPct: 10 },
-  };
-  const { bagWidthPct, overlapPct } = layouts[visible];
+  // Fixed bag size across counts; only overlap changes.
+  const BAG_WIDTH_PCT = 65;
+  const overlapPct = visible <= 1 ? 0 : visible === 2 ? 20 : 30;
 
   return (
     <div
-      className={`relative mx-auto flex h-full w-full max-w-[260px] items-end justify-center overflow-hidden ${className}`}
+      className={`relative mx-auto flex h-full w-full items-end justify-center overflow-hidden rounded-xl bg-amber-50 ring-1 ring-amber-100/60 ${className}`}
     >
       {items.map((_, i) => {
         const offset = i - center;
-        // Outer bags tilt + shrink slightly so the eye reads three
-        // discrete units instead of one wide blob. Center bag stays
-        // square-on with full size + the highest z-index.
+        // Outer bags tilt slightly so the eye reads multiple discrete
+        // units instead of one wide blob. No size variance between
+        // them — every bag is the same scale.
         const rotate = offset === 0 ? 0 : offset * 5;
-        const scale = offset === 0 ? 1 : 0.94;
         const translateY = offset === 0 ? 0 : 6;
         const z = visible - Math.abs(offset);
 
@@ -69,8 +65,8 @@ export function PackageStack({
             decoding="async"
             className="h-auto object-contain drop-shadow-md"
             style={{
-              width: `${bagWidthPct}%`,
-              transform: `translateY(${translateY}px) rotate(${rotate}deg) scale(${scale})`,
+              width: `${BAG_WIDTH_PCT}%`,
+              transform: `translateY(${translateY}px) rotate(${rotate}deg)`,
               transformOrigin: "bottom center",
               marginLeft: i === 0 ? 0 : `-${overlapPct}%`,
               zIndex: z,
