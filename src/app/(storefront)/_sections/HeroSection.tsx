@@ -180,7 +180,7 @@ export function HeroSection({ data }: { data: PageData }) {
           <h1 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
             {data.product.title}
           </h1>
-          <p className="mt-2 text-[28px] font-bold leading-[1.1] tracking-tight text-zinc-900 sm:text-4xl md:text-5xl">
+          <p className="mt-2 text-[28px] font-bold leading-[1.2] tracking-tight text-zinc-900 sm:text-4xl md:text-5xl">
             {headline}
           </p>
 
