@@ -1,19 +1,17 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import type { Review } from "../_lib/page-data";
+import { fetchReviewsBootstrap } from "../_lib/reviews-bootstrap-cache";
 
 /**
- * Hero featured reviews — ported from the customer portal's ReviewsCard.
- * Round-robin across linked products is handled upstream (page-data
- * already pools + sorts featured > rating > recency). This component
- * just rotates through the pre-sorted list every 15s with a fade.
+ * Hero featured reviews — random rotation over the truly-featured pool.
  *
- * Performance: this component is rendered inside HeroSection, which is
- * already a client component. The first review is part of initial state
- * so it's serialized into the SSR HTML — no JS needed for first paint.
- * The 15s rotation timer kicks in only after hydration. No extra fetch:
- * reviews come in on the page-data payload that the page already loads.
+ * SSG payload provides the initial set so first paint has content
+ * (good for SEO + LCP). On mount, /reviews-bootstrap returns the
+ * latest featured pool and we shuffle for display order, so multiple
+ * visits surface different stories. Featured-only filter: Klaviyo's
+ * smart_featured (status="featured" / featured=true).
  */
 
 const ROTATE_MS = 15000;
@@ -27,10 +25,62 @@ function truncate(str: string, max: number) {
   return { text: cut.replace(/\s+$/, "") + "…", cut: true };
 }
 
-export function HeroFeaturedReviews({ reviews }: { reviews: Review[] }) {
-  // Drop reviews with no usable text — keeps the carousel from showing
-  // blank cards when a review row has only a rating number.
-  const usable = reviews.filter(r => r.body || r.title || r.smart_quote);
+function shuffle<T>(arr: T[]): T[] {
+  const out = [...arr];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+export function HeroFeaturedReviews({
+  reviews,
+  workspaceSlug,
+  slug,
+}: {
+  reviews: Review[];
+  workspaceSlug?: string;
+  slug?: string;
+}) {
+  const initialFeatured = useMemo(
+    () =>
+      reviews.filter(
+        (r) =>
+          (r.featured === true || r.status === "featured") &&
+          (r.body || r.title || r.smart_quote),
+      ),
+    [reviews],
+  );
+  const [pool, setPool] = useState<Review[]>(initialFeatured);
+
+  // Refresh featured pool on mount so new featured reviews appear
+  // without ISR. Falls back to SSG initial state on any failure.
+  useEffect(() => {
+    if (!workspaceSlug || !slug) return;
+    let abort = false;
+    fetchReviewsBootstrap(workspaceSlug, slug)
+      .then((body) => {
+        if (abort) return;
+        if (body.featured?.length) {
+          const filtered = body.featured.filter(
+            (r) => r.body || r.title || r.smart_quote,
+          );
+          if (filtered.length) setPool(filtered);
+        }
+      })
+      .catch(() => {
+        /* keep initial */
+      });
+    return () => {
+      abort = true;
+    };
+  }, [workspaceSlug, slug]);
+
+  // Stable shuffle for this mount — order doesn't jump as the user
+  // expands/collapses. Re-randomizes on every new pool (i.e. every
+  // page visit since the component remounts).
+  const usable = useMemo(() => shuffle(pool), [pool]);
   const [idx, setIdx] = useState(0);
   const [fadeOut, setFadeOut] = useState(false);
   const [expanded, setExpanded] = useState(false);

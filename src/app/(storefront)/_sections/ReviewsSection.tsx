@@ -1,13 +1,22 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { PageData, Review } from "../_lib/page-data";
+import { fetchReviewsBootstrap } from "../_lib/reviews-bootstrap-cache";
 import { StarRating } from "../_components/StarRating";
 
 /**
- * Full reviews list. Renders the first 6 server-side via the `data`
- * prop; "Load more" hits /api/storefront/[workspace]/[slug]/reviews.
- * Filter pills switch against the review body text (simple contains).
+ * Full reviews list with benefit-pill filters.
+ *
+ * On mount, hits /reviews-bootstrap to pull a fresh slice of reviews
+ * + the benefit→review-id matches map (computed server-side across
+ * the full linked-product corpus). Initial SSG data is shown for the
+ * first paint / SEO; mount swaps in the freshest set so customers
+ * always see new reviews without waiting on ISR.
+ *
+ * Pill clicks: intersect with the loaded set first; if more matches
+ * exist than loaded, lazy-fetch the missing IDs and merge into state.
+ * Pills with zero matches are hidden — never a broken filter.
  */
 export function ReviewsSection({
   data,
@@ -18,110 +27,132 @@ export function ReviewsSection({
   workspaceSlug: string;
   slug: string;
 }) {
-  const initial = data.reviews.slice(0, 6);
+  const initial = data.reviews.slice(0, 30);
   const [reviews, setReviews] = useState<Review[]>(initial);
+  const [matches, setMatches] = useState<Record<string, string[]>>(
+    data.benefit_review_matches || {},
+  );
+  const [total, setTotal] = useState(data.review_total_count);
   const [offset, setOffset] = useState(initial.length);
-  const [hasMore, setHasMore] = useState(data.review_total_count > initial.length);
   const [loading, setLoading] = useState(false);
+  const [pillLoading, setPillLoading] = useState(false);
   const [filter, setFilter] = useState<string | null>(null);
 
-  // For each benefit, build a keyword set from customer_phrases on the
-  // benefit selection PLUS the AI-extracted top_benefits whose name
-  // overlaps. Substring match against the benefit_name alone almost
-  // never hits review bodies (admin labels like "Cardiovascular Health"
-  // don't appear verbatim in real reviews), so without this the pills
-  // showed empty results and damaged trust. Pills with zero matches
-  // in the loaded set are hidden — guarantees every visible pill works.
-  const STOP_WORDS = new Set([
-    "the", "a", "an", "and", "or", "of", "to", "in", "for", "with",
-    "support", "supports", "health", "amp", "system",
-  ]);
-  const meaningfulTokens = (s: string) =>
-    s
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
-
-  const benefitMatches = useMemo(() => {
-    const map: Record<string, string[]> = {};
-    const topBenefits = data.review_analysis?.top_benefits || [];
-
-    for (const b of data.benefit_selections) {
-      if (b.role !== "lead" && b.role !== "supporting") continue;
-
-      const phrases = new Set<string>();
-      for (const p of b.customer_phrases || []) {
-        if (p && p.trim()) phrases.add(p.trim().toLowerCase());
-      }
-
-      // Fuzzy-match top_benefits by name token overlap so admin's
-      // "Energy & Performance" picks up AI's "Energy boost without jitters"
-      // and all the customer phrases that came with it.
-      const benefitTokens = new Set(meaningfulTokens(b.benefit_name));
-      for (const tb of topBenefits) {
-        const tbTokens = meaningfulTokens(tb.benefit || "");
-        const overlap = tbTokens.some((t) => benefitTokens.has(t));
-        if (overlap) {
-          for (const p of tb.customer_phrases || []) {
-            if (p && p.trim()) phrases.add(p.trim().toLowerCase());
-          }
-        }
-      }
-
-      if (phrases.size === 0) continue;
-
-      const matched: string[] = [];
-      const phraseList = Array.from(phrases);
-      for (const r of reviews) {
-        const body = (r.body || "").toLowerCase();
-        if (phraseList.some((p) => body.includes(p))) matched.push(r.id);
-      }
-      if (matched.length > 0) map[b.benefit_name] = matched;
-    }
-    return map;
-  }, [reviews, data.benefit_selections, data.review_analysis]);
+  // Refresh on mount so new reviews + featured updates appear without
+  // an ISR cycle. We replace state outright when the server returns —
+  // the SSG version stays visible until then for instant LCP. Shared
+  // cache dedupes parallel fetches from sibling sections.
+  useEffect(() => {
+    let abort = false;
+    fetchReviewsBootstrap(workspaceSlug, slug)
+      .then((body) => {
+        if (abort) return;
+        setReviews(body.recent || []);
+        setMatches(body.benefit_review_matches || {});
+        setTotal(body.total || 0);
+        setOffset((body.recent || []).length);
+      })
+      .catch(() => {
+        /* keep SSG data on failure */
+      });
+    return () => {
+      abort = true;
+    };
+  }, [workspaceSlug, slug]);
 
   const availableFilters = useMemo(() => {
     return data.benefit_selections
       .filter(
         (b) =>
           (b.role === "lead" || b.role === "supporting") &&
-          (benefitMatches[b.benefit_name]?.length || 0) > 0,
+          (matches[b.benefit_name]?.length || 0) > 0,
       )
       .map((b) => b.benefit_name)
       .slice(0, 6);
-  }, [data.benefit_selections, benefitMatches]);
+  }, [data.benefit_selections, matches]);
+
+  // For active filter, derive the shown reviews from the matched IDs
+  // intersected with what we have loaded. If the filter has matches we
+  // haven't fetched yet, the effect below lazy-loads them.
+  const loadedById = useMemo(() => {
+    const m = new Map<string, Review>();
+    for (const r of reviews) m.set(r.id, r);
+    return m;
+  }, [reviews]);
 
   const filtered = useMemo(() => {
     if (!filter) return reviews;
-    const ids = new Set(benefitMatches[filter] || []);
-    return reviews.filter((r) => ids.has(r.id));
-  }, [reviews, filter, benefitMatches]);
+    const ids = matches[filter] || [];
+    const result: Review[] = [];
+    for (const id of ids) {
+      const r = loadedById.get(id);
+      if (r) result.push(r);
+    }
+    return result;
+  }, [filter, matches, loadedById, reviews]);
+
+  // Lazy-fetch missing matched reviews when a filter is selected.
+  useEffect(() => {
+    if (!filter) return;
+    const ids = matches[filter] || [];
+    if (ids.length === 0) return;
+    const missing = ids.filter((id) => !loadedById.has(id)).slice(0, 50);
+    if (missing.length === 0) return;
+    let abort = false;
+    setPillLoading(true);
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/storefront/${encodeURIComponent(workspaceSlug)}/${encodeURIComponent(slug)}/reviews?ids=${encodeURIComponent(missing.join(","))}`,
+        );
+        if (!res.ok || abort) return;
+        const body = (await res.json()) as { reviews: Review[] };
+        if (body.reviews?.length) {
+          setReviews((prev) => {
+            const seen = new Set(prev.map((r) => r.id));
+            const fresh = body.reviews.filter((r) => !seen.has(r.id));
+            return [...prev, ...fresh];
+          });
+        }
+      } catch {
+        /* swallow */
+      } finally {
+        if (!abort) setPillLoading(false);
+      }
+    })();
+    return () => {
+      abort = true;
+    };
+  }, [filter, matches, loadedById, workspaceSlug, slug]);
 
   const loadMore = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch(
-        `/api/storefront/${encodeURIComponent(workspaceSlug)}/${encodeURIComponent(
-          slug,
-        )}/reviews?offset=${offset}&limit=12`,
+        `/api/storefront/${encodeURIComponent(workspaceSlug)}/${encodeURIComponent(slug)}/reviews?offset=${offset}&limit=12`,
       );
       if (res.ok) {
         const body = (await res.json()) as {
           reviews: Review[];
+          total: number;
           has_more: boolean;
         };
-        setReviews((prev) => [...prev, ...body.reviews]);
+        setReviews((prev) => {
+          const seen = new Set(prev.map((r) => r.id));
+          const fresh = body.reviews.filter((r) => !seen.has(r.id));
+          return [...prev, ...fresh];
+        });
         setOffset((prev) => prev + body.reviews.length);
-        setHasMore(body.has_more);
+        setTotal(body.total || total);
       }
     } catch {
-      /* swallow — user can retry */
+      /* swallow */
     } finally {
       setLoading(false);
     }
-  }, [workspaceSlug, slug, offset]);
+  }, [workspaceSlug, slug, offset, total]);
 
+  const hasMore = !filter && reviews.length < total;
   if (initial.length === 0) return null;
 
   return (
@@ -137,7 +168,7 @@ export function ReviewsSection({
             <span className="text-base text-zinc-700">
               <strong className="text-zinc-900">{data.product.rating.toFixed(1)}</strong>
               {" · "}
-              {data.review_total_count.toLocaleString()} reviews
+              {total.toLocaleString()} reviews
             </span>
           </div>
         )}
@@ -154,19 +185,28 @@ export function ReviewsSection({
             >
               All reviews
             </button>
-            {availableFilters.map((f) => (
-              <button
-                key={f}
-                type="button"
-                onClick={() => setFilter(filter === f ? null : f)}
-                style={filter === f ? { backgroundColor: "var(--storefront-primary)", borderColor: "var(--storefront-primary)" } : undefined}
-                className={`inline-flex min-h-[36px] items-center rounded-full border px-3 py-1.5 text-sm font-medium transition-colors ${
-                  filter === f ? "text-white" : "border-zinc-200 bg-white text-zinc-700"
-                }`}
-              >
-                {f}
-              </button>
-            ))}
+            {availableFilters.map((f) => {
+              const count = matches[f]?.length || 0;
+              const active = filter === f;
+              return (
+                <button
+                  key={f}
+                  type="button"
+                  onClick={() => setFilter(active ? null : f)}
+                  style={active ? { backgroundColor: "var(--storefront-primary)", borderColor: "var(--storefront-primary)" } : undefined}
+                  className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-medium transition-colors ${
+                    active ? "text-white" : "border-zinc-200 bg-white text-zinc-700"
+                  }`}
+                >
+                  {f}
+                  <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums ${
+                    active ? "bg-white/25 text-white" : "bg-zinc-100 text-zinc-600"
+                  }`}>
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         )}
 
@@ -186,7 +226,7 @@ export function ReviewsSection({
                 <h3 className="mt-2 text-base font-semibold text-zinc-900">{r.title}</h3>
               )}
               {r.body && (
-                <p className="mt-2 whitespace-pre-line text-sm text-zinc-700">
+                <p className="mt-2 whitespace-pre-line text-base text-zinc-800 sm:text-lg">
                   {r.body}
                 </p>
               )}
@@ -194,11 +234,11 @@ export function ReviewsSection({
           ))}
         </div>
 
-        {filtered.length === 0 && (
-          <p className="mt-4 text-sm text-zinc-500">No reviews match that filter.</p>
+        {filter && pillLoading && filtered.length === 0 && (
+          <p className="mt-4 text-sm text-zinc-500">Loading reviews…</p>
         )}
 
-        {hasMore && !filter && (
+        {hasMore && (
           <div className="mt-8 flex justify-center">
             <button
               type="button"

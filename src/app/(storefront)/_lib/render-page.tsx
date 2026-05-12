@@ -127,7 +127,7 @@ export function StorefrontPage({
             the codebase but is no longer in the flow. */}
         <HowItWorksSection data={data} />
         <PriceTableSection data={data} />
-        <UGCSection data={data} />
+        <UGCSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
         <ComparisonSection data={data} />
         <IngredientsSection data={data} />
         <NutritionistEndorsementSection data={data} />

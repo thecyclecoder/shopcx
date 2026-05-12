@@ -248,7 +248,11 @@ export function HeroSection({ data }: { data: PageData }) {
 
           {data.reviews.length > 0 && (
             <div className="mt-6">
-              <HeroFeaturedReviews reviews={data.reviews} />
+              <HeroFeaturedReviews
+                reviews={data.reviews}
+                workspaceSlug={data.workspace.storefront_slug || undefined}
+                slug={data.product.handle}
+              />
             </div>
           )}
 

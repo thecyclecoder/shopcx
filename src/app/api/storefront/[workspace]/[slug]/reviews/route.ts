@@ -13,8 +13,9 @@ export async function GET(
 ) {
   const { workspace: workspaceSlug, slug } = await params;
   const url = new URL(request.url);
+  const idsParam = url.searchParams.get("ids");
   const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10));
-  const limit = Math.min(24, Math.max(1, parseInt(url.searchParams.get("limit") || "12", 10)));
+  const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get("limit") || "12", 10)));
 
   const workspace = await getWorkspaceBySlug(workspaceSlug);
   if (!workspace) {
@@ -33,14 +34,63 @@ export async function GET(
     return NextResponse.json({ reviews: [], total: 0, has_more: false });
   }
 
+  // Linked-product pool — reviews follow the format group (Instant ↔
+  // K-Cups), so the pill matches map and "load more" both serve the
+  // pooled set, not just this product's.
+  const { data: linkMembership } = await admin
+    .from("product_link_members")
+    .select("group_id")
+    .eq("product_id", product.id)
+    .limit(1)
+    .maybeSingle();
+  let productIds: string[] = [product.id];
+  if (linkMembership?.group_id) {
+    const { data: siblings } = await admin
+      .from("product_link_members")
+      .select("product_id")
+      .eq("group_id", linkMembership.group_id);
+    productIds = Array.from(
+      new Set([product.id, ...(siblings || []).map((s) => s.product_id)]),
+    );
+  }
+
+  const reviewSelect =
+    "id, reviewer_name, rating, title, body, images, smart_quote, created_at, status, featured, product_id";
+
+  // ID-list mode: lazy-fetch specific reviews (used by pill clicks
+  // when matched IDs aren't already in the loaded set).
+  if (idsParam) {
+    const ids = idsParam
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 100); // safety cap
+    if (ids.length === 0) {
+      return NextResponse.json({ reviews: [], total: 0, has_more: false });
+    }
+    const { data: reviews } = await admin
+      .from("product_reviews")
+      .select(reviewSelect)
+      .eq("workspace_id", workspace.id)
+      .in("product_id", productIds)
+      .in("id", ids)
+      .in("status", ["published", "featured"])
+      .not("body", "is", null)
+      .order("featured", { ascending: false })
+      .order("rating", { ascending: false })
+      .order("created_at", { ascending: false });
+    return NextResponse.json(
+      { reviews: reviews || [], total: ids.length, has_more: false },
+      { headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300" } },
+    );
+  }
+
   const [{ data: reviews }, { count }] = await Promise.all([
     admin
       .from("product_reviews")
-      .select(
-        "id, reviewer_name, rating, title, body, images, smart_quote, created_at, status, featured",
-      )
+      .select(reviewSelect)
       .eq("workspace_id", workspace.id)
-      .eq("product_id", product.id)
+      .in("product_id", productIds)
       .in("status", ["published", "featured"])
       .not("body", "is", null)
       .order("featured", { ascending: false })
@@ -51,7 +101,7 @@ export async function GET(
       .from("product_reviews")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspace.id)
-      .eq("product_id", product.id)
+      .in("product_id", productIds)
       .in("status", ["published", "featured"])
       .not("body", "is", null),
   ]);
@@ -59,9 +109,12 @@ export async function GET(
   const total = count || 0;
   const returned = reviews || [];
 
-  return NextResponse.json({
-    reviews: returned,
-    total,
-    has_more: offset + returned.length < total,
-  });
+  return NextResponse.json(
+    {
+      reviews: returned,
+      total,
+      has_more: offset + returned.length < total,
+    },
+    { headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300" } },
+  );
 }

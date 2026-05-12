@@ -228,6 +228,12 @@ export interface PageData {
   pricing_tiers: PricingTier[];
   how_it_works: HowItWorksStep[];
   recent_orders_for_proof: RecentOrderForProof[];
+  // Per-benefit review-id matches computed at SSG time across the full
+  // linked-product review corpus. The reviews list itself is capped at
+  // 24 for the initial render, but pills filter against the full pool —
+  // so a click can lazy-fetch the matched IDs that aren't loaded yet.
+  // Only benefits with at least one match appear here.
+  benefit_review_matches: Record<string, string[]>;
   media_by_slot: Record<string, MediaItem>;
   // For slots that support multiple images (currently the hero), all
   // items in display_order. The first item also lives in
@@ -434,6 +440,19 @@ export async function getPageData(
     .in("product_id", reviewProductIds)
     .in("status", ["published", "featured"]);
 
+  // Pre-compute benefit-pill matches across the FULL linked-product
+  // corpus (not just the 24 loaded reviews). This is the source of
+  // truth for which pills show + how many reviews each surfaces; the
+  // client lazy-fetches missing matched IDs when a pill is clicked.
+  // Costs one extra round-trip at SSG/ISR time, ships a tiny ID map.
+  const benefit_review_matches = await computeBenefitReviewMatches(
+    admin,
+    workspace.id,
+    reviewProductIds,
+    (benefitSelectionsRes.data || []) as BenefitSelection[],
+    reviewAnalysisRes.data as ReviewAnalysis | null,
+  );
+
   const mediaBySlot: Record<string, MediaItem> = {};
   const mediaGalleryBySlot: Record<string, MediaItem[]> = {};
   for (const m of mediaRes.data || []) {
@@ -591,6 +610,7 @@ export async function getPageData(
     pricing_tiers: (pricingTiersRes.data || []) as PricingTier[],
     how_it_works: (howItWorksRes.data || []) as HowItWorksStep[],
     recent_orders_for_proof: recentOrdersForProof,
+    benefit_review_matches,
     media_by_slot: mediaBySlot,
     media_gallery_by_slot: mediaGalleryBySlot,
     reviews: (reviews || []) as Review[],
@@ -787,6 +807,90 @@ export async function listPublishedProducts(): Promise<
     }
   }
   return params;
+}
+
+/**
+ * Pre-compute benefit-pill → review-id matches across the full
+ * (linked-product) corpus. Substring-matches each benefit's curated
+ * customer_phrases plus the AI-extracted top_benefits whose name
+ * overlaps (token-level). Only benefits with at least one match end up
+ * in the returned map — empty pills never reach the client.
+ *
+ * Phrase computation:
+ *   - benefit.customer_phrases — admin-curated language pulled from
+ *     real reviews
+ *   - review_analysis.top_benefits — AI-extracted clusters with their
+ *     own customer_phrases. Pulled in when a meaningful token in the
+ *     top_benefit's name overlaps a token in the benefit's name (so
+ *     "Energy & Performance" picks up AI's "Energy boost without
+ *     jitters" cluster and all its phrases).
+ */
+async function computeBenefitReviewMatches(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  reviewProductIds: string[],
+  benefits: BenefitSelection[],
+  analysis: ReviewAnalysis | null,
+): Promise<Record<string, string[]>> {
+  if (benefits.length === 0 || reviewProductIds.length === 0) return {};
+
+  const STOP_WORDS = new Set([
+    "the", "a", "an", "and", "or", "of", "to", "in", "for", "with",
+    "support", "supports", "health", "amp", "system",
+  ]);
+  const meaningfulTokens = (s: string) =>
+    s
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+
+  // Load every review body across linked products. Server-side only —
+  // the bodies never leave this function; we only ship the resulting
+  // ID lists to the client.
+  const { data: rows } = await admin
+    .from("product_reviews")
+    .select("id, body")
+    .eq("workspace_id", workspaceId)
+    .in("product_id", reviewProductIds)
+    .in("status", ["published", "featured"])
+    .not("body", "is", null);
+
+  const corpus: Array<{ id: string; body: string }> = (rows || []).map(
+    (r) => ({ id: String(r.id), body: String(r.body || "").toLowerCase() }),
+  );
+  if (corpus.length === 0) return {};
+
+  const topBenefits = analysis?.top_benefits || [];
+  const map: Record<string, string[]> = {};
+
+  for (const b of benefits) {
+    if (b.role !== "lead" && b.role !== "supporting") continue;
+
+    const phrases = new Set<string>();
+    for (const p of b.customer_phrases || []) {
+      if (p && p.trim()) phrases.add(p.trim().toLowerCase());
+    }
+
+    const benefitTokens = new Set(meaningfulTokens(b.benefit_name));
+    for (const tb of topBenefits) {
+      const tbTokens = meaningfulTokens(tb.benefit || "");
+      if (tbTokens.some((t) => benefitTokens.has(t))) {
+        for (const p of tb.customer_phrases || []) {
+          if (p && p.trim()) phrases.add(p.trim().toLowerCase());
+        }
+      }
+    }
+
+    if (phrases.size === 0) continue;
+
+    const phraseList = Array.from(phrases);
+    const matched: string[] = [];
+    for (const r of corpus) {
+      if (phraseList.some((p) => r.body.includes(p))) matched.push(r.id);
+    }
+    if (matched.length > 0) map[b.benefit_name] = matched;
+  }
+  return map;
 }
 
 /**
