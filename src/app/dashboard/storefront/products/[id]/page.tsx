@@ -249,9 +249,19 @@ export default function StorefrontProductDetailPage() {
                   <tr key={v.id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
                     <td className="py-2 pr-2">
                       <div className="flex items-center gap-2">
-                        {v.image_url && (
-                          <img src={v.image_url} alt="" className="h-8 w-8 rounded object-cover" />
-                        )}
+                        <VariantImageUploader
+                          workspaceId={workspace.id}
+                          productId={product.id}
+                          variantId={v.id}
+                          currentUrl={v.image_url}
+                          onChange={(url) => {
+                            setTableVariants((prev) =>
+                              prev.map((row) =>
+                                row.id === v.id ? { ...row, image_url: url } : row,
+                              ),
+                            );
+                          }}
+                        />
                         <span className="text-sm text-zinc-900 dark:text-zinc-100">{v.title || "Default"}</span>
                       </div>
                     </td>
@@ -291,6 +301,108 @@ function Card({ title, children, className = "" }: { title: string; children: Re
     <div className={`rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900 ${className}`}>
       <h3 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{title}</h3>
       <div className="space-y-1.5">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * Inline thumbnail-sized uploader for a single product_variants row.
+ * Click → file picker → POSTs the file to the variant-image endpoint
+ * which stores it and writes back the public URL. Shift-click clears
+ * the image. Used in the Variants table on the storefront product
+ * page so admins can upload the transparent PNG that powers the
+ * stacked pack visuals in the storefront price table.
+ */
+function VariantImageUploader({
+  workspaceId,
+  productId,
+  variantId,
+  currentUrl,
+  onChange,
+}: {
+  workspaceId: string;
+  productId: string;
+  variantId: string;
+  currentUrl: string | null;
+  onChange: (url: string | null) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+
+  const upload = async (file: File) => {
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/products/${productId}/variants/${variantId}/image`,
+        { method: "POST", body: fd },
+      );
+      if (!res.ok) throw new Error(await res.text());
+      const json = (await res.json()) as { image_url: string };
+      onChange(json.image_url);
+    } catch (err) {
+      console.error("variant image upload failed", err);
+      alert("Upload failed — try a PNG or JPG.");
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  const remove = async () => {
+    if (!currentUrl) return;
+    if (!confirm("Remove this variant image?")) return;
+    setBusy(true);
+    try {
+      await fetch(
+        `/api/workspaces/${workspaceId}/products/${productId}/variants/${variantId}/image`,
+        { method: "DELETE" },
+      );
+      onChange(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="relative">
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/avif"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) upload(f);
+        }}
+      />
+      <button
+        type="button"
+        onClick={(e) => {
+          if (e.shiftKey && currentUrl) {
+            remove();
+            return;
+          }
+          inputRef.current?.click();
+        }}
+        disabled={busy}
+        title={currentUrl ? "Click to replace · Shift-click to remove" : "Click to upload variant image"}
+        className={`flex h-10 w-10 items-center justify-center rounded-md border border-dashed transition-colors ${
+          currentUrl
+            ? "border-transparent bg-zinc-100 dark:bg-zinc-800"
+            : "border-zinc-300 bg-white hover:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
+        } ${busy ? "opacity-60" : ""}`}
+      >
+        {currentUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={currentUrl} alt="" className="h-9 w-9 rounded object-cover" />
+        ) : (
+          <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+            {busy ? "…" : "Add"}
+          </span>
+        )}
+      </button>
     </div>
   );
 }
