@@ -364,11 +364,11 @@ function SubscribeToggle({
       <div className="relative mx-auto flex max-w-xs items-center rounded-full border border-zinc-200 bg-white p-1 shadow-sm">
         {/* Most-popular badge floats above the Subscribe segment so
             it's clearly framed as the recommended default without
-            overflowing the toggle itself. */}
-        <span
-          style={{ backgroundColor: "var(--storefront-primary)" }}
-          className="absolute -top-3 left-1/4 -translate-x-1/2 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white shadow"
-        >
+            overflowing the toggle itself. Intentionally orange — pops
+            against the workspace primary instead of disappearing into
+            the CTA color, and "popular" reads warmer than the brand
+            green. */}
+        <span className="absolute -top-3 left-1/4 -translate-x-1/2 whitespace-nowrap rounded-full bg-orange-500 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white shadow">
           Most Popular
         </span>
         <button
