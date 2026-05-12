@@ -30,13 +30,30 @@ export async function POST(
   ]);
   if (!product?.handle) return NextResponse.json({ error: "Product not found" }, { status: 404 });
 
-  const paths: string[] = [];
-  if (ws?.storefront_slug) {
-    revalidatePath(`/store/${ws.storefront_slug}/${product.handle}`);
-    paths.push(`/store/${ws.storefront_slug}/${product.handle}`);
+  // Cascade to link-group siblings — see media route's
+  // revalidateProductAndLinkedSiblings for the rationale.
+  const ids = new Set<string>([productId]);
+  const { data: groups } = await admin
+    .from("product_link_members").select("group_id").eq("product_id", productId);
+  const groupIds = (groups || []).map(g => g.group_id);
+  if (groupIds.length) {
+    const { data: siblings } = await admin
+      .from("product_link_members").select("product_id").in("group_id", groupIds);
+    for (const s of siblings || []) ids.add(s.product_id as string);
   }
-  revalidatePath(`/${product.handle}`);
-  paths.push(`/${product.handle}`);
+  const { data: products } = await admin
+    .from("products").select("handle").in("id", Array.from(ids)).eq("workspace_id", workspaceId);
+
+  const paths: string[] = [];
+  for (const p of products || []) {
+    if (!p.handle) continue;
+    if (ws?.storefront_slug) {
+      revalidatePath(`/store/${ws.storefront_slug}/${p.handle}`);
+      paths.push(`/store/${ws.storefront_slug}/${p.handle}`);
+    }
+    revalidatePath(`/${p.handle}`);
+    paths.push(`/${p.handle}`);
+  }
 
   return NextResponse.json({ ok: true, paths });
 }

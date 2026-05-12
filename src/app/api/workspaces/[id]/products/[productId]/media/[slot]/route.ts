@@ -218,16 +218,57 @@ export async function POST(
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  // Revalidate storefront pages so the new image appears immediately
+  // Revalidate storefront pages so the new image appears immediately.
+  // Cascade to every product in any link group this product belongs to —
+  // a hero upload on K-Cups affects the toggle preview on Amazing Coffee,
+  // and vice versa. Without this, uploading a hero on one linked product
+  // updated only its own page; the sibling page rendering the toggle
+  // kept serving the stale (or null) image until its own next rebuild.
   try {
-    const { data: product } = await admin.from("products").select("handle").eq("id", productId).single();
     const { data: ws } = await admin.from("workspaces").select("storefront_slug").eq("id", workspaceId).single();
-    if (product?.handle && ws?.storefront_slug) {
-      revalidatePath(`/store/${ws.storefront_slug}/${product.handle}`);
-    }
+    const slug = ws?.storefront_slug || null;
+    await revalidateProductAndLinkedSiblings(admin, workspaceId, productId, slug);
   } catch { /* non-fatal */ }
 
   return NextResponse.json({ media: row });
+}
+
+/**
+ * Revalidate the storefront PDPs for a product and every product it
+ * shares a link group with. Public path (/{handle}) and admin preview
+ * path (/store/{ws_slug}/{handle}).
+ */
+async function revalidateProductAndLinkedSiblings(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  productId: string,
+  workspaceSlug: string | null,
+): Promise<void> {
+  // Find all product IDs that share a link group with this product.
+  const ids = new Set<string>([productId]);
+  const { data: groups } = await admin
+    .from("product_link_members")
+    .select("group_id")
+    .eq("product_id", productId);
+  const groupIds = (groups || []).map(g => g.group_id);
+  if (groupIds.length) {
+    const { data: siblings } = await admin
+      .from("product_link_members")
+      .select("product_id")
+      .in("group_id", groupIds);
+    for (const s of siblings || []) ids.add(s.product_id as string);
+  }
+  // Pull handles + scope to this workspace
+  const { data: products } = await admin
+    .from("products")
+    .select("handle")
+    .in("id", Array.from(ids))
+    .eq("workspace_id", workspaceId);
+  for (const p of products || []) {
+    if (!p.handle) continue;
+    if (workspaceSlug) revalidatePath(`/store/${workspaceSlug}/${p.handle}`);
+    revalidatePath(`/${p.handle}`);
+  }
 }
 
 export async function PATCH(
