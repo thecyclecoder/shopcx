@@ -46,7 +46,8 @@ body {
 .storefront-root h3,
 .storefront-root h4,
 .storefront-root h5,
-.storefront-root h6 {
+.storefront-root h6,
+.storefront-display {
   font-family: var(--storefront-heading-font);
 }
 
