@@ -26,11 +26,11 @@ export function ComparisonSection({ data }: { data: PageData }) {
 
         <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm">
           <div className="grid grid-cols-2">
-            {/* Column headers */}
-            <div
-              style={{ backgroundColor: "var(--storefront-primary)" }}
-              className="px-4 py-4 text-center text-white sm:px-6 sm:py-5"
-            >
+            {/* Column headers. Intentionally not using the CTA primary
+                color — that's reserved for actual click targets so it
+                continues to pop. Dark neutral on our side, light on
+                the alternative side, still gives a clear contrast. */}
+            <div className="bg-zinc-900 px-4 py-4 text-center text-white sm:px-6 sm:py-5">
               <div className="text-base font-extrabold uppercase tracking-wide sm:text-lg">
                 {productName}
               </div>
@@ -89,11 +89,10 @@ function ComparisonRow({
 }
 
 function CheckIcon() {
+  // Neutral emerald — universally read as "✓ correct/good" without
+  // borrowing the CTA primary color (kept exclusive to click targets).
   return (
-    <span
-      style={{ backgroundColor: "color-mix(in srgb, var(--storefront-primary), white 80%)", color: "var(--storefront-primary)" }}
-      className="mt-0.5 inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full"
-    >
+    <span className="mt-0.5 inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-emerald-50 text-emerald-700">
       <svg
         width="14"
         height="14"

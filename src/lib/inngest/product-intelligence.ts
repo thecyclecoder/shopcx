@@ -560,14 +560,15 @@ RULES:
       * Never invent customer quotes.
 - FAQ: 5-8 items.
 - Compare to generic alternatives — never name competitor brands.
-- comparison_table_rows: the storefront renders only `us` vs
-  `competitor_generic` — the `feature` column is no longer shown. Each
-  string on its OWN must imply what's being compared. Write the `us`
-  side as a complete claim ("12 functional ingredients", "165mg natural
-  energy from coffee + matcha") and the `competitor_generic` side as a
-  parallel-shaped negation ("Just caffeine", "Synthetic caffeine
-  only"). Keep `feature` populated as an internal label, but assume
-  the customer never sees it.
+- comparison_table_rows: the storefront renders only the 'us' vs
+  'competitor_generic' columns — the 'feature' column is no longer
+  shown. Each string on its OWN must imply what is being compared.
+  Write the 'us' side as a complete claim ('12 functional ingredients',
+  '165mg natural energy from coffee + matcha') and the
+  'competitor_generic' side as a parallel-shaped negation
+  ('Just caffeine', 'Synthetic caffeine only'). Keep the 'feature'
+  field populated as an internal label, but assume the customer never
+  sees it.
 - Never invent customer quotes.
 - Macros: always write in plain, accurate, professional customer support voice.`;
 
