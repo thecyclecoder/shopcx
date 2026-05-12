@@ -131,6 +131,24 @@ export async function POST(
   const webpUrl = webpPath ? urlFor(webpPath) : null;
   const avifUrl = avifPath ? urlFor(avifPath) : null;
 
+  // display_order is set further down; pre-compute it here so we can
+  // scope the "remove prior files" query to THIS specific display_order
+  // slot. Without the display_order filter, gallery uploads (where the
+  // same slot has multiple rows at different display_orders) clobber
+  // sibling rows' storage:
+  //   - Upload image #2 at display_order=1
+  //   - maybeSingle() returns display_order=0's row (since that's the
+  //     only existing row at that point)
+  //   - cleanup deletes all of display_order=0's files because they
+  //     aren't in image #2's new paths
+  //   - display_order=0's DB row stays intact, pointing at gone files
+  // Surfaced on the Amazing Coffee hero gallery: main image renders
+  // from CDN cache while the actual storage objects are gone.
+  const requestedOrderForCleanup = parseInt((formData.get("display_order") as string) || "0", 10);
+  const displayOrderForCleanup = Number.isFinite(requestedOrderForCleanup) && requestedOrderForCleanup >= 0
+    ? requestedOrderForCleanup
+    : 0;
+
   // Remove prior files so storage doesn't accumulate orphans.
   const { data: existing } = await admin
     .from("product_media")
@@ -140,6 +158,7 @@ export async function POST(
     .eq("workspace_id", workspaceId)
     .eq("product_id", productId)
     .eq("slot", slot)
+    .eq("display_order", displayOrderForCleanup)
     .maybeSingle();
 
   const newPaths = new Set(
@@ -180,13 +199,8 @@ export async function POST(
   }
 
   // display_order: 0 = main image; 1+ = additional gallery slots.
-  // If not specified (or 0), upsert at display_order=0 (single-image
-  // backward-compat path used by every non-gallery slot). If specified,
-  // we treat each (slot, display_order) as its own row — supports the
-  // hero gallery use case where the same product can have multiple
-  // hero images.
-  const requestedOrder = parseInt((formData.get("display_order") as string) || "0", 10);
-  const displayOrder = Number.isFinite(requestedOrder) && requestedOrder >= 0 ? requestedOrder : 0;
+  // Already parsed above for the cleanup query — reuse.
+  const displayOrder = displayOrderForCleanup;
 
   const { data: row, error } = await admin
     .from("product_media")
