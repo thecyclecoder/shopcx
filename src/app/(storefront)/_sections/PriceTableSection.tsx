@@ -119,6 +119,13 @@ interface DisplayTier {
   is_highlighted: boolean;
   /** Cached % off for the "Save N%" pill in subscribe mode. */
   subscribe_discount_pct: number | null;
+  /**
+   * MSRP for the whole tier (base variant price × quantity, with no
+   * discounts applied). The "Save N%" badge and the strikethrough
+   * compare against this so quantity + subscribe discounts stack.
+   * Null when we can't infer base price (legacy tiers).
+   */
+  msrp_total_cents: number | null;
 }
 
 function buildTiersFromRule(
@@ -149,6 +156,7 @@ function buildTiersFromRule(
       per_unit_cents: perUnit,
       badge: i === middle && rule.quantity_breaks.length >= 3 ? "Most Popular" : null,
       is_highlighted: i === middle && rule.quantity_breaks.length >= 3,
+      msrp_total_cents: subtotal,
     };
   });
 }
@@ -165,6 +173,9 @@ function legacyToDisplay(t: PricingTier): DisplayTier {
     per_unit_cents: t.per_unit_cents ?? Math.round(t.price_cents / Math.max(1, t.quantity)),
     badge: t.badge,
     is_highlighted: t.is_highlighted,
+    // Legacy tiers don't carry an MSRP. The savings badge will hide
+    // for these unless we infer it from per_unit × quantity.
+    msrp_total_cents: null,
   };
 }
 
@@ -185,19 +196,42 @@ function PriceCard({
     ? Math.round(tier.subscribe_price_cents / Math.max(1, tier.quantity))
     : tier.per_unit_cents;
 
-  const subDiscount = tier.subscribe_discount_pct ?? 25;
+  // Total savings vs MSRP: combines the quantity-break discount AND
+  // (when subscribing) the subscribe-save discount. We compare the
+  // current displayed price against MSRP (base × quantity) so a
+  // 3-pack subscribe shows the real ~36% off, not just the bare 25%
+  // subscribe discount.
+  const msrp = tier.msrp_total_cents;
+  const savingsCents = msrp != null ? msrp - price : 0;
+  const savingsPct = msrp != null && msrp > 0
+    ? Math.round(((msrp - price) / msrp) * 100)
+    : 0;
+  const showSavings = msrp != null && savingsCents > 0;
 
-  // Perk visibility — rule decides whether free shipping / free gift
-  // apply only when subscribing, and the gift further requires the
-  // tier qty to meet the rule's min-quantity gate.
-  const freeShipApplies = rule?.free_shipping
-    ? rule.free_shipping_subscription_only
-      ? showSubscribe
-      : true
-    : false;
-  const giftApplies = !!rule?.free_gift_variant_id
-    && tier.quantity >= (rule.free_gift_min_quantity || 1)
-    && (!rule.free_gift_subscription_only || showSubscribe);
+  // Perk visibility — the rule decides whether free shipping / free
+  // gift apply only when subscribing, and the gift further requires
+  // the tier qty to meet the rule's min-quantity gate.
+  //
+  // We render in three states per perk:
+  //   - exists + appliesNow → green check + plain label
+  //   - exists + sub-only + onetime mode → red X + "Only with
+  //     Subscribe & Save" annotation (motivates the upsell)
+  //   - doesn't exist OR fails a non-subscription gate (e.g. min qty)
+  //     → hide the row entirely
+  const freeShipExists = !!rule?.free_shipping;
+  const freeShipApplies = freeShipExists
+    && (!rule?.free_shipping_subscription_only || showSubscribe);
+  const freeShipSubLocked = freeShipExists
+    && !!rule?.free_shipping_subscription_only
+    && !showSubscribe;
+
+  const giftQtyOk = tier.quantity >= (rule?.free_gift_min_quantity || 1);
+  const giftExists = !!rule?.free_gift_variant_id && giftQtyOk;
+  const giftApplies = giftExists
+    && (!rule?.free_gift_subscription_only || showSubscribe);
+  const giftSubLocked = giftExists
+    && !!rule?.free_gift_subscription_only
+    && !showSubscribe;
 
   return (
     <div
@@ -219,13 +253,13 @@ function PriceCard({
 
       <div className="text-lg font-semibold text-zinc-900">{tier.tier_name}</div>
 
-      <div className="mt-3 flex items-baseline gap-1">
+      <div className="mt-3 flex items-baseline gap-2">
         <span className="text-4xl font-bold text-zinc-900">
           ${(price / 100).toFixed(2)}
         </span>
-        {showSubscribe && (
+        {showSavings && msrp != null && (
           <span className="text-sm text-zinc-500 line-through">
-            ${(tier.price_cents / 100).toFixed(2)}
+            ${(msrp / 100).toFixed(2)}
           </span>
         )}
       </div>
@@ -234,28 +268,45 @@ function PriceCard({
         ${(perUnit / 100).toFixed(2)} each · {tier.quantity} pack
       </div>
 
-      {showSubscribe && (
+      {showSavings && (
         <div className="mt-2 inline-flex w-fit rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">
-          Save {subDiscount}%
+          Save {savingsPct}%
+          {" · $"}
+          {(savingsCents / 100).toFixed(2)}
         </div>
       )}
 
-      <ul className="mt-5 space-y-2 text-sm text-zinc-700">
-        {freeShipApplies && (
-          <li className="flex items-center gap-2">
-            <CheckIcon /> Free shipping
-            {rule?.free_shipping_subscription_only && (
-              <span className="text-xs text-zinc-500">(on subscriptions)</span>
-            )}
+      <ul className="mt-5 space-y-2.5 text-sm text-zinc-700">
+        {(freeShipApplies || freeShipSubLocked) && (
+          <li className="flex items-start gap-2">
+            {freeShipApplies ? <CheckIcon /> : <XIcon />}
+            <span>
+              Free shipping
+              {freeShipSubLocked && (
+                <span className="ml-1 text-xs text-zinc-500">
+                  (Only with Subscribe &amp; Save)
+                </span>
+              )}
+            </span>
           </li>
         )}
-        {giftApplies && rule?.free_gift_product_title && (
-          <li className="flex items-center gap-2">
-            <CheckIcon />
-            <span>
+        {(giftApplies || giftSubLocked) && rule?.free_gift_product_title && (
+          <li className="flex items-start gap-2">
+            {giftApplies ? <CheckIcon /> : <XIcon />}
+            {rule.free_gift_image_url && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={rule.free_gift_image_url}
+                alt=""
+                className="h-8 w-8 flex-shrink-0 rounded-md object-cover"
+              />
+            )}
+            <span className="flex-1">
               Free {rule.free_gift_product_title}
-              {rule.free_gift_subscription_only && (
-                <span className="ml-1 text-xs text-zinc-500">(on subscriptions)</span>
+              {giftSubLocked && (
+                <span className="ml-1 text-xs text-zinc-500">
+                  (Only with Subscribe &amp; Save)
+                </span>
               )}
             </span>
           </li>
@@ -487,10 +538,33 @@ function CheckIcon() {
       strokeWidth="2.5"
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="flex-shrink-0 text-emerald-600"
+      className="mt-0.5 flex-shrink-0 text-emerald-600"
       aria-hidden="true"
     >
       <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+// Red X for perks that exist on the rule but aren't granted on this
+// mode — pairs with the "(Only with Subscribe & Save)" annotation so
+// the lock-out reads as an upsell, not a missing feature.
+function XIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="mt-0.5 flex-shrink-0 text-rose-500"
+      aria-hidden="true"
+    >
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
     </svg>
   );
 }

@@ -50,6 +50,15 @@ interface Variant {
   position: number;
 }
 
+// Shopify uses "Default Title" as the variant title for products with
+// no real variants (e.g. a mixer with no flavor options). It's a
+// placeholder, not a name we should ever show customers — strip it
+// everywhere a variant label might surface.
+function isRealVariantTitle(t: string | null | undefined): boolean {
+  if (!t) return false;
+  return t.trim().toLowerCase() !== "default title";
+}
+
 export default function PricingRulesPage() {
   const workspace = useWorkspace();
   const [rules, setRules] = useState<PricingRule[]>([]);
@@ -179,9 +188,9 @@ function RuleCard({
     const v = variants.find((x) => x.id === giftVariantId || x.shopify_variant_id === giftVariantId);
     const p = v ? productById.get(v.product_id) : null;
     const giftTitle = v
-      ? v.title && p && v.title !== p.title
+      ? isRealVariantTitle(v.title) && p && v.title !== p.title
         ? `${p.title} — ${v.title}`
-        : p?.title || v.title || ""
+        : p?.title || (isRealVariantTitle(v.title) ? v.title : "") || ""
       : null;
     const giftImage = v?.image_url || p?.image_url || null;
 
@@ -359,9 +368,9 @@ function RuleCard({
                 {variants.map((v) => {
                   const p = productById.get(v.product_id);
                   const label =
-                    v.title && p && v.title !== p.title
+                    isRealVariantTitle(v.title) && p && v.title !== p.title
                       ? `${p?.title} — ${v.title}`
-                      : p?.title || v.title || v.id;
+                      : p?.title || (isRealVariantTitle(v.title) ? v.title : "") || v.id;
                   return (
                     <option key={v.id} value={v.id}>
                       {label}
