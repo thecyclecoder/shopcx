@@ -1,23 +1,19 @@
 /**
  * Visualize a tier's quantity by stacking the variant's transparent
- * PNG. Bag size stays constant across 1/2/3-pack — only the overlap
- * changes. The cream-tinted box clips any spillover so the cluster
- * reads as a curated "display" rather than a row of perfectly framed
- * thumbnails. One image drives all the pack visuals; no separate
- * stacked-render assets needed.
+ * PNG inside a cream display box. One bag is the "prominent" hero;
+ * the rest sit behind at reduced opacity + 10% smaller scale so the
+ * cluster reads as one product with supporting copies, not a flat
+ * lineup of equally-weighted bags.
  *
- * Math:
- *   - bag width is a fixed 65% of the container at every count, so a
- *     2-bag pack and a 3-bag pack both feature life-size bags.
- *   - overlap percentage grows with count so the cluster compresses
- *     into the box; for the 3-pack, outer bags crop ~10% on each
- *     side — intentional, communicates "fully stocked" rather than
- *     "this is too small to fit".
+ * Prominent bag:
+ *   - 1 pack: the only bag, dead-center.
+ *   - 2 pack: the first/left bag (overlap shows the second peeking
+ *     behind it on the right).
+ *   - 3 pack: the middle bag (others fade behind on each side).
  *
- *  1: 65% centered, no overlap.
- *  2: 65% + 65% with 20% overlap = 110% (mild bleed, ~5% per side).
- *  3: 65% + 65% + 65% with 30% overlap = 135% (clear bleed, ~17% per
- *     side — bags peek off the edges like product on a shelf).
+ * Non-prominent bags get opacity 0.75 + scale 0.9; prominent bag is
+ * full opacity + full size with the highest z-index so it always
+ * sits on top regardless of DOM order.
  *
  * Caps the visible count at 3 — beyond that the cluster looks busy
  * and the tier label already communicates the exact pack count.
@@ -35,24 +31,33 @@ export function PackageStack({
 
   const visible = Math.min(count, 3);
   const items = Array.from({ length: visible });
-  const center = Math.floor((visible - 1) / 2);
+  // Which index is the prominent / hero bag:
+  //   1 visible → index 0
+  //   2 visible → index 0 (left bag prominent, right peeks behind)
+  //   3 visible → index 1 (middle prominent, outer two fade behind)
+  const promIndex = visible === 3 ? 1 : 0;
 
-  // Fixed bag size across counts; only overlap changes.
+  // Fixed hero bag size; non-prominent shrink 10%. Overlap grows
+  // with count so the cluster tightens — 2-pack pulls the second bag
+  // partly behind the first, 3-pack tucks both outer bags behind the
+  // middle.
   const BAG_WIDTH_PCT = 65;
-  const overlapPct = visible <= 1 ? 0 : visible === 2 ? 20 : 30;
+  const overlapPct = visible <= 1 ? 0 : visible === 2 ? 35 : 30;
 
   return (
     <div
       className={`relative mx-auto flex h-full w-full items-end justify-center overflow-hidden rounded-xl bg-amber-50 ring-1 ring-amber-100/60 ${className}`}
     >
       {items.map((_, i) => {
-        const offset = i - center;
-        // Outer bags tilt slightly so the eye reads multiple discrete
-        // units instead of one wide blob. No size variance between
-        // them — every bag is the same scale.
-        const rotate = offset === 0 ? 0 : offset * 5;
-        const translateY = offset === 0 ? 0 : 6;
-        const z = visible - Math.abs(offset);
+        const isProm = i === promIndex;
+        const offset = i - promIndex;
+        const rotate = isProm ? 0 : offset * 5;
+        const scale = isProm ? 1 : 0.9;
+        const opacity = isProm ? 1 : 0.75;
+        const translateY = isProm ? 0 : 8;
+        // Binary z-index — depth comes from scale + opacity, but the
+        // prominent bag must always paint on top of its neighbors.
+        const z = isProm ? 10 : 1;
 
         return (
           // eslint-disable-next-line @next/next/no-img-element
@@ -66,7 +71,8 @@ export function PackageStack({
             className="h-auto object-contain drop-shadow-md"
             style={{
               width: `${BAG_WIDTH_PCT}%`,
-              transform: `translateY(${translateY}px) rotate(${rotate}deg)`,
+              opacity,
+              transform: `translateY(${translateY}px) rotate(${rotate}deg) scale(${scale})`,
               transformOrigin: "bottom center",
               marginLeft: i === 0 ? 0 : `-${overlapPct}%`,
               zIndex: z,
