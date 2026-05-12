@@ -38,15 +38,16 @@ export function ShopCTA({
       : "Shop now");
 
   const isPrimary = variant === "primary";
-  // Build a subtle gradient from the workspace primary color to a
-  // slightly darker version of itself. color-mix preserves whatever
-  // hue the workspace picked — no hardcoded shades — and the angle
-  // gives the button a glossy, three-dimensional feel.
+  // Gradient pulls from a lighter shade of the workspace primary to
+  // a noticeably darker one — color-mix preserves the hue so any
+  // workspace color works. Three stops + a 145° angle give a real
+  // glossy sheen rather than the previous subtle drift.
   const buttonStyle = isPrimary
     ? {
         background:
-          "linear-gradient(135deg, var(--storefront-primary) 0%, color-mix(in srgb, var(--storefront-primary), black 22%) 100%)",
+          "linear-gradient(145deg, color-mix(in srgb, var(--storefront-primary), white 14%) 0%, var(--storefront-primary) 45%, color-mix(in srgb, var(--storefront-primary), black 38%) 100%)",
         fontFamily: "var(--storefront-heading-font)",
+        textShadow: "0 1px 2px rgba(0, 0, 0, 0.30), 0 0 1px rgba(0, 0, 0, 0.15)",
       }
     : { fontFamily: "var(--storefront-heading-font)" };
   const buttonClasses = isPrimary
@@ -66,7 +67,14 @@ export function ShopCTA({
     <div className={`flex flex-col items-center gap-3 ${desktopItemsClass} ${className}`}>
       <a href={href} style={isPrimary ? buttonStyle : inverseColorStyle} className={buttonClasses}>
         <span>{resolvedLabel}</span>
-        <span aria-hidden="true" className="-ml-0.5 inline-block translate-x-0 text-[1.1em] leading-none transition-transform duration-200 group-hover:translate-x-1">
+        {/* The » glyph has an optical baseline higher than uppercase
+            letters in Montserrat — nudge it down so it visually centers
+            against the text cap-height. Inline-flex on the parent
+            handles horizontal alignment. */}
+        <span
+          aria-hidden="true"
+          className="-ml-0.5 inline-block translate-y-[0.06em] text-[1.15em] transition-transform duration-200 group-hover:translate-x-1"
+        >
           »
         </span>
       </a>
