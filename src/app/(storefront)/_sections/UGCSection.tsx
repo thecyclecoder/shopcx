@@ -22,13 +22,16 @@ export function UGCSection({ data }: { data: PageData }) {
   const hasPair = !!(beforeImg && afterImg);
 
   // Featured-only — the admin-curated transformation stories.
-  const featured = data.reviews.filter((r) => r.status === "featured" || r.featured === true);
+  // Cap at 8: 2 alongside the before/after, then 2 rows of 3 below.
+  // Section keeps a tight social-proof beat without becoming a wall.
+  const allFeatured = data.reviews.filter((r) => r.status === "featured" || r.featured === true);
+  const featured = allFeatured.slice(0, 8);
 
   if (!hasPair && featured.length === 0) return null;
 
-  // Split: first 2-3 sit alongside the before/after on desktop, the
-  // remainder flow into a grid below.
-  const sideBySideCount = hasPair ? 2 : 0;  // 2 reviews next to the pair
+  // Split: first 2 sit alongside the before/after on desktop, the
+  // remaining 6 flow into a 3-col grid below.
+  const sideBySideCount = hasPair ? 2 : 0;
   const sideReviews = featured.slice(0, sideBySideCount);
   const restReviews = featured.slice(sideBySideCount);
 
