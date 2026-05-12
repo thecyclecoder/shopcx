@@ -25,19 +25,78 @@ export function ReviewsSection({
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<string | null>(null);
 
-  const availableFilters = useMemo(() => {
-    const set = new Set<string>();
+  // For each benefit, build a keyword set from customer_phrases on the
+  // benefit selection PLUS the AI-extracted top_benefits whose name
+  // overlaps. Substring match against the benefit_name alone almost
+  // never hits review bodies (admin labels like "Cardiovascular Health"
+  // don't appear verbatim in real reviews), so without this the pills
+  // showed empty results and damaged trust. Pills with zero matches
+  // in the loaded set are hidden — guarantees every visible pill works.
+  const STOP_WORDS = new Set([
+    "the", "a", "an", "and", "or", "of", "to", "in", "for", "with",
+    "support", "supports", "health", "amp", "system",
+  ]);
+  const meaningfulTokens = (s: string) =>
+    s
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+
+  const benefitMatches = useMemo(() => {
+    const map: Record<string, string[]> = {};
+    const topBenefits = data.review_analysis?.top_benefits || [];
+
     for (const b of data.benefit_selections) {
-      if (b.role === "lead" || b.role === "supporting") set.add(b.benefit_name);
+      if (b.role !== "lead" && b.role !== "supporting") continue;
+
+      const phrases = new Set<string>();
+      for (const p of b.customer_phrases || []) {
+        if (p && p.trim()) phrases.add(p.trim().toLowerCase());
+      }
+
+      // Fuzzy-match top_benefits by name token overlap so admin's
+      // "Energy & Performance" picks up AI's "Energy boost without jitters"
+      // and all the customer phrases that came with it.
+      const benefitTokens = new Set(meaningfulTokens(b.benefit_name));
+      for (const tb of topBenefits) {
+        const tbTokens = meaningfulTokens(tb.benefit || "");
+        const overlap = tbTokens.some((t) => benefitTokens.has(t));
+        if (overlap) {
+          for (const p of tb.customer_phrases || []) {
+            if (p && p.trim()) phrases.add(p.trim().toLowerCase());
+          }
+        }
+      }
+
+      if (phrases.size === 0) continue;
+
+      const matched: string[] = [];
+      const phraseList = Array.from(phrases);
+      for (const r of reviews) {
+        const body = (r.body || "").toLowerCase();
+        if (phraseList.some((p) => body.includes(p))) matched.push(r.id);
+      }
+      if (matched.length > 0) map[b.benefit_name] = matched;
     }
-    return Array.from(set).slice(0, 6);
-  }, [data.benefit_selections]);
+    return map;
+  }, [reviews, data.benefit_selections, data.review_analysis]);
+
+  const availableFilters = useMemo(() => {
+    return data.benefit_selections
+      .filter(
+        (b) =>
+          (b.role === "lead" || b.role === "supporting") &&
+          (benefitMatches[b.benefit_name]?.length || 0) > 0,
+      )
+      .map((b) => b.benefit_name)
+      .slice(0, 6);
+  }, [data.benefit_selections, benefitMatches]);
 
   const filtered = useMemo(() => {
     if (!filter) return reviews;
-    const needle = filter.toLowerCase();
-    return reviews.filter((r) => (r.body || "").toLowerCase().includes(needle));
-  }, [reviews, filter]);
+    const ids = new Set(benefitMatches[filter] || []);
+    return reviews.filter((r) => ids.has(r.id));
+  }, [reviews, filter, benefitMatches]);
 
   const loadMore = useCallback(async () => {
     setLoading(true);
