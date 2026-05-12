@@ -1458,9 +1458,42 @@ function ContentStage({
           value={fieldValue("mechanism_copy") || ""}
           onChange={(e) => setField("mechanism_copy", e.target.value)}
           disabled={!editable}
-          rows={4}
+          rows={6}
           className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
         />
+        <p className="mt-1.5 text-[11px] text-zinc-500">
+          Powers the &quot;Why this works&quot; section on the PDP. Should deliver on every chip in the Benefit Bar above.
+        </p>
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/regenerate-field`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ field: "mechanism_copy" }),
+                });
+                if (!res.ok) {
+                  setError((await res.json()).error || "Regen failed");
+                } else {
+                  const { value } = await res.json();
+                  setField("mechanism_copy", value);
+                  onChange();
+                }
+              } finally {
+                setBusy(false);
+              }
+            }}
+            className="rounded-md border border-indigo-500 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-600 hover:bg-indigo-50 disabled:opacity-50 dark:bg-zinc-900"
+          >
+            {busy ? "Regenerating…" : "Regenerate from Benefit Bar"}
+          </button>
+          <p className="text-[10px] text-zinc-500">Rewrites this field only — hero copy stays untouched.</p>
+        </div>
       </ContentField>
 
       <ContentField label="Ingredient Cards" editable={editable}>

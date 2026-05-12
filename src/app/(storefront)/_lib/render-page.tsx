@@ -6,7 +6,6 @@ import { pictureSources } from "./image-urls";
 // Above-the-fold: imported directly, rendered in initial HTML, part of
 // main JS bundle (or zero JS, for server components).
 import { HeroSection } from "../_sections/HeroSection";
-import { MechanismSection } from "../_sections/MechanismSection";
 import { HowItWorksSection } from "../_sections/HowItWorksSection";
 
 // Below-the-fold: server components still render into the initial
@@ -113,7 +112,10 @@ export function StorefrontPage({
 
       <main className="flex w-full flex-col">
         <HeroSection data={data} />
-        <MechanismSection data={data} />
+        {/* HowItWorksSection ("Why this works") now absorbs what
+            MechanismSection used to render — single block below the
+            hero with image + CTA. MechanismSection still exists in
+            the codebase but is no longer in the flow. */}
         <HowItWorksSection data={data} />
         <PriceTableSection data={data} />
         <UGCSection data={data} />

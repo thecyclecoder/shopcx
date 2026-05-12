@@ -538,6 +538,15 @@ RULES:
 - Hero headline: outcome language from customer reviews, not clinical language.
 - Never claim benefits with confidence < 0.5 as primary claims.
 - benefit_bar: exactly 4-6 items; lead benefits first.
+- mechanism_copy: must directly deliver on EVERY item in benefit_bar.
+    This block renders as the 'Why this works' section right below the
+    hero, so the copy has to make the customer feel that the benefit
+    chips on the hero are real. Open with one connective sentence, then
+    explain (in plain outcome language) HOW the formulation produces
+    each benefit chip — in the same order as benefit_bar. Reference
+    ingredients/mechanisms only when they tie directly to a chip; never
+    introduce unrelated science. 4-6 short sentences total, no
+    paragraph longer than 2 sentences.
 - FAQ: 5-8 items.
 - Compare to generic alternatives — never name competitor brands.
 - Never invent customer quotes.
