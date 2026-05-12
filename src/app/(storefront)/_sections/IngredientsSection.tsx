@@ -1,5 +1,6 @@
 import type { PageData } from "../_lib/page-data";
 import { Picture } from "../_components/PictureHero";
+import { ShopCTA } from "../_components/ShopCTA";
 
 /**
  * Ingredients deep dive. Uses native <details>/<summary> for the expand/
@@ -11,6 +12,10 @@ export function IngredientsSection({ data }: { data: PageData }) {
   // reconciled yet.
   const ingredients = data.ingredients;
   if (ingredients.length === 0) return null;
+
+  const lowestPrice = data.pricing_tiers.length
+    ? Math.min(...data.pricing_tiers.map((t) => t.subscribe_price_cents ?? t.price_cents))
+    : null;
 
   const researchById = new Map<string, typeof data.ingredient_research>();
   for (const r of data.ingredient_research) {
@@ -104,6 +109,10 @@ export function IngredientsSection({ data }: { data: PageData }) {
               </details>
             );
           })}
+        </div>
+
+        <div className="mt-10 flex justify-center md:mt-14">
+          <ShopCTA lowestPriceCents={lowestPrice} align="center" />
         </div>
       </div>
     </section>

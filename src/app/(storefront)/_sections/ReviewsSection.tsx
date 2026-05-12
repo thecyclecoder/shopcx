@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { PageData, Review } from "../_lib/page-data";
 import { fetchReviewsBootstrap } from "../_lib/reviews-bootstrap-cache";
 import { StarRating } from "../_components/StarRating";
+import { ShopCTA } from "../_components/ShopCTA";
 
 /**
  * Full reviews list with benefit-pill filters.
@@ -27,6 +28,7 @@ export function ReviewsSection({
   workspaceSlug: string;
   slug: string;
 }) {
+  const PAGE_SIZE = 6;
   const initial = data.reviews.slice(0, 30);
   const [reviews, setReviews] = useState<Review[]>(initial);
   const [matches, setMatches] = useState<Record<string, string[]>>(
@@ -37,6 +39,15 @@ export function ReviewsSection({
   const [loading, setLoading] = useState(false);
   const [pillLoading, setPillLoading] = useState(false);
   const [filter, setFilter] = useState<string | null>(null);
+  // How many reviews to actually display. Starts at 6, grows by 6
+  // per "Show more" click. We over-fetch (30 on bootstrap, 12 per
+  // server load) so most clicks are instant slice operations — only
+  // hits the network when we've shown everything currently in state.
+  const [displayLimit, setDisplayLimit] = useState(PAGE_SIZE);
+
+  const lowestPrice = data.pricing_tiers.length
+    ? Math.min(...data.pricing_tiers.map((t) => t.subscribe_price_cents ?? t.price_cents))
+    : null;
 
   // Refresh on mount so new reviews + featured updates appear without
   // an ISR cycle. We replace state outright when the server returns —
@@ -91,6 +102,17 @@ export function ReviewsSection({
     return result;
   }, [filter, matches, loadedById, reviews]);
 
+  // Reset to 6 visible whenever the filter changes — switching filters
+  // shouldn't carry over a deep scroll position from the previous list.
+  useEffect(() => {
+    setDisplayLimit(PAGE_SIZE);
+  }, [filter]);
+
+  const visible = useMemo(
+    () => filtered.slice(0, displayLimit),
+    [filtered, displayLimit],
+  );
+
   // Lazy-fetch missing matched reviews when a filter is selected.
   useEffect(() => {
     if (!filter) return;
@@ -126,6 +148,19 @@ export function ReviewsSection({
   }, [filter, matches, loadedById, workspaceSlug, slug]);
 
   const loadMore = useCallback(async () => {
+    const nextLimit = displayLimit + PAGE_SIZE;
+    // If we already have enough loaded to reveal the next 6, just slide
+    // the display window — no network round-trip.
+    if (nextLimit <= filtered.length) {
+      setDisplayLimit(nextLimit);
+      return;
+    }
+    // Need more reviews from the server. Only applies in the unfiltered
+    // case; the filter path lazy-fetches matched IDs in its own effect.
+    if (filter) {
+      setDisplayLimit(nextLimit);
+      return;
+    }
     setLoading(true);
     try {
       const res = await fetch(
@@ -144,15 +179,19 @@ export function ReviewsSection({
         });
         setOffset((prev) => prev + body.reviews.length);
         setTotal(body.total || total);
+        setDisplayLimit(nextLimit);
       }
     } catch {
       /* swallow */
     } finally {
       setLoading(false);
     }
-  }, [workspaceSlug, slug, offset, total]);
+  }, [workspaceSlug, slug, offset, total, displayLimit, filtered.length, filter]);
 
-  const hasMore = !filter && reviews.length < total;
+  // Show "Show more" while there's still content to reveal — either
+  // unrevealed items already in state, or more on the server (unfiltered).
+  const hasMore =
+    displayLimit < filtered.length || (!filter && reviews.length < total);
   if (initial.length === 0) return null;
 
   return (
@@ -209,7 +248,7 @@ export function ReviewsSection({
         )}
 
         <div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
-          {filtered.map((r) => (
+          {visible.map((r) => (
             <article
               key={r.id}
               className="rounded-2xl border border-zinc-200 bg-white p-5"
@@ -244,10 +283,14 @@ export function ReviewsSection({
               disabled={loading}
               className="inline-flex h-12 items-center justify-center rounded-full border border-zinc-300 bg-white px-6 text-sm font-semibold text-zinc-900 transition-colors hover:border-zinc-900 disabled:opacity-50"
             >
-              {loading ? "Loading..." : "Load more reviews"}
+              {loading ? "Loading..." : "Show more reviews"}
             </button>
           </div>
         )}
+
+        <div className="mt-10 flex justify-center md:mt-14">
+          <ShopCTA lowestPriceCents={lowestPrice} align="center" />
+        </div>
       </div>
     </section>
   );

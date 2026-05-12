@@ -2,12 +2,17 @@
 
 import { useState } from "react";
 import type { PageData } from "../_lib/page-data";
+import { ShopCTA } from "../_components/ShopCTA";
 
 export function FAQSection({ data }: { data: PageData }) {
   const items = data.page_content?.faq_items || [];
   const [openIdx, setOpenIdx] = useState<number | null>(0);
 
   if (items.length === 0) return null;
+
+  const lowestPrice = data.pricing_tiers.length
+    ? Math.min(...data.pricing_tiers.map((t) => t.subscribe_price_cents ?? t.price_cents))
+    : null;
 
   return (
     <section data-section="faq" className="w-full bg-white py-12 sm:py-16">
@@ -46,6 +51,10 @@ export function FAQSection({ data }: { data: PageData }) {
               </div>
             );
           })}
+        </div>
+
+        <div className="mt-10 flex justify-center md:mt-14">
+          <ShopCTA lowestPriceCents={lowestPrice} align="center" />
         </div>
       </div>
     </section>

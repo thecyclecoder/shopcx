@@ -1,5 +1,6 @@
 import type { PageData, MediaItem } from "../_lib/page-data";
 import { Picture } from "../_components/PictureHero";
+import { ShopCTA } from "../_components/ShopCTA";
 
 /**
  * Per-product nutritionist endorsements — up to 3 expert cards rendered
@@ -22,6 +23,10 @@ export function NutritionistEndorsementSection({ data }: { data: PageData }) {
   // Cap at 3 — the grid is sized for that and more would crowd the
   // section. Admins can rearrange order in the dashboard.
   const cards = endorsements.slice(0, 3);
+
+  const lowestPrice = data.pricing_tiers.length
+    ? Math.min(...data.pricing_tiers.map((t) => t.subscribe_price_cents ?? t.price_cents))
+    : null;
 
   return (
     <section data-section="endorsement" className="w-full bg-white py-12 sm:py-16">
@@ -46,6 +51,10 @@ export function NutritionistEndorsementSection({ data }: { data: PageData }) {
               bullets={e.bullets || []}
             />
           ))}
+        </div>
+
+        <div className="mt-10 flex justify-center md:mt-14">
+          <ShopCTA lowestPriceCents={lowestPrice} align="center" />
         </div>
       </div>
     </section>

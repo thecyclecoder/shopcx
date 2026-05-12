@@ -1,4 +1,5 @@
 import type { PageData } from "../_lib/page-data";
+import { ShopCTA } from "../_components/ShopCTA";
 
 /**
  * How we compare — two-column side-by-side, no separate "Feature" label.
@@ -16,6 +17,9 @@ export function ComparisonSection({ data }: { data: PageData }) {
   if (rows.length === 0) return null;
 
   const productName = data.product.title;
+  const lowestPrice = data.pricing_tiers.length
+    ? Math.min(...data.pricing_tiers.map((t) => t.subscribe_price_cents ?? t.price_cents))
+    : null;
 
   return (
     <section data-section="comparison" className="w-full bg-zinc-50 py-12 sm:py-16">
@@ -53,6 +57,10 @@ export function ComparisonSection({ data }: { data: PageData }) {
               />
             ))}
           </div>
+        </div>
+
+        <div className="mt-10 flex justify-center md:mt-14">
+          <ShopCTA lowestPriceCents={lowestPrice} align="center" />
         </div>
       </div>
     </section>
