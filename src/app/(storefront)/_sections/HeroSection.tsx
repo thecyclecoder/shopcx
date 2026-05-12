@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import type { PageData, LinkMember, MediaItem } from "../_lib/page-data";
 import { StarRating } from "../_components/StarRating";
 import { BenefitChip } from "../_components/BenefitChip";
-import { ShieldIcon, TrustBadge } from "../_components/TrustBadge";
+import { ShopCTA } from "../_components/ShopCTA";
 import { PressLogos } from "../_components/PressLogos";
 import { HeroGallery } from "../_components/HeroGallery";
 import { HeroFeaturedReviews } from "../_components/HeroFeaturedReviews";
@@ -250,19 +250,13 @@ export function HeroSection({ data }: { data: PageData }) {
             </div>
           )}
 
-          <div className="mt-6 flex flex-col items-center gap-3 sm:flex-row sm:items-center">
-            <a
+          <div className="mt-6">
+            <ShopCTA
               href={ctaHref}
-              style={{ backgroundColor: "var(--storefront-primary)" }}
-              className="inline-flex h-14 w-full items-center justify-center rounded-full px-8 text-base font-semibold text-white shadow-sm transition-[filter] hover:brightness-90 sm:w-auto"
-            >
-              {!isViewingCurrent && activeMember
-                ? `Shop ${activeMember.value}`
-                : lowestPrice != null
-                  ? `Try it now — from $${(lowestPrice / 100).toFixed(2)}`
-                  : "Shop now"}
-            </a>
-            <TrustBadge icon={<ShieldIcon />} label="30-day money-back" />
+              label={!isViewingCurrent && activeMember ? `Shop ${activeMember.value}` : undefined}
+              lowestPriceCents={lowestPrice}
+              align="center"
+            />
           </div>
 
           <div className="mt-6">

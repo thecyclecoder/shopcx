@@ -1,5 +1,6 @@
 import type { PageData } from "../_lib/page-data";
 import { Picture } from "../_components/PictureHero";
+import { ShopCTA } from "../_components/ShopCTA";
 
 /**
  * "Why this works" — single-block section directly below the hero.
@@ -25,9 +26,6 @@ export function HowItWorksSection({ data }: { data: PageData }) {
         ...data.pricing_tiers.map((t) => t.subscribe_price_cents ?? t.price_cents),
       )
     : null;
-  const ctaLabel = lowestPrice != null
-    ? `Get yours from $${(lowestPrice / 100).toFixed(2)}`
-    : "Shop now";
 
   const paragraphs = copy.split(/\n\n+/);
 
@@ -66,13 +64,7 @@ export function HowItWorksSection({ data }: { data: PageData }) {
               ))}
             </div>
             <div className="mt-6 md:mt-8">
-              <a
-                href="#pricing"
-                style={{ backgroundColor: "var(--storefront-primary)" }}
-                className="inline-flex items-center justify-center rounded-xl px-6 py-3.5 text-base font-semibold text-white shadow-sm transition-opacity hover:opacity-90 sm:text-lg"
-              >
-                {ctaLabel}
-              </a>
+              <ShopCTA lowestPriceCents={lowestPrice} align="start" />
             </div>
           </div>
         </div>

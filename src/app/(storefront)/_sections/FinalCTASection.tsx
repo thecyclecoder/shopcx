@@ -1,5 +1,5 @@
 import type { PageData } from "../_lib/page-data";
-import { LockIcon, ShieldIcon, TruckIcon } from "../_components/TrustBadge";
+import { ShopCTA } from "../_components/ShopCTA";
 
 export function FinalCTASection({ data }: { data: PageData }) {
   const guarantee = data.page_content?.guarantee_copy;
@@ -25,26 +25,12 @@ export function FinalCTASection({ data }: { data: PageData }) {
           <p className="mt-4 text-base text-zinc-300 sm:text-lg">{guarantee}</p>
         )}
 
-        <div className="mt-8 flex flex-col items-center gap-4">
-          <a
-            href="#pricing"
-            className="inline-flex h-14 w-full max-w-sm items-center justify-center rounded-full bg-white px-8 text-base font-semibold text-zinc-900 transition-colors hover:bg-zinc-100"
-          >
-            {lowestPrice != null
-              ? `Shop now — from $${(lowestPrice / 100).toFixed(2)}`
-              : "Shop now"}
-          </a>
-          <div className="flex flex-wrap items-center justify-center gap-4 text-xs font-medium text-zinc-300">
-            <span className="inline-flex items-center gap-1.5">
-              <ShieldIcon /> 30-day guarantee
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <TruckIcon /> Free shipping
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <LockIcon /> Secure checkout
-            </span>
-          </div>
+        <div className="mt-8">
+          <ShopCTA
+            lowestPriceCents={lowestPrice}
+            variant="inverse"
+            align="center"
+          />
         </div>
 
         <p className="mt-10 text-[11px] leading-relaxed text-zinc-500">
