@@ -46,10 +46,14 @@ export function ShopCTA({
     : "inline-flex h-14 w-full items-center justify-center rounded-full bg-white px-8 text-base font-semibold transition-colors hover:bg-zinc-100 sm:w-auto sm:min-w-[280px]";
   const inverseTextStyle = !isPrimary ? { color: "var(--storefront-primary)" } : undefined;
 
-  const wrapperAlign = align === "center" ? "items-center" : "items-start";
+  // On mobile the button is always full-width, so the trust badge
+  // looks best centered beneath it regardless of section alignment.
+  // On desktop we respect the section's `align` setting so the badge
+  // tucks under the (content-width) button.
+  const desktopItemsClass = align === "center" ? "sm:items-center" : "sm:items-start";
 
   return (
-    <div className={`flex flex-col gap-3 ${wrapperAlign} ${className}`}>
+    <div className={`flex flex-col items-center gap-3 ${desktopItemsClass} ${className}`}>
       <a href={href} style={buttonStyle ?? inverseTextStyle} className={buttonClasses}>
         {resolvedLabel}
       </a>
