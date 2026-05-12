@@ -37,9 +37,14 @@ export function StorefrontHeader({
   headerWeight,
 }: StorefrontHeaderProps) {
   const wordmark = (headerText && headerText.trim()) || productTitle;
+  // Use the workspace's heading font (Montserrat by default) and the
+  // heavier 800 weight when no per-product override is set. Body text
+  // elsewhere is system font, so without this the wordmark inherits
+  // system-bold and feels light.
   const wordmarkStyle: React.CSSProperties = {
     color: headerColor || undefined,
-    fontWeight: headerWeight ? Number(headerWeight) : 700,
+    fontFamily: "var(--storefront-heading-font)",
+    fontWeight: headerWeight ? Number(headerWeight) : 800,
     letterSpacing: 0,
   };
   const [scrolled, setScrolled] = useState(false);

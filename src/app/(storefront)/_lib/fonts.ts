@@ -27,7 +27,7 @@ import {
 const montserrat = Montserrat({
   subsets: ["latin"],
   display: "swap",
-  weight: ["400", "600", "700"],
+  weight: ["400", "600", "700", "800"],
   variable: "--font-montserrat",
   preload: true,
 });
@@ -60,7 +60,7 @@ export const FONTS: Record<string, StorefrontFontOption> = {
     variable: montserrat.variable,
     className: montserrat.variable,
     stack: "var(--font-montserrat), system-ui, sans-serif",
-    weights: ["400", "600", "700"],
+    weights: ["400", "600", "700", "800"],
   },
   inter: {
     key: "inter",
