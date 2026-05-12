@@ -108,6 +108,18 @@ export function PriceTableSection({ data }: { data: PageData }) {
   );
 }
 
+/**
+ * Defensive scrub for the saved free_gift_product_title — strips a
+ * trailing "— Default Title" / "- Default Title" left over from when
+ * the dashboard concatenated product + variant titles without
+ * guarding the Shopify placeholder. New rules saved through the
+ * updated dashboard never carry it; this catches the pre-fix data.
+ */
+function stripDefaultTitle(s: string | null | undefined): string {
+  if (!s) return "";
+  return s.replace(/\s*[—–\-]\s*Default Title\s*$/i, "").trim();
+}
+
 /** Display tier — common shape for rule-driven + legacy tiers. */
 interface DisplayTier {
   id: string;
@@ -312,7 +324,7 @@ function PriceCard({
               />
             )}
             <span className="flex-1">
-              Free {rule.free_gift_product_title}
+              Free {stripDefaultTitle(rule.free_gift_product_title)}
               {giftSubLocked && (
                 <span className="ml-1 text-xs text-zinc-500">
                   (Only with Subscribe &amp; Save)
