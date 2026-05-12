@@ -32,6 +32,10 @@ export async function PATCH(
   if ("free_gift_image_url" in body) updates.free_gift_image_url = body.free_gift_image_url;
   if (typeof body.free_gift_min_quantity === "number") updates.free_gift_min_quantity = body.free_gift_min_quantity;
   if (typeof body.is_active === "boolean") updates.is_active = body.is_active;
+  if (typeof body.subscribe_discount_pct === "number") updates.subscribe_discount_pct = body.subscribe_discount_pct;
+  if (Array.isArray(body.available_frequencies)) updates.available_frequencies = body.available_frequencies;
+  if (typeof body.free_shipping_subscription_only === "boolean") updates.free_shipping_subscription_only = body.free_shipping_subscription_only;
+  if (typeof body.free_gift_subscription_only === "boolean") updates.free_gift_subscription_only = body.free_gift_subscription_only;
 
   const { error } = await admin.from("pricing_rules")
     .update(updates)

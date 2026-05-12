@@ -113,6 +113,34 @@ export interface PricingTier {
   display_order: number;
 }
 
+/**
+ * Pricing rule attached to a product. Source of truth for the price
+ * table — defines the tier discounts, subscription terms, and the
+ * conditional perks (free shipping, free gift). Composed with the
+ * product's base variant price at render time to produce per-tier
+ * prices, so a single rule can serve many products at their own
+ * per-unit cost.
+ */
+export interface PricingRule {
+  id: string;
+  name: string;
+  quantity_breaks: Array<{ quantity: number; discount_pct: number; label: string }>;
+  free_shipping: boolean;
+  free_shipping_threshold_cents: number | null;
+  free_shipping_subscription_only: boolean;
+  free_gift_variant_id: string | null;
+  free_gift_product_title: string | null;
+  free_gift_image_url: string | null;
+  free_gift_min_quantity: number;
+  free_gift_subscription_only: boolean;
+  subscribe_discount_pct: number;
+  available_frequencies: Array<{
+    interval_days: number;
+    label: string;
+    default?: boolean;
+  }>;
+}
+
 export interface HowItWorksStep {
   id: string;
   step_number: number;
@@ -234,6 +262,16 @@ export interface PageData {
   ingredient_research: IngredientResearch[];
   benefit_selections: BenefitSelection[];
   pricing_tiers: PricingTier[];
+  // Assigned pricing rule (one rule per product). null when no rule
+  // is assigned — the price table falls back to product_pricing_tiers
+  // in that case to keep older products rendering.
+  pricing_rule: PricingRule | null;
+  // Base variant for rule-driven pricing. The lowest-position active
+  // variant on the product; quantity-break math multiplies this price.
+  base_variant: {
+    shopify_variant_id: string | null;
+    price_cents: number;
+  } | null;
   how_it_works: HowItWorksStep[];
   recent_orders_for_proof: RecentOrderForProof[];
   // Per-benefit review-id matches computed at SSG time across the full
@@ -326,6 +364,8 @@ export async function getPageData(
     reviewCountRes,
     benefitAngleRes,
     linkGroup,
+    pricingRule,
+    baseVariantRes,
   ] = await Promise.all([
     admin
       .from("product_page_content")
@@ -409,6 +449,18 @@ export async function getPageData(
     // parallel so we can pool reviews/ratings across members in the
     // same round trip rather than serializing two queries.
     loadLinkGroup(workspace.id, product.id),
+    // Assigned pricing rule — drives the storefront price table.
+    loadPricingRule(workspace.id, product.id),
+    // Base variant for rule-driven pricing math. Lowest-position
+    // variant of this product.
+    admin
+      .from("product_variants")
+      .select("shopify_variant_id, price_cents")
+      .eq("workspace_id", workspace.id)
+      .eq("product_id", product.id)
+      .order("position", { ascending: true })
+      .limit(1)
+      .maybeSingle(),
   ]);
 
   // Product reviews now key off the internal product UUID (the
@@ -616,6 +668,13 @@ export async function getPageData(
     ingredient_research: (researchRes.data || []) as IngredientResearch[],
     benefit_selections: (benefitSelectionsRes.data || []) as BenefitSelection[],
     pricing_tiers: (pricingTiersRes.data || []) as PricingTier[],
+    pricing_rule: pricingRule,
+    base_variant: baseVariantRes.data
+      ? {
+          shopify_variant_id: baseVariantRes.data.shopify_variant_id,
+          price_cents: baseVariantRes.data.price_cents,
+        }
+      : null,
     how_it_works: (howItWorksRes.data || []) as HowItWorksStep[],
     recent_orders_for_proof: recentOrdersForProof,
     benefit_review_matches,
@@ -815,6 +874,37 @@ export async function listPublishedProducts(): Promise<
     }
   }
   return params;
+}
+
+/**
+ * Load the pricing rule assigned to this product, if any. Returns
+ * null when the product has no assignment — caller falls back to
+ * product_pricing_tiers for backwards compat.
+ */
+async function loadPricingRule(
+  workspaceId: string,
+  productId: string,
+): Promise<PricingRule | null> {
+  const admin = await import("@/lib/supabase/admin").then((m) =>
+    m.createAdminClient(),
+  );
+  const { data: assignment } = await admin
+    .from("product_pricing_rule")
+    .select("pricing_rule_id")
+    .eq("workspace_id", workspaceId)
+    .eq("product_id", productId)
+    .maybeSingle();
+  if (!assignment?.pricing_rule_id) return null;
+  const { data: rule } = await admin
+    .from("pricing_rules")
+    .select(
+      "id, name, quantity_breaks, free_shipping, free_shipping_threshold_cents, free_shipping_subscription_only, free_gift_variant_id, free_gift_product_title, free_gift_image_url, free_gift_min_quantity, free_gift_subscription_only, subscribe_discount_pct, available_frequencies",
+    )
+    .eq("id", assignment.pricing_rule_id)
+    .eq("workspace_id", workspaceId)
+    .eq("is_active", true)
+    .maybeSingle();
+  return (rule as PricingRule | null) || null;
 }
 
 /**

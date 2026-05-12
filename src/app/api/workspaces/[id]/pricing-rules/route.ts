@@ -30,6 +30,18 @@ export async function GET(
     .eq("workspace_id", workspaceId)
     .eq("status", "active");
 
+  // Variants for the free-gift picker. Joined client-side by product
+  // id; we ship a flat list with parent product info embedded so the
+  // dashboard can render "Product — Variant" rows in one pass.
+  const productIds = (products || []).map((p) => p.id);
+  const { data: variants } = productIds.length
+    ? await admin
+        .from("product_variants")
+        .select("id, product_id, shopify_variant_id, title, sku, price_cents, image_url, position")
+        .in("product_id", productIds)
+        .order("position", { ascending: true })
+    : { data: [] };
+
   const assignmentMap = new Map<string, string[]>();
   for (const a of assignments || []) {
     const list = assignmentMap.get(a.pricing_rule_id) || [];
@@ -42,7 +54,11 @@ export async function GET(
     product_ids: assignmentMap.get(r.id) || [],
   }));
 
-  return NextResponse.json({ rules: enrichedRules, products: products || [] });
+  return NextResponse.json({
+    rules: enrichedRules,
+    products: products || [],
+    variants: variants || [],
+  });
 }
 
 export async function POST(
@@ -70,10 +86,14 @@ export async function POST(
     quantity_breaks: body.quantity_breaks || [],
     free_shipping: body.free_shipping || false,
     free_shipping_threshold_cents: body.free_shipping_threshold_cents || null,
+    free_shipping_subscription_only: body.free_shipping_subscription_only || false,
     free_gift_variant_id: body.free_gift_variant_id || null,
     free_gift_product_title: body.free_gift_product_title || null,
     free_gift_image_url: body.free_gift_image_url || null,
     free_gift_min_quantity: body.free_gift_min_quantity || 1,
+    free_gift_subscription_only: body.free_gift_subscription_only || false,
+    subscribe_discount_pct: body.subscribe_discount_pct || 0,
+    available_frequencies: body.available_frequencies || [],
     is_active: true,
   }).select("*").single();
 
