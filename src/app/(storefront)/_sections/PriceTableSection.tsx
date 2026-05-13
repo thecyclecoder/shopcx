@@ -348,16 +348,18 @@ function PriceCard({
         ${(perUnit / 100).toFixed(2)} each · {tier.quantity} pack
         {servingsPerPack && servingsPerPack > 0 && (() => {
           // Per-serving breakdown: divide the current displayed total
-          // by total servings (servings/pack × pack count). Helps the
-          // customer compare against $/cup of regular coffee.
+          // by total servings (servings/pack × pack count). Always
+          // labeled "/serving" regardless of the variant's
+          // servings_unit (pods, capsules, scoops, etc.) — one
+          // consistent comparison unit that customers map straight to
+          // "$/cup of regular coffee".
           const totalServings = servingsPerPack * tier.quantity;
           const perServing = price / totalServings;
-          const unit = (servingsUnit || "serving").trim() || "serving";
           return (
             <>
               {" · "}
               <span className="whitespace-nowrap">
-                ${(perServing / 100).toFixed(2)}/{unit}
+                ${(perServing / 100).toFixed(2)}/serving
               </span>
             </>
           );
