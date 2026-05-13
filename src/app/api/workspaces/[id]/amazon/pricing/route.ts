@@ -116,6 +116,32 @@ export async function GET(
     }
   }
 
+  // Cache fetched prices back onto amazon_asins so the storefront
+  // price-table banner can compare without round-tripping SP-API.
+  // Best-effort: a failure here doesn't block returning the live data
+  // to the dashboard.
+  try {
+    const now = new Date().toISOString();
+    await Promise.all(
+      results.map((r) =>
+        admin
+          .from("amazon_asins")
+          .update({
+            current_price_cents:
+              r.current_price != null ? Math.round(r.current_price * 100) : null,
+            list_price_cents:
+              r.list_price != null ? Math.round(r.list_price * 100) : null,
+            sale_price_cents:
+              r.sale_price != null ? Math.round(r.sale_price * 100) : null,
+            price_fetched_at: now,
+          })
+          .eq("id", r.id),
+      ),
+    );
+  } catch (err) {
+    console.error("[amazon/pricing] cache write-back failed:", err);
+  }
+
   return NextResponse.json({
     asins: results,
     seller_id: conn.seller_id,
@@ -247,6 +273,26 @@ export async function POST(
           results.push({ sku: update.sku, success: false, error: issues[0].message });
         } else {
           results.push({ sku: update.sku, success: true });
+          // Mirror the new price into amazon_asins so the storefront
+          // banner picks it up on next render — same source the GET
+          // route caches into.
+          try {
+            await admin
+              .from("amazon_asins")
+              .update({
+                current_price_cents: Math.round(update.price * 100),
+                list_price_cents: Math.round(update.price * 100),
+                sale_price_cents:
+                  update.sale_price != null
+                    ? Math.round(update.sale_price * 100)
+                    : null,
+                price_fetched_at: new Date().toISOString(),
+              })
+              .eq("amazon_connection_id", conn.id)
+              .eq("sku", update.sku);
+          } catch (err) {
+            console.error("[amazon/pricing POST] cache update failed:", err);
+          }
         }
       } else {
         const text = await res.text();

@@ -286,6 +286,11 @@ export interface PageData {
     servings: number | null;
     servings_unit: string | null;
   } | null;
+  // Lowest cached Amazon price for this product, in cents. Sourced
+  // from amazon_asins.current_price_cents (cached when the admin
+  // visits Settings → Amazon Pricing or saves a price). Drives the
+  // "Save $X buying direct" banner above the price table.
+  amazon_price_cents: number | null;
   how_it_works: HowItWorksStep[];
   recent_orders_for_proof: RecentOrderForProof[];
   // Per-benefit review-id matches computed at SSG time across the full
@@ -380,6 +385,7 @@ export async function getPageData(
     linkGroup,
     pricingRule,
     baseVariantRes,
+    amazonPriceRes,
   ] = await Promise.all([
     admin
       .from("product_page_content")
@@ -473,6 +479,19 @@ export async function getPageData(
       .eq("workspace_id", workspace.id)
       .eq("product_id", product.id)
       .order("position", { ascending: true })
+      .limit(1)
+      .maybeSingle(),
+    // Cached Amazon prices for this product. Picks the lowest non-null
+    // current_price_cents across any linked amazon_asins — corresponds
+    // to the cheapest pack size on Amazon (typically the single-unit
+    // listing). Drives the "Save $X buying direct" banner.
+    admin
+      .from("amazon_asins")
+      .select("current_price_cents")
+      .eq("workspace_id", workspace.id)
+      .eq("product_id", product.id)
+      .not("current_price_cents", "is", null)
+      .order("current_price_cents", { ascending: true })
       .limit(1)
       .maybeSingle(),
   ]);
@@ -692,6 +711,7 @@ export async function getPageData(
           servings_unit: baseVariantRes.data.servings_unit,
         }
       : null,
+    amazon_price_cents: amazonPriceRes.data?.current_price_cents ?? null,
     how_it_works: (howItWorksRes.data || []) as HowItWorksStep[],
     recent_orders_for_proof: recentOrdersForProof,
     benefit_review_matches,

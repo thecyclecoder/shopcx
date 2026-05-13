@@ -64,6 +64,40 @@ export function PriceTableSection({ data }: { data: PageData }) {
           Choose your pack
         </h2>
 
+        {/* Amazon savings banner — only when we have a cached Amazon
+            price AND it's higher than our cheapest direct tier. Reads
+            as "savings layer zero" above the per-tier MSRP, which is
+            framed as the actual base price on Amazon. */}
+        {(() => {
+          const amazon = data.amazon_price_cents;
+          const cheapestDirect = tiers.length
+            ? Math.min(
+                ...tiers.map((t) =>
+                  t.subscribe_price_cents != null
+                    ? Math.round(t.subscribe_price_cents / Math.max(1, t.quantity))
+                    : Math.round(t.price_cents / Math.max(1, t.quantity)),
+                ),
+              )
+            : null;
+          const directShown = cheapestDirect ?? (data.base_variant?.price_cents ?? null);
+          if (!amazon || !directShown || amazon <= directShown) return null;
+          const savings = amazon - directShown;
+          return (
+            <div
+              className="mx-auto mb-6 flex max-w-2xl items-center justify-center gap-2 rounded-full bg-amber-100 px-4 py-2 text-sm font-semibold text-amber-900 ring-1 ring-amber-200 sm:text-base"
+            >
+              <span aria-hidden="true">💰</span>
+              <span>
+                Buy direct &amp; save{" "}
+                <strong>${(savings / 100).toFixed(2)}/bag</strong>
+                <span className="hidden sm:inline">
+                  {" "}vs. Amazon&apos;s ${(amazon / 100).toFixed(2)}
+                </span>
+              </span>
+            </div>
+          );
+        })()}
+
         {hasAnySubscribe && <SubscribeToggle mode={mode} setMode={setMode} />}
 
         {/* Frequency picker — only when subscribing AND the rule
@@ -392,7 +426,7 @@ function PriceCard({
       <div className="mt-6">
         <ShopCTA
           href={`#buy-${tier.variant_id}`}
-          label="Add to cart"
+          label="Select"
           size="compact"
           variant={tier.is_highlighted ? "primary" : "inverse"}
           showTrust={false}
