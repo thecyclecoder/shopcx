@@ -303,13 +303,28 @@ function PriceCard({
     && !!rule?.free_shipping_subscription_only
     && !showSubscribe;
 
-  const giftQtyOk = tier.quantity >= (rule?.free_gift_min_quantity || 1);
-  const giftExists = !!rule?.free_gift_variant_id && giftQtyOk;
-  const giftApplies = giftExists
-    && (!rule?.free_gift_subscription_only || showSubscribe);
-  const giftSubLocked = giftExists
-    && !!rule?.free_gift_subscription_only
-    && !showSubscribe;
+  // Gift gating — two independent conditions (min quantity + subscribe
+  // mode). When ANY is missing on a tier where the rule defines a
+  // gift, show the row with a red X + a precise hint about what's
+  // needed. The hint composes cleanly: "Subscribe & Save" if mode is
+  // wrong, "N pack or more" if qty is too low — joined with " on " so
+  // we render "(Only with Subscribe & Save on 2 pack or more)" when
+  // both fail.
+  const giftConfigured = !!rule?.free_gift_variant_id;
+  const giftMinQty = rule?.free_gift_min_quantity || 1;
+  const giftQtyOk = tier.quantity >= giftMinQty;
+  const giftSubOk = !rule?.free_gift_subscription_only || showSubscribe;
+  const giftApplies = giftConfigured && giftQtyOk && giftSubOk;
+  const giftBlocked = giftConfigured && !giftApplies;
+  const giftBlockedReason = (() => {
+    if (!giftBlocked) return null;
+    const subPart = !giftSubOk ? "Subscribe & Save" : null;
+    const qtyPart = !giftQtyOk ? `${giftMinQty} pack or more` : null;
+    if (subPart && qtyPart) return `Only with ${subPart} on ${qtyPart}`;
+    if (subPart) return `Only with ${subPart}`;
+    if (qtyPart) return `On ${qtyPart}`;
+    return null;
+  })();
 
   return (
     <div
@@ -420,14 +435,14 @@ function PriceCard({
             </span>
           </li>
         )}
-        {(giftApplies || giftSubLocked) && rule?.free_gift_product_title && (
+        {(giftApplies || giftBlocked) && rule?.free_gift_product_title && (
           <li className="flex items-start gap-2">
             {giftApplies ? <CheckIcon /> : <XIcon />}
             <span className="flex-1">
               Free {stripDefaultTitle(rule.free_gift_product_title)}
-              {giftSubLocked && (
+              {giftBlockedReason && (
                 <span className="ml-1 text-xs text-zinc-500">
-                  (Only with Subscribe &amp; Save)
+                  ({giftBlockedReason})
                 </span>
               )}
             </span>
