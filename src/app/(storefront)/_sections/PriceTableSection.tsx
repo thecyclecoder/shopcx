@@ -527,7 +527,7 @@ function PriceCard({
  * self-contained so a customer who jumped to #pricing doesn't have
  * to scroll back up to switch formats.
  */
-function FormatToggle({
+export function FormatToggle({
   linkGroup,
   data,
 }: {
@@ -577,7 +577,7 @@ function FormatToggle({
   );
 }
 
-function SubscribeToggle({
+export function SubscribeToggle({
   mode,
   setMode,
 }: {
@@ -649,7 +649,7 @@ function SubscribeToggle({
   );
 }
 
-function FrequencyPicker({
+export function FrequencyPicker({
   frequencies,
   value,
   onChange,

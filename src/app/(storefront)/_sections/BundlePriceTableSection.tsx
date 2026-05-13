@@ -28,6 +28,11 @@ import { useActiveProductData } from "../_lib/active-member-context";
 import { usePricingMode } from "../_lib/pricing-mode-context";
 import { PackageStack } from "../_components/PackageStack";
 import { ShopCTA } from "../_components/ShopCTA";
+import {
+  FormatToggle,
+  SubscribeToggle,
+  FrequencyPicker,
+} from "./PriceTableSection";
 
 export function BundlePriceTableSection({ data }: { data: PageData }) {
   const { pricingRule: rule, baseVariant } = useActiveProductData(data);
@@ -58,6 +63,12 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
 
   const subDiscount = rule.subscribe_discount_pct || 0;
   const showSubscribe = shared?.mode === "subscribe" && subDiscount > 0;
+  const mode = shared?.mode ?? "subscribe";
+  const setMode = shared?.setMode ?? (() => {});
+  const freqDays = shared?.freqDays ?? null;
+  const setFreqDays = shared?.setFreqDays ?? (() => {});
+  const frequencies = rule.available_frequencies || [];
+  const hasAnySubscribe = subDiscount > 0;
 
   const cards = [1, 2].map(n => {
     const totalUnits = n * 2;
@@ -78,8 +89,10 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
 
   return (
     <section
+      id="bundle-pricing"
       data-section="bundle-pricing"
-      className="w-full overflow-x-clip bg-white py-10 sm:py-14"
+      data-mode={mode}
+      className="w-full scroll-mt-6 overflow-x-clip bg-white py-10 sm:py-14"
     >
       <div className="mx-auto max-w-6xl px-5 md:px-8">
         <div className="mx-auto mb-6 max-w-2xl text-center">
@@ -93,6 +106,24 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
             Same quantity discount you&apos;d get on a regular order — applied to both products.
           </p>
         </div>
+
+        {/* Same controls as the primary price table — kept in sync via
+            the shared pricing-mode + active-member contexts. Customer
+            can pick K-Cups/Instant, Subscribe/One-time, and frequency
+            from either table; both update together. */}
+        {data.link_group && data.link_group.members.length > 1 && (
+          <FormatToggle linkGroup={data.link_group} data={data} />
+        )}
+        {hasAnySubscribe && <SubscribeToggle mode={mode} setMode={setMode} />}
+        {mode === "subscribe" && frequencies.length > 1 && (
+          <div className="mb-8 flex justify-center">
+            <FrequencyPicker
+              frequencies={frequencies}
+              value={freqDays}
+              onChange={setFreqDays}
+            />
+          </div>
+        )}
 
         <div className="mx-auto grid max-w-4xl gap-4 md:grid-cols-2 md:items-stretch">
           {cards.map(card => (

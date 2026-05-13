@@ -107,7 +107,7 @@ export function UpsellChapter({ data }: { data: PageData }) {
 
         <div className="mt-10 flex justify-center">
           <ShopCTA
-            href="#pricing"
+            href="#bundle-pricing"
             label="Bundle now and save"
             lowestPriceCents={lowestPrice}
             showTrust={false}
