@@ -20,6 +20,7 @@
 import type { PageData } from "../_lib/page-data";
 import { TrustChipRow } from "../_components/TrustChipRow";
 import { ShopCTA } from "../_components/ShopCTA";
+import { ExpandableReviewCard } from "../_components/ExpandableReviewCard";
 
 export function UpsellChapter({ data }: { data: PageData }) {
   const upsell = data.upsell;
@@ -40,6 +41,7 @@ export function UpsellChapter({ data }: { data: PageData }) {
   const fgMuted = isDark ? "rgba(254, 243, 199, 0.75)" : "rgba(24, 24, 27, 0.7)";
   const accentBorder = isDark ? "rgba(254, 243, 199, 0.15)" : "rgba(24, 24, 27, 0.1)";
   const reviewCardBg = isDark ? "rgba(255, 255, 255, 0.08)" : "#ffffff";
+  const linkColor = isDark ? "#fef3c7" : "var(--storefront-primary)";
 
   return (
     <section
@@ -110,43 +112,28 @@ export function UpsellChapter({ data }: { data: PageData }) {
 
         {topReviews.length > 0 && (
           <div className="mt-10 grid gap-4 sm:grid-cols-2">
-            {topReviews.map((r) => {
-              const quote = (r.smart_quote || r.body || "").trim();
-              if (!quote) return null;
-              const name = r.reviewer_name || "Verified customer";
-              const rating = r.rating || 5;
-              return (
-                <figure
-                  key={r.id}
-                  className="rounded-2xl border p-5"
-                  style={{
-                    backgroundColor: reviewCardBg,
-                    borderColor: accentBorder,
-                  }}
-                >
-                  <Stars rating={rating} />
-                  <blockquote
-                    className="mt-3 text-[16px] leading-relaxed"
-                    style={{ color: fgText }}
-                  >
-                    &ldquo;{quote.length > 220 ? quote.slice(0, 220).trimEnd() + "…" : quote}&rdquo;
-                  </blockquote>
-                  <figcaption
-                    className="mt-3 text-xs font-semibold uppercase tracking-wider"
-                    style={{ color: fgMuted }}
-                  >
-                    — {name}
-                  </figcaption>
-                </figure>
-              );
-            })}
+            {topReviews.map((r) => (
+              <ExpandableReviewCard
+                key={r.id}
+                id={r.id}
+                body={r.body || ""}
+                smartQuote={r.smart_quote}
+                reviewerName={r.reviewer_name || "Verified customer"}
+                rating={r.rating || 5}
+                fgText={fgText}
+                fgMuted={fgMuted}
+                cardBg={reviewCardBg}
+                borderColor={accentBorder}
+                linkColor={linkColor}
+              />
+            ))}
           </div>
         )}
 
         <div className="mt-10 flex justify-center">
           <ShopCTA
             href="#pricing"
-            label={`Bundle ${product.title} below`}
+            label="Bundle now and save"
             lowestPriceCents={lowestPrice}
             showTrust={false}
             align="center"
@@ -196,15 +183,3 @@ function CheckIcon({ className = "", color = "#059669" }: { className?: string; 
   );
 }
 
-function Stars({ rating }: { rating: number }) {
-  const filled = Math.round(rating);
-  return (
-    <div className="flex items-center gap-0.5 text-amber-400">
-      {Array.from({ length: 5 }).map((_, i) => (
-        <svg key={i} width={14} height={14} viewBox="0 0 24 24" fill={i < filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth={1.5}>
-          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-        </svg>
-      ))}
-    </div>
-  );
-}

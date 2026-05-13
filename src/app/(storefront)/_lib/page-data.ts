@@ -846,9 +846,13 @@ export async function getPageData(
         .select("id, reviewer_name, rating, title, body, images, smart_quote, created_at, status, featured, product_id")
         .eq("workspace_id", workspace.id)
         .eq("product_id", productRow.upsell_product_id)
-        .in("status", ["published", "featured"])
+        // Featured ONLY — either the boolean flag or the status enum.
+        // We don't fall back to "highly rated but not featured" here
+        // because the chapter is a curated pull-quote moment, not a
+        // review feed; admins decide which reviews qualify by flagging
+        // them featured.
+        .or("featured.eq.true,status.eq.featured")
         .not("body", "is", null)
-        .order("featured", { ascending: false })
         .order("rating", { ascending: false })
         .order("created_at", { ascending: false })
         .limit(3),
