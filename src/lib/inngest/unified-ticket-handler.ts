@@ -338,11 +338,21 @@ async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: st
 /** Compute delay and call send() as pending if delay > 0, immediate otherwise */
 async function sendWithDelay(admin: Admin, wsId: string, tid: string, ch: string, msg: string, sandbox: boolean) {
   // Resolve customer email for skip-delay-for-members check
-  const { data: t } = await admin.from("tickets").select("customer_id").eq("id", tid).single();
+  const { data: t } = await admin.from("tickets").select("customer_id, detected_language").eq("id", tid).single();
   let custEmail: string | null = null;
   if (t?.customer_id) {
     const { data: c } = await admin.from("customers").select("email").eq("id", t.customer_id).single();
     custEmail = c?.email || null;
+  }
+  // Translate outbound copy to the customer's detected language when
+  // it's not English. Catches every send-path (playbook canned text,
+  // macros, holding messages) so a Spanish customer never gets an
+  // English template.
+  const lang = (t?.detected_language as string | null) || "en";
+  let outboundBody = msg;
+  if (lang && lang !== "en") {
+    const { translateIfNeeded } = await import("@/lib/translate");
+    outboundBody = await translateIfNeeded(msg, lang, { workspaceId: wsId, ticketId: tid });
   }
   // If chat customer is idle, use email response delay instead of chat delay
   let effectiveCh = ch;
@@ -352,7 +362,7 @@ async function sendWithDelay(admin: Admin, wsId: string, tid: string, ch: string
     if (deliveryCh === "email") effectiveCh = "email";
   }
   const delay = await responseDelay(admin, wsId, effectiveCh, custEmail);
-  await send(admin, wsId, tid, ch, msg, sandbox, delay > 0, delay);
+  await send(admin, wsId, tid, ch, outboundBody, sandbox, delay > 0, delay);
 }
 
 // Policy: any outbound customer message closes the ticket. The
@@ -395,7 +405,7 @@ async function escalate(admin: Admin, wsId: string, tid: string, ch: string, int
     ? `AI suggests: "${intent}" (${conf}%). Check journeys/workflows for this intent.`
     : `Unable to determine customer intent after clarification.`;
   await sysNote(admin, tid, `[System] Escalating. ${suggestion}`);
-  const { data: t } = await admin.from("tickets").select("customer_id, subject, email_message_id").eq("id", tid).single();
+  const { data: t } = await admin.from("tickets").select("customer_id, subject, email_message_id, detected_language").eq("id", tid).single();
 
   // Get customer email from profile
   let customerEmail: string | null = null;
@@ -455,7 +465,16 @@ async function escalate(admin: Admin, wsId: string, tid: string, ch: string, int
   // Must contain "send you an email" to trigger chatEnded in the widget —
   // we keep that phrase but frame it as a team handoff so it doesn't
   // read as AI-speak ("I ran into an issue / I'll look into it").
-  const escalationMsg = "Someone on my team is working on this and will send you an email shortly!";
+  const escalationMsgEn = "Someone on my team is working on this and will send you an email shortly!";
+
+  // Translate to the customer's detected language before send so this
+  // matches the rest of the pipeline.
+  const lang = (t?.detected_language as string | null) || "en";
+  let escalationMsg = escalationMsgEn;
+  if (lang && lang !== "en") {
+    const { translateIfNeeded } = await import("@/lib/translate");
+    escalationMsg = await translateIfNeeded(escalationMsgEn, lang, { workspaceId: wsId, ticketId: tid });
+  }
 
   await sendWithDelay(admin, wsId, tid, ch, escalationMsg, false);
 
@@ -588,6 +607,21 @@ export const unifiedTicketHandler = inngest.createFunction(
         assignedTo: ticket.assigned_to || null, escalatedTo: ticket.escalated_to || null,
         subject: ticket.subject || "",
       };
+    });
+
+    // ── 1a. Language detection ──
+    // Detect the inbound message's language and persist on the ticket
+    // so the orchestrator + every send-path can mirror it. Only runs
+    // on new tickets (first inbound); replies re-use the stored value.
+    const detectedLanguage = await step.run("detect-language", async () => {
+      const { data: existing } = await admin.from("tickets")
+        .select("detected_language").eq("id", tid).single();
+      if (existing?.detected_language) return existing.detected_language as string;
+      const { detectLanguage } = await import("@/lib/translate");
+      const lang = await detectLanguage(msg, { workspaceId: wsId, ticketId: tid });
+      await admin.from("tickets").update({ detected_language: lang, updated_at: new Date().toISOString() }).eq("id", tid);
+      if (lang !== "en") await sysNote(admin, tid, `[System] Detected language: ${lang}. Outbound copy will be translated.`);
+      return lang;
     });
 
     // Agent-involved tickets still get AI processing, but Sonnet limits scope

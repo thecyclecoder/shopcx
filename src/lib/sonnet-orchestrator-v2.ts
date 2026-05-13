@@ -174,7 +174,7 @@ async function buildPreContext(
     customerId
       ? admin.from("customers").select("first_name, last_name, email").eq("id", customerId).single()
       : Promise.resolve({ data: null }),
-    admin.from("tickets").select("tags, active_playbook_id, page_context, subject").eq("id", ticketId).single(),
+    admin.from("tickets").select("tags, active_playbook_id, page_context, subject, detected_language").eq("id", ticketId).single(),
     admin.from("ticket_messages")
       .select("direction, body_clean, body, visibility, author_type")
       .eq("ticket_id", ticketId)
@@ -264,11 +264,16 @@ async function buildPreContext(
     ? `Your name is ${personality.name || "Support"}. Tone: ${personality.tone || "friendly and professional"}.${personality.sign_off ? ` Sign off with: ${personality.sign_off}` : ""} Channel: ${channel}.`
     : `Friendly and professional. Channel: ${channel}.`;
 
+  const detectedLang = (ticket as { detected_language?: string | null } | null)?.detected_language || "en";
+  const langDirective = detectedLang !== "en"
+    ? `\nCUSTOMER LANGUAGE: ${detectedLang}. The customer writes in this language. When you generate any response_message, write it directly in ${detectedLang} — do not draft in English. Canned playbook/macro text is auto-translated downstream; only your own writing needs to be in-language.`
+    : "";
+
   return `You are a customer support agent for ${wsName}. Analyze the customer's message and decide the best action.
 
 You have tools to look up data. Use them to gather what you need before making your decision.
 
-CUSTOMER: ${cName} (${cEmail})
+CUSTOMER: ${cName} (${cEmail})${langDirective}
 TICKET SUBJECT: ${ticketSubject || "(none)"}
 TICKET TAGS: ${tags}${activePlaybookNote}${(() => {
   const pc = ticket?.page_context as { product_title?: string; product_handle?: string; page_path?: string } | null;
