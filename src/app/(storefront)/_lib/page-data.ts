@@ -39,6 +39,11 @@ export interface Product {
     intro?: string;
     bullets?: string[];
   } | null;
+  // Admin-curated H2 for the BundlePriceTableSection ("Coffee +
+  // Creamer Bundle"). Lives on the primary product because that's the
+  // page customers land on; falls back to "Add {upsell.title}" in
+  // render when null.
+  bundle_name: string | null;
   variants: Array<{
     id?: string;
     title?: string;
@@ -463,7 +468,7 @@ export async function getPageData(
   const { data: product } = await admin
     .from("products")
     .select(
-      "id, workspace_id, handle, title, image_url, description, rating, rating_count, target_customer, certifications, allergen_free, awards, intelligence_status, is_bestseller, header_text, header_text_color, header_text_weight, upsell_product_id, upsell_complementarity, variants",
+      "id, workspace_id, handle, title, image_url, description, rating, rating_count, target_customer, certifications, allergen_free, awards, intelligence_status, is_bestseller, header_text, header_text_color, header_text_weight, upsell_product_id, upsell_complementarity, bundle_name, variants",
     )
     .eq("workspace_id", workspace.id)
     .eq("handle", productHandle)

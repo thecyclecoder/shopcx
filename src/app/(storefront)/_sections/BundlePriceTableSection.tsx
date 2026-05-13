@@ -114,7 +114,7 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
                 Bundle &amp; Save
               </span>
               <h2 className="mt-3 text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:text-4xl">
-                Add {upsell.product.title}
+                {data.product.bundle_name || `Add ${upsell.product.title}`}
               </h2>
               <p className="mt-2 text-[15px] text-zinc-600">{subtitle}</p>
             </div>

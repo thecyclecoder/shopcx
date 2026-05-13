@@ -53,6 +53,7 @@ interface Product {
   header_text_weight: string | null;
   upsell_product_id: string | null;
   upsell_complementarity: { headline?: string; intro?: string; bullets?: string[] } | null;
+  bundle_name: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1522,6 +1523,7 @@ function UpsellCard({
 }) {
   const [products, setProducts] = useState<ProductOption[]>([]);
   const [upsellId, setUpsellId] = useState<string | null>(product.upsell_product_id);
+  const [bundleName, setBundleName] = useState(product.bundle_name || "");
   const [headline, setHeadline] = useState(product.upsell_complementarity?.headline || "");
   const [intro, setIntro] = useState(product.upsell_complementarity?.intro || "");
   const [bullets, setBullets] = useState<string[]>(product.upsell_complementarity?.bullets || ["", "", ""]);
@@ -1574,6 +1576,7 @@ function UpsellCard({
     const cleanedBullets = bullets.map(b => b.trim()).filter(Boolean);
     const payload = {
       upsell_product_id: upsellId,
+      bundle_name: upsellId ? (bundleName.trim() || null) : null,
       upsell_complementarity: upsellId
         ? {
             headline: headline.trim() || null,
@@ -1628,6 +1631,24 @@ function UpsellCard({
 
       {upsellId && (
         <>
+          <div className="mb-4">
+            <label className="block">
+              <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                Bundle name (H2 on the storefront bundle table)
+              </span>
+              <input
+                type="text"
+                value={bundleName}
+                onChange={(e) => setBundleName(e.target.value)}
+                placeholder={`Add ${upsellTitle || "the upsell product"}`}
+                className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              />
+              <span className="mt-1 block text-[10px] text-zinc-400">
+                Leave blank to fall back to &quot;Add {upsellTitle || "the upsell product"}&quot;.
+              </span>
+            </label>
+          </div>
+
           <div className="mb-3 flex items-center gap-3">
             <button
               type="button"
