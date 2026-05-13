@@ -14,12 +14,11 @@
 
 import { useState } from "react";
 
-const TRUNCATE_AT = 220;
+const TRUNCATE_AT = 260;
 
 interface Props {
   id: string;
   body: string;
-  smartQuote: string | null;
   reviewerName: string;
   rating: number;
   // Color tokens passed in so the card stays neutral about the
@@ -31,9 +30,35 @@ interface Props {
   linkColor: string;
 }
 
+/**
+ * Truncate body text on the nearest sentence boundary within the
+ * char window. Falls back to last word boundary if no sentence break
+ * lands in a sensible spot (must be at least halfway through the
+ * window so the teaser still has substance).
+ *
+ * We use this — not the AI smart_quote — because smart_quote tends to
+ * be the OPENING line of the review (context/setup), while the punch
+ * usually lands a sentence or two later. Pulling the first ~260 chars
+ * of the actual body gives the reader the context AND the start of
+ * the payoff, making "Read full review" feel earned.
+ */
+function smartTruncate(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const slice = text.slice(0, maxChars);
+  const lastEnd = Math.max(
+    slice.lastIndexOf(". "),
+    slice.lastIndexOf("! "),
+    slice.lastIndexOf("? "),
+  );
+  if (lastEnd > maxChars * 0.5) {
+    return text.slice(0, lastEnd + 1);
+  }
+  const lastSpace = slice.lastIndexOf(" ");
+  return (lastSpace > 0 ? slice.slice(0, lastSpace) : slice).trimEnd() + "…";
+}
+
 export function ExpandableReviewCard({
   body,
-  smartQuote,
   reviewerName,
   rating,
   fgText,
@@ -44,22 +69,11 @@ export function ExpandableReviewCard({
 }: Props) {
   const [expanded, setExpanded] = useState(false);
 
-  // Prefer the full body for expansion. Use smart_quote (if present)
-  // as the short version when collapsed — it's the AI-extracted pull
-  // line, usually punchier than the first 220 chars of raw text.
   const fullBody = (body || "").trim();
   if (!fullBody) return null;
 
-  const collapsedDisplay =
-    smartQuote && smartQuote.trim()
-      ? smartQuote.trim()
-      : fullBody.length > TRUNCATE_AT
-        ? fullBody.slice(0, TRUNCATE_AT).trimEnd() + "…"
-        : fullBody;
-
-  const hasMore =
-    fullBody.length > collapsedDisplay.length
-    || (smartQuote && smartQuote.trim() && smartQuote.trim() !== fullBody);
+  const collapsedDisplay = smartTruncate(fullBody, TRUNCATE_AT);
+  const hasMore = collapsedDisplay.length < fullBody.length;
 
   return (
     <figure

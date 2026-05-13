@@ -93,7 +93,6 @@ export function UpsellChapter({ data }: { data: PageData }) {
                 key={r.id}
                 id={r.id}
                 body={r.body || ""}
-                smartQuote={r.smart_quote}
                 reviewerName={r.reviewer_name || "Verified customer"}
                 rating={r.rating || 5}
                 fgText="#18181b"
