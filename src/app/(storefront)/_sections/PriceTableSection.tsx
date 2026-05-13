@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { PageData, PricingRule, PricingTier } from "../_lib/page-data";
-import { useActiveProductData } from "../_lib/active-member-context";
+import type { LinkGroup, PageData, PricingRule, PricingTier } from "../_lib/page-data";
+import { useActiveMember, useActiveProductData } from "../_lib/active-member-context";
 import { TrustChipRow } from "../_components/TrustChipRow";
 import { ShopCTA } from "../_components/ShopCTA";
 import { PackageStack } from "../_components/PackageStack";
@@ -72,6 +72,10 @@ export function PriceTableSection({ data }: { data: PageData }) {
         <h2 className="mb-4 text-center text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:text-4xl">
           Choose your pack
         </h2>
+
+        {data.link_group && data.link_group.members.length > 1 && (
+          <FormatToggle linkGroup={data.link_group} data={data} />
+        )}
 
         {/* Amazon savings banner — only when we have a cached Amazon
             price AND it's higher than our cheapest direct tier. Reads
@@ -451,6 +455,64 @@ function PriceCard({
             "frequency-days": mode === "subscribe" ? freqDays : null,
           }}
         />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Format toggle (Instant ↔ K-Cups) shown above the price-table when
+ * the product is part of a linked group. Mirrors the hero toggle —
+ * both write to the same active-member context, so picking one here
+ * also scrolls back up to a swapped hero. Keeps the buying surface
+ * self-contained so a customer who jumped to #pricing doesn't have
+ * to scroll back up to switch formats.
+ */
+function FormatToggle({
+  linkGroup,
+  data,
+}: {
+  linkGroup: LinkGroup;
+  data: PageData;
+}) {
+  const { activeMember, setActiveMemberId } = useActiveMember(data);
+  const sorted = [...linkGroup.members].sort(
+    (a, b) => a.display_order - b.display_order,
+  );
+  const activeId = activeMember?.member_id ?? sorted.find((m) => m.is_current)?.member_id ?? null;
+
+  return (
+    <div className="mx-auto mb-6 flex max-w-md flex-col items-center gap-2">
+      <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+        {linkGroup.name}
+      </span>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        {sorted.map((m) => {
+          const isActive = m.member_id === activeId;
+          return (
+            <button
+              key={m.member_id}
+              type="button"
+              aria-pressed={isActive}
+              onClick={() => setActiveMemberId(m.member_id)}
+              style={
+                isActive
+                  ? {
+                      backgroundColor: "var(--storefront-primary)",
+                      borderColor: "var(--storefront-primary)",
+                    }
+                  : undefined
+              }
+              className={`rounded-full border-2 px-4 py-2 text-sm font-semibold transition-colors ${
+                isActive
+                  ? "text-white"
+                  : "border-zinc-200 bg-white text-zinc-700 hover:border-zinc-400"
+              }`}
+            >
+              {m.value}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
