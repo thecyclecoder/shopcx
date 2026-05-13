@@ -44,7 +44,7 @@ export function PackageStack({
 
   return (
     <div
-      className={`relative mx-auto flex h-full w-full items-end justify-center overflow-x-hidden rounded-xl bg-amber-50 px-2 py-2 ring-1 ring-amber-100/60 ${className}`}
+      className={`relative mx-auto flex h-full w-full items-end justify-center overflow-x-hidden rounded-md bg-amber-50 px-2 py-2 ring-1 ring-amber-100/60 ${className}`}
     >
       {items.map((_, i) => {
         const isProm = i === promIndex;
