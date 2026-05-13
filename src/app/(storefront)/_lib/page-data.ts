@@ -64,6 +64,10 @@ export interface UpsellPartner {
     certifications: string[] | null;
     allergen_free: string[] | null;
     awards: string[] | null;
+    // The partner product's saved header wordmark color (hex). Used as
+    // the UpsellChapter's section background so the chapter visually
+    // belongs to the partner's brand identity, not a generic neutral.
+    header_text_color: string | null;
   };
   base_variant: {
     shopify_variant_id: string | null;
@@ -72,9 +76,11 @@ export interface UpsellPartner {
     servings: number | null;
     servings_unit: string | null;
   } | null;
-  // Hero image for the chapter's bag visual. Falls back to the base
-  // variant image, then the product image_url.
+  // Lifestyle hero image for the chapter (NOT the transparent-PNG bag
+  // shot). Sourced from product_media slot=hero, display_order 0;
+  // falls back to product.image_url if no hero media exists.
   hero_image_url: string | null;
+  hero_image_alt: string | null;
   // Top featured/highly-rated reviews for the chapter (max 3).
   reviews: Review[];
   complementarity: {
@@ -822,10 +828,10 @@ export async function getPageData(
   const productRow = product as Product & { upsell_product_id: string | null; upsell_complementarity: Product["upsell_complementarity"] };
   let upsell: UpsellPartner | null = null;
   if (productRow.upsell_product_id) {
-    const [{ data: upsellProduct }, { data: upsellVariants }, { data: upsellReviews }] = await Promise.all([
+    const [{ data: upsellProduct }, { data: upsellVariants }, { data: upsellReviews }, { data: upsellHeroMedia }] = await Promise.all([
       admin
         .from("products")
-        .select("id, handle, title, description, image_url, certifications, allergen_free, awards")
+        .select("id, handle, title, description, image_url, certifications, allergen_free, awards, header_text_color")
         .eq("workspace_id", workspace.id)
         .eq("id", productRow.upsell_product_id)
         .maybeSingle(),
@@ -846,10 +852,19 @@ export async function getPageData(
         .order("rating", { ascending: false })
         .order("created_at", { ascending: false })
         .limit(3),
+      admin
+        .from("product_media")
+        .select("url, alt_text, display_order")
+        .eq("workspace_id", workspace.id)
+        .eq("product_id", productRow.upsell_product_id)
+        .eq("slot", "hero")
+        .order("display_order", { ascending: true })
+        .limit(1)
+        .maybeSingle(),
     ]);
     if (upsellProduct) {
       const baseVariant = (upsellVariants || [])[0];
-      const heroImage = baseVariant?.image_url || upsellProduct.image_url || null;
+      const lifestyleHero = upsellHeroMedia?.url || upsellProduct.image_url || baseVariant?.image_url || null;
       const c = productRow.upsell_complementarity;
       upsell = {
         product: {
@@ -860,6 +875,7 @@ export async function getPageData(
           certifications: upsellProduct.certifications,
           allergen_free: upsellProduct.allergen_free,
           awards: upsellProduct.awards,
+          header_text_color: upsellProduct.header_text_color || null,
         },
         base_variant: baseVariant
           ? {
@@ -870,7 +886,8 @@ export async function getPageData(
               servings_unit: baseVariant.servings_unit,
             }
           : null,
-        hero_image_url: heroImage,
+        hero_image_url: lifestyleHero,
+        hero_image_alt: upsellHeroMedia?.alt_text || upsellProduct.title || null,
         reviews: (upsellReviews || []) as Review[],
         complementarity:
           c && c.headline && c.intro && Array.isArray(c.bullets) && c.bullets.length > 0
