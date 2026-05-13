@@ -55,31 +55,54 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   }
 
   if (view === "tickets" && date) {
-    const start = new Date(date + "T00:00:00.000Z").toISOString();
-    const end = new Date(new Date(date + "T00:00:00.000Z").getTime() + 24 * 60 * 60 * 1000).toISOString();
-    const { data } = await admin.from("ticket_analyses")
-      .select("id, ticket_id, score, admin_score, admin_score_reason, summary, issues, action_items, created_at, cost_cents, ai_message_count, trigger, tickets(subject, customer_id)")
+    // Bucket by the TICKET'S close date (tickets.updated_at) rather
+    // than the analysis row's created_at — keeps the daily detail
+    // view aligned with the rollup. A wide created_at filter is used
+    // to bound the query, then we narrow client-side by joined
+    // ticket.updated_at so we don't accidentally miss late-analyzed
+    // tickets whose analysis sits in a later UTC day.
+    const dayStart = new Date(date + "T00:00:00.000Z").toISOString();
+    const dayEnd = new Date(new Date(date + "T00:00:00.000Z").getTime() + 24 * 60 * 60 * 1000).toISOString();
+    const wideStart = new Date(new Date(dayStart).getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const wideEnd = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const { data } = await admin
+      .from("ticket_analyses")
+      .select("id, ticket_id, score, admin_score, admin_score_reason, summary, issues, action_items, created_at, cost_cents, ai_message_count, trigger, tickets(subject, customer_id, updated_at)")
       .eq("workspace_id", workspaceId)
-      .gte("created_at", start)
-      .lt("created_at", end)
+      .gte("created_at", wideStart)
+      .lt("created_at", wideEnd)
       .order("created_at", { ascending: false });
 
-    return NextResponse.json({ analyses: data || [] });
+    const inDay = (data || []).filter((r) => {
+      const t = (r as { tickets?: { updated_at?: string } | null }).tickets?.updated_at;
+      const key = (t || (r.created_at as string)).slice(0, 10);
+      return key === date;
+    });
+
+    return NextResponse.json({ analyses: inDay });
   }
 
-  // daily rollups (default) — last 14 days
+  // Daily rollups (default) — last 14 days. We pull the joined
+  // ticket row so each analysis is bucketed by the TICKET'S close
+  // date (tickets.updated_at) instead of the analysis row's
+  // created_at. Otherwise a backlog of older closed tickets analyzed
+  // today all bunch into today's report — which is exactly what
+  // happened the first time the cron resumed after a multi-day gap.
   const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
   fourteenDaysAgo.setHours(0, 0, 0, 0);
-  const { data } = await admin.from("ticket_analyses")
-    .select("score, admin_score, issues, action_items, created_at")
+  const { data } = await admin
+    .from("ticket_analyses")
+    .select("score, admin_score, issues, action_items, created_at, tickets(updated_at)")
     .eq("workspace_id", workspaceId)
     .gte("created_at", fourteenDaysAgo.toISOString())
     .order("created_at", { ascending: false });
 
-  // Group by date
+  // Group by ticket close date — fall back to the analysis's own
+  // created_at if the joined ticket row is missing for any reason.
   const byDate: Record<string, { scores: number[]; issues: Record<string, number>; actions: number; corrected: number }> = {};
   for (const r of (data || [])) {
-    const d = (r.created_at as string).slice(0, 10);
+    const ticketUpdatedAt = (r as { tickets?: { updated_at?: string } | null }).tickets?.updated_at;
+    const d = (ticketUpdatedAt || (r.created_at as string)).slice(0, 10);
     if (!byDate[d]) byDate[d] = { scores: [], issues: {}, actions: 0, corrected: 0 };
     const score = (r.admin_score ?? r.score) as number | null;
     if (score != null) byDate[d].scores.push(score);
