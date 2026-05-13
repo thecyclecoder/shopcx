@@ -13,6 +13,7 @@ import { ReplacementsList } from "@/components/shared/ReplacementsList";
 import type { ReplacementItem } from "@/components/shared/ReplacementsList";
 import SubscriptionsList from "@/components/shared/SubscriptionsList";
 import LoyaltyCard from "@/components/shared/LoyaltyCard";
+import CrisisEnrollmentCard from "@/components/crisis-enrollment-card";
 import type { LoyaltyMemberData, LoyaltyRedemption } from "@/components/shared/LoyaltyCard";
 import type { SubscriptionData as CustomerSubscription } from "@/components/shared/SubscriptionsList";
 import { formatItemName } from "@/components/shared/format-utils";
@@ -2773,6 +2774,13 @@ export default function TicketDetailPage() {
           </div>
         )}
         </div>
+
+        {/* ═══ CRISIS ENROLLMENT CARD ═══ (only renders when active crisis enrollment exists) */}
+        {customer && (
+          <div className={`${mobileSection !== "subscriptions" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
+            <CrisisEnrollmentCard workspaceId={workspace.id} customerId={customer.id} />
+          </div>
+        )}
 
         {/* ═══ SUBSCRIPTIONS CARD ═══ */}
         <div className={`${mobileSection !== "subscriptions" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>
