@@ -95,17 +95,31 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
       className="w-full scroll-mt-6 overflow-x-clip bg-white py-10 sm:py-14"
     >
       <div className="mx-auto max-w-6xl px-5 md:px-8">
-        <div className="mx-auto mb-6 max-w-2xl text-center">
-          <span className="inline-flex rounded-full bg-orange-100 px-3 py-1 text-[11px] font-extrabold uppercase tracking-[0.18em] text-orange-700">
-            Bundle &amp; Save
-          </span>
-          <h2 className="mt-3 text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:text-4xl">
-            Add {upsell.product.title}
-          </h2>
-          <p className="mt-2 text-[15px] text-zinc-600">
-            Same quantity discount you&apos;d get on a regular order — applied to both products.
-          </p>
-        </div>
+        {(() => {
+          // Subtitle mentions "and free gifts" only when (a) the primary's
+          // rule actually has a gift configured AND (b) at least one of
+          // the bundle sizes meets the gift's min-quantity threshold.
+          // Largest bundle = 4 units (2 primary + 2 upsell), so a min-qty
+          // up to 4 keeps the gift in play; anything higher and we'd be
+          // promising a gift no bundle can unlock.
+          const giftAvailableForAnyBundle =
+            !!rule.free_gift_variant_id
+            && (rule.free_gift_min_quantity || 1) <= 4;
+          const subtitle = giftAvailableForAnyBundle
+            ? `Bundle ${data.product.title} & ${upsell.product.title} for even bigger discounts and free gifts.`
+            : `Bundle ${data.product.title} & ${upsell.product.title} for even bigger discounts.`;
+          return (
+            <div className="mx-auto mb-6 max-w-2xl text-center">
+              <span className="inline-flex rounded-full bg-orange-100 px-3 py-1 text-[11px] font-extrabold uppercase tracking-[0.18em] text-orange-700">
+                Bundle &amp; Save
+              </span>
+              <h2 className="mt-3 text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:text-4xl">
+                Add {upsell.product.title}
+              </h2>
+              <p className="mt-2 text-[15px] text-zinc-600">{subtitle}</p>
+            </div>
+          );
+        })()}
 
         {/* Same controls as the primary price table — kept in sync via
             the shared pricing-mode + active-member contexts. Customer
