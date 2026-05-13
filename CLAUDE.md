@@ -3,6 +3,7 @@
 @CANCEL-FLOW.md
 @SONNET-ORCHESTRATOR.md
 @CRISIS-MANAGEMENT-SPEC.md
+@STOREFRONT.md
 
 # ShopCX.ai — The Retention Operating System
 
