@@ -184,7 +184,7 @@ function EnrollmentRow({
       <div className="mt-3 space-y-2 border-t border-amber-100 pt-3 dark:border-amber-900/40">
         <Toggle
           label={`Auto-switch back to ${originalName} when restocked`}
-          hint="When the crisis is resolved, the system silently swaps the subscription line back to the original variant. Customer doesn't need to confirm."
+          hint="When the crisis is resolved, the system automatically swaps the subscription line back to the original variant. Customer doesn't need to confirm."
           checked={action.auto_readd}
           onChange={(v) => onPatch({ auto_readd: v })}
           saving={saving}

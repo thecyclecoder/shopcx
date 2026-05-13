@@ -892,21 +892,22 @@ async function getCrisisStatus(admin: Admin, wsId: string, custId: string): Prom
     // reasonable-sounding guess.
     //
     // The customer does nothing. If auto_readd is true the system
-    // silently switches their subscription line back to the original
-    // variant when the admin resolves the crisis — they just receive
-    // the original product on the next shipment with no journey, no
-    // email, no confirmation needed.
+    // automatically switches their subscription line back to the
+    // original variant when the admin resolves the crisis — they
+    // just receive the original product on the next shipment with
+    // no journey, no email, no confirmation needed. Always say
+    // "automatically" in customer-facing copy, never "silently".
     const resolutionActions: string[] = [];
     if (a.auto_resume && a.paused_at) {
       resolutionActions.push("auto-resume the paused subscription");
     }
     if (a.auto_readd) {
       if (a.removed_item_at) {
-        resolutionActions.push("silently re-add the removed original item to the subscription");
+        resolutionActions.push("automatically re-add the removed original item to the subscription");
       } else {
         // Swap case — berry_only / berry_plus customer who was
         // auto-swapped to default_swap rather than paused/removed.
-        resolutionActions.push("silently switch the subscription line back to the original variant (customer does nothing, just receives the original on the next shipment)");
+        resolutionActions.push("automatically switch the subscription line back to the original variant (customer does nothing, just receives the original on the next shipment)");
       }
     }
     if (resolutionActions.length === 0) {
