@@ -1,6 +1,9 @@
 export function TrustBadge({ icon, label }: { icon?: React.ReactNode; label: string }) {
+  // text-current so the badge inherits whatever color its parent
+  // wrapper sets — lets ShopCTA render the badge dark on light
+  // backgrounds and light on the green FinalCTA section.
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-700">
+    <span className="inline-flex items-center gap-1.5 text-xs font-medium text-current">
       {icon}
       {label}
     </span>

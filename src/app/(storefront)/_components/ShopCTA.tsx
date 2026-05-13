@@ -90,6 +90,10 @@ export function ShopCTA({
   // trust badge looks best centered beneath it regardless of section
   // alignment. On desktop we respect the section's `align` setting.
   const desktopItemsClass = align === "center" ? "sm:items-center" : "sm:items-start";
+  // Trust-badge color follows the variant: dark text on light cards
+  // (primary), light text on the colored FinalCTA (inverse) so the
+  // "30-day money-back" line stays readable against the green bg.
+  const trustColorClass = isPrimary ? "text-zinc-700" : "text-white/85";
 
   // Build data-* attribute set — filter out empty values so we don't
   // emit `data-x=""` on every button by default.
@@ -101,7 +105,7 @@ export function ShopCTA({
   }
 
   return (
-    <div className={`flex flex-col items-center gap-3 ${desktopItemsClass} ${className}`}>
+    <div className={`flex flex-col items-center gap-3 ${desktopItemsClass} ${trustColorClass} ${className}`}>
       <a
         href={href}
         style={isPrimary ? buttonStyle : inverseColorStyle}

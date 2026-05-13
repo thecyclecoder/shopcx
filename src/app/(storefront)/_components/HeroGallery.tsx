@@ -51,21 +51,25 @@ export function HeroGallery({
 
   return (
     <>
+      {/* When showing the facts slide we drop the fixed 4:3 mobile
+          aspect so the CSS panel renders at its natural height —
+          otherwise the top of the panel gets clipped on mobile. */}
       <div
-        className="relative w-full aspect-[4/3] xl:aspect-auto"
+        className={`relative w-full xl:aspect-auto ${showingFacts ? "" : "aspect-[4/3]"}`}
       >
-        <div
-          style={{ aspectRatio: `${aspectW} / ${aspectH}` }}
-          className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover xl:relative xl:inset-auto xl:[&_picture]:relative xl:[&_picture]:inset-auto xl:[&_img]:h-full xl:[&_img]:w-full xl:[&_img]:object-contain"
-        >
-          {showingFacts && supplementFacts ? (
-            <div className="absolute inset-0 flex items-center justify-center overflow-auto bg-zinc-50 p-4 xl:relative xl:inset-auto xl:bg-transparent xl:p-0">
-              <SupplementFactsPanel facts={supplementFacts} />
-            </div>
-          ) : (
-            // key forces React to remount the <picture> when active changes,
-            // so the new image's <source> srcset is read fresh — without
-            // this, browsers caching the prior decoded image can stick.
+        {showingFacts && supplementFacts ? (
+          <div className="flex w-full justify-center bg-zinc-50 p-4 xl:bg-transparent xl:p-0">
+            <SupplementFactsPanel facts={supplementFacts} />
+          </div>
+        ) : (
+          <div
+            style={{ aspectRatio: `${aspectW} / ${aspectH}` }}
+            className="absolute inset-0 [&_picture]:absolute [&_picture]:inset-0 [&_img]:h-full [&_img]:w-full [&_img]:object-cover xl:relative xl:inset-auto xl:[&_picture]:relative xl:[&_picture]:inset-auto xl:[&_img]:h-full xl:[&_img]:w-full xl:[&_img]:object-contain"
+          >
+            {/* key forces React to remount the <picture> when active
+                changes, so the new image's <source> srcset is read
+                fresh — without this, browsers caching the prior
+                decoded image can stick. */}
             <PictureHero
               key={active?.url || activeIdx}
               media={active || null}
@@ -74,8 +78,8 @@ export function HeroGallery({
               width={aspectW}
               height={aspectH}
             />
-          )}
-        </div>
+          </div>
+        )}
         {isBestseller && !showingFacts && (
           <span
             className="absolute right-3 top-3 z-10 inline-flex items-center rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white shadow-md xl:right-4 xl:top-12 xl:px-4 xl:py-2 xl:text-sm"
