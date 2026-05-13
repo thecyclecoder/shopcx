@@ -870,10 +870,39 @@ async function getCrisisStatus(admin: Admin, wsId: string, custId: string): Prom
     if (a.tier1_response) out.push(`  Tier 1: ${a.tier1_response}${a.tier1_swapped_to ? ` → ${JSON.stringify(a.tier1_swapped_to)}` : ""}`);
     if (a.tier2_response) out.push(`  Tier 2: ${a.tier2_response}${a.tier2_swapped_to ? ` → ${JSON.stringify(a.tier2_swapped_to)}` : ""}`);
     if (a.tier3_response) out.push(`  Tier 3: ${a.tier3_response}`);
-    if (a.paused_at) out.push(`  PAUSED at ${new Date(a.paused_at).toLocaleDateString()} (auto_resume: ${a.auto_resume})`);
-    if (a.removed_item_at) out.push(`  REMOVED at ${new Date(a.removed_item_at).toLocaleDateString()} (auto_readd: ${a.auto_readd})`);
+    if (a.paused_at) out.push(`  PAUSED at ${new Date(a.paused_at).toLocaleDateString()}`);
+    if (a.removed_item_at) out.push(`  REMOVED at ${new Date(a.removed_item_at).toLocaleDateString()}`);
     if (a.cancelled) out.push("  CANCELLED");
     if (a.exhausted_at) out.push("  All tiers exhausted");
+
+    // ALWAYS surface auto_readd + auto_resume regardless of pause/remove
+    // state. Without this Opus had no way to know whether the system
+    // would auto-reach-out post-resolution (see Debra's 5/11 ticket —
+    // it promised "we'll reach out" by coincidence, not certainty).
+    out.push(`  auto_resume: ${a.auto_resume}  (will the system unpause this subscription when the crisis ends?)`);
+    out.push(`  auto_readd: ${a.auto_readd}  (will the system re-add / offer the original product when the crisis ends?)`);
+
+    // Derived: what literally happens when the crisis resolves. Lets
+    // Opus answer "will you reach out?" with certainty instead of a
+    // reasonable-sounding guess.
+    const resolutionActions: string[] = [];
+    if (a.auto_resume && a.paused_at) {
+      resolutionActions.push("auto-resume the paused subscription + send confirmation email");
+    }
+    if (a.auto_readd) {
+      if (a.removed_item_at) {
+        resolutionActions.push("re-add the removed original item to the subscription + send confirmation email");
+      } else {
+        // Swap case — berry_only / berry_plus customer who was
+        // auto-swapped to default_swap rather than paused/removed.
+        resolutionActions.push("send a 'Original is back — want to switch back?' journey to the customer");
+      }
+    }
+    if (resolutionActions.length === 0) {
+      out.push(`  ON RESOLUTION: nothing automatic — customer must reach out themselves.`);
+    } else {
+      out.push(`  ON RESOLUTION: ${resolutionActions.join("; ")}.`);
+    }
 
     // Available swaps
     if (crisis.default_swap_title) out.push(`  Default swap: ${crisis.default_swap_title} (${crisis.default_swap_variant_id})`);
