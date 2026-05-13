@@ -92,17 +92,23 @@ export function PriceTableSection({ data }: { data: PageData }) {
           if (!amazon || !directShown || amazon <= directShown) return null;
           const savings = amazon - directShown;
           return (
-            <div
-              className="mx-auto mb-6 flex max-w-2xl items-center justify-center gap-2 rounded-full bg-amber-100 px-4 py-2 text-sm font-semibold text-amber-900 ring-1 ring-amber-200 sm:text-base"
-            >
-              <span aria-hidden="true">💰</span>
-              <span>
-                Buy direct &amp; save{" "}
-                <strong>${(savings / 100).toFixed(2)}/bag</strong>
-                <span className="hidden sm:inline">
-                  {" "}vs. Amazon&apos;s ${(amazon / 100).toFixed(2)}
+            <div className="mx-auto mb-6 flex max-w-2xl flex-col items-center gap-1 rounded-2xl bg-amber-100 px-4 py-3 text-center text-amber-900 ring-1 ring-amber-200">
+              <div className="flex items-center justify-center gap-2 text-sm font-bold sm:text-base">
+                <span aria-hidden="true">💰</span>
+                <span>
+                  Save{" "}
+                  <strong className="text-amber-950">
+                    ${(savings / 100).toFixed(2)}/bag
+                  </strong>{" "}
+                  vs Amazon&apos;s ${(amazon / 100).toFixed(2)}
                 </span>
-              </span>
+              </div>
+              <div className="flex items-center justify-center gap-1.5 text-xs font-semibold text-amber-800 sm:text-sm">
+                <span aria-hidden="true">⏱</span>
+                <span>
+                  Plus extra savings unlocked below — limited time
+                </span>
+              </div>
             </div>
           );
         })()}
