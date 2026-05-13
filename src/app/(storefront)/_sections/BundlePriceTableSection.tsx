@@ -146,6 +146,16 @@ export function BundlePriceTableSection({ data }: { data: PageData }) {
               isHighlighted={card.n === 2}
               freqDays={shared?.mode === "subscribe" ? (shared?.freqDays ?? null) : null}
               mode={shared?.mode === "subscribe" ? "subscribe" : "onetime"}
+              // Perks pulled from the primary's pricing_rule — same
+              // gating logic as the single-product card so bundles
+              // qualify for shipping/gift on the same terms.
+              freeShipping={!!rule.free_shipping}
+              freeShippingSubOnly={!!rule.free_shipping_subscription_only}
+              freeGiftTitle={rule.free_gift_product_title || null}
+              freeGiftImageUrl={rule.free_gift_image_url || null}
+              freeGiftPriceCents={rule.free_gift_price_cents || null}
+              freeGiftMinQty={rule.free_gift_min_quantity || 1}
+              freeGiftSubOnly={!!rule.free_gift_subscription_only}
             />
           ))}
         </div>
@@ -172,6 +182,13 @@ function BundleCard({
   isHighlighted,
   freqDays,
   mode,
+  freeShipping,
+  freeShippingSubOnly,
+  freeGiftTitle,
+  freeGiftImageUrl,
+  freeGiftPriceCents,
+  freeGiftMinQty,
+  freeGiftSubOnly,
 }: {
   n: number;
   totalUnits: number;
@@ -190,8 +207,43 @@ function BundleCard({
   isHighlighted: boolean;
   freqDays: number | null;
   mode: "subscribe" | "onetime";
+  freeShipping: boolean;
+  freeShippingSubOnly: boolean;
+  freeGiftTitle: string | null;
+  freeGiftImageUrl: string | null;
+  freeGiftPriceCents: number | null;
+  freeGiftMinQty: number;
+  freeGiftSubOnly: boolean;
 }) {
   const perUnitCents = Math.round(finalPriceCents / Math.max(1, totalUnits));
+  const isSubscribing = mode === "subscribe";
+
+  // Free shipping eligibility — same gating as the primary card.
+  const freeShipApplies = freeShipping && (!freeShippingSubOnly || isSubscribing);
+  const freeShipSubLocked = freeShipping && freeShippingSubOnly && !isSubscribing;
+
+  // Free gift eligibility — totalUnits is the count that gates the
+  // gift, exactly like a 2-pack or 3-pack of a single product would.
+  // Bundle-1 = 2 units, Bundle-2 = 4 units, so a min-qty of 2 unlocks
+  // both bundles, and a min-qty of 4 unlocks only Bundle-2.
+  const giftConfigured = !!freeGiftTitle;
+  const giftQtyOk = totalUnits >= freeGiftMinQty;
+  const giftSubOk = !freeGiftSubOnly || isSubscribing;
+  const giftApplies = giftConfigured && giftQtyOk && giftSubOk;
+  const giftBlocked = giftConfigured && !giftApplies;
+  const giftBlockedReason = (() => {
+    if (!giftBlocked) return null;
+    const subPart = !giftSubOk ? "Subscribe & Save" : null;
+    const qtyPart = !giftQtyOk ? `${freeGiftMinQty}+ items` : null;
+    if (subPart && qtyPart) return `Only with ${subPart} on ${qtyPart}`;
+    if (subPart) return `Only with ${subPart}`;
+    if (qtyPart) return `On ${qtyPart}`;
+    return null;
+  })();
+
+  // Strip the "— Default Title" suffix some older saved gift titles
+  // carry (mirrors PriceTableSection's stripDefaultTitle helper).
+  const cleanGiftTitle = (freeGiftTitle || "").replace(/\s*[—–\-]\s*Default Title\s*$/i, "").trim();
 
   return (
     <div
@@ -274,6 +326,32 @@ function BundleCard({
             </span>
           </li>
         )}
+        {(freeShipApplies || freeShipSubLocked) && (
+          <li className="flex items-start gap-2">
+            {freeShipApplies ? <CheckIcon /> : <XIcon />}
+            <span>
+              Free shipping
+              {freeShipSubLocked && (
+                <span className="ml-1 text-xs text-zinc-500">
+                  (Only with Subscribe &amp; Save)
+                </span>
+              )}
+            </span>
+          </li>
+        )}
+        {(giftApplies || giftBlocked) && cleanGiftTitle && (
+          <li className="flex items-start gap-2">
+            {giftApplies ? <CheckIcon /> : <XIcon />}
+            <span className="flex-1">
+              Free {cleanGiftTitle}
+              {giftBlockedReason && (
+                <span className="ml-1 text-xs text-zinc-500">
+                  ({giftBlockedReason})
+                </span>
+              )}
+            </span>
+          </li>
+        )}
         <li className="flex items-center gap-2">
           <CheckIcon /> 30-day money-back
         </li>
@@ -283,6 +361,37 @@ function BundleCard({
           </li>
         )}
       </ul>
+
+      {/* Big free-gift callout — only when the gift actually applies
+          to this bundle + mode. Mirrors the primary card's treatment. */}
+      {giftApplies && cleanGiftTitle && (
+        <div className="mt-5 flex items-center gap-3 rounded-xl bg-amber-100 p-3 ring-1 ring-amber-200">
+          {freeGiftImageUrl && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={freeGiftImageUrl}
+              alt=""
+              className="h-16 w-16 flex-shrink-0 rounded-lg bg-white object-contain p-1.5 shadow-sm sm:h-20 sm:w-20"
+            />
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] font-extrabold uppercase tracking-wider text-amber-700 sm:text-xs">
+              Plus a free gift
+            </div>
+            <div className="mt-0.5 text-sm font-bold leading-tight text-zinc-900 sm:text-base">
+              {cleanGiftTitle}
+            </div>
+            {freeGiftPriceCents != null && freeGiftPriceCents > 0 && (
+              <div className="mt-1 inline-flex items-baseline gap-1 text-xs font-semibold text-amber-700 sm:text-sm">
+                <span className="text-zinc-500 line-through">
+                  ${(freeGiftPriceCents / 100).toFixed(2)}
+                </span>
+                <span>value · yours free</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="mt-6">
         <ShopCTA
@@ -311,6 +420,15 @@ function CheckIcon() {
   return (
     <svg className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function XIcon() {
+  return (
+    <svg className="mt-0.5 h-4 w-4 flex-shrink-0 text-rose-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
     </svg>
   );
 }
