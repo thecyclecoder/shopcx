@@ -39,6 +39,8 @@ const EDITABLE_FIELDS = new Set([
   "header_text",
   "header_text_color",
   "header_text_weight",
+  "upsell_product_id",
+  "upsell_complementarity",
 ]);
 
 export async function PATCH(

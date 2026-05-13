@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { LinkGroup, PageData, PricingRule, PricingTier } from "../_lib/page-data";
 import { useActiveMember, useActiveProductData } from "../_lib/active-member-context";
+import { usePricingMode } from "../_lib/pricing-mode-context";
 import { TrustChipRow } from "../_components/TrustChipRow";
 import { ShopCTA } from "../_components/ShopCTA";
 import { PackageStack } from "../_components/PackageStack";
@@ -49,16 +50,25 @@ export function PriceTableSection({ data }: { data: PageData }) {
   }, [rule, baseVariant, data.pricing_tiers]);
 
   const hasAnySubscribe = tiers.some((t) => t.subscribe_price_cents != null);
-  const [mode, setMode] = useState<"subscribe" | "onetime">(
+
+  // Shared pricing mode + frequency state. When the bundle table is
+  // also on the page, this context is provided at the page level and
+  // both tables stay in sync. When it's not (older pages / no upsell
+  // configured), we fall back to a local state instance so behavior
+  // is unchanged.
+  const shared = usePricingMode();
+  const [localMode, setLocalMode] = useState<"subscribe" | "onetime">(
     hasAnySubscribe ? "subscribe" : "onetime",
   );
-
-  // Default frequency = the one flagged default, else the first one.
   const frequencies = rule?.available_frequencies || [];
   const defaultFreq = frequencies.find((f) => f.default) || frequencies[0] || null;
-  const [freqDays, setFreqDays] = useState<number | null>(
+  const [localFreqDays, setLocalFreqDays] = useState<number | null>(
     defaultFreq?.interval_days ?? null,
   );
+  const mode = shared?.mode ?? localMode;
+  const setMode = shared?.setMode ?? setLocalMode;
+  const freqDays = shared?.freqDays ?? localFreqDays;
+  const setFreqDays = shared?.setFreqDays ?? setLocalFreqDays;
 
   if (tiers.length === 0) return null;
 

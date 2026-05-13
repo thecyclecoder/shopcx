@@ -33,6 +33,12 @@ export interface Product {
   header_text: string | null;
   header_text_color: string | null;
   header_text_weight: string | null;
+  upsell_product_id: string | null;
+  upsell_complementarity: {
+    headline?: string;
+    intro?: string;
+    bullets?: string[];
+  } | null;
   variants: Array<{
     id?: string;
     title?: string;
@@ -40,6 +46,42 @@ export interface Product {
     price_cents?: number;
     image_url?: string | null;
   }> | null;
+}
+
+/**
+ * Upsell partner product, loaded when the primary product has
+ * upsell_product_id set. Drives the UpsellChapter + the
+ * BundlePriceTableSection. The complementarity copy (admin-curated +
+ * AI-generated) lives on the PRIMARY product (we attach it here too
+ * for convenience).
+ */
+export interface UpsellPartner {
+  product: {
+    id: string;
+    handle: string;
+    title: string;
+    description: string | null;
+    certifications: string[] | null;
+    allergen_free: string[] | null;
+    awards: string[] | null;
+  };
+  base_variant: {
+    shopify_variant_id: string | null;
+    price_cents: number;
+    image_url: string | null;
+    servings: number | null;
+    servings_unit: string | null;
+  } | null;
+  // Hero image for the chapter's bag visual. Falls back to the base
+  // variant image, then the product image_url.
+  hero_image_url: string | null;
+  // Top featured/highly-rated reviews for the chapter (max 3).
+  reviews: Review[];
+  complementarity: {
+    headline: string;
+    intro: string;
+    bullets: string[];
+  } | null;
 }
 
 export interface PageContent {
@@ -357,6 +399,10 @@ export interface PageData {
   // K-Cups), the group's members + visual + variant data so the hero
   // toggle can swap inline without re-fetching.
   link_group: LinkGroup | null;
+  // Bundle upsell partner — present when products.upsell_product_id
+  // is set on the primary. Drives the UpsellChapter + bundle price
+  // table on the storefront PDP.
+  upsell: UpsellPartner | null;
   reviews: Review[];
   review_analysis: ReviewAnalysis | null;
   review_total_count: number;
@@ -411,7 +457,7 @@ export async function getPageData(
   const { data: product } = await admin
     .from("products")
     .select(
-      "id, workspace_id, handle, title, image_url, description, rating, rating_count, target_customer, certifications, allergen_free, awards, intelligence_status, is_bestseller, header_text, header_text_color, header_text_weight, variants",
+      "id, workspace_id, handle, title, image_url, description, rating, rating_count, target_customer, certifications, allergen_free, awards, intelligence_status, is_bestseller, header_text, header_text_color, header_text_weight, upsell_product_id, upsell_complementarity, variants",
     )
     .eq("workspace_id", workspace.id)
     .eq("handle", productHandle)
@@ -768,6 +814,72 @@ export async function getPageData(
     }),
   );
 
+  // ── Bundle upsell partner (optional) ─────────────────────────────
+  // Loaded when the primary has products.upsell_product_id set. We
+  // pull the partner's basic product fields, hero variant, and a few
+  // top featured reviews so the UpsellChapter has everything it needs
+  // to render without N+1 client fetches.
+  const productRow = product as Product & { upsell_product_id: string | null; upsell_complementarity: Product["upsell_complementarity"] };
+  let upsell: UpsellPartner | null = null;
+  if (productRow.upsell_product_id) {
+    const [{ data: upsellProduct }, { data: upsellVariants }, { data: upsellReviews }] = await Promise.all([
+      admin
+        .from("products")
+        .select("id, handle, title, description, image_url, certifications, allergen_free, awards")
+        .eq("workspace_id", workspace.id)
+        .eq("id", productRow.upsell_product_id)
+        .maybeSingle(),
+      admin
+        .from("product_variants")
+        .select("shopify_variant_id, price_cents, image_url, servings, servings_unit, position")
+        .eq("product_id", productRow.upsell_product_id)
+        .order("position", { ascending: true })
+        .limit(1),
+      admin
+        .from("product_reviews")
+        .select("id, reviewer_name, rating, title, body, images, smart_quote, created_at, status, featured, product_id")
+        .eq("workspace_id", workspace.id)
+        .eq("product_id", productRow.upsell_product_id)
+        .in("status", ["published", "featured"])
+        .not("body", "is", null)
+        .order("featured", { ascending: false })
+        .order("rating", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(3),
+    ]);
+    if (upsellProduct) {
+      const baseVariant = (upsellVariants || [])[0];
+      const heroImage = baseVariant?.image_url || upsellProduct.image_url || null;
+      const c = productRow.upsell_complementarity;
+      upsell = {
+        product: {
+          id: upsellProduct.id,
+          handle: upsellProduct.handle,
+          title: upsellProduct.title,
+          description: upsellProduct.description,
+          certifications: upsellProduct.certifications,
+          allergen_free: upsellProduct.allergen_free,
+          awards: upsellProduct.awards,
+        },
+        base_variant: baseVariant
+          ? {
+              shopify_variant_id: baseVariant.shopify_variant_id,
+              price_cents: baseVariant.price_cents,
+              image_url: baseVariant.image_url,
+              servings: baseVariant.servings,
+              servings_unit: baseVariant.servings_unit,
+            }
+          : null,
+        hero_image_url: heroImage,
+        reviews: (upsellReviews || []) as Review[],
+        complementarity:
+          c && c.headline && c.intro && Array.isArray(c.bullets) && c.bullets.length > 0
+            ? { headline: c.headline, intro: c.intro, bullets: c.bullets }
+            : null,
+      };
+    }
+  }
+
   return {
     product: productWithBump as Product,
     link_group: linkGroup,
@@ -788,6 +900,7 @@ export async function getPageData(
       : null,
     amazon_price_cents: amazonPriceRes.data?.current_price_cents ?? null,
     variants_with_facts,
+    upsell,
     how_it_works: (howItWorksRes.data || []) as HowItWorksStep[],
     recent_orders_for_proof: recentOrdersForProof,
     benefit_review_matches,

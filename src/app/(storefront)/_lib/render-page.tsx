@@ -22,6 +22,8 @@ import { FinalCTASection } from "../_sections/FinalCTASection";
 import { StorefrontHeader } from "../_components/StorefrontHeader";
 import { ProductJsonLd } from "../_components/ProductJsonLd";
 import { ActiveMemberProvider } from "./active-member-context";
+import { PricingModeProvider } from "./pricing-mode-context";
+import { UpsellChapter } from "../_sections/UpsellChapter";
 
 // PriceTable is mid-page but interactive on first scroll — load its
 // JS with the page but in a separate chunk so it doesn't inflate the
@@ -29,6 +31,13 @@ import { ActiveMemberProvider } from "./active-member-context";
 // initial response for SEO + instant paint.
 const PriceTableSection = dynamic(
   () => import("../_sections/PriceTableSection").then((m) => m.PriceTableSection),
+);
+
+// BundlePriceTableSection only renders when an upsell partner is
+// configured + complementarity copy is set. Loaded lazily to keep
+// the main bundle lean on pages where it's not used.
+const BundlePriceTableSection = dynamic(
+  () => import("../_sections/BundlePriceTableSection").then((m) => m.BundlePriceTableSection),
 );
 
 const ReviewsSection = dynamic(
@@ -125,23 +134,48 @@ export function StorefrontPage({
           data.link_group?.members.find((m) => m.is_current)?.member_id ?? null
         }
       >
-        <main className="flex w-full flex-col">
-          <HeroSection data={data} />
-          {/* HowItWorksSection ("Why this works") now absorbs what
-              MechanismSection used to render — single block below the
-              hero with image + CTA. MechanismSection still exists in
-              the codebase but is no longer in the flow. */}
-          <HowItWorksSection data={data} />
-          <UGCSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
-          <ComparisonSection data={data} />
-          <IngredientsSection data={data} />
-          <NutritionistEndorsementSection data={data} />
-          <WhatToExpectTimeline data={data} />
-          <PriceTableSection data={data} />
-          <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
-          <FAQSection data={data} />
-          <FinalCTASection data={data} />
-        </main>
+        <PricingModeProvider
+          initialMode={
+            // Default to subscribe when the product has a sub discount
+            // configured (preserves the existing default behavior for
+            // most products, which all subscribe by default).
+            (data.pricing_rule?.subscribe_discount_pct || 0) > 0 ? "subscribe" : "onetime"
+          }
+          initialFreqDays={
+            // Pull from the primary product's rule: the flagged-default
+            // frequency, else the first available.
+            (() => {
+              const fs = data.pricing_rule?.available_frequencies || [];
+              const def = fs.find(f => f.default) || fs[0] || null;
+              return def?.interval_days ?? null;
+            })()
+          }
+        >
+          <main className="flex w-full flex-col">
+            <HeroSection data={data} />
+            {/* HowItWorksSection ("Why this works") now absorbs what
+                MechanismSection used to render — single block below the
+                hero with image + CTA. MechanismSection still exists in
+                the codebase but is no longer in the flow. */}
+            <HowItWorksSection data={data} />
+            <UGCSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
+            <ComparisonSection data={data} />
+            <IngredientsSection data={data} />
+            <NutritionistEndorsementSection data={data} />
+            <WhatToExpectTimeline data={data} />
+            {/* Upsell complementarity chapter — only rendered when the
+                primary has an upsell partner configured and AI/admin
+                has saved complementarity copy. Sits between the primary
+                product's chapters and the price tables so the bundle
+                pitch is set up before the customer hits pricing. */}
+            <UpsellChapter data={data} />
+            <PriceTableSection data={data} />
+            <BundlePriceTableSection data={data} />
+            <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
+            <FAQSection data={data} />
+            <FinalCTASection data={data} />
+          </main>
+        </PricingModeProvider>
       </ActiveMemberProvider>
 
       <RecentOrdersToast orders={data.recent_orders_for_proof} />
