@@ -1083,6 +1083,7 @@ export async function callSonnetOrchestratorV2(
 
     // Max rounds exceeded — force a final response without tools
     console.warn(`Orchestrator (${modelKey}): max tool rounds exceeded, forcing final response`);
+    let forceStatus = "unknown";
     try {
       const forceRes = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
@@ -1090,18 +1091,36 @@ export async function callSonnetOrchestratorV2(
         body: JSON.stringify({
           model: modelId,
           max_tokens: 2000,
-          messages: [...messages, { role: "user", content: "You have gathered enough data. Based on what you know, provide your decision NOW as JSON. Do not call any more tools." }],
+          messages: [
+            ...messages,
+            {
+              role: "user",
+              content:
+                "You have gathered enough data. Provide your decision NOW as a single JSON object with at minimum the keys `reasoning` and `action_type`. Do not call any more tools. Do not include prose outside the JSON.",
+            },
+          ],
           // No tools — forces text response
         }),
       });
+      forceStatus = `http ${forceRes.status}`;
       if (forceRes.ok) {
         const forceData = await forceRes.json();
         logUsage(forceData.usage, "force-decision");
         const text = (forceData.content || []).filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => b.text).join("");
         if (text) return parseSonnetDecision(text);
+        forceStatus = "ok but empty text";
+      } else {
+        const errBody = await forceRes.text().catch(() => "");
+        console.error(`Orchestrator (${modelKey}) force-decision API error: ${forceRes.status}`, errBody.slice(0, 300));
+        forceStatus = `http ${forceRes.status}: ${errBody.slice(0, 100)}`;
       }
-    } catch { /* fall through to fallback */ }
-    return FALLBACK_DECISION;
+    } catch (err) {
+      forceStatus = `throw: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    return {
+      ...FALLBACK_DECISION,
+      reasoning: `Max ${MAX_ROUNDS} tool rounds exceeded; force-decision retry: ${forceStatus}`,
+    };
   } catch (err) {
     console.error(`Orchestrator (${modelKey}) error:`, err);
     return { ...FALLBACK_DECISION, reasoning: `${modelKey} error: ${err instanceof Error ? err.message : String(err)}` };
@@ -1111,24 +1130,36 @@ export async function callSonnetOrchestratorV2(
 // ── JSON Parser ──
 
 function parseSonnetDecision(text: string): SonnetDecision {
+  // Each failure mode tags the reasoning so when a ticket lands in
+  // the escalation pile we know which guardrail tripped — bare
+  // "Orchestrator error" left us blind on Barbara's cancel ticket.
+  const snippet = (text || "").slice(0, 180).replace(/\s+/g, " ").trim();
   try {
-    // Strip markdown code fences if present
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      console.error("Sonnet v2: no JSON found in response");
-      return FALLBACK_DECISION;
+      console.error("Sonnet v2: no JSON found in response:", snippet);
+      return {
+        ...FALLBACK_DECISION,
+        reasoning: `Parse fail: no JSON block in response. Got: "${snippet}"`,
+      };
     }
 
     const parsed = JSON.parse(jsonMatch[0]);
 
     if (!parsed.reasoning || !parsed.action_type) {
-      console.error("Sonnet v2: missing required fields");
-      return FALLBACK_DECISION;
+      console.error("Sonnet v2: missing required fields:", parsed);
+      return {
+        ...FALLBACK_DECISION,
+        reasoning: `Parse fail: missing reasoning/action_type. Got keys: ${Object.keys(parsed).join(", ")}`,
+      };
     }
 
     return parsed as SonnetDecision;
   } catch (err) {
-    console.error("Sonnet v2: JSON parse error:", err);
-    return FALLBACK_DECISION;
+    console.error("Sonnet v2: JSON parse error:", err, "text:", snippet);
+    return {
+      ...FALLBACK_DECISION,
+      reasoning: `Parse fail: ${err instanceof Error ? err.message : String(err)}. Got: "${snippet}"`,
+    };
   }
 }
