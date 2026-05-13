@@ -21,6 +21,7 @@ import { IngredientsSection } from "../_sections/IngredientsSection";
 import { FinalCTASection } from "../_sections/FinalCTASection";
 import { StorefrontHeader } from "../_components/StorefrontHeader";
 import { ProductJsonLd } from "../_components/ProductJsonLd";
+import { ActiveMemberProvider } from "./active-member-context";
 
 // PriceTable is mid-page but interactive on first scroll — load its
 // JS with the page but in a separate chunk so it doesn't inflate the
@@ -119,23 +120,29 @@ export function StorefrontPage({
         headerWeight={data.product.header_text_weight}
       />
 
-      <main className="flex w-full flex-col">
-        <HeroSection data={data} />
-        {/* HowItWorksSection ("Why this works") now absorbs what
-            MechanismSection used to render — single block below the
-            hero with image + CTA. MechanismSection still exists in
-            the codebase but is no longer in the flow. */}
-        <HowItWorksSection data={data} />
-        <UGCSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
-        <ComparisonSection data={data} />
-        <IngredientsSection data={data} />
-        <NutritionistEndorsementSection data={data} />
-        <WhatToExpectTimeline data={data} />
-        <PriceTableSection data={data} />
-        <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
-        <FAQSection data={data} />
-        <FinalCTASection data={data} />
-      </main>
+      <ActiveMemberProvider
+        initialMemberId={
+          data.link_group?.members.find((m) => m.is_current)?.member_id ?? null
+        }
+      >
+        <main className="flex w-full flex-col">
+          <HeroSection data={data} />
+          {/* HowItWorksSection ("Why this works") now absorbs what
+              MechanismSection used to render — single block below the
+              hero with image + CTA. MechanismSection still exists in
+              the codebase but is no longer in the flow. */}
+          <HowItWorksSection data={data} />
+          <UGCSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
+          <ComparisonSection data={data} />
+          <IngredientsSection data={data} />
+          <NutritionistEndorsementSection data={data} />
+          <WhatToExpectTimeline data={data} />
+          <PriceTableSection data={data} />
+          <ReviewsSection data={data} slug={reviewSlug} workspaceSlug={data.workspace.storefront_slug || ""} />
+          <FAQSection data={data} />
+          <FinalCTASection data={data} />
+        </main>
+      </ActiveMemberProvider>
 
       <RecentOrdersToast orders={data.recent_orders_for_proof} />
     </div>

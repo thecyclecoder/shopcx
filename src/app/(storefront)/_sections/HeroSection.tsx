@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
 import { usePathname } from "next/navigation";
-import type { PageData, LinkMember, MediaItem } from "../_lib/page-data";
+import type { PageData, MediaItem } from "../_lib/page-data";
+import { useActiveMember } from "../_lib/active-member-context";
 import { StarRating } from "../_components/StarRating";
 import { BenefitChip } from "../_components/BenefitChip";
 import { ShopCTA } from "../_components/ShopCTA";
@@ -39,10 +39,10 @@ export function HeroSection({ data }: { data: PageData }) {
   // shown below the hero in phase 1; that wiring comes in phase 3.
   const linkGroup = data.link_group;
   const sortedMembers = linkGroup ? [...linkGroup.members].sort((a, b) => a.display_order - b.display_order) : [];
-  const defaultMemberId = sortedMembers.find(m => m.is_current)?.member_id || sortedMembers[0]?.member_id || null;
-  const [activeMemberId, setActiveMemberId] = useState<string | null>(defaultMemberId);
-  const activeMember: LinkMember | null = sortedMembers.find(m => m.member_id === activeMemberId) || null;
-  const isViewingCurrent = !!activeMember?.is_current;
+  // Active member state is shared via context so the price table
+  // swaps to the toggled member's pricing rule + variant in parallel.
+  const { activeMember, isViewingCurrent, setActiveMemberId } = useActiveMember(data);
+  const activeMemberId = activeMember?.member_id || null;
 
   // When viewing the CURRENT product, use its full multi-image gallery.
   // When viewing a linked member, fall back to that member's single hero
@@ -85,20 +85,12 @@ export function HeroSection({ data }: { data: PageData }) {
       )
     : null;
 
-  // CTA href: when viewing a linked member that ISN'T the current
-  // product, the price table on this page is for the WRONG format —
-  // route Shop now to that member's own page so the customer sees its
-  // price table. Pathname has the current product's handle as the last
-  // segment (admin: /store/{ws}/{handle}, public: /{handle}). Swap that
-  // segment for the active member's handle.
-  const ctaHref = isViewingCurrent || !activeMember
-    ? "#pricing"
-    : (() => {
-        const segs = pathname.split("/").filter(Boolean);
-        if (segs.length === 0) return `/${activeMember.product_handle}`;
-        segs[segs.length - 1] = activeMember.product_handle;
-        return "/" + segs.join("/");
-      })();
+  // The price table now updates in-place when the hero toggle
+  // changes (via shared active-member context), so the CTA always
+  // scrolls down to pricing — no need to bounce the customer to a
+  // sibling product's URL just to show its pricing.
+  void pathname;
+  const ctaHref = "#pricing";
 
   const ratingValue = data.product.rating ?? null;
   const ratingCount =

@@ -180,6 +180,15 @@ export interface LinkMember {
   primary_variant_shopify_id: string | null;
   primary_variant_servings: number | null;
   primary_variant_servings_unit: string | null;
+  // Additional primary-variant fields needed when the price table
+  // swaps to render THIS member's pricing without a page reload:
+  primary_variant_price_cents: number | null;
+  primary_variant_image_url: string | null;
+  // This member's pricing rule + cached Amazon price so the price
+  // table can render its quantity tiers, free gift, frequencies, and
+  // savings banner without re-fetching when the hero toggle changes.
+  pricing_rule: PricingRule | null;
+  amazon_price_cents: number | null;
   rating: number | null;
   rating_count: number | null;
 }
@@ -786,8 +795,17 @@ async function loadLinkGroup(
 
   const memberProductIds = memberRows.map(m => m.product_id);
 
-  // 3. Pull product data, hero media, primary variant in parallel
-  const [{ data: products }, { data: media }, { data: variants }] = await Promise.all([
+  // 3. Pull product data, hero media, primary variant, pricing-rule
+  // assignment, and cached Amazon prices in parallel. We pull the
+  // pricing fields here so the hero toggle can swap the price table
+  // in-place without a page reload.
+  const [
+    { data: products },
+    { data: media },
+    { data: variants },
+    { data: ruleAssignments },
+    { data: amazonPrices },
+  ] = await Promise.all([
     admin.from("products")
       .select("id, handle, title, rating, rating_count, shopify_product_id")
       .in("id", memberProductIds),
@@ -797,10 +815,78 @@ async function loadLinkGroup(
       .eq("slot", "hero")
       .order("display_order"),
     admin.from("product_variants")
-      .select("product_id, shopify_variant_id, servings, servings_unit, position")
+      .select("product_id, shopify_variant_id, servings, servings_unit, price_cents, image_url, position")
       .in("product_id", memberProductIds)
       .order("position"),
+    admin.from("product_pricing_rule")
+      .select("product_id, pricing_rule_id")
+      .eq("workspace_id", workspaceId)
+      .in("product_id", memberProductIds),
+    admin.from("amazon_asins")
+      .select("product_id, current_price_cents")
+      .eq("workspace_id", workspaceId)
+      .in("product_id", memberProductIds)
+      .not("current_price_cents", "is", null),
   ]);
+
+  // 3b. Hydrate the actual pricing_rules rows referenced by the
+  // assignments above, then attach by product_id.
+  const ruleIds = Array.from(
+    new Set((ruleAssignments || []).map((r) => r.pricing_rule_id).filter(Boolean)),
+  );
+  const rulesById = new Map<string, PricingRule>();
+  if (ruleIds.length) {
+    const { data: rules } = await admin
+      .from("pricing_rules")
+      .select(
+        "id, name, quantity_breaks, free_shipping, free_shipping_threshold_cents, free_shipping_subscription_only, free_gift_variant_id, free_gift_product_title, free_gift_image_url, free_gift_min_quantity, free_gift_subscription_only, subscribe_discount_pct, available_frequencies",
+      )
+      .in("id", ruleIds)
+      .eq("workspace_id", workspaceId)
+      .eq("is_active", true);
+
+    // Resolve the gift price for each rule in one batch query rather
+    // than N round-trips per member.
+    const giftVariantIds = (rules || [])
+      .map((r) => r.free_gift_variant_id)
+      .filter((id): id is string => !!id);
+    const giftPriceById = new Map<string, number | null>();
+    if (giftVariantIds.length) {
+      const { data: giftVariants } = await admin
+        .from("product_variants")
+        .select("id, price_cents, compare_at_price_cents")
+        .in("id", giftVariantIds);
+      for (const v of giftVariants || []) {
+        const p = v.price_cents ?? 0;
+        const c = v.compare_at_price_cents ?? 0;
+        giftPriceById.set(v.id, Math.max(p, c) || null);
+      }
+    }
+
+    for (const r of rules || []) {
+      const free_gift_price_cents = r.free_gift_variant_id
+        ? giftPriceById.get(r.free_gift_variant_id) ?? null
+        : null;
+      rulesById.set(r.id, { ...r, free_gift_price_cents } as PricingRule);
+    }
+  }
+
+  const ruleByProductId = new Map<string, PricingRule | null>();
+  for (const a of ruleAssignments || []) {
+    ruleByProductId.set(a.product_id, rulesById.get(a.pricing_rule_id) ?? null);
+  }
+
+  // Pick the lowest cached Amazon price per product (matches the
+  // single-product loader's logic).
+  const amazonByProductId = new Map<string, number | null>();
+  for (const a of amazonPrices || []) {
+    const current = a.current_price_cents as number | null;
+    if (current == null) continue;
+    const existing = amazonByProductId.get(a.product_id);
+    if (existing == null || current < existing) {
+      amazonByProductId.set(a.product_id, current);
+    }
+  }
 
   // 4. Build the per-member shape — pick the lowest-display_order hero +
   // the first (position 0) variant's servings as the "primary" for the
@@ -811,13 +897,24 @@ async function loadLinkGroup(
   for (const m of (media || []) as HeroRow[]) {
     if (!heroByProduct.has(m.product_id)) heroByProduct.set(m.product_id, m);
   }
-  const variantsByProduct = new Map<string, { shopify_variant_id: string | null; servings: number | null; servings_unit: string | null }>();
+  const variantsByProduct = new Map<
+    string,
+    {
+      shopify_variant_id: string | null;
+      servings: number | null;
+      servings_unit: string | null;
+      price_cents: number | null;
+      image_url: string | null;
+    }
+  >();
   for (const v of variants || []) {
     if (!variantsByProduct.has(v.product_id)) {
       variantsByProduct.set(v.product_id, {
         shopify_variant_id: v.shopify_variant_id,
         servings: v.servings,
         servings_unit: v.servings_unit,
+        price_cents: v.price_cents,
+        image_url: v.image_url,
       });
     }
   }
@@ -843,6 +940,10 @@ async function loadLinkGroup(
       primary_variant_shopify_id: variant?.shopify_variant_id || null,
       primary_variant_servings: variant?.servings ?? null,
       primary_variant_servings_unit: variant?.servings_unit ?? null,
+      primary_variant_price_cents: variant?.price_cents ?? null,
+      primary_variant_image_url: variant?.image_url ?? null,
+      pricing_rule: ruleByProductId.get(m.product_id) ?? null,
+      amazon_price_cents: amazonByProductId.get(m.product_id) ?? null,
       rating: (p as { rating?: number } | undefined)?.rating ?? null,
       rating_count: (p as { rating_count?: number } | undefined)?.rating_count ?? null,
     };

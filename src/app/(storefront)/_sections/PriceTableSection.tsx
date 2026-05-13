@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PageData, PricingRule, PricingTier } from "../_lib/page-data";
+import { useActiveProductData } from "../_lib/active-member-context";
 import { TrustChipRow } from "../_components/TrustChipRow";
 import { ShopCTA } from "../_components/ShopCTA";
 import { PackageStack } from "../_components/PackageStack";
@@ -23,8 +24,16 @@ import { PackageStack } from "../_components/PackageStack";
  * selected tier quantity against `free_gift_min_quantity`.
  */
 export function PriceTableSection({ data }: { data: PageData }) {
-  const rule = data.pricing_rule;
-  const baseVariant = data.base_variant;
+  // Pull from context so the toggle in the hero swaps the price table
+  // to whichever linked-product member is active (Instant ↔ K-Cups).
+  // When no link group exists or the customer is on the current
+  // product, these mirror data.pricing_rule / data.base_variant /
+  // data.amazon_price_cents directly.
+  const {
+    pricingRule: rule,
+    baseVariant,
+    amazonPriceCents,
+  } = useActiveProductData(data);
 
   // Build tiers either from the rule (preferred) or from the legacy
   // product_pricing_tiers payload. Both code paths produce the same
@@ -69,7 +78,7 @@ export function PriceTableSection({ data }: { data: PageData }) {
             as "savings layer zero" above the per-tier MSRP, which is
             framed as the actual base price on Amazon. */}
         {(() => {
-          const amazon = data.amazon_price_cents;
+          const amazon = amazonPriceCents;
           const cheapestDirect = tiers.length
             ? Math.min(
                 ...tiers.map((t) =>
@@ -79,7 +88,7 @@ export function PriceTableSection({ data }: { data: PageData }) {
                 ),
               )
             : null;
-          const directShown = cheapestDirect ?? (data.base_variant?.price_cents ?? null);
+          const directShown = cheapestDirect ?? (baseVariant?.price_cents ?? null);
           if (!amazon || !directShown || amazon <= directShown) return null;
           const savings = amazon - directShown;
           return (
@@ -122,9 +131,9 @@ export function PriceTableSection({ data }: { data: PageData }) {
               mode={mode}
               rule={rule}
               freqDays={freqDays}
-              variantImageUrl={data.base_variant?.image_url || null}
-              servingsPerPack={data.base_variant?.servings || null}
-              servingsUnit={data.base_variant?.servings_unit || null}
+              variantImageUrl={baseVariant?.image_url || null}
+              servingsPerPack={baseVariant?.servings || null}
+              servingsUnit={baseVariant?.servings_unit || null}
             />
           ))}
         </div>
