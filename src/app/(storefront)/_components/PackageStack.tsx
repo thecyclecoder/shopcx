@@ -128,10 +128,12 @@ function StackInner({
 
 /**
  * Bundle mode: split the cream box into equal-width columns, one per
- * variant. Each column renders that variant's bags using the same
- * StackInner logic the single-product treatment uses — so Bundle-2
- * renders a 2-pack stack in each column (4 bags total, but visually
- * two distinct pairs, not a chaotic merge).
+ * variant. Each column shows ONE bag for that variant (regardless of
+ * count) so the bundle reads as "primary + upsell" at a glance —
+ * never a stacked tower. When the per-variant count is greater than
+ * one, a small "N-Pack" pill overlays the bag in that column so the
+ * customer still knows they're getting multiple, without the visual
+ * clutter of overlapping packaging.
  */
 function BundleStack({ variants, className }: { variants: Variant[]; className: string }) {
   const usable = variants.filter((v) => v.imageUrl && v.count > 0);
@@ -143,9 +145,14 @@ function BundleStack({ variants, className }: { variants: Variant[]; className: 
         {usable.map((v, i) => (
           <div
             key={i}
-            className="flex h-full min-w-0 flex-1 items-end justify-center"
+            className="relative flex h-full min-w-0 flex-1 items-end justify-center"
           >
-            <StackInner imageUrl={v.imageUrl as string} count={v.count} />
+            <StackInner imageUrl={v.imageUrl as string} count={1} />
+            {v.count > 1 && (
+              <span className="absolute right-2 top-2 rounded-full bg-orange-500 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-white shadow-md sm:text-xs">
+                {v.count}-Pack
+              </span>
+            )}
           </div>
         ))}
       </div>
