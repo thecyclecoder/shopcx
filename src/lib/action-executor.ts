@@ -833,6 +833,57 @@ const directActionHandlers: Record<
   // a reply would just bounce again. Pair with NO response_message —
   // the executor knows to skip sending when actions succeed AND no
   // response_message is set.
+  // Subscribe a customer to email and/or SMS marketing via Shopify.
+  // Optionally persists a phone number on the customer record first —
+  // used when the customer types their number directly into chat
+  // instead of filling the journey form. Eliminates the "kept asking
+  // for the form, customer kept replying with their number" loop on
+  // ticket 2876a0b1.
+  //
+  // Params:
+  //   - code: phone number (E.164 or 10-digit; we'll normalize). If
+  //     provided, set on customers.phone BEFORE subscribing.
+  //   - reason: which channels — "email", "sms", or "both" (default).
+  marketing_signup: async (ctx, p) => {
+    const channelsParam = (p.reason || "both").toLowerCase();
+    const wantEmail = channelsParam === "both" || channelsParam === "email";
+    const wantSms = channelsParam === "both" || channelsParam === "sms";
+
+    // Persist phone if passed and the customer doesn't already have one
+    // that matches. Normalize: strip non-digits, prepend +1 if 10 digits.
+    let phoneApplied: string | null = null;
+    if (p.code) {
+      const digits = String(p.code).replace(/\D/g, "");
+      const normalized = digits.length === 10 ? `+1${digits}` : digits.length === 11 && digits.startsWith("1") ? `+${digits}` : `+${digits}`;
+      const { data: existing } = await ctx.admin.from("customers")
+        .select("phone").eq("id", ctx.customerId).single();
+      if (!existing?.phone || existing.phone !== normalized) {
+        await ctx.admin.from("customers")
+          .update({ phone: normalized, updated_at: new Date().toISOString() })
+          .eq("id", ctx.customerId);
+      }
+      phoneApplied = normalized;
+    }
+
+    const channels: ("email" | "sms")[] = [];
+    if (wantEmail) channels.push("email");
+    if (wantSms) channels.push("sms");
+    if (channels.length === 0) return { success: false, error: "No channels selected" };
+
+    const { subscribeToMarketing } = await import("@/lib/shopify-marketing");
+    const result = await subscribeToMarketing(ctx.workspaceId, ctx.customerId, channels);
+
+    const parts: string[] = [];
+    if (phoneApplied) parts.push(`phone ${phoneApplied} saved`);
+    if (wantEmail) parts.push("email subscribed");
+    if (wantSms) parts.push("SMS subscribed");
+    return {
+      success: result.success,
+      summary: parts.join(", "),
+      error: result.error,
+    };
+  },
+
   close_ticket: async (ctx, p) => {
     await ctx.admin.from("tickets").update({
       status: "closed",

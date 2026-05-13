@@ -39,13 +39,24 @@ interface LaunchParams {
                             // skips the picker step when set.
 }
 
-// Cancel journey is fully live-rendered by the mini-site. The orchestrator's
-// only job is to pick the right ids and insert a session row; the API loader
-// at /api/journey/[token] handles all data fetching, step-building, and
-// rendering. See feedback_orchestrator_minimal_payload memory entry.
+// Live-rendered journeys: the orchestrator's only job is to pick ids
+// and insert a session row; the API loader at /api/journey/[token]
+// handles all data fetching, step-building, and rendering at click
+// time. No config snapshot to go stale.
+//
+// Cancel journey was the original member. Discount/marketing signup
+// joined because: (a) the chat embedded-form was repeatedly mis-
+// parsing inline phone-number replies as new submissions, sending
+// the form again instead of completing it (see ticket 2876a0b1),
+// and (b) it's a 3-step flow where the data (whether they have a
+// phone on file, etc) can change between when the journey was sent
+// and when the customer clicks.
 const LIVE_RENDERED_INTENTS = new Set([
   "cancel_subscription",
   "cancel",
+  "discount_signup",
+  "discount_&_marketing_signup",
+  "marketing_signup",
 ]);
 
 /**

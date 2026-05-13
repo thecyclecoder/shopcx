@@ -56,13 +56,20 @@ export async function GET(
     || (configObj.journeyType as string)
     || "";
   const isCancel = triggerIntent === "cancel_subscription" || triggerIntent === "cancel" || configObj.cancelJourney === true;
+  const isDiscount = triggerIntent === "discount_signup"
+    || triggerIntent === "marketing_signup"
+    || triggerIntent === "discount_&_marketing_signup"
+    || configObj.journeyType === "discount_signup"
+    || configObj.journeyType === "marketing_signup";
 
-  // ── Live-rendered cancel journey ──
+  // ── Live-rendered journeys ──
   // Orchestrator only inserted ids; we build the full config here from
   // current data. Always overrides the snapshot — even old sessions get
   // fresh data, which fixes the "subs went stale between send and click"
-  // class of bug. Mini-site reads metadata.subscriptions + steps just
-  // like before; only the source has changed.
+  // class of bug (and the analogous "customer's phone/marketing state
+  // went stale" bug for discount signup). Mini-site reads
+  // metadata.subscriptions + steps just like before; only the source
+  // has changed.
   if (isCancel) {
     const { buildJourneySteps } = await import("@/lib/journey-step-builder");
     const built = await buildJourneySteps(
@@ -83,6 +90,20 @@ export async function GET(
       codeDriven: true,
       cancelJourney: true,
       journeyType: "cancel_subscription",
+    };
+  } else if (isDiscount) {
+    const { buildJourneySteps } = await import("@/lib/journey-step-builder");
+    const built = await buildJourneySteps(
+      session.workspace_id,
+      "discount_signup",
+      session.customer_id,
+      session.ticket_id || "",
+    );
+    config = {
+      ...configObj,
+      ...built,
+      codeDriven: true,
+      journeyType: "discount_signup",
     };
   } else if (configObj.codeDriven && configObj.journeyType && !(configObj.steps as unknown[])?.length) {
     // Legacy code-driven journeys (non-cancel) still build steps once
