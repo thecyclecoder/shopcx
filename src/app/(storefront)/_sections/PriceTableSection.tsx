@@ -392,11 +392,17 @@ function PriceCard({
             : /cup|coffee/.test(u) || u === ""
               ? "Cups"
               : servingsUnit || "Servings";
+          // Strip the format suffix from the product title to avoid
+          // "72 K-Cups of Amazing Coffee K-Cups" — when the label
+          // already ends the title, drop that word from the display.
+          const titleDisplay = productTitle
+            .replace(new RegExp(`\\s+${label}$`, "i"), "")
+            .trim();
           return (
             <li className="flex items-start gap-2">
               <CheckIcon />
               <span>
-                <strong className="text-zinc-900">{total} {label}</strong> of {productTitle}
+                <strong className="text-zinc-900">{total} {label}</strong> of {titleDisplay}
               </span>
             </li>
           );
