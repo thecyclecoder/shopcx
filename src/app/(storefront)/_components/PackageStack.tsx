@@ -164,7 +164,8 @@ function BundleStack({ variants, className }: { variants: Variant[]; className: 
             />
             {v.count > 1 && (
               <span
-                className="absolute left-1/2 top-1 z-20 -translate-x-1/2 whitespace-nowrap rounded-full bg-orange-500 px-2.5 py-1 text-[11px] font-extrabold uppercase tracking-wider text-white shadow-md sm:text-xs"
+                style={{ backgroundColor: "var(--storefront-primary)" }}
+                className="absolute left-1/2 top-1 z-20 -translate-x-1/2 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-extrabold uppercase tracking-wider text-white shadow-md sm:text-xs"
               >
                 {v.count}-Pack
               </span>
