@@ -91,16 +91,15 @@ export function PriceTableSection({ data }: { data: PageData }) {
           const directShown = cheapestDirect ?? (baseVariant?.price_cents ?? null);
           if (!amazon || !directShown || amazon <= directShown) return null;
           const savings = amazon - directShown;
+          const savingsPct = Math.round((savings / amazon) * 100);
           return (
             <div className="mx-auto mb-6 flex max-w-2xl flex-col items-center gap-1 rounded-2xl bg-amber-100 px-4 py-3 text-center text-amber-900 ring-1 ring-amber-200">
               <div className="flex items-center justify-center gap-2 text-sm font-bold sm:text-base">
                 <span aria-hidden="true">💰</span>
                 <span>
                   Save{" "}
-                  <strong className="text-amber-950">
-                    ${(savings / 100).toFixed(2)}/bag
-                  </strong>{" "}
-                  vs Amazon&apos;s ${(amazon / 100).toFixed(2)}
+                  <strong className="text-amber-950">{savingsPct}%</strong>{" "}
+                  vs buying on Amazon
                 </span>
               </div>
               <div className="flex items-center justify-center gap-1.5 text-xs font-semibold text-amber-800 sm:text-sm">
