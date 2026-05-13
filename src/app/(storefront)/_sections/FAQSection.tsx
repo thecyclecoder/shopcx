@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { PageData } from "../_lib/page-data";
 import { ShopCTA } from "../_components/ShopCTA";
+import { SupplementFactsSection } from "./SupplementFactsSection";
 
 export function FAQSection({ data }: { data: PageData }) {
   const items = data.page_content?.faq_items || [];
@@ -14,43 +15,58 @@ export function FAQSection({ data }: { data: PageData }) {
     ? Math.min(...data.pricing_tiers.map((t) => t.subscribe_price_cents ?? t.price_cents))
     : null;
 
+  // Supplement facts panel goes in the right column on desktop when
+  // we have any variant with facts populated. Mobile stacks them.
+  const hasFacts = (data.variants_with_facts || []).length > 0;
+
   return (
     <section data-section="faq" className="w-full bg-white py-12 sm:py-16">
-      <div className="mx-auto max-w-3xl px-5 md:px-8">
+      <div className={`mx-auto px-5 md:px-8 ${hasFacts ? "max-w-6xl" : "max-w-3xl"}`}>
         <h2 className="mb-8 text-center text-2xl font-bold tracking-tight text-zinc-900 sm:text-3xl md:text-4xl">
           Frequently asked questions
         </h2>
-        <div className="divide-y divide-zinc-200 overflow-hidden rounded-2xl border border-zinc-200 bg-white">
-          {items.map((item, i) => {
-            const open = openIdx === i;
-            return (
-              <div key={i}>
-                <button
-                  type="button"
-                  onClick={() => setOpenIdx(open ? null : i)}
-                  aria-expanded={open}
-                  className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left transition-colors hover:bg-zinc-50"
-                >
-                  <span className="text-base font-medium text-zinc-900">
-                    {item.question}
-                  </span>
-                  <span
-                    className={`flex-shrink-0 text-zinc-400 transition-transform ${
-                      open ? "rotate-180" : ""
-                    }`}
-                    aria-hidden="true"
+
+        <div
+          className={
+            hasFacts
+              ? "grid gap-8 md:grid-cols-[minmax(0,1fr)_minmax(0,420px)] md:items-start md:gap-10"
+              : ""
+          }
+        >
+          <div className="divide-y divide-zinc-200 overflow-hidden rounded-2xl border border-zinc-200 bg-white">
+            {items.map((item, i) => {
+              const open = openIdx === i;
+              return (
+                <div key={i}>
+                  <button
+                    type="button"
+                    onClick={() => setOpenIdx(open ? null : i)}
+                    aria-expanded={open}
+                    className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left transition-colors hover:bg-zinc-50"
                   >
-                    <ChevronDown />
-                  </span>
-                </button>
-                {open && (
-                  <div className="px-5 pb-5 text-sm leading-relaxed text-zinc-700">
-                    {item.answer}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                    <span className="text-base font-medium text-zinc-900">
+                      {item.question}
+                    </span>
+                    <span
+                      className={`flex-shrink-0 text-zinc-400 transition-transform ${
+                        open ? "rotate-180" : ""
+                      }`}
+                      aria-hidden="true"
+                    >
+                      <ChevronDown />
+                    </span>
+                  </button>
+                  {open && (
+                    <div className="px-5 pb-5 text-sm leading-relaxed text-zinc-700">
+                      {item.answer}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {hasFacts && <SupplementFactsSection data={data} />}
         </div>
 
         <div className="mt-10 flex justify-center md:mt-14">

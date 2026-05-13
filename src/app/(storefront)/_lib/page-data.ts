@@ -114,6 +114,38 @@ export interface PricingTier {
 }
 
 /**
+ * Per-variant Supplement Facts panel data. Rendered alongside the FAQ
+ * section. Variants of a single product can share most fields but
+ * differ in "other_ingredients" (flavor additives, etc).
+ */
+export interface SupplementFacts {
+  serving_size: string;
+  servings_per_container: number;
+  nutrients: Array<{
+    name: string;
+    amount: string;
+    daily_value: string | null;
+    /** Indent level for sub-nutrients like "Dietary Fiber" under "Total Carbohydrate". */
+    indent: number;
+  }>;
+  proprietary_blend: {
+    amount: string;
+    daily_value: string;
+    ingredients: string;
+  } | null;
+  footer_notes: string[];
+  other_ingredients: string | null;
+}
+
+export interface VariantWithFacts {
+  product_id: string;
+  variant_id: string;
+  variant_title: string;
+  position: number;
+  supplement_facts: SupplementFacts | null;
+}
+
+/**
  * Pricing rule attached to a product. Source of truth for the price
  * table — defines the tier discounts, subscription terms, and the
  * conditional perks (free shipping, free gift). Composed with the
@@ -295,6 +327,14 @@ export interface PageData {
     servings: number | null;
     servings_unit: string | null;
   } | null;
+  /**
+   * Every variant of the current product (and any linked-group
+   * members) that has supplement_facts populated, used by the
+   * SupplementFactsSection + the hero gallery's facts slide. Keyed by
+   * product_id so the active-member context can filter to the
+   * relevant set when the format toggle is engaged.
+   */
+  variants_with_facts: VariantWithFacts[];
   // Lowest cached Amazon price for this product, in cents. Sourced
   // from amazon_asins.current_price_cents (cached when the admin
   // visits Settings → Amazon Pricing or saves a price). Drives the
@@ -702,6 +742,32 @@ export async function getPageData(
     console.error("[page-data] recent_orders_for_proof load failed:", err);
   }
 
+  // Variants with supplement facts — for the current product + all
+  // linked-group members. The facts panel filters this list to the
+  // active product so the format toggle swaps the panel too.
+  const factsProductIds = Array.from(
+    new Set(
+      linkGroup
+        ? [product.id, ...linkGroup.members.map((m) => m.product_id)]
+        : [product.id],
+    ),
+  );
+  const { data: variantsWithFactsRows } = await admin
+    .from("product_variants")
+    .select("product_id, id, title, position, supplement_facts")
+    .in("product_id", factsProductIds)
+    .not("supplement_facts", "is", null)
+    .order("position", { ascending: true });
+  const variants_with_facts: VariantWithFacts[] = (variantsWithFactsRows || []).map(
+    (v) => ({
+      product_id: v.product_id,
+      variant_id: v.id,
+      variant_title: v.title || "",
+      position: v.position ?? 0,
+      supplement_facts: v.supplement_facts as SupplementFacts | null,
+    }),
+  );
+
   return {
     product: productWithBump as Product,
     link_group: linkGroup,
@@ -721,6 +787,7 @@ export async function getPageData(
         }
       : null,
     amazon_price_cents: amazonPriceRes.data?.current_price_cents ?? null,
+    variants_with_facts,
     how_it_works: (howItWorksRes.data || []) as HowItWorksStep[],
     recent_orders_for_proof: recentOrdersForProof,
     benefit_review_matches,

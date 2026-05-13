@@ -156,6 +156,19 @@ export function HeroSection({ data }: { data: PageData }) {
             isBestseller={!!data.product.is_bestseller}
             aspectW={heroAspectW}
             aspectH={heroAspectH}
+            supplementFacts={(() => {
+              // Show the active product's first variant with facts as
+              // the hero's facts slide. Active product = current product
+              // unless the format toggle is on a linked sibling.
+              const activeProductId =
+                activeMember && !activeMember.is_current
+                  ? activeMember.product_id
+                  : data.product.id;
+              const v = (data.variants_with_facts || []).find(
+                (x) => x.product_id === activeProductId,
+              );
+              return v?.supplement_facts || null;
+            })()}
           />
         </div>
 
