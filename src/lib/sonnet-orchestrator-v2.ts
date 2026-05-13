@@ -885,17 +885,23 @@ async function getCrisisStatus(admin: Admin, wsId: string, custId: string): Prom
     // Derived: what literally happens when the crisis resolves. Lets
     // Opus answer "will you reach out?" with certainty instead of a
     // reasonable-sounding guess.
+    //
+    // The customer does nothing. If auto_readd is true the system
+    // silently switches their subscription line back to the original
+    // variant when the admin resolves the crisis — they just receive
+    // the original product on the next shipment with no journey, no
+    // email, no confirmation needed.
     const resolutionActions: string[] = [];
     if (a.auto_resume && a.paused_at) {
-      resolutionActions.push("auto-resume the paused subscription + send confirmation email");
+      resolutionActions.push("auto-resume the paused subscription");
     }
     if (a.auto_readd) {
       if (a.removed_item_at) {
-        resolutionActions.push("re-add the removed original item to the subscription + send confirmation email");
+        resolutionActions.push("silently re-add the removed original item to the subscription");
       } else {
         // Swap case — berry_only / berry_plus customer who was
         // auto-swapped to default_swap rather than paused/removed.
-        resolutionActions.push("send a 'Original is back — want to switch back?' journey to the customer");
+        resolutionActions.push("silently switch the subscription line back to the original variant (customer does nothing, just receives the original on the next shipment)");
       }
     }
     if (resolutionActions.length === 0) {
