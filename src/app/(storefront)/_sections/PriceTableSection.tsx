@@ -367,7 +367,7 @@ function PriceCard({
           ${(price / 100).toFixed(2)}
         </span>
         {showSavings && msrp != null && (
-          <span className="text-sm text-zinc-500 line-through">
+          <span className="text-sm font-semibold text-red-500 line-through">
             ${(msrp / 100).toFixed(2)}
           </span>
         )}

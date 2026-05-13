@@ -294,7 +294,7 @@ function BundleCard({
         <span className="text-4xl font-bold text-zinc-900">
           ${(finalPriceCents / 100).toFixed(2)}
         </span>
-        <span className="text-sm text-zinc-500 line-through">
+        <span className="text-sm font-semibold text-red-500 line-through">
           ${(msrpTotalCents / 100).toFixed(2)}
         </span>
       </div>
