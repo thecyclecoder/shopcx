@@ -917,6 +917,25 @@ async function handleIdentifyOrder(
     };
   }
 
+  // Time-distance shortcut — when the two most recent orders are more
+  // than 10 days apart, the customer is overwhelmingly talking about
+  // the most recent one (e.g. "my last order didn't arrive"). Asking
+  // creates needless friction. Only ask when orders are close enough
+  // in time (within 10 days) that the customer could genuinely be
+  // referring to either.
+  if (orders.length >= 2) {
+    const newestMs = new Date(orders[0].created_at).getTime();
+    const nextMs = new Date(orders[1].created_at).getTime();
+    const daysApart = Math.abs(newestMs - nextMs) / 86_400_000;
+    if (daysApart > 10) {
+      return {
+        action: "advance", newStep: step.step_order + 1,
+        context: { identified_orders: [orders[0].order_number] },
+        systemNote: `[Playbook] Auto-identified most recent order (${orders[0].order_number}) — next order is ${Math.round(daysApart)} days older, outside the 10-day disambiguation window.`,
+      };
+    }
+  }
+
   // First time — show the order list and ask
   const channel = (ctx._channel as string) || "email";
   const useHtml = ["email", "chat", "help_center"].includes(channel);

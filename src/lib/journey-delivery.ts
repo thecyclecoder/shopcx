@@ -57,6 +57,14 @@ const LIVE_RENDERED_INTENTS = new Set([
   "discount_signup",
   "discount_&_marketing_signup",
   "marketing_signup",
+  // Shipping-address joined for the same reason discount/marketing did:
+  // (a) the customer's actual delivery address can shift between the
+  // moment we send the journey and the moment they click (a more
+  // recent order may have a corrected address), and (b) in live chat
+  // we want a CTA to a mini-site, not an embedded address form that
+  // gets stuck if the customer types over it.
+  "shipping_address",
+  "address_change",
 ]);
 
 /**

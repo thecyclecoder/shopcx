@@ -61,6 +61,10 @@ export async function GET(
     || triggerIntent === "discount_&_marketing_signup"
     || configObj.journeyType === "discount_signup"
     || configObj.journeyType === "marketing_signup";
+  const isShippingAddress = triggerIntent === "shipping_address"
+    || triggerIntent === "address_change"
+    || configObj.journeyType === "shipping_address"
+    || configObj.journeyType === "address_change";
 
   // ── Live-rendered journeys ──
   // Orchestrator only inserted ids; we build the full config here from
@@ -104,6 +108,25 @@ export async function GET(
       ...built,
       codeDriven: true,
       journeyType: "discount_signup",
+    };
+  } else if (isShippingAddress) {
+    // Live-rendered shipping address. Current address pulled from the
+    // most recent order at click time, not from a stale snapshot —
+    // matters when the orchestrator sends the journey today but the
+    // customer doesn't click until after their next order has shipped
+    // to a corrected address.
+    const { buildJourneySteps } = await import("@/lib/journey-step-builder");
+    const built = await buildJourneySteps(
+      session.workspace_id,
+      "shipping_address",
+      session.customer_id,
+      session.ticket_id || "",
+    );
+    config = {
+      ...configObj,
+      ...built,
+      codeDriven: true,
+      journeyType: "shipping_address",
     };
   } else if (configObj.codeDriven && configObj.journeyType && !(configObj.steps as unknown[])?.length) {
     // Legacy code-driven journeys (non-cancel) still build steps once
