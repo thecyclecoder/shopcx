@@ -347,57 +347,22 @@ async function applySeverityActions(
     updated_at: new Date().toISOString(),
   }).eq("id", ticketId);
 
+  // Single internal-note message describing why the auto-analysis
+  // re-opened + escalated this ticket. The note's wording differs
+  // based on severity so the agent can triage at a glance — but in
+  // every case it stays INTERNAL. We never send a follow-up to the
+  // customer; the previous "we're taking another look" outbound was
+  // pulled because most low-score tickets had already been resolved
+  // by the AI and the message just confused customers.
+  const noteBody =
+    action === "escalate_with_message"
+      ? `[Auto-Analysis] Low score ${score}/10 — this ticket needs another look. ${analysisId ? `Analysis ${analysisId}.` : ""}`
+      : `[Auto-Analysis] Re-opened + escalated silently. Score ${score}/10. ${analysisId ? `Analysis ${analysisId}.` : ""}`;
   await admin.from("ticket_messages").insert({
     ticket_id: ticketId,
     direction: "outbound",
     visibility: "internal",
     author_type: "system",
-    body: `[Auto-Analysis] Re-opened + escalated. Score ${score}/10. ${analysisId ? `Analysis ${analysisId}` : ""}`,
+    body: noteBody,
   });
-
-  if (action === "escalate_with_message" && customerId) {
-    // Pull customer first name
-    const { data: cust } = await admin.from("customers")
-      .select("email, first_name").eq("id", customerId).maybeSingle();
-    const firstName = cust?.first_name || "there";
-
-    // Sentinel comment so the analyzer's next window doesn't grade our
-    // own holding message as if it were an AI reply. Surfaced on ticket
-    // 0ef4a608 (Jill, May 11) where this message landed in the scoring
-    // window. AUTO_ANALYSIS_HOLDING is filtered out in pullMessagesForGrading.
-    const html = `<!--AUTO_ANALYSIS_HOLDING--><p style="margin:0 0 16px 0;">Hi ${firstName},</p>
-
-<p style="margin:0 0 16px 0;">Our team is taking another look at your last message to make sure we got it right — we'll follow up shortly.</p>
-
-<p style="margin:0 0 8px 0;">Julie<br><span style="color:#71717a;font-size:13px;">Customer Support, Superfoods Company</span></p>`;
-
-    // Insert as ticket_message; for email channel also send via Resend
-    await admin.from("ticket_messages").insert({
-      ticket_id: ticketId,
-      direction: "outbound",
-      visibility: "external",
-      author_type: "system",
-      body: html,
-    });
-
-    const { data: ticketRow } = await admin.from("tickets")
-      .select("channel, subject, email_message_id").eq("id", ticketId).single();
-
-    if (ticketRow?.channel === "email" && cust?.email) {
-      try {
-        const { sendTicketReply } = await import("@/lib/email");
-        await sendTicketReply({
-          workspaceId,
-          toEmail: cust.email,
-          subject: ticketRow.subject || "Re: Your message",
-          body: html,
-          inReplyTo: ticketRow.email_message_id || null,
-          agentName: "Julie",
-          workspaceName: "Superfoods Company",
-        });
-      } catch (err) {
-        console.error("[ticket-analyzer] follow-up email failed:", err);
-      }
-    }
-  }
 }
