@@ -128,12 +128,18 @@ function StackInner({
 
 /**
  * Bundle mode: split the cream box into equal-width columns, one per
- * variant. Each column shows ONE bag for that variant (regardless of
- * count) so the bundle reads as "primary + upsell" at a glance —
- * never a stacked tower. When the per-variant count is greater than
- * one, a small "N-Pack" pill overlays the bag in that column so the
- * customer still knows they're getting multiple, without the visual
- * clutter of overlapping packaging.
+ * variant. Each column shows ONE bag image (regardless of count) so
+ * the bundle reads as "primary + upsell" at a glance — never a
+ * stacked tower. When the per-variant count is greater than one, an
+ * "N-Pack" pill overlays the bag in that column so quantity stays
+ * legible without the visual clutter of overlapping packaging.
+ *
+ * Sizing is constrained on BOTH axes here (max-h + max-w) instead of
+ * single-product mode's height-driven approach — the column is only
+ * half the container width and the bag images often include lifestyle
+ * setups (cup, ingredients) that are wider than tall, so a pure
+ * height fit would overflow the column on mobile and clip into the
+ * neighboring bag.
  */
 function BundleStack({ variants, className }: { variants: Variant[]; className: string }) {
   const usable = variants.filter((v) => v.imageUrl && v.count > 0);
@@ -141,15 +147,25 @@ function BundleStack({ variants, className }: { variants: Variant[]; className: 
 
   return (
     <CreamBox className={className}>
-      <div className="flex h-full w-full items-end">
+      <div className="flex h-full w-full items-end gap-1">
         {usable.map((v, i) => (
           <div
             key={i}
             className="relative flex h-full min-w-0 flex-1 items-end justify-center"
           >
-            <StackInner imageUrl={v.imageUrl as string} count={1} />
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={v.imageUrl as string}
+              alt=""
+              aria-hidden="true"
+              loading="lazy"
+              decoding="async"
+              className="max-h-full max-w-full object-contain drop-shadow-md"
+            />
             {v.count > 1 && (
-              <span className="absolute right-2 top-2 rounded-full bg-orange-500 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-white shadow-md sm:text-xs">
+              <span
+                className="absolute left-1/2 top-1 z-20 -translate-x-1/2 whitespace-nowrap rounded-full bg-orange-500 px-2.5 py-1 text-[11px] font-extrabold uppercase tracking-wider text-white shadow-md sm:text-xs"
+              >
                 {v.count}-Pack
               </span>
             )}
