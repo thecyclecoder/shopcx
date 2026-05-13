@@ -1718,7 +1718,7 @@ async function handleJourney(
     triggerIntent: journey.trigger_intent,
     channel: ctx.channel,
     leadIn: decision.response_message || "",
-    ctaText: `${journey.name} →`,
+    ctaText: journey.name,
     subscriptionId,
   });
 

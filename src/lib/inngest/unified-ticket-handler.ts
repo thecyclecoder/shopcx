@@ -209,9 +209,9 @@ Write two things:
 Return JSON: { "lead_in": "...", "cta_text": "..." }`, "haiku", 150);
   try {
     const parsed = JSON.parse(raw.replace(/^```json?\n?/, "").replace(/\n?```$/, ""));
-    return { leadIn: parsed.lead_in || `Let me help you with that.`, ctaText: parsed.cta_text || `${journeyName} →` };
+    return { leadIn: parsed.lead_in || `Let me help you with that.`, ctaText: parsed.cta_text || journeyName };
   } catch {
-    return { leadIn: `Let me help you with that.`, ctaText: `${journeyName} →` };
+    return { leadIn: `Let me help you with that.`, ctaText: journeyName };
   }
 }
 

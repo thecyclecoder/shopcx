@@ -16,6 +16,13 @@ import crypto from "crypto";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
+/** Strip any trailing arrow / chevron / "→" / "»" that an upstream caller
+ *  may have appended to ctaText. The styled-button render adds its own
+ *  chevron, so without this we get duplicates like "Cancel Subscription → →". */
+function cleanCtaLabel(s: string): string {
+  return (s || "").replace(/[\s→»>]+$/u, "").trim();
+}
+
 interface LaunchParams {
   workspaceId: string;
   ticketId: string;
@@ -236,7 +243,19 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
     const expiryNote = isLiveRendered
       ? "" // live-rendered links last 30 days, don't bother mentioning
       : `<p><small>This link expires in 24 hours.</small></p>`;
-    const ticketMsgBody = `${emailLabel}<p>${leadIn}</p><p><a href="${journeyUrlForPreview}">${ctaText} →</a></p>${expiryNote}`;
+    // Strip any trailing arrow / chevron callers may have included on
+    // ctaText — the styled-button render is the single source of the
+    // chevron, otherwise we end up with "Cancel Subscription → →"
+    // (caught on ticket c769e4ff).
+    const cleanCta = cleanCtaLabel(ctaText);
+    const buttonColor = ws?.help_primary_color || "#4f46e5";
+    // Ticket-side preview now renders as the SAME styled button the
+    // customer sees in the email, not a bare hyperlink. Agents
+    // viewing the ticket get a faithful preview, customers in the
+    // email get the proper CTA. Inline styles only so it survives
+    // the dashboard's prose render + the mail client.
+    const ctaButton = `<a href="${journeyUrlForPreview}" style="display:inline-block;margin:8px 0;padding:12px 24px;background:${buttonColor};color:#ffffff !important;text-decoration:none;border-radius:8px;font-size:15px;font-weight:600;line-height:1;">${cleanCta} &rsaquo;</a>`;
+    const ticketMsgBody = `${emailLabel}<p>${leadIn}</p><p>${ctaButton}</p>${expiryNote}`;
 
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId,
