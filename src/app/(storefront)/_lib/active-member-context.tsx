@@ -79,6 +79,7 @@ export function useActiveProductData(data: PageData): {
   pricingRule: PricingRule | null;
   amazonPriceCents: number | null;
   productHandle: string;
+  productTitle: string;
 } {
   const { activeMember, isViewingCurrent } = useActiveMember(data);
 
@@ -89,6 +90,7 @@ export function useActiveProductData(data: PageData): {
         pricingRule: data.pricing_rule,
         amazonPriceCents: data.amazon_price_cents,
         productHandle: data.product.handle,
+        productTitle: data.product.title,
       };
     }
     return {
@@ -104,6 +106,7 @@ export function useActiveProductData(data: PageData): {
       pricingRule: activeMember.pricing_rule,
       amazonPriceCents: activeMember.amazon_price_cents,
       productHandle: activeMember.product_handle,
+      productTitle: activeMember.product_title,
     };
   }, [activeMember, isViewingCurrent, data]);
 }

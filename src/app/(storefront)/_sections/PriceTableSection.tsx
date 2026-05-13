@@ -33,6 +33,7 @@ export function PriceTableSection({ data }: { data: PageData }) {
     pricingRule: rule,
     baseVariant,
     amazonPriceCents,
+    productTitle,
   } = useActiveProductData(data);
 
   // Build tiers either from the rule (preferred) or from the legacy
@@ -143,6 +144,7 @@ export function PriceTableSection({ data }: { data: PageData }) {
               variantImageUrl={baseVariant?.image_url || null}
               servingsPerPack={baseVariant?.servings || null}
               servingsUnit={baseVariant?.servings_unit || null}
+              productTitle={productTitle}
             />
           ))}
         </div>
@@ -255,6 +257,7 @@ function PriceCard({
   variantImageUrl,
   servingsPerPack,
   servingsUnit,
+  productTitle,
 }: {
   tier: DisplayTier;
   mode: "subscribe" | "onetime";
@@ -263,6 +266,7 @@ function PriceCard({
   variantImageUrl: string | null;
   servingsPerPack: number | null;
   servingsUnit: string | null;
+  productTitle: string;
 }) {
   const showSubscribe = mode === "subscribe" && tier.subscribe_price_cents != null;
   const price = showSubscribe ? tier.subscribe_price_cents! : tier.price_cents;
@@ -375,6 +379,28 @@ function PriceCard({
       )}
 
       <ul className="mt-5 space-y-2.5 text-sm text-zinc-700">
+        {servingsPerPack && servingsPerPack > 0 && (() => {
+          // Total-servings row — the core "what you get" line, leads
+          // the perks list. Label switches to "K-Cups" when the
+          // variant's servings_unit reads as pods, else "Cups". Other
+          // formats (capsules, scoops) fall back to the raw unit so
+          // we don't render "Cups of Probiotics".
+          const total = servingsPerPack * tier.quantity;
+          const u = (servingsUnit || "").toLowerCase();
+          const label = /pods?|k-?cup/.test(u)
+            ? "K-Cups"
+            : /cup|coffee/.test(u) || u === ""
+              ? "Cups"
+              : servingsUnit || "Servings";
+          return (
+            <li className="flex items-start gap-2">
+              <CheckIcon />
+              <span>
+                <strong className="text-zinc-900">{total} {label}</strong> of {productTitle}
+              </span>
+            </li>
+          );
+        })()}
         {(freeShipApplies || freeShipSubLocked) && (
           <li className="flex items-start gap-2">
             {freeShipApplies ? <CheckIcon /> : <XIcon />}
