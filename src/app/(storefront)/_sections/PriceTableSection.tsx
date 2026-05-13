@@ -437,7 +437,7 @@ function PriceCard({
           href={`#buy-${tier.variant_id}`}
           label="Select"
           size="compact"
-          variant={tier.is_highlighted ? "primary" : "inverse"}
+          variant="primary"
           showTrust={false}
           align="center"
           dataAttributes={{
