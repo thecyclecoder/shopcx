@@ -52,11 +52,12 @@ const METRICS_TO_BACKFILL = [
 const DEFAULT_DAYS = 180;
 const PAGE_SIZE = 200;
 const UPSERT_CHUNK = 100;
-// Pages-per-step.run before yielding back to Inngest. 30 pages × ~1.2s
-// per page ≈ 36 seconds — well under the 300s Vercel function timeout.
-// Inngest re-invokes for the next chunk; total runtime accumulates
-// across invocations.
-const PAGES_PER_STEP = 30;
+// Pages-per-step.run before yielding back to Inngest. 100 pages ×
+// ~1.2s per page ≈ 120 seconds — under the 300s Vercel function
+// timeout, with margin. Started at 30 but the wall-clock invocation
+// overhead between steps was making chunks effectively 2-3 min each;
+// 100 pages per chunk amortizes that overhead.
+const PAGES_PER_STEP = 100;
 
 export const klaviyoEngagementBackfill = inngest.createFunction(
   {
