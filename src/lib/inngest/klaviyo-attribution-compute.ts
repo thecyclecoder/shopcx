@@ -1,39 +1,35 @@
 /**
- * Initial Revenue attribution recompute.
+ * Initial Revenue attribution recompute — UTM-precise version.
  *
- * For each Klaviyo SMS campaign in our history table, scan the
- * klaviyo_events table for Placed Order events in the 7-day window
- * after send_time, EXCLUDING events whose source_name starts with
- * 'subscription_contract' (auto-renewals). Sum revenue + count
- * orders. Store as initial_conversions /
- * initial_conversion_value_cents / initial_average_order_value_cents
- * on the campaign row.
+ * Each Klaviyo SMS link carries utm_id=<klaviyo_campaign_id>. When a
+ * recipient clicks through and orders, Shopify's Placed Order event
+ * carries that URL on event_properties.$extra.landing_site, which
+ * our events importer parses into klaviyo_events.attributed_klaviyo_campaign_id.
  *
- * This is the local equivalent of Klaviyo's UI-only "Initial Revenue"
- * conversion metric.
+ * So attribution becomes precise:
+ *   - Initial Conversions = rows where attributed_klaviyo_campaign_id
+ *     = this campaign AND source_name doesn't start with
+ *     'subscription_contract' (defensive — Klaviyo UTMs shouldn't
+ *     show up on auto-renewals anyway)
+ *   - Sum value → Initial Revenue
+ *
+ * No 7-day window guessing, no false positives from coincidental
+ * orders. Matches what Klaviyo's UI shows for "campaign conversions"
+ * (modulo their attribution-window cap, which we don't enforce —
+ * a buyer clicking the link 30 days after send still counts).
  *
  *   marketing/klaviyo-attribution.compute { workspace_id }
- *
- * Run after a fresh events import. Idempotent — overwrites prior
- * computed values with the latest numbers.
- *
- * Attribution window assumption: we count every non-subscription
- * Placed Order in the 7-day window after send_time. This is
- * "post-send revenue" rather than strict click-attributed revenue —
- * good enough for relative campaign comparison, intentionally
- * generous so we don't undercount.
  */
 
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-const ATTRIBUTION_WINDOW_DAYS = 7;
 const PLACED_ORDER_METRIC = "VCkHuL";
 
 export const klaviyoAttributionCompute = inngest.createFunction(
   {
     id: "klaviyo-attribution-compute",
-    name: "Klaviyo — recompute Initial Revenue per campaign",
+    name: "Klaviyo — recompute Initial Revenue per campaign (UTM-precise)",
     concurrency: [{ limit: 1 }],
     retries: 2,
     triggers: [{ event: "marketing/klaviyo-attribution.compute" }],
@@ -45,10 +41,9 @@ export const klaviyoAttributionCompute = inngest.createFunction(
       const admin = createAdminClient();
       const { data } = await admin
         .from("klaviyo_sms_campaign_history")
-        .select("id, send_time")
-        .eq("workspace_id", workspace_id)
-        .not("send_time", "is", null);
-      return (data || []) as Array<{ id: string; send_time: string }>;
+        .select("id, klaviyo_campaign_id")
+        .eq("workspace_id", workspace_id);
+      return (data || []) as Array<{ id: string; klaviyo_campaign_id: string }>;
     });
 
     if (campaigns.length === 0) return { computed: 0 };
@@ -56,22 +51,19 @@ export const klaviyoAttributionCompute = inngest.createFunction(
     let computed = 0;
     for (const c of campaigns) {
       await step.run(`compute-${c.id}`, async () => {
-        const sendStart = new Date(c.send_time).toISOString();
-        const sendEnd = new Date(
-          new Date(c.send_time).getTime() + ATTRIBUTION_WINDOW_DAYS * 86_400_000,
-        ).toISOString();
-
         const admin = createAdminClient();
-        // Pull all non-subscription Placed Order events in the
-        // attribution window. With <100K Placed Orders for 6 months
-        // total, a per-campaign filtered query is fast.
+        // Pull every Placed Order event attributed via UTMs to this
+        // campaign id. Defensive subscription filter: in practice
+        // Klaviyo UTMs land on the storefront checkout, not the
+        // subscription auto-renewal path, so this filter rarely
+        // excludes anything — but we keep it so a manually-tagged
+        // renewal can't sneak in.
         const { data: events } = await admin
           .from("klaviyo_events")
-          .select("value, source_name")
+          .select("value, source_name, klaviyo_profile_id")
           .eq("workspace_id", workspace_id)
           .eq("klaviyo_metric_id", PLACED_ORDER_METRIC)
-          .gte("datetime", sendStart)
-          .lt("datetime", sendEnd);
+          .eq("attributed_klaviyo_campaign_id", c.klaviyo_campaign_id);
 
         let initialConversions = 0;
         let totalRevenue = 0;

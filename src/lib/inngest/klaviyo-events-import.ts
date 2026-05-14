@@ -46,7 +46,10 @@ export const klaviyoEventsImport = inngest.createFunction(
   {
     id: "klaviyo-events-import",
     name: "Klaviyo — import Placed Order events",
-    concurrency: [{ limit: 2 }],
+    // Single in-flight import — the previous run with concurrency=2
+    // saturated the Postgres connection pool on Micro tier and locked
+    // up the DB. Even on Small we keep this conservative.
+    concurrency: [{ limit: 1 }],
     retries: 2,
     triggers: [{ event: "marketing/klaviyo-events.import" }],
   },
@@ -93,15 +96,30 @@ export const klaviyoEventsImport = inngest.createFunction(
         const rows = events.map((e) => mapEventToRow(workspace_id, e)).filter(Boolean);
 
         if (rows.length > 0) {
+          // Chunk upserts into smaller batches. Pages can carry up to
+          // 200 events; submitting them as one statement saturates
+          // the connection pool. 50 rows per chunk is comfortable.
           const admin = createAdminClient();
-          const { error } = await admin
-            .from("klaviyo_events")
-            .upsert(rows as Record<string, unknown>[], {
-              onConflict: "workspace_id,klaviyo_event_id",
-              ignoreDuplicates: false,
-            });
-          if (error) throw new Error(`Upsert failed: ${error.message}`);
+          const CHUNK = 50;
+          for (let i = 0; i < rows.length; i += CHUNK) {
+            const batch = rows.slice(i, i + CHUNK);
+            const { error } = await admin
+              .from("klaviyo_events")
+              .upsert(batch as Record<string, unknown>[], {
+                onConflict: "workspace_id,klaviyo_event_id",
+                ignoreDuplicates: false,
+              });
+            if (error) throw new Error(`Upsert failed: ${error.message}`);
+            // Tiny breather between chunks so we don't queue them all
+            // back-to-back.
+            if (i + CHUNK < rows.length) {
+              await new Promise((r) => setTimeout(r, 50));
+            }
+          }
         }
+        // 200ms pause between pages — keeps Klaviyo + Postgres happy
+        // and roughly matches the user's network round-trip.
+        await new Promise((r) => setTimeout(r, 200));
         return { count: rows.length, next: body.links?.next || null };
       });
       totalImported += result.count;
@@ -147,6 +165,13 @@ function mapEventToRow(
     || e.attributes.metric_id
     || PLACED_ORDER_METRIC;
 
+  // UTM-based campaign attribution. Klaviyo SMS sends tag links
+  // with utm_id = <klaviyo_campaign_id>; the value lands here in
+  // event_properties.$extra.landing_site (the URL the buyer hit
+  // before checkout). Parsing UTMs once at import time turns
+  // attribution into a precise JOIN later.
+  const utm = extractUtms(props);
+
   return {
     workspace_id: workspaceId,
     klaviyo_event_id: e.id,
@@ -157,6 +182,52 @@ function mapEventToRow(
     source_name: sourceName,
     order_number: orderNumber,
     event_properties: props,
+    attributed_klaviyo_campaign_id: utm.utm_id,
+    attributed_utm_source: utm.utm_source,
+    attributed_utm_medium: utm.utm_medium,
+    attributed_utm_campaign: utm.utm_campaign,
+  };
+}
+
+interface ExtractedUtms {
+  utm_id: string | null;
+  utm_source: string | null;
+  utm_medium: string | null;
+  utm_campaign: string | null;
+}
+
+/**
+ * Extract UTM params from a Placed Order event's landing-site URL.
+ * Klaviyo tags every campaign link with the standard utm_* set plus
+ * utm_id = the Klaviyo campaign id. Returns nulls when the URL is
+ * absent or unparseable — non-Klaviyo orders just fall through.
+ */
+function extractUtms(props: Record<string, unknown>): ExtractedUtms {
+  const empty: ExtractedUtms = {
+    utm_id: null, utm_source: null, utm_medium: null, utm_campaign: null,
+  };
+  const extra = props.$extra as Record<string, unknown> | undefined;
+  // Try both full URL forms Klaviyo may write. Some events carry
+  // landing_site (path + query), others have full_landing_site (with host).
+  const candidate =
+    (typeof extra?.full_landing_site === "string" ? extra.full_landing_site : null)
+    || (typeof extra?.landing_site === "string" ? extra.landing_site : null)
+    || null;
+  if (!candidate) return empty;
+  let query: URLSearchParams;
+  try {
+    // Construct against a dummy origin so we don't fail on path-only
+    // landing_site values.
+    const url = new URL(candidate, "https://x.example");
+    query = url.searchParams;
+  } catch {
+    return empty;
+  }
+  return {
+    utm_id: query.get("utm_id") || null,
+    utm_source: query.get("utm_source") || null,
+    utm_medium: query.get("utm_medium") || null,
+    utm_campaign: query.get("utm_campaign") || null,
   };
 }
 

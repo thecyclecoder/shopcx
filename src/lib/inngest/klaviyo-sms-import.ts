@@ -247,11 +247,15 @@ export const klaviyoSmsImport = inngest.createFunction(
       data: { workspace_id },
     });
     // Attribution recompute fires after events finish via a delayed
-    // re-trigger — 5 min gives the events import a head start.
+    // re-trigger. Events import is now throttled (chunked + paged
+    // with delays) and takes ~15-20 min on a 200-day window of
+    // Placed Orders. 25 min gives plenty of buffer; if events takes
+    // longer the recompute just re-runs against the partial set and
+    // can be manually re-fired later.
     await step.sendEvent("trigger-attribution-compute", {
       name: "marketing/klaviyo-attribution.compute",
       data: { workspace_id },
-      ts: Date.now() + 5 * 60 * 1000,
+      ts: Date.now() + 25 * 60 * 1000,
     });
 
     return { imported, total_campaigns: campaigns.length };
