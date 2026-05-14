@@ -789,6 +789,28 @@ async function handleIdentifyOrder(
     };
   }
 
+  // Recency shortcut: if exactly one order in the last 14 days, that's
+  // overwhelmingly the one the customer is talking about. The 180-day
+  // lookback gives Sonnet visibility into history but presenting orders
+  // back to December for a "my recent order" question creates needless
+  // confusion (ticket 36f7664d: customer talking about an order from 11
+  // days ago, playbook listed orders going back ~5 months).
+  const RECENT_DAYS = 14;
+  const recentCutoff = Date.now() - RECENT_DAYS * 86_400_000;
+  const recentOrders = orders.filter(o => new Date(o.created_at).getTime() >= recentCutoff);
+  if (recentOrders.length === 1) {
+    return {
+      action: "advance", newStep: step.step_order + 1,
+      context: { identified_orders: [recentOrders[0].order_number] },
+      systemNote: `[Playbook] Single order in last ${RECENT_DAYS} days: ${recentOrders[0].order_number}. Auto-identified.`,
+    };
+  }
+  // If 2+ orders are within 14 days, narrow disambiguation to that set
+  // — older orders aren't viable candidates for a "my recent" query.
+  if (recentOrders.length >= 2) {
+    orders = recentOrders;
+  }
+
   // Multiple orders — try to match customer's message to an order
   const msgLower = msg.toLowerCase().replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ");
 
@@ -834,10 +856,26 @@ async function handleIdentifyOrder(
     };
   }
 
-  // Match by product name
+  // Match by product name — full title OR a distinctive token from the
+  // title (so "creamer" matches "Amazing Creamer", "tabs" matches
+  // "Superfood Tabs"). Common brand/filler words are stripped so we
+  // don't false-match on words like "amazing" that appear across SKUs.
+  const STOPWORDS = new Set([
+    "amazing", "superfoods", "superfood", "the", "and", "with", "for",
+    "shipping", "protection", "mystery", "item", "free", "gift", "bamboo",
+  ]);
   const matchedByProduct = orders.filter(o => {
     const items = (o.line_items as { title?: string }[] || []);
-    return items.some(i => i.title && msgLower.includes(i.title.toLowerCase()));
+    return items.some(i => {
+      if (!i.title) return false;
+      const titleLower = i.title.toLowerCase();
+      if (msgLower.includes(titleLower)) return true;
+      const tokens = titleLower
+        .replace(/[^\w\s]/g, " ")
+        .split(/\s+/)
+        .filter(t => t.length >= 4 && !STOPWORDS.has(t));
+      return tokens.some(t => new RegExp(`\\b${t}\\b`, "i").test(msgLower));
+    });
   });
   if (matchedByProduct.length === 1) {
     return {

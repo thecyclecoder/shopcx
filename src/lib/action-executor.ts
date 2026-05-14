@@ -1849,23 +1849,33 @@ async function handlePlaybook(
       if (result.action === "complete") break;
     }
   } else {
-    // Starting new playbook
+    // Starting new playbook. Pass the customer's last inbound message
+    // so the playbook can use it for order identification, intent
+    // detection, etc. Previously this was hardcoded to "" which meant
+    // the order-number/product-name/date matchers had nothing to work
+    // with — even when the customer typed the order number AND named
+    // the product in their first sentence (ticket 36f7664d: "order
+    // SC129467 The creamer I bought…" → playbook still asked which
+    // order, because msg was empty).
+    const lastMsg = await ctx.admin.from("ticket_messages")
+      .select("body_clean, body")
+      .eq("ticket_id", ctx.ticketId).eq("direction", "inbound").eq("author_type", "customer")
+      .order("created_at", { ascending: false }).limit(1).single();
+    const customerMsg = lastMsg?.data?.body_clean || lastMsg?.data?.body || "";
+
     await startPlaybook(ctx.admin, ctx.ticketId, playbook.id);
 
     let result = await executePlaybookStep(
-      ctx.workspaceId, ctx.ticketId,
-      "", // no customer message for first step
-      personality,
+      ctx.workspaceId, ctx.ticketId, customerMsg, personality,
     );
 
     if (result.systemNote) await sysNote(result.systemNote);
     if (result.response) { await send(result.response, ctx.sandbox); return; }
 
-    // Auto-advance for initial step too
     let advances = 0;
     while (result.action === "advance" && advances < 10) {
       advances++;
-      result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, "", personality);
+      result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
       if (result.systemNote) await sysNote(result.systemNote);
       if (result.response) { await send(result.response, ctx.sandbox); return; }
       if (result.action === "complete") break;
