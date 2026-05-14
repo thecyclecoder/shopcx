@@ -58,56 +58,73 @@ export async function GET(
   }
   const authHeader = `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString("base64")}`;
 
-  // Fire both list calls in parallel.
-  const [longRes, shortRes] = await Promise.all([
+  // Fire both list calls in parallel. Partial-success pattern: one
+  // failure (e.g. shortcode endpoint denied for the account) doesn't
+  // kill the whole response — we surface per-endpoint warnings so the
+  // UI can render what loaded plus an explanation for what didn't.
+  //
+  // Note: Twilio's shortcode endpoint sits under /SMS/ — easy to
+  // miss because the long-code endpoint doesn't.
+  const [longResult, shortResult] = await Promise.allSettled([
     fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json?PageSize=200`, {
       headers: { Authorization: authHeader },
     }),
-    fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/ShortCodes.json?PageSize=200`, {
+    fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/SMS/ShortCodes.json?PageSize=200`, {
       headers: { Authorization: authHeader },
     }),
   ]);
 
-  if (!longRes.ok) {
-    const text = await longRes.text().catch(() => "");
-    return NextResponse.json({ error: `Twilio IncomingPhoneNumbers error: ${longRes.status} ${text.slice(0, 200)}` }, { status: 502 });
-  }
-  if (!shortRes.ok) {
-    const text = await shortRes.text().catch(() => "");
-    return NextResponse.json({ error: `Twilio ShortCodes error: ${shortRes.status} ${text.slice(0, 200)}` }, { status: 502 });
-  }
-
-  const longData = await longRes.json() as { incoming_phone_numbers?: TwilioPhoneRow[] };
-  const shortData = await shortRes.json() as { short_codes?: TwilioPhoneRow[] };
-
+  const warnings: string[] = [];
   const numbers: NumberOption[] = [];
 
-  for (const r of longData.incoming_phone_numbers || []) {
-    numbers.push({
-      phone_number: r.phone_number,
-      display: formatLongCode(r.phone_number, r.friendly_name),
-      type: "long_code",
-      capabilities: {
-        sms: !!r.capabilities?.sms,
-        mms: !!r.capabilities?.mms,
-        voice: !!r.capabilities?.voice,
-      },
-    });
+  // Long codes
+  if (longResult.status === "fulfilled" && longResult.value.ok) {
+    const data = await longResult.value.json() as { incoming_phone_numbers?: TwilioPhoneRow[] };
+    for (const r of data.incoming_phone_numbers || []) {
+      numbers.push({
+        phone_number: r.phone_number,
+        display: formatLongCode(r.phone_number, r.friendly_name),
+        type: "long_code",
+        capabilities: {
+          sms: !!r.capabilities?.sms,
+          mms: !!r.capabilities?.mms,
+          voice: !!r.capabilities?.voice,
+        },
+      });
+    }
+  } else if (longResult.status === "fulfilled") {
+    const text = await longResult.value.text().catch(() => "");
+    warnings.push(`Long codes: ${longResult.value.status} ${text.slice(0, 200)}`);
+  } else {
+    warnings.push(`Long codes: ${String(longResult.reason).slice(0, 200)}`);
   }
 
-  for (const r of shortData.short_codes || []) {
-    const sc = r.short_code || "";
-    numbers.push({
-      phone_number: sc,
-      display: r.friendly_name ? `${sc} — ${r.friendly_name}` : sc,
-      type: "shortcode",
-      // Shortcodes are SMS+MMS by default in the US; Twilio's API
-      // doesn't expose capabilities here, so we assume both.
-      capabilities: { sms: true, mms: true, voice: false },
-    });
+  // Shortcodes
+  if (shortResult.status === "fulfilled" && shortResult.value.ok) {
+    const data = await shortResult.value.json() as { short_codes?: TwilioPhoneRow[] };
+    for (const r of data.short_codes || []) {
+      const sc = r.short_code || "";
+      numbers.push({
+        phone_number: sc,
+        display: r.friendly_name ? `${sc} — ${r.friendly_name}` : sc,
+        type: "shortcode",
+        capabilities: { sms: true, mms: true, voice: false },
+      });
+    }
+  } else if (shortResult.status === "fulfilled") {
+    const text = await shortResult.value.text().catch(() => "");
+    warnings.push(`Shortcodes: ${shortResult.value.status} ${text.slice(0, 200)}`);
+  } else {
+    warnings.push(`Shortcodes: ${String(shortResult.reason).slice(0, 200)}`);
   }
 
-  return NextResponse.json({ numbers });
+  // If BOTH failed, treat it as a hard error so the UI surfaces it
+  // distinctly from "loaded but the list is empty."
+  if (numbers.length === 0 && warnings.length === 2) {
+    return NextResponse.json({ error: warnings.join(" | ") }, { status: 502 });
+  }
+
+  return NextResponse.json({ numbers, warnings });
 }
 
 /**
