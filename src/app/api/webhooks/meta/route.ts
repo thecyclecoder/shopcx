@@ -1,8 +1,15 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
+import { verifyMetaWebhookSignature } from "@/lib/meta";
+import { ingestSocialComment } from "@/lib/social-comment-ingest";
 
-// GET: Meta webhook verification (hub.verify_token challenge)
+// GET: Meta webhook verification (hub.verify_token challenge).
+//
+// Meta sends this once when an admin subscribes the webhook in the
+// App Dashboard. Verify token is per-page (on meta_pages) once
+// multi-page is wired up; for now we still check the workspace-level
+// token first, then fall back to any meta_pages row matching the token.
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const mode = searchParams.get("hub.mode");
@@ -13,19 +20,28 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Invalid verification request" }, { status: 400 });
   }
 
-  // Look up workspace by verify token
   const admin = createAdminClient();
+
+  // Legacy single-page workspaces still verify off workspaces.meta_webhook_verify_token.
   const { data: workspace } = await admin
     .from("workspaces")
     .select("id")
     .eq("meta_webhook_verify_token", token)
-    .single();
+    .maybeSingle();
 
   if (!workspace) {
-    return NextResponse.json({ error: "Invalid verify token" }, { status: 403 });
+    // Per-page tokens — once a workspace has connected via the new
+    // multi-page flow, every meta_pages row gets its own verify token.
+    const { data: page } = await admin
+      .from("meta_pages")
+      .select("id")
+      .eq("webhook_verify_token", token)
+      .maybeSingle();
+    if (!page) {
+      return NextResponse.json({ error: "Invalid verify token" }, { status: 403 });
+    }
   }
 
-  // Return the challenge to confirm subscription
   return new Response(challenge, {
     status: 200,
     headers: { "Content-Type": "text/plain" },
@@ -33,7 +49,7 @@ export async function GET(request: Request) {
 }
 
 interface MetaMessagingEntry {
-  id: string; // page ID
+  id: string;                                  // page ID (FB) or IG Business ID
   time: number;
   messaging?: Array<{
     sender: { id: string };
@@ -46,74 +62,107 @@ interface MetaMessagingEntry {
     };
   }>;
   changes?: Array<{
-    field: string;
-    value: {
-      from: { id: string; name?: string };
-      item: string; // "comment" | "post" | "status"
-      comment_id?: string;
-      post_id?: string;
-      message?: string;
-      verb: string; // "add" | "edited" | "remove"
-      created_time: number;
-    };
+    field: string;                             // 'feed' (FB) | 'comments' (IG) | 'messages' | 'mention' | …
+    value: MetaChangeValue;
   }>;
 }
 
+interface MetaChangeValue {
+  from?: { id: string; name?: string; username?: string };
+  item?: string;                               // 'comment' | 'post' | 'status'
+  comment_id?: string;
+  parent_id?: string;                          // present when this is a reply to another comment
+  post_id?: string;
+  message?: string;
+  verb?: string;                               // 'add' | 'edited' | 'remove' | 'hide' | …
+  created_time?: number;
+  ad_id?: string;                              // present on ad-comment events
+  // Instagram comments shape
+  id?: string;                                 // IG comment ID
+  media?: { id?: string; ad_id?: string };
+}
+
 interface MetaWebhookBody {
-  object: string;
+  object: string;                              // 'page' | 'instagram'
   entry: MetaMessagingEntry[];
 }
 
-// POST: Process incoming Meta messages and comments
+// POST: Process incoming Meta webhook events.
+//
+// Two routing paths:
+//   1. DMs (entry.messaging or change.field === 'messages')
+//      → existing tickets flow, channel = 'meta_dm'. Unchanged.
+//   2. Comments (change.field === 'feed' with item='comment', OR
+//                change.field === 'comments' on Instagram)
+//      → new social_comments table via ingestSocialComment().
+//
+// HMAC verification runs first on the raw request body. Without it
+// any third party that learns our endpoint URL can spoof webhooks.
 export async function POST(request: Request) {
+  const rawBody = await request.text();
+  const signatureHeader = request.headers.get("x-hub-signature-256");
+
+  if (!verifyMetaWebhookSignature(rawBody, signatureHeader, process.env.META_APP_SECRET)) {
+    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+  }
+
   let body: MetaWebhookBody;
   try {
-    body = await request.json();
+    body = JSON.parse(rawBody);
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  // Meta expects 200 quickly; process async
   const admin = createAdminClient();
 
   for (const entry of body.entry || []) {
-    const pageId = entry.id;
+    const platformPageId = entry.id;
 
-    // Find workspace by page ID
-    const { data: workspace } = await admin
-      .from("workspaces")
-      .select("id, meta_page_id")
-      .eq("meta_page_id", pageId)
-      .single();
+    // Resolve workspace from the meta_pages table first (multi-page)
+    // and fall back to the legacy workspaces.meta_page_id column so
+    // workspaces that haven't migrated keep working unchanged.
+    const { data: page } = await admin
+      .from("meta_pages")
+      .select("id, workspace_id, page_type, ai_moderate_ad_comments, ai_moderate_organic_comments, platform")
+      .eq("meta_page_id", platformPageId)
+      .eq("is_active", true)
+      .maybeSingle();
 
-    if (!workspace) continue;
+    let workspaceId: string | null = page?.workspace_id ?? null;
+    if (!workspaceId) {
+      const { data: legacyWorkspace } = await admin
+        .from("workspaces")
+        .select("id")
+        .eq("meta_page_id", platformPageId)
+        .maybeSingle();
+      workspaceId = legacyWorkspace?.id ?? null;
+    }
 
-    // Handle DMs (messaging field)
+    if (!workspaceId) continue;
+
+    // ── DMs (entry.messaging) — unchanged ────────────────────────
     if (entry.messaging) {
       for (const event of entry.messaging) {
         if (!event.message?.text) continue;
 
         const senderId = event.sender.id;
-        // Skip messages sent by the page itself
-        if (senderId === pageId) continue;
+        if (senderId === platformPageId) continue;
 
         const messageText = event.message.text;
         const messageId = event.message.mid;
 
-        // Check for existing open ticket from this sender
         const { data: existingTicket } = await admin
           .from("tickets")
           .select("id")
-          .eq("workspace_id", workspace.id)
+          .eq("workspace_id", workspaceId)
           .eq("meta_sender_id", senderId)
           .eq("channel", "meta_dm")
           .in("status", ["open", "pending"])
           .order("updated_at", { ascending: false })
           .limit(1)
-          .single();
+          .maybeSingle();
 
         if (existingTicket) {
-          // Thread into existing ticket
           await admin.from("ticket_messages").insert({
             ticket_id: existingTicket.id,
             direction: "inbound",
@@ -129,15 +178,19 @@ export async function POST(request: Request) {
             last_customer_reply_at: new Date().toISOString(),
           }).eq("id", existingTicket.id);
 
-          // Trigger unified handler
           await inngest.send({
             name: "ticket/inbound-message",
-            data: { workspace_id: workspace.id, ticket_id: existingTicket.id, message_body: messageText, channel: "meta_dm", is_new_ticket: false },
+            data: {
+              workspace_id: workspaceId,
+              ticket_id: existingTicket.id,
+              message_body: messageText,
+              channel: "meta_dm",
+              is_new_ticket: false,
+            },
           });
         } else {
-          // Create new ticket
           const { data: ticket } = await admin.from("tickets").insert({
-            workspace_id: workspace.id,
+            workspace_id: workspaceId,
             channel: "meta_dm",
             status: "open",
             subject: `DM from ${senderId}`,
@@ -155,65 +208,46 @@ export async function POST(request: Request) {
               meta_message_id: messageId,
             });
 
-            // Trigger unified handler
             await inngest.send({
               name: "ticket/inbound-message",
-              data: { workspace_id: workspace.id, ticket_id: ticket.id, message_body: messageText, channel: "meta_dm", is_new_ticket: true },
+              data: {
+                workspace_id: workspaceId,
+                ticket_id: ticket.id,
+                message_body: messageText,
+                channel: "meta_dm",
+                is_new_ticket: true,
+              },
             });
           }
         }
       }
     }
 
-    // Handle comments/feed changes
-    if (entry.changes) {
+    // ── Comments / feed changes → social_comments ────────────────
+    if (entry.changes && page) {
       for (const change of entry.changes) {
-        if (change.field !== "feed") continue;
-        if (change.value.verb !== "add") continue;
-        if (change.value.item !== "comment") continue;
+        const isFbComment = change.field === "feed" && change.value.item === "comment";
+        const isIgComment = change.field === "comments";
+        if (!isFbComment && !isIgComment) continue;
 
-        const senderId = change.value.from.id;
-        const senderName = change.value.from.name || senderId;
-        // Skip comments from the page itself
-        if (senderId === pageId) continue;
+        // Comments posted by the page itself are us — never moderate
+        // our own outbound replies. Without this check the AI could
+        // reply to its own reply, loop forever.
+        const senderId = change.value.from?.id;
+        if (!senderId || senderId === platformPageId) continue;
 
-        const commentId = change.value.comment_id;
-        const postId = change.value.post_id;
-        const commentText = change.value.message || "";
-
-        if (!commentText || !commentId) continue;
-
-        // Create a ticket for the comment
-        const { data: ticket } = await admin.from("tickets").insert({
-          workspace_id: workspace.id,
-          channel: "social_comments",
-          status: "open",
-          subject: `Comment from ${senderName} on post`,
-          meta_sender_id: senderId,
-          meta_comment_id: commentId,
-          meta_post_id: postId,
-          last_customer_reply_at: new Date().toISOString(),
-        }).select("id").single();
-
-        if (ticket) {
-          await admin.from("ticket_messages").insert({
-            ticket_id: ticket.id,
-            direction: "inbound",
-            visibility: "external",
-            author_type: "customer",
-            body: commentText,
-            meta_message_id: commentId,
-          });
-
-          // Trigger unified handler (social comments = macro only)
-          await inngest.send({
-            name: "ticket/inbound-message",
-            data: { workspace_id: workspace.id, ticket_id: ticket.id, message_body: commentText, channel: "social_comments", is_new_ticket: true },
-          });
-        }
+        await ingestSocialComment({
+          admin,
+          page,
+          platform: body.object === "instagram" ? "instagram" : "facebook",
+          change: change.value,
+          changeField: change.field,
+        });
       }
     }
   }
 
+  // Meta expects 200 quickly — we don't await Inngest fan-out beyond
+  // the send() enqueue.
   return NextResponse.json({ status: "ok" });
 }

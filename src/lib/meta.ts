@@ -1,5 +1,40 @@
+import { createHmac, timingSafeEqual } from "crypto";
+
 const GRAPH_API_VERSION = "v21.0";
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
+
+/**
+ * Verify the X-Hub-Signature-256 header on an incoming Meta webhook.
+ *
+ * Meta signs the raw request body with HMAC-SHA256(appSecret, body)
+ * and sends it in the header as `sha256=<hex>`. We compute the same
+ * signature and constant-time compare. Reject when:
+ *  - header is missing or malformed
+ *  - app secret isn't configured
+ *  - hex string length doesn't match (timingSafeEqual throws otherwise)
+ *  - digests don't match
+ *
+ * The raw body string MUST be the exact bytes as received. Once JSON
+ * parsing happens, key ordering / whitespace can change the bytes and
+ * the signature won't match.
+ */
+export function verifyMetaWebhookSignature(
+  rawBody: string,
+  signatureHeader: string | null,
+  appSecret: string | undefined,
+): boolean {
+  if (!signatureHeader || !appSecret) return false;
+  const [algo, providedHex] = signatureHeader.split("=");
+  if (algo !== "sha256" || !providedHex) return false;
+
+  const computed = createHmac("sha256", appSecret).update(rawBody, "utf8").digest("hex");
+  if (computed.length !== providedHex.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(computed, "hex"), Buffer.from(providedHex, "hex"));
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Send a DM reply via Meta Messenger / Instagram
@@ -101,6 +136,66 @@ export async function deleteComment(
   }
 
   return { success: true };
+}
+
+/**
+ * Like a comment on behalf of the Page (Graph API: POST /{comment-id}/likes).
+ * Used as a moderation action — Sonnet may decide a positive customer
+ * comment is best acknowledged with a like rather than a written reply.
+ */
+export async function likeComment(
+  pageAccessToken: string,
+  commentId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const res = await fetch(`${GRAPH_BASE}/${commentId}/likes`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pageAccessToken}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return { success: false, error: err?.error?.message || `Meta API error ${res.status}` };
+  }
+  return { success: true };
+}
+
+/**
+ * Fetch a post's metadata + attachments. Used to cache post context
+ * (caption, permalink, image, ad flag) and to extract product URLs
+ * for product matching.
+ *
+ * Returns null on error rather than throwing — the moderation pipeline
+ * should keep working even if a single post fetch fails.
+ */
+export interface MetaPostMetadata {
+  id: string;
+  permalink_url?: string;
+  message?: string;
+  created_time?: string;
+  is_eligible_for_promotion?: boolean;
+  attachments?: {
+    data: Array<{
+      type?: string;
+      url?: string;
+      media?: { image?: { src?: string }; source?: string };
+      target?: { url?: string };
+      subattachments?: { data: Array<{ media?: { image?: { src?: string } }; target?: { url?: string } }> };
+    }>;
+  };
+}
+
+export async function getPostMetadata(
+  pageAccessToken: string,
+  postId: string,
+): Promise<MetaPostMetadata | null> {
+  const fields = "id,permalink_url,message,created_time,is_eligible_for_promotion,attachments{media,target,subattachments,type,url}";
+  const url = `${GRAPH_BASE}/${postId}?fields=${encodeURIComponent(fields)}&access_token=${encodeURIComponent(pageAccessToken)}`;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  return res.json();
 }
 
 /**
