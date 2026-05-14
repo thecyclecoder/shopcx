@@ -21,6 +21,7 @@ import { IngredientsSection } from "../_sections/IngredientsSection";
 import { FinalCTASection } from "../_sections/FinalCTASection";
 import { StorefrontHeader } from "../_components/StorefrontHeader";
 import { ProductJsonLd } from "../_components/ProductJsonLd";
+import { StorefrontPixelInit } from "../_components/StorefrontPixelInit";
 import { ActiveMemberProvider } from "./active-member-context";
 import { PricingModeProvider } from "./pricing-mode-context";
 import { UpsellChapter } from "../_sections/UpsellChapter";
@@ -118,6 +119,15 @@ export function StorefrontPage({
         />
       )}
       <ProductJsonLd data={data} canonicalUrl={canonicalPath} />
+
+      {/* Storefront pixel — pdp_view fires on mount, pdp_engaged on
+          first click/scroll/dwell, pack_selected on Select CTA via
+          delegated handler. No UI rendered. */}
+      <StorefrontPixelInit
+        workspaceId={data.workspace.id}
+        productId={data.product.id}
+        productHandle={data.product.handle}
+      />
 
       <StorefrontHeader
         workspaceId={data.product.workspace_id}
