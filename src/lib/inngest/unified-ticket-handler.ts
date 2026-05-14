@@ -1375,17 +1375,77 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           return { status: "positive_close_suppressed_pending_journey" };
         }
 
-        const delay = await step.run("close-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
-        // delay handled by sendWithDelay
-        await step.run("send-close", async () => {
-          if (await newerActivity(admin, tid, t0)) return;
-          const { data: ws } = await admin.from("workspaces").select("auto_close_reply").eq("id", wsId).single();
-          const closing = await generatePositiveClose(msg, st.ch, pers, ws?.auto_close_reply || null, tid, wsId);
-          await sendWithDelay(admin, wsId, tid, st.ch, closing, cfg.sandbox);
-          await setStatus(admin, tid, true);
-          await sysNote(admin, tid, `[System] Positive close. Ticket closed.`);
+        // Guard: if the prior AI message promised an action that was
+        // never executed, "thanks" means the customer is trusting we
+        // followed through — we shouldn't close until we actually have.
+        // Surfaced on Carrie Puckett's ticket (bd095f77): AI said "I'd
+        // be glad to set up a free prepaid return label" + customer
+        // replied "Yes. Thank you" + positive close fired with no
+        // return ever created. Customer came back a day later asking
+        // where the label was.
+        const unfulfilledPromise = await step.run("check-unfulfilled-promise", async () => {
+          const { data: lastOut } = await admin.from("ticket_messages")
+            .select("id, body, created_at")
+            .eq("ticket_id", tid)
+            .eq("direction", "outbound")
+            .eq("visibility", "external")
+            .in("author_type", ["ai", "agent"])
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          if (!lastOut) return null;
+
+          // Strip HTML for regex matching.
+          const text = (lastOut.body || "").replace(/<[^>]+>/g, " ").replace(/&[^;]+;/g, " ").toLowerCase();
+
+          // Future-tense promise patterns the AI commonly uses for an
+          // action that needs to fire. Order verbs by frequency in
+          // our own outbound copy.
+          const promiseRegex = /\b(i(?:'ll| will| am going to| 'd be (?:glad|happy) to| would be (?:glad|happy) to)|let me)\s+(send|set up|create|generate|prepare|process|get|issue|email|ship|put together)/i;
+          if (!promiseRegex.test(text)) return null;
+
+          // Promise detected. Look for any "Action completed" /
+          // "Action " system note AFTER this AI message and BEFORE
+          // the customer's thanks (now). Also count any action_type
+          // direct_action / playbook / journey decisions Sonnet logged.
+          const { data: notesAfter } = await admin.from("ticket_messages")
+            .select("body")
+            .eq("ticket_id", tid)
+            .eq("visibility", "internal")
+            .eq("author_type", "system")
+            .gt("created_at", lastOut.created_at);
+          const fulfilled = (notesAfter || []).some((n) => {
+            const b = (n.body || "").toLowerCase();
+            return b.includes("action completed")
+              || b.includes("[playbook]")
+              || b.includes("journey")
+              || b.includes("return created")
+              || b.includes("✓");
+          });
+          if (fulfilled) return null;
+          return { aiMessage: text.slice(0, 200) };
         });
-        return { status: "positive_close" };
+
+        if (unfulfilledPromise) {
+          await sysNote(admin, tid, `[System] Positive close suppressed — prior AI message contained an action promise that wasn't executed. Routing to orchestrator to fulfill instead of closing. Promise context: "${unfulfilledPromise.aiMessage.slice(0, 200)}"`);
+          // Fall through the rest of this block so the orchestrator
+          // (Section 4 below) runs on this customer message and can
+          // actually fire the action that was promised. This is the
+          // ONE suppression case that doesn't return early.
+        } else {
+          const delay = await step.run("close-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
+          void delay;
+          // delay handled by sendWithDelay
+          await step.run("send-close", async () => {
+            if (await newerActivity(admin, tid, t0)) return;
+            const { data: ws } = await admin.from("workspaces").select("auto_close_reply").eq("id", wsId).single();
+            const closing = await generatePositiveClose(msg, st.ch, pers, ws?.auto_close_reply || null, tid, wsId);
+            await sendWithDelay(admin, wsId, tid, st.ch, closing, cfg.sandbox);
+            await setStatus(admin, tid, true);
+            await sysNote(admin, tid, `[System] Positive close. Ticket closed.`);
+          });
+          return { status: "positive_close" };
+        }
       }
     }
 
