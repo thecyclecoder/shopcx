@@ -115,7 +115,7 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
     icon: ICONS.marketing,
     collapsible: true,
     items: [
-      { href: "#", label: "SMS", icon: ICONS.marketing, comingSoon: true },
+      { href: "/dashboard/marketing/text", label: "Text", icon: ICONS.marketing },
       { href: "#", label: "Email", icon: ICONS.marketing, comingSoon: true },
     ],
   },
