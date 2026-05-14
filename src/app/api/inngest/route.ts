@@ -73,6 +73,7 @@ import { marketingCouponAutoDisable } from "@/lib/inngest/marketing-coupon-cron"
 import { klaviyoSmsImport } from "@/lib/inngest/klaviyo-sms-import";
 import { klaviyoEventsImport } from "@/lib/inngest/klaviyo-events-import";
 import { klaviyoAttributionCompute } from "@/lib/inngest/klaviyo-attribution-compute";
+import { klaviyoEngagementBackfill } from "@/lib/inngest/klaviyo-engagement-backfill";
 
 export const maxDuration = 300;
 
@@ -150,5 +151,6 @@ export const { GET, POST, PUT } = serve({
     klaviyoSmsImport,
     klaviyoEventsImport,
     klaviyoAttributionCompute,
+    klaviyoEngagementBackfill,
   ],
 });
