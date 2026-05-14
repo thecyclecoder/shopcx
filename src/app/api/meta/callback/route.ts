@@ -89,17 +89,41 @@ export async function GET(request: Request) {
     // Generate webhook verify token
     const verifyToken = randomBytes(16).toString("hex");
 
-    // Store everything encrypted
+    const encryptedToken = encrypt(pageResult.pageAccessToken);
+
+    // Legacy single-page columns — keep updating these until the
+    // workspaces.meta_* columns are retired so older code paths
+    // (DM ticket creation, the existing settings card) keep working.
     await admin
       .from("workspaces")
       .update({
         meta_page_id: pageResult.pageId,
-        meta_page_access_token_encrypted: encrypt(pageResult.pageAccessToken),
+        meta_page_access_token_encrypted: encryptedToken,
         meta_page_name: pageResult.pageName,
         meta_instagram_id: pageResult.instagramId || null,
         meta_webhook_verify_token: verifyToken,
       })
       .eq("id", workspaceId);
+
+    // New multi-page table — upsert so reconnecting the same page
+    // rotates the token + re-activates rather than duplicating.
+    await admin
+      .from("meta_pages")
+      .upsert(
+        {
+          workspace_id: workspaceId,
+          platform: "facebook",
+          meta_page_id: pageResult.pageId,
+          meta_page_name: pageResult.pageName,
+          meta_instagram_id: pageResult.instagramId || null,
+          access_token_encrypted: encryptedToken,
+          webhook_verify_token: verifyToken,
+          is_active: true,
+          connected_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "workspace_id,meta_page_id" },
+      );
 
     // Subscribe page to webhook events
     const subResult = await subscribePageWebhooks(pageResult.pageId, pageResult.pageAccessToken);
