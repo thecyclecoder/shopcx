@@ -68,6 +68,7 @@ import {
 } from "@/lib/inngest/customer-demographics";
 import { orderAddressFallback } from "@/lib/inngest/order-address-fallback";
 import { resellerDiscoveryWeeklyCron, resellerDiscoveryManual } from "@/lib/inngest/reseller-discovery";
+import { socialCommentModerate } from "@/lib/inngest/social-comment-moderate";
 
 export const maxDuration = 300;
 
@@ -139,5 +140,6 @@ export const { GET, POST, PUT } = serve({
     orderAddressFallback,
     resellerDiscoveryWeeklyCron,
     resellerDiscoveryManual,
+    socialCommentModerate,
   ],
 });
