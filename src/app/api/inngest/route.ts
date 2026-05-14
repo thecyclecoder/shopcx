@@ -71,6 +71,8 @@ import { resellerDiscoveryWeeklyCron, resellerDiscoveryManual } from "@/lib/inng
 import { textCampaignScheduled, textCampaignSendTick } from "@/lib/inngest/marketing-text";
 import { marketingCouponAutoDisable } from "@/lib/inngest/marketing-coupon-cron";
 import { klaviyoSmsImport } from "@/lib/inngest/klaviyo-sms-import";
+import { klaviyoEventsImport } from "@/lib/inngest/klaviyo-events-import";
+import { klaviyoAttributionCompute } from "@/lib/inngest/klaviyo-attribution-compute";
 
 export const maxDuration = 300;
 
@@ -146,5 +148,7 @@ export const { GET, POST, PUT } = serve({
     textCampaignSendTick,
     marketingCouponAutoDisable,
     klaviyoSmsImport,
+    klaviyoEventsImport,
+    klaviyoAttributionCompute,
   ],
 });

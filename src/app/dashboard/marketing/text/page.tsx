@@ -45,6 +45,13 @@ interface KlaviyoHistoryRow {
   average_order_value_cents: number | null;
   unsubscribe_rate: number | null;
   audience_included: string[];
+  // Locally-computed Initial Revenue (Placed Order excluding
+  // subscription auto-renewals). Null until the events importer +
+  // attribution recompute have run.
+  initial_conversions: number | null;
+  initial_conversion_value_cents: number | null;
+  initial_average_order_value_cents: number | null;
+  initial_revenue_computed_at: string | null;
 }
 
 type HistorySort = "send_time" | "conversion_rate" | "conversion_value_cents" | "click_rate" | "recipients";
@@ -191,7 +198,7 @@ export default function TextMarketingListPage() {
         <div>
           <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Klaviyo history</h2>
           <p className="mt-0.5 text-xs text-zinc-500">
-            Imported SMS campaign performance from Klaviyo — last ~6 months. Used as the historical baseline for AI segment recommendations.
+            Imported SMS campaign performance from Klaviyo — last ~6 months. <strong>Initial Revenue</strong> excludes subscription auto-renewals (computed locally from Placed Order events with source_name not in subscription_contract*). Klaviyo&apos;s raw revenue appears in grey next to it when they differ.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -225,7 +232,7 @@ export default function TextMarketingListPage() {
                 <SortableTh label="Recipients" field="recipients" current={historySort} setSort={setHistorySort} />
                 <SortableTh label="CTR" field="click_rate" current={historySort} setSort={setHistorySort} />
                 <SortableTh label="Conversions" field="conversion_rate" current={historySort} setSort={setHistorySort} />
-                <SortableTh label="Revenue" field="conversion_value_cents" current={historySort} setSort={setHistorySort} />
+                <SortableTh label="Initial Revenue" field="conversion_value_cents" current={historySort} setSort={setHistorySort} />
                 <th className="px-4 py-3">AOV</th>
               </tr>
             </thead>
@@ -249,18 +256,43 @@ export default function TextMarketingListPage() {
                     )}
                   </td>
                   <td className="px-4 py-3 text-xs tabular-nums">
-                    <span className="text-zinc-900 dark:text-zinc-100">{c.conversions?.toLocaleString() || 0}</span>
-                    {c.conversion_rate != null && (
-                      <span className="ml-1 text-[10px] text-zinc-500">
+                    {/* Initial conversions = non-subscription Placed Order
+                        attributed to this campaign. Falls back to Klaviyo's
+                        raw conversions count when we haven't run the
+                        local attribution yet. */}
+                    <span className="text-zinc-900 dark:text-zinc-100">
+                      {(c.initial_conversions ?? c.conversions ?? 0).toLocaleString()}
+                    </span>
+                    {c.initial_conversions == null && c.conversion_rate != null && (
+                      <span className="ml-1 text-[10px] text-zinc-400" title="Klaviyo raw — includes subscription renewals">
                         ({(c.conversion_rate * 100).toFixed(2)}%)
                       </span>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-xs tabular-nums font-semibold text-emerald-700 dark:text-emerald-400">
-                    {c.conversion_value_cents != null ? `$${(c.conversion_value_cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "—"}
+                  <td className="px-4 py-3 text-xs tabular-nums font-semibold">
+                    {c.initial_conversion_value_cents != null ? (
+                      <>
+                        <span className="text-emerald-700 dark:text-emerald-400">
+                          ${(c.initial_conversion_value_cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                        </span>
+                        {c.conversion_value_cents != null && c.conversion_value_cents !== c.initial_conversion_value_cents && (
+                          <span className="ml-1 text-[10px] font-normal text-zinc-400" title="Klaviyo raw revenue including subscription renewals">
+                            (raw ${(c.conversion_value_cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })})
+                          </span>
+                        )}
+                      </>
+                    ) : c.conversion_value_cents != null ? (
+                      <span className="text-zinc-500" title="Klaviyo raw — Initial Revenue computation pending">
+                        ${(c.conversion_value_cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                      </span>
+                    ) : "—"}
                   </td>
                   <td className="px-4 py-3 text-xs tabular-nums text-zinc-600 dark:text-zinc-400">
-                    {c.average_order_value_cents != null ? `$${(c.average_order_value_cents / 100).toFixed(2)}` : "—"}
+                    {c.initial_average_order_value_cents != null
+                      ? `$${(c.initial_average_order_value_cents / 100).toFixed(2)}`
+                      : c.average_order_value_cents != null
+                        ? `$${(c.average_order_value_cents / 100).toFixed(2)}`
+                        : "—"}
                   </td>
                 </tr>
               ))}

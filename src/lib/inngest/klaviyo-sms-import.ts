@@ -234,6 +234,26 @@ export const klaviyoSmsImport = inngest.createFunction(
       });
     }
 
+    // Chain: kick off the events import + attribution recompute so
+    // a single "Import history" click does the full pipeline.
+    // Events first (so attribution has data to consume); attribution
+    // is fired in sequence inside its own function by waiting for
+    // the events import to complete via Inngest's event-emit pattern
+    // — for simplicity we fire both here and the attribution
+    // recompute is a no-op until events have landed; it can be
+    // re-fired manually later.
+    await step.sendEvent("trigger-events-import", {
+      name: "marketing/klaviyo-events.import",
+      data: { workspace_id },
+    });
+    // Attribution recompute fires after events finish via a delayed
+    // re-trigger — 5 min gives the events import a head start.
+    await step.sendEvent("trigger-attribution-compute", {
+      name: "marketing/klaviyo-attribution.compute",
+      data: { workspace_id },
+      ts: Date.now() + 5 * 60 * 1000,
+    });
+
     return { imported, total_campaigns: campaigns.length };
   },
 );
