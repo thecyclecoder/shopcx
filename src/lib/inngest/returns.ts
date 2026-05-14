@@ -1,12 +1,32 @@
-// Inngest returns functions: process-delivery (auto-dispose after delivery) and issue-refund
+// Inngest returns pipeline:
+//   returns/process-delivery → fires returns/issue-refund instantly
+//   returns/issue-refund     → reads stored net_refund_cents, refunds
+//                              or issues store credit, closes return,
+//                              emails customer. Escalates if amount
+//                              missing — never auto-refunds $0.
+//
+// Design notes:
+//   - Dispose (Shopify reverseFulfillmentOrderDispose) was previously
+//     gating the refund. We don't use Shopify's inventory bookkeeping
+//     for returns, so it was pure dead weight that blocked refunds
+//     when older returns lacked reverse fulfillment line item IDs.
+//   - The 24-hour inspection wait was for that dispose step. With
+//     dispose gone, the refund fires as soon as EasyPost confirms
+//     delivery. Customer experience > inventory accounting.
+//   - The refund amount is the value STORED on the return row at
+//     create time (computed from items + label policy + resolution
+//     type). The pipeline never re-derives it — if it's missing or
+//     zero, that's a creation-time bug, surfaced as a dashboard
+//     notification.
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { disposeReturnItems, closeReturn } from "@/lib/shopify-returns";
+import { closeReturn } from "@/lib/shopify-returns";
 
 // ── returns/process-delivery ──
-// Triggered when tracking shows delivered. Waits 24h for warehouse inspection,
-// then auto-disposes as RESTOCKED and triggers refund flow.
+// Triggered by EasyPost webhook when tracker → delivered. Verifies
+// status and instantly fires the refund event. No 24h wait. No
+// dispose. We don't tell Shopify what to do with the physical items.
 
 export const returnsProcessDelivery = inngest.createFunction(
   {
@@ -23,52 +43,24 @@ export const returnsProcessDelivery = inngest.createFunction(
 
     const admin = createAdminClient();
 
-    // Verify the return is in delivered status
     const ret = await step.run("load-return", async () => {
       const { data } = await admin
         .from("returns")
-        .select("id, status, resolution_type, shopify_reverse_fulfillment_order_gid")
+        .select("id, status, refunded_at, refund_id")
         .eq("id", return_id)
         .eq("workspace_id", workspace_id)
         .single();
       return data;
     });
 
-    if (!ret || ret.status !== "delivered") {
-      return { skipped: true, reason: "Return not in delivered status" };
+    if (!ret) return { skipped: true, reason: "Return not found" };
+    if (ret.status !== "delivered") {
+      return { skipped: true, reason: `Status is ${ret.status}, not delivered` };
+    }
+    if (ret.refunded_at || ret.refund_id) {
+      return { skipped: true, reason: "Already refunded" };
     }
 
-    // Wait 24 hours for warehouse inspection
-    await step.sleep("wait-for-inspection", "24h");
-
-    // Re-check status — might have been manually processed during wait
-    const current = await step.run("recheck-status", async () => {
-      const { data } = await admin
-        .from("returns")
-        .select("status")
-        .eq("id", return_id)
-        .single();
-      return data;
-    });
-
-    if (!current || current.status !== "delivered") {
-      return { skipped: true, reason: "Return status changed during wait" };
-    }
-
-    // Auto-dispose as RESTOCKED
-    const disposeResult = await step.run("dispose-items", async () => {
-      return disposeReturnItems(workspace_id, {
-        returnId: return_id,
-        disposition: "RESTOCKED",
-      });
-    });
-
-    if (!disposeResult.success) {
-      console.error(`Failed to auto-dispose return ${return_id}:`, disposeResult.error);
-      return { error: disposeResult.error };
-    }
-
-    // Trigger refund flow
     await step.run("trigger-refund", async () => {
       await inngest.send({
         name: "returns/issue-refund",
@@ -81,8 +73,10 @@ export const returnsProcessDelivery = inngest.createFunction(
 );
 
 // ── returns/issue-refund ──
-// Triggered after disposal. Issues store credit or closes the return.
-// Sends confirmation email. Closes return in Shopify.
+// Reads the stored amount, branches refund vs store credit, closes
+// the Shopify return, sends customer confirmation. Trusts net_refund_cents
+// as the contract; if it's missing/zero, surfaces a notification and
+// stops — does NOT auto-refund full or guess at the amount.
 
 export const returnsIssueRefund = inngest.createFunction(
   {
@@ -99,13 +93,12 @@ export const returnsIssueRefund = inngest.createFunction(
 
     const admin = createAdminClient();
 
-    // Load the return with customer info + the Shopify order for refund
     const ret = await step.run("load-return", async () => {
       const { data } = await admin
         .from("returns")
         .select(`
-          id, status, resolution_type, order_number, order_id, net_refund_cents, order_total_cents,
-          label_cost_cents, easypost_shipment_id, shopify_return_gid, customer_id, refund_id,
+          id, status, resolution_type, order_number, order_id,
+          net_refund_cents, refund_id, customer_id,
           customers(email, first_name)
         `)
         .eq("id", return_id)
@@ -114,82 +107,61 @@ export const returnsIssueRefund = inngest.createFunction(
       return data;
     });
 
-    if (!ret) {
-      return { error: "Return not found" };
-    }
+    if (!ret) return { error: "Return not found" };
+    if (ret.refund_id) return { skipped: true, reason: "Already has refund_id" };
 
-    const customers = ret.customers as unknown as { email: string; first_name: string | null }[] | null;
-    const customer = customers?.[0] || null;
+    const amountCents = ret.net_refund_cents || 0;
 
-    // Check for rate adjustments from EasyPost (adjustments settle by delivery time)
-    let finalLabelCostCents = ret.label_cost_cents || 0;
-    let finalNetRefundCents = ret.net_refund_cents || 0;
-
-    if (ret.easypost_shipment_id) {
-      const adjusted = await step.run("check-rate-adjustment", async () => {
-        try {
-          const { getActualShippingCost } = await import("@/lib/easypost");
-          return getActualShippingCost(workspace_id, ret.easypost_shipment_id);
-        } catch (err) {
-          console.error("Rate adjustment check failed:", err);
-          return null;
-        }
+    // If no amount stored, escalate. Never auto-refund $0 and never
+    // guess the amount from the order — the amount is context-dependent
+    // (full vs partial, label deducted or not) and has to come from
+    // the return-creation step that knew the context.
+    if (amountCents <= 0) {
+      await step.run("notify-missing-amount", async () => {
+        await admin.from("dashboard_notifications").insert({
+          workspace_id,
+          type: "system",
+          title: `Return needs manual review — no refund amount stored`,
+          body: `Return ${ret.order_number} was delivered but net_refund_cents is ${amountCents}. Set the amount on the return row, then re-fire returns/issue-refund with { workspace_id, return_id: ${return_id} }.`,
+          metadata: { type: "return_missing_amount", return_id, order_number: ret.order_number },
+        });
       });
-
-      if (adjusted) {
-        finalLabelCostCents = adjusted.actualCostCents;
-        finalNetRefundCents = (ret.order_total_cents || 0) - finalLabelCostCents;
-        if (adjusted.adjusted) {
-          console.log(`Rate adjusted for return ${return_id}: quoted ${ret.label_cost_cents}c → actual ${finalLabelCostCents}c`);
-        }
-      }
+      return { needs_review: true, reason: "net_refund_cents missing" };
     }
 
-    // Update return with final amounts
-    await step.run("update-final-amounts", async () => {
-      await admin.from("returns").update({
-        label_cost_cents: finalLabelCostCents,
-        net_refund_cents: finalNetRefundCents,
-        updated_at: new Date().toISOString(),
-      }).eq("id", return_id);
-    });
+    const customersRel = ret.customers as unknown as { email: string; first_name: string | null }[] | { email: string; first_name: string | null } | null;
+    const customer = Array.isArray(customersRel) ? customersRel[0] : customersRel;
 
-    // Branch on resolution_type — refund and store credit are
-    // separate Shopify mutations. closeReturn alone only closes the
-    // return record; it does NOT move money or issue credit. We must
-    // call the right API for what the playbook actually offered.
     const isStoreCredit = (ret.resolution_type || "").includes("store_credit");
-    let refundIssued = !!ret.refund_id;
-    let creditIssued = false;
+    let valueIssued = false;
+    let issuedSummary = "";
 
-    if (isStoreCredit && !refundIssued) {
-      // Store credit branch — issue via Shopify storeCreditAccountCredit
-      // mutation. Amount is the net (order total minus label cost).
+    if (isStoreCredit) {
       const creditResult = await step.run("issue-store-credit", async (): Promise<{ ok: boolean; balance: number; transactionId: string | null; error?: string }> => {
         const { data: cust } = await admin.from("customers")
           .select("shopify_customer_id").eq("id", ret.customer_id).maybeSingle();
-        if (!cust?.shopify_customer_id) return { ok: false, balance: 0, transactionId: null, error: "Customer has no Shopify ID" };
-        const amountDollars = (finalNetRefundCents || 0) / 100;
-        if (amountDollars <= 0) return { ok: false, balance: 0, transactionId: null, error: `Net amount is ${amountDollars}` };
+        if (!cust?.shopify_customer_id) {
+          return { ok: false, balance: 0, transactionId: null, error: "Customer has no Shopify ID" };
+        }
         const { issueStoreCredit } = await import("@/lib/store-credit");
         return issueStoreCredit({
           workspaceId: workspace_id,
           customerId: ret.customer_id,
           shopifyCustomerId: cust.shopify_customer_id,
-          amount: amountDollars,
+          amount: amountCents / 100,
           reason: `Return ${ret.order_number} delivered — store credit issued`,
           issuedBy: "system",
           issuedByName: "ShopCX (auto)",
         });
       });
       if (creditResult.ok) {
-        creditIssued = true;
+        valueIssued = true;
+        issuedSummary = `Store credit $${(amountCents / 100).toFixed(2)} issued`;
         await admin.from("returns").update({
           refund_id: creditResult.transactionId,
           updated_at: new Date().toISOString(),
         }).eq("id", return_id);
       } else {
-        console.error(`Failed to issue store credit for return ${return_id}:`, creditResult.error);
         await step.run("notify-credit-failed", async () => {
           await admin.from("dashboard_notifications").insert({
             workspace_id,
@@ -200,27 +172,23 @@ export const returnsIssueRefund = inngest.createFunction(
           });
         });
       }
-    } else if (!isStoreCredit && !refundIssued) {
-      // Refund branch — issue via Shopify refundCreate
+    } else {
       const refundResult = await step.run("issue-refund", async () => {
-        const { data: order } = await admin
-          .from("orders")
-          .select("shopify_order_id")
-          .eq("id", ret.order_id)
-          .single();
+        const { data: order } = await admin.from("orders")
+          .select("shopify_order_id").eq("id", ret.order_id).single();
         if (!order?.shopify_order_id) return { success: false, error: "Order not found" };
-        const { refundOrder } = await import("@/lib/shopify-order-actions");
-        const r = await refundOrder(workspace_id, order.shopify_order_id, {
-          full: true,
-          reason: `Return ${ret.order_number} delivered back to warehouse`,
-          notify: false, // we send our own confirmation email below
-        });
-        return r;
+        const { partialRefundByAmount } = await import("@/lib/shopify-order-actions");
+        return partialRefundByAmount(
+          workspace_id,
+          order.shopify_order_id,
+          amountCents,
+          `Return ${ret.order_number} delivered`,
+        );
       });
       if (refundResult.success) {
-        refundIssued = true;
+        valueIssued = true;
+        issuedSummary = `Refund $${(amountCents / 100).toFixed(2)} issued via Shopify`;
       } else {
-        console.error(`Failed to issue refund for return ${return_id}:`, refundResult.error);
         await step.run("notify-refund-failed", async () => {
           await admin.from("dashboard_notifications").insert({
             workspace_id,
@@ -233,19 +201,16 @@ export const returnsIssueRefund = inngest.createFunction(
       }
     }
 
-    // Close the return in Shopify (marks it as fully resolved)
-    const closeResult = await step.run("close-return", async () => {
-      return closeReturn(workspace_id, return_id);
+    // Close the Shopify return record (purely cosmetic on their side —
+    // marks it as fully resolved).
+    await step.run("close-return", async () => {
+      const r = await closeReturn(workspace_id, return_id);
+      if (!r.success) {
+        console.error(`closeReturn failed for ${return_id}:`, r.error);
+      }
     });
 
-    if (!closeResult.success) {
-      console.error(`Failed to close return ${return_id}:`, closeResult.error);
-    }
-
-    // Update return status — only mark refunded if the value actually
-    // moved (either Shopify refund OR store credit). If neither
-    // succeeded, leave as "delivered" so an agent can intervene.
-    const valueIssued = refundIssued || creditIssued;
+    // Update local status. Only mark refunded if money actually moved.
     await step.run("update-status", async () => {
       const updates: Record<string, string> = {
         status: valueIssued ? "refunded" : "delivered",
@@ -255,10 +220,7 @@ export const returnsIssueRefund = inngest.createFunction(
       await admin.from("returns").update(updates).eq("id", return_id);
     });
 
-    // Send confirmation email — only if value actually moved. The email
-    // helper already differentiates store credit vs refund wording based
-    // on resolution_type. Skipping when neither succeeded prevents
-    // telling the customer their money is back when it isn't.
+    // Confirmation email only if value moved.
     if (customer?.email && valueIssued) {
       await step.run("send-confirmation", async () => {
         const { sendReturnConfirmationEmail } = await import("@/lib/email");
@@ -272,6 +234,6 @@ export const returnsIssueRefund = inngest.createFunction(
       });
     }
 
-    return { success: true, return_id, resolution: ret.resolution_type };
+    return { success: valueIssued, return_id, summary: issuedSummary };
   },
 );

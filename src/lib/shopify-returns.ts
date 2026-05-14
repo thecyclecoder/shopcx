@@ -816,16 +816,43 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
       });
     }
 
-    // Update our DB with EasyPost details. Status advances to
-    // label_created independently of attachReturnTracking's success —
-    // the customer has the label and that's the customer-facing truth.
-    // Shopify-side reverse-delivery is a nice-to-have for inventory
-    // tracking but shouldn't gate our status. (Previously we relied on
-    // attachReturnTracking to flip status, which silently broke when
-    // Shopify's API changed.)
+    // Compute the refund commitment NOW, while we have full context:
+    //   - items: what's being returned (from getReturnableItems)
+    //   - labelCostCents: what EasyPost actually charged us
+    //   - params.freeLabel: policy decision the caller made
+    //   - order.total_cents: what the customer paid
+    //
+    // The downstream pipeline reads net_refund_cents as the contract
+    // and never re-derives. Storing it here keeps the math local to
+    // the moment we have all the context.
+    const { data: orderRow } = await admin.from("orders")
+      .select("total_cents").eq("id", params.orderId).maybeSingle();
+    const orderTotalCents = orderRow?.total_cents || 0;
+    const itemsSubtotalCents = items.reduce((s, i) => s + (i.amountCents || 0), 0);
+    const finalLabelCostCents = params.freeLabel ? 0 : labelCostCents;
+    // If all returnable items are being returned (i.e. effectively a
+    // full return), refund the full order total minus our label cost.
+    // Otherwise refund just the line-item subtotal of what they're
+    // sending back. items.amountCents is line-item original total
+    // (no tax/shipping), so full-order math is the better path when
+    // it applies — it gives the customer their tax + shipping back.
+    const isFullReturn = itemsSubtotalCents >= orderTotalCents * 0.95;
+    const netRefundCents = Math.max(
+      0,
+      (isFullReturn ? orderTotalCents : itemsSubtotalCents) - finalLabelCostCents,
+    );
+
+    // Update our DB with EasyPost details + the refund commitment.
+    // Status advances to label_created independently of
+    // attachReturnTracking's success — the customer has the label
+    // and that's the customer-facing truth. Shopify-side
+    // reverse-delivery is a nice-to-have for inventory tracking but
+    // shouldn't gate our status.
     await admin.from("returns").update({
       easypost_shipment_id: shipment.id,
-      label_cost_cents: params.freeLabel ? 0 : labelCostCents,
+      label_cost_cents: finalLabelCostCents,
+      order_total_cents: orderTotalCents,
+      net_refund_cents: netRefundCents,
       tracking_number: trackingNumber || null,
       label_url: labelUrl || null,
       carrier: carrier || null,
