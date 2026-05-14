@@ -89,11 +89,23 @@ export async function updateSession(request: NextRequest) {
       //    SSG route. Uses NextResponse.rewrite with a rewritten
       //    pathname so Next.js caches under that key; no headers
       //    injection, no dynamic rendering, no auth sideeffects.
+      //
+      //    EXCEPT for storefront app routes (/customize, /checkout,
+      //    /thank-you) which serve at the root and must NOT be
+      //    rewritten to /store/{slug}/{route} — those resolve to the
+      //    workspace-scoped product SSG path, which doesn't exist for
+      //    these app paths. Leaving them untouched lets the
+      //    (storefront)/customize route render normally.
       if (!isPrimaryDomain && !isLocalhost) {
         const storefrontSlug = await resolveStorefrontSlugByDomain(hostname);
         if (storefrontSlug) {
           const segs = pathname.split("/").filter(Boolean);
-          if (segs.length === 1 && segs[0] !== "favicon.ico") {
+          const STOREFRONT_APP_ROUTES = new Set(["customize", "checkout", "thank-you"]);
+          if (
+            segs.length === 1
+            && segs[0] !== "favicon.ico"
+            && !STOREFRONT_APP_ROUTES.has(segs[0])
+          ) {
             const url = request.nextUrl.clone();
             url.pathname = `/store/${storefrontSlug}/${segs[0]}`;
             return NextResponse.rewrite(url);
