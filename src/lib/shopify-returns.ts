@@ -816,18 +816,20 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
       });
     }
 
-    // Update our DB with EasyPost details. Until 2026-04-29 this only
-    // wrote easypost_shipment_id + label_cost_cents — tracking_number,
-    // label_url, and carrier silently stayed null even though the label
-    // was purchased and Shopify had the tracking. Surfaced when the
-    // create_return direct action's response_message tried to render
-    // {{label_url}} from a returns row that had no label_url.
+    // Update our DB with EasyPost details. Status advances to
+    // label_created independently of attachReturnTracking's success —
+    // the customer has the label and that's the customer-facing truth.
+    // Shopify-side reverse-delivery is a nice-to-have for inventory
+    // tracking but shouldn't gate our status. (Previously we relied on
+    // attachReturnTracking to flip status, which silently broke when
+    // Shopify's API changed.)
     await admin.from("returns").update({
       easypost_shipment_id: shipment.id,
       label_cost_cents: params.freeLabel ? 0 : labelCostCents,
       tracking_number: trackingNumber || null,
       label_url: labelUrl || null,
       carrier: carrier || null,
+      status: "label_created",
       updated_at: new Date().toISOString(),
     }).eq("id", returnResult.returnId);
 
