@@ -1450,6 +1450,27 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       }
     }
 
+    // ── 3.8 AUTO-LINK FROM INLINE EMAILS ──
+    // Customers often answer the linking question in their FIRST
+    // message ("my husband's email is X"). Linking those accounts
+    // proactively — before Sonnet runs — lets the orchestrator see
+    // the merged customer data via get_customer_account and route
+    // straight to the right journey (cancel, refund, etc.) instead
+    // of asking the linking question they already answered.
+    if (st.custId && msg) {
+      await step.run("auto-link-from-inbound", async () => {
+        const { autoLinkCustomerFromMessage } = await import("@/lib/auto-link-customer-from-message");
+        const result = await autoLinkCustomerFromMessage(admin, wsId, tid, st.custId!);
+        if (result.linkedCount > 0) {
+          await sysNote(
+            admin,
+            tid,
+            `[System] Auto-linked ${result.linkedCount} account${result.linkedCount === 1 ? "" : "s"} from inline email mention(s) in inbound message: ${result.linkedEmails.join(", ")}`,
+          );
+        }
+      });
+    }
+
     // ── 4. SONNET ORCHESTRATOR ──
     // Sonnet analyzes the full request and decides the best action. Replaces pattern matching,
     // AI classification, confidence gate, and routeExec cascading lookup.
