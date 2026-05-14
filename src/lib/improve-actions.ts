@@ -48,47 +48,57 @@ export async function runImproveActions(
           break;
         }
         case "create_return": {
+          // Use the canonical createFullReturn helper so we (a) persist a
+          // `returns` row for audit + downstream UI, and (b) avoid the
+          // `is_return: true` shipment flag — for USPS, that flag tells
+          // EasyPost to print the label with FROM/TO swapped, so USPS
+          // then delivers the package back to the customer instead of to
+          // our warehouse (Janet Kellie, ticket 8aabc12f). The non-flag
+          // path matches what the Sonnet orchestrator already uses.
+          const { createFullReturn } = await import("@/lib/shopify-returns");
           const { data: order } = await admin.from("orders")
-            .select("order_number, shopify_order_id, shipping_address, line_items")
+            .select("id, order_number, shopify_order_id, shipping_address")
             .or(`shopify_order_id.eq.${a.shopify_order_id},order_number.eq.${a.shopify_order_id}`)
             .single();
           if (!order) { results.push(`create_return: order not found (${a.shopify_order_id})`); break; }
+
+          const { data: t } = await admin.from("tickets").select("customer_id").eq("id", ticketId).single();
+          if (!t?.customer_id) { results.push(`create_return: no customer on ticket`); break; }
+
+          const { data: customer } = await admin.from("customers")
+            .select("first_name, last_name, phone").eq("id", t.customer_id).single();
           const ship = order.shipping_address as Record<string, string> | null;
           if (!ship?.address1) { results.push(`create_return: order has no shipping address`); break; }
-          const { data: ws } = await admin.from("workspaces")
-            .select("return_address, default_return_parcel").eq("id", workspaceId).single();
-          const returnAddr = ws?.return_address as Record<string, string> | null;
-          const parcel = (ws?.default_return_parcel as { length: number; width: number; height: number; weight: number } | null) || { length: 12, width: 10, height: 6, weight: 16 };
-          if (!returnAddr) { results.push(`create_return: no return_address configured`); break; }
 
-          const { getEasyPostClient } = await import("@/lib/easypost");
-          const client = await getEasyPostClient(workspaceId);
-          const shipment = await client.Shipment.create({
-            from_address: {
-              name: ship.name || `${ship.first_name || ""} ${ship.last_name || ""}`.trim(),
-              street1: ship.address1, street2: ship.address2 || "",
-              city: ship.city, state: ship.province_code || ship.province,
-              zip: ship.zip, country: ship.country_code || "US",
-              phone: ship.phone || undefined,
+          const r = await createFullReturn({
+            workspaceId,
+            orderId: order.id,
+            orderNumber: order.order_number,
+            shopifyOrderGid: `gid://shopify/Order/${order.shopify_order_id}`,
+            customerId: t.customer_id,
+            ticketId,
+            customerName: ship.name || `${customer?.first_name || ""} ${customer?.last_name || ""}`.trim() || "Customer",
+            customerPhone: ship.phone || customer?.phone || undefined,
+            shippingAddress: {
+              street1: ship.address1,
+              city: ship.city || "",
+              state: ship.province_code || ship.provinceCode || ship.state || "",
+              zip: ship.zip || "",
+              country: ship.country_code || ship.countryCode || "US",
             },
-            to_address: {
-              name: returnAddr.name, street1: returnAddr.street1, street2: returnAddr.street2 || "",
-              city: returnAddr.city, state: returnAddr.state, zip: returnAddr.zip,
-              country: returnAddr.country || "US", phone: returnAddr.phone || undefined,
-            },
-            parcel,
-            is_return: true,
+            source: "agent",
+            freeLabel: !!a.free_label,
           });
-          const rates = (shipment.rates || []) as Array<{id: string; carrier: string; service: string; rate: string}>;
-          const usps = rates.filter(r => r.carrier === "USPS").sort((a, b) => parseFloat(a.rate) - parseFloat(b.rate))[0];
-          if (!usps) { results.push(`create_return: no USPS rates`); break; }
-          const bought = await client.Shipment.buy(shipment.id, usps.id);
-          const labelUrl = bought.postage_label?.label_url || "";
-          const tracking = bought.tracking_code || "";
-          actionContext.label_url = labelUrl;
-          actionContext.tracking_number = tracking;
-          actionContext.carrier = "USPS";
-          results.push(`Return label created (${order.order_number}) — tracking ${tracking}, $${parseFloat(usps.rate).toFixed(2)}`);
+
+          if (!r.success || !r.labelUrl) {
+            results.push(`create_return: ${r.error || "failed"}`);
+            break;
+          }
+          actionContext.label_url = r.labelUrl;
+          actionContext.tracking_number = r.trackingNumber || "";
+          actionContext.carrier = r.carrier || "USPS";
+          const cost = ((r.labelCostCents || 0) / 100).toFixed(2);
+          results.push(`Return label created (${order.order_number}) — tracking ${r.trackingNumber}, $${cost}`);
           break;
         }
         case "swap_variant": {

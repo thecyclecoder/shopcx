@@ -760,16 +760,27 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
       return { success: true, returnId: returnResult.returnId, error: `EasyPost shipment error: ${shipment?.error?.message || "unknown"}` };
     }
 
-    // Buy cheapest rate
-    const rates = (shipment.rates || []).sort((a: { rate: string }, b: { rate: string }) => parseFloat(a.rate) - parseFloat(b.rate));
-    if (rates.length === 0) {
+    // Pin carrier to USPS. We used to grab the absolute cheapest rate
+    // across all carriers, which made labels bounce between USPS and
+    // FedEx unpredictably — bad customer UX because the email always
+    // says "drop at any USPS location" but the actual label might say
+    // FedEx. USPS has the most drop-off locations and works for the
+    // overwhelming majority of return shipments. Only fall back to
+    // whatever's cheapest if USPS returned no rates at all (rare —
+    // usually means a parcel-spec validation issue on EasyPost's side).
+    type Rate = { id: string; rate: string; carrier?: string };
+    const allRates = (shipment.rates || []) as Rate[];
+    if (allRates.length === 0) {
       return { success: true, returnId: returnResult.returnId, error: "No shipping rates available" };
     }
+    const sortByPrice = (a: Rate, b: Rate) => parseFloat(a.rate) - parseFloat(b.rate);
+    const usps = allRates.filter((r) => (r.carrier || "").toUpperCase() === "USPS").sort(sortByPrice);
+    const chosen = usps[0] || allRates.slice().sort(sortByPrice)[0];
 
     const buyRes = await fetch(`https://api.easypost.com/v2/shipments/${shipment.id}/buy`, {
       method: "POST",
       headers: { Authorization: "Basic " + btoa(easypostKey + ":"), "Content-Type": "application/json" },
-      body: JSON.stringify({ rate: { id: rates[0].id } }),
+      body: JSON.stringify({ rate: { id: chosen.id } }),
     });
 
     const purchased = await buyRes.json();
