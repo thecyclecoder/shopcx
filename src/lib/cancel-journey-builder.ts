@@ -65,13 +65,16 @@ export async function buildCancelJourneySteps(
     allCustomerIds = (grp || []).map(m => m.customer_id);
   }
 
-  // Fetch active subscriptions across main + linked accounts
+  // Fetch active + paused subscriptions across main + linked accounts.
+  // Paused subs are still on the hook for a future renewal — a customer
+  // who decides to cancel a paused sub should be able to do so through
+  // the journey without unpause-then-cancel friction.
   const { data: subs } = await admin
     .from("subscriptions")
     .select("id, shopify_contract_id, items, next_billing_date, status, billing_interval, billing_interval_count, created_at")
     .in("customer_id", allCustomerIds)
     .eq("workspace_id", workspaceId)
-    .eq("status", "active")
+    .in("status", ["active", "paused"])
     .order("next_billing_date", { ascending: true });
 
   if (!subs?.length) {
