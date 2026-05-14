@@ -52,6 +52,11 @@ const METRICS_TO_BACKFILL = [
 const DEFAULT_DAYS = 180;
 const PAGE_SIZE = 200;
 const UPSERT_CHUNK = 100;
+// Pages-per-step.run before yielding back to Inngest. 30 pages × ~1.2s
+// per page ≈ 36 seconds — well under the 300s Vercel function timeout.
+// Inngest re-invokes for the next chunk; total runtime accumulates
+// across invocations.
+const PAGES_PER_STEP = 30;
 
 export const klaviyoEngagementBackfill = inngest.createFunction(
   {
@@ -153,6 +158,13 @@ export const klaviyoEngagementBackfill = inngest.createFunction(
     });
 
     // ── 2) For each metric: paginate + upsert raw events ──
+    //
+    // Pagination is chunked across multiple step.run calls so we
+    // never exceed Vercel's 5-minute function timeout. Each step
+    // pulls up to PAGES_PER_STEP pages, then returns the next URL;
+    // Inngest re-invokes for the next chunk. Total runtime can be
+    // hours for high-volume metrics like Active on Site — that's
+    // fine, Inngest persists the loop state.
     const headers = {
       Authorization: `Klaviyo-API-Key ${apiKey}`,
       revision: KLAVIYO_REVISION,
@@ -162,80 +174,97 @@ export const klaviyoEngagementBackfill = inngest.createFunction(
     const totals: Record<string, number> = {};
 
     for (const [metricName, metricId] of Object.entries(metricIds)) {
-      totals[metricName] = await step.run(`pull-${metricName.replace(/\s+/g, "-").toLowerCase()}`, async () => {
-        const filter = `and(equals(metric_id,"${metricId}"),greater-than(datetime,${sinceIso}))`;
-        let url: string | null =
-          "https://a.klaviyo.com/api/events" +
-          `?filter=${encodeURIComponent(filter)}&sort=datetime&page[size]=${PAGE_SIZE}`;
-        let imported = 0;
-        let pages = 0;
+      const metricSlug = metricName.replace(/\s+/g, "-").toLowerCase();
+      const filter = `and(equals(metric_id,"${metricId}"),greater-than(datetime,${sinceIso}))`;
+      let nextUrl: string | null =
+        "https://a.klaviyo.com/api/events" +
+        `?filter=${encodeURIComponent(filter)}&sort=datetime&page[size]=${PAGE_SIZE}`;
+      let metricImported = 0;
+      let chunkNum = 0;
 
-        while (url) {
-          const res = await fetch(url, { headers });
-          if (!res.ok) {
-            const text = await res.text().catch(() => "");
-            throw new Error(`Events page ${pages} ${res.status}: ${text.slice(0, 200)}`);
-          }
-          const body = (await res.json()) as {
-            data: Array<{
-              id: string;
-              attributes?: {
-                datetime?: string;
-                timestamp?: number;
-                event_properties?: Record<string, unknown>;
-              };
-              relationships?: { profile?: { data?: { id: string } | null } };
-            }>;
-            links?: { next?: string };
-          };
+      while (nextUrl) {
+        chunkNum++;
+        const urlForStep: string = nextUrl;
+        const result = await step.run(`pull-${metricSlug}-chunk-${chunkNum}`, async () => {
+          let pageUrl: string | null = urlForStep;
+          let chunkImported = 0;
+          let pagesInChunk = 0;
+          const admin = createAdminClient();
 
-          const rows = (body.data || [])
-            .map((e) => {
-              const profileId = e.relationships?.profile?.data?.id;
-              if (!profileId) return null;
-              const datetime =
-                e.attributes?.datetime ||
-                (e.attributes?.timestamp ? new Date(e.attributes.timestamp * 1000).toISOString() : null);
-              if (!datetime) return null;
-              const props = e.attributes?.event_properties || {};
-              const rawValue = (props["$value"] ?? props["value"] ?? null) as unknown;
-              const valueCents =
-                typeof rawValue === "number" && Number.isFinite(rawValue)
-                  ? Math.round(rawValue * 100)
-                  : typeof rawValue === "string" && Number.isFinite(Number(rawValue))
-                    ? Math.round(Number(rawValue) * 100)
-                    : null;
-              return {
-                workspace_id,
-                klaviyo_profile_id: profileId,
-                klaviyo_event_id: e.id,
-                metric_name: metricName,
-                datetime,
-                value_cents: valueCents,
-              };
-            })
-            .filter((r): r is NonNullable<typeof r> => r !== null);
-
-          if (rows.length > 0) {
-            const admin = createAdminClient();
-            for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
-              const batch = rows.slice(i, i + UPSERT_CHUNK);
-              const { error } = await admin.from("klaviyo_profile_events").upsert(batch, {
-                onConflict: "workspace_id,klaviyo_event_id",
-                ignoreDuplicates: false,
-              });
-              if (error) throw new Error(`Upsert failed: ${error.message}`);
-              if (i + UPSERT_CHUNK < rows.length) await new Promise((r) => setTimeout(r, 30));
+          while (pageUrl && pagesInChunk < PAGES_PER_STEP) {
+            const res = await fetch(pageUrl, { headers });
+            if (!res.ok) {
+              const text = await res.text().catch(() => "");
+              throw new Error(`Events ${metricName} chunk=${chunkNum} page=${pagesInChunk} ${res.status}: ${text.slice(0, 200)}`);
             }
+            const body = (await res.json()) as {
+              data: Array<{
+                id: string;
+                attributes?: {
+                  datetime?: string;
+                  timestamp?: number;
+                  event_properties?: Record<string, unknown>;
+                };
+                relationships?: { profile?: { data?: { id: string } | null } };
+              }>;
+              links?: { next?: string };
+            };
+
+            const rows = (body.data || [])
+              .map((e) => {
+                const profileId = e.relationships?.profile?.data?.id;
+                if (!profileId) return null;
+                const datetime =
+                  e.attributes?.datetime ||
+                  (e.attributes?.timestamp ? new Date(e.attributes.timestamp * 1000).toISOString() : null);
+                if (!datetime) return null;
+                const props = e.attributes?.event_properties || {};
+                const rawValue = (props["$value"] ?? props["value"] ?? null) as unknown;
+                const valueCents =
+                  typeof rawValue === "number" && Number.isFinite(rawValue)
+                    ? Math.round(rawValue * 100)
+                    : typeof rawValue === "string" && Number.isFinite(Number(rawValue))
+                      ? Math.round(Number(rawValue) * 100)
+                      : null;
+                return {
+                  workspace_id,
+                  klaviyo_profile_id: profileId,
+                  klaviyo_event_id: e.id,
+                  metric_name: metricName,
+                  datetime,
+                  value_cents: valueCents,
+                };
+              })
+              .filter((r): r is NonNullable<typeof r> => r !== null);
+
+            if (rows.length > 0) {
+              for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
+                const batch = rows.slice(i, i + UPSERT_CHUNK);
+                const { error } = await admin.from("klaviyo_profile_events").upsert(batch, {
+                  onConflict: "workspace_id,klaviyo_event_id",
+                  ignoreDuplicates: false,
+                });
+                if (error) throw new Error(`Upsert failed: ${error.message}`);
+                if (i + UPSERT_CHUNK < rows.length) await new Promise((r) => setTimeout(r, 20));
+              }
+            }
+
+            chunkImported += rows.length;
+            pagesInChunk++;
+            pageUrl = body.links?.next || null;
+            // Light throttle to stay well under Klaviyo's 75 req/sec
+            // limit (we're at ~10/sec at this pace).
+            if (pageUrl) await new Promise((r) => setTimeout(r, 100));
           }
 
-          imported += rows.length;
-          pages++;
-          await new Promise((r) => setTimeout(r, 200));
-          url = body.links?.next || null;
-        }
-        return imported;
-      });
+          return { count: chunkImported, next: pageUrl };
+        });
+
+        metricImported += result.count;
+        nextUrl = result.next;
+      }
+
+      totals[metricName] = metricImported;
     }
 
     // ── 3) Rebuild summary rollups in a single SQL pass ──
