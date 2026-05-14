@@ -16,6 +16,13 @@
 import { useEffect, useState, useCallback } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 
+interface TwilioNumberOption {
+  phone_number: string;
+  display: string;
+  type: "long_code" | "shortcode";
+  capabilities: { sms: boolean; mms: boolean; voice: boolean };
+}
+
 const TIMEZONE_OPTIONS = [
   { value: "America/New_York", label: "Eastern (New York)" },
   { value: "America/Chicago", label: "Central (Chicago)" },
@@ -33,6 +40,8 @@ export default function TextMarketingSettingsPage() {
   const [phoneInput, setPhoneInput] = useState("");
   const [editingPhone, setEditingPhone] = useState(false);
   const [savingPhone, setSavingPhone] = useState(false);
+  const [twilioNumbers, setTwilioNumbers] = useState<TwilioNumberOption[] | null>(null);
+  const [loadingNumbers, setLoadingNumbers] = useState(false);
   const [shortlinkDomain, setShortlinkDomain] = useState<string | null>(null);
   const [domainInput, setDomainInput] = useState("");
   const [savingDomain, setSavingDomain] = useState(false);
@@ -71,6 +80,25 @@ export default function TextMarketingSettingsPage() {
       setError(d.error || "Failed to add domain");
     }
     setSavingDomain(false);
+  }
+
+  async function loadTwilioNumbers() {
+    if (twilioNumbers !== null) return; // already loaded
+    setLoadingNumbers(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workspaces/${workspace.id}/twilio/numbers`);
+      if (res.ok) {
+        const d = await res.json();
+        setTwilioNumbers(d.numbers || []);
+      } else {
+        const d = await res.json().catch(() => ({}));
+        setError(d.error || "Failed to load Twilio numbers");
+        setTwilioNumbers([]);
+      }
+    } finally {
+      setLoadingNumbers(false);
+    }
   }
 
   async function savePhone() {
@@ -130,19 +158,74 @@ export default function TextMarketingSettingsPage() {
       {/* Sender */}
       <Section title="Sender" subtitle="The phone / shortcode that messages go out from. Provisioned through Twilio at the account level — enter it here so campaigns know which number to send from.">
         {editingPhone ? (
-          <div className="space-y-2">
-            <input
-              type="text"
-              value={phoneInput}
-              onChange={(e) => setPhoneInput(e.target.value)}
-              placeholder="e.g. 85041 (shortcode) or +18005551234"
-              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-            />
-            <p className="text-[11px] text-zinc-400">Accepts 5- or 6-digit shortcodes (e.g. 85041) or US 10-digit long codes (auto-prefixed with +1).</p>
-            <div className="flex gap-2">
+          <div className="space-y-3">
+            {/* Quick-pick from the Twilio account */}
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Pick from your Twilio account</span>
+                <button
+                  onClick={loadTwilioNumbers}
+                  disabled={loadingNumbers}
+                  className="text-[11px] font-medium text-indigo-600 hover:underline disabled:opacity-50"
+                >
+                  {twilioNumbers !== null ? "Refresh" : loadingNumbers ? "Loading…" : "Load numbers"}
+                </button>
+              </div>
+              {twilioNumbers === null ? (
+                <p className="text-xs text-zinc-400">Click &quot;Load numbers&quot; to pull the list from Twilio.</p>
+              ) : twilioNumbers.length === 0 ? (
+                <p className="text-xs text-zinc-400">No numbers or shortcodes found on the Twilio account.</p>
+              ) : (
+                <ul className="max-h-72 space-y-1 overflow-auto rounded border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-700 dark:bg-zinc-800/50">
+                  {twilioNumbers.map((n) => (
+                    <li key={n.phone_number}>
+                      <button
+                        onClick={() => setPhoneInput(n.phone_number)}
+                        className={`flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors ${
+                          phoneInput === n.phone_number
+                            ? "bg-indigo-100 text-indigo-900 dark:bg-indigo-900/40 dark:text-indigo-200"
+                            : "hover:bg-white dark:hover:bg-zinc-800"
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="truncate font-mono font-semibold">{n.display}</div>
+                          <div className="text-[10px] text-zinc-500">
+                            {n.type === "shortcode" ? "Shortcode" : "Long code"}
+                            {" · "}
+                            {[
+                              n.capabilities.sms && "SMS",
+                              n.capabilities.mms && "MMS",
+                              n.capabilities.voice && "Voice",
+                            ].filter(Boolean).join(" / ") || "—"}
+                          </div>
+                        </div>
+                        {phoneInput === n.phone_number && (
+                          <span className="rounded bg-indigo-500 px-1.5 py-0.5 text-[10px] font-bold text-white">Selected</span>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {/* Manual entry — still useful for ports / shortcodes that haven't shown up in the API yet */}
+            <div>
+              <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Or enter manually</span>
+              <input
+                type="text"
+                value={phoneInput}
+                onChange={(e) => setPhoneInput(e.target.value)}
+                placeholder="e.g. 85041 (shortcode) or +18005551234"
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              />
+              <p className="mt-1 text-[11px] text-zinc-400">Accepts 5- or 6-digit shortcodes (e.g. 85041) or US 10-digit long codes (auto-prefixed with +1).</p>
+            </div>
+
+            <div className="flex gap-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
               <button
                 onClick={savePhone}
-                disabled={savingPhone}
+                disabled={savingPhone || !phoneInput.trim()}
                 className="rounded-md bg-indigo-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-600 disabled:opacity-50"
               >
                 {savingPhone ? "Saving…" : "Save"}
