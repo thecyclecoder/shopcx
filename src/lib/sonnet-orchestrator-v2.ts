@@ -234,8 +234,14 @@ async function buildPreContext(
         }
         return false;
       })
+      // 200 chars was too aggressive — it cut Myranda McConnell's
+      // legal-claim message at "We are in need of" and Sonnet then
+      // escalated as "message appears incomplete" (ticket 2025d4c6).
+      // 2000 chars covers >99% of customer messages including
+      // forwarded legal/business inquiries while keeping the
+      // conversation block under ~6k tokens at the 12-message limit.
       .map((m: { direction: string; author_type: string; body_clean?: string; body?: string }) => {
-        const text = (m.body_clean || m.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+        const text = (m.body_clean || m.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 2000);
         const who = m.direction === "inbound" ? "Customer"
           : m.author_type === "system" ? "[Action]"
           : "Agent";
