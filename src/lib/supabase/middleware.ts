@@ -1,7 +1,12 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula", "/coming-soon", "/api/shopify/callback", "/api/webhooks", "/api/inngest", "/csat", "/api/csat", "/help", "/api/help", "/api/portal", "/portal", "/journey", "/api/journey", "/api/storefront", "/api/revalidate", "/sitemap.xml", "/robots.txt", "/store/", "/storefront-img"];
+const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula", "/coming-soon", "/api/shopify/callback", "/api/webhooks", "/api/inngest", "/csat", "/api/csat", "/help", "/api/help", "/api/portal", "/portal", "/journey", "/api/journey", "/api/storefront", "/api/revalidate", "/sitemap.xml", "/robots.txt", "/store/", "/storefront-img",
+  // Post-Shopify storefront platform — public storefront routes +
+  // the pixel/cart/lead/checkout APIs they call. Auth-gating these
+  // would silent-fail the funnel for every anonymous visitor.
+  "/api/pixel", "/api/cart", "/api/lead", "/api/checkout",
+  "/customize", "/checkout", "/thank-you"];
 const WORKSPACE_SETUP_ROUTES = ["/workspace/new", "/workspace/select"];
 const ADMIN_EMAIL = "dylan@superfoodscompany.com";
 const PRIMARY_DOMAINS = ["shopcx.ai", "www.shopcx.ai", "localhost"];
