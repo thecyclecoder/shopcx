@@ -501,6 +501,36 @@ export async function PATCH(
       }
     }
 
+    // Twilio sender phone / shortcode — used by SMS marketing
+    // campaigns and SMS ticket replies. Stored raw (no encryption);
+    // these are public, like an email address. Accepts a US 10-digit
+    // long code (+1XXXXXXXXXX) or a 5–6 digit shortcode.
+    if ("twilio_phone_number" in body) {
+      const raw = (body.twilio_phone_number || "").trim();
+      if (!raw) {
+        updates.twilio_phone_number = null;
+      } else {
+        const digits = raw.replace(/\D/g, "");
+        let normalized: string | null = null;
+        if (digits.length === 5 || digits.length === 6) {
+          // Shortcode — store as-is (no + prefix). Twilio expects the
+          // bare 5/6 digits in From for shortcode sends.
+          normalized = digits;
+        } else if (digits.length === 10) {
+          normalized = `+1${digits}`;
+        } else if (digits.length === 11 && digits.startsWith("1")) {
+          normalized = `+${digits}`;
+        }
+        if (!normalized) {
+          return NextResponse.json(
+            { error: "Phone must be a US 10-digit number or 5/6-digit shortcode" },
+            { status: 400 },
+          );
+        }
+        updates.twilio_phone_number = normalized;
+      }
+    }
+
     // Shortlink domain — sprfd.co style. Same Vercel registration
     // flow as the other custom domains; resolved by middleware to
     // route /<slug> requests to /api/sl/<slug>.

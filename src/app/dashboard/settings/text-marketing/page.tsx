@@ -30,6 +30,9 @@ export default function TextMarketingSettingsPage() {
   const workspace = useWorkspace();
   const [loading, setLoading] = useState(true);
   const [senderPhone, setSenderPhone] = useState<string | null>(null);
+  const [phoneInput, setPhoneInput] = useState("");
+  const [editingPhone, setEditingPhone] = useState(false);
+  const [savingPhone, setSavingPhone] = useState(false);
   const [shortlinkDomain, setShortlinkDomain] = useState<string | null>(null);
   const [domainInput, setDomainInput] = useState("");
   const [savingDomain, setSavingDomain] = useState(false);
@@ -70,6 +73,27 @@ export default function TextMarketingSettingsPage() {
     setSavingDomain(false);
   }
 
+  async function savePhone() {
+    setSavingPhone(true);
+    setError(null); setMessage(null);
+    const res = await fetch(`/api/workspaces/${workspace.id}/integrations`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ twilio_phone_number: phoneInput.trim() || null }),
+    });
+    if (res.ok) {
+      setMessage("Sender phone saved.");
+      // Refresh from server so the normalized form (e.g. 10-digit → +1)
+      // shows up.
+      await load();
+      setEditingPhone(false);
+    } else {
+      const d = await res.json().catch(() => ({}));
+      setError(d.error || "Failed to save phone");
+    }
+    setSavingPhone(false);
+  }
+
   async function removeDomain() {
     if (!confirm("Remove shortlink domain? Active shortlinks will stop resolving.")) return;
     setRemovingDomain(true); setError(null);
@@ -104,16 +128,55 @@ export default function TextMarketingSettingsPage() {
       </p>
 
       {/* Sender */}
-      <Section title="Sender" subtitle="The phone / shortcode that messages go out from. Provisioned through Twilio at the account level.">
-        {senderPhone ? (
+      <Section title="Sender" subtitle="The phone / shortcode that messages go out from. Provisioned through Twilio at the account level — enter it here so campaigns know which number to send from.">
+        {editingPhone ? (
+          <div className="space-y-2">
+            <input
+              type="text"
+              value={phoneInput}
+              onChange={(e) => setPhoneInput(e.target.value)}
+              placeholder="e.g. 85041 (shortcode) or +18005551234"
+              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+            />
+            <p className="text-[11px] text-zinc-400">Accepts 5- or 6-digit shortcodes (e.g. 85041) or US 10-digit long codes (auto-prefixed with +1).</p>
+            <div className="flex gap-2">
+              <button
+                onClick={savePhone}
+                disabled={savingPhone}
+                className="rounded-md bg-indigo-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-600 disabled:opacity-50"
+              >
+                {savingPhone ? "Saving…" : "Save"}
+              </button>
+              <button
+                onClick={() => { setEditingPhone(false); setPhoneInput(senderPhone || ""); }}
+                disabled={savingPhone}
+                className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : senderPhone ? (
           <div className="flex items-center gap-3">
             <span className="font-mono text-xl font-semibold text-zinc-900 dark:text-zinc-100">{senderPhone}</span>
             <span className="rounded bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-700">Active</span>
+            <button
+              onClick={() => { setPhoneInput(senderPhone); setEditingPhone(true); }}
+              className="ml-auto text-xs text-indigo-600 hover:underline"
+            >
+              Change
+            </button>
           </div>
         ) : (
-          <p className="text-sm text-zinc-500">
-            No sender phone configured. Set <span className="font-mono">workspaces.twilio_phone_number</span> for this workspace before scheduling campaigns.
-          </p>
+          <div className="space-y-3">
+            <p className="text-sm text-zinc-500">No sender configured yet. Set the phone or shortcode this workspace sends marketing messages from.</p>
+            <button
+              onClick={() => { setPhoneInput(""); setEditingPhone(true); }}
+              className="rounded-md bg-indigo-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-600"
+            >
+              Set sender
+            </button>
+          </div>
         )}
       </Section>
 
