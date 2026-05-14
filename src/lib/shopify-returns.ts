@@ -198,28 +198,27 @@ export async function createShopifyReturn(
 
 // ── 2. attachReturnTracking ──
 
+// Shopify's reverseDeliveryCreateWithShipping requires:
+//   - reverseDeliveryLineItems (added requirement — without it the API
+//     returns "missing required arguments: reverseDeliveryLineItems")
+//   - the returned ReverseDelivery type no longer exposes `status` or
+//     `deliverable` fields in current Admin API versions; querying them
+//     returns an undefinedField error
 const REVERSE_DELIVERY_CREATE_MUTATION = `
   mutation ReverseDeliveryCreate(
     $reverseFulfillmentOrderId: ID!,
+    $reverseDeliveryLineItems: [ReverseDeliveryLineItemInput!]!,
     $trackingInput: ReverseDeliveryTrackingInput,
     $labelInput: ReverseDeliveryLabelInput
   ) {
     reverseDeliveryCreateWithShipping(
       reverseFulfillmentOrderId: $reverseFulfillmentOrderId
+      reverseDeliveryLineItems: $reverseDeliveryLineItems
       trackingInput: $trackingInput
       labelInput: $labelInput
       notifyCustomer: false
     ) {
-      reverseDelivery {
-        id
-        status
-        deliverable {
-          ... on ReverseDeliveryShippingDeliverable {
-            tracking { number carrierName }
-            label { publicFileUrl }
-          }
-        }
-      }
+      reverseDelivery { id }
       userErrors { field message }
     }
   }
@@ -231,10 +230,11 @@ export async function attachReturnTracking(
 ): Promise<{ success: boolean; error?: string }> {
   const admin = createAdminClient();
 
-  // Get the return record
+  // Get the return record + its line items (Shopify now requires them
+  // on the reverseDeliveryCreateWithShipping mutation).
   const { data: ret } = await admin
     .from("returns")
-    .select("shopify_reverse_fulfillment_order_gid")
+    .select("shopify_reverse_fulfillment_order_gid, return_line_items")
     .eq("id", params.returnId)
     .eq("workspace_id", workspaceId)
     .single();
@@ -243,11 +243,24 @@ export async function attachReturnTracking(
     return { success: false, error: "Return has no reverse fulfillment order" };
   }
 
+  const lineItems = (ret.return_line_items as Array<{ shopify_rfo_line_item_id?: string; quantity?: number }> | null) || [];
+  const reverseDeliveryLineItems = lineItems
+    .filter((li) => li.shopify_rfo_line_item_id && li.quantity)
+    .map((li) => ({
+      reverseFulfillmentOrderLineItemId: li.shopify_rfo_line_item_id,
+      quantity: li.quantity,
+    }));
+
+  if (reverseDeliveryLineItems.length === 0) {
+    return { success: false, error: "Return has no line items to attach tracking to" };
+  }
+
   try {
     const { shop, accessToken } = await getShopifyCredentials(workspaceId);
 
     const variables: Record<string, unknown> = {
       reverseFulfillmentOrderId: ret.shopify_reverse_fulfillment_order_gid,
+      reverseDeliveryLineItems,
       trackingInput: {
         number: params.trackingNumber,
         ...(params.trackingUrl && { url: params.trackingUrl }),
