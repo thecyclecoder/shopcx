@@ -27,6 +27,13 @@ interface Props {
   customerId?: string | null;
 }
 
+interface CtaPayload {
+  bundle: boolean;
+  mode: "subscribe" | "onetime";
+  frequency_days: number | null;
+  line_items: Array<{ shopify_variant_id: string; quantity: number }>;
+}
+
 export function StorefrontPixelInit({
   workspaceId,
   productId,
@@ -85,10 +92,13 @@ export function StorefrontPixelInit({
       window.clearTimeout(dwellTimer);
     }
 
-    // ── pack_selected (delegated click on price-table CTAs) ───────
-    // PriceTableSection (`#pricing`) and BundlePriceTableSection
-    // (`#bundle-pricing`) both render ShopCTAs with data attributes
-    // we read here. Delegation keeps those components untouched.
+    // ── pack_selected → cart create → /customize ─────────────────
+    // Delegated click on the Select CTAs that PriceTableSection and
+    // BundlePriceTableSection already render. We read the data-*
+    // attributes off the anchor, fire pack_selected, POST to /api/cart
+    // with the resolved line items, then navigate to /customize. The
+    // anchor's native href (#buy-... / #buy-bundle-...) is suppressed
+    // — it was always a placeholder waiting for the cart pipeline.
     const onPriceCtaClick = (e: MouseEvent) => {
       const target = e.target as Element | null;
       if (!target) return;
@@ -97,23 +107,91 @@ export function StorefrontPixelInit({
 
       const ds = anchor.dataset;
       const isBundle = anchor.getAttribute("href")?.startsWith("#buy-bundle-");
-      const payload: Record<string, unknown> = {
-        product_id: productId,
+      const mode = (ds.mode === "onetime" ? "onetime" : "subscribe") as "subscribe" | "onetime";
+      const freqDays = ds.frequencyDays ? Number(ds.frequencyDays) : null;
+
+      const cta: CtaPayload = {
         bundle: !!isBundle,
-        mode: ds.mode || "subscribe",
-        frequency_days: ds.frequencyDays ? Number(ds.frequencyDays) : null,
+        mode,
+        frequency_days: freqDays,
+        line_items: [],
       };
+
       if (isBundle) {
-        payload.bundle_size = ds.bundleSize ? Number(ds.bundleSize) : null;
-        payload.primary_variant_id = ds.primaryVariantId || null;
-        payload.primary_quantity = ds.primaryQuantity ? Number(ds.primaryQuantity) : null;
-        payload.upsell_variant_id = ds.upsellVariantId || null;
-        payload.upsell_quantity = ds.upsellQuantity ? Number(ds.upsellQuantity) : null;
+        if (ds.primaryVariantId && ds.primaryQuantity) {
+          cta.line_items.push({
+            shopify_variant_id: ds.primaryVariantId,
+            quantity: Number(ds.primaryQuantity) || 1,
+          });
+        }
+        if (ds.upsellVariantId && ds.upsellQuantity) {
+          cta.line_items.push({
+            shopify_variant_id: ds.upsellVariantId,
+            quantity: Number(ds.upsellQuantity) || 1,
+          });
+        }
       } else {
-        payload.variant_id = ds.variantId || null;
+        // Single tier: the PriceTable encodes variant_id only; tier
+        // qty is derived from the existing tier display, NOT on the
+        // data attribute today. Default to 1 — the bundle path is the
+        // common multi-pack flow. Future: add a data-quantity attr
+        // on the Select CTA so single-tier multi-pack adds the right
+        // qty straight from the click.
+        if (ds.variantId) {
+          cta.line_items.push({
+            shopify_variant_id: ds.variantId,
+            quantity: Number(ds.tierQuantity) || 1,
+          });
+        }
       }
 
-      track("pack_selected", payload);
+      const trackPayload: Record<string, unknown> = {
+        product_id: productId,
+        bundle: cta.bundle,
+        mode: cta.mode,
+        frequency_days: cta.frequency_days,
+      };
+      if (isBundle) {
+        trackPayload.bundle_size = ds.bundleSize ? Number(ds.bundleSize) : null;
+        trackPayload.primary_variant_id = ds.primaryVariantId || null;
+        trackPayload.upsell_variant_id = ds.upsellVariantId || null;
+      } else {
+        trackPayload.variant_id = ds.variantId || null;
+      }
+      track("pack_selected", trackPayload);
+
+      // Block default anchor scroll, take over navigation.
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (cta.line_items.length === 0) return;
+
+      // POST to /api/cart, then navigate. Errors keep the customer
+      // on the PDP and surface to console — no toast UI yet.
+      void fetch("/api/cart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          anonymous_id: undefined, // server reads from cookie/session — we don't expose it here
+          line_items: cta.line_items,
+          mode: cta.mode,
+          frequency_days: cta.frequency_days,
+        }),
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            console.error("cart create failed:", res.status, await res.text());
+            return;
+          }
+          const json = (await res.json()) as { cart?: { token: string } };
+          const token = json.cart?.token;
+          window.location.href = token ? `/customize?token=${token}` : "/customize";
+        })
+        .catch((err) => {
+          console.error("cart create error:", err);
+        });
     };
 
     document.addEventListener("click", onPriceCtaClick, { capture: true });

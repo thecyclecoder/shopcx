@@ -510,6 +510,7 @@ function PriceCard({
           align="center"
           dataAttributes={{
             "variant-id": tier.variant_id,
+            "tier-quantity": tier.quantity,
             mode,
             "frequency-days": mode === "subscribe" ? freqDays : null,
           }}
