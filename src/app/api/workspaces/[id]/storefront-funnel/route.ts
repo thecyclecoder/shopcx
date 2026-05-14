@@ -46,8 +46,11 @@ export async function GET(
 
   const start = url.searchParams.get("start") || defaultStart();
   const end = url.searchParams.get("end") || defaultEnd();
-  const startIso = new Date(`${start}T00:00:00Z`).toISOString();
-  const endIso = new Date(`${end}T23:59:59.999Z`).toISOString();
+  // Date boundaries interpreted in Central time, matching the rest
+  // of the analytics dashboards (ROAS, MRR). Avoids the "events
+  // before midnight CT show up in tomorrow's bucket" footgun.
+  const startIso = centralBoundary(start, false);
+  const endIso = centralBoundary(end, true);
 
   // ── Funnel: distinct sessions per step ──────────────────────────
   // One row per (event_type, session_id) — group + count distinct
@@ -171,11 +174,51 @@ export async function GET(
   });
 }
 
+function todayCentral(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+}
+
 function defaultStart(): string {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() - 6);
-  return d.toISOString().slice(0, 10);
+  // 7-day window ending today (Central). Use noon UTC for the
+  // n-days-ago math so the resulting Central date is unambiguous
+  // (noon UTC = morning Central, comfortably away from midnight).
+  const today = todayCentral();
+  const [y, m, d] = today.split("-").map(Number);
+  const noon = new Date(Date.UTC(y, m - 1, d - 6, 12));
+  return noon.toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
 }
 function defaultEnd(): string {
-  return new Date().toISOString().slice(0, 10);
+  return todayCentral();
+}
+
+/**
+ * Convert a YYYY-MM-DD Central-time date into the UTC ISO instant
+ * for either start-of-day (00:00:00.000 CT) or end-of-day
+ * (23:59:59.999 CT). DST-aware via Intl.DateTimeFormat — we query
+ * the actual Central offset for noon UTC on the target date.
+ */
+function centralBoundary(yyyyMmDd: string, endOfDay: boolean): string {
+  const time = endOfDay ? "T23:59:59.999Z" : "T00:00:00.000Z";
+
+  // Resolve Central's offset for this calendar day. Noon UTC is a
+  // safe pick — it falls in the middle of the day regardless of DST.
+  const noon = new Date(`${yyyyMmDd}T12:00:00Z`);
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    timeZoneName: "longOffset",
+  });
+  const parts = fmt.formatToParts(noon);
+  const tzName = parts.find((p) => p.type === "timeZoneName")?.value || "";
+  const match = tzName.match(/GMT([+-])(\d\d):(\d\d)/);
+  let offsetMinutes = 0;
+  if (match) {
+    const sign = match[1] === "+" ? 1 : -1;
+    offsetMinutes = sign * (Number(match[2]) * 60 + Number(match[3]));
+  }
+
+  // The string "{yyyyMmDd}T00:00:00.000Z" treated as a UTC moment
+  // represents Central wall time numerically. Shift by -offsetMinutes
+  // to get the actual UTC instant of that wall time.
+  const wallAsUtc = new Date(`${yyyyMmDd}${time}`);
+  return new Date(wallAsUtc.getTime() - offsetMinutes * 60_000).toISOString();
 }

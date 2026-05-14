@@ -47,19 +47,31 @@ interface FunnelData {
 
 type Preset = "today" | "7d" | "30d" | "custom";
 
+/**
+ * Date presets resolved in Central time, matching the rest of the
+ * analytics dashboards (ROAS, MRR). Avoids the "today's events miss
+ * the bucket between midnight UTC and midnight CT" off-by-six-hours
+ * footgun for late-night activity.
+ */
+function todayCentral(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+}
+
+function daysAgoCentral(n: number): string {
+  // Use noon UTC on the n-days-ago anchor so the formatted Central
+  // date is unambiguous (noon UTC = morning CT, comfortably away
+  // from midnight in either direction).
+  const today = todayCentral();
+  const [y, m, d] = today.split("-").map(Number);
+  const noon = new Date(Date.UTC(y, m - 1, d - n, 12));
+  return noon.toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+}
+
 function rangeForPreset(p: Preset): { start: string; end: string } {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayCentral();
   if (p === "today") return { start: today, end: today };
-  if (p === "7d") {
-    const d = new Date();
-    d.setUTCDate(d.getUTCDate() - 6);
-    return { start: d.toISOString().slice(0, 10), end: today };
-  }
-  if (p === "30d") {
-    const d = new Date();
-    d.setUTCDate(d.getUTCDate() - 29);
-    return { start: d.toISOString().slice(0, 10), end: today };
-  }
+  if (p === "7d") return { start: daysAgoCentral(6), end: today };
+  if (p === "30d") return { start: daysAgoCentral(29), end: today };
   return { start: today, end: today };
 }
 
