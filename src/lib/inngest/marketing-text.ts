@@ -30,6 +30,12 @@ import {
   type CustomerForTzResolve,
   type TimezoneSource,
 } from "@/lib/marketing-text-timezone";
+import { generateShortlinkSlug } from "@/lib/shortlink-slug";
+import {
+  createCampaignCoupon,
+  disableCampaignCoupon,
+  buildShortlinkUrl,
+} from "@/lib/marketing-coupons";
 
 // ─── Scheduled — build the recipient queue ─────────────────────────
 export const textCampaignScheduled = inngest.createFunction(
@@ -54,6 +60,71 @@ export const textCampaignScheduled = inngest.createFunction(
     if (!campaign) return { skipped: "campaign-not-found" };
     if (campaign.status !== "scheduled" && campaign.status !== "draft") {
       return { skipped: `status=${campaign.status}` };
+    }
+
+    // ── Generate shortlink (if a target URL is configured) ────────
+    // Done before audience resolve so the body's {shortlink}
+    // placeholder gets substituted with the right URL at send time.
+    // Idempotent — if a slug was already issued for this campaign
+    // (re-Schedule after pause/edit) we keep the existing one so
+    // any pre-sent SMS keep working.
+    let shortlinkSlug: string | null = campaign.shortlink_slug || null;
+    if (campaign.shortlink_target_url && !shortlinkSlug) {
+      shortlinkSlug = await step.run("create-shortlink", async () => {
+        const admin = createAdminClient();
+        // 3 tries to avoid the (vanishingly rare) slug collision.
+        for (let i = 0; i < 3; i++) {
+          const slug = generateShortlinkSlug(6);
+          const { error } = await admin.from("marketing_shortlinks").insert({
+            workspace_id: campaign.workspace_id,
+            slug,
+            target_url: campaign.shortlink_target_url,
+            campaign_id: campaign.id,
+            is_active: true,
+          });
+          if (!error) {
+            await admin
+              .from("sms_campaigns")
+              .update({ shortlink_slug: slug, updated_at: new Date().toISOString() })
+              .eq("id", campaign.id);
+            return slug;
+          }
+          if (!String(error.message).includes("duplicate")) throw error;
+        }
+        throw new Error("shortlink slug collision — try again");
+      });
+    }
+
+    // ── Generate coupon (if enabled) ──────────────────────────────
+    // Created in Shopify; we cache the code + node id on the campaign
+    // for substitution + the auto-disable cron. Skipped if already
+    // created (e.g. re-Schedule after edit).
+    if (campaign.coupon_enabled && !campaign.coupon_code && campaign.coupon_discount_pct) {
+      const result = await step.run("create-coupon", async () => {
+        const expiresAt = new Date(
+          Date.now() + (campaign.coupon_expires_days_after_send || 21) * 86_400_000,
+        );
+        return await createCampaignCoupon({
+          workspaceId: campaign.workspace_id,
+          campaignName: campaign.name,
+          discountPct: campaign.coupon_discount_pct,
+          expiresAt,
+        });
+      });
+      if (result.error) {
+        throw new Error(`coupon create failed: ${result.error}`);
+      }
+      await step.run("persist-coupon", async () => {
+        const admin = createAdminClient();
+        await admin.from("sms_campaigns").update({
+          coupon_code: result.code,
+          coupon_shopify_node_id: result.shopifyNodeId,
+          coupon_created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq("id", campaign.id);
+      });
+      campaign.coupon_code = result.code;
+      campaign.coupon_shopify_node_id = result.shopifyNodeId;
     }
 
     const customers = await step.run("resolve-audience", async () => {
@@ -181,10 +252,24 @@ export const textCampaignSendTick = inngest.createFunction(
       const admin = createAdminClient();
       const { data } = await admin
         .from("sms_campaigns")
-        .select("id, message_body, media_url, status, workspace_id")
+        .select("id, message_body, media_url, status, workspace_id, coupon_code, shortlink_slug")
         .in("id", campaignIds);
-      const map = new Map<string, { id: string; message_body: string; media_url: string | null; status: string; workspace_id: string }>();
-      for (const c of data || []) map.set(c.id, c);
+      // Resolve each campaign's full shortlink URL once per tick.
+      const map = new Map<string, {
+        id: string;
+        message_body: string;
+        media_url: string | null;
+        status: string;
+        workspace_id: string;
+        coupon_code: string | null;
+        shortlink_url: string | null;
+      }>();
+      for (const c of data || []) {
+        const shortlinkUrl = c.shortlink_slug
+          ? await buildShortlinkUrl(c.workspace_id, c.shortlink_slug)
+          : null;
+        map.set(c.id, { ...c, shortlink_url: shortlinkUrl });
+      }
       return Array.from(map.entries());
     });
     const campaignMap = new Map(campaigns);
@@ -228,13 +313,16 @@ export const textCampaignSendTick = inngest.createFunction(
       if (!claimed) continue; // someone else picked it up
 
       const result = await step.run(`send-${recipient.id}`, async () => {
-        return await sendSMS(
-          recipient.workspace_id,
-          recipient.phone,
-          campaign.message_body,
-        );
-        // TODO: pass mediaUrl when sendSMS supports MMS — needs
-        // sendSMS extension to forward the MediaUrl param to Twilio.
+        // Substitute {coupon} and {shortlink} placeholders in the
+        // body. Both resolve to empty string when not configured so
+        // a body like "Use code {coupon}" gracefully degrades to
+        // "Use code " if the admin removed the coupon mid-campaign.
+        const body = campaign.message_body
+          .replace(/\{coupon\}/g, campaign.coupon_code || "")
+          .replace(/\{shortlink\}/g, campaign.shortlink_url || "");
+        return await sendSMS(recipient.workspace_id, recipient.phone, body, {
+          mediaUrl: campaign.media_url,
+        });
       });
 
       await step.run(`finalize-${recipient.id}`, async () => {

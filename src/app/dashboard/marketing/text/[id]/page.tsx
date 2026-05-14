@@ -29,12 +29,28 @@ interface Campaign {
   recipients_sent: number;
   recipients_failed: number;
   recipients_skipped: number;
+  coupon_enabled: boolean;
+  coupon_code: string | null;
+  coupon_discount_pct: number | null;
+  coupon_expires_days_after_send: number | null;
+  coupon_created_at: string | null;
+  coupon_disabled_at: string | null;
+  shortlink_target_url: string | null;
+  shortlink_slug: string | null;
   scheduled_at: string | null;
   first_send_at: string | null;
   last_send_at: string | null;
   completed_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface ShortlinkStats {
+  slug: string | null;
+  url: string | null;
+  clicks: number;
+  first_clicked_at: string | null;
+  last_clicked_at: string | null;
 }
 
 const STATUS_STYLES: Record<string, string> = {
@@ -59,6 +75,7 @@ export default function TextCampaignDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [tzBreakdown, setTzBreakdown] = useState<Record<string, number>>({});
+  const [shortlink, setShortlink] = useState<ShortlinkStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +86,7 @@ export default function TextCampaignDetailPage() {
       const d = await res.json();
       setCampaign(d.campaign);
       setTzBreakdown(d.tz_source_breakdown || {});
+      setShortlink(d.shortlink || null);
     }
     setLoading(false);
   }, [workspace.id, id]);
@@ -165,6 +183,69 @@ export default function TextCampaignDetailPage() {
           </div>
         )}
       </div>
+
+      {(campaign.coupon_enabled || shortlink) && (
+        <div className="mb-6 grid gap-4 sm:grid-cols-2">
+          {campaign.coupon_enabled && (
+            <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+              <h3 className="mb-1 text-sm font-semibold uppercase tracking-wider text-zinc-500">Coupon</h3>
+              {campaign.coupon_code ? (
+                <>
+                  <p className="text-2xl font-bold tabular-nums text-zinc-900 dark:text-zinc-100">
+                    {campaign.coupon_code}
+                  </p>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    {campaign.coupon_discount_pct}% off · expires {campaign.coupon_expires_days_after_send} days after first send
+                  </p>
+                  {campaign.coupon_disabled_at ? (
+                    <p className="mt-2 inline-flex rounded bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
+                      Disabled · {new Date(campaign.coupon_disabled_at).toLocaleDateString()}
+                    </p>
+                  ) : (
+                    <p className="mt-2 inline-flex rounded bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-700">
+                      Active in Shopify
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-zinc-500">
+                  Will generate at schedule time ({campaign.coupon_discount_pct}% off, expires after {campaign.coupon_expires_days_after_send} days).
+                </p>
+              )}
+            </div>
+          )}
+
+          {shortlink && (
+            <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+              <h3 className="mb-1 text-sm font-semibold uppercase tracking-wider text-zinc-500">Shortlink</h3>
+              {shortlink.url ? (
+                <a
+                  href={shortlink.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-base font-mono font-semibold text-indigo-600 hover:underline dark:text-indigo-400"
+                >
+                  {shortlink.url}
+                </a>
+              ) : shortlink.slug ? (
+                <p className="font-mono text-sm text-zinc-500">
+                  /{shortlink.slug} · <span className="text-rose-600">configure shortlink domain in Settings</span>
+                </p>
+              ) : null}
+              <p className="mt-1 text-xs text-zinc-500">→ {campaign.shortlink_target_url}</p>
+              <p className="mt-3 text-2xl font-bold tabular-nums text-zinc-900 dark:text-zinc-100">
+                {shortlink.clicks.toLocaleString()}
+                <span className="ml-1 text-xs font-normal text-zinc-500">click{shortlink.clicks === 1 ? "" : "s"}</span>
+              </p>
+              {shortlink.first_clicked_at && (
+                <p className="mt-0.5 text-[10px] text-zinc-400">
+                  First {new Date(shortlink.first_clicked_at).toLocaleString()} · last {new Date(shortlink.last_clicked_at || "").toLocaleString()}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {totalResolved > 0 && (
         <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">

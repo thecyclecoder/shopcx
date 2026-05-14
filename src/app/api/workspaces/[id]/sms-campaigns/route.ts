@@ -52,6 +52,8 @@ export async function POST(
     name, message_body, media_url,
     send_date, target_local_hour, fallback_timezone,
     audience_filter,
+    coupon_enabled, coupon_discount_pct, coupon_expires_days_after_send,
+    shortlink_target_url,
   } = body as Record<string, unknown>;
 
   if (!name || typeof name !== "string") {
@@ -79,6 +81,12 @@ export async function POST(
       target_local_hour: hour,
       fallback_timezone: (fallback_timezone as string) || "America/Chicago",
       audience_filter: (audience_filter as Record<string, unknown>) || {},
+      coupon_enabled: !!coupon_enabled,
+      coupon_discount_pct: coupon_enabled ? Number(coupon_discount_pct) || null : null,
+      coupon_expires_days_after_send: coupon_enabled
+        ? Number(coupon_expires_days_after_send) || 21
+        : 21,
+      shortlink_target_url: (shortlink_target_url as string) || null,
       created_by: user.id,
     })
     .select()

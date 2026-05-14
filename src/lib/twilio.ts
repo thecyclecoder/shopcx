@@ -17,12 +17,23 @@ export async function getWorkspacePhone(workspaceId: string): Promise<string | n
 }
 
 /**
- * Send an SMS using the global Twilio account and the workspace's assigned phone number.
+ * Send an SMS or MMS using the global Twilio account and the workspace's
+ * assigned phone number.
+ *
+ * Pass `mediaUrl` to send as MMS — Twilio fetches the URL at send time
+ * and attaches the image to the message. The URL must be publicly
+ * reachable (Twilio's servers must GET it); presigned S3 URLs work.
+ * Twilio supports JPG / PNG / GIF up to ~5MB per attachment.
+ *
+ * SMS body is truncated at 1600 chars (10 segments) to stay inside
+ * Twilio's hard limit. MMS doesn't have the per-segment math but
+ * carriers still cap effective body length around 1600 chars too.
  */
 export async function sendSMS(
   workspaceId: string,
   to: string,
-  body: string
+  body: string,
+  options?: { mediaUrl?: string | null }
 ): Promise<{ success: boolean; messageSid?: string; error?: string }> {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
@@ -36,11 +47,22 @@ export async function sendSMS(
     return { success: false, error: "No Twilio phone number assigned to this workspace" };
   }
 
-  // Truncate to SMS-safe length (320 chars max for 2 segments)
-  const truncatedBody = body.length > 320 ? body.slice(0, 317) + "..." : body;
+  // Hard cap at 1600 chars (Twilio's 10-segment cap).
+  const truncatedBody = body.length > 1600 ? body.slice(0, 1597) + "..." : body;
 
   try {
     const authHeader = Buffer.from(`${accountSid}:${authToken}`).toString("base64");
+    const params = new URLSearchParams({
+      To: to,
+      From: fromNumber,
+      Body: truncatedBody,
+    });
+    if (options?.mediaUrl) {
+      // Twilio accepts repeated MediaUrl params for multi-image MMS,
+      // but we only support one per send for now.
+      params.append("MediaUrl", options.mediaUrl);
+    }
+
     const res = await fetch(
       `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
       {
@@ -49,11 +71,7 @@ export async function sendSMS(
           Authorization: `Basic ${authHeader}`,
           "Content-Type": "application/x-www-form-urlencoded",
         },
-        body: new URLSearchParams({
-          To: to,
-          From: fromNumber,
-          Body: truncatedBody,
-        }).toString(),
+        body: params.toString(),
       }
     );
 

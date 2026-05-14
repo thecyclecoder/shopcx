@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted, storefront_domain, storefront_slug, google_ads_developer_token_encrypted, google_ads_client_id, google_ads_client_secret_encrypted, google_ads_refresh_token_encrypted, google_ads_customer_id, google_search_console_credentials_encrypted, google_search_console_site_url"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted, storefront_domain, storefront_slug, shortlink_domain, google_ads_developer_token_encrypted, google_ads_client_id, google_ads_client_secret_encrypted, google_ads_refresh_token_encrypted, google_ads_customer_id, google_search_console_credentials_encrypted, google_search_console_site_url"
     )
     .eq("id", workspaceId)
     .single();
@@ -78,6 +78,9 @@ export async function GET(
     // Storefront
     storefront_domain: workspace.storefront_domain || null,
     storefront_slug: workspace.storefront_slug || null,
+
+    // Shortlink (marketing) domain — sprfd.co etc.
+    shortlink_domain: workspace.shortlink_domain || null,
 
     // Meta
     meta_connected: !!workspace.meta_page_access_token_encrypted,
@@ -492,6 +495,35 @@ export async function PATCH(
         updates.help_custom_domain = domain;
       } else {
         updates.help_custom_domain = null;
+      }
+    }
+
+    // Shortlink domain — sprfd.co style. Same Vercel registration
+    // flow as the other custom domains; resolved by middleware to
+    // route /<slug> requests to /api/sl/<slug>.
+    if ("shortlink_domain" in body) {
+      const domain = (body.shortlink_domain || "").toLowerCase().trim();
+      if (domain) {
+        const vercelToken = process.env.VERCEL_API_TOKEN;
+        const vercelProjectId = process.env.VERCEL_PROJECT_ID;
+        const vercelTeamId = process.env.VERCEL_TEAM_ID;
+        if (vercelToken && vercelProjectId) {
+          const url = `https://api.vercel.com/v10/projects/${vercelProjectId}/domains${vercelTeamId ? `?teamId=${vercelTeamId}` : ""}`;
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${vercelToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ name: domain }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            if (res.status !== 409 && !err?.error?.code?.includes("existing")) {
+              return NextResponse.json({ error: `Failed to add domain to Vercel: ${err?.error?.message || res.status}` }, { status: 400 });
+            }
+          }
+        }
+        updates.shortlink_domain = domain;
+      } else {
+        updates.shortlink_domain = null;
       }
     }
   } catch {

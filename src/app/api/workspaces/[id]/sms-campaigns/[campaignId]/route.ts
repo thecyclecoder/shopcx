@@ -20,6 +20,8 @@ const EDITABLE_DRAFT_FIELDS = new Set([
   "name", "message_body", "media_url",
   "send_date", "target_local_hour", "fallback_timezone",
   "audience_filter",
+  "coupon_enabled", "coupon_discount_pct", "coupon_expires_days_after_send",
+  "shortlink_target_url",
 ]);
 
 export async function GET(request: Request, { params }: RouteParams) {
@@ -52,7 +54,33 @@ export async function GET(request: Request, { params }: RouteParams) {
     sourceCounts[r.timezone_source] = (sourceCounts[r.timezone_source] || 0) + 1;
   }
 
-  return NextResponse.json({ campaign: data, tz_source_breakdown: sourceCounts });
+  // Shortlink stats — click count, first/last click.
+  let shortlink: { url: string | null; slug: string | null; clicks: number; first_clicked_at: string | null; last_clicked_at: string | null } | null = null;
+  if (data.shortlink_slug) {
+    const { data: sl } = await admin
+      .from("marketing_shortlinks")
+      .select("slug, click_count, first_clicked_at, last_clicked_at")
+      .eq("campaign_id", campaignId)
+      .maybeSingle();
+    const { data: ws } = await admin
+      .from("workspaces")
+      .select("shortlink_domain")
+      .eq("id", workspaceId)
+      .single();
+    shortlink = {
+      slug: sl?.slug || null,
+      url: sl?.slug && ws?.shortlink_domain ? `https://${ws.shortlink_domain}/${sl.slug}` : null,
+      clicks: sl?.click_count || 0,
+      first_clicked_at: sl?.first_clicked_at || null,
+      last_clicked_at: sl?.last_clicked_at || null,
+    };
+  }
+
+  return NextResponse.json({
+    campaign: data,
+    tz_source_breakdown: sourceCounts,
+    shortlink,
+  });
 }
 
 export async function PATCH(request: Request, { params }: RouteParams) {

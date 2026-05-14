@@ -58,6 +58,12 @@ export default function NewTextCampaignPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Coupon + shortlink fields
+  const [couponEnabled, setCouponEnabled] = useState(false);
+  const [couponDiscountPct, setCouponDiscountPct] = useState(15);
+  const [couponExpiresDays, setCouponExpiresDays] = useState(21);
+  const [shortlinkTargetUrl, setShortlinkTargetUrl] = useState("");
+
   function toggleSubStatus(s: string) {
     setSubStatuses((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
     setAudiencePreview(null);
@@ -104,6 +110,10 @@ export default function NewTextCampaignPage() {
         audience_filter: {
           subscription_status: subStatuses.length > 0 ? subStatuses : undefined,
         },
+        coupon_enabled: couponEnabled,
+        coupon_discount_pct: couponEnabled ? couponDiscountPct : null,
+        coupon_expires_days_after_send: couponEnabled ? couponExpiresDays : null,
+        shortlink_target_url: shortlinkTargetUrl.trim() || null,
       }),
     });
     if (!res.ok) {
@@ -230,6 +240,62 @@ export default function NewTextCampaignPage() {
             ))}
           </select>
         </Field>
+
+        {/* ── Shortlink (optional) ──────────────────────────── */}
+        <div className="rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/40">
+          <Field
+            label="Shortlink target URL (optional)"
+            hint="If set, we generate a short URL on your shortlink domain (e.g. sprfd.co/ABC123) that redirects here. Use {shortlink} in the body to insert it."
+          >
+            <input
+              type="url"
+              value={shortlinkTargetUrl}
+              onChange={(e) => setShortlinkTargetUrl(e.target.value)}
+              placeholder="https://shop.superfoodscompany.com/amazing-coffee"
+              className="w-full rounded border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+            />
+          </Field>
+        </div>
+
+        {/* ── Coupon (optional) ────────────────────────────── */}
+        <div className="rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/40">
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              checked={couponEnabled}
+              onChange={(e) => setCouponEnabled(e.target.checked)}
+              className="mt-0.5"
+            />
+            <div>
+              <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Generate a campaign coupon</span>
+              <p className="text-xs text-zinc-500">
+                One shared discount code (e.g. <span className="font-mono">MAYBL47</span>) auto-created in Shopify when you schedule. Use <span className="font-mono">{"{coupon}"}</span> in the body to insert it. Auto-disabled after the expiry window.
+              </p>
+            </div>
+          </label>
+          {couponEnabled && (
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <Field label="Discount %">
+                <input
+                  type="number"
+                  min={1} max={80}
+                  value={couponDiscountPct}
+                  onChange={(e) => setCouponDiscountPct(Number(e.target.value))}
+                  className="w-full rounded border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+                />
+              </Field>
+              <Field label="Expires after (days)">
+                <input
+                  type="number"
+                  min={1} max={365}
+                  value={couponExpiresDays}
+                  onChange={(e) => setCouponExpiresDays(Number(e.target.value))}
+                  className="w-full rounded border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+                />
+              </Field>
+            </div>
+          )}
+        </div>
 
         <Field label="Audience" hint="All SMS-subscribed customers in the selected subscription states.">
           <div className="space-y-2">

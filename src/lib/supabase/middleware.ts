@@ -6,7 +6,10 @@ const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula"
   // the pixel/cart/lead/checkout APIs they call. Auth-gating these
   // would silent-fail the funnel for every anonymous visitor.
   "/api/pixel", "/api/cart", "/api/lead", "/api/checkout",
-  "/customize", "/checkout", "/thank-you"];
+  "/customize", "/checkout", "/thank-you",
+  // Shortlink redirector — sprfd.co/ABC123 hits this via middleware
+  // rewrite; the handler returns a 302 to the campaign target URL.
+  "/api/sl/"];
 const WORKSPACE_SETUP_ROUTES = ["/workspace/new", "/workspace/select"];
 const ADMIN_EMAIL = "dylan@superfoodscompany.com";
 const PRIMARY_DOMAINS = ["shopcx.ai", "www.shopcx.ai", "localhost"];
@@ -17,6 +20,42 @@ const PRIMARY_DOMAINS = ["shopcx.ai", "www.shopcx.ai", "localhost"];
 type StorefrontCacheEntry = { slug: string | null; expiresAt: number };
 const storefrontCache = new Map<string, StorefrontCacheEntry>();
 const STOREFRONT_CACHE_TTL_MS = 60_000;
+
+// ─── Shortlink domain cache ─────────────────────────────────────────────
+// Resolves a workspace's shortlink_domain (e.g. sprfd.co) to the owning
+// workspace's id. Same caching pattern as storefronts.
+type ShortlinkCacheEntry = { workspaceId: string | null; expiresAt: number };
+const shortlinkCache = new Map<string, ShortlinkCacheEntry>();
+const SHORTLINK_CACHE_TTL_MS = 60_000;
+
+async function resolveShortlinkWorkspaceByDomain(
+  hostname: string,
+): Promise<string | null> {
+  const cached = shortlinkCache.get(hostname);
+  if (cached && cached.expiresAt > Date.now()) return cached.workspaceId;
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !serviceKey) return null;
+
+  try {
+    const res = await fetch(
+      `${supabaseUrl}/rest/v1/workspaces?shortlink_domain=eq.${encodeURIComponent(
+        hostname,
+      )}&select=id&limit=1`,
+      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
+    );
+    const data = (await res.json()) as Array<{ id?: string }>;
+    const workspaceId = data?.[0]?.id || null;
+    shortlinkCache.set(hostname, {
+      workspaceId,
+      expiresAt: Date.now() + SHORTLINK_CACHE_TTL_MS,
+    });
+    return workspaceId;
+  } catch {
+    return null;
+  }
+}
 
 async function resolveStorefrontSlugByDomain(
   hostname: string,
@@ -51,6 +90,36 @@ export async function updateSession(request: NextRequest) {
   // ── Subdomain routing for help center mini-sites ──
   const hostname = request.headers.get("host") || "";
   const isLocalhost = hostname.includes("localhost") || hostname.includes("127.0.0.1");
+
+  // ── Shortlink domain routing ──
+  // sprfd.co/ABC123 → rewrite to /api/sl/ABC123?ws={workspaceId}
+  // First check the dedicated shortlink domain table so a short URL
+  // never collides with a single-segment product handle on a
+  // storefront subdomain (shortlink domains are separate by design).
+  if (!isLocalhost) {
+    const isPrimaryDomain = PRIMARY_DOMAINS.some(
+      (d) => hostname === d || hostname.endsWith(`.${d}`),
+    );
+    if (!isPrimaryDomain) {
+      const wsId = await resolveShortlinkWorkspaceByDomain(hostname);
+      if (wsId) {
+        const pathname = request.nextUrl.pathname;
+        const segs = pathname.split("/").filter(Boolean);
+        // Root → marketing landing page on the shortlink domain is
+        // out of scope for v1. 404 is fine. Slug must be the only
+        // path segment; deeper paths 404 too.
+        if (segs.length === 1) {
+          const url = request.nextUrl.clone();
+          url.pathname = `/api/sl/${segs[0]}`;
+          url.searchParams.set("ws", wsId);
+          return NextResponse.rewrite(url);
+        }
+        // Anything else on the shortlink domain → 404 (don't fall
+        // through to storefront logic).
+        return new NextResponse("Not found", { status: 404 });
+      }
+    }
+  }
 
   // ── Storefront routing ──
   // Two external URL shapes, one underlying SSG route:
