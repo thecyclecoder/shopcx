@@ -16,8 +16,9 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { HAIKU_MODEL } from "@/lib/ai-models";
 
-const HAIKU = "claude-haiku-4-5-20251001";
+const HAIKU = HAIKU_MODEL;
 
 type IngredientRow = { id: string; name: string; dosage_display: string | null };
 type ResearchRow = { ingredient_id: string; benefit_headline: string | null; mechanism_explanation: string | null };

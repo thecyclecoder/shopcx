@@ -25,8 +25,9 @@ import {
   type OrderInput,
   type SubscriptionInput,
 } from "@/lib/customer-demographics";
+import { HAIKU_MODEL } from "@/lib/ai-models";
 
-const HAIKU = "claude-haiku-4-5-20251001";
+const HAIKU = HAIKU_MODEL;
 const ENRICHMENT_VERSION = 1;
 const BATCH_SIZE = 50;
 const MAX_PER_RUN = 500;

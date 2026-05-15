@@ -21,9 +21,10 @@
  *                       Central is the safe US default.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
+import { SmsPhonePreview } from "@/components/sms-phone-preview";
 
 const TIMEZONE_OPTIONS = [
   { value: "America/New_York", label: "Eastern (New York)" },
@@ -63,6 +64,21 @@ export default function NewTextCampaignPage() {
   const [couponDiscountPct, setCouponDiscountPct] = useState(15);
   const [couponExpiresDays, setCouponExpiresDays] = useState(21);
   const [shortlinkTargetUrl, setShortlinkTargetUrl] = useState("");
+
+  // Sender phone + shortlink domain for preview rendering
+  const [senderNumber, setSenderNumber] = useState<string | null>(null);
+  const [shortlinkDomain, setShortlinkDomain] = useState<string | null>(null);
+  useEffect(() => {
+    if (!workspace?.id) return;
+    fetch(`/api/workspaces/${workspace.id}/integrations`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => {
+        if (!d) return;
+        setSenderNumber(d.twilio_phone_number || null);
+        setShortlinkDomain(d.shortlink_domain || null);
+      })
+      .catch(() => { /* preview will show placeholder */ });
+  }, [workspace?.id]);
 
   function toggleSubStatus(s: string) {
     setSubStatuses((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
@@ -160,7 +176,7 @@ export default function NewTextCampaignPage() {
   const segments = Math.ceil(charCount / 160) || 1;
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6">
+    <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
       <header className="mb-6">
         <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">New text campaign</h1>
         <p className="mt-1 text-sm text-zinc-500">
@@ -168,7 +184,8 @@ export default function NewTextCampaignPage() {
         </p>
       </header>
 
-      <div className="space-y-5 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_320px]">
+        <div className="space-y-5 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
         <Field label="Campaign name" hint="Internal — customers don't see this.">
           <input
             type="text"
@@ -351,6 +368,18 @@ export default function NewTextCampaignPage() {
           >
             {busy ? "Scheduling…" : "Schedule campaign"}
           </button>
+        </div>
+        </div>
+
+        <div className="hidden lg:block">
+          <SmsPhonePreview
+            messageBody={messageBody}
+            mediaUrl={mediaUrl || undefined}
+            senderNumber={senderNumber}
+            couponEnabled={couponEnabled}
+            hasShortlink={!!shortlinkTargetUrl.trim()}
+            shortlinkDomain={shortlinkDomain}
+          />
         </div>
       </div>
     </div>

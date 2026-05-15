@@ -10,6 +10,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { readFileSync } from "fs";
 import { resolve } from "path";
+import { SONNET_MODEL } from "../src/lib/ai-models";
 
 const envPath = resolve(__dirname, "../.env.local");
 for (const line of readFileSync(envPath, "utf8").split("\n")) {
@@ -121,7 +122,7 @@ async function main() {
     method: "POST",
     headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: SONNET_MODEL,
       max_tokens: 2000,
       system: `You are an AI quality analyst reviewing customer support conversations handled by an AI agent.
 

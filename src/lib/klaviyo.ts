@@ -13,6 +13,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { HAIKU_MODEL } from "@/lib/ai-models";
 
 /**
  * Extract Shopify product ID from Klaviyo review relationships.
@@ -448,7 +449,7 @@ export async function generateMissingSummaries(workspaceId: string) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
+          model: HAIKU_MODEL,
           max_tokens: 50,
           messages: [
             {

@@ -11,10 +11,11 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { retrieveContext } from "@/lib/rag";
 import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
+import { SONNET_MODEL, OPUS_MODEL } from "@/lib/ai-models";
 
 const MODEL_IDS = {
-  sonnet: "claude-sonnet-4-20250514",
-  opus: "claude-opus-4-7",
+  sonnet: SONNET_MODEL,
+  opus: OPUS_MODEL,
 } as const;
 export type OrchestratorModelKey = keyof typeof MODEL_IDS;
 

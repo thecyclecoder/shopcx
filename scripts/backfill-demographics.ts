@@ -30,11 +30,12 @@ import { createAdminClient } from "../src/lib/supabase/admin";
 import { decrypt } from "../src/lib/crypto";
 import { fetchZipDemographics, timezoneFromState } from "../src/lib/census";
 import {
+import { HAIKU_MODEL } from "../src/lib/ai-models";
   analyzeOrderHistory, lifeStageFromAgeRange,
   type AgeRange, type OrderInput, type SubscriptionInput,
 } from "../src/lib/customer-demographics";
 
-const HAIKU = "claude-haiku-4-5-20251001";
+const HAIKU = HAIKU_MODEL;
 const ENRICHMENT_VERSION = 1;
 const CONFIDENCE_FLOOR_FOR_GENDER = 0.6;
 

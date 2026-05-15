@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { OPUS_MODEL } from "@/lib/ai-models";
 
 // POST — admin overrides the auto score on the latest analysis.
 // Optionally also drafts a grader_prompts rule via Opus that admin can
@@ -98,7 +99,7 @@ Output JSON:
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "claude-opus-4-7",
+          model: OPUS_MODEL,
           max_tokens: 400,
           messages: [{ role: "user", content: prompt }],
         }),

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
+import { SONNET_MODEL } from "@/lib/ai-models";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -127,7 +128,7 @@ Respond in JSON only:
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: SONNET_MODEL,
         max_tokens: 500,
         messages: [{ role: "user", content: prompt }],
       }),

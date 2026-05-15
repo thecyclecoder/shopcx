@@ -16,11 +16,12 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
+import { SONNET_MODEL } from "@/lib/ai-models";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const GRADER_MODEL = "claude-sonnet-4-20250514";
+const GRADER_MODEL = SONNET_MODEL;
 
 // Tickets we don't waste a Sonnet call on
 const SKIP_TAGS = new Set(["spam:bot", "outreach", "cls:outreach"]);

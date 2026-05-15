@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
+import { SONNET_MODEL } from "@/lib/ai-models";
 
 // POST: AI personalizes a macro for a ticket's customer context
 export async function POST(
@@ -122,7 +123,7 @@ export async function POST(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: SONNET_MODEL,
         max_tokens: 1024,
         system: parts.join("\n"),
         messages: [{ role: "user", content: `Personalize this macro "${macro.name}" for the customer.` }],

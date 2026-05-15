@@ -12,8 +12,9 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { SONNET_MODEL } from "@/lib/ai-models";
 
-const SONNET = "claude-sonnet-4-20250514";
+const SONNET = SONNET_MODEL;
 const SUPPORTED_FIELDS = new Set<string>(["mechanism_copy"]);
 
 export async function POST(

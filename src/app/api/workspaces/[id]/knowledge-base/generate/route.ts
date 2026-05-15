@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { SONNET_MODEL } from "@/lib/ai-models";
 
 export async function POST(
   request: Request,
@@ -60,7 +61,7 @@ Return JSON only, no other text:
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: SONNET_MODEL,
         max_tokens: 4096,
         system: systemPrompt,
         messages: [{ role: "user", content: userPrompt }],

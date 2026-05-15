@@ -4,6 +4,7 @@ import { runAllFraudRules, checkOrderForFraud, checkCustomerForFraud } from "@/l
 import { decrypt } from "@/lib/crypto";
 import { unsubscribeFromAllMarketing } from "@/lib/shopify-marketing";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
+import { HAIKU_MODEL } from "@/lib/ai-models";
 
 // ── Nightly full scan ──
 
@@ -152,7 +153,7 @@ export const fraudGenerateSummary = inngest.createFunction(
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
+          model: HAIKU_MODEL,
           max_tokens: 300,
           messages: [
             {

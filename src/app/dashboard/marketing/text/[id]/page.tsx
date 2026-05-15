@@ -14,6 +14,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
+import { SmsPhonePreview } from "@/components/sms-phone-preview";
 
 interface Campaign {
   id: string;
@@ -79,6 +80,20 @@ export default function TextCampaignDetailPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [senderNumber, setSenderNumber] = useState<string | null>(null);
+  const [shortlinkDomain, setShortlinkDomain] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!workspace?.id) return;
+    fetch(`/api/workspaces/${workspace.id}/integrations`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => {
+        if (!d) return;
+        setSenderNumber(d.twilio_phone_number || null);
+        setShortlinkDomain(d.shortlink_domain || null);
+      })
+      .catch(() => { /* preview shows placeholder */ });
+  }, [workspace?.id]);
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/sms-campaigns/${id}`);
@@ -170,7 +185,9 @@ export default function TextCampaignDetailPage() {
         <StatCard label="Progress" value={`${progressPct}%`} />
       </div>
 
-      <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_320px]">
+        <div>
+        <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">Message</h2>
         <pre className="whitespace-pre-wrap rounded bg-zinc-50 p-3 font-mono text-sm text-zinc-800 dark:bg-zinc-950 dark:text-zinc-200">
           {campaign.message_body}
@@ -290,6 +307,19 @@ export default function TextCampaignDetailPage() {
           <KV label="First send" value={fmtTime(campaign.first_send_at)} />
           <KV label="Completed" value={fmtTime(campaign.completed_at)} />
         </dl>
+      </div>
+        </div>
+
+        <div className="hidden lg:block">
+          <SmsPhonePreview
+            messageBody={campaign.message_body}
+            mediaUrl={campaign.media_url || undefined}
+            senderNumber={senderNumber}
+            couponEnabled={campaign.coupon_enabled}
+            hasShortlink={!!campaign.shortlink_target_url}
+            shortlinkDomain={shortlinkDomain}
+          />
+        </div>
       </div>
     </div>
   );

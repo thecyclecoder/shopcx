@@ -5,6 +5,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getReviewsForProducts } from "@/lib/klaviyo";
+import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 
 interface RemedySelection {
   remedy_id: string;
@@ -185,7 +186,7 @@ export async function selectRemedies(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
+        model: HAIKU_MODEL,
         max_tokens: 500,
         messages: [
           {
@@ -340,7 +341,7 @@ IMPORTANT: You CANNOT perform cancellations or any subscription actions yourself
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: SONNET_MODEL,
       max_tokens: 200,
       system: systemPrompt,
       messages: [
@@ -360,7 +361,7 @@ IMPORTANT: You CANNOT perform cancellations or any subscription actions yourself
         method: "POST",
         headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
+          model: HAIKU_MODEL,
           max_tokens: 200,
           system: systemPrompt,
           messages: [...conversationHistory, { role: "user", content: userMessage }],

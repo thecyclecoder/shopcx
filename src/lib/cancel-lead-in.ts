@@ -12,6 +12,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { OPUS_MODEL } from "@/lib/ai-models";
 
 export interface CancelLeadInArgs {
   workspaceId: string;
@@ -86,7 +87,7 @@ Output: 1-2 sentences, plain text only, no quotes/markdown/emoji. End with a sho
       },
       body: JSON.stringify({
         // Opus — first save touch, strongest reasoning over reason × tenure × product.
-        model: "claude-opus-4-7",
+        model: OPUS_MODEL,
         max_tokens: 200,
         messages: [{ role: "user", content: prompt }],
       }),

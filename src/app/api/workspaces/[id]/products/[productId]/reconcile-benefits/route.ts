@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { SONNET_MODEL } from "@/lib/ai-models";
 
 /**
  * POST: AI reconciliation — groups 64 science benefits + customer benefits into
@@ -104,7 +105,7 @@ Return JSON array:
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: SONNET_MODEL,
       max_tokens: 8192,
       temperature: 0,
       system: "You are a product marketing analyst. Return strict JSON only — no prose, no markdown fences.",

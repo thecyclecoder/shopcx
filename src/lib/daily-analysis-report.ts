@@ -18,9 +18,10 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
+import { OPUS_MODEL } from "@/lib/ai-models";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const REPORT_MODEL = "claude-opus-4-7";
+const REPORT_MODEL = OPUS_MODEL;
 
 interface AnalysisInput {
   ticket_id: string;

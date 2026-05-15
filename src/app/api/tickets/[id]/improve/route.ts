@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 import { runImproveActions, type ImproveAction } from "@/lib/improve-actions";
+import { OPUS_MODEL } from "@/lib/ai-models";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -234,7 +235,7 @@ export async function POST(
         body: JSON.stringify({
           // Improve is used infrequently and is the deepest investigation
           // surface — always use the strongest model available.
-          model: "claude-opus-4-7",
+          model: OPUS_MODEL,
           max_tokens: 2000,
           tools,
           system: `${SYSTEM_PROMPT}\n\n--- TICKET CONTEXT ---\n${ticketContext}`,

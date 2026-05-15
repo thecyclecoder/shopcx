@@ -14,8 +14,8 @@
  */
 
 import { logAiUsage } from "@/lib/ai-usage";
+import { HAIKU_MODEL } from "@/lib/ai-models";
 
-const HAIKU_MODEL = "claude-haiku-4-5-20251001";
 const API_URL = "https://api.anthropic.com/v1/messages";
 
 const SUPPORTED_LANGS = new Set([

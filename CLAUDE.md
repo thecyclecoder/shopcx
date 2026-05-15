@@ -4,6 +4,7 @@
 @SONNET-ORCHESTRATOR.md
 @CRISIS-MANAGEMENT-SPEC.md
 @STOREFRONT.md
+@DATABASE.md
 
 # ShopCX.ai — The Retention Operating System
 
@@ -254,6 +255,38 @@ ShopCX.ai replaces Gorgias (helpdesk), Siena AI (customer service AI), Appstle (
 - Journey settings: detail view with flow visualization, editable steps, channels, match patterns, priority, step ticket status
 - Branding: ShopCX.ai (lowercase .ai), notification bell, collapsible tickets menu
 
+## Returns & Refund Pipeline (rewritten 2026-05-14)
+
+End-to-end flow for product returns:
+
+1. **Create return** — `createFullReturn()` (`src/lib/shopify-returns.ts`):
+   - Calls Shopify `returnCreate` mutation (creates the Shopify-side return record)
+   - Inserts our `returns` row with `status='open'` and `return_line_items` populated with `shopify_rfo_line_item_id`
+   - Buys EasyPost label (pinned to USPS, falls back to other carriers only if USPS has no rates)
+   - Computes + stores `order_total_cents`, `label_cost_cents`, `net_refund_cents` at this moment — these are the contract for what we'll refund
+   - Advances `status='label_created'` independently of Shopify-side reverse-delivery (was previously gated on it)
+   - `attachReturnTracking()` creates the Shopify ReverseDelivery (cosmetic — doesn't gate our flow)
+
+2. **EasyPost webhook fires `delivered`** → updates `returns.delivered_at` + sends Inngest event `returns/process-delivery`
+
+3. **`returns/process-delivery`** (`src/lib/inngest/returns.ts`): instantly fires `returns/issue-refund`. No 24h wait, no Shopify dispose call — we don't use their inventory bookkeeping.
+
+4. **`returns/issue-refund`**: reads `net_refund_cents` from the return. If missing/zero, inserts a `dashboard_notifications` row and stops. If present, branches:
+   - `refund_return` → `partialRefundByAmount()` on Shopify (exactly the stored amount, not full order)
+   - `store_credit_return` → `issueStoreCredit()` via Shopify `storeCreditAccountCredit`
+   - Updates `status='refunded'`, sets `refunded_at` + `refund_id`, sends `sendReturnConfirmationEmail`
+
+**Critical rules:**
+- Never auto-refund a guessed amount. The contract is set at return-creation time; the pipeline trusts it.
+- `freeLabel: true` means we eat the EasyPost cost (label_cost_cents = 0, net = order_total). Crisis returns + tenured-customer goodwill returns use this.
+- Customer-pays-shipping returns: label_cost_cents = actual EasyPost rate, net = order_total − label_cost.
+- Partial returns: items_subtotal-based net rather than full order (line items only, no tax/shipping refund).
+- Improve-tab `create_return` action now uses `createFullReturn` (was setting `is_return: true` directly on EasyPost which made USPS print labels with from/to swapped → packages came back to customers).
+
+**Failures surface as `dashboard_notifications`:**
+- `Return refund failed — manual action needed` — Shopify rejected refundCreate (most often `Braintree::AuthenticationError`). Manually refund via Shopify Admin → mark our return refunded with `refund_id='manual-braintree'` and fire confirmation email.
+- `Return needs manual review — no refund amount stored` — `net_refund_cents` was missing. Set it manually, re-fire `returns/issue-refund`.
+
 ## Inbound Message Handling (Sonnet Orchestrator v2)
 All inbound messages go through the unified ticket handler → Sonnet Orchestrator v2:
 1. **Resolve** — find customer, check agent_intervened, load channel config
@@ -418,6 +451,7 @@ Use `addTicketTag()` from `src/lib/ticket-tags.ts` (idempotent). Use `markFirstT
 | `PLAYBOOK-SPEC.md` | Playbook system — steps, policies, exceptions, stand-firm |
 | `PLAYBOOK-PATTERNS.md` | Pattern matching for playbook triggers |
 | `APPSTLE.md` | Appstle API reference — endpoints, auth, common operations |
+| `DATABASE.md` | DB query reference — status case sensitivity, customer linking, common gotchas + recipes |
 | `LOYALTY-SPEC.md` | Loyalty points, redemption tiers, coupon generation |
 | `UNIFIED-HANDLER.md` | Unified ticket handler pipeline documentation |
 

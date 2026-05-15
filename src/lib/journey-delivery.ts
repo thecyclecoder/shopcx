@@ -13,6 +13,7 @@ import { addTicketTag } from "@/lib/ticket-tags";
 import { markFirstTouch } from "@/lib/first-touch";
 import { getDeliveryChannel } from "@/lib/delivery-channel";
 import crypto from "crypto";
+import { HAIKU_MODEL } from "@/lib/ai-models";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -452,7 +453,7 @@ export async function nudgeJourney(
       method: "POST",
       headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001", max_tokens: 100,
+        model: HAIKU_MODEL, max_tokens: 100,
         messages: [{ role: "user", content: `${persona} Never reveal AI. A customer needs to complete a "${journeyEntry.journey_name}" form but replied instead of clicking the link. Their message: "${customerMessage}". Write a brief, empathetic re-nudge (2-3 sentences max) explaining they need to use the secure form link. Acknowledge their frustration. Only the message, no markdown.` }],
       }),
     });

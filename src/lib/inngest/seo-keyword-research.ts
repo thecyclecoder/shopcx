@@ -8,8 +8,9 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { generateKeywordIdeas } from "@/lib/google-ads";
 import { getSearchAnalytics } from "@/lib/google-search-console";
+import { SONNET_MODEL } from "@/lib/ai-models";
 
-const SONNET = "claude-sonnet-4-20250514";
+const SONNET = SONNET_MODEL;
 
 export const seoKeywordResearch = inngest.createFunction(
   {

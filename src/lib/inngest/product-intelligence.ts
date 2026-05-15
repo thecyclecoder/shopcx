@@ -8,8 +8,9 @@
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { SONNET_MODEL } from "@/lib/ai-models";
 
-const SONNET = "claude-sonnet-4-20250514";
+const SONNET = SONNET_MODEL;
 
 type AnthropicContentBlock = { type: string; text?: string };
 

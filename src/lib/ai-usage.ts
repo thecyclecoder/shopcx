@@ -53,8 +53,11 @@ export async function logAiUsage({ workspaceId, model, usage, purpose, ticketId 
 }
 
 // Cost per 1K tokens — keep in sync with Anthropic pricing.
+// Keys include both the bare model name and any dated aliases historical
+// usage rows may carry, so we don't lose costing fidelity on old data.
 const PRICING: Record<string, { input: number; output: number; cacheRead: number }> = {
   // input/output cents per 1K tokens
+  "claude-sonnet-4-6":          { input: 0.30, output: 1.50, cacheRead: 0.03 },
   "claude-sonnet-4-20250514":   { input: 0.30, output: 1.50, cacheRead: 0.03 },
   "claude-sonnet-4":            { input: 0.30, output: 1.50, cacheRead: 0.03 },
   "claude-haiku-4-5-20251001":  { input: 0.10, output: 0.50, cacheRead: 0.01 },
@@ -67,7 +70,7 @@ const PRICING: Record<string, { input: number; output: number; cacheRead: number
  * 10% of input rate; cache creation at 125% of input.
  */
 export function usageCostCents(model: string, row: { input_tokens: number; output_tokens: number; cache_creation_tokens: number; cache_read_tokens: number }): number {
-  const p = PRICING[model] || PRICING["claude-sonnet-4-20250514"];
+  const p = PRICING[model] || PRICING["claude-sonnet-4-6"];
   const fromInput = (row.input_tokens / 1000) * p.input;
   const fromOutput = (row.output_tokens / 1000) * p.output;
   const fromCacheRead = (row.cache_read_tokens / 1000) * p.cacheRead;

@@ -11,6 +11,7 @@
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { SONNET_MODEL } from "@/lib/ai-models";
 
 export const aiNightlyAnalysis = inngest.createFunction(
   {
@@ -144,7 +145,7 @@ export const aiNightlyAnalysis = inngest.createFunction(
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "claude-sonnet-4-20250514",
+            model: SONNET_MODEL,
             max_tokens: 2000,
             system: `You are an AI quality analyst reviewing customer support conversations handled by an AI agent.
 

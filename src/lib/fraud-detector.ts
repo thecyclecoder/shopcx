@@ -3,6 +3,7 @@ import { inngest } from "@/lib/inngest/client";
 import { addOrderTags } from "@/lib/shopify-order-tags";
 import { zipDistance, extractZip } from "@/lib/geo-distance";
 import { normalizeReseller } from "@/lib/known-resellers";
+import { HAIKU_MODEL } from "@/lib/ai-models";
 
 // ── Types ──
 
@@ -599,7 +600,7 @@ Respond with EXACTLY "FRAUD" or "OK".`;
         const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
           headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 10, messages: [{ role: "user", content: prompt }] }),
+          body: JSON.stringify({ model: HAIKU_MODEL, max_tokens: 10, messages: [{ role: "user", content: prompt }] }),
         });
         if (!aiRes.ok) throw new Error(`AI API error: ${aiRes.status}`);
         const aiData = await aiRes.json();
@@ -1141,7 +1142,7 @@ These count as DIFFERENT:
       method: "POST",
       headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
+        model: HAIKU_MODEL,
         max_tokens: 5,
         messages: [{ role: "user", content: prompt }],
       }),

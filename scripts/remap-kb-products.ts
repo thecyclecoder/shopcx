@@ -5,6 +5,7 @@
  */
 
 import { createClient } from "@supabase/supabase-js";
+import { HAIKU_MODEL } from "../src/lib/ai-models";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -64,7 +65,7 @@ async function run() {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
+        model: HAIKU_MODEL,
         max_tokens: 4000,
         system: `You are matching knowledge base articles to the correct product.
 

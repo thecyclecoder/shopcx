@@ -7,6 +7,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { HAIKU_MODEL } from "@/lib/ai-models";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -709,7 +710,7 @@ function buildDataContext(
 
 // ── AI helper ──
 
-async function aiGenerate(systemPrompt: string, userPrompt: string, model = "claude-haiku-4-5-20251001"): Promise<string> {
+async function aiGenerate(systemPrompt: string, userPrompt: string, model = HAIKU_MODEL): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return "";
 

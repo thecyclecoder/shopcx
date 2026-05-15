@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { HAIKU_MODEL } from "@/lib/ai-models";
 
 /**
  * POST: Run (or re-run) AI analysis on a fraud case.
@@ -81,7 +82,7 @@ export async function POST(
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
+      model: HAIKU_MODEL,
       max_tokens: 500,
       messages: [{
         role: "user",

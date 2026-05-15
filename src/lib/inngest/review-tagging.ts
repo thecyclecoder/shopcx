@@ -3,6 +3,7 @@
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { HAIKU_MODEL } from "@/lib/ai-models";
 
 const DEFAULT_CANCEL_REASONS = [
   "too_expensive",
@@ -49,7 +50,7 @@ async function tagReview(
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
+      model: HAIKU_MODEL,
       max_tokens: 200,
       messages: [{
         role: "user",

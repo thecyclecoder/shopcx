@@ -1,4 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { HAIKU_MODEL } from "@/lib/ai-models";
 
 // ── Types ──
 
@@ -190,7 +191,7 @@ async function matchWithAI(
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
+        model: HAIKU_MODEL,
         max_tokens: 200,
         messages: [{
           role: "user",
