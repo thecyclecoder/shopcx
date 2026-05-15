@@ -5,6 +5,7 @@
 @CRISIS-MANAGEMENT-SPEC.md
 @STOREFRONT.md
 @DATABASE.md
+@TEXT-MARKETING.md
 
 # ShopCX.ai — The Retention Operating System
 
@@ -454,6 +455,8 @@ Use `addTicketTag()` from `src/lib/ticket-tags.ts` (idempotent). Use `markFirstT
 | `DATABASE.md` | DB query reference — status case sensitivity, customer linking, common gotchas + recipes |
 | `LOYALTY-SPEC.md` | Loyalty points, redemption tiers, coupon generation |
 | `UNIFIED-HANDLER.md` | Unified ticket handler pipeline documentation |
+| `TEXT-MARKETING.md` | SMS marketing — campaign builder, send pipeline, shortlinks, coupons, Klaviyo data pipeline, predictive segmentation, archetype framework |
+| `APPSTLE-WEBHOOKS.md` | Reference for all Appstle webhook payloads (used by billing forecast + subscription state tracking) |
 
 ## Reseller Defense System (May 2026)
 
