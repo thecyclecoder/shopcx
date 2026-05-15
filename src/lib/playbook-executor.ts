@@ -490,7 +490,7 @@ async function executeStep(
       const remainingActive = subs.filter(s => s.status === "active" && s.shopify_contract_id !== ctx.cancel_target_sub);
       if (remainingActive.length > 0) {
         const subItems = (remainingActive[0].items as { title?: string }[] || []).map(i => i.title || "item").join(", ");
-        response += ` I also noticed you have another active subscription for ${subItems}. Would you like to cancel that one as well?`;
+        response += ` I also noticed you have another active subscription for ${subItems}. Would you like to keep that one running?`;
       }
 
       // Reset playbook step to apply_policy so if customer brings up refund, it resumes there
