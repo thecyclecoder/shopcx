@@ -635,6 +635,184 @@ The architecture supports this naturally: same angle, multiple `sms_series` rows
 
 ---
 
+## 7b. Personalization layer — identification + benefit interests
+
+A campaign that says "Up to 55% off today" lands universally. A campaign that says "Up to 55% off — the natural way to shed pounds" lands harder on someone who told us they care about weight loss. This layer is the substrate that makes that targeting work.
+
+Four components.
+
+### Component 1 — Shortlink session token
+
+Today's shortlinks (`superfd.co/XSM0Q5`) redirect to a target URL with no identity attached. Once we have our own pixel + the storefront we control, every shortlink in a campaign-sent SMS should carry the customer's identity.
+
+**Mechanism:**
+- Each campaign keeps ONE shortlink slug (today's design — don't 138K-multiply per send)
+- The customer-specific identity is a signed token attached as a query param: `superfd.co/XSM0Q5?t=eyJhbG...`
+- Token payload: `{ customer_id, campaign_id, sent_at, device_fp_hash, exp }`, HMAC-signed against an app secret
+- When the customer is enrolled into a campaign send, the per-customer link is built and stored on `sms_campaign_recipients.shortlink_token`
+
+**On click:**
+1. Click handler validates token signature + expiry
+2. If valid: set first-party cookie `sx_customer` with customer_id (60d expiry, SameSite=Lax, HttpOnly, Secure)
+3. Match request's device fingerprint (UA + screen + accept-lang + IP /24) against stored fingerprints on the customer. If match → also set `sx_session_authoritative=1`. If mismatch (forwarded link) → cookie still set but session is not authoritative (no auto-login on portal)
+4. Fire `Shortlink Clicked` event into `storefront_events` with `customer_id` resolved
+5. 302 to the target URL
+
+**Why device-binding matters:** prevents the "customer forwards SMS to spouse → spouse clicks → spouse gets logged in as the customer" scenario. The cookie still identifies the click belongs to that customer (for pixel attribution + popup decisions), but doesn't grant authoritative session access to portal mutations.
+
+**On Shopify today:** the `sx_customer` cookie is readable from our pixel (loaded as a custom script on Shopify theme), so popup decisions can use it.
+**Post-Shopify:** the same cookie powers automatic login to the customer portal — no password entry needed if device fingerprint matches.
+
+### Component 2 — Dual-mode popup
+
+The storefront pixel runs on every page load. On page mount, it inspects identity state and picks one of three modes:
+
+| State | Mode | What shows |
+|---|---|---|
+| Anonymous (no `sx_customer` cookie) | **Signup popup** | "Get 10% off your first order — give us your email and SMS" |
+| Identified, never surveyed (or last survey > 60d ago) | **Survey popup** | "Tell us what you care about — enter to win [prize]" |
+| Identified, recently surveyed | **No popup** | Just track pixel events; no interruption |
+
+Popup frequency caps:
+- Signup popup: max once per 30d per visitor (cookie-based)
+- Survey popup: max once per 60d per identified customer (DB-tracked)
+- Dismiss → respect for 30d (signup) / 14d (survey)
+
+### Component 3 — Benefit survey
+
+A 1-3 question modal. Designed for high completion rate via the prize incentive.
+
+**V1 question:** "Which of these are you working on? Pick all that apply"
+- Weight loss
+- Anti-aging
+- Brain fog / mental clarity
+- Energy
+- Gut health
+- Workout performance
+- Sleep
+- Stress / mood
+- General wellness
+
+**Closer:** "Enter to win [a year of free Superfood Tabs / our Spring sweepstakes prize]"
+
+**Storage:**
+```sql
+ALTER TABLE customers ADD COLUMN health_benefits TEXT[] DEFAULT '{}';
+ALTER TABLE customers ADD COLUMN health_benefits_surveyed_at TIMESTAMPTZ;
+
+CREATE TABLE sweepstakes_entries (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id    UUID NOT NULL,
+  customer_id     UUID NOT NULL REFERENCES customers(id),
+  sweepstakes_id  UUID NOT NULL,
+  entered_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  source          TEXT NOT NULL,            -- 'benefit_survey', 'manual', etc.
+  metadata        JSONB
+);
+```
+
+Submit handler writes the array to `customers.health_benefits`, stamps `health_benefits_surveyed_at`, and inserts the sweepstakes entry. Customer gets a thank-you screen + confirmation that they're entered.
+
+### Component 4 — Benefit-tokenized copy
+
+SMS message bodies and value-track page slugs both support `{primary_benefit}` substitution:
+
+```
+"VIP Sale up to 55% off today only — the natural way to {benefit_action_phrase}"
+```
+
+`{benefit_action_phrase}` maps:
+- `weight_loss` → "shed pounds and feel lighter"
+- `anti_aging` → "look and feel younger"
+- `brain_fog` → "sharpen your focus and clear the fog"
+- `energy` → "feel energized through the day"
+- `gut_health` → "balance your gut and digest with ease"
+- `workout_performance` → "fuel your training and recover faster"
+- `sleep` → "wind down and sleep deeply"
+- `stress` → "calm the noise and steady your mood"
+- `general` → "feel your best every day"
+
+Per-series multi-variant message bodies stored in a new column:
+
+```sql
+ALTER TABLE sms_series_steps ADD COLUMN benefit_variants JSONB;
+-- Shape: { "weight_loss": "Up to 55% off — shed pounds...", "anti_aging": "Up to 55% off — turn back the clock...", "default": "Up to 55% off — feel your best..." }
+```
+
+Render-time picker:
+- Customer has `health_benefits = ['weight_loss', 'energy']` → use `weight_loss` variant (first listed = highest priority)
+- Customer has no benefits set → use `default` variant
+- Customer's primary benefit has no variant defined for this step → fall back to `default`
+
+### Per-(angle, archetype, benefit) attribution
+
+The performance attribution query from § 7 gains a third dimension:
+
+```sql
+SELECT
+  s.angle,
+  e.features_snapshot->>'archetype' AS archetype,
+  e.features_snapshot->>'primary_benefit' AS benefit,
+  COUNT(*) AS enrollments,
+  COUNT(*) FILTER (WHERE e.converted_at IS NOT NULL) AS conversions,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE e.converted_at IS NOT NULL) / COUNT(*), 2) AS conversion_pct
+FROM sms_series_enrollments e
+JOIN sms_series s ON s.id = e.series_id
+WHERE e.enrolled_at >= now() - interval '90 days'
+GROUP BY s.angle, e.features_snapshot->>'archetype', e.features_snapshot->>'primary_benefit'
+ORDER BY conversion_pct DESC;
+```
+
+Now we see things like:
+- `restock_reminder` × `lapsed` × `weight_loss` = 12.4% conversion
+- `restock_reminder` × `lapsed` × `general` = 6.8% conversion
+- `restock_reminder` × `lapsed` × `(no benefit)` = 5.2% conversion
+
+The benefit dimension surfaces *which framings to keep developing and which to retire*. Per § 7's copy-variant guidance — if `weight_loss` cells are winning, spawn 2-3 variants of weight-loss copy within the highest-converting angles and A/B those.
+
+### Coverage trajectory
+
+The benefit survey can't fill the dimension overnight. Realistic coverage:
+- Month 1: ~15-25% of identified customers surveyed (most via shortlink-driven popup)
+- Month 3: ~40-50%
+- Plateau: ~60-70% (rest are pure email-only or click-shy)
+
+Default `general` benefit handles the remaining 30-40%. Performance attribution treats `(no benefit)` as a real cell so we can see how much benefit-tokenized copy actually moves the needle vs unpersonalized.
+
+### Schema additions summary
+
+```sql
+-- Identity
+ALTER TABLE sms_campaign_recipients ADD COLUMN shortlink_token TEXT;
+ALTER TABLE customers ADD COLUMN device_fingerprints JSONB DEFAULT '[]';
+
+-- Benefits
+ALTER TABLE customers ADD COLUMN health_benefits TEXT[] DEFAULT '{}';
+ALTER TABLE customers ADD COLUMN health_benefits_surveyed_at TIMESTAMPTZ;
+
+-- Copy variants
+ALTER TABLE sms_series_steps ADD COLUMN benefit_variants JSONB;
+
+-- Sweepstakes
+CREATE TABLE sweepstakes_entries (...);
+CREATE TABLE sweepstakes (...);  -- prize, period, winner_drawn_at, etc.
+
+-- Popup state (in pixel session table from STOREFRONT.md)
+ALTER TABLE storefront_sessions ADD COLUMN signup_popup_dismissed_at TIMESTAMPTZ;
+ALTER TABLE storefront_sessions ADD COLUMN survey_popup_dismissed_at TIMESTAMPTZ;
+```
+
+### Phase placement
+
+Personalization layer ships in **Phase 3** (after multi-series + sunset is stable). Requires:
+- Storefront pixel must be live (per `STOREFRONT.md`) — currently planned
+- Customer portal authentication via cookie (post-Shopify) — currently planned
+- The benefit survey UI on the storefront — net-new design work
+
+V1 of the benefit survey can ship before the full storefront migration, mounted on Shopify via the pixel script, writing back to our DB. That gives us months of benefit data before the storefront ships, so by the time `/learn` pages and benefit-tokenized SMS go live, we have signal.
+
+---
+
 ## 8. Cross-sell layer (Phase 3)
 
 The same machinery, different trigger:
