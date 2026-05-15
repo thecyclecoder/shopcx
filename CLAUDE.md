@@ -456,6 +456,7 @@ Use `addTicketTag()` from `src/lib/ticket-tags.ts` (idempotent). Use `markFirstT
 | `LOYALTY-SPEC.md` | Loyalty points, redemption tiers, coupon generation |
 | `UNIFIED-HANDLER.md` | Unified ticket handler pipeline documentation |
 | `TEXT-MARKETING.md` | SMS marketing — campaign builder, send pipeline, shortlinks, coupons, Klaviyo data pipeline, predictive segmentation, archetype framework |
+| `PERPETUAL-CAMPAIGNS-SPEC.md` | Roadmap spec — shift from manual campaigns to archetype-driven series engine (daily qualifier + enrollment + multi-step send + sunset) |
 | `APPSTLE-WEBHOOKS.md` | Reference for all Appstle webhook payloads (used by billing forecast + subscription state tracking) |
 
 ## Reseller Defense System (May 2026)
