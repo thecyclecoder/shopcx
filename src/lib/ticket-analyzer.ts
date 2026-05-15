@@ -139,6 +139,59 @@ interface AnalyzeResult {
 }
 
 /**
+ * Build a "playbook context" block for the grader. When a ticket has an
+ * active playbook running, the grader needs to know that the AI's
+ * behavior is constrained by the playbook's documented step sequence
+ * — otherwise it penalizes legitimate playbook execution as if the AI
+ * were just dodging the customer's actual ask.
+ *
+ * Returns null if no playbook is active.
+ */
+async function buildPlaybookContextForGrader(
+  admin: Admin,
+  ticket: { active_playbook_id: string | null; playbook_step: number | null; playbook_context: Record<string, unknown> | null; tags: string[] | null },
+): Promise<string | null> {
+  if (!ticket.active_playbook_id) return null;
+
+  const { data: playbook } = await admin.from("playbooks")
+    .select("name, slug, description")
+    .eq("id", ticket.active_playbook_id)
+    .maybeSingle();
+  if (!playbook) return null;
+
+  const tags = (ticket.tags as string[]) || [];
+  const pbTag = tags.find(t => t.startsWith("pb:")) || `pb:${playbook.slug || "unknown"}`;
+
+  // Playbook-specific context. Some playbooks have intentional "do
+  // something before the obvious ask" steps that the grader needs to
+  // understand. Add per-playbook context as we encounter false-penalty
+  // patterns.
+  const playbookHints: Record<string, string> = {
+    "pb:refund": `The refund playbook is designed to NOT immediately offer a refund. Step 1 is to launch a cancel journey (or, if the sub is already paused, a pause-confirmation message), because sometimes giving the customer control over their subscription resolves their underlying complaint without needing a refund. So if the AI sent a "manage subscription" link or a "would you like to keep your subscription paused" question as its first response to a refund ask, that is the CORRECT playbook step and should NOT be graded as "didn't address the refund." The playbook proceeds to refund handling after the save attempt resolves.`,
+    "pb:replacement_order": `The replacement playbook asks clarifying questions ("did you receive your order? was something missing or damaged?") before issuing a replacement. Those questions are intentional verification steps, not stalling.`,
+    "pb:return_request": `The return-request playbook walks the customer through return eligibility before issuing a label. Questions about order number and product condition are intentional verification steps.`,
+  };
+
+  const hint = playbookHints[pbTag] || `The ticket is following the "${playbook.name}" playbook. Its steps are intentional — don't penalize the AI for executing the playbook's documented behavior.`;
+
+  // Context state from the playbook execution
+  const ctx = (ticket.playbook_context || {}) as Record<string, unknown>;
+  const stateLines: string[] = [];
+  if (ctx.paused_for_cancel) stateLines.push("- Currently waiting for customer to complete the cancel journey");
+  if (ctx.paused_for_pause_confirmation) stateLines.push("- Currently waiting for customer to confirm whether to keep their subscription paused");
+  if (ctx.cancel_journey_completed) stateLines.push("- Cancel journey already completed");
+  if (ctx.cancel_handled) stateLines.push("- Cancel/save step already resolved; refund discussion is the current focus");
+  if (ctx.exception_offered) stateLines.push("- Exception offer already made; waiting on customer acceptance");
+  if (ctx.offer_accepted) stateLines.push("- Customer accepted the exception offer; return is being processed");
+
+  return [
+    `Active playbook: ${playbook.name} (${pbTag}), currently at step ${ticket.playbook_step ?? "?"}.`,
+    hint,
+    stateLines.length ? "\nCurrent playbook state:\n" + stateLines.join("\n") : "",
+  ].filter(Boolean).join("\n");
+}
+
+/**
  * Analyze a single ticket. Returns ok=false with a reason when we
  * intentionally skip (no AI messages, spam tags, etc.) — caller should
  * still mark `last_analyzed_at` so we don't re-check.
@@ -152,7 +205,7 @@ export async function analyzeTicket(
   const admin = createAdminClient();
 
   const { data: ticket } = await admin.from("tickets")
-    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id")
+    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context")
     .eq("id", ticketId).maybeSingle();
   if (!ticket) return { ok: false, reason: "ticket_not_found" };
 
@@ -200,7 +253,15 @@ export async function analyzeTicket(
   const system = await buildGraderSystemPrompt(admin, ticket.workspace_id);
   const conversation = formatMessagesForGrading(msgs);
 
-  const userMsg = `Grade this conversation window. The window covers ${windowStart} → ${windowEnd}.\n\n--- CONVERSATION ---\n${conversation}\n\nReturn the JSON only.`;
+  // ── Playbook context ──
+  // When a ticket is mid-playbook, the AI's behavior is constrained by
+  // the playbook's documented steps. The grader needs to know what step
+  // the playbook is on so it doesn't penalize "didn't directly address
+  // the refund ask" when sending the cancel-journey link is the actual
+  // first step of the refund playbook by design.
+  const playbookContext = await buildPlaybookContextForGrader(admin, ticket);
+
+  const userMsg = `Grade this conversation window. The window covers ${windowStart} → ${windowEnd}.${playbookContext ? `\n\n--- PLAYBOOK CONTEXT ---\n${playbookContext}` : ""}\n\n--- CONVERSATION ---\n${conversation}\n\nReturn the JSON only.`;
 
   // Call Sonnet
   const res = await fetch("https://api.anthropic.com/v1/messages", {

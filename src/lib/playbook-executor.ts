@@ -350,22 +350,68 @@ async function executeStep(
   const cancelPatterns = /\b(cancel|stop charging|stop my subscription|don't want.*subscription|end.*subscription)\b/i;
   const pastStep2 = step.step_order >= 2 || ctx.identified_subscription;
   if (pastStep2 && !ctx.paused_for_cancel && !ctx.cancel_handled && cancelPatterns.test(msg) && step.type !== "cancel_subscription") {
-    // Check subscription status
+    // Check subscription status. The cancel journey is a "save attempt"
+    // step — we only launch it if there's something ACTIVELY billing
+    // the customer that we could pause/skip/change to save them.
+    //
+    // If their only sub(s) are already paused (customer self-paused) or
+    // cancelled, the cancel journey is a wasted step — there's nothing
+    // to save. Skip to the next playbook step (typically apply_policy +
+    // refund handling).
     const identifiedSub = ctx.identified_subscription as string | undefined;
-    const activeSubs = subs.filter(s => s.status === "active" || s.status === "paused");
+    const trulyActiveSubs = subs.filter(s => s.status === "active");
+    const pausedOrCancelledSubs = subs.filter(s => s.status === "paused" || s.status === "cancelled");
     const identifiedSubObj = identifiedSub ? subs.find(s => s.shopify_contract_id === identifiedSub) : null;
     const isAlreadyCancelled = identifiedSubObj?.status === "cancelled";
+    const isAlreadyPaused = identifiedSubObj?.status === "paused";
 
-    if (isAlreadyCancelled && activeSubs.length === 0) {
-      // Sub already cancelled — mark it and fall through to apply_policy
-      // which will show the timeline explaining the charges
+    if (isAlreadyCancelled && trulyActiveSubs.length === 0) {
+      // Sub already cancelled, nothing else active — mark handled and
+      // fall through to apply_policy which shows the timeline explaining
+      // the charges.
       ctx.cancel_handled = true;
       ctx.subscription_cancelled = true;
     }
 
-    if (activeSubs.length > 0) {
+    if (isAlreadyPaused && trulyActiveSubs.length === 0) {
+      // Customer already self-paused their only sub. Launching the
+      // cancel journey is wrong — they've already done the "save
+      // action" themselves. But we shouldn't silently skip either —
+      // we want to CONFIRM that pause is what they want, since some
+      // customers pause when they actually meant to cancel.
+      //
+      // Send a confirmation message + wait for their reply. Their
+      // response routes the playbook from there.
+      const pauseTarget = identifiedSubObj || pausedOrCancelledSubs.find(s => s.status === "paused");
+      const resumeDate = (pauseTarget as { pause_resume_at?: string | null })?.pause_resume_at;
+      const items = (pauseTarget?.items as { title?: string }[] || []).map(i => i.title || "item").join(", ");
+
+      let pauseMessage = `I see you've already paused your ${items || "subscription"}`;
+      if (resumeDate) {
+        const d = new Date(resumeDate);
+        const formatted = d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+        pauseMessage += ` — it's set to resume on ${formatted}. Would you like to keep it paused, or would you rather cancel it entirely?`;
+      } else {
+        pauseMessage += `. Would you like to keep it that way, or would you rather cancel it entirely?`;
+      }
+
+      ctx.paused_for_pause_confirmation = true;
+      ctx.pause_target_sub = pauseTarget?.shopify_contract_id;
+
+      return {
+        action: "respond",
+        response: pauseMessage,
+        context: {
+          paused_for_pause_confirmation: true,
+          pause_target_sub: pauseTarget?.shopify_contract_id,
+        },
+        systemNote: `[Playbook] Subscription #${pauseTarget?.shopify_contract_id} already paused — sending pause-confirmation question instead of cancel journey. Playbook paused waiting for customer response.`,
+      };
+    }
+
+    if (trulyActiveSubs.length > 0) {
       // Has active subs — launch cancel journey
-      const targetSub = identifiedSubObj?.status === "active" ? identifiedSubObj : activeSubs[0];
+      const targetSub = identifiedSubObj?.status === "active" ? identifiedSubObj : trulyActiveSubs[0];
       const targetItems = (targetSub.items as { title?: string }[] || []).map(i => i.title || "item").join(", ");
 
       // Launch the cancel journey
@@ -466,6 +512,65 @@ async function executeStep(
       context: { cancel_journey_launched: true },
       systemNote: `[Playbook] Cancel journey launched. Waiting for completion. No message sent.`,
     };
+  }
+
+  // If playbook is paused waiting for pause-confirmation reply, route
+  // based on the customer's answer.
+  if (ctx.paused_for_pause_confirmation && !ctx.cancel_handled) {
+    const wantsCancel = /\b(cancel|nope|no.*keep|don'?t.*keep|rather cancel|just cancel|fully cancel)\b/i.test(msg);
+    const wantsKeepPaused = /\b(yes|keep.*paus|sure|fine|that('?s)? fine|keep it|leave it|sounds good)\b/i.test(msg);
+
+    if (wantsCancel) {
+      // Customer wants full cancel — launch cancel journey now
+      try {
+        const { data: journeyDef } = await admin.from("journey_definitions")
+          .select("id, name")
+          .eq("workspace_id", wsId)
+          .eq("journey_type", "cancellation")
+          .eq("is_active", true)
+          .limit(1).single();
+        if (journeyDef) {
+          const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
+          await launchJourneyForTicket({
+            workspaceId: wsId, ticketId: tid, customerId: customer.id,
+            journeyId: journeyDef.id, journeyName: journeyDef.name,
+            triggerIntent: "cancel_subscription",
+            channel: (ctx._channel as string) || "email",
+            leadIn: `Got it — here's a link to cancel your subscription.`,
+            ctaText: "Cancel Subscription",
+          });
+          return {
+            action: "respond",
+            context: { paused_for_pause_confirmation: false, paused_for_cancel: true, cancel_target_sub: ctx.pause_target_sub, cancel_journey_launched: true },
+            systemNote: `[Playbook] Customer wants full cancel after pause-confirmation. Launching cancel journey.`,
+          };
+        }
+      } catch (err) {
+        console.error("Failed to launch cancel journey:", err);
+      }
+    }
+
+    if (wantsKeepPaused || !wantsCancel) {
+      // Either explicit "keep paused" or ambiguous — treat as "fine,
+      // pause stands" and proceed to refund handling. The customer's
+      // actual refund ask is the next priority anyway.
+      ctx.cancel_handled = true;
+      ctx.paused_for_pause_confirmation = false;
+      ctx.subscription_already_paused = true;
+      // Reset playbook step to apply_policy so we discuss the refund
+      const applyPolicyStep = allSteps.find(s => s.type === "apply_policy");
+      if (applyPolicyStep) {
+        await admin.from("tickets").update({ playbook_step: applyPolicyStep.step_order }).eq("id", tid);
+      }
+      // Don't send a separate response here — falling through to
+      // apply_policy will produce the right message based on the
+      // policy timeline.
+      return {
+        action: "advance", newStep: applyPolicyStep?.step_order || step.step_order,
+        context: { cancel_handled: true, paused_for_pause_confirmation: false, subscription_already_paused: true },
+        systemNote: `[Playbook] Pause confirmation: customer confirmed (or didn't push for full cancel). Proceeding to apply_policy for refund discussion.`,
+      };
+    }
   }
 
   // ── Global acceptance detection ──
