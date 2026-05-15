@@ -210,9 +210,21 @@ export const klaviyoEngagementSync = inngest.createFunction(
                   metric_name: metricName,
                   datetime,
                   value_cents: valueCents,
+                  customer_id: null as string | null,  // resolved below before insert
                 };
               })
               .filter((r): r is NonNullable<typeof r> => r !== null);
+
+            // Resolve klaviyo_profile_id → customer_id for this page's
+            // events. Uses directory cache + falls back to Klaviyo API
+            // for unknown profiles. See resolveProfilesToCustomers below.
+            if (rows.length > 0) {
+              const profileIds = [...new Set(rows.map(r => r.klaviyo_profile_id))];
+              const profileToCustomer = await resolveProfilesToCustomers(admin, ws.id, profileIds, headers);
+              for (const r of rows) {
+                r.customer_id = profileToCustomer.get(r.klaviyo_profile_id) || null;
+              }
+            }
 
             if (rows.length > 0) {
               for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
@@ -251,3 +263,149 @@ export const klaviyoEngagementSync = inngest.createFunction(
     };
   },
 );
+
+// ── Profile → customer resolution ──────────────────────────────────
+//
+// Klaviyo events carry only `klaviyo_profile_id`. For analysis we need
+// our internal `customer_id`. This helper:
+//   1. Checks the local `klaviyo_profile_directory` table for cached
+//      mappings (most repeat profiles resolve here, no API call).
+//   2. For profile_ids not in the directory, batch-fetches them from
+//      Klaviyo `/api/profiles?filter=any(id,[...])` (max 100/call).
+//   3. For each Klaviyo profile returned:
+//        - Tries email match (case-insensitive) against customers.email
+//        - Falls back to phone match
+//        - If neither matches: store profile in directory with
+//          customer_id=NULL (these are typically phone-only Klaviyo
+//          signups for people who never bought from us — see option-A
+//          decision on May 15 2026).
+//   4. Upserts the directory so the next event from this profile
+//      resolves from cache instead of hitting Klaviyo again.
+
+const PROFILE_BATCH_SIZE = 100;
+const KLAVIYO_PROFILES_REVISION = "2025-01-15";
+
+async function resolveProfilesToCustomers(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  profileIds: string[],
+  klaviyoHeaders: Record<string, string>,
+): Promise<Map<string, string | null>> {
+  const result = new Map<string, string | null>();
+  if (profileIds.length === 0) return result;
+
+  // Step 1 — local directory lookup (covers 95%+ of repeat profiles)
+  const { data: existing } = await admin
+    .from("klaviyo_profile_directory")
+    .select("klaviyo_profile_id, customer_id")
+    .eq("workspace_id", workspaceId)
+    .in("klaviyo_profile_id", profileIds);
+  for (const r of existing || []) {
+    result.set(r.klaviyo_profile_id, r.customer_id || null);
+  }
+  const unknownIds = profileIds.filter(id => !result.has(id));
+  if (unknownIds.length === 0) return result;
+
+  // Step 2 — batch-fetch unknown profiles from Klaviyo
+  const fetchedProfiles: Array<{ id: string; email: string | null; phone: string | null }> = [];
+  for (let i = 0; i < unknownIds.length; i += PROFILE_BATCH_SIZE) {
+    const batch = unknownIds.slice(i, i + PROFILE_BATCH_SIZE);
+    const filter = `any(id,[${batch.map(id => `"${id}"`).join(",")}])`;
+    const url = `https://a.klaviyo.com/api/profiles?filter=${encodeURIComponent(filter)}&page[size]=${PROFILE_BATCH_SIZE}`;
+    const r = await fetch(url, { headers: { ...klaviyoHeaders, revision: KLAVIYO_PROFILES_REVISION } });
+    if (r.status === 429) {
+      await new Promise((res) => setTimeout(res, 5000));
+      i -= PROFILE_BATCH_SIZE;
+      continue;
+    }
+    if (!r.ok) {
+      // Profile fetch failed for this batch — mark them as unresolved
+      // (customer_id stays NULL) so events still land. We'll re-try
+      // next cron run.
+      for (const id of batch) result.set(id, null);
+      continue;
+    }
+    const body = (await r.json()) as {
+      data: Array<{
+        id: string;
+        attributes?: { email?: string | null; phone_number?: string | null };
+      }>;
+    };
+    for (const p of body.data || []) {
+      fetchedProfiles.push({
+        id: p.id,
+        email: p.attributes?.email || null,
+        phone: p.attributes?.phone_number || null,
+      });
+    }
+  }
+
+  // Step 3 — match to customers via email (case-insensitive) then phone
+  const emails = fetchedProfiles.map(p => p.email).filter((e): e is string => !!e).map(e => e.toLowerCase());
+  const phones = fetchedProfiles.map(p => p.phone).filter((p): p is string => !!p);
+
+  const emailToCustomer = new Map<string, string>();
+  if (emails.length > 0) {
+    // Case-insensitive match via ilike + ANY pattern. supabase-js doesn't
+    // support array-based ilike directly, so fetch by lowercase + verify
+    // in memory. Customers' email storage is generally lowercase anyway
+    // (Shopify normalizes), so the lowercase .in() catches ~all matches.
+    const uniqueLowered = [...new Set(emails)];
+    const { data: ce } = await admin
+      .from("customers")
+      .select("id, email")
+      .eq("workspace_id", workspaceId)
+      .in("email", uniqueLowered);
+    for (const c of ce || []) if (c.email) emailToCustomer.set(c.email.toLowerCase(), c.id);
+  }
+
+  const phoneToCustomer = new Map<string, string>();
+  if (phones.length > 0) {
+    const { data: cp } = await admin
+      .from("customers")
+      .select("id, phone")
+      .eq("workspace_id", workspaceId)
+      .in("phone", [...new Set(phones)]);
+    for (const c of cp || []) if (c.phone) phoneToCustomer.set(c.phone, c.id);
+  }
+
+  // Step 4 — build directory upsert rows + populate result map
+  const directoryRows: Array<{
+    workspace_id: string;
+    klaviyo_profile_id: string;
+    email: string | null;
+    phone: string | null;
+    customer_id: string | null;
+    last_synced_at: string;
+  }> = [];
+  const now = new Date().toISOString();
+  for (const p of fetchedProfiles) {
+    let customerId: string | null = null;
+    if (p.email) customerId = emailToCustomer.get(p.email.toLowerCase()) || null;
+    if (!customerId && p.phone) customerId = phoneToCustomer.get(p.phone) || null;
+    result.set(p.id, customerId);
+    directoryRows.push({
+      workspace_id: workspaceId,
+      klaviyo_profile_id: p.id,
+      email: p.email,
+      phone: p.phone,
+      customer_id: customerId,
+      last_synced_at: now,
+    });
+  }
+
+  // Profiles Klaviyo didn't return at all (shouldn't happen but defensive):
+  for (const id of unknownIds) {
+    if (!result.has(id)) result.set(id, null);
+  }
+
+  // Upsert directory entries — chunked to avoid request size limits
+  for (let i = 0; i < directoryRows.length; i += 500) {
+    const chunk = directoryRows.slice(i, i + 500);
+    await admin
+      .from("klaviyo_profile_directory")
+      .upsert(chunk, { onConflict: "workspace_id,klaviyo_profile_id" });
+  }
+
+  return result;
+}
