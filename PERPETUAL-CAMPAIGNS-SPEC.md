@@ -103,15 +103,79 @@ CREATE TABLE sms_series_steps (
 );
 ```
 
+### Series = creative rotation, NOT archetype targeting
+
+The point of having 3-5 series is **rotation, not different audiences**. The same eligible customers cycle through different creative each run so they don't see "Flash Sale!" every weekend. Customer A might see:
+
+- Run 1 (this weekend): Flash Sale creative
+- Run 2 (next weekend): Weekend Only creative
+- Run 3 (weekend after): Founder's Favorite creative
+- Run 4: back to Flash Sale (now meaningfully rotated, doesn't feel repetitive)
+
+The exception is **tiers** — a VIP tier exists because VIPs should get exclusive messaging that non-VIPs don't see. Inside a tier, multiple series rotate.
+
 ### Seeded V1 series
 
-| slug | name | priority | eligibility |
+All series share the same baseline eligibility (`pre_send_orders >= 1 AND sms_marketing_status = 'subscribed' AND no recent cooldown`). The differentiator is the **creative**, plus an optional tier.
+
+| slug | name | tier | hook |
 |---|---|---|---|
-| `flash` | Flash Sale | 100 | `pre_send_orders >= 2 AND replenishment_ratio BETWEEN 0.5 AND 3.0` |
-| `vip` | VIP Sale | 50 | `pre_send_ltv_cents >= 100000 AND active_sub_at_send = true` |
-| `weekend` | Weekend Only | 200 | `pre_send_orders >= 1 AND day_of_week IN (Fri, Sat)` |
+| `flash` | Flash Sale | general | "1 day only — code FL40 for 40% off" — urgency framing |
+| `weekend` | Weekend Only | general | "Weekend pricing — Sat/Sun only" — casual framing |
+| `founders_fave` | Founder's Favorite | general | "Andy's pick of the month, 25% off" — personality framing |
+| `vip` | VIP Sale | vip | "Exclusive for our top customers — early access" — only for VIPs |
+| `comeback` | Come Back Sale | general | "We miss you — special pricing" — lapse-focused framing |
+
+VIP tier filter: `pre_send_ltv_cents >= 100000 AND active_sub_at_send = true`. VIPs are eligible for both the VIP series AND the general rotation; the rotation engine picks one per run, with VIP-tier series getting precedence within their tier.
 
 Day-1/2/3 copy honesty: see § 5 below.
+
+---
+
+## 1b. Rotation engine
+
+The core enrollment question becomes: "of all series this customer is eligible for and hasn't seen recently, which goes out next?"
+
+### Per-customer rotation state
+
+```sql
+CREATE TABLE customer_series_rotation (
+  workspace_id      UUID NOT NULL,
+  customer_id       UUID NOT NULL,
+  series_id         UUID NOT NULL REFERENCES sms_series(id) ON DELETE CASCADE,
+  last_received_at  TIMESTAMPTZ NOT NULL,
+  receive_count     INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (workspace_id, customer_id, series_id)
+);
+```
+
+One row per (customer, series) the customer has been enrolled in. Updated on every enrollment.
+
+### Rotation pick logic
+
+For each candidate customer on enrollment day, in this order:
+
+1. **Filter to eligible series** — series.status='active' AND tier eligibility matches customer's archetype state AND `customer NOT IN customer_series_rotation WHERE last_received_at > now() - tier_rotation_window`
+2. **Rank remaining by `last_received_at` ascending** — never-seen series rank first, oldest-seen series rank second, etc.
+3. **Pick the top** — enroll the customer in that series
+
+This guarantees:
+- Customer sees every series in a tier before repeating
+- Once they've seen all, they get the one they haven't seen in the longest time
+- A new series ships at any time and slots into the rotation naturally
+
+### Tier rotation windows
+
+A series within the "general" tier shouldn't repeat for ≥ N runs. With 4 general series and weekly cadence, full rotation = 4 weeks. So `tier_rotation_window = 4 weeks` for the general tier means a customer cycles through all 4 before any repeats.
+
+```sql
+ALTER TABLE sms_series ADD COLUMN tier TEXT NOT NULL DEFAULT 'general';
+ALTER TABLE sms_series ADD COLUMN tier_rotation_weeks INTEGER NOT NULL DEFAULT 4;
+```
+
+### Priority vs rotation
+
+The `priority` column from § 1 becomes secondary — it only resolves ties when two series within the same tier have identical `last_received_at` (e.g. customer's first-ever enrollment). Use it for "show this newest series first" or "always prefer this when otherwise equal."
 
 ---
 
@@ -206,15 +270,16 @@ CREATE INDEX ON sms_series_enrollments (next_send_at) WHERE status = 'active';
 CREATE INDEX ON sms_series_enrollments (workspace_id, customer_id);
 ```
 
-### Conflict resolution: multi-series qualification
+### Conflict resolution: multi-series eligibility via rotation
 
-A customer may match `flash` + `vip` + `weekend` on the same day. Rules:
+A customer is typically eligible for multiple series (since they share the baseline eligibility rule). Pick via the rotation logic from § 1b:
 
-1. Single-flight: customer can only be `active` in ONE series at a time.
-2. Priority order: lowest `priority` value wins. (`vip` priority=50 beats `flash` priority=100.)
-3. If they don't qualify for VIP next time, they get Flash next.
+1. **Single-flight** — customer can only be `active` in ONE series at a time. If they have an active enrollment, no new one is created.
+2. **Tier filter first** — VIPs get VIP-tier series picked over general-tier when both apply. Non-VIPs only see general.
+3. **Within a tier, rotate by `last_received_at`** — never-seen series first, then longest-not-seen. This is what makes "Flash → Weekend → Founder's Favorite → Flash" feel intentional rather than spammy.
+4. **`priority` is a tiebreaker** — only matters when two series have identical rotation state (e.g. first-ever enrollment for a new customer).
 
-The qualifier writes to `customer_archetype_state` once; the enrollment engine respects priority when picking which series to enroll into.
+The qualifier writes archetype state daily; the enrollment engine joins it with `customer_series_rotation` to pick the right next-in-rotation series per customer.
 
 ---
 
@@ -252,6 +317,82 @@ The "Sale extended!" framing is the trickiest copy. Three options ranked by inte
 3. **(Avoid)** Day 3 fires unconditionally with "Extended one more day!" — script-y, savvy customers will catch on.
 
 Recommend (1) when feasible; (2) as default fallback.
+
+---
+
+## 5b. Smart sending
+
+Three layers of intelligence on top of basic enrollment + send. Each is independent — they compose.
+
+### Per-customer optimal send time
+
+11 AM local is a global default; customers don't all click at 11. We compute per customer (during the daily qualifier) the modal hour-of-day and day-of-week of their engagement:
+
+- `optimal_click_hour` — mode of (datetime hour, local time) for Clicked SMS + Clicked Email events in last 180d
+- `optimal_purchase_hour` — mode of (datetime hour, local time) for Placed Order events in last 180d
+- `optimal_dow` — mode of day-of-week of any of the above
+
+Stored in `customer_archetype_state.features` as a sub-object:
+
+```json
+{
+  "optimal_click_hour": 19,
+  "optimal_purchase_hour": 20,
+  "optimal_dow": 6,
+  "send_time_sample_size": 12
+}
+```
+
+When scheduling the next step send for an enrollment, use the customer's `optimal_click_hour` if `send_time_sample_size >= 3`. Otherwise fall back to the series step's `target_local_hour`. This is Klaviyo's "Smart Send Time" feature, but built on our own data.
+
+### Payday-aware scheduling
+
+Dunning already encodes this (`src/lib/dunning.ts`) — retries fire on 1st, 15th, Fridays, last business day of the month at 7 AM Central. Same money-availability logic applies to marketing: people are more receptive to "spend" messages when their accounts have just been replenished.
+
+Make this a per-series opt-in via a new column:
+
+```sql
+ALTER TABLE sms_series ADD COLUMN payday_aware BOOLEAN NOT NULL DEFAULT false;
+```
+
+Recommended defaults:
+- `flash` — `payday_aware = true`
+- `vip` — `payday_aware = true`
+- `weekend` — `payday_aware = true` (Fridays already line up; explicit flag means the system would also pick up 1st/15th when they fall mid-week)
+- Cross-sell series — `payday_aware = false` (these are behavioral triggers tied to a recent order, not money triggers)
+
+**Enrollment logic when `payday_aware = true`:**
+
+```
+nearest_payday = next of: today (if payday), or 1st, 15th, Friday, last-biz-day in the next 3 days
+IF nearest_payday is within 3 days:
+  enroll, schedule Day 0 send for nearest_payday at customer's optimal_click_hour
+ELSE:
+  defer enrollment by 1 day, re-check tomorrow
+```
+
+So a customer who qualifies on a Monday for a payday-aware series sits in the qualifier pool until Friday, when they enroll and the 3-day arc starts. Day 1 = Friday, Day 2 = Saturday, Day 3 = Sunday — perfect weekend buying window.
+
+### Multi-archetype lockout (hardened single-flight)
+
+The spec already states a customer can only be `active` in ONE series at a time. We extend that with a **post-completion lockout**: once a customer completes (or converts on) any series, they're locked out of *all* series for `global_lockout_days` (default 14d), regardless of which archetypes they currently fit.
+
+This prevents the "VIP today, Flash tomorrow, Weekend Friday" runaway when overlapping archetypes change quickly.
+
+```sql
+ALTER TABLE sms_series_suppressions ADD COLUMN reason_type TEXT NOT NULL DEFAULT 'series_specific';
+-- 'global_lockout' = suppress all series; 'series_specific' = only this one
+```
+
+On completion, the enrollment engine writes a `global_lockout` suppression row covering all series for that customer for the lockout window.
+
+### Implementation order within Phase 2
+
+1. Smart send time computation — adds ~50 lines to the qualifier cron
+2. Payday-aware enrollment — small change to enrollment logic + the new `payday_aware` column
+3. Global lockout — extension of existing suppression table
+
+All three are inexpensive to add and dramatically improve the engine's hit rate without making the architecture more complex.
 
 ---
 
