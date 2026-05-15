@@ -255,6 +255,23 @@ export async function analyzeTicket(
     return { ok: false, reason: "parse_failed" };
   }
 
+  // ── Deterministic post-grader checks ──
+  // The AI grader sees the conversation transcript but can't query the
+  // DB. Some failures are only visible if you cross-reference what the
+  // AI claimed in the thread against current state. Run those here and
+  // inject findings into `analysis.issues` + cap the score so severity
+  // routing catches them.
+  const cancelCheck = await detectUnfulfilledCancelClaim(admin, ticket.id, ticket.customer_id, msgs);
+  if (cancelCheck) {
+    analysis.issues = [cancelCheck, ...(analysis.issues || [])];
+    analysis.score = Math.min(analysis.score, 3); // catastrophic — broken cancel promise
+    if (analysis.summary && !/cancel/i.test(analysis.summary)) {
+      analysis.summary = `Cancel journey reported success but subscription remains active. ${analysis.summary}`;
+    } else if (!analysis.summary) {
+      analysis.summary = "Cancel journey reported success but subscription remains active — agent must manually cancel.";
+    }
+  }
+
   // Insert the analysis row
   const { data: inserted } = await admin.from("ticket_analyses").insert({
     workspace_id: ticket.workspace_id,
@@ -282,6 +299,114 @@ export async function analyzeTicket(
   await applySeverityActions(admin, ticket.id, ticket.workspace_id, ticket.customer_id, analysis, msgs, inserted?.id);
 
   return { ok: true, analysis, cost_cents: costCents, ai_message_count: aiMessageCount };
+}
+
+/**
+ * Did the system tell the customer their subscription was cancelled
+ * while the underlying contract is still active in our DB? This bug
+ * pattern (cancel journey claims success, Appstle was never called)
+ * burned 15+ customers in mid-May 2026 — see commit 5e879e2 for the
+ * underlying fix. This detector catches it post-hoc on any new ticket
+ * so it can't recur silently.
+ *
+ * Cross-references:
+ *   - The conversation has a "cancel completed" indicator (from
+ *     either the journey or the AI)
+ *   - The customer's intended target sub (resolved via journey session
+ *     or by single-active fallback) is still status='active'
+ *
+ * Returns a `broken_action` issue when fired; null otherwise.
+ */
+async function detectUnfulfilledCancelClaim(
+  admin: Admin,
+  ticketId: string,
+  customerId: string | null,
+  msgs: MessageRow[],
+): Promise<{ type: string; description: string } | null> {
+  if (!customerId) return null;
+
+  // Look for cancel-claim signals in the window
+  const cancelClaimSignals = [
+    /Your subscription has been cancelled/i,
+    /Cancel journey completed/i,
+    /\bI(?:'ve|\s+have)\s+cancelled?\s+your\s+subscription/i,
+    /\bsubscription\s+(?:is\s+now\s+|has\s+been\s+)?cancelled\b/i,
+  ];
+  const hasClaim = (msgs || []).some(m => {
+    const txt = (m.body || "").replace(/<[^>]+>/g, " ");
+    return cancelClaimSignals.some(rx => rx.test(txt));
+  });
+  if (!hasClaim) return null;
+
+  // Find the cancel journey session for this ticket (most recent)
+  const { data: sessions } = await admin.from("journey_sessions")
+    .select("id, subscription_id, responses, config_snapshot, outcome")
+    .eq("ticket_id", ticketId)
+    .order("created_at", { ascending: false });
+
+  let intendedContractId: string | null = null;
+  let intendedSubId: string | null = null;
+  for (const s of sessions || []) {
+    const jt = (s.config_snapshot as Record<string, unknown> | null)?.journeyType as string | undefined;
+    if (jt && /cancel/i.test(jt) && s.outcome === "cancelled") {
+      // Strategy 1: select_subscription response
+      const sel = (s.responses as Record<string, { value?: string }> | null)?.select_subscription?.value;
+      if (sel) {
+        intendedSubId = sel;
+        const { data: sub } = await admin.from("subscriptions").select("shopify_contract_id").eq("id", sel).maybeSingle();
+        if (sub) intendedContractId = sub.shopify_contract_id;
+      }
+      // Strategy 2: session.subscription_id
+      if (!intendedSubId && s.subscription_id) {
+        intendedSubId = s.subscription_id;
+        const { data: sub } = await admin.from("subscriptions").select("shopify_contract_id").eq("id", s.subscription_id).maybeSingle();
+        if (sub) intendedContractId = sub.shopify_contract_id;
+      }
+      break;
+    }
+  }
+
+  // Resolve the customer's linked group
+  const linkedIds = [customerId];
+  const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", customerId).maybeSingle();
+  if (link?.group_id) {
+    const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
+    for (const g of grp || []) if (!linkedIds.includes(g.customer_id)) linkedIds.push(g.customer_id);
+  }
+
+  // Strategy 3: if no intended target known, fall back to "customer has exactly one active sub"
+  if (!intendedSubId) {
+    const { data: active } = await admin.from("subscriptions")
+      .select("id, shopify_contract_id, status").in("customer_id", linkedIds).eq("status", "active");
+    if ((active || []).length === 1) {
+      intendedSubId = active![0].id;
+      intendedContractId = active![0].shopify_contract_id;
+    } else if ((active || []).length > 1) {
+      // Ambiguous — but if a cancel claim was made AND the customer has multiple active subs,
+      // that's also suspicious. Flag it as ambiguous so an agent reviews.
+      return {
+        type: "broken_action",
+        description: `Cancel completion message was sent but the target subscription is ambiguous — customer has ${active!.length} active subs and the journey session has no resolved target. Possible silent no-op from the pre-5e879e2 cancel handler bug. Agent must verify the intended sub was cancelled.`,
+      };
+    } else {
+      // No active subs left — cancel probably worked through some other path
+      return null;
+    }
+  }
+
+  // Check if the intended target is still active
+  if (intendedSubId) {
+    const { data: sub } = await admin.from("subscriptions")
+      .select("status, shopify_contract_id").eq("id", intendedSubId).maybeSingle();
+    if (sub?.status === "active") {
+      return {
+        type: "broken_action",
+        description: `Customer was told their subscription was cancelled, but contract ${sub.shopify_contract_id || intendedContractId} is still active in our DB. The Appstle cancel call did not fire (or did fire but the webhook hasn't synced). This is the cancel-journey silent-no-op pattern fixed in commit 5e879e2 — but verify in case it recurred.`,
+      };
+    }
+  }
+
+  return null;
 }
 
 /**
