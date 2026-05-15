@@ -233,13 +233,50 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     } catch { /* non-fatal */ }
   }
 
+  // Resolve oldVariants from the subscription's pre-swap state if the
+  // client only sent oldLineId (or if oldVariants was empty). Without
+  // this, the customer_event has newVariants but no record of what was
+  // swapped FROM — and downstream timeline/anomaly detectors can't
+  // describe the change without joining to earlier events.
+  let resolvedOldVariants: Array<{ variant_id: string; sku?: string | null; title?: string | null; variant_title?: string | null; quantity?: number }> = [];
+  if (oldVariants.length || oldLineId) {
+    try {
+      const adminDb = createAdminClient();
+      const { data: subData } = await adminDb.from("subscriptions")
+        .select("items").eq("shopify_contract_id", String(contractId)).single();
+      const items = (subData?.items as Array<{ variant_id?: string; line_id?: string; sku?: string; title?: string; variant_title?: string; quantity?: number }>) || [];
+
+      if (oldVariants.length) {
+        const wanted = new Set(oldVariants.map(String));
+        for (const it of items) {
+          if (it.variant_id && wanted.has(String(it.variant_id))) {
+            resolvedOldVariants.push({ variant_id: String(it.variant_id), sku: it.sku || null, title: it.title || null, variant_title: it.variant_title || null, quantity: it.quantity || 1 });
+          }
+        }
+      } else if (oldLineId) {
+        const rawLineId = oldLineId.startsWith("gid://") ? oldLineId.split("/").pop() : oldLineId;
+        const lineItem = items.find(i => i.line_id === rawLineId || i.line_id === oldLineId);
+        if (lineItem?.variant_id) {
+          resolvedOldVariants.push({ variant_id: String(lineItem.variant_id), sku: lineItem.sku || null, title: lineItem.title || null, variant_title: lineItem.variant_title || null, quantity: lineItem.quantity || 1 });
+        }
+      }
+    } catch { /* non-fatal — event still logs with the legacy shape */ }
+  }
+
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
   if (customer) {
     await logPortalAction({
       workspaceId: auth.workspaceId, customerId: customer.id,
       eventType: "portal.items.swapped",
       summary: "Customer swapped subscription items via portal",
-      properties: { shopify_contract_id: String(contractId), oldVariants, newVariants },
+      properties: {
+        shopify_contract_id: String(contractId),
+        oldVariants,
+        newVariants,
+        // Enriched detail for timeline / anomaly detection. `oldVariants`
+        // stays for back-compat; `oldVariantDetails` is the rich shape.
+        oldVariantDetails: resolvedOldVariants,
+      },
       createNote: true,
     });
   }

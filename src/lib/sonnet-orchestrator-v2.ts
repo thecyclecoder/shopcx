@@ -12,6 +12,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { retrieveContext } from "@/lib/rag";
 import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, OPUS_MODEL } from "@/lib/ai-models";
+import { buildCustomerTimeline, timelineToText } from "@/lib/customer-timeline";
 
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
@@ -71,6 +72,11 @@ function buildToolDefinitions() {
     {
       name: "get_customer_account",
       description: "Get customer's subscriptions, recent orders, loyalty points, unused coupons, and linked accounts. Use when the customer's question involves their account, subscription, orders, billing, or loyalty.",
+      input_schema: { type: "object" as const, properties: {}, required: [] as string[] },
+    },
+    {
+      name: "get_customer_timeline",
+      description: "Get a chronological 60-day timeline of orders, fulfillments, subscription changes (variant swaps, pauses, frequency changes), payments, and returns — PLUS pre-computed anomaly flags that surface contradictions between customer narrative and ground truth (e.g. 'subscription was changed after order entered fulfillment'). USE THIS FIRST whenever the customer says something that contradicts what they expect: 'I didn't order X', 'I changed it but...', 'why am I being charged', 'where's my order', 'I cancelled but...'. The anomalies section will save you from accepting a wrong customer framing.",
       input_schema: { type: "object" as const, properties: {}, required: [] as string[] },
     },
     {
@@ -337,6 +343,10 @@ export async function executeToolCall(
     switch (name) {
       case "get_customer_account":
         return await getCustomerAccount(admin, workspaceId, customerId);
+      case "get_customer_timeline": {
+        const t = await buildCustomerTimeline(workspaceId, customerId);
+        return timelineToText(t);
+      }
       case "get_product_knowledge":
         return await getProductKnowledge(admin, workspaceId, (input?.query as string) || "");
       case "get_returns":

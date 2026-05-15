@@ -216,7 +216,23 @@ export default function TicketDetailPage() {
   const [replyMode, setReplyMode] = useState<"external" | "internal">("external");
   const [sending, setSending] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"messages" | "history" | "improve" | "api_logs">("messages");
+  const [activeTab, setActiveTab] = useState<"messages" | "timeline" | "history" | "improve" | "api_logs">("messages");
+  const [timeline, setTimeline] = useState<{
+    customer: { id: string; email: string | null; name: string | null };
+    window_days: number;
+    current_state: {
+      active_subscriptions: number;
+      paused_subscriptions: number;
+      cancelled_subscriptions: number;
+      orders_in_window: number;
+      open_returns: number;
+      ltv_cents: number;
+      retention_score: number | null;
+    };
+    anomalies: Array<{ type: string; severity: string; summary: string; evidence?: Record<string, unknown> }>;
+    timeline: Array<{ at: string; type: string; summary: string; ref?: string; confidence?: string }>;
+  } | null>(null);
+  const [timelineLoading, setTimelineLoading] = useState(false);
   const [apiLogs, setApiLogs] = useState<{
     id: string;
     action_type: string;
@@ -529,6 +545,17 @@ export default function TicketDetailPage() {
       .then((data) => { if (Array.isArray(data)) setCustomerEvents(data); })
       .catch(() => {});
   }, [activeTab, customer?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch customer timeline when timeline tab is selected
+  useEffect(() => {
+    if (activeTab !== "timeline" || timeline) return;
+    setTimelineLoading(true);
+    fetch(`/api/tickets/${id}/timeline`)
+      .then((res) => res.ok ? res.json() : null)
+      .then((data) => { if (data) setTimeline(data); })
+      .catch(() => {})
+      .finally(() => setTimelineLoading(false));
+  }, [activeTab, id, timeline]);
 
   const handleOrderAction = async (order: RecentOrder, action: string, payload: Record<string, unknown>) => {
     setOrderActionLoading(true);
@@ -1090,6 +1117,21 @@ export default function TicketDetailPage() {
               Messages
             </button>
             <button
+              onClick={() => setActiveTab("timeline")}
+              className={`pb-2 text-sm font-medium transition-colors ${
+                activeTab === "timeline"
+                  ? "border-b-2 border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400"
+                  : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+              }`}
+            >
+              Timeline
+              {timeline && timeline.anomalies.length > 0 && (
+                <span className="ml-1.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-bold text-white">
+                  {timeline.anomalies.length}
+                </span>
+              )}
+            </button>
+            <button
               onClick={() => setActiveTab("history")}
               className={`pb-2 text-sm font-medium transition-colors ${
                 activeTab === "history"
@@ -1337,6 +1379,101 @@ export default function TicketDetailPage() {
             })()}
             <div ref={messagesEndRef} />
           </div>}
+
+          {/* Timeline tab */}
+          {activeTab === "timeline" && (
+            <div className="mt-4 space-y-4">
+              {timelineLoading && (
+                <p className="py-8 text-center text-sm text-zinc-400">Loading timeline…</p>
+              )}
+              {!timelineLoading && !timeline && (
+                <p className="py-8 text-center text-sm text-zinc-400">No timeline available for this ticket.</p>
+              )}
+              {timeline && (
+                <>
+                  {/* Anomalies — surfaced first, like the orchestrator sees them */}
+                  {timeline.anomalies.length > 0 && (
+                    <div className="space-y-2">
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-amber-700 dark:text-amber-400">
+                        Flagged ({timeline.anomalies.length})
+                      </h3>
+                      {timeline.anomalies.map((a, i) => (
+                        <div key={i} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 dark:border-amber-900/50 dark:bg-amber-900/20">
+                          <div className="flex items-start gap-2">
+                            <span className="mt-0.5 inline-block h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400">⚑</span>
+                            <div className="min-w-0 flex-1">
+                              <p className="font-mono text-[11px] uppercase text-amber-700 dark:text-amber-400">{a.type}</p>
+                              <p className="mt-0.5 text-sm text-zinc-800 dark:text-zinc-200">{a.summary}</p>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Current state strip */}
+                  <div className="grid grid-cols-2 gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2.5 text-sm dark:border-zinc-800 dark:bg-zinc-900 sm:grid-cols-4">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wider text-zinc-400">Active subs</p>
+                      <p className="font-semibold text-zinc-900 dark:text-zinc-100">{timeline.current_state.active_subscriptions}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wider text-zinc-400">Orders ({timeline.window_days}d)</p>
+                      <p className="font-semibold text-zinc-900 dark:text-zinc-100">{timeline.current_state.orders_in_window}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wider text-zinc-400">LTV</p>
+                      <p className="font-semibold text-zinc-900 dark:text-zinc-100">${(timeline.current_state.ltv_cents / 100).toFixed(0)}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wider text-zinc-400">Retention</p>
+                      <p className="font-semibold text-zinc-900 dark:text-zinc-100">{timeline.current_state.retention_score ?? "—"}</p>
+                    </div>
+                  </div>
+
+                  {/* Chronological event list */}
+                  <div>
+                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                      Last {timeline.window_days} days
+                    </h3>
+                    <div className="space-y-2">
+                      {timeline.timeline.length === 0 ? (
+                        <p className="py-8 text-center text-sm text-zinc-400">No activity in this window.</p>
+                      ) : (
+                        timeline.timeline.map((e, i) => {
+                          const dot =
+                            e.type.startsWith("order_") ? "bg-blue-400" :
+                            e.type.startsWith("subscription_") ? "bg-violet-400" :
+                            e.type.startsWith("payment_") ? "bg-emerald-400" :
+                            e.type.startsWith("return_") ? "bg-amber-400" :
+                            e.type === "portal_login" ? "bg-zinc-400" :
+                            e.type === "ticket_created" ? "bg-rose-400" :
+                            "bg-zinc-300";
+                          return (
+                            <div key={i} className="flex items-start gap-3 rounded-lg border border-zinc-200 bg-white px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-900">
+                              <div className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${dot}`} />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm text-zinc-800 dark:text-zinc-200">{e.summary}</p>
+                                <div className="mt-0.5 flex items-center gap-2 text-xs text-zinc-400">
+                                  <span>{formatDateTime(e.at)}</span>
+                                  {e.ref && <span className="font-mono">{e.ref}</span>}
+                                  {e.confidence === "reconstructed" && (
+                                    <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-zinc-500 dark:bg-zinc-800">
+                                      reconstructed
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           {/* History tab */}
           {activeTab === "history" && (

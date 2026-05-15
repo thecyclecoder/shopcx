@@ -307,7 +307,19 @@ async function handleSubscriptionEvent(
       shopify_contract_id: contractId,
       status,
       next_billing_date: data.nextBillingDate,
-      items: items.map(i => i.title).filter(Boolean),
+      // Rich item shape — variant_id, sku, variant_title, qty, price.
+      // Downstream timeline/anomaly detectors need this to describe what
+      // changed without joining back to the subscriptions table.
+      items: items.map(i => ({
+        variant_id: i.variant_id || null,
+        sku: i.sku || null,
+        title: i.title || null,
+        variant_title: i.variant_title || null,
+        quantity: i.quantity || 1,
+        price_cents: i.price_cents || 0,
+      })),
+      billing_interval: billingPolicy?.interval?.toLowerCase() || null,
+      billing_interval_count: billingPolicy?.intervalCount || null,
     },
   });
 
