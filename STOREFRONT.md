@@ -83,7 +83,9 @@ Already shipped, no Shopify dependencies in this layer.
 | 6 | `order_placed` | Server-confirmed payment success | `{ order_id, total_cents, currency }` |
 
 ### Identity stitching
-Three trigger points; all run the same SQL backfill:
+Two complementary mechanisms keep customer_id attribution correct as we learn more about each visitor:
+
+**1. Anonymous-id backfill** (legacy, broad strokes — same `anonymous_id` cookie across all visits in 365d):
 
 ```sql
 UPDATE storefront_sessions SET customer_id = $1, updated_at = now()
@@ -93,12 +95,20 @@ UPDATE storefront_events SET customer_id = $1
   WHERE workspace_id = $2 AND anonymous_id = $3 AND customer_id IS NULL;
 ```
 
-Triggers:
-1. **Lead capture** — `POST /api/lead` matches email/phone against `customers` or creates a new one (with `subscription_status='never'`), then backfills.
-2. **Checkout** — Braintree returns a successful transaction, customer record is finalized, backfill runs.
-3. **Logged-in account view** (future) — auth cookie identifies session immediately.
+**2. Device-fingerprint ground-truth backfill** (newer, sharper — see `PERPETUAL-CAMPAIGNS-SPEC.md` § 7b "Identity bootstrap"):
+
+When a customer browses across devices or clears cookies, the anonymous_id backfill misses them. But device fingerprint hash (UA + screen + accept-lang + IP /24) recurs across visits. A ground-truth event (purchase, portal login) anchors a device → customer pairing and retroactively attributes 90d of prior events on that fingerprint to that customer.
+
+Both mechanisms run on the same triggers:
+
+1. **Lead capture** — `POST /api/lead` matches email/phone against `customers` or creates a new one (with `subscription_status='never'`), then backfills both ways.
+2. **Checkout** — Braintree returns a successful transaction, customer record is finalized, both backfills run.
+3. **Shortlink click** — resolves `customers.short_code` from the URL, sets `sx_customer` cookie. Events forward of this point are attributed by cookie; past anonymous events are NOT backfilled by shortlink alone (shortcode-derived identity is medium-confidence; a deliberate-paste in incognito would falsely attribute Dylan's past sessions otherwise). Backfill happens only when a ground-truth event from the same fingerprint confirms the identity.
+4. **Portal login** (post-Shopify) — authoritative auth, runs both backfills.
 
 Per the design: **a lead IS a customer** with no orders. We don't keep a parallel lead concept — the Sonnet orchestrator, AI dashboard, segmentation, etc. all work for leads the moment they sign up.
+
+Storefront events also carry `identity_source` (`shortcode` | `cookie` | `purchase` | `portal_login` | `form_submit` | `backfilled_*`) so analytics queries can filter to high-confidence attribution when needed (archetype scoring, conversion attribution) while still using all events for raw funnel volume.
 
 ### Retention
 - Raw `storefront_events`: **90 days**, cleared by a daily Inngest cron.

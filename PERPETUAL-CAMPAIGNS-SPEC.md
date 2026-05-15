@@ -763,6 +763,98 @@ Mitigation: 18-month total lease window (180d active + 365d grace). An SMS that 
 - Or bulk backfill: one-shot script populates all existing customers with codes (~287 retries on 138K bulk gen, runs in seconds)
 - Once set, never changes. Customer keeps their code forever.
 
+#### Identity bootstrap: ground-truth events backfill device trust
+
+The shortcode + customer-code design gets a customer's identity into events from their very first click. But two things are still unknown at click time:
+1. Whether the click is from the actual customer or someone with their code (incognito paste, shoulder-surf)
+2. Which devices belong to which customer (no pre-registered fingerprints when we launch)
+
+We solve both by treating **ground-truth events** as anchors that retroactively sharpen identity attribution. Forward-only verification (require fingerprint match before trusting) doesn't work because we have no fingerprints to match against at launch.
+
+**Every `storefront_events` row records:**
+
+```sql
+ALTER TABLE storefront_events ADD COLUMN device_fingerprint_hash VARCHAR(32);
+ALTER TABLE storefront_events ADD COLUMN ip_address INET;  -- 90d retention, abuse signals only
+ALTER TABLE storefront_events ADD COLUMN identity_source TEXT;
+  -- One of: 'shortcode' | 'cookie' | 'purchase' | 'portal_login' | 'form_submit' | 'backfilled_*'
+```
+
+**Ground-truth events** that establish (device, customer) trust:
+
+| Event | Strength | Why |
+|---|---|---|
+| Purchase | strongest | Real money, real shipping address, real payment method tied to a customer |
+| Portal login (post-Shopify) | strong | Authoritative session via cookie auth |
+| Confirmed form submit | medium | Email signup with verified confirmation |
+| Survey submit | medium | Identified via existing customer cookie + active session |
+
+When any of these fires, two things happen:
+
+**Step 1 — Backfill past events from this device to this customer:**
+
+```sql
+UPDATE storefront_events
+SET customer_id = :verified_customer_id,
+    identity_source = 'backfilled_' || COALESCE(identity_source, 'anonymous')
+WHERE device_fingerprint_hash = :current_event_fp
+  AND created_at > now() - interval '90 days'
+  AND (customer_id IS NULL OR customer_id <> :verified_customer_id);
+```
+
+A customer who browsed anonymously for 30 days, clicked a shortlink on day 25, finally bought on day 30 — all 30 days of pre-purchase events retroactively attribute to them. Archetype scoring, engagement features, abandoned-cart triggers become correct as of the purchase moment, not just the purchase event itself.
+
+**Step 2 — Add this device to the customer's trusted fingerprints:**
+
+```sql
+UPDATE customers
+SET device_fingerprints = device_fingerprints || jsonb_build_object(
+  'hash', :current_event_fp,
+  'first_seen', :first_event_at,  -- earliest event from this fp
+  'verified_via', :ground_truth_event_type,  -- 'purchase' | 'portal_login' | ...
+  'verified_at', now()
+)
+WHERE id = :verified_customer_id;
+```
+
+Going forward, that fingerprint is trusted for that customer. Subsequent clicks/views from the same device need no further verification.
+
+#### What this gives up vs. binary verified flag
+
+Real-time event data is slightly fuzzier — some events have a `customer_id` attribution that's later corrected. Analytics queries that need high confidence filter on `identity_source`:
+
+```sql
+-- High-confidence events for archetype scoring / conversion attribution
+WHERE customer_id IS NOT NULL
+  AND identity_source IN ('purchase', 'portal_login', 'backfilled_purchase', 'backfilled_portal_login')
+
+-- All events for funnel volume / traffic rollups (raw counts)
+WHERE customer_id IS NOT NULL  -- or NULL if anonymous traffic
+```
+
+No `is_verified` column needed. The lineage in `identity_source` is the audit trail.
+
+#### Incognito-paste scenario revisited
+
+Someone shoulder-surfs a customer's SMS and pastes `superfd.co/ASDF/7K2m9` in incognito:
+
+- Events fire with `customer_id = original_customer_id`, `identity_source = 'shortcode'`
+- They never buy, never log in → events stay attributed to that customer
+- That customer's archetype gets a small false-positive engagement bump
+- **Acceptable noise floor** — at any realistic scale the volume of deliberate code-paste abuse is rounding error
+
+If the incognito visitor DOES buy (under their own name):
+- Their purchase event resolves to a different customer (via checkout email/payment)
+- The backfill kicks in: "this fingerprint just verified as customer M, not D"
+- Past events on that fingerprint re-attribute to M
+- D's data self-corrects, removing the noise
+
+System self-corrects when ground-truth catches up to the misattribution.
+
+#### Pixel + IP retention
+
+`ip_address` is stored on every event for abuse / fraud / device-grouping signals, but retained only 90 days (per `STOREFRONT.md` privacy conventions). After 90d, the IP gets nulled but the rest of the event row stays for analytics. The device_fingerprint_hash is non-PII and stays indefinitely.
+
 ### Component 2 — Dual-mode popup
 
 The storefront pixel runs on every page load. On page mount, it inspects identity state and picks one of three modes:
@@ -903,8 +995,18 @@ ALTER TABLE customers ADD COLUMN short_code VARCHAR(5);  -- ~33M namespace
 CREATE UNIQUE INDEX customers_short_code_idx
   ON customers (workspace_id, short_code) WHERE short_code IS NOT NULL;
 
--- Device fingerprints for portal auto-login (post-Shopify)
+-- Device fingerprints — accumulated via ground-truth backfill
+-- Shape: [{hash, first_seen, verified_via, verified_at}, ...]
 ALTER TABLE customers ADD COLUMN device_fingerprints JSONB DEFAULT '[]';
+
+-- Storefront events get device + identity lineage for backfill
+ALTER TABLE storefront_events ADD COLUMN device_fingerprint_hash VARCHAR(32);
+ALTER TABLE storefront_events ADD COLUMN ip_address INET;  -- 90d retention
+ALTER TABLE storefront_events ADD COLUMN identity_source TEXT;
+  -- 'shortcode' | 'cookie' | 'purchase' | 'portal_login' | 'form_submit' | 'backfilled_*'
+CREATE INDEX storefront_events_fp_idx
+  ON storefront_events (workspace_id, device_fingerprint_hash, created_at DESC)
+  WHERE device_fingerprint_hash IS NOT NULL;
 
 -- Benefits
 ALTER TABLE customers ADD COLUMN health_benefits TEXT[] DEFAULT '{}';
