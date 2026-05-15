@@ -44,12 +44,12 @@ const METRICS = [
   "Active on Site",
 ] as const;
 
-// Last-resort metric IDs per workspace. Klaviyo's /api/metrics endpoint
-// can return 0 rows for accounts with permission quirks, and the
-// fallback profile-event probe can miss metrics if the seed profile
-// doesn't have an event of that metric. Hardcoded IDs win when both
-// resolution paths fail. Add new workspaces as we onboard them.
-const FALLBACK_METRIC_IDS: Record<string, Record<string, string>> = {
+// Metric IDs per workspace. Hardcoded by design — Klaviyo's /api/metrics
+// endpoint is unreliable for this account (it's what took the original
+// backfill Inngest function down; the local script bypassed it via a
+// fixed map and that's what actually worked). Add new workspaces as we
+// onboard them.
+const METRIC_IDS_BY_WORKSPACE: Record<string, Record<string, string>> = {
   "fdc11e10-b89f-4989-8b73-ed6526c4d906": {
     "Clicked SMS": "XguEVT",
     "Opened Email": "P6RT4W",
@@ -63,13 +63,15 @@ const FALLBACK_METRIC_IDS: Record<string, Record<string, string>> = {
 
 const PAGE_SIZE = 200;
 const UPSERT_CHUNK = 100;
-// Maximum pages per metric per run. Daily incremental should be well
-// under this — if we hit it, something is wrong (backfill never ran or
-// the cron has been failing silently for days).
+// Hard cap on lookback. If yesterday's run failed and the watermark is
+// 3 days old, we still only pull 1 day — never a multi-day backlog.
+// Recovering from a longer outage means running the local backfill
+// script (which is what proved reliable for high-volume metrics).
+const MAX_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+// Max pages per metric per run. With PAGE_SIZE=200 that's 10K events
+// per metric, which is well above any realistic daily delta for this
+// account. Hitting the cap means we should run the backfill script.
 const MAX_PAGES_PER_METRIC = 50;
-// If a metric has zero rows in our DB (backfill hasn't covered it yet),
-// pull this far back as a safety net rather than 180d.
-const COLD_START_DAYS = 1;
 
 export const klaviyoEngagementSync = inngest.createFunction(
   {
@@ -112,41 +114,25 @@ export const klaviyoEngagementSync = inngest.createFunction(
           Accept: "application/json",
         };
 
-        // ── Resolve metric IDs (cheap, ~one /api/metrics call) ──
-        const metricIds: Record<string, string> = {};
-        try {
-          let url: string | null = "https://a.klaviyo.com/api/metrics?page[size]=200";
-          while (url) {
-            const r: Response = await fetch(url, { headers });
-            if (!r.ok) break;
-            const body = (await r.json()) as {
-              data: Array<{ id: string; attributes?: { name?: string } }>;
-              links?: { next?: string };
-            };
-            for (const m of body.data || []) {
-              const name = m.attributes?.name;
-              if (name && (METRICS as readonly string[]).includes(name)) metricIds[name] = m.id;
-            }
-            url = body.links?.next || null;
-          }
-        } catch (e) {
-          console.warn(`[engagement-sync] /api/metrics failed for ${ws.id}:`, e instanceof Error ? e.message : e);
-        }
-
-        // Workspace-specific fallback
-        const fallback = FALLBACK_METRIC_IDS[ws.id] || {};
-        for (const m of METRICS) {
-          if (!metricIds[m] && fallback[m]) metricIds[m] = fallback[m];
-        }
-
+        // Hardcoded metric IDs — /api/metrics resolution intentionally
+        // skipped (broke the original backfill, the local script with
+        // fixed IDs is the path that proved reliable).
+        const metricIds = METRIC_IDS_BY_WORKSPACE[ws.id] || {};
         const pulled: Record<string, number> = {};
         const errors: string[] = [];
 
+        if (Object.keys(metricIds).length === 0) {
+          errors.push(`No METRIC_IDS_BY_WORKSPACE entry for workspace ${ws.id} — add one to enable sync`);
+          return { workspace_id: ws.id, pulled, errors };
+        }
+
         // ── For each metric: watermark → paginate → upsert ──
+        const oneDayAgoIso = new Date(Date.now() - MAX_LOOKBACK_MS).toISOString();
+
         for (const metricName of METRICS) {
           const metricId = metricIds[metricName];
           if (!metricId) {
-            errors.push(`${metricName}: no metric_id resolved (auto + fallback both empty)`);
+            errors.push(`${metricName}: no metric_id in METRIC_IDS_BY_WORKSPACE`);
             continue;
           }
 
@@ -163,9 +149,15 @@ export const klaviyoEngagementSync = inngest.createFunction(
             .limit(1)
             .maybeSingle();
 
-          const sinceIso = watermark?.datetime
+          // sinceIso = MAX(watermark - 1s, now - 1 day). The MAX caps
+          // the lookback at 1 day even if the cron has been failing —
+          // we never do a multi-day pull from this function.
+          const watermarkSince = watermark?.datetime
             ? new Date(new Date(watermark.datetime).getTime() - 1000).toISOString()
-            : new Date(Date.now() - COLD_START_DAYS * 86_400_000).toISOString();
+            : null;
+          const sinceIso = watermarkSince && watermarkSince > oneDayAgoIso
+            ? watermarkSince
+            : oneDayAgoIso;
 
           const filter = `and(equals(metric_id,"${metricId}"),greater-than(datetime,${sinceIso}))`;
           let url: string | null =
