@@ -457,6 +457,7 @@ Use `addTicketTag()` from `src/lib/ticket-tags.ts` (idempotent). Use `markFirstT
 | `UNIFIED-HANDLER.md` | Unified ticket handler pipeline documentation |
 | `TEXT-MARKETING.md` | SMS marketing — campaign builder, send pipeline, shortlinks, coupons, Klaviyo data pipeline, predictive segmentation, archetype framework |
 | `PERPETUAL-CAMPAIGNS-SPEC.md` | Roadmap spec — shift from manual campaigns to archetype-driven series engine (daily qualifier + enrollment + multi-step send + sunset) |
+| `LANDING-PAGES-SPEC.md` | Roadmap spec — custom landing pages with Shopify Storefront API cart bridge today, swap to native cart post-Shopify. Destination for SMS shortcodes. |
 | `APPSTLE-WEBHOOKS.md` | Reference for all Appstle webhook payloads (used by billing forecast + subscription state tracking) |
 
 ## Reseller Defense System (May 2026)
