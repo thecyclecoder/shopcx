@@ -641,27 +641,127 @@ A campaign that says "Up to 55% off today" lands universally. A campaign that sa
 
 Four components.
 
-### Component 1 — Shortlink session token
+### Component 1 — Leased shortcodes + permanent customer codes
 
-Today's shortlinks (`superfd.co/XSM0Q5`) redirect to a target URL with no identity attached. Once we have our own pixel + the storefront we control, every shortlink in a campaign-sent SMS should carry the customer's identity.
+Shortlinks split into two distinct concepts:
 
-**Mechanism:**
-- Each campaign keeps ONE shortlink slug (today's design — don't 138K-multiply per send)
-- The customer-specific identity is a signed token attached as a query param: `superfd.co/XSM0Q5?t=eyJhbG...`
-- Token payload: `{ customer_id, campaign_id, sent_at, device_fp_hash, exp }`, HMAC-signed against an app secret
-- When the customer is enrolled into a campaign send, the per-customer link is built and stored on `sms_campaign_recipients.shortlink_token`
+| | Lifecycle | Scope | Example |
+|---|---|---|---|
+| **Campaign ID** | Permanent (forever) | Internal record of a marketing campaign | `01KPJZ5Q3QP3Q7R7VM2275XTB5` |
+| **Shortcode** | Leased — claimable for a window, then recyclable | The short token in the visible URL | `ASDF` |
+| **Customer code** | Permanent (forever) | One per customer, identifies them across every campaign | `7K2m9` |
 
-**On click:**
-1. Click handler validates token signature + expiry
-2. If valid: set first-party cookie `sx_customer` with customer_id (60d expiry, SameSite=Lax, HttpOnly, Secure)
-3. Match request's device fingerprint (UA + screen + accept-lang + IP /24) against stored fingerprints on the customer. If match → also set `sx_session_authoritative=1`. If mismatch (forwarded link) → cookie still set but session is not authoritative (no auto-login on portal)
-4. Fire `Shortlink Clicked` event into `storefront_events` with `customer_id` resolved
-5. 302 to the target URL
+The shortcode is a **lease** on a slot in a small namespace. A campaign claims the slot for ~180d active + ~365d grace; afterwards the slot can be reclaimed by a new campaign. The campaign record itself never changes.
 
-**Why device-binding matters:** prevents the "customer forwards SMS to spouse → spouse clicks → spouse gets logged in as the customer" scenario. The cookie still identifies the click belongs to that customer (for pixel attribution + popup decisions), but doesn't grant authoritative session access to portal mutations.
+The customer code is permanent — generated once when the customer enters the SMS list, lives forever, identifies them in every shortlink they ever click.
 
-**On Shopify today:** the `sx_customer` cookie is readable from our pixel (loaded as a custom script on Shopify theme), so popup decisions can use it.
-**Post-Shopify:** the same cookie powers automatic login to the customer portal — no password entry needed if device fingerprint matches.
+#### URL shape
+
+```
+superfd.co/ASDF/7K2m9
+            └┬─┘ └─┬─┘
+             │     │
+             │     └─ customers.short_code (permanent, 5 chars, ~33M namespace)
+             └─ shortcodes.code (leased, 4 chars, ~1M namespace, recyclable after grace)
+```
+
+10 chars after the slash. Clean. No visible UTM/tracking junk.
+
+#### Schema
+
+```sql
+-- Shortcode leases (new table — separate from the existing marketing_shortlinks
+-- which becomes the legacy single-slug-per-campaign storage)
+CREATE TABLE shortcodes (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id      UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  code              VARCHAR(4) NOT NULL,           -- Crockford base32, 4 chars
+  campaign_id       UUID NOT NULL,                 -- references the permanent campaign record
+  target_url        TEXT NOT NULL,                 -- destination with UTMs baked in
+  fallback_url      TEXT,                          -- stale-click destination after expires_at
+  active_from       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at        TIMESTAMPTZ NOT NULL,          -- default = now + 180 days
+  recyclable_after  TIMESTAMPTZ NOT NULL,          -- default = expires_at + 365 days
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Multiple historical rows per code allowed; partial index guarantees one
+-- active-OR-grace lease at a time:
+CREATE UNIQUE INDEX shortcodes_active_lease_idx
+  ON shortcodes (workspace_id, code)
+  WHERE recyclable_after > now();
+CREATE INDEX shortcodes_lookup_idx
+  ON shortcodes (workspace_id, code, active_from DESC);
+
+-- Permanent customer code
+ALTER TABLE customers ADD COLUMN short_code VARCHAR(5);
+CREATE UNIQUE INDEX customers_short_code_idx
+  ON customers (workspace_id, short_code)
+  WHERE short_code IS NOT NULL;
+```
+
+#### Three lifecycle phases of a shortcode
+
+1. **Active** (`now < expires_at`) → 302 to `target_url`. Fresh click, original campaign.
+2. **Expired but in grace** (`expires_at < now < recyclable_after`) → 302 to `fallback_url || target_url`, fire `Shortlink Clicked Stale` event. Code still owned, late click still identifies the customer.
+3. **Recyclable** (`now > recyclable_after`) → code is up for grabs by a new campaign. The old row stays for audit. The next campaign that claims this code gets a new row.
+
+#### Click handler logic
+
+```sql
+-- Pick the most-recently-leased row for this code
+SELECT * FROM shortcodes
+WHERE workspace_id = ? AND code = ?
+ORDER BY active_from DESC
+LIMIT 1;
+```
+
+Then:
+- `now < row.expires_at` → 302 `row.target_url`
+- `now >= row.expires_at` AND `row.fallback_url IS NOT NULL` → 302 `row.fallback_url`, fire stale event
+- `now >= row.expires_at` AND no fallback → 302 `row.target_url` anyway (best-effort late click)
+
+The customer-code half of the path (`/7K2m9`) is resolved independently against `customers.short_code` → identity, cookie set, pixel event fired. Customer code resolution doesn't depend on shortcode state.
+
+#### Late-click collision risk
+
+If shortcode `ASDF` is leased by campaign A (Jan-June), released July, then leased by campaign B (Aug-onward), and someone clicks a Jan-A SMS in September:
+- Handler picks the most recent lease = campaign B
+- Customer hits campaign B's page — wrong campaign
+
+Mitigation: 18-month total lease window (180d active + 365d grace). An SMS that old has essentially zero engagement anyway. The customer's identity cookie still gets set correctly via their permanent customer code — only the campaign-context is "wrong," and the fallback page can be generic ("Shop our latest").
+
+#### Construction flow (at send time)
+
+1. Admin provides a clean target URL: `https://superfoodscompany.com/products/amazing-coffee`
+2. Send pipeline builds the enriched target URL with UTMs:
+   - **On Shopify today (compatibility with GA / Triple Whale):**
+     `https://superfoodscompany.com/products/amazing-coffee?utm_source=sms&utm_campaign=ASDF&utm_content=campaign_short`
+   - **Post-Shopify (we own the parser):**
+     `https://shop.shopcx.ai/amazing-coffee?s=sms&c=ASDF&t=<optional-jwt>`
+3. Claim a 4-char shortcode for this campaign — generate random Crockford slug, retry on conflict (~50 retries at 10K-campaign saturation, negligible)
+4. Insert `shortcodes` row with `expires_at = now + 180d`, `recyclable_after = expires_at + 365d`
+5. The SMS body uses `superfd.co/ASDF/{customer.short_code}` — no per-recipient row needed; the customer code is looked up at send-time and inlined
+
+#### Why this design is simpler than per-recipient shortlinks
+
+- **No per-recipient rows.** Customer code is on the `customers` table, one row total. Send time just inlines the existing code into the URL.
+- **No JWT signing/verification.** The customer code itself IS the identity reference. Brute-force protected by rate limiting (5-char Crockford = 33M namespace).
+- **No token expiration logic.** Customer codes live forever; shortcodes lease/expire/recycle on their own clock independently.
+- **Device-fingerprint check is per-click, not per-link.** When a click resolves to a customer, the handler hashes the request fingerprint and compares against stored fingerprints on `customers.device_fingerprints[]`. Match → set `sx_session_authoritative=1`. No-match → identity cookie set but session non-authoritative.
+
+#### Cookies set on click
+
+| Cookie | Set when | Purpose |
+|---|---|---|
+| `sx_customer` | Any click that resolves a customer | Pixel + popup decisions read this; SameSite=Lax, HttpOnly, Secure, 60d expiry |
+| `sx_session_authoritative` | Click + device-fp match against `customers.device_fingerprints[]` | Portal auto-login (post-Shopify). 24h expiry, refreshed per session |
+| `sx_last_campaign` | Active-lease click | Attribution context for downstream pageviews. 7d expiry |
+
+#### Customer code generation
+
+- Lazy: first SMS send to a customer triggers `INSERT INTO customers SET short_code = generate()` with retry-on-collision
+- Or bulk backfill: one-shot script populates all existing customers with codes (~287 retries on 138K bulk gen, runs in seconds)
+- Once set, never changes. Customer keeps their code forever.
 
 ### Component 2 — Dual-mode popup
 
@@ -782,8 +882,28 @@ Default `general` benefit handles the remaining 30-40%. Performance attribution 
 ### Schema additions summary
 
 ```sql
--- Identity
-ALTER TABLE sms_campaign_recipients ADD COLUMN shortlink_token TEXT;
+-- Shortcode leases (separate from legacy marketing_shortlinks)
+CREATE TABLE shortcodes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL,
+  code VARCHAR(4) NOT NULL,                  -- 4-char Crockford, ~1M namespace
+  campaign_id UUID NOT NULL,
+  target_url TEXT NOT NULL,                  -- destination with UTMs baked in
+  fallback_url TEXT,                         -- stale-click destination
+  active_from TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,           -- default: now + 180d
+  recyclable_after TIMESTAMPTZ NOT NULL,     -- default: expires_at + 365d
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX shortcodes_active_lease_idx
+  ON shortcodes (workspace_id, code) WHERE recyclable_after > now();
+
+-- Permanent customer code
+ALTER TABLE customers ADD COLUMN short_code VARCHAR(5);  -- ~33M namespace
+CREATE UNIQUE INDEX customers_short_code_idx
+  ON customers (workspace_id, short_code) WHERE short_code IS NOT NULL;
+
+-- Device fingerprints for portal auto-login (post-Shopify)
 ALTER TABLE customers ADD COLUMN device_fingerprints JSONB DEFAULT '[]';
 
 -- Benefits
