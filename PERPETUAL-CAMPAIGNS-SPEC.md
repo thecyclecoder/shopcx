@@ -68,6 +68,7 @@ CREATE TABLE sms_series (
   workspace_id      UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   slug              TEXT NOT NULL,             -- "flash", "vip", "weekend"
   name              TEXT NOT NULL,             -- customer-facing label (internal)
+  angle             TEXT NOT NULL,             -- "flash_sale", "exclusive_invite", "restock_reminder", etc. — see § 1 angle taxonomy
   status            TEXT NOT NULL DEFAULT 'draft',  -- draft, active, paused
   priority          INTEGER NOT NULL DEFAULT 100,   -- lower wins when customer qualifies for multiple
   -- Eligibility rule (DSL or JSON, see § 2)
@@ -114,17 +115,44 @@ The point of having 3-5 series is **rotation, not different audiences**. The sam
 
 The exception is **tiers** — a VIP tier exists because VIPs should get exclusive messaging that non-VIPs don't see. Inside a tier, multiple series rotate.
 
+### Angles — the persuasion dimension
+
+Every series has an **angle** — the psychological hook of the message. Different angles work for different archetypes:
+- A `lapsed` customer might convert on "time to restock" but ignore "flash sale" because they're not actively shopping
+- An `engaged` customer might convert on "exclusive invite" because they want to feel chosen
+- A `just_ordered` customer probably ignores everything except "new arrival"
+
+We track per-(angle, archetype) conversion rate continuously. Over time, eligibility rules evolve to route archetypes to their highest-converting angle. Underperforming angles get retired; high-performing ones get iterated on.
+
+### V1 angle taxonomy
+
+| angle | persuasion type | example hook |
+|---|---|---|
+| `flash_sale` | urgency | "1 day only — code FL40 for 40% off" |
+| `weekend_only` | casual scarcity | "Weekend pricing — Sat/Sun only" |
+| `restock_reminder` | utility | "It's been ~30 days since your last order. Time to restock?" |
+| `exclusive_invite` | status | "You've been hand-picked for early access to our new flavor" |
+| `vip_early_access` | tier status | "VIPs only — 48h head start on our spring sale" |
+| `miss_you` | emotional | "We miss you. Here's a special price to come back" |
+| `sale_extended` | second chance | "Last chance — your code expires tonight" (used as Day-3 step within other angles) |
+| `bestseller_back` | social proof | "Cocoa French Roast is back — 92% of customers reorder" |
+| `new_arrival` | novelty | "Just launched: Maple Cinnamon. Try it 25% off" |
+| `founders_fave` | personality | "Andy's pick of the month — 25% off this week" |
+
+Angles are extensible — admin can add new ones. We seed with these 10 as a starting taxonomy.
+
 ### Seeded V1 series
 
-All series share the same baseline eligibility (`pre_send_orders >= 1 AND sms_marketing_status = 'subscribed' AND no recent cooldown`). The differentiator is the **creative**, plus an optional tier.
+All series share the same baseline eligibility (`pre_send_orders >= 1 AND sms_marketing_status = 'subscribed' AND no recent cooldown`). The differentiator is the **angle** + an optional tier.
 
-| slug | name | tier | hook |
+| slug | angle | tier | notes |
 |---|---|---|---|
-| `flash` | Flash Sale | general | "1 day only — code FL40 for 40% off" — urgency framing |
-| `weekend` | Weekend Only | general | "Weekend pricing — Sat/Sun only" — casual framing |
-| `founders_fave` | Founder's Favorite | general | "Andy's pick of the month, 25% off" — personality framing |
-| `vip` | VIP Sale | vip | "Exclusive for our top customers — early access" — only for VIPs |
-| `comeback` | Come Back Sale | general | "We miss you — special pricing" — lapse-focused framing |
+| `flash` | `flash_sale` | general | The urgency variant |
+| `weekend` | `weekend_only` | general | Friday-Sunday timing |
+| `founders_fave` | `founders_fave` | general | Brand-personality angle |
+| `restock` | `restock_reminder` | general | Cycle-aware (uses replenishment ratio) |
+| `comeback` | `miss_you` | general | Targeted at lapsed via eligibility, not just at all |
+| `vip` | `vip_early_access` | vip | VIPs only |
 
 VIP tier filter: `pre_send_ltv_cents >= 100000 AND active_sub_at_send = true`. VIPs are eligible for both the VIP series AND the general rotation; the rotation engine picks one per run, with VIP-tier series getting precedence within their tier.
 
@@ -443,15 +471,80 @@ The qualifier checks this table before enrolling.
 
 ---
 
-## 7. Calibration loop
+## 7. Angle performance attribution
 
-Every quarter (or on demand), re-run `scripts/segment-analysis-3mo.ts` with the latest 90 days of campaign data + Received SMS recipient lists. Compare:
+This is the learning loop. Without it, the engine is just automation; with it, the engine gets better over time.
 
-- Conversion rate per (archetype, series) — which combos actually perform
-- Missed opportunity per series — how many customers qualify but never get enrolled (frequency cap dropping them)
+### What we measure
+
+For every enrollment, we already capture `features_snapshot` (the customer's archetype + features at enrollment time) and `converted_at` (whether they bought during the series window). Joined to `sms_series.angle`, we get the conversion-rate matrix:
+
+```sql
+SELECT
+  s.angle,
+  e.features_snapshot->>'archetype' AS archetype,
+  COUNT(*) AS enrollments,
+  COUNT(*) FILTER (WHERE e.converted_at IS NOT NULL) AS conversions,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE e.converted_at IS NOT NULL) / COUNT(*), 2) AS conversion_pct
+FROM sms_series_enrollments e
+JOIN sms_series s ON s.id = e.series_id
+WHERE e.enrolled_at >= now() - interval '90 days'
+GROUP BY s.angle, e.features_snapshot->>'archetype'
+ORDER BY s.angle, conversion_pct DESC;
+```
+
+Sample output:
+
+| angle | archetype | enrollments | conv | conv % |
+|---|---|---|---|---|
+| restock_reminder | lapsed | 4,200 | 380 | 9.0% |
+| restock_reminder | cycle_hitter | 3,800 | 290 | 7.6% |
+| flash_sale | engaged | 1,100 | 95 | 8.6% |
+| flash_sale | lapsed | 4,500 | 180 | 4.0% |
+| flash_sale | cycle_hitter | 4,000 | 160 | 4.0% |
+| exclusive_invite | engaged | 900 | 110 | 12.2% |
+| miss_you | lapsed | 2,800 | 190 | 6.8% |
+
+**What this tells us:**
+- `restock_reminder` wins on lapsed AND cycle_hitter — should over-route them here
+- `exclusive_invite` wins on engaged — gives them a strong status framing
+- `flash_sale` underperforms restock_reminder on lapsed (4% vs 9%) — should de-prioritize flash for that archetype
+
+### How to surface this
+
+Admin UI page: `/dashboard/marketing/text/angle-performance`. Heatmap of angle × archetype with conversion %. Sortable, filterable, shows enrollment volume + 90d trend.
+
+### Automatic eligibility tuning (Phase 5)
+
+Once we have enough enrollments (≥500 per cell), the system can auto-tune routing:
+
+- If `angle X / archetype Y` significantly outperforms the cohort average → boost eligibility weight to route more of `Y` to `X`
+- If `angle X / archetype Y` significantly underperforms AND has had ≥1000 enrollments → flag for retirement or copy iteration
+- Per (angle, archetype) eligibility weights stored in `sms_series_angle_weights` table; rotation engine considers weight when picking next series
+
+This is the "learning" — the spec sets up the data; the analysis runs continuously; the routing improves quarter-over-quarter without manual rule changes.
+
+### Calibration loop (analyst-driven)
+
+Every quarter (or on demand), re-run `scripts/segment-analysis-3mo.ts` with the latest 90 days of campaign data + Received SMS recipient lists. Outputs:
+
+- Conversion rate per (angle, archetype) — confirms which combos actually perform
+- Missed opportunity per angle — how many customers fit the high-converting cell but never get enrolled (frequency cap, sunset, conflict drops them)
 - Sunset rate — what % of customers end up in non-responder suppression
+- **Angle saturation curve** — does conversion rate flatten or decline as enrollment volume per angle grows? Tells us when to spawn a copy variant within an angle
 
-Update series `eligibility` JSON based on findings. Save calibration results to `sms_series_calibration` table for audit.
+Update series eligibility + angle weights based on findings. Save calibration results to `sms_series_calibration` table for audit.
+
+### When to spawn a copy variant within an angle
+
+The angle taxonomy is the **strategy** layer; specific copy is the **tactics** layer. Once `restock_reminder` clearly wins on lapsed customers, spawn 2-3 copy variants within that angle:
+- "It's been ~30 days since your last order. Time to restock?"
+- "Your last order was Mar 15. Reorder before you run out?"
+- "Hey, just a heads up — based on your usual order timing, you're probably running low."
+
+Same angle, different copy. A/B test within the angle. Keep the winner, retire the others. Iterate.
+
+The architecture supports this naturally: same angle, multiple `sms_series` rows with that angle. The rotation engine picks based on `last_received_at` ascending — so copy variants rotate. Performance attribution still works because we group by angle, not by series.
 
 ---
 
