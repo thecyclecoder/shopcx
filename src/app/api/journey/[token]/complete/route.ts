@@ -13,7 +13,7 @@ export async function POST(
 
   const { data: session } = await admin
     .from("journey_sessions")
-    .select("id, workspace_id, ticket_id, customer_id, journey_id, status, config_snapshot")
+    .select("id, workspace_id, ticket_id, customer_id, journey_id, status, config_snapshot, subscription_id")
     .eq("token", token)
     .single();
 
@@ -762,11 +762,104 @@ export async function POST(
     const cancelReason = responses?.cancel_reason?.value || "unknown";
     const cancelReasonLabel = responses?.cancel_reason?.label || cancelReason;
 
-    // Determine which subscription to act on
-    const subscriptions = (metadata.subscriptions as { id: string; contractId: string; items: { title: string }[]; isFirstRenewal?: boolean }[]) || [];
+    // ── Determine which subscription to cancel ──
+    //
+    // Resolution chain (most specific → most permissive):
+    //   1. responses.select_subscription — customer picked one via the mini-site
+    //      sub picker (only shown when there are 2+ active subs).
+    //   2. metadata.subscriptions[0] — legacy config-snapshot path.
+    //   3. session.subscription_id — current architecture: orchestrator passes
+    //      contract_id → action-executor → journey-delivery writes
+    //      subscription_id on the session row. Fresh-fetched here.
+    //   4. Customer's single active sub — if the customer has exactly ONE
+    //      active subscription, auto-pick it. (Common case for single-sub
+    //      customers where the picker is skipped.)
+    //
+    // If NONE of these resolve a sub, we MUST NOT silently no-op — that
+    // ships a "Your subscription has been cancelled" message to the
+    // customer while leaving the sub charging. Log a system error, leave
+    // an internal note, and stop.
+    type CancelTarget = { id: string; contractId: string; items: { title: string }[]; isFirstRenewal?: boolean };
+    const subscriptions = (metadata.subscriptions as CancelTarget[]) || [];
     const selectedSubId = responses?.select_subscription?.value || (metadata.selectedSubscriptionId as string);
-    const selectedSub = subscriptions.find(s => s.id === selectedSubId) || subscriptions[0];
+    let selectedSub: CancelTarget | undefined = subscriptions.find(s => s.id === selectedSubId) || subscriptions[0];
+
+    if (!selectedSub && session.subscription_id) {
+      const { data: subRow } = await admin.from("subscriptions")
+        .select("id, shopify_contract_id, items")
+        .eq("id", session.subscription_id)
+        .eq("workspace_id", wsId)
+        .maybeSingle();
+      if (subRow?.shopify_contract_id) {
+        selectedSub = {
+          id: subRow.id,
+          contractId: subRow.shopify_contract_id,
+          items: ((subRow.items as { title?: string }[]) || []).map(i => ({ title: i.title || "" })),
+        };
+      }
+    }
+
+    if (!selectedSub && session.customer_id) {
+      // Auto-pick a single active sub for the customer (and their linked accounts)
+      const linkedIds = [session.customer_id];
+      const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", session.customer_id).maybeSingle();
+      if (link?.group_id) {
+        const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
+        for (const g of grp || []) if (!linkedIds.includes(g.customer_id)) linkedIds.push(g.customer_id);
+      }
+      const { data: activeSubs } = await admin.from("subscriptions")
+        .select("id, shopify_contract_id, items")
+        .in("customer_id", linkedIds)
+        .eq("status", "active");
+      if (activeSubs?.length === 1 && activeSubs[0].shopify_contract_id) {
+        selectedSub = {
+          id: activeSubs[0].id,
+          contractId: activeSubs[0].shopify_contract_id,
+          items: ((activeSubs[0].items as { title?: string }[]) || []).map(i => ({ title: i.title || "" })),
+        };
+      }
+    }
+
     const isFirstRenewal = selectedSub?.isFirstRenewal || false;
+
+    if (outcome === "cancelled" && !selectedSub) {
+      // The completion handler was asked to cancel a subscription it couldn't
+      // resolve. The "Your subscription has been cancelled" message at the
+      // end of this block would then fire while nothing was actually cancelled.
+      // Refuse to send that message; surface as an internal alert.
+      console.error(`[cancel-journey] cancel outcome but no resolvable subscription. session=${session.id} ticket=${session.ticket_id}`);
+      if (session.ticket_id) {
+        await admin.from("ticket_messages").insert({
+          ticket_id: session.ticket_id,
+          direction: "outbound",
+          visibility: "internal",
+          author_type: "system",
+          body: `[Cancel journey] ⚠ Customer completed the cancel flow with outcome=cancelled but the handler could not resolve a target subscription (no select_subscription response, no metadata.subscriptions, session.subscription_id is null, and the customer does not have exactly one active sub). NO Appstle cancel was sent. Escalating — agent must manually cancel.`,
+        });
+        await admin.from("dashboard_notifications").insert({
+          workspace_id: wsId,
+          type: "system",
+          title: "Cancel journey could not resolve target subscription",
+          body: `Ticket ${session.ticket_id} — cancel journey completed with no target sub. Manual cancellation required.`,
+          metadata: { severity: "high", ticket_id: session.ticket_id, journey_session_id: session.id },
+        });
+        await admin.from("tickets").update({
+          status: "open",
+          handled_by: null,
+          updated_at: new Date().toISOString(),
+        }).eq("id", session.ticket_id);
+      }
+      await admin.from("journey_sessions").update({
+        status: "completed",
+        completed_at: new Date().toISOString(),
+        outcome: "error_no_target_sub",
+        responses: responses || {},
+      }).eq("id", session.id);
+      return NextResponse.json({
+        success: false,
+        message: "We weren't able to process this automatically — our team has been notified and will follow up with you shortly.",
+      });
+    }
 
     if (outcome === "cancelled" && selectedSub) {
       // Cancel via Appstle API
