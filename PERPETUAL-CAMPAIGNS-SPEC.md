@@ -471,6 +471,93 @@ The qualifier checks this table before enrolling.
 
 ---
 
+## 6b. Two tracks — sale vs value
+
+Not every message should ask for a purchase. Customers who fit a high-converting archetype but stop engaging with sale campaigns aren't "dead" — they've just gone numb to the ask. The fix is to re-ignite their connection to the product (why they need it, what it does, how it's changed others) BEFORE asking again.
+
+So the engine has two tracks:
+
+| | Sale track | Value track |
+|---|---|---|
+| Goal | Get the order | Get the attention |
+| CTA | "Buy now / use code" | "Read this / watch this" |
+| Success metric | Conversion (Placed Order) | Engagement (page view + dwell) |
+| Angles | `flash_sale`, `restock_reminder`, `vip_early_access`, `weekend_only`, `miss_you`, `bestseller_back`, `new_arrival`, `sale_extended` | `customer_story`, `science_explainer`, `transformation`, `expert_review`, `behind_scenes`, `usage_tip`, `myth_busting`, `founder_message` |
+| Frequency cap shared? | Yes — same global cap | Yes — counts the same |
+| Cooldown after completion? | 14d (general) / 7d (vip) | 7d |
+| Skip if customer is in active sub | No | No |
+| Day-3 step? | Yes — urgency closer | No — single send per series (value content doesn't need urgency) |
+
+### When does a customer enter the value track?
+
+Two paths:
+
+1. **Non-responder rescue** — most common. After `value_track_threshold` (default 2) consecutive non-converting sale series in a row, the customer flips to value track on next eligibility check.
+2. **Cold archetype** — `lurker` and `cold` archetypes (engaged with no orders, or zero engagement at all) skip sale track entirely on first contact and start in value track. The ask comes after we've built familiarity.
+
+### When does a customer graduate back to sale track?
+
+- Reads (clicks + pixel-fires `Viewed Product`) on a value page → `engagement_score += 1`. After ≥1 engaged value series, customer is eligible for sale track on next run.
+- Customer places an unprompted order while in value track → instant graduation + 30d conversion cooldown.
+
+### When does a customer get sunset for real?
+
+Only when BOTH tracks fail. Specifically:
+- 2 consecutive non-converting sale series AND 2 consecutive non-engaging value series → 60d sunset (configurable per workspace).
+
+This is meaningfully more nuanced than "didn't buy 3x → sunset." Some customers buy once a year and would happily read value content monthly; we should keep them warm with content, not bury them.
+
+### Value content infrastructure
+
+Value pages need somewhere to live with click tracking. Two implementation options:
+
+| Option | Effort | UX | Trade-off |
+|---|---|---|---|
+| **Reuse help center** — `/help/learn/{slug}` with existing article view tracking | ~3 days | OK but help-center-y framing | Fastest path, leverages existing infra |
+| **Dedicated `/learn` storefront section** — branded as a content hub | ~2 weeks | Premium content feel, separate from help center | Better long-term, larger investment |
+
+V1 picks the help-center path. Migrate to dedicated `/learn` later when the value track is shipping enough volume to justify the design work.
+
+### Tracking engagement on value pages
+
+The storefront pixel (per `STOREFRONT.md`) already fires `Viewed Product` for any URL on the storefront. For value pages, treat the page view as the engagement signal:
+
+```sql
+-- Customer engaged with a value series if:
+EXISTS (
+  SELECT 1 FROM storefront_events
+  WHERE customer_id = enrollment.customer_id
+  AND event_type = 'Viewed Product'
+  AND meta->>'product_handle' = enrollment.value_page_slug
+  AND created_at >= enrollment.enrolled_at
+  AND created_at <= enrollment.enrolled_at + interval '7 days'
+)
+```
+
+V2 adds dwell-time + scroll-past-50% signals via additional pixel events. V1 just uses the page view.
+
+### Value track schema additions
+
+```sql
+ALTER TABLE sms_series ADD COLUMN track TEXT NOT NULL DEFAULT 'sale';  -- 'sale' or 'value'
+ALTER TABLE sms_series ADD COLUMN value_page_slug TEXT;                 -- the /help/learn/X slug for this series
+ALTER TABLE sms_series ADD COLUMN max_steps INTEGER NOT NULL DEFAULT 3; -- value track typically 1, sale track 3
+
+ALTER TABLE sms_series_enrollments ADD COLUMN engagement_signaled_at TIMESTAMPTZ;  -- when the customer viewed the page
+
+ALTER TABLE customer_archetype_state ADD COLUMN non_responder_streak INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE customer_archetype_state ADD COLUMN value_engagement_streak INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE customer_archetype_state ADD COLUMN current_track TEXT NOT NULL DEFAULT 'sale';  -- 'sale' or 'value'
+```
+
+The enrollment engine routes based on `current_track`:
+- If `sale` → eligible series filter excludes track='value'
+- If `value` → eligible series filter excludes track='sale'
+
+Track switches happen during the daily qualifier run, before enrollment.
+
+---
+
 ## 7. Angle performance attribution
 
 This is the learning loop. Without it, the engine is just automation; with it, the engine gets better over time.
