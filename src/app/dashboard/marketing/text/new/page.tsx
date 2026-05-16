@@ -36,11 +36,22 @@ const TIMEZONE_OPTIONS = [
   { value: "Pacific/Honolulu", label: "Hawaii" },
 ];
 
-const SUB_STATUS_OPTIONS = [
-  { value: "active", label: "Active" },
-  { value: "paused", label: "Paused" },
-  { value: "cancelled", label: "Cancelled" },
-  { value: "never", label: "Never subscribed (lead-only)" },
+// Archetype segments — independent boolean tags. Sorted by predicted
+// conversion (engaged → cold) so the "cascade" pattern (include lower
+// tiers, exclude higher tiers) reads naturally top-down. See
+// TEXT-MARKETING.md § "Predictive segmentation" for definitions.
+const ARCHETYPE_SEGMENTS = [
+  { value: "engaged",      label: "Engaged",       hint: "Orders ≥1 + recent email-click / ATC / checkout (0.44% conv)" },
+  { value: "cycle_hitter", label: "Cycle hitter",  hint: "Orders ≥2 + at expected reorder window (0.30% conv)" },
+  { value: "just_ordered", label: "Just ordered",  hint: "Orders ≥2 + ordered recently vs cadence (0.19% conv)" },
+  { value: "lapsed",       label: "Lapsed",        hint: "Orders ≥2 + 1.5–3× past expected reorder gap (0.10% conv)" },
+  { value: "deep_lapsed",  label: "Deep lapsed",   hint: "Orders ≥2 + >3× past expected reorder gap" },
+  { value: "single_order", label: "Single order",  hint: "Exactly 1 prior order (0.03% conv)" },
+  { value: "cold",         label: "Cold",          hint: "0 prior orders (0.003% conv — spam tax)" },
+];
+// Flag segments — overlap with archetypes. Used as exclusions.
+const FLAG_SEGMENTS = [
+  { value: "active_sub",   label: "Active subscription", hint: "Has at least one status='active' subscription" },
 ];
 
 export default function NewTextCampaignPage() {
@@ -51,9 +62,11 @@ export default function NewTextCampaignPage() {
   const [messageBody, setMessageBody] = useState("");
   const [mediaUrl, setMediaUrl] = useState("");
   const [sendDate, setSendDate] = useState(tomorrowIso());
-  const [hour, setHour] = useState(11);
+  const [hour, setHour] = useState(9);
+  const [fallbackHour, setFallbackHour] = useState(10);
   const [fallbackTz, setFallbackTz] = useState("America/Chicago");
-  const [subStatuses, setSubStatuses] = useState<string[]>(["active", "paused", "never"]);
+  const [includedSegments, setIncludedSegments] = useState<string[]>([]);
+  const [excludedSegments, setExcludedSegments] = useState<string[]>(["active_sub"]);
   const [audiencePreview, setAudiencePreview] = useState<number | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -80,8 +93,12 @@ export default function NewTextCampaignPage() {
       .catch(() => { /* preview will show placeholder */ });
   }, [workspace?.id]);
 
-  function toggleSubStatus(s: string) {
-    setSubStatuses((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+  function toggleInclude(s: string) {
+    setIncludedSegments((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+    setAudiencePreview(null);
+  }
+  function toggleExclude(s: string) {
+    setExcludedSegments((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
     setAudiencePreview(null);
   }
 
@@ -122,10 +139,11 @@ export default function NewTextCampaignPage() {
         media_url: mediaUrl.trim() || null,
         send_date: sendDate,
         target_local_hour: hour,
+        fallback_target_local_hour: fallbackHour,
         fallback_timezone: fallbackTz,
-        audience_filter: {
-          subscription_status: subStatuses.length > 0 ? subStatuses : undefined,
-        },
+        audience_filter: {},
+        included_segments: includedSegments,
+        excluded_segments: excludedSegments,
         coupon_enabled: couponEnabled,
         coupon_discount_pct: couponEnabled ? couponDiscountPct : null,
         coupon_expires_days_after_send: couponEnabled ? couponExpiresDays : null,
@@ -172,15 +190,22 @@ export default function NewTextCampaignPage() {
     setBusy(false);
   }
 
+  // Segment count uses 160 chars (GSM-7). Any emoji or non-Latin char
+  // forces UCS-2 (70 chars/segment) but a hard 1-segment cap at 160
+  // catches both — admin will see the warning and either trim text
+  // or remove the emoji.
   const charCount = messageBody.length;
-  const segments = Math.ceil(charCount / 160) || 1;
+  const hasUcs2 = /[^\x00-\x7F]/.test(messageBody);
+  const segmentSize = hasUcs2 ? 70 : 160;
+  const segments = Math.ceil(charCount / segmentSize) || 1;
+  const overflowsOneSegment = segments > 1;
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
       <header className="mb-6">
         <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">New text campaign</h1>
         <p className="mt-1 text-sm text-zinc-500">
-          Each recipient gets the message at <strong>{String(hour).padStart(2, "0")}:00 local time</strong> in their timezone on {sendDate}.
+          Each recipient gets the message at <strong>{String(hour).padStart(2, "0")}:00 local time</strong> on {sendDate}, or <strong>{String(fallbackHour).padStart(2, "0")}:00 in {fallbackTz.split("/").pop()?.replace("_", " ")}</strong> if their timezone is unknown. Recipients with a known better-converting hour (later than planned) get sent at theirs.
         </p>
       </header>
 
@@ -198,7 +223,7 @@ export default function NewTextCampaignPage() {
 
         <Field
           label="Message body"
-          hint={`${charCount} chars · ~${segments} SMS segment${segments === 1 ? "" : "s"}`}
+          hint={`${charCount} chars · ${segments} SMS segment${segments === 1 ? "" : "s"}${hasUcs2 ? " (UCS-2, emoji)" : " (GSM-7)"}${overflowsOneSegment ? ` — over 1 segment, would cost ${segments}× per recipient. Trim to ${segmentSize} chars${hasUcs2 ? " or remove emoji to use GSM-7 (160-char limit)" : ""}.` : ""}`}
         >
           <textarea
             value={messageBody}
@@ -219,7 +244,7 @@ export default function NewTextCampaignPage() {
           />
         </Field>
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-3 gap-4">
           <Field label="Send date (recipient local)">
             <input
               type="date"
@@ -228,10 +253,23 @@ export default function NewTextCampaignPage() {
               className="w-full rounded border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800"
             />
           </Field>
-          <Field label="Local hour">
+          <Field label="Local hour" hint="Used when we can resolve the recipient's timezone.">
             <select
               value={hour}
               onChange={(e) => setHour(Number(e.target.value))}
+              className="w-full rounded border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800"
+            >
+              {Array.from({ length: 24 }).map((_, h) => (
+                <option key={h} value={h}>
+                  {String(h).padStart(2, "0")}:00 ({h === 0 ? "midnight" : h < 12 ? `${h} AM` : h === 12 ? "noon" : `${h - 12} PM`})
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Fallback hour" hint="Used when we can't resolve the recipient's timezone — sent at this hour in the fallback timezone.">
+            <select
+              value={fallbackHour}
+              onChange={(e) => setFallbackHour(Number(e.target.value))}
               className="w-full rounded border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800"
             >
               {Array.from({ length: 24 }).map((_, h) => (
@@ -314,38 +352,75 @@ export default function NewTextCampaignPage() {
           )}
         </div>
 
-        <Field label="Audience" hint="All SMS-subscribed customers in the selected subscription states.">
-          <div className="space-y-2">
-            <div className="flex flex-wrap gap-2">
-              {SUB_STATUS_OPTIONS.map((o) => {
-                const on = subStatuses.includes(o.value);
-                return (
-                  <button
-                    key={o.value}
-                    type="button"
-                    onClick={() => toggleSubStatus(o.value)}
-                    className={`rounded-full border px-3 py-1 text-xs font-semibold ${on ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-zinc-300 bg-white text-zinc-700"}`}
-                  >
-                    {o.label}
-                  </button>
-                );
-              })}
+        <div className="rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/40">
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-600 dark:text-zinc-400">Audience segments</div>
+          <p className="mb-3 text-[11px] text-zinc-500">
+            SMS-subscribed customers matching at least one <strong>Include</strong> segment AND none of the <strong>Exclude</strong> segments. Bad-phone customers and anyone messaged within the last 12 hours are filtered automatically.
+          </p>
+
+          <div className="space-y-3">
+            <div>
+              <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">Include</div>
+              <div className="flex flex-wrap gap-2">
+                {ARCHETYPE_SEGMENTS.map((o) => {
+                  const on = includedSegments.includes(o.value);
+                  return (
+                    <button
+                      key={o.value}
+                      type="button"
+                      onClick={() => toggleInclude(o.value)}
+                      title={o.hint}
+                      className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${on ? "border-emerald-500 bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300" : "border-zinc-300 bg-white text-zinc-700 hover:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"}`}
+                    >
+                      {o.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-            <button
-              type="button"
-              onClick={previewAudience}
-              disabled={previewing}
-              className="text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
-            >
-              {previewing ? "Counting…" : "Preview audience size"}
-            </button>
-            {audiencePreview != null && (
-              <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                {audiencePreview.toLocaleString()} recipients match this audience.
-              </p>
-            )}
+
+            <div>
+              <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-rose-700 dark:text-rose-400">Exclude</div>
+              <div className="flex flex-wrap gap-2">
+                {/* All archetypes + the active_sub flag are excludable */}
+                {[...ARCHETYPE_SEGMENTS, ...FLAG_SEGMENTS].map((o) => {
+                  const on = excludedSegments.includes(o.value);
+                  // Don't let admin exclude something they also included
+                  // — that's a 0-recipient configuration.
+                  const conflicted = includedSegments.includes(o.value);
+                  return (
+                    <button
+                      key={o.value}
+                      type="button"
+                      onClick={() => toggleExclude(o.value)}
+                      title={conflicted ? `Already included — can't exclude` : o.hint}
+                      disabled={conflicted}
+                      className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${on ? "border-rose-500 bg-rose-100 text-rose-800 dark:bg-rose-900/30 dark:text-rose-300" : "border-zinc-300 bg-white text-zinc-700 hover:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"} ${conflicted ? "opacity-30 cursor-not-allowed" : ""}`}
+                    >
+                      {o.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 border-t border-zinc-200 pt-3 dark:border-zinc-700">
+              <button
+                type="button"
+                onClick={previewAudience}
+                disabled={previewing || includedSegments.length === 0}
+                className="text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
+              >
+                {previewing ? "Counting…" : includedSegments.length === 0 ? "Select at least one Include segment" : "Preview audience size"}
+              </button>
+              {audiencePreview != null && (
+                <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                  {audiencePreview.toLocaleString()} recipients
+                </p>
+              )}
+            </div>
           </div>
-        </Field>
+        </div>
 
         {error && (
           <p className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>
@@ -363,7 +438,8 @@ export default function NewTextCampaignPage() {
           <button
             type="button"
             onClick={scheduleNow}
-            disabled={busy}
+            disabled={busy || overflowsOneSegment || includedSegments.length === 0}
+            title={overflowsOneSegment ? "Trim to 1 segment first (avoids 2× cost per recipient)" : includedSegments.length === 0 ? "Pick at least one Include segment" : ""}
             className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-600 disabled:opacity-50"
           >
             {busy ? "Scheduling…" : "Schedule campaign"}

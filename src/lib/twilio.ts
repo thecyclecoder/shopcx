@@ -33,8 +33,13 @@ export async function sendSMS(
   workspaceId: string,
   to: string,
   body: string,
-  options?: { mediaUrl?: string | null }
-): Promise<{ success: boolean; messageSid?: string; error?: string }> {
+  options?: {
+    mediaUrl?: string | null;
+    statusCallback?: string | null;
+    sendAt?: Date | null;
+    messagingServiceSid?: string | null;
+  },
+): Promise<{ success: boolean; messageSid?: string; error?: string; errorCode?: number }> {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
 
@@ -42,9 +47,16 @@ export async function sendSMS(
     return { success: false, error: "Twilio credentials not configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN)" };
   }
 
-  const fromNumber = await getWorkspacePhone(workspaceId);
-  if (!fromNumber) {
-    return { success: false, error: "No Twilio phone number assigned to this workspace" };
+  // Sender resolution: if MessagingServiceSid is passed, prefer it
+  // (required for SendAt scheduled sends). Otherwise fall back to
+  // the workspace's direct From number.
+  const msSid = options?.messagingServiceSid;
+  let fromNumber: string | null = null;
+  if (!msSid) {
+    fromNumber = await getWorkspacePhone(workspaceId);
+    if (!fromNumber) {
+      return { success: false, error: "No Twilio phone number assigned to this workspace" };
+    }
   }
 
   // Hard cap at 1600 chars (Twilio's 10-segment cap).
@@ -54,13 +66,29 @@ export async function sendSMS(
     const authHeader = Buffer.from(`${accountSid}:${authToken}`).toString("base64");
     const params = new URLSearchParams({
       To: to,
-      From: fromNumber,
       Body: truncatedBody,
     });
+    if (msSid) {
+      params.append("MessagingServiceSid", msSid);
+    } else if (fromNumber) {
+      params.append("From", fromNumber);
+    }
+    if (options?.sendAt) {
+      // Twilio requires SendAt 15+ min in the future, <= 7 days out.
+      // Format: ISO 8601 in UTC. ScheduleType=fixed is required.
+      params.append("SendAt", options.sendAt.toISOString());
+      params.append("ScheduleType", "fixed");
+    }
     if (options?.mediaUrl) {
       // Twilio accepts repeated MediaUrl params for multi-image MMS,
       // but we only support one per send for now.
       params.append("MediaUrl", options.mediaUrl);
+    }
+    if (options?.statusCallback) {
+      // Per-message delivery webhook. Required to receive
+      // delivered/undelivered status when sending direct via From
+      // (rather than through a Messaging Service).
+      params.append("StatusCallback", options.statusCallback);
     }
 
     const res = await fetch(
@@ -77,7 +105,14 @@ export async function sendSMS(
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      return { success: false, error: err.message || `Twilio API error: ${res.status}` };
+      // Twilio error bodies always include `code` (integer) — surface
+      // it so the caller can map fatal codes (e.g. 21211 invalid phone)
+      // to permanent customer state.
+      return {
+        success: false,
+        error: err.message || `Twilio API error: ${res.status}`,
+        errorCode: typeof err.code === "number" ? err.code : undefined,
+      };
     }
 
     const data = await res.json();

@@ -50,8 +50,9 @@ export async function POST(
   const body = await request.json().catch(() => ({}));
   const {
     name, message_body, media_url,
-    send_date, target_local_hour, fallback_timezone,
+    send_date, target_local_hour, fallback_target_local_hour, fallback_timezone,
     audience_filter,
+    included_segments, excluded_segments,
     coupon_enabled, coupon_discount_pct, coupon_expires_days_after_send,
     shortlink_target_url,
   } = body as Record<string, unknown>;
@@ -79,8 +80,11 @@ export async function POST(
       media_url: (media_url as string) || null,
       send_date,
       target_local_hour: hour,
+      fallback_target_local_hour: Number.isInteger(fallback_target_local_hour) ? fallback_target_local_hour : 10,
       fallback_timezone: (fallback_timezone as string) || "America/Chicago",
       audience_filter: (audience_filter as Record<string, unknown>) || {},
+      included_segments: Array.isArray(included_segments) ? (included_segments as string[]) : [],
+      excluded_segments: Array.isArray(excluded_segments) ? (excluded_segments as string[]) : [],
       coupon_enabled: !!coupon_enabled,
       coupon_discount_pct: coupon_enabled ? Number(coupon_discount_pct) || null : null,
       coupon_expires_days_after_send: coupon_enabled

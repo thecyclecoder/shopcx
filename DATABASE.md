@@ -56,8 +56,11 @@ const { data: subs } = await admin.from("subscriptions")
 | `orders` | `subtotal_price_cents` | (not stored — use `total_cents` and back out tax/shipping if needed) |
 | `ticket_messages` | `workspace_id` | (doesn't exist — keyed by `ticket_id`; workspace comes via `tickets`) |
 | `ticket_messages` | `clean_body` / `cleaned_body` | `body_clean` |
+| `ticket_messages` | `resend_id` | `resend_email_id` — and **always check `error` on the insert**, supabase-js does not throw on unknown-column errors |
 | `returns` | `name` | `order_number` |
 | `customer_events` | `event_name` | `event_type` |
+| `customer_events` | `event_data` | `properties` (JSONB) |
+| `subscriptions` | `cancelled_at` / `paused_at` | (not stored as columns — use `status` lowercase; the timestamp lives in `customer_events` if you need when) |
 
 ## ID shapes — three IDs per order, two per customer, etc.
 

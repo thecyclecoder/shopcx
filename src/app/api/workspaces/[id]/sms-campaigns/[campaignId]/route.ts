@@ -18,8 +18,9 @@ interface RouteParams {
 
 const EDITABLE_DRAFT_FIELDS = new Set([
   "name", "message_body", "media_url",
-  "send_date", "target_local_hour", "fallback_timezone",
+  "send_date", "target_local_hour", "fallback_target_local_hour", "fallback_timezone",
   "audience_filter",
+  "included_segments", "excluded_segments",
   "coupon_enabled", "coupon_discount_pct", "coupon_expires_days_after_send",
   "shortlink_target_url",
 ]);
@@ -200,18 +201,37 @@ export async function POST(request: Request, { params }: RouteParams) {
     case "preview_audience": {
       // Count of subscribers matching the audience filter without
       // creating recipient rows. Cheap sanity check before scheduling.
+      // Mirrors the resolution logic in textCampaignScheduled —
+      // include segments, exclude segments, drop bad phones.
       const filter = (campaign.audience_filter as Record<string, unknown>) || {};
+      const included = (campaign.included_segments as string[]) || [];
+      const excluded = (campaign.excluded_segments as string[]) || [];
+
       let q = admin.from("customers")
-        .select("id", { count: "exact", head: true })
+        .select("id, segments", { count: "exact" })
         .eq("workspace_id", workspaceId)
         .not("phone", "is", null)
-        .eq("sms_marketing_status", "subscribed");
+        .eq("sms_marketing_status", "subscribed")
+        .or("phone_status.is.null,phone_status.eq.good");
+      if (included.length > 0) q = q.overlaps("segments", included);
       const subStatuses = filter.subscription_status as string[] | undefined;
       if (Array.isArray(subStatuses) && subStatuses.length > 0) {
         q = q.in("subscription_status", subStatuses);
       }
-      const { count } = await q;
-      return NextResponse.json({ audience_count: count || 0 });
+      // For exclusions we can't filter at the DB level (no NOT
+      // overlaps), so we fetch the segment arrays for the matched
+      // rows and subtract in JS. This is bounded by the include-set
+      // size, which is small for archetype-targeted sends.
+      if (excluded.length === 0) {
+        const { count } = await q.limit(1); // count comes back regardless of limit
+        return NextResponse.json({ audience_count: count || 0 });
+      }
+      const { data } = await q.limit(200000);
+      const excludeSet = new Set(excluded);
+      const finalCount = (data || []).filter(
+        (r: { segments: string[] | null }) => !(r.segments || []).some((s) => excludeSet.has(s)),
+      ).length;
+      return NextResponse.json({ audience_count: finalCount });
     }
     default:
       return NextResponse.json({ error: "unknown action" }, { status: 400 });
