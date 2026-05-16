@@ -70,6 +70,15 @@ export const textCampaignScheduled = inngest.createFunction(
     // any pre-sent SMS keep working.
     let shortlinkSlug: string | null = campaign.shortlink_slug || null;
     if (campaign.shortlink_target_url && !shortlinkSlug) {
+      // Inject UTM params so Placed Order events on Shopify carry
+      // attribution back to this campaign. Klaviyo's event importer
+      // parses event_properties.$extra.landing_site → utm_campaign →
+      // klaviyo_events.attributed_utm_campaign. Enables:
+      //   1. Per-campaign revenue attribution
+      //   2. Excluding past-campaign buyers from tomorrow's send
+      //      (query orders/klaviyo_events where utm_campaign = prior
+      //      campaign_id)
+      const utmTargetUrl = injectMarketingUtms(campaign.shortlink_target_url, campaign.id);
       shortlinkSlug = await step.run("create-shortlink", async () => {
         const admin = createAdminClient();
         // 3 tries to avoid the (vanishingly rare) slug collision.
@@ -78,7 +87,7 @@ export const textCampaignScheduled = inngest.createFunction(
           const { error } = await admin.from("marketing_shortlinks").insert({
             workspace_id: campaign.workspace_id,
             slug,
-            target_url: campaign.shortlink_target_url,
+            target_url: utmTargetUrl,
             campaign_id: campaign.id,
             is_active: true,
           });
@@ -520,6 +529,59 @@ export const textCampaignSendTick = inngest.createFunction(
     return { sent: sentCount, failed: failedCount, skipped: skippedCount };
   },
 );
+
+/**
+ * Inject UTM tracking params into a campaign target URL so the
+ * Placed Order event Klaviyo fires carries attribution back to this
+ * SMS campaign.
+ *
+ * For Shopify discount URLs (?redirect=/path...) we inject UTMs on
+ * BOTH layers:
+ *   - Outer URL — so Shopify's session-entry capture (landing_site)
+ *     records them. UTMs only inside the redirect param sometimes
+ *     get dropped before the redirect step (Shopify community thread
+ *     2023+ confirms this; verified live 2026-05-16 on superfoodscompany.com).
+ *   - Inside the redirect= value — so the final landing URL the
+ *     customer sees still has them (visible in address bar; survives
+ *     for any client-side analytics / FB Pixel / GA4).
+ *
+ * For non-discount URLs, just inject on the URL's own query string.
+ *
+ * Existing utm_* params are preserved (admin override wins) — we
+ * only add params that aren't already present.
+ */
+function injectMarketingUtms(rawUrl: string, campaignId: string): string {
+  const utmDefaults: Record<string, string> = {
+    utm_source: "shopcx_sms",
+    utm_medium: "sms",
+    utm_campaign: campaignId,
+  };
+  try {
+    const url = new URL(rawUrl);
+    const redirectParam = url.searchParams.get("redirect");
+    if (redirectParam) {
+      // Inject INSIDE the redirect target so they show on the
+      // final landing URL.
+      const dummyBase = "https://_redirect_/";
+      const redirUrl = new URL(redirectParam, dummyBase);
+      for (const [k, v] of Object.entries(utmDefaults)) {
+        if (!redirUrl.searchParams.has(k)) redirUrl.searchParams.set(k, v);
+      }
+      const rebuiltRedirect = redirUrl.pathname + (redirUrl.search || "");
+      url.searchParams.set("redirect", rebuiltRedirect);
+    }
+    // ALSO inject on the outer URL. This is the version Shopify's
+    // session tracking sees first — necessary for the Placed Order
+    // event's landing_site / $extra.full_landing_site to carry UTMs.
+    for (const [k, v] of Object.entries(utmDefaults)) {
+      if (!url.searchParams.has(k)) url.searchParams.set(k, v);
+    }
+    return url.toString();
+  } catch {
+    // Malformed URL — return as-is, admin will fix and re-schedule.
+    return rawUrl;
+  }
+}
 
 /**
  * Map a Twilio API error code to a customers.phone_status value, OR

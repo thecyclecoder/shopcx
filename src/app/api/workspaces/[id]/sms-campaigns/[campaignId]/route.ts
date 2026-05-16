@@ -77,10 +77,54 @@ export async function GET(request: Request, { params }: RouteParams) {
     };
   }
 
+  // Detailed status breakdown — pending / sending / scheduled / sent /
+  // delivered / failed / failed_permanent / skipped / skipped_rate_limit.
+  // Lets the UI show "X delivered, Y still in Twilio's queue, Z fatal."
+  const { data: statusRows } = await admin
+    .from("sms_campaign_recipients")
+    .select("status, error")
+    .eq("campaign_id", campaignId);
+  const statusCounts: Record<string, number> = {};
+  const errorCounts: Record<string, number> = {};
+  for (const r of (statusRows || []) as { status: string; error: string | null }[]) {
+    statusCounts[r.status] = (statusCounts[r.status] || 0) + 1;
+    if (r.error && (r.status === "failed" || r.status === "failed_permanent")) {
+      // error is like "21211: Invalid 'To' Phone Number" — extract code
+      const m = r.error.match(/^(\d+):/);
+      const key = m ? m[1] : "unknown";
+      errorCounts[key] = (errorCounts[key] || 0) + 1;
+    }
+  }
+
+  // Conversions via klaviyo_events.attributed_utm_campaign — orders
+  // placed by recipients whose Placed Order landing_site carried our
+  // utm_campaign=<this_campaign_id>. Klaviyo importer populates this
+  // on its next run after the order; expect a small lag for very
+  // recent orders.
+  const PLACED_ORDER_METRIC = "VCkHuL";
+  const { data: convRows } = await admin
+    .from("klaviyo_events")
+    .select("value, order_number, datetime, klaviyo_profile_id")
+    .eq("workspace_id", workspaceId)
+    .eq("klaviyo_metric_id", PLACED_ORDER_METRIC)
+    .eq("attributed_utm_campaign", campaignId);
+  const conversions = (convRows || []) as Array<{ value: number | null; order_number: string | null; datetime: string; klaviyo_profile_id: string | null }>;
+  const convCount = conversions.length;
+  const convRevenueCents = conversions.reduce((s, c) => s + Math.round((c.value || 0) * 100), 0);
+  const uniqueConverters = new Set(conversions.map((c) => c.klaviyo_profile_id).filter(Boolean)).size;
+
   return NextResponse.json({
     campaign: data,
     tz_source_breakdown: sourceCounts,
     shortlink,
+    status_breakdown: statusCounts,
+    error_breakdown: errorCounts,
+    conversions: {
+      count: convCount,
+      unique_converters: uniqueConverters,
+      revenue_cents: convRevenueCents,
+      aov_cents: convCount > 0 ? Math.round(convRevenueCents / convCount) : 0,
+    },
   });
 }
 

@@ -54,6 +54,43 @@ interface ShortlinkStats {
   last_clicked_at: string | null;
 }
 
+interface Conversions {
+  count: number;
+  unique_converters: number;
+  revenue_cents: number;
+  aov_cents: number;
+}
+
+// Friendly labels for sms_campaign_recipients.status values
+const STATUS_LABEL: Record<string, string> = {
+  pending: "Waiting to submit",
+  sending: "Submitting to Twilio",
+  scheduled: "Held by Twilio (SendAt)",
+  sent: "Sent immediately",
+  delivered: "Delivered",
+  failed: "Failed (retryable)",
+  failed_permanent: "Failed (bad phone)",
+  skipped: "Skipped (paused/cancelled)",
+  skipped_rate_limit: "Skipped (12h rate limit)",
+};
+// Friendly labels for common Twilio error codes
+const TWILIO_ERROR_LABEL: Record<string, string> = {
+  "21211": "Invalid phone number",
+  "21217": "Invalid number format",
+  "21407": "Number type not supported",
+  "21408": "Region opt-out (carrier permission)",
+  "21421": "Phone number invalid",
+  "21610": "Recipient unsubscribed (STOP)",
+  "21612": "Cannot receive SMS",
+  "21614": "Landline (not mobile)",
+  "30003": "Unreachable handset",
+  "30004": "Message blocked by carrier",
+  "30005": "Unknown destination",
+  "30006": "Landline / carrier failure",
+  "30007": "Carrier spam filter",
+  "30008": "Carrier unknown error",
+};
+
 const STATUS_STYLES: Record<string, string> = {
   draft: "bg-zinc-100 text-zinc-700",
   scheduled: "bg-amber-100 text-amber-800",
@@ -77,6 +114,9 @@ export default function TextCampaignDetailPage() {
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [tzBreakdown, setTzBreakdown] = useState<Record<string, number>>({});
   const [shortlink, setShortlink] = useState<ShortlinkStats | null>(null);
+  const [statusBreakdown, setStatusBreakdown] = useState<Record<string, number>>({});
+  const [errorBreakdown, setErrorBreakdown] = useState<Record<string, number>>({});
+  const [conversions, setConversions] = useState<Conversions | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +142,9 @@ export default function TextCampaignDetailPage() {
       setCampaign(d.campaign);
       setTzBreakdown(d.tz_source_breakdown || {});
       setShortlink(d.shortlink || null);
+      setStatusBreakdown(d.status_breakdown || {});
+      setErrorBreakdown(d.error_breakdown || {});
+      setConversions(d.conversions || null);
     }
     setLoading(false);
   }, [workspace.id, id]);
@@ -178,12 +221,101 @@ export default function TextCampaignDetailPage() {
         <p className="mb-4 rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>
       )}
 
-      <div className="mb-6 grid gap-3 sm:grid-cols-4">
+      <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Audience" value={campaign.recipients_total.toLocaleString()} />
-        <StatCard label="Sent" value={campaign.recipients_sent.toLocaleString()} tone="good" />
-        <StatCard label="Failed" value={campaign.recipients_failed.toLocaleString()} tone={campaign.recipients_failed > 0 ? "bad" : "neutral"} />
-        <StatCard label="Progress" value={`${progressPct}%`} />
+        <StatCard
+          label="Delivered"
+          value={(statusBreakdown.delivered || 0).toLocaleString()}
+          tone="good"
+          hint={
+            (statusBreakdown.scheduled || 0) > 0
+              ? `+${(statusBreakdown.scheduled || 0).toLocaleString()} held by Twilio for SendAt`
+              : (statusBreakdown.sent || 0) > 0
+              ? `${(statusBreakdown.sent || 0).toLocaleString()} sent immediately, awaiting delivery callback`
+              : undefined
+          }
+        />
+        <StatCard
+          label={shortlink ? "Clicks" : "Failed"}
+          value={
+            shortlink
+              ? shortlink.clicks.toLocaleString()
+              : campaign.recipients_failed.toLocaleString()
+          }
+          tone={shortlink ? "good" : campaign.recipients_failed > 0 ? "bad" : "neutral"}
+          hint={
+            shortlink && (statusBreakdown.delivered || 0) > 0
+              ? `${((shortlink.clicks / (statusBreakdown.delivered || 1)) * 100).toFixed(1)}% CTR`
+              : undefined
+          }
+        />
+        <StatCard
+          label="Revenue"
+          value={
+            conversions && conversions.revenue_cents > 0
+              ? `$${(conversions.revenue_cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+              : "—"
+          }
+          tone={conversions && conversions.count > 0 ? "good" : "neutral"}
+          hint={
+            conversions && conversions.count > 0
+              ? `${conversions.count} order${conversions.count === 1 ? "" : "s"} · $${(conversions.aov_cents / 100).toFixed(0)} AOV`
+              : "Attribution updates as Klaviyo imports Placed Order events"
+          }
+        />
       </div>
+
+      {/* Detailed recipient status breakdown */}
+      {Object.keys(statusBreakdown).length > 0 && (
+        <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">Recipient status</h2>
+          <ul className="grid gap-2 sm:grid-cols-2">
+            {Object.entries(statusBreakdown)
+              .sort((a, b) => b[1] - a[1])
+              .map(([status, count]) => {
+                const pct = campaign.recipients_total > 0 ? (count / campaign.recipients_total) * 100 : 0;
+                const bad = status === "failed" || status === "failed_permanent";
+                const limbo = status === "pending" || status === "sending" || status === "scheduled";
+                return (
+                  <li key={status} className="flex items-center justify-between text-sm">
+                    <span className={`${bad ? "text-rose-700" : limbo ? "text-amber-700" : "text-zinc-700"} dark:text-zinc-300`}>
+                      {STATUS_LABEL[status] || status}
+                    </span>
+                    <span className="font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                      {count.toLocaleString()}
+                      <span className="ml-1 text-xs font-normal text-zinc-400">({pct.toFixed(1)}%)</span>
+                    </span>
+                  </li>
+                );
+              })}
+          </ul>
+        </div>
+      )}
+
+      {/* Error code breakdown — only if any failed */}
+      {Object.keys(errorBreakdown).length > 0 && (
+        <div className="mb-6 rounded-lg border border-rose-200 bg-rose-50/40 p-5 dark:border-rose-900 dark:bg-rose-950/20">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-rose-700 dark:text-rose-400">Twilio errors</h2>
+          <ul className="space-y-1.5 text-sm">
+            {Object.entries(errorBreakdown)
+              .sort((a, b) => b[1] - a[1])
+              .map(([code, count]) => (
+                <li key={code} className="flex items-center justify-between">
+                  <span className="text-zinc-700 dark:text-zinc-300">
+                    <span className="font-mono text-xs text-zinc-500">{code}</span>{" "}
+                    {TWILIO_ERROR_LABEL[code] || "Unknown"}
+                  </span>
+                  <span className="font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                    {count.toLocaleString()}
+                  </span>
+                </li>
+              ))}
+          </ul>
+          <p className="mt-3 text-[11px] text-zinc-500">
+            Customers with fatal codes (21610 unsubscribed, 21211/21217/21614 invalid number, 30003-8 carrier failure) are stamped on <code>customers.phone_status</code> and excluded from all future campaigns automatically.
+          </p>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_320px]">
         <div>
@@ -378,12 +510,13 @@ function ActionButtons({
   );
 }
 
-function StatCard({ label, value, tone }: { label: string; value: string; tone?: "good" | "bad" | "neutral" }) {
+function StatCard({ label, value, tone, hint }: { label: string; value: string; tone?: "good" | "bad" | "neutral"; hint?: string }) {
   const colorClass = tone === "good" ? "text-emerald-600" : tone === "bad" ? "text-rose-600" : "text-zinc-900 dark:text-zinc-100";
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
       <p className="text-xs font-medium uppercase tracking-wider text-zinc-400">{label}</p>
       <p className={`mt-1 text-2xl font-bold tabular-nums ${colorClass}`}>{value}</p>
+      {hint && <p className="mt-1 text-[10px] text-zinc-400">{hint}</p>}
     </div>
   );
 }
