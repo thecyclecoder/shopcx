@@ -868,139 +868,74 @@ async function handleIdentifyOrder(
     orders = recentOrders;
   }
 
-  // Multiple orders — try to match customer's message to an order
-  const msgLower = msg.toLowerCase().replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ");
-
-  // Match by order number (if customer somehow knows it)
-  const matchedByNumber = orders.filter(o => {
-    const num = o.order_number.replace(/^[^0-9]*/, "");
-    return msgLower.includes(o.order_number.toLowerCase()) || msgLower.includes(num);
-  });
-  if (matchedByNumber.length > 0) {
-    return {
-      action: "advance", newStep: step.step_order + 1,
-      context: { identified_orders: matchedByNumber.map(o => o.order_number) },
-      systemNote: `[Playbook] Customer specified order(s): ${matchedByNumber.map(o => o.order_number).join(", ")}`,
-    };
-  }
-
-  // Match by date reference ("the April 4 one", "april 4th", "4/4")
-  const matchedByDate = orders.filter(o => {
+  // Multiple orders — ask the AI which order(s) the customer is
+  // referring to. Customers can phrase this infinitely many ways:
+  // "my last one", "the April 4 one", "the $59 charge", "the
+  // creamer order", "both of them", "the one with tabs". Keyword
+  // matching can't cover all phrasings reliably; Haiku does it in
+  // one call.
+  const orderList = orders.map((o, i) => {
     const d = new Date(o.created_at);
-    const monthNames = ["january","february","march","april","may","june","july","august","september","october","november","december"];
-    const monthShort = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
-    const month = monthNames[d.getMonth()];
-    const mShort = monthShort[d.getMonth()];
-    const day = d.getDate();
-    const dayStr = String(day);
-    const monthNum = String(d.getMonth() + 1);
+    const dateStr = d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+    const items = ((o.line_items as Array<{title?: string; quantity?: number}> | undefined) || [])
+      .filter(li => li.title && !["Shipping Protection", "Mystery Item"].includes(li.title))
+      .map(li => `${li.quantity || 1}x ${li.title}`)
+      .join(", ");
+    return `[${i}] ${o.order_number} — ${dateStr} — $${((o.total_cents || 0) / 100).toFixed(2)} — ${items || "(items unknown)"}`;
+  }).join("\n");
 
-    // "April 4", "april 4th", "Apr 4", "4/4", "the 4th"
-    return msgLower.includes(`${month} ${dayStr}`) ||
-      msgLower.includes(`${month} ${day}th`) ||
-      msgLower.includes(`${month} ${day}st`) ||
-      msgLower.includes(`${month} ${day}nd`) ||
-      msgLower.includes(`${month} ${day}rd`) ||
-      msgLower.includes(`${mShort} ${dayStr}`) ||
-      msgLower.includes(`${monthNum}/${dayStr}`) ||
-      msgLower.includes(`${monthNum}-${dayStr}`);
-  });
-  if (matchedByDate.length > 0) {
-    return {
-      action: "advance", newStep: step.step_order + 1,
-      context: { identified_orders: matchedByDate.map(o => o.order_number) },
-      systemNote: `[Playbook] Customer identified order by date: ${matchedByDate.map(o => o.order_number).join(", ")}`,
-    };
-  }
+  const verdict = await aiGenerate(
+    `You are helping match a customer's message to one or more of their recent orders. They have multiple orders and we need to know which one(s) they're talking about.
 
-  // Match by product name — full title OR a distinctive token from the
-  // title (so "creamer" matches "Amazing Creamer", "tabs" matches
-  // "Superfood Tabs"). Common brand/filler words are stripped so we
-  // don't false-match on words like "amazing" that appear across SKUs.
-  const STOPWORDS = new Set([
-    "amazing", "superfoods", "superfood", "the", "and", "with", "for",
-    "shipping", "protection", "mystery", "item", "free", "gift", "bamboo",
-  ]);
-  const matchedByProduct = orders.filter(o => {
-    const items = (o.line_items as { title?: string }[] || []);
-    return items.some(i => {
-      if (!i.title) return false;
-      const titleLower = i.title.toLowerCase();
-      if (msgLower.includes(titleLower)) return true;
-      const tokens = titleLower
-        .replace(/[^\w\s]/g, " ")
-        .split(/\s+/)
-        .filter(t => t.length >= 4 && !STOPWORDS.has(t));
-      return tokens.some(t => new RegExp(`\\b${t}\\b`, "i").test(msgLower));
-    });
-  });
-  if (matchedByProduct.length === 1) {
-    return {
-      action: "advance", newStep: step.step_order + 1,
-      context: { identified_orders: [matchedByProduct[0].order_number] },
-      systemNote: `[Playbook] Customer identified order by product name: ${matchedByProduct[0].order_number}`,
-    };
-  }
+THEIR ORDERS (most recent first):
+${orderList}
 
-  // Match by dollar amount ("the $5.87 one")
-  const amountMatch = msgLower.match(/\$(\d+(?:\.\d{2})?)/);
-  if (amountMatch) {
-    const amountCents = Math.round(parseFloat(amountMatch[1]) * 100);
-    const matchedByAmount = orders.filter(o => o.total_cents === amountCents);
-    if (matchedByAmount.length === 1) {
-      return {
-        action: "advance", newStep: step.step_order + 1,
-        context: { identified_orders: [matchedByAmount[0].order_number] },
-        systemNote: `[Playbook] Customer identified order by amount: ${matchedByAmount[0].order_number}`,
-      };
-    }
-  }
+Reply on ONE line with the bracketed index numbers of the matching orders, comma-separated.
+- Use "[0]" / "[1]" / "[0,1]" / etc.
+- Use "ALL" if they want every order addressed ("all of them", "both of them", "every order")
+- Use "MOST_RECENT" if they reference timing ambiguously ("my last order", "the recent one") and there's a single most recent
+- Use "OLDEST" if they reference the oldest
+- Use "UNCLEAR" if their message doesn't reference a specific order or could mean multiple — we'll ask them.
 
-  // "All orders" / "all of them"
-  if (/all (of )?(them|my orders|orders)|every order|each order|both/i.test(msg)) {
+Reference hints they may use: order number, date ("April 4"), product name ("the creamer one"), dollar amount ("the $58 one"), position ("first / last / second"), recency ("most recent / latest").`,
+    `Customer's message: "${msg}"`,
+  );
+  const v = (verdict || "").trim().toUpperCase();
+
+  if (v === "ALL") {
     return {
       action: "advance", newStep: step.step_order + 1,
       context: { identified_orders: orders.map(o => o.order_number) },
       systemNote: `[Playbook] Customer wants all ${orders.length} orders addressed.`,
     };
   }
-
-  // Positional: "the first one", "the last one", "the most recent", "the second one"
-  if (/\b(last|most recent|latest|recent)\b/i.test(msg)) {
+  if (v === "MOST_RECENT") {
     return {
       action: "advance", newStep: step.step_order + 1,
       context: { identified_orders: [orders[0].order_number] },
       systemNote: `[Playbook] Customer referenced most recent order: ${orders[0].order_number}.`,
     };
   }
-  if (/\b(first one|first order|the first)\b/i.test(msg)) {
-    // "First one" = first in the displayed list = most recent
-    return {
-      action: "advance", newStep: step.step_order + 1,
-      context: { identified_orders: [orders[0].order_number] },
-      systemNote: `[Playbook] Customer referenced "first one" (first in list = most recent): ${orders[0].order_number}.`,
-    };
-  }
-  if (/\b(oldest|earliest)\b/i.test(msg)) {
+  if (v === "OLDEST") {
     return {
       action: "advance", newStep: step.step_order + 1,
       context: { identified_orders: [orders[orders.length - 1].order_number] },
       systemNote: `[Playbook] Customer referenced oldest order: ${orders[orders.length - 1].order_number}.`,
     };
   }
-  if (/\bsecond\b/i.test(msg) && orders.length >= 2) {
-    return {
-      action: "advance", newStep: step.step_order + 1,
-      context: { identified_orders: [orders[1].order_number] },
-      systemNote: `[Playbook] Customer referenced second order: ${orders[1].order_number}.`,
-    };
-  }
-  if (/\bthird\b/i.test(msg) && orders.length >= 3) {
-    return {
-      action: "advance", newStep: step.step_order + 1,
-      context: { identified_orders: [orders[2].order_number] },
-      systemNote: `[Playbook] Customer referenced third order: ${orders[2].order_number}.`,
-    };
+  if (v !== "UNCLEAR") {
+    // Parse bracketed indices: "[0]" or "[1,2]" or "[0],[2]"
+    const indices = [...v.matchAll(/\[(\d+)\]|\b(\d+)\b/g)]
+      .map(m => parseInt(m[1] || m[2], 10))
+      .filter(n => Number.isInteger(n) && n >= 0 && n < orders.length);
+    const picked = [...new Set(indices)].map(i => orders[i]);
+    if (picked.length > 0) {
+      return {
+        action: "advance", newStep: step.step_order + 1,
+        context: { identified_orders: picked.map(o => o.order_number) },
+        systemNote: `[Playbook] AI matched customer message to order(s): ${picked.map(o => o.order_number).join(", ")}.`,
+      };
+    }
   }
 
   // If we already asked and customer replied but we couldn't match — default to most recent
@@ -2682,11 +2617,21 @@ async function handleSelectMissingItems(
       };
     }
 
-    // Parse their response
-    const lower = msg.toLowerCase().replace(/<[^>]*>/g, " ");
-    const saysCorrect = /\b(yes|correct|right|that's right|yep|yeah)\b/i.test(lower);
+    // AI classification — "did the customer confirm everything came
+    // through?" Customers phrase this all sorts of ways: "yep all
+    // good", "yes thanks", "actually one was missing", "no the
+    // strawberry didn't arrive". Keyword matching missed nuance.
+    const verdict = await aiGenerate(
+      `Did the customer confirm that all items in their order arrived (yes) or report that something is still wrong (no)?
 
-    if (saysCorrect) {
+Respond with EXACTLY one word:
+- "yes" — they confirmed everything's good, or said thanks-style closure
+- "no" — they're reporting another issue (something missing, damaged, etc)
+- "unclear" — only if you genuinely can't tell`,
+      `Customer's message: "${msg}"`,
+    );
+
+    if ((verdict || "").toLowerCase().includes("yes")) {
       return {
         action: "complete",
         response: "Got it! If anything comes up in the future, don't hesitate to reach out.",
