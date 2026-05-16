@@ -205,9 +205,17 @@ export async function analyzeTicket(
   const admin = createAdminClient();
 
   const { data: ticket } = await admin.from("tickets")
-    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context")
+    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply")
     .eq("id", ticketId).maybeSingle();
   if (!ticket) return { ok: false, reason: "ticket_not_found" };
+
+  // do_not_reply tickets don't get analyzed — the AI intentionally
+  // didn't reply (wrong company, spam, etc), so grading the absent
+  // response would always score poorly and re-escalate, which is the
+  // opposite of what we want.
+  if (ticket.do_not_reply) {
+    return { ok: false, reason: "do_not_reply" };
+  }
 
   // Skip spam / outreach / B2B
   const tags = (ticket.tags as string[]) || [];

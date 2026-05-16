@@ -191,6 +191,41 @@ const directActionHandlers: Record<
     return { ...r, summary: "Resumed subscription" };
   },
 
+  // Flags the ticket as do_not_reply — AI pipeline + auto-analyzer +
+  // auto-reopen all short-circuit on future inbound. Used when the
+  // customer is reaching out about a product/company we have nothing
+  // to do with (wrong company, wrong product, spam, accidental, etc).
+  // The Sonnet decision should include response_message — that one
+  // message is sent BEFORE the flag is set so the customer gets the
+  // "you have the wrong company" clarification once.
+  //
+  // action params:
+  //   reason: machine tag — "wrong_product" | "wrong_company" | "spam"
+  //           | "accidental_send" | "other". Gets stamped as a ticket
+  //           tag for analytics.
+  deactivate_ticket: async (ctx, p) => {
+    const reason = p.reason || "wrong_company";
+    const now = new Date().toISOString();
+    const tag = reason.startsWith("wrong_") || reason === "spam" || reason === "accidental_send"
+      ? reason
+      : `do_not_reply:${reason}`;
+
+    const { error } = await ctx.admin
+      .from("tickets")
+      .update({
+        do_not_reply: true,
+        do_not_reply_at: now,
+        status: "closed",
+        updated_at: now,
+      })
+      .eq("id", ctx.ticketId);
+    if (error) return { success: false, error: error.message, summary: `Deactivate failed: ${error.message}` };
+
+    const { addTicketTag } = await import("@/lib/ticket-tags");
+    await addTicketTag(ctx.ticketId, tag);
+    return { success: true, summary: `Deactivated ticket (reason: ${reason})` };
+  },
+
   skip_next_order: async (ctx, p) => {
     const { appstleSkipNextOrder } = await import("@/lib/appstle");
     const r = await appstleSkipNextOrder(ctx.workspaceId, p.contract_id!);

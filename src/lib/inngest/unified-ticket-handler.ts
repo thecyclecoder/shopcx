@@ -577,9 +577,19 @@ export const unifiedTicketHandler = inngest.createFunction(
     // ── 1. Resolve ──
     const st = await step.run("resolve", async () => {
       const { data: ticket } = await admin.from("tickets")
-        .select("customer_id, channel, ai_clarification_turn, agent_intervened, assigned_to, escalated_to, subject")
+        .select("customer_id, channel, ai_clarification_turn, agent_intervened, assigned_to, escalated_to, subject, do_not_reply")
         .eq("id", tid).single();
       if (!ticket) throw new Error("Ticket not found");
+      // ── do_not_reply short-circuit ──
+      // Tickets flagged as do_not_reply (wrong_company, wrong_product,
+      // spam, etc.) skip all AI processing on inbound messages. The
+      // message is logged in ticket_messages by the channel webhook
+      // before we get here; we just don't respond.
+      if (ticket.do_not_reply) {
+        await sysNote(admin, tid, `[System] Skipped — ticket is flagged do_not_reply`);
+        // Return a sentinel that downstream steps will short-circuit on.
+        return { _doNotReply: true, hasCust: false, custId: null, custEmail: null, hasShopifyCustomer: false, ch: ticket.channel || ch, turn: 0, intervened: false, assignedTo: null, escalatedTo: null, subject: ticket.subject || "" };
+      }
       let cust: { id: string; email: string; first_name: string | null; phone: string | null; shopify_customer_id: string | null } | null = null;
       if (ticket.customer_id) {
         const { data } = await admin.from("customers").select("id, email, first_name, phone, shopify_customer_id").eq("id", ticket.customer_id).single();
@@ -609,6 +619,14 @@ export const unifiedTicketHandler = inngest.createFunction(
         subject: ticket.subject || "",
       };
     });
+
+    // Hard exit if the ticket is flagged do_not_reply. The resolve
+    // step already logged the system note; we just stop here and
+    // skip everything downstream — language detection, classification,
+    // Sonnet, all of it.
+    if ((st as unknown as { _doNotReply?: boolean })._doNotReply) {
+      return { skipped: "do_not_reply" };
+    }
 
     // ── 1a. Language detection ──
     // Detect the inbound message's language and persist on the ticket
