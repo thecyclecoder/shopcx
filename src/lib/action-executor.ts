@@ -181,7 +181,7 @@ function substituteActionPlaceholders(
 
 // ── Direct Action Handler Registry ──
 
-const directActionHandlers: Record<
+export const directActionHandlers: Record<
   string,
   (ctx: ActionContext, p: ActionParams) => Promise<ActionResult>
 > = {
@@ -189,6 +189,62 @@ const directActionHandlers: Record<
     const { appstleSubscriptionAction } = await import("@/lib/appstle");
     const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
     return { ...r, summary: "Resumed subscription" };
+  },
+
+  // Unsubscribe the customer from email marketing. Fires when a
+  // customer messages in saying "unsubscribe me", "stop emailing",
+  // "remove me from your list", etc. Updates Shopify (canonical) +
+  // local customers row so subsequent campaigns skip them.
+  unsubscribe_email_marketing: async (ctx) => {
+    const { data: cust } = await ctx.admin.from("customers")
+      .select("shopify_customer_id").eq("id", ctx.customerId).single();
+    if (!cust?.shopify_customer_id) {
+      return { success: false, error: "No Shopify customer id", summary: "Unsubscribe failed: no Shopify id" };
+    }
+    const { unsubscribeFromEmailMarketing } = await import("@/lib/shopify-marketing");
+    const r = await unsubscribeFromEmailMarketing(ctx.workspaceId, cust.shopify_customer_id);
+    if (!r.success) return { success: false, error: r.error, summary: `Shopify unsubscribe failed: ${r.error}` };
+    await ctx.admin.from("customers").update({
+      email_marketing_status: "unsubscribed",
+      updated_at: new Date().toISOString(),
+    }).eq("id", ctx.customerId);
+    return { success: true, summary: "Unsubscribed from email marketing" };
+  },
+
+  // Unsubscribe from SMS marketing. Same pattern.
+  unsubscribe_sms_marketing: async (ctx) => {
+    const { data: cust } = await ctx.admin.from("customers")
+      .select("shopify_customer_id").eq("id", ctx.customerId).single();
+    if (!cust?.shopify_customer_id) {
+      return { success: false, error: "No Shopify customer id", summary: "Unsubscribe failed: no Shopify id" };
+    }
+    const { unsubscribeFromSmsMarketing } = await import("@/lib/shopify-marketing");
+    const r = await unsubscribeFromSmsMarketing(ctx.workspaceId, cust.shopify_customer_id);
+    if (!r.success) return { success: false, error: r.error, summary: `Shopify unsubscribe failed: ${r.error}` };
+    await ctx.admin.from("customers").update({
+      sms_marketing_status: "unsubscribed",
+      updated_at: new Date().toISOString(),
+    }).eq("id", ctx.customerId);
+    return { success: true, summary: "Unsubscribed from SMS marketing" };
+  },
+
+  // Unsubscribe from both email AND SMS. Use this when customer says
+  // "stop all marketing" / "unsubscribe me from everything".
+  unsubscribe_all_marketing: async (ctx) => {
+    const { data: cust } = await ctx.admin.from("customers")
+      .select("shopify_customer_id").eq("id", ctx.customerId).single();
+    if (!cust?.shopify_customer_id) {
+      return { success: false, error: "No Shopify customer id", summary: "Unsubscribe failed: no Shopify id" };
+    }
+    const { unsubscribeFromAllMarketing } = await import("@/lib/shopify-marketing");
+    const r = await unsubscribeFromAllMarketing(ctx.workspaceId, cust.shopify_customer_id);
+    if (!r.success) return { success: false, error: r.error, summary: `Shopify unsubscribe failed: ${r.error}` };
+    await ctx.admin.from("customers").update({
+      email_marketing_status: "unsubscribed",
+      sms_marketing_status: "unsubscribed",
+      updated_at: new Date().toISOString(),
+    }).eq("id", ctx.customerId);
+    return { success: true, summary: "Unsubscribed from all marketing (email + SMS)" };
   },
 
   // Flags the ticket as do_not_reply — AI pipeline + auto-analyzer +

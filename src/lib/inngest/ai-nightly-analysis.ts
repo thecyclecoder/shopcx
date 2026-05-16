@@ -149,6 +149,8 @@ export const aiNightlyAnalysis = inngest.createFunction(
             max_tokens: 2000,
             system: `You are an AI quality analyst reviewing customer support conversations handled by an AI agent.
 
+${(await import("@/lib/ai-date-context")).currentDateContext()}
+
 You will be shown only the messages from the last 24 hours of each ticket. Tickets marked "HAS PRIOR HISTORY" had earlier conversation that was intentionally excluded from this prompt — do NOT penalize the AI for not acknowledging context you can't see, do NOT score those tickets based on assumed prior failures, and do NOT count loops/repetition that may have happened before this window. Only grade what's in front of you.
 
 ROLE LABELS:

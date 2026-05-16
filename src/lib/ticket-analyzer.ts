@@ -68,7 +68,11 @@ async function buildGraderSystemPrompt(admin: Admin, workspaceId: string): Promi
       (rules || []).map(r => `• ${r.title}\n  ${r.content}`).join("\n\n")
     : "";
 
+  const { currentDateContext } = await import("@/lib/ai-date-context");
+
   return `You are an AI Quality Analyst grading customer-support conversations handled by an AI agent named Suzie/Julie.
+
+${currentDateContext()}
 
 You will be shown a window of messages from a single ticket. Grade ONLY the AI agent's behavior in this window. Do not grade human agent messages or system messages.
 

@@ -13,6 +13,7 @@ import { retrieveContext } from "@/lib/rag";
 import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, OPUS_MODEL } from "@/lib/ai-models";
 import { buildCustomerTimeline, timelineToText } from "@/lib/customer-timeline";
+import { currentDateContext } from "@/lib/ai-date-context";
 
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
@@ -283,6 +284,8 @@ async function buildPreContext(
     : "";
 
   return `You are a customer support agent for ${wsName}. Analyze the customer's message and decide the best action.
+
+${currentDateContext()}
 
 You have tools to look up data. Use them to gather what you need before making your decision.
 

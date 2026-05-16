@@ -2355,8 +2355,9 @@ async function handleClarifyIssue(
     `You are classifying a customer's message about an order issue.
 
 Respond with EXACTLY one word:
-- "received" — they received the package but items are missing, damaged, wrong, or incomplete (e.g. "my order is missing X", "the package arrived damaged", "wrong item", "broken")
+- "received" — they received the package but items are missing, damaged, wrong, incomplete, OR have a short/near-term expiration date (e.g. "my order is missing X", "the package arrived damaged", "wrong item", "broken", "expires in a month", "the date on the package is way too soon", "near expiration")
 - "not_received" — they did not receive the package at all (e.g. "never arrived", "never saw my package", "lost in transit", "not delivered yet", "where is my order")
+- "expired" — they received items that are at/near expiration, or much shorter dated than expected (e.g. "expiration date of 6/26", "expires next month", "almost expired", "much shorter than my previous box")
 - "unclear" — only if you truly cannot determine the scenario`,
     `Customer's message: "${msg}"`,
   );
@@ -2366,6 +2367,16 @@ Respond with EXACTLY one word:
   if (result.includes("not_received")) {
     ctx.received_order = false;
     ctx.replacement_reason = "not_received";
+    return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
+  if (result.includes("expired")) {
+    // Treat near-expiration / expired as a delivered-but-defective case.
+    // Customer gets a replacement; no item-selection journey (we replace
+    // exactly what they got).
+    ctx.received_order = true;
+    ctx.needs_item_selection = true;
+    ctx.replacement_reason = "expired";
     return { action: "advance", newStep: step.step_order + 1, context: ctx };
   }
 
@@ -2577,6 +2588,12 @@ async function handleClassifyIssue(
   const lower = msg.toLowerCase();
   if (lower.includes("missing") || lower.includes("not in") || lower.includes("wasn't there") || lower.includes("didn't receive") || lower.includes("empty")) {
     ctx.replacement_reason = "missing_items";
+    ctx.needs_item_selection = true;
+  } else if (lower.includes("expir") || lower.includes("expire") || lower.includes("expired") || lower.includes("near expiration") || lower.includes("almost expired") || lower.includes("shelf life") || /expir(es?|ation)\s*(date)?/.test(lower)) {
+    // Expired / near-expiration: customer received intact product
+    // with a too-short shelf life. Replacement reason 'expired' so
+    // downstream steps know it's a fresh-stock swap.
+    ctx.replacement_reason = "expired";
     ctx.needs_item_selection = true;
   } else if (lower.includes("damaged") || lower.includes("broken") || lower.includes("crushed") || lower.includes("leak")) {
     ctx.replacement_reason = "damaged_items";
