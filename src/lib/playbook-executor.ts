@@ -2473,8 +2473,16 @@ async function handleCheckTracking(
 
     // Auto-classify based on tracking
     if (result.status === "delivered") {
-      // Package delivered — need to ask customer what's wrong
-      ctx.replacement_reason = null; // Will be classified in next step
+      // If the customer already explicitly said the package never
+      // arrived ("not_received"), their word stands over carrier
+      // tracking. Common scenarios: porch theft, mis-delivery to a
+      // neighbor, carrier scanned-then-not-actually-delivered.
+      // Keep replacement_reason as 'not_received' so classify_issue
+      // skips its "delivered, what happened?" question.
+      if (ctx.replacement_reason !== "not_received") {
+        // No prior customer classification → ask them what happened.
+        ctx.replacement_reason = null;
+      }
     } else if (result.status === "return_to_sender") {
       const isRefused = (reasonEvent?.message || "").toLowerCase().includes("refused");
       ctx.replacement_reason = isRefused ? "refused" : "delivery_error";
