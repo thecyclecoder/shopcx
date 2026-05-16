@@ -39,6 +39,48 @@ export async function verifyShopifyWebhook(
 
 // ── Helpers ──
 
+/**
+ * Extract UTM attribution fields from a Shopify Order's landing_site
+ * URL. landing_site is the path-or-URL the customer first hit in the
+ * session that placed the order — Shopify captures it server-side
+ * before any client-side JS can scrub the query string.
+ *
+ * Returns the standard 5 utm_* fields, suitable for direct merge into
+ * an orders upsert.
+ */
+function extractOrderUtms(landingSite: string | null): {
+  attributed_utm_source: string | null;
+  attributed_utm_medium: string | null;
+  attributed_utm_campaign: string | null;
+  attributed_utm_content: string | null;
+  attributed_utm_term: string | null;
+} {
+  const empty = {
+    attributed_utm_source: null,
+    attributed_utm_medium: null,
+    attributed_utm_campaign: null,
+    attributed_utm_content: null,
+    attributed_utm_term: null,
+  };
+  if (!landingSite) return empty;
+  try {
+    // landing_site may be path-only ("/collections/x?utm_*=...") or
+    // full URL. Construct against dummy base so URL() doesn't throw
+    // on path-only inputs.
+    const url = new URL(landingSite, "https://x.example");
+    const q = url.searchParams;
+    return {
+      attributed_utm_source: q.get("utm_source") || null,
+      attributed_utm_medium: q.get("utm_medium") || null,
+      attributed_utm_campaign: q.get("utm_campaign") || null,
+      attributed_utm_content: q.get("utm_content") || null,
+      attributed_utm_term: q.get("utm_term") || null,
+    };
+  } catch {
+    return empty;
+  }
+}
+
 function dollarsToCents(amount: string | number | null | undefined): number {
   if (amount == null) return 0;
   const num = typeof amount === "string" ? parseFloat(amount) : amount;
@@ -526,6 +568,14 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
       created_at: (payload.created_at as string) || new Date().toISOString(),
       delivery_status: deliveryStatus,
       ...(deliveredAt ? { delivered_at: deliveredAt } : {}),
+      // ── Landing-site attribution (UTM capture) ──
+      // Shopify's orders/create webhook payload carries `landing_site`
+      // — the session-entry URL with any UTM params intact. Parse out
+      // top-level UTMs so the campaign detail page can join orders
+      // directly (instant) instead of waiting on Klaviyo's import cron.
+      landing_site: (payload.landing_site as string) || null,
+      referring_site: (payload.referring_site as string) || null,
+      ...extractOrderUtms((payload.landing_site as string) || null),
     },
     { onConflict: "workspace_id,shopify_order_id" }
   );

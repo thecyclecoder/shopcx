@@ -96,11 +96,22 @@ export async function GET(request: Request, { params }: RouteParams) {
     }
   }
 
-  // Conversions via klaviyo_events.attributed_utm_campaign — orders
-  // placed by recipients whose Placed Order landing_site carried our
-  // utm_campaign=<this_campaign_id>. Klaviyo importer populates this
-  // on its next run after the order; expect a small lag for very
-  // recent orders.
+  // Conversions — direct from Shopify orders/create webhook landing_site
+  // attribution (instant). The Klaviyo events path remains as defense
+  // in depth (catches cross-session attribution via profile-tagging),
+  // but for same-session conversions the orders table is faster +
+  // captured at write time vs. waiting for the Klaviyo import cron.
+  //
+  // Strategy: merge both sources, deduped by Shopify order_number.
+  // Orders source = canonical revenue. Klaviyo source = catches any
+  // late attribution Shopify missed.
+  const { data: orderRows } = await admin
+    .from("orders")
+    .select("order_number, total_cents, created_at, customer_id")
+    .eq("workspace_id", workspaceId)
+    .eq("attributed_utm_campaign", campaignId);
+  const orderConv = (orderRows || []) as Array<{ order_number: string | null; total_cents: number | null; created_at: string; customer_id: string | null }>;
+
   const PLACED_ORDER_METRIC = "VCkHuL";
   const { data: convRows } = await admin
     .from("klaviyo_events")
@@ -108,10 +119,22 @@ export async function GET(request: Request, { params }: RouteParams) {
     .eq("workspace_id", workspaceId)
     .eq("klaviyo_metric_id", PLACED_ORDER_METRIC)
     .eq("attributed_utm_campaign", campaignId);
-  const conversions = (convRows || []) as Array<{ value: number | null; order_number: string | null; datetime: string; klaviyo_profile_id: string | null }>;
-  const convCount = conversions.length;
-  const convRevenueCents = conversions.reduce((s, c) => s + Math.round((c.value || 0) * 100), 0);
-  const uniqueConverters = new Set(conversions.map((c) => c.klaviyo_profile_id).filter(Boolean)).size;
+  const klaviyoConv = (convRows || []) as Array<{ value: number | null; order_number: string | null; datetime: string; klaviyo_profile_id: string | null }>;
+
+  // Build dedup set by order_number — orders table wins on revenue
+  // (it's the canonical Shopify value), Klaviyo fills in orders the
+  // webhook may have missed (rare, but defense-in-depth).
+  const orderNumbersFromOrders = new Set(orderConv.map((o) => o.order_number).filter(Boolean));
+  const dedupKlaviyo = klaviyoConv.filter((k) => !k.order_number || !orderNumbersFromOrders.has(k.order_number));
+
+  const convCount = orderConv.length + dedupKlaviyo.length;
+  const convRevenueCents =
+    orderConv.reduce((s, o) => s + (o.total_cents || 0), 0) +
+    dedupKlaviyo.reduce((s, c) => s + Math.round((c.value || 0) * 100), 0);
+  const uniqueConverters = new Set([
+    ...orderConv.map((o) => o.customer_id).filter(Boolean),
+    ...dedupKlaviyo.map((k) => k.klaviyo_profile_id).filter(Boolean),
+  ]).size;
 
   return NextResponse.json({
     campaign: data,
