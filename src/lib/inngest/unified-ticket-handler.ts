@@ -668,76 +668,78 @@ export const unifiedTicketHandler = inngest.createFunction(
       }
     }
 
-    // ── 1a. Auto-merge: check if customer has other recent tickets about the same issue ──
+    // ── 1a. Auto-merge: combine ALL recent open/pending tickets from
+    // the same customer (or linked accounts) into this new one. The
+    // previous LLM-driven topic-matching was too conservative — two
+    // tickets about the same Mixed Berry order with slightly different
+    // subjects wouldn't merge. The simpler rule:
+    //   Same customer (or linked) + status open|pending + last 14 days
+    //   + not system-initiated (crisis email, do_not_reply, test)
+    //   → merge them all.
+    // Risk: customer with multiple unrelated topics gets one mega-thread.
+    // Mitigation: trust the orchestrator + agents to handle the drift
+    // (they already deal with multi-topic threads from real conversations).
     if (st.custId) {
       const mergeResult = await step.run("auto-merge", async () => {
-        // Find other non-archived tickets for this customer (or linked accounts)
         const { data: otherTickets } = await admin.from("tickets")
-          .select("id, subject, status, created_at, customer_id, merged_into")
+          .select("id, subject, status, created_at, customer_id, tags, merged_into")
           .eq("workspace_id", wsId)
           .eq("customer_id", st.custId!)
           .neq("id", tid)
-          .neq("status", "archived")
+          .in("status", ["open", "pending"])
           .is("merged_into", null)
           .order("created_at", { ascending: false })
-          .limit(5);
+          .limit(10);
 
-        // Also check linked accounts
+        // Linked accounts
         let linkedTickets: typeof otherTickets = [];
         const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", st.custId!).maybeSingle();
         if (link) {
           const { data: linked } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id).neq("customer_id", st.custId!);
           if (linked?.length) {
             const { data: lt } = await admin.from("tickets")
-              .select("id, subject, status, created_at, customer_id, merged_into")
+              .select("id, subject, status, created_at, customer_id, tags, merged_into")
               .eq("workspace_id", wsId)
               .in("customer_id", linked.map(l => l.customer_id))
-              .neq("status", "archived")
+              .in("status", ["open", "pending"])
               .is("merged_into", null)
               .order("created_at", { ascending: false })
-              .limit(5);
+              .limit(10);
             linkedTickets = lt || [];
           }
         }
 
-        const candidates = [...(otherTickets || []), ...linkedTickets]
+        // System-initiated tickets have their own lifecycle — don't
+        // suck them into a customer-driven thread.
+        const isSystemInitiated = (tags: string[] | null) => {
+          if (!tags) return false;
+          return tags.some(tag =>
+            tag === "crisis" || tag === "do_not_reply" || tag === "test" ||
+            tag === "crisis:test" || tag.startsWith("crisis:") || tag === "test:perpetual"
+          );
+        };
+
+        const ageLimitMs = 14 * 24 * 60 * 60 * 1000;
+        const mergeable = [...(otherTickets || []), ...linkedTickets]
           .filter(t => t.id !== tid)
-          .filter(t => {
-            // Only consider tickets from the last 14 days
-            const age = Date.now() - new Date(t.created_at).getTime();
-            return age < 14 * 24 * 60 * 60 * 1000;
-          });
+          .filter(t => Date.now() - new Date(t.created_at).getTime() < ageLimitMs)
+          .filter(t => !isSystemInitiated(t.tags as string[] | null));
 
-        if (candidates.length === 0) return null;
+        if (mergeable.length === 0) return null;
 
-        // Ask Haiku if any of these are about the same issue
-        const candidateList = candidates.map(t => `- "${t.subject}" (${t.status}, ${new Date(t.created_at).toLocaleDateString()})`).join("\n");
-        const check = await claude(
-          `A customer just sent a new message on a ticket with subject: "${st.subject}"
-
-They also have these other recent tickets:
-${candidateList}
-
-Is the new ticket clearly about the SAME issue as any of the other tickets? Consider: same topic (return, cancel, billing, etc.), continuation of a prior conversation, follow-up on an unresolved issue.
-
-Respond with EXACTLY the ticket subject that matches, or "NONE" if no match. Only match if you're confident it's the same issue.`, "haiku", 50, { workspaceId: wsId, ticketId: tid, purpose: "auto-merge-check" });
-
-        if (!check || check.trim().toUpperCase() === "NONE") return null;
-
-        // Find the matching ticket
-        const match = candidates.find(t => check.includes(t.subject || "___NOMATCH___"));
-        if (!match) return null;
-
-        return match.id;
+        return mergeable.map(t => t.id);
       });
 
-      if (mergeResult) {
-        // Merge the old ticket into this one (newest)
+      if (mergeResult && mergeResult.length > 0) {
+        // Merge all candidate tickets into this newest one.
         const { mergeTickets } = await import("@/lib/ticket-merge");
         await step.run("merge-tickets", async () => {
-          const result = await mergeTickets(wsId, [mergeResult, tid], "AI Agent");
+          // mergeTickets picks the newest as target — pass them all
+          // along with the current ticket id.
+          const result = await mergeTickets(wsId, [...mergeResult, tid], "AI Agent");
           if (result.success) {
-            await sysNote(admin, tid, `[System] Auto-merged related ticket — ${result.messagesMoved} messages brought forward for context.`);
+            const noun = mergeResult.length === 1 ? "ticket" : `${mergeResult.length} tickets`;
+            await sysNote(admin, tid, `[System] Auto-merged ${noun} from this customer in the last 14d — ${result.messagesMoved} messages brought forward for context.`);
           }
         });
 
