@@ -107,10 +107,28 @@ export async function POST(request: Request) {
 
   const now = new Date().toISOString();
   switch (status) {
+    case "sent": {
+      // Twilio handed the message off to the carrier. With SendAt
+      // scheduling the row is currently 'scheduled' (or 'sent' if
+      // we sent immediately and missed the prior callback). Either
+      // way, advance to 'sent' and stamp sent_at. Don't overwrite
+      // failed/failed_permanent (defensive).
+      await admin
+        .from("sms_campaign_recipients")
+        .update({
+          status: "sent",
+          sent_at: now,
+          updated_at: now,
+        })
+        .eq("id", recipient.id)
+        .in("status", ["scheduled", "sending", "sent"]);
+      break;
+    }
     case "delivered": {
-      // Only advance from 'sent' → 'delivered'. Don't overwrite a
-      // recipient that's already been marked failed_permanent by a
-      // later status (shouldn't happen, but defensive).
+      // Final state. Set delivered_at and advance status. Don't touch
+      // sent_at — the 'sent' callback handles that; if it never fired
+      // (rare race), we leave sent_at null rather than overwrite with
+      // a too-late timestamp.
       await admin
         .from("sms_campaign_recipients")
         .update({
@@ -119,7 +137,7 @@ export async function POST(request: Request) {
           updated_at: now,
         })
         .eq("id", recipient.id)
-        .in("status", ["sent", "delivered"]);
+        .in("status", ["scheduled", "sending", "sent", "delivered"]);
       break;
     }
     case "undelivered":
