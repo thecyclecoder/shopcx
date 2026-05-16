@@ -2345,25 +2345,20 @@ async function handleClarifyIssue(
     return { action: "advance", newStep: step.step_order + 1, context: ctx };
   }
 
-  // First time — ask the clarification question
-  if (!ctx.clarify_asked) {
-    ctx.clarify_asked = true;
-    return {
-      action: "respond", context: ctx,
-      response: "I'd like to help get this resolved for you. Could you let me know — did you receive your order and something was missing or damaged? Or did you not receive your order at all?",
-    };
-  }
-
-  // Use AI to classify the response
+  // Try to classify the CURRENT inbound message first — most customers
+  // already say "I never got my package" / "the box was damaged" /
+  // "items are missing" in their opening message. Asking a clarifying
+  // question after that wastes a turn and frustrates the customer (and
+  // earns a poor auto-analysis score). Only ask if the message is
+  // genuinely ambiguous.
   const classification = await aiGenerate(
-    `You are classifying a customer's response about an order issue.
-The customer was asked: "Did you receive your order and something was missing or damaged? Or did you not receive your order at all?"
+    `You are classifying a customer's message about an order issue.
 
 Respond with EXACTLY one word:
-- "received" — if the customer received the package but items are missing, damaged, wrong, or incomplete
-- "not_received" — if the customer did not receive the package at all, it never arrived, it's lost
-- "unclear" — if you truly cannot determine which scenario from their response`,
-    `Customer's response: "${msg}"`,
+- "received" — they received the package but items are missing, damaged, wrong, or incomplete (e.g. "my order is missing X", "the package arrived damaged", "wrong item", "broken")
+- "not_received" — they did not receive the package at all (e.g. "never arrived", "never saw my package", "lost in transit", "not delivered yet", "where is my order")
+- "unclear" — only if you truly cannot determine the scenario`,
+    `Customer's message: "${msg}"`,
   );
 
   const result = (classification || "").toLowerCase().trim();
@@ -2379,6 +2374,15 @@ Respond with EXACTLY one word:
     ctx.needs_item_selection = true;
     ctx.replacement_reason = "missing_items";
     return { action: "advance", newStep: step.step_order + 1, context: ctx };
+  }
+
+  // Genuinely unclear — first time through, ask the clarifying question.
+  if (!ctx.clarify_asked) {
+    ctx.clarify_asked = true;
+    return {
+      action: "respond", context: ctx,
+      response: "I'd like to help get this resolved for you. Could you let me know — did you receive your order and something was missing or damaged? Or did you not receive your order at all?",
+    };
   }
 
   // AI couldn't determine — ask again more specifically. But cap the
