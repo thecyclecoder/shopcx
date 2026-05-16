@@ -528,7 +528,7 @@ async function executeStep(
   // If an offer has been made and not yet accepted, check every incoming message for acceptance.
   // If accepted, jump directly to initiate_return regardless of current step.
   if (ctx.exception_offered && !ctx.offer_accepted && step.type !== "offer_exception") {
-    const accepted = detectAcceptance(msg);
+    const accepted = await detectAcceptance(msg);
     if (accepted) {
       ctx.offer_accepted = true;
       // Find the initiate_return step and jump to it
@@ -1643,7 +1643,7 @@ async function handleOfferException(
 
   // ── If we already offered an exception, check acceptance ──
   if (currentTier > 0 && ctx.exception_offered) {
-    const accepted = detectAcceptance(msg);
+    const accepted = await detectAcceptance(msg);
     if (accepted) {
       return {
         action: "advance", newStep: step.step_order + 1,
@@ -1815,13 +1815,24 @@ Tell the customer the EXACT breakdown with these numbers. Say "approximately" si
   };
 }
 
-function detectAcceptance(msg: string): boolean {
-  const lower = msg.toLowerCase();
-  const acceptPatterns = /\b(yes|yeah|yep|ok|okay|sure|fine|sounds good|i('ll| will) (take|accept|do)|go ahead|let('s| us) do|that works|proceed|i('d| would) like that|deal)\b/i;
-  const rejectPatterns = /\b(no|nope|not acceptable|refuse|ridiculous|unacceptable|won't|don't want|i want my money|real money|cash refund|full refund|not good enough|hell no|absolutely not|are you kidding|bs|bullshit)\b/i;
-  if (rejectPatterns.test(lower)) return false;
-  if (acceptPatterns.test(lower)) return true;
-  return false; // Ambiguous — treat as rejection to escalate
+async function detectAcceptance(msg: string): Promise<boolean> {
+  // AI classification — customers express accept/reject in infinite
+  // ways ("yeah let's do it" / "sure, that works" / "I guess so" /
+  // "no thanks I want my money back" / "ridiculous, full refund or
+  // bust"). Regex matching missed valid acceptances and false-
+  // negative'd customers into escalation. Haiku handles the nuance.
+  const verdict = await aiGenerate(
+    `You are reading a customer's reply to a support offer. Did they accept the offer or reject it?
+
+Respond with EXACTLY one word:
+- "accept" — they said yes, sounded fine with it, asked to proceed, or expressed any agreement
+- "reject" — they said no, want something different (e.g. cash refund instead of store credit), expressed frustration with the offer, or are explicitly refusing
+- "unclear" — only when you genuinely cannot determine acceptance from the reply (rare)
+
+Treat lukewarm-but-positive replies as accept ("ok I guess", "fine", "sure"). Treat any explicit demand for a different remedy as reject.`,
+    `Customer's reply: "${msg}"`,
+  );
+  return (verdict || "").toLowerCase().includes("accept");
 }
 
 async function handleInitiateReturn(
@@ -1840,7 +1851,7 @@ async function handleInitiateReturn(
 
   // Gate: only proceed if customer accepted the offer
   if (!ctx.offer_accepted) {
-    const accepted = detectAcceptance(msg);
+    const accepted = await detectAcceptance(msg);
     if (!accepted) {
       return {
         action: "advance", newStep: step.step_order + 1,
@@ -2584,28 +2595,37 @@ async function handleClassifyIssue(
     };
   }
 
-  // Parse customer's response
-  const lower = msg.toLowerCase();
-  if (lower.includes("missing") || lower.includes("not in") || lower.includes("wasn't there") || lower.includes("didn't receive") || lower.includes("empty")) {
+  // AI-only classification — never keyword match (customers phrase
+  // things infinitely many ways: "didn't receive" / "never came" /
+  // "still waiting" / "where is it" all mean the same thing).
+  const aiClass = await aiGenerate(
+    `You are classifying what's wrong with a customer's order. They've already confirmed they received the package (or it shows as delivered by the carrier).
+
+Respond with EXACTLY one word:
+- "missing_items" — items were absent from the package, wrong item shipped, incomplete order
+- "damaged_items" — items arrived broken, crushed, leaking, melted
+- "expired" — items received but with a too-short / near-expiration date
+- "not_received" — customer is saying the package itself never arrived (e.g. "I didn't receive my order", "the package never came", "lost in transit", "still hasn't shown up"). USE THIS even if carrier says delivered — customer's claim stands (porch theft, mis-delivery).
+- "unclear" — only if you genuinely cannot tell from the message`,
+    `Customer's message: "${msg}"`,
+  );
+  const aiResult = (aiClass || "").toLowerCase().trim();
+
+  if (aiResult.includes("missing_items")) {
     ctx.replacement_reason = "missing_items";
     ctx.needs_item_selection = true;
-  } else if (lower.includes("expir") || lower.includes("expire") || lower.includes("expired") || lower.includes("near expiration") || lower.includes("almost expired") || lower.includes("shelf life") || /expir(es?|ation)\s*(date)?/.test(lower)) {
-    // Expired / near-expiration: customer received intact product
-    // with a too-short shelf life. Replacement reason 'expired' so
-    // downstream steps know it's a fresh-stock swap.
-    ctx.replacement_reason = "expired";
-    ctx.needs_item_selection = true;
-  } else if (lower.includes("damaged") || lower.includes("broken") || lower.includes("crushed") || lower.includes("leak")) {
+  } else if (aiResult.includes("damaged_items")) {
     ctx.replacement_reason = "damaged_items";
     ctx.needs_item_selection = true;
-  } else if (lower.includes("wrong") || lower.includes("not what i ordered") || lower.includes("different")) {
-    ctx.replacement_reason = "missing_items";
+  } else if (aiResult.includes("expired")) {
+    ctx.replacement_reason = "expired";
     ctx.needs_item_selection = true;
-  } else if (lower.includes("never") || lower.includes("didn't get") || lower.includes("not received") || lower.includes("didn't arrive")) {
+  } else if (aiResult.includes("not_received")) {
     ctx.replacement_reason = "not_received";
     ctx.customer_error = false;
+    ctx.received_order = false;
   } else {
-    // Couldn't classify — ask again
+    // AI returned "unclear" — ask once more, more specifically.
     return {
       action: "respond",
       response: "I want to make sure I help you correctly. Were any items missing from the package, or was something damaged? Or did you not receive the package at all?",
