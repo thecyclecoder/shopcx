@@ -784,6 +784,40 @@ export async function POST(
     const selectedSubId = responses?.select_subscription?.value || (metadata.selectedSubscriptionId as string);
     let selectedSub: CancelTarget | undefined = subscriptions.find(s => s.id === selectedSubId) || subscriptions[0];
 
+    // Direct DB lookup when the customer's selection value looks like a
+    // subscription UUID. This is the canonical path: the journey builder
+    // emits the subscription's row UUID as the option value, so we can
+    // always resolve it via subscriptions.id without depending on
+    // metadata.subscriptions being seeded (it sometimes isn't —
+    // Victoria's ticket 78fda092 surfaced this: metadata was empty so
+    // .find() returned undefined and the handler bailed despite a
+    // valid customer selection).
+    if (!selectedSub && typeof selectedSubId === "string" && /^[0-9a-f-]{36}$/i.test(selectedSubId)) {
+      const { data: subRow } = await admin.from("subscriptions")
+        .select("id, shopify_contract_id, items, customer_id, status")
+        .eq("id", selectedSubId)
+        .eq("workspace_id", wsId)
+        .maybeSingle();
+      // Guard: the sub must belong to this session's customer (or a
+      // linked account). Stops a hand-tampered token from cancelling
+      // someone else's sub.
+      if (subRow?.shopify_contract_id && subRow.customer_id) {
+        const allowedIds = [session.customer_id];
+        const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", session.customer_id).maybeSingle();
+        if (link?.group_id) {
+          const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
+          for (const g of grp || []) if (!allowedIds.includes(g.customer_id)) allowedIds.push(g.customer_id);
+        }
+        if (allowedIds.includes(subRow.customer_id)) {
+          selectedSub = {
+            id: subRow.id,
+            contractId: subRow.shopify_contract_id,
+            items: ((subRow.items as { title?: string }[]) || []).map(i => ({ title: i.title || "" })),
+          };
+        }
+      }
+    }
+
     if (!selectedSub && session.subscription_id) {
       const { data: subRow } = await admin.from("subscriptions")
         .select("id, shopify_contract_id, items")
@@ -800,22 +834,26 @@ export async function POST(
     }
 
     if (!selectedSub && session.customer_id) {
-      // Auto-pick a single active sub for the customer (and their linked accounts)
+      // Auto-pick the customer's lone non-cancelled subscription if
+      // there's exactly one (active OR paused — both are still billable
+      // and the customer's "cancel my subscription" intent applies to
+      // either). Previously this only counted 'active' which missed
+      // customers with a single paused sub.
       const linkedIds = [session.customer_id];
       const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", session.customer_id).maybeSingle();
       if (link?.group_id) {
         const { data: grp } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
         for (const g of grp || []) if (!linkedIds.includes(g.customer_id)) linkedIds.push(g.customer_id);
       }
-      const { data: activeSubs } = await admin.from("subscriptions")
+      const { data: liveSubs } = await admin.from("subscriptions")
         .select("id, shopify_contract_id, items")
         .in("customer_id", linkedIds)
-        .eq("status", "active");
-      if (activeSubs?.length === 1 && activeSubs[0].shopify_contract_id) {
+        .in("status", ["active", "paused"]);
+      if (liveSubs?.length === 1 && liveSubs[0].shopify_contract_id) {
         selectedSub = {
-          id: activeSubs[0].id,
-          contractId: activeSubs[0].shopify_contract_id,
-          items: ((activeSubs[0].items as { title?: string }[]) || []).map(i => ({ title: i.title || "" })),
+          id: liveSubs[0].id,
+          contractId: liveSubs[0].shopify_contract_id,
+          items: ((liveSubs[0].items as { title?: string }[]) || []).map(i => ({ title: i.title || "" })),
         };
       }
     }
