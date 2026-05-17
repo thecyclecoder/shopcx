@@ -117,6 +117,9 @@ export default function TextCampaignDetailPage() {
   const [statusBreakdown, setStatusBreakdown] = useState<Record<string, number>>({});
   const [errorBreakdown, setErrorBreakdown] = useState<Record<string, number>>({});
   const [conversions, setConversions] = useState<Conversions | null>(null);
+  const [editingBody, setEditingBody] = useState(false);
+  const [bodyDraft, setBodyDraft] = useState("");
+  const [savingBody, setSavingBody] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -320,10 +323,58 @@ export default function TextCampaignDetailPage() {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_320px]">
         <div>
         <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">Message</h2>
-        <pre className="whitespace-pre-wrap rounded bg-zinc-50 p-3 font-mono text-sm text-zinc-800 dark:bg-zinc-950 dark:text-zinc-200">
-          {campaign.message_body}
-        </pre>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Message</h2>
+          {campaign.status === "draft" && !editingBody && (
+            <button
+              onClick={() => { setBodyDraft(campaign.message_body); setEditingBody(true); }}
+              className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+            >
+              Edit
+            </button>
+          )}
+        </div>
+        {campaign.status === "draft" && editingBody ? (
+          <div>
+            <textarea
+              value={bodyDraft}
+              onChange={(e) => setBodyDraft(e.target.value)}
+              rows={6}
+              className="w-full rounded border border-zinc-300 bg-white p-3 font-mono text-sm text-zinc-800 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200"
+            />
+            <div className="mt-2 flex items-center gap-2 text-xs text-zinc-500">
+              <span>{bodyDraft.length} chars · {Math.ceil(bodyDraft.length / 160) || 1} segment{bodyDraft.length > 160 ? "s (over limit!)" : ""}</span>
+              <span className="flex-1" />
+              <button
+                onClick={async () => {
+                  setSavingBody(true);
+                  const res = await fetch(`/api/workspaces/${workspace.id}/sms-campaigns/${id}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ message_body: bodyDraft }),
+                  });
+                  setSavingBody(false);
+                  if (res.ok) { setEditingBody(false); load(); }
+                  else { const j = await res.json().catch(() => ({})); setError(j.error || "Save failed"); }
+                }}
+                disabled={savingBody || !bodyDraft.trim()}
+                className="rounded-md bg-emerald-500 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-600 disabled:opacity-50"
+              >
+                {savingBody ? "Saving…" : "Save"}
+              </button>
+              <button
+                onClick={() => { setEditingBody(false); setBodyDraft(""); }}
+                className="rounded-md border border-zinc-300 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <pre className="whitespace-pre-wrap rounded bg-zinc-50 p-3 font-mono text-sm text-zinc-800 dark:bg-zinc-950 dark:text-zinc-200">
+            {campaign.message_body}
+          </pre>
+        )}
         {campaign.media_url && (
           <div className="mt-3">
             <p className="text-xs font-medium uppercase tracking-wider text-zinc-500">MMS image</p>
