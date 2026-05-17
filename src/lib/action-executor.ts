@@ -132,6 +132,45 @@ function ctaButton(url: string, label: string): string {
   return `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:8px 0 16px 0;"><tr><td bgcolor="#0f766e" style="background-color:#0f766e;border-radius:8px;"><a href="${url}" style="display:inline-block;padding:14px 24px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">${label}</a></td></tr></table>`;
 }
 
+/**
+ * Substitute placeholders in an action's string params using results
+ * from earlier actions in the same turn. Chained actions like
+ * [redeem_points, apply_loyalty_coupon{code:"{{coupon_code}}"}]
+ * depend on this — without it, the second action runs with the literal
+ * "{{coupon_code}}" string and the downstream API call fails.
+ *
+ * The map mirrors substituteActionPlaceholders (the message-side helper).
+ */
+function substituteActionParams(
+  action: ActionParams,
+  results: { action: ActionParams; result: ActionResult }[],
+): ActionParams {
+  const map: Record<string, string> = {};
+  for (const { result } of results) {
+    if (!result.success) continue;
+    if (result.couponCode) map.coupon_code = result.couponCode;
+    if (result.trackingNumber) map.tracking_number = result.trackingNumber;
+    if (result.carrier) map.carrier = result.carrier;
+    if (result.labelUrl) map.label_url = result.labelUrl;
+  }
+  if (Object.keys(map).length === 0) return action;
+
+  const sub = (v: string): string => {
+    let out = v;
+    for (const [k, val] of Object.entries(map)) {
+      out = out.replace(new RegExp(`\\{\\{\\s*${k}\\s*\\}\\}`, "g"), val);
+      out = out.replace(new RegExp(`\\[\\s*${k.toUpperCase()}\\s*\\]`, "g"), val);
+    }
+    return out;
+  };
+  const cloned = { ...action } as unknown as Record<string, unknown>;
+  for (const key of Object.keys(cloned)) {
+    const v = cloned[key];
+    if (typeof v === "string") cloned[key] = sub(v);
+  }
+  return cloned as unknown as ActionParams;
+}
+
 function substituteActionPlaceholders(
   message: string,
   results: { action: ActionParams; result: ActionResult }[],
@@ -1627,6 +1666,15 @@ async function handleDirectAction(
       continue;
     }
 
+    // Substitute placeholders in this action's string params using
+    // results from prior actions in this same turn. The classic case:
+    // Sonnet emits actions=[redeem_points, apply_loyalty_coupon{code:
+    // "{{coupon_code}}"}]. The previous code substituted placeholders
+    // in the response message only, so apply_loyalty_coupon ran with
+    // the literal "{{coupon_code}}" string and Appstle returned
+    // DISCOUNT_NOT_FOUND. Caught on Becky's ticket 6ab4b02d (May 16).
+    const substituted = substituteActionParams(action, results);
+
     try {
       const result = await withActionContext(
         {
@@ -1635,12 +1683,12 @@ async function handleDirectAction(
           customerId: ctx.customerId,
           actionType: action.type,
         },
-        () => handler(ctx, action),
+        () => handler(ctx, substituted),
       );
-      results.push({ action, result });
+      results.push({ action: substituted, result });
     } catch (err) {
       results.push({
-        action,
+        action: substituted,
         result: { success: false, error: err instanceof Error ? err.message : String(err) },
       });
     }
