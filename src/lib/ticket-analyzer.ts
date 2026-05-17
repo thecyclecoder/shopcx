@@ -527,6 +527,29 @@ async function applySeverityActions(
 
   if (action === "none") return;
 
+  // ── Respect human-agent closure ──
+  // If a human agent already handled this ticket (agent_intervened) or
+  // an agent manually closed/resolved it after their review, the
+  // analyzer should NOT re-open. The agent's review is the source of
+  // truth — auto-reopening overrides their judgment, frustrates them,
+  // and creates churn (close → analyze → reopen → close again loop).
+  const { data: tBefore } = await admin.from("tickets")
+    .select("agent_intervened, status, closed_at, resolved_at")
+    .eq("id", ticketId).single();
+  if (tBefore?.agent_intervened) {
+    // Log the would-be escalation as a system note but don't actually
+    // re-open the ticket. The agent already weighed in; if there's a
+    // real issue they can flag it manually.
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — would have ${action === "escalate_with_message" ? "re-opened + escalated" : "re-opened silently"}, but skipped because an agent already handled this ticket. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+    return;
+  }
+
   // Re-open + escalate
   const escReason = forceEscalate
     ? `Auto-flag: ${hasSevereIssue ? "severe issue type" : "customer threat language"} (score ${score})`
