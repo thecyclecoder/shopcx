@@ -128,3 +128,38 @@ export async function loggedAppstleFetch(
   });
   return res;
 }
+
+/**
+ * Generic fetch wrapper for non-Appstle action calls (Shopify draft
+ * orders, EasyPost, etc). Same logging surface as loggedAppstleFetch
+ * but with explicit endpoint labeling since we can't infer from URL.
+ *
+ * The "success" boolean factors in GraphQL-style errors that come
+ * back with HTTP 200 — without this, a Shopify userErrors response
+ * would log as success=true while the action actually failed.
+ */
+export async function loggedActionFetch(
+  url: string,
+  init: RequestInit,
+  opts: { endpoint: string; bodySuccessCheck?: (body: string) => boolean },
+): Promise<Response> {
+  const t0 = Date.now();
+  const res = await fetch(url, init);
+  let body = "";
+  try { body = await res.clone().text(); } catch { /* ignore */ }
+  let success = res.ok;
+  if (success && opts.bodySuccessCheck) {
+    try { success = opts.bodySuccessCheck(body); } catch { /* keep res.ok */ }
+  }
+  await logAppstleCall({
+    url,
+    method: (init.method as string) || "POST",
+    body: init.body ? safeParseJson(String(init.body)) : undefined,
+    endpoint: opts.endpoint,
+    status: res.status,
+    responseBody: body,
+    success,
+    durationMs: Date.now() - t0,
+  });
+  return res;
+}

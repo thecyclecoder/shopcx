@@ -1479,45 +1479,102 @@ export const directActionHandlers: Record<
       }
     } catch { /* fall back to "item" */ }
 
-    const draftRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+    const { loggedActionFetch } = await import("@/lib/appstle-call-log");
+    const shopifyGqlUrl = `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
+    // Include a hyperlink to the originating ticket in the Shopify
+    // order note so warehouse / finance can jump straight to the
+    // conversation that drove this replacement.
+    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
+    const ticketLink = ctx.ticketId ? `${siteUrl}/dashboard/tickets/${ctx.ticketId}` : null;
+    const noteText = `Replacement order — crisis swap compensation${ticketLink ? `\n\nTicket: ${ticketLink}` : ""}`;
+
+    const draftBody = JSON.stringify({
+      query: `mutation($input: DraftOrderInput!) { draftOrderCreate(input: $input) { draftOrder { id name } userErrors { field message } } }`,
+      variables: {
+        input: {
+          customerId: `gid://shopify/Customer/${cust.shopify_customer_id}`,
+          lineItems: [{ variantId: `gid://shopify/ProductVariant/${variantId}`, quantity }],
+          shippingAddress: {
+            firstName: addr.firstName || addr.first_name || "",
+            lastName: addr.lastName || addr.last_name || "",
+            address1: addr.address1 || "", address2: addr.address2 || "",
+            city: addr.city || "",
+            provinceCode: addr.provinceCode || addr.province_code || addr.province || "",
+            zip: addr.zip || "", countryCode: "US",
+          },
+          note: noteText,
+          tags: ["replacement", "crisis"],
+          appliedDiscount: { value: 100.0, valueType: "PERCENTAGE", title: "Replacement" },
+        },
+      },
+    });
+    const draftRes = await loggedActionFetch(shopifyGqlUrl, {
       method: "POST",
       headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: `mutation($input: DraftOrderInput!) { draftOrderCreate(input: $input) { draftOrder { id name } userErrors { field message } } }`,
-        variables: {
-          input: {
-            customerId: `gid://shopify/Customer/${cust.shopify_customer_id}`,
-            lineItems: [{ variantId: `gid://shopify/ProductVariant/${variantId}`, quantity }],
-            shippingAddress: {
-              firstName: addr.firstName || addr.first_name || "",
-              lastName: addr.lastName || addr.last_name || "",
-              address1: addr.address1 || "", address2: addr.address2 || "",
-              city: addr.city || "",
-              provinceCode: addr.provinceCode || addr.province_code || addr.province || "",
-              zip: addr.zip || "", countryCode: "US",
-            },
-            note: "Replacement order — crisis swap compensation",
-            tags: ["replacement", "crisis"],
-            appliedDiscount: { value: 100.0, valueType: "PERCENTAGE", title: "Replacement" },
-          },
-        },
-      }),
+      body: draftBody,
+    }, {
+      endpoint: "shopify:draftOrderCreate",
+      bodySuccessCheck: (body) => {
+        try {
+          const d = JSON.parse(body);
+          if (d?.errors?.length) return false;
+          if (d?.data?.draftOrderCreate?.userErrors?.length) return false;
+          return !!d?.data?.draftOrderCreate?.draftOrder?.id;
+        } catch { return false; }
+      },
     });
     const draftData = await draftRes.json();
     if (draftData.data?.draftOrderCreate?.userErrors?.length) {
       return { success: false, error: draftData.data.draftOrderCreate.userErrors.map((e: { message: string }) => e.message).join(", ") };
     }
     const draftId = draftData.data?.draftOrderCreate?.draftOrder?.id;
-    if (!draftId) return { success: false, error: "Draft order creation failed" };
+    if (!draftId) {
+      const reason = draftData?.errors?.[0]?.message || JSON.stringify(draftData).slice(0, 300);
+      return { success: false, error: `Draft order creation returned no draftId. Shopify response: ${reason}` };
+    }
 
     // Complete the draft
-    const completeRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+    const completeRes = await loggedActionFetch(shopifyGqlUrl, {
       method: "POST",
       headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
       body: JSON.stringify({ query: `mutation { draftOrderComplete(id: "${draftId}") { draftOrder { order { name } } userErrors { message } } }` }),
+    }, {
+      endpoint: "shopify:draftOrderComplete",
+      bodySuccessCheck: (body) => {
+        try {
+          const d = JSON.parse(body);
+          if (d?.errors?.length) return false;
+          if (d?.data?.draftOrderComplete?.userErrors?.length) return false;
+          return !!d?.data?.draftOrderComplete?.draftOrder?.order?.name;
+        } catch { return false; }
+      },
     });
     const completeData = await completeRes.json();
     const orderName = completeData.data?.draftOrderComplete?.draftOrder?.order?.name;
+
+    // Log to replacements table so dashboard + downstream tools have
+    // visibility into Sonnet-driven replacements (previously only the
+    // playbook handler wrote here, so action-driven replacements were
+    // invisible).
+    try {
+      const { data: originalOrder } = p.order_number
+        ? await ctx.admin.from("orders").select("id").eq("workspace_id", ctx.workspaceId).eq("order_number", p.order_number).maybeSingle()
+        : { data: null };
+      await ctx.admin.from("replacements").insert({
+        workspace_id: ctx.workspaceId,
+        customer_id: ctx.customerId,
+        original_order_id: originalOrder?.id || null,
+        original_order_number: p.order_number || null,
+        shopify_draft_order_id: draftId,
+        shopify_replacement_order_name: orderName || null,
+        reason: (p.reason as string) || "damaged_items",
+        items: [{ variantId, quantity, title: variantTitle, type: "all" }],
+        status: orderName ? "created" : "pending",
+        ticket_id: ctx.ticketId,
+      });
+    } catch (logErr) {
+      console.error("[create_replacement_order] replacements row insert failed (non-fatal):", logErr);
+    }
 
     return { success: true, summary: `Replacement order ${orderName || "created"} — ${quantity}x ${variantTitle} shipped free` };
   },
