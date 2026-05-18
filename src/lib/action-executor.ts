@@ -337,8 +337,23 @@ export const directActionHandlers: Record<
 
   change_next_date: async (ctx, p) => {
     const { appstleUpdateNextBillingDate } = await import("@/lib/appstle");
-    const r = await appstleUpdateNextBillingDate(ctx.workspaceId, p.contract_id!, p.date!);
-    return { ...r, summary: `Changed next billing date to ${p.date}` };
+    // Appstle rejects past timestamps with a 400. If Sonnet passes a date
+    // that is today (Central) or earlier — common when a customer says
+    // "ship it ASAP" and Sonnet picks the current date — bump to tomorrow
+    // before calling. The customer-facing message references {{next_date}}
+    // which substitutes from the final action params.
+    let date = p.date!;
+    const centralToday = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }));
+    centralToday.setHours(0, 0, 0, 0);
+    const requested = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00`) : new Date(date);
+    if (!isNaN(requested.getTime()) && requested.getTime() <= centralToday.getTime()) {
+      const tomorrow = new Date(centralToday);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      date = tomorrow.toISOString().slice(0, 10);
+      p.date = date; // so the action-completed summary reflects the actual date
+    }
+    const r = await appstleUpdateNextBillingDate(ctx.workspaceId, p.contract_id!, date);
+    return { ...r, summary: `Changed next billing date to ${date}` };
   },
 
   add_item: async (ctx, p) => {
