@@ -147,7 +147,7 @@ export async function POST(request: Request) {
     // workspaces that haven't migrated keep working unchanged.
     const { data: page } = await admin
       .from("meta_pages")
-      .select("id, workspace_id, page_type, ai_moderate_ad_comments, ai_moderate_organic_comments, platform")
+      .select("id, workspace_id, meta_page_id, page_type, ai_moderate_ad_comments, ai_moderate_organic_comments, platform")
       .eq("meta_page_id", platformPageId)
       .eq("is_active", true)
       .maybeSingle();

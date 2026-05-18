@@ -198,85 +198,99 @@ export async function getPostMetadata(
   return res.json();
 }
 
-interface AdCreativeShape {
-  creative?: {
-    object_story_spec?: { link_data?: { link?: string } };
-    asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
-  };
+interface CreativeShape {
+  effective_instagram_media_id?: string;
+  effective_object_story_id?: string;
+  object_story_spec?: { link_data?: { link?: string } };
+  asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
 }
 
-function extractDestinationUrls(json: AdCreativeShape): string[] {
+function extractDestinationUrls(c: CreativeShape): string[] {
   const out: string[] = [];
-  const single = json.creative?.object_story_spec?.link_data?.link;
+  const single = c.object_story_spec?.link_data?.link;
   if (single) out.push(single);
-  for (const lu of json.creative?.asset_feed_spec?.link_urls || []) {
+  for (const lu of c.asset_feed_spec?.link_urls || []) {
     if (lu.website_url) out.push(lu.website_url);
   }
   return out;
 }
 
 /**
- * Fetch the destination URLs configured on an ad creative.
+ * Resolve the destination URLs of the ad that promoted a given post.
+ *
+ * Why we look up by media id instead of the webhook's `ad_id`:
+ * Meta's IG comments webhook ships a placement-variant alias as `ad_id`
+ * (e.g. 120246490668840184) that direct /{id} lookup rejects. The
+ * `media.id` field — the IG post being promoted — IS stable, never
+ * changes, and resolves to a single ad creative via the
+ * `effective_instagram_media_id` field on adcreatives.
+ *
+ * For FB-side ads (rare on this surface), the equivalent is
+ * `effective_object_story_id` on the creative, formatted as
+ * `{page_id}_{post_id}`.
  *
  * Strategy:
- *   1. Direct lookup of /{ad_id} — works when the webhook's ad_id is a
- *      first-class ad object.
- *   2. Fallback: search ads by name across the user's ad accounts using
- *      adTitle. Meta sometimes ships asset/placement variant IDs as
- *      `ad_id` in comments webhooks — those direct-lookup with 400. The
- *      real ad with that name does exist and has the destination URLs.
+ *   1. Walk active ad accounts (account_status=1) first.
+ *   2. For each account, paginate /act_X/adcreatives requesting
+ *      effective_instagram_media_id + object_story_spec + asset_feed_spec.
+ *   3. First creative whose effective_instagram_media_id matches our
+ *      media id wins. Extract URLs and return.
  *
- * Two creative shapes to extract URLs from:
- *   - Single-link ads → creative.object_story_spec.link_data.link
- *   - Asset-feed / Advantage+ ads → creative.asset_feed_spec.link_urls[].website_url
+ * Caller persists the result on meta_post_cache keyed by media_id (post_id),
+ * so this expensive cross-account scan only runs once per ad campaign.
  *
- * Requires ads_read scope on the USER access token (not the page token —
- * Marketing API rejects page tokens). First-match-wins across ad accounts;
- * the post cache keys on post_id so we only do this lookup once per post.
+ * Requires ads_read on the USER access token (Marketing API rejects page
+ * tokens for adcreatives).
  */
-export async function getAdDestinationUrls(
+export async function getAdDestinationUrlsByMediaId(
   userAccessToken: string,
-  adId: string,
-  adTitle?: string | null,
+  mediaId: string,
+  platform: "instagram" | "facebook",
 ): Promise<string[]> {
-  // ── Strategy 1: direct lookup ───────────────────────────────────────
-  const fields = "creative{object_story_spec{link_data{link}},asset_feed_spec{link_urls}}";
+  // For IG ads: creative.effective_instagram_media_id == webhook media.id (raw IG media id).
+  // For FB ads: creative.effective_object_story_id == webhook post_id (already in
+  //             "{pageId}_{postId}" format — no extra concat needed).
+  const matchField: "effective_instagram_media_id" | "effective_object_story_id" =
+    platform === "instagram" ? "effective_instagram_media_id" : "effective_object_story_id";
+  const matchValue = mediaId;
+
+  let accounts: Array<{ id: string; account_status: number }>;
   try {
-    const res = await fetch(`${GRAPH_BASE}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${encodeURIComponent(userAccessToken)}`);
-    if (res.ok) {
-      const urls = extractDestinationUrls((await res.json()) as AdCreativeShape);
-      if (urls.length) return urls;
-    }
-  } catch (err) {
-    console.warn(`getAdDestinationUrls direct lookup failed for ${adId}:`, err);
+    const r = await fetch(`${GRAPH_BASE}/me/adaccounts?fields=id,account_status&limit=200&access_token=${encodeURIComponent(userAccessToken)}`);
+    if (!r.ok) return [];
+    accounts = ((await r.json()).data || []) as Array<{ id: string; account_status: number }>;
+  } catch {
+    return [];
   }
+  // Active first; disabled accounts only as last resort.
+  accounts.sort((a, b) => (a.account_status === 1 ? 0 : 1) - (b.account_status === 1 ? 0 : 1));
 
-  // ── Strategy 2: search by ad name ──────────────────────────────────
-  if (!adTitle) return [];
+  const fields = "id,name,effective_instagram_media_id,effective_object_story_id,object_story_spec{link_data{link}},asset_feed_spec{link_urls}";
 
-  try {
-    const accountsRes = await fetch(`${GRAPH_BASE}/me/adaccounts?fields=id,account_status&limit=200&access_token=${encodeURIComponent(userAccessToken)}`);
-    if (!accountsRes.ok) return [];
-    const accounts = ((await accountsRes.json()).data || []) as Array<{ id: string; account_status: number }>;
-    // Active accounts first (account_status=1); search disabled accounts only as last resort.
-    const sorted = [...accounts].sort((a, b) => (a.account_status === 1 ? -1 : 1) - (b.account_status === 1 ? -1 : 1));
-
-    const filter = encodeURIComponent(JSON.stringify([
-      { field: "name", operator: "EQUAL", value: adTitle },
-    ]));
-    const adFields = "id,name,creative{object_story_spec{link_data{link}},asset_feed_spec{link_urls}}";
-
-    for (const acct of sorted) {
-      const r = await fetch(`${GRAPH_BASE}/${acct.id}/ads?filtering=${filter}&fields=${encodeURIComponent(adFields)}&limit=5&access_token=${encodeURIComponent(userAccessToken)}`);
-      if (!r.ok) continue;
-      const data = ((await r.json()).data || []) as AdCreativeShape[];
-      for (const ad of data) {
-        const urls = extractDestinationUrls(ad);
-        if (urls.length) return urls;
+  for (const acct of accounts) {
+    let next: string | null = `${GRAPH_BASE}/${acct.id}/adcreatives?fields=${encodeURIComponent(fields)}&limit=200&access_token=${encodeURIComponent(userAccessToken)}`;
+    let pages = 0;
+    while (next && pages < 5) {   // cap pagination per account at 1000 creatives
+      let json: { data?: CreativeShape[]; paging?: { next?: string } } = {};
+      try {
+        const r: Response = await fetch(next);
+        if (!r.ok) break;
+        json = await r.json();
+      } catch {
+        break;
       }
+      for (const c of json.data || []) {
+        const stored = matchField === "effective_instagram_media_id"
+          ? c.effective_instagram_media_id
+          : c.effective_object_story_id;
+        if (stored === matchValue) {
+          const urls = extractDestinationUrls(c);
+          if (urls.length) return urls;
+        }
+      }
+      next = json.paging?.next || null;
+      pages++;
     }
-  } catch (err) {
-    console.warn(`getAdDestinationUrls name-search fallback failed for ${adTitle}:`, err);
   }
 
   return [];

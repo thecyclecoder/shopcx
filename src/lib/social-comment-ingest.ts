@@ -22,7 +22,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { decrypt } from "@/lib/crypto";
-import { hideComment, getPostMetadata, getAdDestinationUrls } from "@/lib/meta";
+import { hideComment, getPostMetadata, getAdDestinationUrlsByMediaId } from "@/lib/meta";
 import { resolvePostProductMatch } from "@/lib/meta-product-match";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -30,6 +30,7 @@ type Admin = ReturnType<typeof createAdminClient>;
 interface MetaPageRow {
   id: string;
   workspace_id: string;
+  meta_page_id: string;         // Meta-side numeric page ID (FB page) — needed for Marketing API joins
   page_type: string;
   ai_moderate_ad_comments: boolean;
   ai_moderate_organic_comments: boolean;
@@ -133,6 +134,7 @@ export async function ingestSocialComment(args: IngestArgs): Promise<void> {
     postId,
     adId,
     adTitle,
+    platform,
   });
 
   const isAd = cachedIsAd || !!adId;
@@ -215,6 +217,7 @@ interface EnsurePostCacheArgs {
   postId: string;
   adId: string | null;
   adTitle: string | null;
+  platform: "facebook" | "instagram";
 }
 
 /**
@@ -230,7 +233,7 @@ async function ensurePostCache(args: EnsurePostCacheArgs): Promise<{
   matchedProductId: string | null;
   isAd: boolean;
 }> {
-  const { admin, page, postId, adId, adTitle } = args;
+  const { admin, page, postId, adId, adTitle, platform } = args;
   if (!postId) return { matchedProductId: null, isAd: !!adId };
 
   const { data: existing } = await admin
@@ -269,8 +272,12 @@ async function ensurePostCache(args: EnsurePostCacheArgs): Promise<{
   // the ad's configured destination URL(s) directly via Marketing API.
   // Requires the USER access token (Marketing API rejects page tokens)
   // + ads_read scope.
+  // Resolve the ad's destination URL via the IG media id (postId for IG,
+  // or pageId_postId for FB). The webhook's `ad_id` is a placement alias
+  // that doesn't direct-lookup; media id is stable across title changes
+  // and points to the exact creative.
   let adUrls: string[] = [];
-  if (adId) {
+  if (adId && postId) {
     const { data: ws } = await admin
       .from("workspaces")
       .select("meta_user_access_token_encrypted")
@@ -278,9 +285,10 @@ async function ensurePostCache(args: EnsurePostCacheArgs): Promise<{
       .maybeSingle();
     if (ws?.meta_user_access_token_encrypted) {
       const userToken = decrypt(ws.meta_user_access_token_encrypted as string);
-      adUrls = await getAdDestinationUrls(userToken, adId, adTitle);
+      adUrls = await getAdDestinationUrlsByMediaId(userToken, postId, platform);
     }
   }
+  void adTitle;  // no longer used for lookup — media id is the canonical key
   const urls = [...new Set([...adUrls, ...messageUrls, ...attachmentUrls])];
 
   // Resolve a product match — follows shortlink redirects, matches

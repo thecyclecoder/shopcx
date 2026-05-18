@@ -50,6 +50,10 @@ export async function GET(
   const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10), 200);
   const offset = parseInt(url.searchParams.get("offset") || "0", 10);
 
+  // meta_post_cache has no FK from social_comments — meta_post_id is just
+  // text on both sides, and a comment can land before the cache row exists
+  // (if Graph metadata fetch failed). Join in JS instead of using
+  // PostgREST embeds for that one relation.
   let query = admin
     .from("social_comments")
     .select(
@@ -57,7 +61,6 @@ export async function GET(
        body, is_ad, page_type, ad_id, sentiment, matched_product_id, status, moderation_source,
        ai_action, ai_reasoning, liked_at, hidden_at, replied_at, deleted_at, created_at, updated_at,
        meta_pages!inner(meta_page_name, platform, page_type),
-       meta_post_cache(permalink_url, message, image_url, is_ad),
        products(title, handle)`,
       { count: "exact" },
     )
@@ -79,5 +82,21 @@ export async function GET(
 
   if (error) return NextResponse.json({ error: error.message }, { status: 400 });
 
-  return NextResponse.json({ comments: data || [], total: count || 0 });
+  // Manual join: stitch in meta_post_cache fields by (workspace_id, meta_post_id).
+  const postIds = Array.from(new Set((data || []).map((c) => (c as { meta_post_id: string }).meta_post_id).filter(Boolean)));
+  let cacheByPost: Map<string, { permalink_url: string | null; message: string | null; image_url: string | null; is_ad: boolean }> = new Map();
+  if (postIds.length) {
+    const { data: cacheRows } = await admin
+      .from("meta_post_cache")
+      .select("meta_post_id, permalink_url, message, image_url, is_ad")
+      .eq("workspace_id", workspaceId)
+      .in("meta_post_id", postIds);
+    cacheByPost = new Map((cacheRows || []).map((r) => [r.meta_post_id as string, r]));
+  }
+  const comments = (data || []).map((c) => {
+    const cached = cacheByPost.get((c as { meta_post_id: string }).meta_post_id);
+    return { ...c, meta_post_cache: cached || null };
+  });
+
+  return NextResponse.json({ comments, total: count || 0 });
 }
