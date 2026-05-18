@@ -117,12 +117,20 @@ export async function POST(request: Request) {
 
   // Stash raw payload for debugging (every body, even invalid sig).
   // 7-day retention via cleanup cron — see meta_webhook_raw migration.
-  // Fire-and-forget so we don't slow Meta's 200-or-retry expectation.
-  void admin.from("meta_webhook_raw").insert({
-    signature_valid: signatureValid,
-    body: parsed ? body : { raw: rawBody.slice(0, 50000) },
-    headers: Object.fromEntries(request.headers),
-  });
+  //
+  // Must AWAIT this — Vercel serverless terminates the function process
+  // the instant we return a response. A fire-and-forget Promise gets
+  // killed mid-flight before the Supabase fetch lands. Supabase insert
+  // is ~50ms; Meta gives us 20s. Trivially within budget.
+  try {
+    await admin.from("meta_webhook_raw").insert({
+      signature_valid: signatureValid,
+      body: parsed ? body : { raw: rawBody.slice(0, 50000) },
+      headers: Object.fromEntries(request.headers),
+    });
+  } catch (err) {
+    console.error("meta_webhook_raw insert failed:", err);
+  }
 
   if (!signatureValid) {
     return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
