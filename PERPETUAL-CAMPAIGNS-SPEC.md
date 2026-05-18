@@ -232,7 +232,7 @@ Cron `0 10 * * *` (4 AM CT). For every SMS-subscribed customer in the workspace:
 ### Inputs
 - `orders` table → `pre_send_orders`, `pre_send_ltv_cents`, `days_since_last_order`, `mean_reorder_gap_days`, `replenishment_ratio`
 - `subscriptions` table → `active_sub_at_send`
-- `klaviyo_profile_events` (incremental synced by cron daily) → `clicked_sms_60d`, `opened_email_60d`, etc.
+- `profile_events` (incremental synced by cron daily) → `clicked_sms_60d`, `opened_email_60d`, etc.
 - `customers.subscription_status`, `email_marketing_status`, `sms_marketing_status`, `retention_score`
 
 ### Output

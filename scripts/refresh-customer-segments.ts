@@ -196,7 +196,7 @@ async function main() {
     for (let j = 0; j < customerIds.length; j += ENGAGEMENT_BATCH) {
       const chunk = customerIds.slice(j, j + ENGAGEMENT_BATCH);
       const { data } = await sb
-        .from("klaviyo_profile_events")
+        .from("profile_events")
         .select("customer_id, metric_name, datetime")
         .eq("workspace_id", WS)
         .in("customer_id", chunk)

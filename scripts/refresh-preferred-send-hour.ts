@@ -1,7 +1,7 @@
 /**
  * Compute customers.preferred_sms_send_hour from Clicked SMS history.
  *
- * For each customer with klaviyo_profile_events.metric_name='Clicked SMS':
+ * For each customer with profile_events.metric_name='Clicked SMS':
  *   1. Pull all their Clicked SMS event datetimes
  *   2. Convert each to local hour (0-23) in their resolved timezone
  *   3. Bucket clicks by local hour
@@ -123,7 +123,7 @@ async function main() {
     for (let j = 0; j < ids.length; j += CLICK_BATCH) {
       const chunk = ids.slice(j, j + CLICK_BATCH);
       const { data } = await sb
-        .from("klaviyo_profile_events")
+        .from("profile_events")
         .select("customer_id, datetime")
         .eq("workspace_id", WS)
         .in("customer_id", chunk)

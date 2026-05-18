@@ -40,6 +40,11 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
   const url = request.nextUrl;
   const workspaceHint = url.searchParams.get("ws");
+  // Per-customer code (the second URL segment, /SLUG/CUSTCODE) — middleware
+  // forwards it as ?c=. Uppercase + length-bounded to keep the lookup cheap
+  // and ignore obvious junk.
+  const rawCustCode = url.searchParams.get("c");
+  const customerCode = rawCustCode && /^[0-9A-Z]{4,8}$/i.test(rawCustCode) ? rawCustCode.toUpperCase() : null;
 
   const admin = createAdminClient();
 
@@ -59,18 +64,63 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     return notFound();
   }
 
+  // Resolve the customer code synchronously — needed for the cookie. Cheap
+  // (single indexed lookup), and we want sx_customer on the redirect response.
+  let resolvedCustomerId: string | null = null;
+  if (customerCode) {
+    const { data: cust } = await admin
+      .from("customers")
+      .select("id")
+      .eq("workspace_id", shortlink.workspace_id)
+      .eq("short_code", customerCode)
+      .maybeSingle();
+    resolvedCustomerId = cust?.id || null;
+  }
+
   // Fire-and-forget click logging. We don't await so the redirect
   // is as fast as possible — typical SMS click is on cellular where
   // every extra round-trip is felt.
-  void logClick(admin, request, shortlink);
+  void logClick(admin, request, shortlink, resolvedCustomerId);
 
-  return NextResponse.redirect(shortlink.target_url, 302);
+  // Engagement event for the segmentation pipeline (clicked_sms_60d
+  // bucket). Same shape as the Klaviyo-imported events so the
+  // segmentation scoring reads both sources uniformly.
+  if (resolvedCustomerId) {
+    // Look up the campaign id for the shortlink so we can attribute
+    // properly. Lightweight indexed lookup.
+    void (async () => {
+      const { data: link } = await admin
+        .from("marketing_shortlinks")
+        .select("campaign_id")
+        .eq("id", shortlink.id)
+        .maybeSingle();
+      await admin.from("profile_events").insert({
+        workspace_id: shortlink.workspace_id,
+        customer_id: resolvedCustomerId,
+        metric_name: "Clicked SMS",
+        datetime: new Date().toISOString(),
+        attributed_campaign_id: link?.campaign_id || null,
+      });
+    })();
+  }
+
+  const response = NextResponse.redirect(shortlink.target_url, 302);
+  if (resolvedCustomerId) {
+    // Identifies the customer for the storefront pixel + lead-capture flows.
+    // SameSite=Lax + Secure + HttpOnly per the storefront cookie conventions.
+    response.cookies.set("sx_customer", resolvedCustomerId, {
+      path: "/", maxAge: 60 * 60 * 24 * 60, // 60 days
+      httpOnly: true, sameSite: "lax", secure: true,
+    });
+  }
+  return response;
 }
 
 async function logClick(
   admin: ReturnType<typeof createAdminClient>,
   request: NextRequest,
   shortlink: { id: string; workspace_id: string; click_count: number },
+  customerId: string | null,
 ) {
   try {
     const ua = request.headers.get("user-agent") || null;
@@ -82,6 +132,7 @@ async function logClick(
       workspace_id: shortlink.workspace_id,
       shortlink_id: shortlink.id,
       recipient_id: recipientHint || null,
+      customer_id: customerId,
       user_agent: ua,
       ip_country: country,
       referrer,

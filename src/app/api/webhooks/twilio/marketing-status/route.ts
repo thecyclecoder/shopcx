@@ -138,6 +138,18 @@ export async function POST(request: Request) {
         })
         .eq("id", recipient.id)
         .in("status", ["scheduled", "sending", "sent", "delivered"]);
+      // Log `Received SMS` event for SendAt-scheduled sends (the
+      // immediate-send path logs it at submit time). Idempotent at the
+      // segmentation layer — duplicates count as one engagement slot.
+      if (recipient.customer_id) {
+        await admin.from("profile_events").insert({
+          workspace_id: recipient.workspace_id,
+          customer_id: recipient.customer_id,
+          metric_name: "Received SMS",
+          datetime: now,
+          attributed_campaign_id: recipient.campaign_id,
+        });
+      }
       break;
     }
     case "undelivered":

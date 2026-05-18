@@ -75,7 +75,7 @@ Settings → Text Marketing → Campaign Builder
 |---|---|
 | `klaviyo_sms_campaign_history` | Historical Klaviyo SMS campaigns: campaign_id, name, send_time, audience segments, message body, native Klaviyo conversion stats, our recomputed `initial_*` columns |
 | `klaviyo_events` | Placed Order events (and others) with `attributed_klaviyo_campaign_id` + `attributed_utm_campaign` — populated by the import job from UTMs |
-| `klaviyo_profile_events` | Engagement events: Clicked SMS, Opened Email, Clicked Email, Active on Site, Viewed Product, Added to Cart, Checkout Started — **plus Received SMS once the May 15 backfill finishes** |
+| `profile_events` | Engagement events: Clicked SMS, Opened Email, Clicked Email, Active on Site, Viewed Product, Added to Cart, Checkout Started — **plus Received SMS once the May 15 backfill finishes** |
 | `profile_engagement_summary` | Per-(workspace, profile) rollup of engagement counts in 30/60/90d windows. Built by RPC `rebuild_engagement_summary`. **Currently empty — RPC timed out at 2M+ rows; needs rework.** |
 | `workspaces.klaviyo_engagement_backfill_completed_at` | Set when initial 180d backfill finishes. The incremental sync cron only runs against workspaces with this set. |
 

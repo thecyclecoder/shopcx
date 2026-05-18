@@ -106,12 +106,14 @@ export async function updateSession(request: NextRequest) {
         const pathname = request.nextUrl.pathname;
         const segs = pathname.split("/").filter(Boolean);
         // Root → marketing landing page on the shortlink domain is
-        // out of scope for v1. 404 is fine. Slug must be the only
-        // path segment; deeper paths 404 too.
-        if (segs.length === 1) {
+        // out of scope for v1. 404 is fine.
+        // /SLUG          → bare campaign click (legacy, pre-shortcode era)
+        // /SLUG/CUSTCODE → campaign click that also identifies a customer
+        if (segs.length === 1 || segs.length === 2) {
           const url = request.nextUrl.clone();
           url.pathname = `/api/sl/${segs[0]}`;
           url.searchParams.set("ws", wsId);
+          if (segs.length === 2) url.searchParams.set("c", segs[1]);
           return NextResponse.rewrite(url);
         }
         // Anything else on the shortlink domain → 404 (don't fall

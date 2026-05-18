@@ -5,7 +5,7 @@
  *
  * Pulls 180d (configurable) of engagement events from Klaviyo across
  * the metrics we use for archetype scoring, mirrors them into
- * `klaviyo_profile_events`, then rebuilds the per-profile rolling
+ * `profile_events`, then rebuilds the per-profile rolling
  * aggregates in `profile_engagement_summary`.
  *
  * One-time historical fill — SMS clicks are frozen (Dylan cut Klaviyo
@@ -14,7 +14,7 @@
  *
  * Strategy:
  *  - One step.run per metric: filter events by metric_id, paginate.
- *  - Per-page chunked upsert into klaviyo_profile_events (idempotent
+ *  - Per-page chunked upsert into profile_events (idempotent
  *    via (workspace_id, klaviyo_event_id)).
  *  - After all metrics are pulled, one rebuild step does a single
  *    GROUP-BY SQL pass to recompute the summary rollups.
@@ -241,7 +241,7 @@ export const klaviyoEngagementBackfill = inngest.createFunction(
             if (rows.length > 0) {
               for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
                 const batch = rows.slice(i, i + UPSERT_CHUNK);
-                const { error } = await admin.from("klaviyo_profile_events").upsert(batch, {
+                const { error } = await admin.from("profile_events").upsert(batch, {
                   onConflict: "workspace_id,klaviyo_event_id",
                   ignoreDuplicates: false,
                 });

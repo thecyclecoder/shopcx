@@ -98,10 +98,10 @@ async function main() {
     const recipientsMap = new Map<string, { profile_id: string; customer_id: string | null }>();
     let lastDt: string | null = null;
     while (true) {
-      let q = admin.from("klaviyo_profile_events")
+      let q = admin.from("profile_events")
         .select("klaviyo_profile_id, customer_id, datetime")
         .eq("workspace_id", W)
-        .eq("attributed_klaviyo_campaign_id", c.klaviyo_campaign_id)
+        .eq("attributed_campaign_id", c.klaviyo_campaign_id)
         .order("datetime", { ascending: true })
         .limit(1000);
       if (lastDt) q = q.gt("datetime", lastDt);
@@ -121,13 +121,13 @@ async function main() {
 
     // Converters — Placed Order events for this campaign.
     // NOTE: klaviyo_events uses klaviyo_metric_id (e.g. "VCkHuL"),
-    // not metric_name. Only klaviyo_profile_events has metric_name.
+    // not metric_name. Only profile_events has metric_name.
     const PLACED_ORDER_METRIC = "VCkHuL";
     const converterCustomerIds = new Set<string>();
     const { data: orders } = await admin.from("klaviyo_events")
       .select("order_number, klaviyo_profile_id")
       .eq("workspace_id", W).eq("klaviyo_metric_id", PLACED_ORDER_METRIC)
-      .eq("attributed_klaviyo_campaign_id", c.klaviyo_campaign_id);
+      .eq("attributed_campaign_id", c.klaviyo_campaign_id);
     const converterProfileIds = new Set((orders || []).map(o => o.klaviyo_profile_id));
     const orderNumbers = [...new Set((orders || []).map(o => o.order_number).filter(Boolean))];
     if (orderNumbers.length > 0) {
@@ -176,7 +176,7 @@ async function main() {
     const since90 = new Date(sendTimeMs - 90 * 86_400_000).toISOString();
     for (let i = 0; i < profileIdList.length; i += 100) {
       const batch = profileIdList.slice(i, i + 100);
-      const { data } = await admin.from("klaviyo_profile_events")
+      const { data } = await admin.from("profile_events")
         .select("klaviyo_profile_id, metric_name, datetime")
         .eq("workspace_id", W)
         .in("klaviyo_profile_id", batch)

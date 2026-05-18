@@ -4,7 +4,7 @@
  *
  * Klaviyo's event_properties.$message contains the canonical
  * klaviyo_campaign_id for campaign-typed sends. We extract it and store
- * on klaviyo_profile_events.attributed_klaviyo_campaign_id so
+ * on profile_events.attributed_campaign_id so
  * downstream segmentation analyses can do per-campaign case-control.
  *
  * Flow-typed events (welcome flows, drip campaigns) get null
@@ -97,10 +97,10 @@ async function main() {
 
     // Idempotency: if this campaign already has any attributed rows, skip
     const { count: existing } = await supabase
-      .from("klaviyo_profile_events")
+      .from("profile_events")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", WS)
-      .eq("attributed_klaviyo_campaign_id", c.klaviyo_campaign_id);
+      .eq("attributed_campaign_id", c.klaviyo_campaign_id);
     if ((existing || 0) > 0) {
       console.log(`  skipping — already attributed (${existing} rows in DB)\n`);
       continue;
@@ -152,8 +152,8 @@ async function main() {
         const chunk = updates.splice(0, UPSERT_CHUNK);
         const ids = chunk.map(u => u.klaviyo_event_id);
         const { error } = await supabase
-          .from("klaviyo_profile_events")
-          .update({ attributed_klaviyo_campaign_id: c.klaviyo_campaign_id })
+          .from("profile_events")
+          .update({ attributed_campaign_id: c.klaviyo_campaign_id })
           .eq("workspace_id", WS)
           .in("klaviyo_event_id", ids);
         if (error) throw new Error(`batch update: ${error.message}`);
@@ -167,8 +167,8 @@ async function main() {
       const chunk = updates.splice(0, UPSERT_CHUNK);
       const ids = chunk.map(u => u.klaviyo_event_id);
       const { error } = await supabase
-        .from("klaviyo_profile_events")
-        .update({ attributed_klaviyo_campaign_id: c.klaviyo_campaign_id })
+        .from("profile_events")
+        .update({ attributed_campaign_id: c.klaviyo_campaign_id })
         .eq("workspace_id", WS)
         .in("klaviyo_event_id", ids);
       if (error) throw new Error(`final flush: ${error.message}`);

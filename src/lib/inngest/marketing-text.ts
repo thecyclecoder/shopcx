@@ -104,6 +104,26 @@ export const textCampaignScheduled = inngest.createFunction(
       });
     }
 
+    // If the campaign uses an already-existing Shopify coupon embedded in
+    // the shortlink target (e.g. /discount/VIP-226?redirect=…) and no
+    // coupon_code was set, parse it out and persist. This is the manual-
+    // coupon path; the auto-generated path below covers coupon_enabled.
+    // Persisting it lets the campaign list/detail views attribute revenue
+    // by coupon match as a fallback when UTM is missing.
+    if (!campaign.coupon_code && campaign.shortlink_target_url) {
+      const m = /\/discount\/([^/?#]+)/i.exec(campaign.shortlink_target_url);
+      const parsed = m ? (() => { try { return decodeURIComponent(m[1]); } catch { return m[1]; } })() : null;
+      if (parsed) {
+        await step.run("persist-shortlink-coupon", async () => {
+          const admin = createAdminClient();
+          await admin.from("sms_campaigns")
+            .update({ coupon_code: parsed, updated_at: new Date().toISOString() })
+            .eq("id", campaign.id);
+        });
+        campaign.coupon_code = parsed;
+      }
+    }
+
     // ── Generate coupon (if enabled) ──────────────────────────────
     // Created in Shopify; we cache the code + node id on the campaign
     // for substitution + the auto-disable cron. Skipped if already
@@ -278,20 +298,21 @@ export const textCampaignSendTick = inngest.createFunction(
       const sevenDays = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
       const { data } = await admin
         .from("sms_campaign_recipients")
-        .select("id, campaign_id, workspace_id, customer_id, phone, scheduled_send_at")
+        .select("id, campaign_id, workspace_id, customer_id, phone, scheduled_send_at, customer:customers!sms_campaign_recipients_customer_id_fkey(short_code)")
         .eq("status", "pending")
         .is("scheduled_at_twilio", null)
         .lte("scheduled_send_at", sevenDays)
         .order("scheduled_send_at", { ascending: true })
         .limit(1000); // raised from 200 — submission is fast (just an API call)
-      return (data || []) as Array<{
-        id: string;
-        campaign_id: string;
-        workspace_id: string;
-        customer_id: string | null;
-        phone: string;
-        scheduled_send_at: string;
-      }>;
+      return (data || []).map((r) => ({
+        id: r.id as string,
+        campaign_id: r.campaign_id as string,
+        workspace_id: r.workspace_id as string,
+        customer_id: r.customer_id as string | null,
+        phone: r.phone as string,
+        scheduled_send_at: r.scheduled_send_at as string,
+        customer_short_code: ((r.customer as unknown) as { short_code?: string | null } | null)?.short_code || null,
+      }));
     });
 
     if (due.length === 0) return { sent: 0 };
@@ -431,9 +452,18 @@ export const textCampaignSendTick = inngest.createFunction(
       const useSendAt = sendAtMs - Date.now() >= 15 * 60 * 1000;
 
       const result = await step.run(`send-${recipient.id}`, async () => {
+        // Append the customer's permanent short_code so the shortlink
+        // URL identifies them on click (superfd.co/{slug}/{short_code}).
+        // The redirect handler resolves the trailing segment against
+        // customers.short_code and sets the sx_customer cookie. Falls
+        // back to the bare shortlink if the customer somehow has no
+        // code — shouldn't happen post-backfill, but covered.
+        const personalShortlink = campaign.shortlink_url && recipient.customer_short_code
+          ? `${campaign.shortlink_url}/${recipient.customer_short_code}`
+          : campaign.shortlink_url || "";
         const body = campaign.message_body
           .replace(/\{coupon\}/g, campaign.coupon_code || "")
-          .replace(/\{shortlink\}/g, campaign.shortlink_url || "");
+          .replace(/\{shortlink\}/g, personalShortlink);
         const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
         return await sendSMS(recipient.workspace_id, recipient.phone, body, {
           mediaUrl: campaign.media_url,
@@ -464,6 +494,20 @@ export const textCampaignSendTick = inngest.createFunction(
             .eq("id", recipient.id);
           if (recipient.customer_id) recentlySent.add(recipient.customer_id);
           sentCount++;
+          // Log a `Received SMS` engagement event tied to our customer
+          // UUID. Mirrors the Klaviyo metric shape so segmentation reads
+          // both sources uniformly (clicked_sms_60d etc. just match on
+          // metric_name). Fire-and-forget; one missing event doesn't
+          // block a successful send.
+          if (recipient.customer_id && !useSendAt) {
+            void admin.from("profile_events").insert({
+              workspace_id: recipient.workspace_id,
+              customer_id: recipient.customer_id,
+              metric_name: "Received SMS",
+              datetime: new Date().toISOString(),
+              attributed_campaign_id: campaign.id,  // our sms_campaigns.id
+            });
+          }
         } else {
           const phoneStatus = classifyTwilioError(result.errorCode);
           const isFatal = phoneStatus !== null;

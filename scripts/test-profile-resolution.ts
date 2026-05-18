@@ -40,10 +40,10 @@ async function main() {
   const profileIds = new Set<string>();
   let lastDt: string | null = null;
   while (profileIds.size < SAMPLE_SIZE * 3) {  // overfetch to ensure 100 unique
-    let q = admin.from("klaviyo_profile_events")
+    let q = admin.from("profile_events")
       .select("klaviyo_profile_id, datetime")
       .eq("workspace_id", W)
-      .not("attributed_klaviyo_campaign_id", "is", null)
+      .not("attributed_campaign_id", "is", null)
       .order("datetime", { ascending: true })
       .limit(1000);
     if (lastDt) q = q.gt("datetime", lastDt);

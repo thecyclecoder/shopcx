@@ -7,7 +7,7 @@
  * for case-control analysis of segments, we need it: it's the only way
  * to reconstruct per-campaign recipient lists.
  *
- * Resumable via MAX(datetime) watermark on klaviyo_profile_events.
+ * Resumable via MAX(datetime) watermark on profile_events.
  * Idempotent upserts on (workspace_id, klaviyo_event_id).
  *
  * Usage:
@@ -77,7 +77,7 @@ async function main() {
     sinceIso = new Date(Date.now() - args.days * 86_400_000).toISOString();
   } else {
     const { data: latest } = await supabase
-      .from("klaviyo_profile_events")
+      .from("profile_events")
       .select("datetime")
       .eq("workspace_id", WS)
       .eq("metric_name", METRIC_NAME)
@@ -147,7 +147,7 @@ async function main() {
       for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
         const batch = rows.slice(i, i + UPSERT_CHUNK);
         const { error } = await supabase
-          .from("klaviyo_profile_events")
+          .from("profile_events")
           .upsert(batch, { onConflict: "workspace_id,klaviyo_event_id", ignoreDuplicates: false });
         if (error) throw new Error(`page ${page} upsert: ${error.message}`);
       }

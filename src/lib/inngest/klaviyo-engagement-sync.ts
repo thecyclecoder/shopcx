@@ -2,7 +2,7 @@
  * Klaviyo engagement INCREMENTAL sync.
  *
  * Daily cron — pulls events created since MAX(datetime) per metric and
- * upserts them into `klaviyo_profile_events`. The companion to the
+ * upserts them into `profile_events`. The companion to the
  * one-shot `klaviyo-engagement-backfill` function (which loads 180d).
  *
  * Why this exists: per `project_klaviyo_engagement_backfill_local`, the
@@ -141,7 +141,7 @@ export const klaviyoEngagementSync = inngest.createFunction(
           // datetime, so back off 1s to catch same-second events;
           // duplicates dedupe on the unique constraint.
           const { data: watermark } = await admin
-            .from("klaviyo_profile_events")
+            .from("profile_events")
             .select("datetime")
             .eq("workspace_id", ws.id)
             .eq("metric_name", metricName)
@@ -230,7 +230,7 @@ export const klaviyoEngagementSync = inngest.createFunction(
               for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
                 const batch = rows.slice(i, i + UPSERT_CHUNK);
                 const { error } = await admin
-                  .from("klaviyo_profile_events")
+                  .from("profile_events")
                   .upsert(batch, { onConflict: "workspace_id,klaviyo_event_id", ignoreDuplicates: false });
                 if (error) {
                   errors.push(`${metricName} upsert page=${pages}: ${error.message}`);
