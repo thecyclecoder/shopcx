@@ -23,9 +23,22 @@ interface Campaign {
   recipients_total: number;
   recipients_sent: number;
   recipients_failed: number;
+  coupon_code: string | null;
   scheduled_at: string | null;
   completed_at: string | null;
   created_at: string;
+  stats?: {
+    recipients: number;
+    sent: number;
+    delivered: number;
+    clicks: number;
+    click_rate: number;
+    conversions: number;
+    revenue_cents: number;
+    cvr: number;
+    untracked_coupon_redemptions: number;
+    untracked_coupon_revenue_cents: number;
+  };
 }
 
 interface KlaviyoHistoryRow {
@@ -151,14 +164,17 @@ export default function TextMarketingListPage() {
               <tr className="border-b border-zinc-200 bg-zinc-50 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950">
                 <th className="px-4 py-3">Name</th>
                 <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Sent</th>
+                <th className="px-4 py-3">CTR</th>
+                <th className="px-4 py-3">CVR</th>
+                <th className="px-4 py-3">Revenue</th>
                 <th className="px-4 py-3">Send date</th>
-                <th className="px-4 py-3">Local hour</th>
-                <th className="px-4 py-3">Progress</th>
-                <th className="px-4 py-3">Created</th>
               </tr>
             </thead>
             <tbody>
-              {campaigns.map((c) => (
+              {campaigns.map((c) => {
+                const s = c.stats;
+                return (
                 <tr key={c.id} className="border-b border-zinc-100 last:border-0 hover:bg-zinc-50 dark:border-zinc-800/50 dark:hover:bg-zinc-800/50">
                   <td className="px-4 py-3">
                     <Link href={`/dashboard/marketing/text/${c.id}`} className="font-medium text-zinc-900 hover:underline dark:text-zinc-100">
@@ -173,23 +189,51 @@ export default function TextMarketingListPage() {
                       {c.status}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400">{c.send_date}</td>
-                  <td className="px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400">
-                    {String(c.target_local_hour).padStart(2, "0")}:00 local
+                  <td className="px-4 py-3 text-xs tabular-nums text-zinc-600 dark:text-zinc-400">
+                    {s ? s.sent.toLocaleString() : "—"}
+                    {s && s.recipients > s.sent && (
+                      <span className="ml-1 text-[10px] text-zinc-400">/ {s.recipients.toLocaleString()}</span>
+                    )}
                   </td>
-                  <td className="px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400">
-                    {c.recipients_sent.toLocaleString()} / {c.recipients_total.toLocaleString()}
-                    {c.recipients_failed > 0 && (
-                      <span className="ml-2 text-rose-600">+{c.recipients_failed} failed</span>
+                  <td className="px-4 py-3 text-xs tabular-nums text-zinc-600 dark:text-zinc-400">
+                    {s && s.sent > 0 ? `${(s.click_rate * 100).toFixed(2)}%` : "—"}
+                    {s && s.clicks > 0 && (
+                      <span className="ml-1 text-[10px] text-zinc-400">({s.clicks.toLocaleString()})</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-xs tabular-nums text-zinc-600 dark:text-zinc-400">
+                    {s && s.sent > 0 ? `${(s.cvr * 100).toFixed(2)}%` : "—"}
+                    {s && s.conversions > 0 && (
+                      <span className="ml-1 text-[10px] text-zinc-400">({s.conversions.toLocaleString()})</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-xs tabular-nums font-semibold">
+                    {s && s.revenue_cents > 0 ? (
+                      <span className="text-emerald-700 dark:text-emerald-400">
+                        ${(s.revenue_cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                      </span>
+                    ) : <span className="text-zinc-400">—</span>}
+                    {s && s.untracked_coupon_redemptions > 0 && (
+                      <span
+                        className="ml-1 text-[10px] font-normal text-amber-600"
+                        title={`${s.untracked_coupon_redemptions} order${s.untracked_coupon_redemptions > 1 ? "s" : ""} used ${c.coupon_code} without UTM attribution (shared across all campaigns using this code)`}
+                      >
+                        +${(s.untracked_coupon_revenue_cents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}*
+                      </span>
                     )}
                   </td>
                   <td className="px-4 py-3 text-xs text-zinc-500">
-                    {new Date(c.created_at).toLocaleDateString()}
+                    {c.send_date}
                   </td>
                 </tr>
-              ))}
+              );})}
             </tbody>
           </table>
+          {campaigns.some((c) => (c.stats?.untracked_coupon_redemptions || 0) > 0) && (
+            <p className="border-t border-zinc-100 bg-zinc-50 px-4 py-2 text-[10px] text-zinc-500 dark:border-zinc-800/50 dark:bg-zinc-950">
+              <span className="font-mono text-amber-600">+$X*</span> = untracked coupon revenue. The coupon was used but no UTM attributed the purchase to a specific campaign. When multiple campaigns share a code, this total appears on each row.
+            </p>
+          )}
         </div>
       )}
 
