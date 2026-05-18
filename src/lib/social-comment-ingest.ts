@@ -22,7 +22,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { decrypt } from "@/lib/crypto";
-import { hideComment, getPostMetadata } from "@/lib/meta";
+import { hideComment, getPostMetadata, getAdDestinationUrls } from "@/lib/meta";
 import { resolvePostProductMatch } from "@/lib/meta-product-match";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -260,7 +260,25 @@ async function ensurePostCache(args: EnsurePostCacheArgs): Promise<{
       if (sub.target?.url) attachmentUrls.push(sub.target.url);
     }
   }
-  const urls = [...new Set([...messageUrls, ...attachmentUrls])];
+  // For ad comments, the destination URL lives on the ad CREATIVE, not on
+  // the post body or attachments. The post itself is just the IG media
+  // container — its message/attachments don't contain a click-through. Pull
+  // the ad's configured destination URL(s) directly via Marketing API.
+  // Requires the USER access token (Marketing API rejects page tokens)
+  // + ads_read scope.
+  let adUrls: string[] = [];
+  if (adId) {
+    const { data: ws } = await admin
+      .from("workspaces")
+      .select("meta_user_access_token_encrypted")
+      .eq("id", page.workspace_id)
+      .maybeSingle();
+    if (ws?.meta_user_access_token_encrypted) {
+      const userToken = decrypt(ws.meta_user_access_token_encrypted as string);
+      adUrls = await getAdDestinationUrls(userToken, adId);
+    }
+  }
+  const urls = [...new Set([...adUrls, ...messageUrls, ...attachmentUrls])];
 
   // Resolve a product match — follows shortlink redirects, matches
   // against products.handle.

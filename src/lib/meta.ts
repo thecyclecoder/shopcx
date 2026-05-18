@@ -199,6 +199,50 @@ export async function getPostMetadata(
 }
 
 /**
+ * Fetch the destination URLs configured on an ad creative.
+ *
+ * Two shapes to handle:
+ *   - Single-link ads → creative.object_story_spec.link_data.link
+ *   - Asset-feed / Advantage+ ads → creative.asset_feed_spec.link_urls[].website_url
+ *
+ * Returns every URL we find, in the order Meta listed them. Caller passes
+ * them into resolvePostProductMatch which picks the first that matches a
+ * products.handle.
+ *
+ * Requires ads_read scope on the access token.
+ */
+export async function getAdDestinationUrls(
+  accessToken: string,
+  adId: string,
+): Promise<string[]> {
+  const fields = "creative{object_story_spec{link_data{link}},asset_feed_spec{link_urls}}";
+  const url = `${GRAPH_BASE}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${encodeURIComponent(accessToken)}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.warn(`getAdDestinationUrls failed for ${adId}: ${res.status}`);
+      return [];
+    }
+    const json = (await res.json()) as {
+      creative?: {
+        object_story_spec?: { link_data?: { link?: string } };
+        asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
+      };
+    };
+    const out: string[] = [];
+    const single = json.creative?.object_story_spec?.link_data?.link;
+    if (single) out.push(single);
+    for (const lu of json.creative?.asset_feed_spec?.link_urls || []) {
+      if (lu.website_url) out.push(lu.website_url);
+    }
+    return out;
+  } catch (err) {
+    console.warn(`getAdDestinationUrls error for ${adId}:`, err);
+    return [];
+  }
+}
+
+/**
  * Get Page profile info
  */
 export async function getPageProfile(
@@ -225,12 +269,16 @@ export interface ExchangedPage {
  * ALL pages the user authorized — not just the first. Returns one entry
  * per FB page; Instagram business accounts come through as `instagramId`
  * + `instagramName` on the parent FB page (Meta links IG to a page).
+ *
+ * Also returns the long-lived USER access token. Pages tokens can hit
+ * pages/comments/messages endpoints; Marketing API endpoints (e.g.
+ * /{ad_id}?fields=creative) require the user token + ads_read scope.
  */
 export async function exchangeForPageTokens(
   appId: string,
   appSecret: string,
   shortLivedToken: string
-): Promise<{ pages: ExchangedPage[] } | { error: string }> {
+): Promise<{ pages: ExchangedPage[]; userAccessToken: string } | { error: string }> {
   const longLivedRes = await fetch(
     `${GRAPH_BASE}/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${shortLivedToken}`
   );
@@ -271,7 +319,7 @@ export async function exchangeForPageTokens(
     instagramName: p.instagram_business_account?.name || p.instagram_business_account?.username,
   }));
 
-  return { pages };
+  return { pages, userAccessToken: longLivedUserToken };
 }
 
 /**
@@ -318,6 +366,9 @@ export function buildMetaAuthUrl(params: {
     "instagram_basic",
     "instagram_manage_messages",
     "instagram_manage_comments",
+    // ads_read = lets us call /{ad_id} for creative.object_story_spec.link_data.link
+    // so ad-comment moderation can match the comment to the destination product.
+    "ads_read",
   ].join(",");
 
   return `https://www.facebook.com/${GRAPH_API_VERSION}/dialog/oauth?client_id=${params.appId}&redirect_uri=${encodeURIComponent(params.redirectUri)}&state=${params.state}&scope=${scopes}`;

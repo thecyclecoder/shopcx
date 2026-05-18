@@ -92,8 +92,11 @@ export async function GET(request: Request) {
     // Legacy single-page columns on workspaces stay populated with the
     // FIRST FB page so older code paths (DM ticket creation, the
     // existing settings card) keep working. Once those callers move
-    // over to meta_pages joins we can drop these columns.
+    // over to meta_pages joins we can drop these columns. The user
+    // access token persists separately for Marketing API calls
+    // (ad creative lookups for product matching).
     const firstEncrypted = encrypt(firstPage.pageAccessToken);
+    const userTokenEncrypted = encrypt(pageResult.userAccessToken);
     const workspaceVerifyToken = randomBytes(16).toString("hex");
     await admin
       .from("workspaces")
@@ -103,6 +106,7 @@ export async function GET(request: Request) {
         meta_page_name: firstPage.pageName,
         meta_instagram_id: firstPage.instagramId || null,
         meta_webhook_verify_token: workspaceVerifyToken,
+        meta_user_access_token_encrypted: userTokenEncrypted,
       })
       .eq("id", workspaceId);
 
