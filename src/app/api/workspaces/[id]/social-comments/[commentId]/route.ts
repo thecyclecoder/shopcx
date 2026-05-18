@@ -25,21 +25,31 @@ export async function GET(
     .single();
   if (!member) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-  const { data: comment, error } = await admin
+  // meta_post_cache has no FK from social_comments — join in JS instead
+  // of using a PostgREST embed. (Cache row can legitimately be missing if
+  // the Graph metadata fetch failed at ingest time.)
+  const { data: commentRow, error } = await admin
     .from("social_comments")
     .select(
       `*,
        meta_pages!inner(meta_page_name, platform, page_type),
-       products(title, handle, description),
-       meta_post_cache(permalink_url, message, image_url, posted_at, is_ad)`,
+       products(title, handle, description)`,
     )
     .eq("workspace_id", workspaceId)
     .eq("id", commentId)
     .single();
 
-  if (error || !comment) {
+  if (error || !commentRow) {
     return NextResponse.json({ error: "Comment not found" }, { status: 404 });
   }
+
+  const { data: cacheRow } = await admin
+    .from("meta_post_cache")
+    .select("permalink_url, message, image_url, posted_at, is_ad")
+    .eq("workspace_id", workspaceId)
+    .eq("meta_post_id", (commentRow as { meta_post_id: string }).meta_post_id)
+    .maybeSingle();
+  const comment = { ...commentRow, meta_post_cache: cacheRow || null };
 
   const [{ data: replies }, { data: senderHistory }, { data: ban }] = await Promise.all([
     admin
