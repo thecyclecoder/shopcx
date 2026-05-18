@@ -29,7 +29,7 @@ export async function GET(
   while (true) {
     const { data } = await admin
       .from("daily_order_snapshots")
-      .select("snapshot_date, new_subscription_count, new_subscription_revenue_cents, one_time_count, one_time_revenue_cents, recurring_count")
+      .select("snapshot_date, new_subscription_count, new_subscription_revenue_cents, one_time_count, one_time_revenue_cents, recurring_count, recurring_revenue_cents")
       .eq("workspace_id", workspaceId)
       .gte("snapshot_date", startDate)
       .lte("snapshot_date", endDate)
@@ -58,8 +58,13 @@ export async function GET(
       .lt("created_at", utcEnd);
 
     let newSubCount = 0, newSubRev = 0, oneTimeCount = 0, oneTimeRev = 0;
+    let recurringCount = 0, recurringRev = 0;
     for (const o of todayOrders || []) {
-      if (o.source_name === "subscription_contract_checkout_one") continue;
+      if (o.source_name === "subscription_contract_checkout_one") {
+        recurringCount++;
+        recurringRev += o.total_cents || 0;
+        continue;
+      }
       const tags = (o.tags || "").toLowerCase();
       if (tags.includes("first subscription")) {
         newSubCount++;
@@ -76,11 +81,13 @@ export async function GET(
       new_subscription_revenue_cents: newSubRev,
       one_time_count: oneTimeCount,
       one_time_revenue_cents: oneTimeRev,
+      recurring_count: recurringCount,
+      recurring_revenue_cents: recurringRev,
     });
   }
 
-  // ── Amazon checkout revenue (one-time + sns_checkout, excludes recurring) ──
-  // Today's data kept fresh by 5-min cron (today-sync)
+  // ── Amazon checkout revenue (all three buckets — recurring is surfaced
+  //    separately as "not in ROAS" context). Today kept fresh by 5-min cron.
   const amazonRows: Record<string, unknown>[] = [];
   offset = 0;
   while (true) {
@@ -90,7 +97,7 @@ export async function GET(
       .eq("workspace_id", workspaceId)
       .gte("snapshot_date", startDate)
       .lte("snapshot_date", endDate)
-      .in("order_bucket", ["one_time", "sns_checkout"])
+      .in("order_bucket", ["one_time", "sns_checkout", "recurring"])
       .order("snapshot_date", { ascending: true })
       .range(offset, offset + 999);
     if (!data || data.length === 0) break;
@@ -123,14 +130,17 @@ export async function GET(
     shopify_checkout_revenue: number;
     shopify_new_sub_revenue: number;
     shopify_one_time_revenue: number;
+    shopify_recurring_revenue: number;  // surfaced separately on cards
     shopify_new_sub_count: number;
     shopify_one_time_count: number;
     shopify_recurring_count: number;
     amazon_checkout_revenue: number;
     amazon_one_time_revenue: number;
     amazon_sns_checkout_revenue: number;
+    amazon_recurring_revenue: number;   // surfaced separately on cards
     amazon_one_time_count: number;
     amazon_sns_checkout_count: number;
+    amazon_recurring_count: number;
     meta_spend: number;
     // amazon_ad_spend: number; // future
   }
@@ -139,9 +149,11 @@ export async function GET(
   const emptyDay = (date: string): DayData => ({
     date,
     shopify_checkout_revenue: 0, shopify_new_sub_revenue: 0, shopify_one_time_revenue: 0,
+    shopify_recurring_revenue: 0,
     shopify_new_sub_count: 0, shopify_one_time_count: 0, shopify_recurring_count: 0,
     amazon_checkout_revenue: 0, amazon_one_time_revenue: 0, amazon_sns_checkout_revenue: 0,
-    amazon_one_time_count: 0, amazon_sns_checkout_count: 0,
+    amazon_recurring_revenue: 0,
+    amazon_one_time_count: 0, amazon_sns_checkout_count: 0, amazon_recurring_count: 0,
     meta_spend: 0,
   });
 
@@ -155,6 +167,7 @@ export async function GET(
     d.shopify_new_sub_count += s.new_subscription_count as number;
     d.shopify_one_time_count += s.one_time_count as number;
     d.shopify_recurring_count += (s.recurring_count as number) || 0;
+    d.shopify_recurring_revenue += (s.recurring_revenue_cents as number) || 0;
     d.shopify_checkout_revenue += (s.new_subscription_revenue_cents as number) + (s.one_time_revenue_cents as number);
   }
 
@@ -168,11 +181,17 @@ export async function GET(
     if (s.order_bucket === "sns_checkout") {
       d.amazon_sns_checkout_revenue += rev;
       d.amazon_sns_checkout_count += count;
+      d.amazon_checkout_revenue += rev;
+    } else if (s.order_bucket === "recurring") {
+      // SnS auto-renewals — NOT part of ROAS revenue, surfaced on the card
+      // separately as "Recurring (not in ROAS)" context.
+      d.amazon_recurring_revenue += rev;
+      d.amazon_recurring_count += count;
     } else {
       d.amazon_one_time_revenue += rev;
       d.amazon_one_time_count += count;
+      d.amazon_checkout_revenue += rev;
     }
-    d.amazon_checkout_revenue += rev;
   }
 
   for (const _s of metaRows) {
@@ -189,20 +208,25 @@ export async function GET(
     shopify_checkout_revenue: acc.shopify_checkout_revenue + d.shopify_checkout_revenue,
     shopify_new_sub_revenue: acc.shopify_new_sub_revenue + d.shopify_new_sub_revenue,
     shopify_one_time_revenue: acc.shopify_one_time_revenue + d.shopify_one_time_revenue,
+    shopify_recurring_revenue: acc.shopify_recurring_revenue + d.shopify_recurring_revenue,
     shopify_new_sub_count: acc.shopify_new_sub_count + d.shopify_new_sub_count,
     shopify_one_time_count: acc.shopify_one_time_count + d.shopify_one_time_count,
     shopify_recurring_count: acc.shopify_recurring_count + d.shopify_recurring_count,
     amazon_checkout_revenue: acc.amazon_checkout_revenue + d.amazon_checkout_revenue,
     amazon_one_time_revenue: acc.amazon_one_time_revenue + d.amazon_one_time_revenue,
     amazon_sns_checkout_revenue: acc.amazon_sns_checkout_revenue + d.amazon_sns_checkout_revenue,
+    amazon_recurring_revenue: acc.amazon_recurring_revenue + d.amazon_recurring_revenue,
     amazon_one_time_count: acc.amazon_one_time_count + d.amazon_one_time_count,
     amazon_sns_checkout_count: acc.amazon_sns_checkout_count + d.amazon_sns_checkout_count,
+    amazon_recurring_count: acc.amazon_recurring_count + d.amazon_recurring_count,
     meta_spend: acc.meta_spend + d.meta_spend,
   }), {
     shopify_checkout_revenue: 0, shopify_new_sub_revenue: 0, shopify_one_time_revenue: 0,
+    shopify_recurring_revenue: 0,
     shopify_new_sub_count: 0, shopify_one_time_count: 0, shopify_recurring_count: 0,
     amazon_checkout_revenue: 0, amazon_one_time_revenue: 0, amazon_sns_checkout_revenue: 0,
-    amazon_one_time_count: 0, amazon_sns_checkout_count: 0,
+    amazon_recurring_revenue: 0,
+    amazon_one_time_count: 0, amazon_sns_checkout_count: 0, amazon_recurring_count: 0,
     meta_spend: 0,
   });
 
@@ -269,10 +293,13 @@ export async function GET(
       shopify_checkout_revenue: totals.shopify_checkout_revenue,
       shopify_new_sub_count: totals.shopify_new_sub_count,
       shopify_one_time_count: totals.shopify_one_time_count,
+      shopify_recurring_revenue: totals.shopify_recurring_revenue,
+      shopify_recurring_count: totals.shopify_recurring_count,
       amazon_checkout_revenue: totals.amazon_checkout_revenue,
       amazon_one_time_count: totals.amazon_one_time_count,
       amazon_sns_checkout_count: totals.amazon_sns_checkout_count,
-      shopify_recurring_count: totals.shopify_recurring_count,
+      amazon_recurring_revenue: totals.amazon_recurring_revenue,
+      amazon_recurring_count: totals.amazon_recurring_count,
       // For G&A allocation: total orders including recurring across all channels
       total_all_orders: totals.shopify_new_sub_count + totals.shopify_one_time_count + totals.shopify_recurring_count + totals.amazon_one_time_count + totals.amazon_sns_checkout_count,
       shopify_sub_rate: Math.round(shopifySubRate * 100) / 100,

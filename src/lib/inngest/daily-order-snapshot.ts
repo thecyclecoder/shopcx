@@ -11,6 +11,45 @@ import { decrypt } from "@/lib/crypto";
 
 type SourceCategory = "recurring" | "checkout" | "replacement" | "unknown";
 
+// Self-heal cron — runs at 7 AM Central (after the 1 AM snapshot + after our
+// Shopify→DB orders sync typically catches up). Looks at the last 7 days of
+// snapshots and re-fires the daily snapshot event for any date flagged
+// shopify_mismatch=true. Catches days where the 1 AM cron ran before our
+// Shopify sync ingested that day's orders — symptom: snapshot shows 0/0/0
+// while Shopify GraphQL says there were N orders.
+export const dailyOrderSnapshotSelfHeal = inngest.createFunction(
+  {
+    id: "daily-order-snapshot-self-heal",
+    triggers: [{ cron: "0 12 * * *" }], // 7 AM Central = 12:00 UTC during CDT
+  },
+  async ({ step }) => {
+    const admin = createAdminClient();
+
+    // Find mismatched snapshots in the past 7 days. We re-fire the event
+    // so the original snapshot function does the work — keeps logic in
+    // one place. The function upserts on (workspace_id, snapshot_date)
+    // so this is idempotent.
+    const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    const flagged = await step.run("find-mismatches", async () => {
+      const { data } = await admin
+        .from("daily_order_snapshots")
+        .select("workspace_id, snapshot_date, shopify_count, total_count")
+        .eq("shopify_mismatch", true)
+        .gte("snapshot_date", sevenDaysAgo);
+      return data || [];
+    });
+
+    if (flagged.length === 0) return { rerun: 0 };
+
+    await step.sendEvent("rerun", flagged.map(r => ({
+      name: "snapshot/daily-orders",
+      data: { date: r.snapshot_date as string, workspace_id: r.workspace_id as string },
+    })));
+
+    return { rerun: flagged.length, dates: flagged.map(r => r.snapshot_date) };
+  },
+);
+
 export const dailyOrderSnapshot = inngest.createFunction(
   {
     id: "daily-order-snapshot",

@@ -19,10 +19,13 @@ interface ROASData {
     shopify_checkout_revenue: number;
     shopify_new_sub_count: number;
     shopify_one_time_count: number;
+    shopify_recurring_revenue: number;
+    shopify_recurring_count: number;
     amazon_checkout_revenue: number;
     amazon_one_time_count: number;
     amazon_sns_checkout_count: number;
-    shopify_recurring_count: number;
+    amazon_recurring_revenue: number;
+    amazon_recurring_count: number;
     total_all_orders: number;
     shopify_sub_rate: number;
     amazon_sub_rate: number;
@@ -59,15 +62,26 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
 type Preset = "today" | "yesterday" | "this_month" | "last_month" | "custom";
 
 function getPresetDates(preset: Preset): { start: string; end: string } {
-  // Use Central time for date boundaries to match snapshot crons
+  // All date math runs through Central directly — never bounce off the
+  // browser's local timezone, which causes off-by-one days for users east
+  // of Central (e.g. a Yesterday click in ET returned 5/16 instead of 5/17).
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
   const [y, m] = today.split("-").map(Number);
+
+  // Add N days to a YYYY-MM-DD string interpreted as a Central date.
+  // We use UTC math on a midnight-UTC anchor (same calendar arithmetic;
+  // no local-tz contamination).
+  function addDays(dateStr: string, days: number): string {
+    const t = new Date(dateStr + "T12:00:00Z");  // noon anchor avoids DST
+    t.setUTCDate(t.getUTCDate() + days);
+    return t.toISOString().slice(0, 10);
+  }
 
   switch (preset) {
     case "today":
       return { start: today, end: today };
     case "yesterday": {
-      const yd = new Date(y, m - 1, Number(today.split("-")[2]) - 1).toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+      const yd = addDays(today, -1);
       return { start: yd, end: yd };
     }
     case "this_month": {
@@ -78,7 +92,8 @@ function getPresetDates(preset: Preset): { start: string; end: string } {
       const lm = m === 1 ? 12 : m - 1;
       const ly = m === 1 ? y - 1 : y;
       const firstLast = `${ly}-${String(lm).padStart(2, "0")}-01`;
-      const lastDay = new Date(y, m - 1, 0).toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+      // Last day of last month = day before the 1st of this month.
+      const lastDay = addDays(`${y}-${String(m).padStart(2, "0")}-01`, -1);
       return { start: firstLast, end: lastDay };
     }
     default:
@@ -167,13 +182,13 @@ export default function ROASDashboard() {
             <StatCard
               label="Website Rev"
               value={fmtShort(s.shopify_checkout_revenue)}
-              sub={`${s.shopify_new_sub_count + s.shopify_one_time_count} orders`}
+              sub={`${s.shopify_new_sub_count + s.shopify_one_time_count} orders${s.shopify_recurring_revenue > 0 ? ` · +${fmtShort(s.shopify_recurring_revenue)} recurring` : ""}`}
               color="text-emerald-600 dark:text-emerald-400"
             />
             <StatCard
               label="Amazon Rev"
               value={fmtShort(s.amazon_checkout_revenue)}
-              sub={`${s.amazon_one_time_count + s.amazon_sns_checkout_count} orders`}
+              sub={`${s.amazon_one_time_count + s.amazon_sns_checkout_count} orders${s.amazon_recurring_revenue > 0 ? ` · +${fmtShort(s.amazon_recurring_revenue)} recurring` : ""}`}
               color="text-amber-600 dark:text-amber-400"
             />
             <StatCard
