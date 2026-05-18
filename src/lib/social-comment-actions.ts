@@ -25,6 +25,8 @@ import {
   hideComment,
   deleteComment,
   likeComment,
+  blockUserOnFbPage,
+  unblockUserOnFbPage,
 } from "@/lib/meta";
 import type { ModerationDecision, ModerationAction } from "@/lib/social-comment-orchestrator";
 
@@ -300,6 +302,24 @@ export async function banUser(args: BanArgs): Promise<void> {
     { onConflict: "workspace_id,meta_sender_id" },
   );
 
+  // Real Meta-side block on every FB page in the workspace. This stops
+  // the user from commenting on the Page, prevents them from seeing the
+  // Page's ads, and blocks messaging. IG has no equivalent API — for
+  // Instagram users we fall back to hiding existing comments and
+  // skipping future ones via banned_meta_users.
+  const { data: pages } = await admin
+    .from("meta_pages")
+    .select("id, meta_page_id, platform")
+    .eq("workspace_id", args.workspaceId)
+    .eq("is_active", true);
+  for (const p of pages || []) {
+    if (p.platform !== "facebook") continue;
+    const token = await loadPageAccessToken(admin, p.id);
+    if (!token) continue;
+    const r = await blockUserOnFbPage(token, p.meta_page_id, args.senderId);
+    if (!r.success) console.warn(`Block on page ${p.meta_page_id} failed:`, r.error);
+  }
+
   if (!args.hideAllExisting) return;
 
   // Hide every still-public comment by this user across every page in
@@ -342,6 +362,21 @@ export async function unbanUser(
     })
     .eq("workspace_id", workspaceId)
     .eq("meta_sender_id", senderId);
+
+  // Reverse the FB Page block(s). IG has no programmatic block, so this
+  // is a no-op there — the internal ban list is the only artifact.
+  const { data: pages } = await admin
+    .from("meta_pages")
+    .select("id, meta_page_id, platform")
+    .eq("workspace_id", workspaceId)
+    .eq("is_active", true);
+  for (const p of pages || []) {
+    if (p.platform !== "facebook") continue;
+    const token = await loadPageAccessToken(admin, p.id);
+    if (!token) continue;
+    const r = await unblockUserOnFbPage(token, p.meta_page_id, senderId);
+    if (!r.success) console.warn(`Unblock on page ${p.meta_page_id} failed:`, r.error);
+  }
 }
 
 async function loadPageAccessToken(admin: Admin, metaPagesId: string): Promise<string | null> {

@@ -231,6 +231,76 @@ export default function SocialCommentDetailPage({
         {/* Right sidebar — moderation context */}
         <aside className="w-80 shrink-0 border-l border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-950 overflow-auto">
           <div className="space-y-4">
+            {/* Moderation actions — pinned at top for fast triage */}
+            <Card title="Moderation actions" accent="purple">
+              <div className="grid grid-cols-2 gap-2">
+                <ActionButton onClick={() => act("like").then(load)} disabled={submitting}>
+                  Like
+                </ActionButton>
+                <ActionButton onClick={() => act("hide").then(load)} disabled={submitting}>
+                  Hide
+                </ActionButton>
+                <ActionButton
+                  onClick={() => {
+                    if (confirm("Delete this comment from Meta? This can't be undone.")) {
+                      act("delete").then(load);
+                    }
+                  }}
+                  disabled={submitting}
+                  tone="danger"
+                >
+                  Delete
+                </ActionButton>
+                <ActionButton onClick={() => act("ignore").then(load)} disabled={submitting}>
+                  Ignore
+                </ActionButton>
+                <ActionButton
+                  onClick={() => act("escalate").then(load)}
+                  disabled={submitting}
+                >
+                  Escalate
+                </ActionButton>
+              </div>
+            </Card>
+
+            {/* Commenter — pinned near top alongside actions */}
+            <Card title="Commenter">
+              <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                {comment.meta_sender_name || "(name unknown)"}
+              </p>
+              {comment.meta_sender_username && (
+                <p className="text-xs text-zinc-500">@{comment.meta_sender_username}</p>
+              )}
+              <p className="mt-2 text-xs text-zinc-500">
+                {senderHistory.length} other comment{senderHistory.length === 1 ? "" : "s"} from this user
+              </p>
+              {senderBanned ? (
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={async () => {
+                    if (await act("unban")) await load();
+                  }}
+                  className="mt-2 w-full rounded-md border border-emerald-300 px-3 py-1.5 text-sm font-medium text-emerald-700 transition-colors hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-800 dark:text-emerald-400"
+                >
+                  Unban user
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={async () => {
+                    const reason = prompt("Reason for ban (optional):");
+                    if (reason === null) return;
+                    if (await act("ban", { ban_reason: reason })) await load();
+                  }}
+                  className="mt-2 w-full rounded-md border border-red-300 px-3 py-1.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400"
+                >
+                  Ban this user
+                </button>
+              )}
+            </Card>
+
             {/* AI suggestion */}
             {comment.ai_action && (
               <Card title="AI suggestion" accent="purple">
@@ -309,76 +379,6 @@ export default function SocialCommentDetailPage({
                 </Link>
               </Card>
             )}
-
-            {/* Sender */}
-            <Card title="Commenter">
-              <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                {comment.meta_sender_name || "(name unknown)"}
-              </p>
-              {comment.meta_sender_username && (
-                <p className="text-xs text-zinc-500">@{comment.meta_sender_username}</p>
-              )}
-              <p className="mt-2 text-xs text-zinc-500">
-                {senderHistory.length} other comment{senderHistory.length === 1 ? "" : "s"} from this user
-              </p>
-              {senderBanned ? (
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={async () => {
-                    if (await act("unban")) await load();
-                  }}
-                  className="mt-2 w-full rounded-md border border-emerald-300 px-3 py-1.5 text-sm font-medium text-emerald-700 transition-colors hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-800 dark:text-emerald-400"
-                >
-                  Unban user
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={async () => {
-                    const reason = prompt("Reason for ban (optional):");
-                    if (reason === null) return;
-                    if (await act("ban", { ban_reason: reason })) await load();
-                  }}
-                  className="mt-2 w-full rounded-md border border-red-300 px-3 py-1.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400"
-                >
-                  Ban this user
-                </button>
-              )}
-            </Card>
-
-            {/* Quick actions */}
-            <Card title="Moderation actions">
-              <div className="grid grid-cols-2 gap-2">
-                <ActionButton onClick={() => act("like").then(load)} disabled={submitting}>
-                  Like
-                </ActionButton>
-                <ActionButton onClick={() => act("hide").then(load)} disabled={submitting}>
-                  Hide
-                </ActionButton>
-                <ActionButton
-                  onClick={() => {
-                    if (confirm("Delete this comment from Meta? This can't be undone.")) {
-                      act("delete").then(load);
-                    }
-                  }}
-                  disabled={submitting}
-                  tone="danger"
-                >
-                  Delete
-                </ActionButton>
-                <ActionButton onClick={() => act("ignore").then(load)} disabled={submitting}>
-                  Ignore
-                </ActionButton>
-                <ActionButton
-                  onClick={() => act("escalate").then(load)}
-                  disabled={submitting}
-                >
-                  Escalate
-                </ActionButton>
-              </div>
-            </Card>
 
             {/* Audit log */}
             <Card title="Audit">

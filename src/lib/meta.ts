@@ -143,6 +143,56 @@ export async function deleteComment(
  * Used as a moderation action — Sonnet may decide a positive customer
  * comment is best acknowledged with a like rather than a written reply.
  */
+/**
+ * Block a user from interacting with a Facebook Page.
+ *
+ * Effects on the Meta side once added:
+ *   - User can no longer like or comment on the Page
+ *   - User is excluded from the Page's ad audiences (won't see ads anymore)
+ *   - User can't message the Page
+ *
+ * Instagram has no equivalent programmatic block — IG blocking has to be
+ * done from the Instagram app itself. Our IG flow falls back to hiding
+ * existing comments + tracking the sender in banned_meta_users so future
+ * comments are auto-hidden.
+ *
+ * `asid` (app-scoped ID) is what Meta delivers as `from.id` on webhooks —
+ * the same value we persist as social_comments.meta_sender_id.
+ *
+ * Requires pages_manage_metadata on the page access token (we have it).
+ */
+export async function blockUserOnFbPage(
+  pageAccessToken: string,
+  pageId: string,
+  appScopedUserId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const res = await fetch(`${GRAPH_BASE}/${pageId}/blocked?asid=${encodeURIComponent(appScopedUserId)}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${pageAccessToken}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return { success: false, error: err?.error?.message || `Meta API error ${res.status}` };
+  }
+  return { success: true };
+}
+
+export async function unblockUserOnFbPage(
+  pageAccessToken: string,
+  pageId: string,
+  appScopedUserId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const res = await fetch(`${GRAPH_BASE}/${pageId}/blocked?asid=${encodeURIComponent(appScopedUserId)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${pageAccessToken}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return { success: false, error: err?.error?.message || `Meta API error ${res.status}` };
+  }
+  return { success: true };
+}
+
 export async function likeComment(
   pageAccessToken: string,
   commentId: string,
@@ -198,21 +248,35 @@ export async function getPostMetadata(
   return res.json();
 }
 
+interface CallToActionShape { value?: { link?: string } }
+
 interface CreativeShape {
   effective_instagram_media_id?: string;
   effective_object_story_id?: string;
-  object_story_spec?: { link_data?: { link?: string } };
+  object_story_spec?: {
+    link_data?: { link?: string; call_to_action?: CallToActionShape };
+    video_data?: { call_to_action?: CallToActionShape };
+    photo_data?: { call_to_action?: CallToActionShape };
+    text_data?: { call_to_action?: CallToActionShape };
+  };
   asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
 }
 
 function extractDestinationUrls(c: CreativeShape): string[] {
   const out: string[] = [];
-  const single = c.object_story_spec?.link_data?.link;
-  if (single) out.push(single);
+  const oss = c.object_story_spec;
+  // link_data.link — feed/single-link image ads
+  if (oss?.link_data?.link) out.push(oss.link_data.link);
+  // call_to_action.value.link on any spec — video/photo/text variants
+  for (const spec of [oss?.link_data, oss?.video_data, oss?.photo_data, oss?.text_data]) {
+    const cta = spec?.call_to_action?.value?.link;
+    if (cta) out.push(cta);
+  }
+  // asset_feed_spec — Advantage+ / dynamic ads with rotating URLs
   for (const lu of c.asset_feed_spec?.link_urls || []) {
     if (lu.website_url) out.push(lu.website_url);
   }
-  return out;
+  return [...new Set(out)];
 }
 
 /**
@@ -265,12 +329,16 @@ export async function getAdDestinationUrlsByMediaId(
   // Active first; disabled accounts only as last resort.
   accounts.sort((a, b) => (a.account_status === 1 ? 0 : 1) - (b.account_status === 1 ? 0 : 1));
 
-  const fields = "id,name,effective_instagram_media_id,effective_object_story_id,object_story_spec{link_data{link}},asset_feed_spec{link_urls}";
+  const fields = "id,name,effective_instagram_media_id,effective_object_story_id,object_story_spec{link_data{link,call_to_action},video_data{call_to_action},photo_data{call_to_action},text_data{call_to_action}},asset_feed_spec{link_urls}";
 
   for (const acct of accounts) {
     let next: string | null = `${GRAPH_BASE}/${acct.id}/adcreatives?fields=${encodeURIComponent(fields)}&limit=200&access_token=${encodeURIComponent(userAccessToken)}`;
     let pages = 0;
-    while (next && pages < 5) {   // cap pagination per account at 1000 creatives
+    // Cap at 100 pages = 20k creatives per account. Match-on-find returns
+    // immediately, so this only fully traverses an account that has zero
+    // matching creative — bounded by the total ad volume across the
+    // workspace, capped just below "runaway" levels.
+    while (next && pages < 100) {
       let json: { data?: CreativeShape[]; paging?: { next?: string } } = {};
       try {
         const r: Response = await fetch(next);
@@ -417,6 +485,10 @@ export function buildMetaAuthUrl(params: {
     "pages_messaging",
     "pages_read_engagement",
     "pages_manage_metadata",
+    // pages_manage_engagement = liking/reacting to comments + reactions
+    // on the page's own posts. Without this, POST /{comment-id}/likes
+    // returns "insufficient permissions" on FB.
+    "pages_manage_engagement",
     "instagram_basic",
     "instagram_manage_messages",
     "instagram_manage_comments",
