@@ -26,17 +26,59 @@ export default function MetaPagesSettingsPage() {
   const [savingId, setSavingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Ad-destination domains — the host(s) that show up in CTA URLs of this
+  // workspace's Meta ads. Used by the comment moderation pipeline to
+  // recognize an ad's destination and match it to a product.handle.
+  const [adDomains, setAdDomains] = useState<string[]>([]);
+  const [adDomainInput, setAdDomainInput] = useState("");
+  const [savingDomains, setSavingDomains] = useState(false);
+
   const loadPages = useCallback(async () => {
     setLoading(true);
     const res = await fetch(`/api/workspaces/${workspaceId}/meta-pages`);
     const data = await res.json();
     setPages(data.pages || []);
+    setAdDomains(data.ad_destination_domains || []);
     setLoading(false);
   }, [workspaceId]);
 
   useEffect(() => {
     void loadPages();
   }, [loadPages]);
+
+  async function saveAdDomains(next: string[]) {
+    setSavingDomains(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workspaces/${workspaceId}/meta-pages`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ad_destination_domains: next }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setError(data.error || "Save failed");
+        return;
+      }
+      setAdDomains(next);
+    } finally {
+      setSavingDomains(false);
+    }
+  }
+
+  function addAdDomain() {
+    const raw = adDomainInput.trim().toLowerCase()
+      .replace(/^https?:\/\//, "")
+      .replace(/^www\./, "")
+      .replace(/\/.*$/, "");
+    if (!raw || adDomains.includes(raw)) { setAdDomainInput(""); return; }
+    void saveAdDomains([...adDomains, raw]);
+    setAdDomainInput("");
+  }
+
+  function removeAdDomain(d: string) {
+    void saveAdDomains(adDomains.filter(x => x !== d));
+  }
 
   async function updatePage(pageId: string, body: Partial<MetaPageRow>) {
     setSavingId(pageId);
@@ -134,6 +176,53 @@ export default function MetaPagesSettingsPage() {
               onDisconnect={() => disconnect(page.id)}
             />
           ))}
+        </div>
+      )}
+
+      {!loading && (
+        <div className="mt-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Ad destination domains</h2>
+          <p className="mt-1 text-xs text-zinc-500">
+            Domain(s) you currently link to from your Meta ads. When a customer comments on an ad, we look up the ad&apos;s CTA URL and match the path
+            (e.g. <code className="rounded bg-zinc-100 px-1 dark:bg-zinc-800">/products/amazing-coffee</code>) against your products. Subdomains of any entry here also match.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {adDomains.map(d => (
+              <span key={d} className="inline-flex items-center gap-1.5 rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">
+                {d}
+                <button
+                  type="button"
+                  onClick={() => removeAdDomain(d)}
+                  disabled={savingDomains}
+                  className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-100 disabled:opacity-50"
+                  aria-label={`Remove ${d}`}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            {adDomains.length === 0 && (
+              <span className="text-xs text-zinc-400">No domains configured — ad-to-product matching will miss.</span>
+            )}
+          </div>
+          <div className="mt-3 flex gap-2">
+            <input
+              type="text"
+              value={adDomainInput}
+              onChange={(e) => setAdDomainInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addAdDomain(); } }}
+              placeholder="e.g. superfoodscompany.com"
+              className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+            />
+            <button
+              type="button"
+              onClick={addAdDomain}
+              disabled={savingDomains || !adDomainInput.trim()}
+              className="rounded-md bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+            >
+              Add
+            </button>
+          </div>
         </div>
       )}
     </div>

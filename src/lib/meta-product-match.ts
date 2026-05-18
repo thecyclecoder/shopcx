@@ -46,7 +46,18 @@ const NON_PRODUCT_PREFIXES = new Set([
 ]);
 
 interface WorkspaceHosts {
-  hosts: Set<string>;
+  hosts: Set<string>;         // exact storefront/shopify hosts as configured
+  brandRoots: Set<string>;    // last-two-labels of each, for cross-subdomain match
+}
+
+// Extract the last two labels of a host. Crude but covers the .com / .co / .net
+// case the user faces here. Handles bare hosts cleanly; no eTLD library needed
+// because workspace storefront domains in practice never use a multi-part TLD
+// (.co.uk etc) — if that ever happens we add psl.
+function registrableRoot(host: string): string {
+  const labels = host.split(".");
+  if (labels.length <= 2) return host;
+  return labels.slice(-2).join(".");
 }
 
 /**
@@ -87,8 +98,10 @@ async function tryUrl(
   }
   const host = url.host.toLowerCase().replace(/^www\./, "");
 
-  // Direct match against our storefront / shopify domain.
-  if (hosts.hosts.has(host)) {
+  // Direct match against our storefront / shopify domain, OR same
+  // registrable root (matches superfoodscompany.com against a workspace
+  // configured with shop.superfoodscompany.com and vice versa).
+  if (hosts.hosts.has(host) || hosts.brandRoots.has(registrableRoot(host))) {
     const handle = extractProductHandle(url.pathname);
     if (!handle) return null;
     const { data: product } = await admin
@@ -161,14 +174,25 @@ async function followRedirect(href: string): Promise<string | null> {
 async function loadWorkspaceHosts(admin: Admin, workspaceId: string): Promise<WorkspaceHosts> {
   const { data } = await admin
     .from("workspaces")
-    .select("storefront_domain, shopify_domain")
+    .select("storefront_domain, shopify_domain, shopify_myshopify_domain, ad_destination_domains")
     .eq("id", workspaceId)
     .single();
 
-  const set = new Set<string>();
-  if (data?.storefront_domain) set.add(stripHost(data.storefront_domain as string));
-  if (data?.shopify_domain) set.add(stripHost(data.shopify_domain as string));
-  return { hosts: set };
+  const hosts = new Set<string>();
+  if (data?.storefront_domain) hosts.add(stripHost(data.storefront_domain as string));
+  if (data?.shopify_domain) hosts.add(stripHost(data.shopify_domain as string));
+  if (data?.shopify_myshopify_domain) hosts.add(stripHost(data.shopify_myshopify_domain as string));
+  // Admin-curated list of additional domains the workspace runs ads on.
+  // Lets ads that link to a different domain than the storefront still
+  // resolve to products. Configured at Settings → Integrations → Meta.
+  for (const d of (data?.ad_destination_domains as string[] | null) || []) {
+    if (d) hosts.add(stripHost(d));
+  }
+
+  const brandRoots = new Set<string>();
+  for (const h of hosts) brandRoots.add(registrableRoot(h));
+
+  return { hosts, brandRoots };
 }
 
 function stripHost(value: string): string {
