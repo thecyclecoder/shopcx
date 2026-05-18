@@ -42,12 +42,13 @@ interface CommentChangeValue {
   comment_id?: string;
   parent_id?: string;
   post_id?: string;
-  message?: string;
+  message?: string;   // FB feed comment body
+  text?: string;      // IG comment body (different field name than FB)
   verb?: string;
   created_time?: number;
   ad_id?: string;
   id?: string;                                 // IG comment ID
-  media?: { id?: string; ad_id?: string };     // IG parent post container
+  media?: { id?: string; ad_id?: string; ad_title?: string; media_product_type?: string };
 }
 
 interface IngestArgs {
@@ -74,7 +75,8 @@ export async function ingestSocialComment(args: IngestArgs): Promise<void> {
   const parentCommentId = change.parent_id && change.parent_id !== postId ? change.parent_id : null;
   const adId = change.ad_id || change.media?.ad_id || null;
   const verb = change.verb || "add";
-  const body = change.message || "";
+  // FB feed comments ship the body as `message`; IG comments as `text`.
+  const body = change.message || change.text || "";
 
   // ── edited / remove verbs ────────────────────────────────────────
   // These only touch an existing row; if we never saw the original
