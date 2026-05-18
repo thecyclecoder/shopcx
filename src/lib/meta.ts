@@ -198,48 +198,88 @@ export async function getPostMetadata(
   return res.json();
 }
 
+interface AdCreativeShape {
+  creative?: {
+    object_story_spec?: { link_data?: { link?: string } };
+    asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
+  };
+}
+
+function extractDestinationUrls(json: AdCreativeShape): string[] {
+  const out: string[] = [];
+  const single = json.creative?.object_story_spec?.link_data?.link;
+  if (single) out.push(single);
+  for (const lu of json.creative?.asset_feed_spec?.link_urls || []) {
+    if (lu.website_url) out.push(lu.website_url);
+  }
+  return out;
+}
+
 /**
  * Fetch the destination URLs configured on an ad creative.
  *
- * Two shapes to handle:
+ * Strategy:
+ *   1. Direct lookup of /{ad_id} — works when the webhook's ad_id is a
+ *      first-class ad object.
+ *   2. Fallback: search ads by name across the user's ad accounts using
+ *      adTitle. Meta sometimes ships asset/placement variant IDs as
+ *      `ad_id` in comments webhooks — those direct-lookup with 400. The
+ *      real ad with that name does exist and has the destination URLs.
+ *
+ * Two creative shapes to extract URLs from:
  *   - Single-link ads → creative.object_story_spec.link_data.link
  *   - Asset-feed / Advantage+ ads → creative.asset_feed_spec.link_urls[].website_url
  *
- * Returns every URL we find, in the order Meta listed them. Caller passes
- * them into resolvePostProductMatch which picks the first that matches a
- * products.handle.
- *
- * Requires ads_read scope on the access token.
+ * Requires ads_read scope on the USER access token (not the page token —
+ * Marketing API rejects page tokens). First-match-wins across ad accounts;
+ * the post cache keys on post_id so we only do this lookup once per post.
  */
 export async function getAdDestinationUrls(
-  accessToken: string,
+  userAccessToken: string,
   adId: string,
+  adTitle?: string | null,
 ): Promise<string[]> {
+  // ── Strategy 1: direct lookup ───────────────────────────────────────
   const fields = "creative{object_story_spec{link_data{link}},asset_feed_spec{link_urls}}";
-  const url = `${GRAPH_BASE}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${encodeURIComponent(accessToken)}`;
   try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      console.warn(`getAdDestinationUrls failed for ${adId}: ${res.status}`);
-      return [];
+    const res = await fetch(`${GRAPH_BASE}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${encodeURIComponent(userAccessToken)}`);
+    if (res.ok) {
+      const urls = extractDestinationUrls((await res.json()) as AdCreativeShape);
+      if (urls.length) return urls;
     }
-    const json = (await res.json()) as {
-      creative?: {
-        object_story_spec?: { link_data?: { link?: string } };
-        asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
-      };
-    };
-    const out: string[] = [];
-    const single = json.creative?.object_story_spec?.link_data?.link;
-    if (single) out.push(single);
-    for (const lu of json.creative?.asset_feed_spec?.link_urls || []) {
-      if (lu.website_url) out.push(lu.website_url);
-    }
-    return out;
   } catch (err) {
-    console.warn(`getAdDestinationUrls error for ${adId}:`, err);
-    return [];
+    console.warn(`getAdDestinationUrls direct lookup failed for ${adId}:`, err);
   }
+
+  // ── Strategy 2: search by ad name ──────────────────────────────────
+  if (!adTitle) return [];
+
+  try {
+    const accountsRes = await fetch(`${GRAPH_BASE}/me/adaccounts?fields=id,account_status&limit=200&access_token=${encodeURIComponent(userAccessToken)}`);
+    if (!accountsRes.ok) return [];
+    const accounts = ((await accountsRes.json()).data || []) as Array<{ id: string; account_status: number }>;
+    // Active accounts first (account_status=1); search disabled accounts only as last resort.
+    const sorted = [...accounts].sort((a, b) => (a.account_status === 1 ? -1 : 1) - (b.account_status === 1 ? -1 : 1));
+
+    const filter = encodeURIComponent(JSON.stringify([
+      { field: "name", operator: "EQUAL", value: adTitle },
+    ]));
+    const adFields = "id,name,creative{object_story_spec{link_data{link}},asset_feed_spec{link_urls}}";
+
+    for (const acct of sorted) {
+      const r = await fetch(`${GRAPH_BASE}/${acct.id}/ads?filtering=${filter}&fields=${encodeURIComponent(adFields)}&limit=5&access_token=${encodeURIComponent(userAccessToken)}`);
+      if (!r.ok) continue;
+      const data = ((await r.json()).data || []) as AdCreativeShape[];
+      for (const ad of data) {
+        const urls = extractDestinationUrls(ad);
+        if (urls.length) return urls;
+      }
+    }
+  } catch (err) {
+    console.warn(`getAdDestinationUrls name-search fallback failed for ${adTitle}:`, err);
+  }
+
+  return [];
 }
 
 /**

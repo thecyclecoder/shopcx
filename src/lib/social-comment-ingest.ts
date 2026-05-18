@@ -74,6 +74,7 @@ export async function ingestSocialComment(args: IngestArgs): Promise<void> {
   const postId = change.post_id || change.media?.id || "";
   const parentCommentId = change.parent_id && change.parent_id !== postId ? change.parent_id : null;
   const adId = change.ad_id || change.media?.ad_id || null;
+  const adTitle = change.media?.ad_title || null;
   const verb = change.verb || "add";
   // FB feed comments ship the body as `message`; IG comments as `text`.
   const body = change.message || change.text || "";
@@ -131,6 +132,7 @@ export async function ingestSocialComment(args: IngestArgs): Promise<void> {
     page,
     postId,
     adId,
+    adTitle,
   });
 
   const isAd = cachedIsAd || !!adId;
@@ -212,6 +214,7 @@ interface EnsurePostCacheArgs {
   page: MetaPageRow;
   postId: string;
   adId: string | null;
+  adTitle: string | null;
 }
 
 /**
@@ -227,7 +230,7 @@ async function ensurePostCache(args: EnsurePostCacheArgs): Promise<{
   matchedProductId: string | null;
   isAd: boolean;
 }> {
-  const { admin, page, postId, adId } = args;
+  const { admin, page, postId, adId, adTitle } = args;
   if (!postId) return { matchedProductId: null, isAd: !!adId };
 
   const { data: existing } = await admin
@@ -275,7 +278,7 @@ async function ensurePostCache(args: EnsurePostCacheArgs): Promise<{
       .maybeSingle();
     if (ws?.meta_user_access_token_encrypted) {
       const userToken = decrypt(ws.meta_user_access_token_encrypted as string);
-      adUrls = await getAdDestinationUrls(userToken, adId);
+      adUrls = await getAdDestinationUrls(userToken, adId, adTitle);
     }
   }
   const urls = [...new Set([...adUrls, ...messageUrls, ...attachmentUrls])];
