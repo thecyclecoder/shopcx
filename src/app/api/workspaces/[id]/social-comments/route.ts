@@ -45,6 +45,8 @@ export async function GET(
   const pageType = url.searchParams.get("page_type");
   const productId = url.searchParams.get("product_id");
   const ad = url.searchParams.get("ad");
+  const aiAction = url.searchParams.get("ai_action");
+  const humanRating = url.searchParams.get("human_rating");
   const from = url.searchParams.get("from");
   const to = url.searchParams.get("to");
   const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10), 200);
@@ -59,7 +61,9 @@ export async function GET(
     .select(
       `id, meta_page_id, meta_comment_id, meta_post_id, meta_sender_id, meta_sender_name, meta_sender_username,
        body, is_ad, page_type, ad_id, sentiment, matched_product_id, status, moderation_source,
-       ai_action, ai_reasoning, liked_at, hidden_at, replied_at, deleted_at, created_at, updated_at,
+       ai_action, ai_reasoning, ai_reply_body, ai_visibility, ai_considers, ai_kb_sources, ai_model,
+       human_rating, human_rating_notes, human_rated_at,
+       liked_at, hidden_at, replied_at, deleted_at, created_at, updated_at,
        meta_pages!inner(meta_page_name, platform, page_type),
        products(title, handle)`,
       { count: "exact" },
@@ -73,6 +77,9 @@ export async function GET(
   if (productId) query = query.eq("matched_product_id", productId);
   if (ad === "true") query = query.eq("is_ad", true);
   if (ad === "false") query = query.eq("is_ad", false);
+  if (aiAction) query = query.eq("ai_action", aiAction);
+  if (humanRating === "null") query = query.is("human_rating", null);
+  else if (humanRating) query = query.eq("human_rating", humanRating);
   if (from) query = query.gte("created_at", from);
   if (to) query = query.lt("created_at", to);
 

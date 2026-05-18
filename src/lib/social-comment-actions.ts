@@ -64,8 +64,9 @@ export async function applyModerationDecision(
 
   if (!comment) return { ok: false, error: "social_comments row not found" };
 
-  // Always stamp the AI fields so the detail view can render the
-  // suggestion card regardless of sandbox vs live.
+  // Stamp ALL the AI fields. The new two-pass orchestrator emits richer
+  // metadata (visibility / considers / kb_sources / model) — we persist
+  // every field so the analyzer page can review decisions later.
   await admin
     .from("social_comments")
     .update({
@@ -73,10 +74,17 @@ export async function applyModerationDecision(
       ai_reply_body: decision.reply_body,
       ai_reasoning: decision.reasoning,
       ai_ran_at: new Date().toISOString(),
+      ai_visibility: decision.visibility,
+      ai_considers: decision.considers,
+      ai_kb_sources: decision.kb_sources,
+      ai_model: decision.model,
       sentiment: decision.sentiment,
     })
     .eq("id", socialCommentId);
 
+  // sandbox_mode still respected as an escape hatch — but the design
+  // calls for auto-execute by default. Comments where AI got it wrong
+  // are caught by the human_rating review flow on the dashboard.
   if (workspace?.sandbox_mode) {
     await admin
       .from("social_comments")
@@ -186,6 +194,65 @@ export async function executeAction(args: ExecuteArgs): Promise<{ ok: boolean; e
           updated_at: now,
         })
         .eq("id", comment.id);
+      break;
+    }
+
+    case "hidden_reply": {
+      // Hide the parent comment first so the reply lands in a thread
+      // that's no longer in the public feed. FB cascades visibility on
+      // hide — children of a hidden parent are hidden too. IG behavior
+      // is similar but worth verifying on the first live one (TODO).
+      if (!replyBody || !token) {
+        return { ok: false, error: "Reply body required for hidden_reply" };
+      }
+      const hideResult = await hideComment(token, comment.meta_comment_id, true);
+      if (!hideResult.success) return { ok: false, error: `hide failed: ${hideResult.error}` };
+
+      const { data: replyRow } = await admin
+        .from("social_comment_replies")
+        .insert({
+          workspace_id: comment.workspace_id,
+          social_comment_id: comment.id,
+          meta_sender_id: null,
+          direction: "outbound",
+          author_type: moderationSource === "ai_auto" ? "ai" : "agent",
+          author_user_id: actorUserId,
+          body: replyBody,
+          send_status: "pending",
+        })
+        .select("id")
+        .single();
+
+      const replyResult = await replyToComment(token, comment.meta_comment_id, replyBody);
+      if (replyResult.error) {
+        if (replyRow) {
+          await admin.from("social_comment_replies")
+            .update({ send_status: "failed", send_error: replyResult.error })
+            .eq("id", replyRow.id);
+        }
+        // The hide stuck even if the reply didn't — leave status='hidden'.
+        await admin.from("social_comments").update({
+          status: "hidden", moderation_source: moderationSource,
+          hidden_at: now, hidden_by: actorUserId, updated_at: now,
+        }).eq("id", comment.id);
+        return { ok: false, error: `reply failed (hide succeeded): ${replyResult.error}` };
+      }
+      if (replyRow) {
+        await admin.from("social_comment_replies")
+          .update({ send_status: "sent", meta_reply_id: replyResult.commentId || null })
+          .eq("id", replyRow.id);
+      }
+      // Status records the dominant action — replied. Hidden state is
+      // captured via hidden_at + ai_visibility='hidden'.
+      await admin.from("social_comments").update({
+        status: "replied",
+        moderation_source: moderationSource,
+        replied_at: now,
+        replied_by: actorUserId,
+        hidden_at: now,
+        hidden_by: actorUserId,
+        updated_at: now,
+      }).eq("id", comment.id);
       break;
     }
 
