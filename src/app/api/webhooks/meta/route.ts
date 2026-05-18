@@ -102,18 +102,34 @@ export async function POST(request: Request) {
   const rawBody = await request.text();
   const signatureHeader = request.headers.get("x-hub-signature-256");
 
-  if (!verifyMetaWebhookSignature(rawBody, signatureHeader, process.env.META_APP_SECRET)) {
-    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
-  }
+  const signatureValid = verifyMetaWebhookSignature(rawBody, signatureHeader, process.env.META_APP_SECRET);
 
   let body: MetaWebhookBody;
+  let parsed = false;
   try {
     body = JSON.parse(rawBody);
+    parsed = true;
   } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    body = { object: "", entry: [] };
   }
 
   const admin = createAdminClient();
+
+  // Stash raw payload for debugging (every body, even invalid sig).
+  // 7-day retention via cleanup cron — see meta_webhook_raw migration.
+  // Fire-and-forget so we don't slow Meta's 200-or-retry expectation.
+  void admin.from("meta_webhook_raw").insert({
+    signature_valid: signatureValid,
+    body: parsed ? body : { raw: rawBody.slice(0, 50000) },
+    headers: Object.fromEntries(request.headers),
+  });
+
+  if (!signatureValid) {
+    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+  }
+  if (!parsed) {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
 
   for (const entry of body.entry || []) {
     const platformPageId = entry.id;
