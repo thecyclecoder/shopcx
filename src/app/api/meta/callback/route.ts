@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { encrypt } from "@/lib/crypto";
-import { exchangeMetaCode, exchangeForPageToken, subscribePageWebhooks } from "@/lib/meta";
+import { exchangeMetaCode, exchangeForPageTokens, subscribePageWebhooks } from "@/lib/meta";
 import { randomBytes } from "crypto";
 
 export async function GET(request: Request) {
@@ -78,60 +78,102 @@ export async function GET(request: Request) {
       return NextResponse.redirect(`${siteUrl}/dashboard/settings/integrations?meta=error&reason=token_exchange`);
     }
 
-    // Exchange for long-lived page token
-    const pageResult = await exchangeForPageToken(appId, appSecret, tokenResult.access_token);
+    // Exchange for long-lived page tokens — ALL authorized pages, not just first
+    const pageResult = await exchangeForPageTokens(appId, appSecret, tokenResult.access_token);
 
     if ("error" in pageResult) {
       console.error("Meta page token error:", pageResult.error);
       return NextResponse.redirect(`${siteUrl}/dashboard/settings/integrations?meta=error&reason=${encodeURIComponent(pageResult.error)}`);
     }
 
-    // Generate webhook verify token
-    const verifyToken = randomBytes(16).toString("hex");
+    const now = new Date().toISOString();
+    const firstPage = pageResult.pages[0];
 
-    const encryptedToken = encrypt(pageResult.pageAccessToken);
-
-    // Legacy single-page columns — keep updating these until the
-    // workspaces.meta_* columns are retired so older code paths
-    // (DM ticket creation, the existing settings card) keep working.
+    // Legacy single-page columns on workspaces stay populated with the
+    // FIRST FB page so older code paths (DM ticket creation, the
+    // existing settings card) keep working. Once those callers move
+    // over to meta_pages joins we can drop these columns.
+    const firstEncrypted = encrypt(firstPage.pageAccessToken);
+    const workspaceVerifyToken = randomBytes(16).toString("hex");
     await admin
       .from("workspaces")
       .update({
-        meta_page_id: pageResult.pageId,
-        meta_page_access_token_encrypted: encryptedToken,
-        meta_page_name: pageResult.pageName,
-        meta_instagram_id: pageResult.instagramId || null,
-        meta_webhook_verify_token: verifyToken,
+        meta_page_id: firstPage.pageId,
+        meta_page_access_token_encrypted: firstEncrypted,
+        meta_page_name: firstPage.pageName,
+        meta_instagram_id: firstPage.instagramId || null,
+        meta_webhook_verify_token: workspaceVerifyToken,
       })
       .eq("id", workspaceId);
 
-    // New multi-page table — upsert so reconnecting the same page
-    // rotates the token + re-activates rather than duplicating.
-    await admin
-      .from("meta_pages")
-      .upsert(
-        {
-          workspace_id: workspaceId,
-          platform: "facebook",
-          meta_page_id: pageResult.pageId,
-          meta_page_name: pageResult.pageName,
-          meta_instagram_id: pageResult.instagramId || null,
-          access_token_encrypted: encryptedToken,
-          webhook_verify_token: verifyToken,
-          is_active: true,
-          connected_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "workspace_id,meta_page_id" },
-      );
+    // Per-page rows in meta_pages — one for each FB page, plus a
+    // separate row for the linked IG business account when present.
+    // Per-page tokens so re-auth on one page doesn't rotate others.
+    let persisted = 0;
+    const subscribeWarnings: string[] = [];
+    for (const p of pageResult.pages) {
+      const encryptedToken = encrypt(p.pageAccessToken);
+      const fbVerifyToken = randomBytes(16).toString("hex");
 
-    // Subscribe page to webhook events
-    const subResult = await subscribePageWebhooks(pageResult.pageId, pageResult.pageAccessToken);
-    if (!subResult.success) {
-      console.warn("Meta webhook subscription warning:", subResult.error);
+      const { error: fbErr } = await admin
+        .from("meta_pages")
+        .upsert(
+          {
+            workspace_id: workspaceId,
+            platform: "facebook",
+            meta_page_id: p.pageId,
+            meta_page_name: p.pageName,
+            meta_instagram_id: p.instagramId || null,
+            access_token_encrypted: encryptedToken,
+            webhook_verify_token: fbVerifyToken,
+            is_active: true,
+            connected_at: now,
+            updated_at: now,
+          },
+          { onConflict: "workspace_id,meta_page_id" },
+        );
+      if (fbErr) {
+        console.error(`meta_pages upsert (FB ${p.pageId}) failed:`, fbErr.message);
+        continue;
+      }
+      persisted++;
+
+      // Companion IG row — same FB page token works for IG comments/DMs
+      // on the linked Instagram Business Account.
+      if (p.instagramId) {
+        const igVerifyToken = randomBytes(16).toString("hex");
+        const { error: igErr } = await admin
+          .from("meta_pages")
+          .upsert(
+            {
+              workspace_id: workspaceId,
+              platform: "instagram",
+              meta_page_id: p.instagramId,
+              meta_page_name: p.instagramName || p.pageName,
+              meta_instagram_id: p.instagramId,
+              access_token_encrypted: encryptedToken,
+              webhook_verify_token: igVerifyToken,
+              is_active: true,
+              connected_at: now,
+              updated_at: now,
+            },
+            { onConflict: "workspace_id,meta_page_id" },
+          );
+        if (igErr) console.error(`meta_pages upsert (IG ${p.instagramId}) failed:`, igErr.message);
+        else persisted++;
+      }
+
+      // Subscribe THIS page's webhook events. One failure shouldn't block
+      // the others — accumulate warnings and report at the end.
+      const subResult = await subscribePageWebhooks(p.pageId, p.pageAccessToken);
+      if (!subResult.success) subscribeWarnings.push(`${p.pageName}: ${subResult.error}`);
     }
 
-    return NextResponse.redirect(`${siteUrl}/dashboard/settings/integrations?meta=connected`);
+    if (subscribeWarnings.length) {
+      console.warn("Meta webhook subscription warnings:", subscribeWarnings.join(" | "));
+    }
+
+    return NextResponse.redirect(`${siteUrl}/dashboard/settings/integrations?meta=connected&pages=${persisted}`);
   } catch (err) {
     console.error("Meta OAuth error:", err);
     return NextResponse.redirect(`${siteUrl}/dashboard/settings/integrations?meta=error&reason=unknown`);

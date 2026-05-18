@@ -212,15 +212,25 @@ export async function getPageProfile(
   return res.json();
 }
 
+export interface ExchangedPage {
+  pageAccessToken: string;
+  pageId: string;
+  pageName: string;
+  instagramId?: string;
+  instagramName?: string;
+}
+
 /**
- * Exchange short-lived user token for a long-lived page access token
+ * Exchange short-lived user token for long-lived page access tokens for
+ * ALL pages the user authorized — not just the first. Returns one entry
+ * per FB page; Instagram business accounts come through as `instagramId`
+ * + `instagramName` on the parent FB page (Meta links IG to a page).
  */
-export async function exchangeForPageToken(
+export async function exchangeForPageTokens(
   appId: string,
   appSecret: string,
   shortLivedToken: string
-): Promise<{ pageAccessToken: string; pageId: string; pageName: string; instagramId?: string } | { error: string }> {
-  // Step 1: Exchange for long-lived user token
+): Promise<{ pages: ExchangedPage[] } | { error: string }> {
   const longLivedRes = await fetch(
     `${GRAPH_BASE}/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${shortLivedToken}`
   );
@@ -232,9 +242,8 @@ export async function exchangeForPageToken(
 
   const { access_token: longLivedUserToken } = await longLivedRes.json();
 
-  // Step 2: Get pages with page access tokens
   const pagesRes = await fetch(
-    `${GRAPH_BASE}/me/accounts?fields=id,name,access_token,instagram_business_account&access_token=${longLivedUserToken}`
+    `${GRAPH_BASE}/me/accounts?fields=id,name,access_token,instagram_business_account{id,username,name}&access_token=${longLivedUserToken}`
   );
 
   if (!pagesRes.ok) {
@@ -243,21 +252,26 @@ export async function exchangeForPageToken(
   }
 
   const pagesData = await pagesRes.json();
-  const pages = pagesData.data;
+  const raw = (pagesData.data || []) as Array<{
+    id: string;
+    name: string;
+    access_token: string;
+    instagram_business_account?: { id: string; username?: string; name?: string };
+  }>;
 
-  if (!pages || pages.length === 0) {
+  if (raw.length === 0) {
     return { error: "No Facebook Pages found. Make sure you have admin access to a Facebook Page." };
   }
 
-  // Use first page (most common use case)
-  const page = pages[0];
+  const pages: ExchangedPage[] = raw.map((p) => ({
+    pageAccessToken: p.access_token,
+    pageId: p.id,
+    pageName: p.name,
+    instagramId: p.instagram_business_account?.id,
+    instagramName: p.instagram_business_account?.name || p.instagram_business_account?.username,
+  }));
 
-  return {
-    pageAccessToken: page.access_token,
-    pageId: page.id,
-    pageName: page.name,
-    instagramId: page.instagram_business_account?.id,
-  };
+  return { pages };
 }
 
 /**
