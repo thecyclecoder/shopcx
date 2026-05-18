@@ -76,6 +76,7 @@ import { klaviyoAttributionCompute } from "@/lib/inngest/klaviyo-attribution-com
 import { klaviyoEngagementBackfill } from "@/lib/inngest/klaviyo-engagement-backfill";
 import { klaviyoEngagementSync } from "@/lib/inngest/klaviyo-engagement-sync";
 import { socialCommentModerate } from "@/lib/inngest/social-comment-moderate";
+import { metaHistoricalCommentsSync } from "@/lib/inngest/meta-historical-comments-sync";
 
 export const maxDuration = 300;
 
@@ -157,5 +158,6 @@ export const { GET, POST, PUT } = serve({
     klaviyoEngagementBackfill,
     klaviyoEngagementSync,
     socialCommentModerate,
+    metaHistoricalCommentsSync,
   ],
 });
