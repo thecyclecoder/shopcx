@@ -1131,7 +1131,30 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
     if (!isNew) {
       const pbActive = await step.run("check-playbook", async () => {
         const { data: t } = await admin.from("tickets").select("active_playbook_id").eq("id", tid).single();
-        return t?.active_playbook_id || null;
+        if (!t?.active_playbook_id) return null;
+
+        // Agent intervention supersedes the playbook. Once a human agent
+        // has sent an external (customer-facing) reply, they own the
+        // conversation — the playbook would otherwise re-fire its
+        // clarifying questions on every subsequent customer message
+        // (e.g. a customer thank-you 2 days later re-asks the clarification).
+        // Internal-only agent activity (notes) doesn't count — those are
+        // agent-to-agent comms and shouldn't change the customer flow.
+        const { data: agentMsgs } = await admin.from("ticket_messages")
+          .select("id")
+          .eq("ticket_id", tid)
+          .eq("direction", "outbound")
+          .eq("visibility", "external")
+          .eq("author_type", "agent")
+          .limit(1);
+        if (agentMsgs && agentMsgs.length > 0) {
+          await admin.from("tickets")
+            .update({ active_playbook_id: null, playbook_step: 0, playbook_exceptions_used: 0, agent_intervened: true })
+            .eq("id", tid);
+          await sysNote(admin, tid, `[System] Active playbook cleared — a human agent has replied externally on this ticket, so the playbook is no longer authoritative. Routing to Sonnet.`);
+          return null;
+        }
+        return t.active_playbook_id;
       });
 
       if (pbActive) {
