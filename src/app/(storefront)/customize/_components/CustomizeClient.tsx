@@ -25,6 +25,11 @@ import { initPixel, track } from "@/lib/storefront-pixel";
 import { HeroFeaturedReviews } from "../../_components/HeroFeaturedReviews";
 import type { Review } from "../../_lib/page-data";
 
+// Estimated per-unit shipping value used when computing the savings
+// number on subscriptions. Reflects what we'd otherwise charge a one-
+// time buyer; subscribers see this rolled into the "Save $X.XX" total.
+const ESTIMATED_SHIPPING_PER_ITEM_CENTS = 495;
+
 // ── Shared types ───────────────────────────────────────────────────
 
 export interface CartDraft {
@@ -182,15 +187,44 @@ export function CustomizeClient({
     [groups, productCatalog, orderFrequencyDays],
   );
 
-  // Savings vs MSRP. Each cart line carries unit_msrp_cents and
-  // unit_price_cents (post-subscription-discount). The footer shows
-  // the running gap so subscribers see what they're getting today.
+  // Total stockable units across the cart — drives the shipping
+  // estimate (a free shipping unlock saves $4.95/item, so a 2-coffee
+  // 2-creamer 1-mixer cart represents $24.75 in shipping value).
+  const totalUnits = useMemo(
+    () => cart.line_items.reduce((s, l) => s + l.quantity, 0),
+    [cart.line_items],
+  );
+
+  // Free-gift savings — sum of the gift's perceived value for every
+  // product in the cart whose qty has crossed the free_gift_min_quantity
+  // threshold. Multi-product carts can stack gifts.
+  const freeGiftSavingsCents = useMemo(() => {
+    let total = 0;
+    for (const g of groups) {
+      const rule = productCatalog[g.product_id]?.pricing_rule;
+      if (!rule) continue;
+      if (giftAppliesAtQty(rule, g.totalQty, subscribing) && rule.free_gift_price_cents) {
+        total += rule.free_gift_price_cents;
+      }
+    }
+    return total;
+  }, [groups, productCatalog, subscribing]);
+
+  // Shipping savings. Only counted when subscribing — for one-time
+  // orders we don't surface shipping on the customize page at all.
+  const shippingSavingsCents = subscribing ? totalUnits * ESTIMATED_SHIPPING_PER_ITEM_CENTS : 0;
+
+  // Total order savings = (MSRP gap on line items) + shipping value (if
+  // sub) + free-gift value. The footer's "Save $X.XX" surfaces this
+  // composite so customers see EVERYTHING they're getting today, not
+  // just the discount on the box.
   const orderSavingsCents = useMemo(() => {
-    return cart.line_items.reduce((sum, l) => {
+    const msrpGap = cart.line_items.reduce((sum, l) => {
       const msrp = l.unit_msrp_cents * l.quantity;
       return sum + Math.max(0, msrp - l.line_total_cents);
     }, 0);
-  }, [cart.line_items]);
+    return msrpGap + shippingSavingsCents + freeGiftSavingsCents;
+  }, [cart.line_items, shippingSavingsCents, freeGiftSavingsCents]);
   const availableFrequencies = useMemo(() => {
     // Use the first product with a rule that has options — same
     // logic as orderFrequencyLabel.
@@ -333,6 +367,25 @@ export function CustomizeClient({
     return mutate(nextLines, { mode: "subscribe", frequency_days: intervalDays }, "frequency");
   }
 
+  function switchToSubscribe() {
+    // Default frequency: cart's current value if set, else the rule's
+    // marked-default frequency, else the first one available.
+    let defaultFreq: number | null = cart.subscription_frequency_days;
+    if (!defaultFreq) {
+      for (const g of groups) {
+        const freqs = productCatalog[g.product_id]?.pricing_rule?.available_frequencies || [];
+        const def = freqs.find((f) => f.default) || freqs[0];
+        if (def) {
+          defaultFreq = def.interval_days;
+          break;
+        }
+      }
+    }
+    const nextLines = cart.line_items.map((l) => ({ variant_id: l.variant_id, quantity: l.quantity }));
+    track("switched_to_subscribe", { cart_token: cart.token });
+    return mutate(nextLines, { mode: "subscribe", frequency_days: defaultFreq }, "switch-sub");
+  }
+
   // ── Continue → checkout ──────────────────────────────────────────
 
   async function onContinue() {
@@ -375,6 +428,34 @@ export function CustomizeClient({
       <p className="mt-2 text-base text-zinc-600">
         Customize each item, then checkout. Tap or drag — your changes save automatically.
       </p>
+
+      {/* Free shipping / switch-to-sub strip */}
+      {subscribing ? (
+        <div className="mt-5 overflow-hidden rounded-2xl bg-gradient-to-r from-emerald-500 via-emerald-600 to-teal-600 px-5 py-3 text-white shadow-md">
+          <div className="flex items-center gap-3">
+            <span className="text-2xl" aria-hidden>🚚</span>
+            <div>
+              <div className="text-sm font-extrabold uppercase tracking-wider">Free shipping</div>
+              <div className="text-xs text-white/90">Included with every subscription delivery</div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={switchToSubscribe}
+          className="mt-5 flex w-full items-center justify-between gap-3 rounded-2xl border-2 border-dashed border-emerald-300 bg-emerald-50 px-4 py-3 text-left transition hover:border-emerald-400 hover:bg-emerald-100"
+        >
+          <div className="flex items-center gap-3">
+            <span className="text-2xl" aria-hidden>🚚</span>
+            <div>
+              <div className="text-sm font-bold text-emerald-800">Switch to subscription</div>
+              <div className="text-xs text-emerald-700">Unlock free shipping and 25% off — cancel anytime</div>
+            </div>
+          </div>
+          <span className="text-lg font-bold text-emerald-700">→</span>
+        </button>
+      )}
 
       {/* Per-product worksheet cards */}
       <div className="mt-8 space-y-6">
