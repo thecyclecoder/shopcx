@@ -118,7 +118,7 @@ export default async function CustomizePage({ searchParams }: PageProps) {
           .select("product_id, value, display_order, products!inner(id, handle, title, image_url, status)")
           .eq("group_id", groupId)
           .order("display_order", { ascending: true });
-        linkedProducts = ((peers || []) as Array<{
+        const peerRows = ((peers || []) as Array<{
           product_id: string;
           value: string;
           display_order: number;
@@ -141,6 +141,31 @@ export default async function CustomizePage({ searchParams }: PageProps) {
           })
           .filter((p): p is NonNullable<typeof p> => p !== null)
           .filter((p) => p.product_id !== pid);
+
+        // Hydrate each peer with its variants so the worksheet can swap
+        // inline (no PDP round-trip). Variant-title matching lets us
+        // preserve flavor across the swap (Hazelnut Instant → Hazelnut
+        // K-Cups when both products have a Hazelnut variant).
+        linkedProducts = await Promise.all(
+          peerRows.map(async (peer) => {
+            const { data: peerVariants } = await admin
+              .from("product_variants")
+              .select("id, shopify_variant_id, title, image_url, price_cents, position")
+              .eq("product_id", peer.product_id)
+              .order("position", { ascending: true });
+            return {
+              ...peer,
+              variants: (peerVariants || []).map((v) => ({
+                id: v.id,
+                shopify_variant_id: v.shopify_variant_id,
+                title: v.title,
+                image_url: v.image_url,
+                price_cents: v.price_cents,
+                position: v.position,
+              })),
+            };
+          }),
+        );
         // Stash group label on the entry for the chip section title
         if (groupHeader?.name) {
           (linkedProducts as unknown as { group_name?: string }).group_name = groupHeader.name;

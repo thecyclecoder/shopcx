@@ -86,6 +86,14 @@ export interface ProductCatalogEntry {
     image_url: string | null;
     value: string;
     display_order: number;
+    variants: Array<{
+      id: string;
+      shopify_variant_id: string | null;
+      title: string;
+      image_url: string | null;
+      price_cents: number;
+      position: number;
+    }>;
   }>;
   linked_group_name: string | null;
 }
@@ -229,25 +237,70 @@ export function CustomizeClient({
     return mutate(nextLines, undefined, `group:${productId}`);
   }
 
-  function swapLinkedProduct(currentProductId: string, targetProductId: string, targetVariantId: string) {
-    // Replace the current product's lines wholesale with ONE line of the
-    // first variant of the target product (qty = current group total).
+  function swapLinkedProduct(currentProductId: string, targetProductId: string) {
+    // Preserve flavor when possible: if the current allocation has
+    // 2x Hazelnut + 1x Cocoa and the target product has Hazelnut +
+    // Cocoa variants, the swap maps Hazelnut→Hazelnut and Cocoa→Cocoa.
+    // Anything that doesn't match falls onto the target's first
+    // variant.
+    const currentGroup = groups.find((g) => g.product_id === currentProductId);
+    const currentCatalog = productCatalog[currentProductId];
+    const target = currentCatalog?.linked_products.find((p) => p.product_id === targetProductId);
+    if (!currentGroup || !target || target.variants.length === 0) return;
+
+    // Title -> variant lookup on the target side (case-insensitive,
+    // matches on substring so "Hazelnut French Roast" finds "Hazelnut").
+    const targetVariants = target.variants;
+    function mapToTarget(currentVariantId: string): string {
+      const cur = currentCatalog?.variants.find((v) => v.id === currentVariantId);
+      const curTitle = (cur?.title || "").toLowerCase();
+      // Exact match first
+      const exact = targetVariants.find((tv) => tv.title.toLowerCase() === curTitle);
+      if (exact) return exact.id;
+      // Substring either direction
+      const sub = targetVariants.find((tv) => {
+        const t = tv.title.toLowerCase();
+        return curTitle && (t.includes(curTitle) || curTitle.includes(t));
+      });
+      if (sub) return sub.id;
+      // Fallback: first variant
+      return targetVariants[0].id;
+    }
+
+    // Aggregate by target variant since multiple source variants might
+    // collapse to the same target (rare, but defensive).
+    const targetAlloc = new Map<string, number>();
+    for (const a of currentGroup.allocation) {
+      if (a.quantity <= 0) continue;
+      const mapped = mapToTarget(a.variant_id);
+      targetAlloc.set(mapped, (targetAlloc.get(mapped) || 0) + a.quantity);
+    }
+
     const nextLines: Array<{ variant_id: string; quantity: number }> = [];
     for (const g of groups) {
       if (g.product_id === currentProductId) {
-        nextLines.push({ variant_id: targetVariantId, quantity: g.totalQty });
+        for (const [vid, q] of targetAlloc) {
+          if (q > 0) nextLines.push({ variant_id: vid, quantity: q });
+        }
       } else {
         for (const a of g.allocation) {
           if (a.quantity > 0) nextLines.push({ variant_id: a.variant_id, quantity: a.quantity });
         }
       }
     }
+
     track("linked_product_swapped", {
       cart_token: cart.token,
       from_product: currentProductId,
       to_product: targetProductId,
     });
-    return mutate(nextLines, undefined, `swap:${currentProductId}`);
+    // After the cart is mutated, reload so the server fetches the target
+    // product's catalog (variants, pricing rule, reciprocal linked-
+    // products). Without this, the worksheet card would render with no
+    // catalog entry for the new product and stick on "Loading…".
+    return mutate(nextLines, undefined, `swap:${currentProductId}`).then(() => {
+      window.location.reload();
+    });
   }
 
   // ── Order-level mutations ────────────────────────────────────────
@@ -309,9 +362,7 @@ export function CustomizeClient({
             catalog={productCatalog[group.product_id]}
             primaryColor={workspace.primary_color}
             onAllocationChange={(allocation) => applyGroupChange(group.product_id, allocation)}
-            onSwap={(targetProductId, targetVariantId) =>
-              swapLinkedProduct(group.product_id, targetProductId, targetVariantId)
-            }
+            onSwap={(targetProductId) => swapLinkedProduct(group.product_id, targetProductId)}
           />
         ))}
       </div>
@@ -387,7 +438,7 @@ function ProductWorksheetCard({
   catalog: ProductCatalogEntry | undefined;
   primaryColor: string;
   onAllocationChange: (allocation: Record<string, number>) => void;
-  onSwap: (targetProductId: string, targetVariantId: string) => void;
+  onSwap: (targetProductId: string) => void;
 }) {
   // Build local allocation state keyed by variant_id. Server is source
   // of truth — when the parent rerenders the group prop, we sync.
@@ -504,18 +555,7 @@ function ProductWorksheetCard({
                 <button
                   key={p.product_id}
                   type="button"
-                  onClick={() => {
-                    // Look up the first variant of the target product.
-                    // The page server-side catalog only loaded the
-                    // current product's variants — we need to fetch the
-                    // target's. For now this swap is best-effort: we
-                    // POST to /api/cart with the target's product_id as
-                    // a hint and let the server pick first variant.
-                    // Until that endpoint exists we route through the
-                    // PDP for a clean change.
-                    window.location.href = `/${p.handle}`;
-                    void onSwap;
-                  }}
+                  onClick={() => onSwap(p.product_id)}
                   className="rounded-full border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
                 >
                   {p.value || p.title}
