@@ -459,6 +459,7 @@ Use `addTicketTag()` from `src/lib/ticket-tags.ts` (idempotent). Use `markFirstT
 | `PERPETUAL-CAMPAIGNS-SPEC.md` | Roadmap spec — shift from manual campaigns to archetype-driven series engine (daily qualifier + enrollment + multi-step send + sunset) |
 | `LANDING-PAGES-SPEC.md` | Roadmap spec — custom landing pages with Shopify Storefront API cart bridge today, swap to native cart post-Shopify. Destination for SMS shortcodes. |
 | `APPSTLE-WEBHOOKS.md` | Reference for all Appstle webhook payloads (used by billing forecast + subscription state tracking) |
+| `RESEARCH-AND-HEAL.md` | Auto-recovery for AI-flagged tickets — code-driven recipes verify state vs. OG source of truth, propose heals, auto-execute the allowlisted ones. **Read before adding a new recipe** (recipe interface + heal flow + Phase 2 allowlist conventions). |
 
 ## Reseller Defense System (May 2026)
 
