@@ -130,15 +130,26 @@ export async function appstleUpdateBillingInterval(
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
+  // Appstle's SellingPlanInterval enum is strictly UPPERCASE
+  // (DAY/WEEK/MONTH/YEAR). The TS signature claims uppercase but the
+  // value can come from Opus as lowercase ("week", "month") — that
+  // hits a 400 from Appstle ("No enum constant ... .week"). Force-
+  // uppercase before the call. Jim O'Brien 2026-05-19 (ticket
+  // 5e7c1c80) was escalated because of this.
+  const normalizedInterval = String(interval).toUpperCase() as "DAY" | "WEEK" | "MONTH" | "YEAR";
+  if (!["DAY", "WEEK", "MONTH", "YEAR"].includes(normalizedInterval)) {
+    return { success: false, error: `Invalid interval: ${interval} (expected DAY/WEEK/MONTH/YEAR)` };
+  }
+
   try {
     const res = await loggedAppstleFetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-interval?contractId=${contractId}&interval=${interval}&intervalCount=${intervalCount}&api_key=${creds.apiKey}`,
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-interval?contractId=${contractId}&interval=${normalizedInterval}&intervalCount=${intervalCount}&api_key=${creds.apiKey}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
 
     if (res.status === 504) {
       // Appstle sometimes times out but still applies the change — verify
-      const verified = await verifyBillingInterval(creds.apiKey, contractId, interval, intervalCount);
+      const verified = await verifyBillingInterval(creds.apiKey, contractId, normalizedInterval, intervalCount);
       if (!verified) return { success: false, error: "Request timed out and change could not be verified" };
       // Fall through to update local DB
     } else if (!res.ok && res.status !== 204) {
@@ -152,7 +163,7 @@ export async function appstleUpdateBillingInterval(
     await admin
       .from("subscriptions")
       .update({
-        billing_interval: interval.toLowerCase(),
+        billing_interval: normalizedInterval.toLowerCase(),
         billing_interval_count: intervalCount,
         updated_at: new Date().toISOString(),
       })
