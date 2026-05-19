@@ -22,6 +22,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { initPixel, track } from "@/lib/storefront-pixel";
+import { HeroFeaturedReviews } from "../../_components/HeroFeaturedReviews";
+import type { Review } from "../../_lib/page-data";
 
 // ── Shared types ───────────────────────────────────────────────────
 
@@ -126,12 +128,16 @@ export function CustomizeClient({
   upsells: _upsells,
   workspace,
   sourceProductHandle,
+  featuredReviews,
+  primaryProductHandle,
 }: {
   cart: CartDraft;
   productCatalog: Record<string, ProductCatalogEntry>;
   upsells: UpsellCandidate[];
   workspace: Workspace;
   sourceProductHandle: string | null;
+  featuredReviews: Review[];
+  primaryProductHandle: string | null;
 }) {
   const [cart, setCart] = useState(initialCart);
   const [continueBusy, setContinueBusy] = useState(false);
@@ -168,6 +174,16 @@ export function CustomizeClient({
     () => pickFrequencyLabel(groups, productCatalog, orderFrequencyDays),
     [groups, productCatalog, orderFrequencyDays],
   );
+
+  // Savings vs MSRP. Each cart line carries unit_msrp_cents and
+  // unit_price_cents (post-subscription-discount). The footer shows
+  // the running gap so subscribers see what they're getting today.
+  const orderSavingsCents = useMemo(() => {
+    return cart.line_items.reduce((sum, l) => {
+      const msrp = l.unit_msrp_cents * l.quantity;
+      return sum + Math.max(0, msrp - l.line_total_cents);
+    }, 0);
+  }, [cart.line_items]);
   const availableFrequencies = useMemo(() => {
     // Use the first product with a rule that has options — same
     // logic as orderFrequencyLabel.
@@ -400,14 +416,31 @@ export function CustomizeClient({
         </div>
       )}
 
+      {/* Featured reviews — purchase-confidence boost. Hidden when no
+          featured reviews are available for the cart's products. */}
+      {featuredReviews.length > 0 && (
+        <section className="mt-10">
+          <h2 className="mb-4 text-center text-sm font-semibold uppercase tracking-wider text-zinc-500">
+            What customers are saying
+          </h2>
+          <HeroFeaturedReviews
+            reviews={featuredReviews}
+            workspaceSlug={workspace.storefront_slug || undefined}
+            slug={primaryProductHandle || undefined}
+          />
+        </section>
+      )}
+
       {/* Sticky bottom CTA */}
       <section className="fixed inset-x-0 bottom-0 z-10 border-t border-zinc-200 bg-white/95 px-4 py-3 backdrop-blur sm:relative sm:mt-8 sm:rounded-2xl sm:border sm:px-6 sm:py-4 sm:shadow-lg">
         <div className="mx-auto flex max-w-3xl items-center justify-between gap-4">
-          <div>
-            <div className="text-[10px] uppercase tracking-wider text-zinc-500">
-              {subscribing && orderFrequencyLabel ? `Ships ${orderFrequencyLabel}` : "Total"}
-            </div>
+          <div className="flex items-baseline gap-2">
             <div className="text-2xl font-bold text-zinc-900">{fmt(cart.total_cents)}</div>
+            {orderSavingsCents > 0 && (
+              <div className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                Save {fmt(orderSavingsCents)}
+              </div>
+            )}
           </div>
           <button
             type="button"

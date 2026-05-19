@@ -26,6 +26,7 @@ import type {
   ProductCatalogEntry,
   UpsellCandidate,
 } from "./_components/CustomizeClient";
+import type { Review } from "../_lib/page-data";
 
 interface PageProps {
   searchParams: Promise<{ token?: string }>;
@@ -243,6 +244,35 @@ export default async function CustomizePage({ searchParams }: PageProps) {
     .eq("id", cart.workspace_id)
     .single();
 
+  // Featured reviews — surface at the bottom of the worksheet to keep
+  // purchase confidence high. Pulls the featured pool for every
+  // product currently in the cart (plus any linked-group peers so
+  // social proof for Instant carries to a K-Cups swap and back).
+  const reviewProductIds = new Set<string>(productIds);
+  for (const pid of productIds) {
+    for (const peer of productCatalog[pid]?.linked_products || []) {
+      reviewProductIds.add(peer.product_id);
+    }
+  }
+  const { data: featuredReviewsRaw } = await admin
+    .from("product_reviews")
+    .select("id, reviewer_name, rating, title, body, images, smart_quote, created_at, status, featured, product_id")
+    .eq("workspace_id", cart.workspace_id)
+    .in("product_id", [...reviewProductIds])
+    .in("status", ["published", "featured"])
+    .not("body", "is", null)
+    .order("featured", { ascending: false })
+    .order("rating", { ascending: false })
+    .order("created_at", { ascending: false })
+    .limit(24);
+  const featuredReviews: Review[] = ((featuredReviewsRaw || []) as Review[]).filter(
+    (r) => r.featured === true || r.status === "featured",
+  );
+  // Use the FIRST cart product's handle for the bootstrap-cache refresh
+  // (the widget periodically pulls a fresh featured pool to avoid stale
+  // ISR). Multi-product carts converge to the dominant product.
+  const primaryProductHandle = productCatalog[productIds[0]]?.product.handle || null;
+
   return (
     <main className="min-h-screen bg-zinc-50">
       <CustomizeClient
@@ -258,6 +288,8 @@ export default async function CustomizePage({ searchParams }: PageProps) {
           storefront_slug: workspace?.storefront_slug || null,
         }}
         sourceProductHandle={(cart as { source_product_handle?: string | null }).source_product_handle || null}
+        featuredReviews={featuredReviews}
+        primaryProductHandle={primaryProductHandle}
       />
     </main>
   );
