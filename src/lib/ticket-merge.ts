@@ -33,7 +33,7 @@ export async function mergeTickets(
 
   // Fetch all tickets
   const { data: allTickets } = await admin.from("tickets")
-    .select("id, customer_id, status, subject, tags, created_at, active_playbook_id, playbook_step, playbook_context, playbook_queue, playbook_exceptions_used, journey_id, journey_step, journey_data, merged_into, agent_intervened, assigned_to")
+    .select("id, customer_id, status, subject, tags, created_at, active_playbook_id, playbook_step, playbook_context, playbook_queue, playbook_exceptions_used, journey_id, journey_step, journey_data, merged_into, agent_intervened, assigned_to, do_not_reply, do_not_reply_at")
     .eq("workspace_id", workspaceId)
     .in("id", ticketIds)
     .order("created_at", { ascending: false }); // Newest first
@@ -113,8 +113,8 @@ export async function mergeTickets(
     // ticket in the merge, the new combined ticket inherits that state —
     // otherwise Sonnet keeps acting on a brand-new ticket as if no agent
     // had ever weighed in.
-    const targetAgentState = (target as { agent_intervened?: boolean; assigned_to?: string | null });
-    const sourceAgentState = (source as { agent_intervened?: boolean; assigned_to?: string | null });
+    const targetAgentState = (target as { agent_intervened?: boolean; assigned_to?: string | null; do_not_reply?: boolean; do_not_reply_at?: string | null });
+    const sourceAgentState = (source as { agent_intervened?: boolean; assigned_to?: string | null; do_not_reply?: boolean; do_not_reply_at?: string | null });
     const updates: Record<string, unknown> = {};
     if (!targetAgentState.agent_intervened && sourceAgentState.agent_intervened) {
       updates.agent_intervened = true;
@@ -123,6 +123,16 @@ export async function mergeTickets(
     if (!targetAgentState.assigned_to && sourceAgentState.assigned_to) {
       updates.assigned_to = sourceAgentState.assigned_to;
       targetAgentState.assigned_to = sourceAgentState.assigned_to;
+    }
+    // Carry forward do_not_reply. If any source ticket has been
+    // deactivated (fraud gate, wrong_company, etc.), the merged target
+    // inherits that state — otherwise a reseller's follow-up email
+    // would fire a fresh fraud gate + canonical refusal each time
+    // instead of silent-closing.
+    if (!targetAgentState.do_not_reply && sourceAgentState.do_not_reply) {
+      updates.do_not_reply = true;
+      updates.do_not_reply_at = sourceAgentState.do_not_reply_at || new Date().toISOString();
+      targetAgentState.do_not_reply = true;
     }
     if (Object.keys(updates).length > 0) {
       await admin.from("tickets").update(updates).eq("id", target.id);
@@ -155,8 +165,11 @@ export async function mergeTickets(
     }).eq("id", source.id);
   }
 
-  // Reopen target if it was closed
-  if (target.status === "closed") {
+  // Reopen target if it was closed — unless it inherited do_not_reply
+  // through this merge (or already had it). A deactivated ticket should
+  // stay closed; reopening would invite the handler to engage again.
+  const targetFinal = target as { status?: string; do_not_reply?: boolean };
+  if (targetFinal.status === "closed" && !targetFinal.do_not_reply) {
     await admin.from("tickets").update({
       status: "open",
       updated_at: new Date().toISOString(),

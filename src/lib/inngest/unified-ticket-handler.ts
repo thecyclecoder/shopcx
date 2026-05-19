@@ -1559,12 +1559,23 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           return { status: "chargeback_blocked", reason };
         }
 
-        // Fraud / banned path — same canonical refusal + escalate flow.
+        // Fraud / banned path — send the canonical refusal once, then
+        // deactivate the ticket (do_not_reply + close). No escalation:
+        // a reseller doesn't get an agent's time, and the do_not_reply
+        // flag short-circuits future inbound on this thread (plus the
+        // auto-analyzer skips do_not_reply tickets). If the customer
+        // opens a fresh ticket later, auto-merge propagates do_not_reply
+        // forward and they get silenced again with no second refusal.
         await step.run("fraud-gate-block", async () => {
           if (await newerActivity(admin, tid, t0)) return;
           if (reply) await sendWithDelay(admin, wsId, tid, st.ch, reply, cfg.sandbox);
-          await sysNote(admin, tid, `[System] FRAUD GATE: ${reason}. Sent canonical refusal. Escalating for agent review.`);
-          await escalate(admin, wsId, tid, st.ch, "fraud_blocked", 1.0, msg, reason);
+          await sysNote(admin, tid, `[System] FRAUD GATE: ${reason}. Sent canonical refusal. Deactivating ticket.`);
+          await admin.from("tickets").update({
+            status: "closed",
+            do_not_reply: true,
+            do_not_reply_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }).eq("id", tid);
         });
         return { status: "fraud_blocked", reason };
       }
