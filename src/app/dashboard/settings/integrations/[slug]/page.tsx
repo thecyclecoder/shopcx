@@ -8,6 +8,7 @@ const NAMES: Record<string, string> = {
   resend: "Resend",
   appstle: "Appstle",
   easypost: "EasyPost / Returns",
+  braintree: "Braintree",
   klaviyo: "Klaviyo",
   meta: "Meta",
   amplifier: "Amplifier",

@@ -122,6 +122,16 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
   const [easypostTesting, setEasypostTesting] = useState(false);
   const [easypostTestResult, setEasypostTestResult] = useState<string | null>(null);
 
+  // Braintree
+  const [braintreeConnected, setBraintreeConnected] = useState(false);
+  const [braintreeMerchantId, setBraintreeMerchantId] = useState("");
+  const [braintreePublicKey, setBraintreePublicKey] = useState("");
+  const [braintreePrivateKey, setBraintreePrivateKey] = useState("");
+  const [braintreeEnvironment, setBraintreeEnvironment] = useState<"production" | "sandbox">("production");
+  const [braintreePrivateKeyHint, setBraintreePrivateKeyHint] = useState<string | null>(null);
+  const [braintreeTesting, setBraintreeTesting] = useState(false);
+  const [braintreeTestResult, setBraintreeTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+
   // Sandbox
   const [sandboxMode, setSandboxMode] = useState(true);
 
@@ -193,6 +203,11 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
         setEasypostTestMode(data.easypost_test_mode ?? true);
         if (data.return_address) setReturnAddress({ name: "", street1: "", street2: "", city: "", state: "", zip: "", country: "US", phone: "", ...data.return_address });
         if (data.default_return_parcel) setDefaultParcel(data.default_return_parcel);
+        setBraintreeConnected(!!data.braintree_connected);
+        setBraintreeMerchantId(data.braintree_merchant_id || "");
+        setBraintreePublicKey(data.braintree_public_key || "");
+        setBraintreeEnvironment((data.braintree_environment as "production" | "sandbox") || "production");
+        setBraintreePrivateKeyHint(data.braintree_private_key_hint || null);
         setSlackConnected(!!data.slack_connected);
         setSlackTeamName(data.slack_team_name || null);
         setSlackConnectedAt(data.slack_connected_at || null);
@@ -2036,6 +2051,176 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
           </div>
         )}
       </div>
+      )}
+
+      {show("braintree") && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-sky-600/10">
+                <svg className="h-5 w-5 text-sky-600 dark:text-sky-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25v10.5A2.25 2.25 0 004.5 19.5z" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Braintree</h2>
+                <p className="text-sm text-zinc-500">Payment processing for the post-Shopify storefront. Vaulted cards drive subscription renewals.</p>
+              </div>
+            </div>
+            {braintreeConnected && (
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                Connected
+              </span>
+            )}
+          </div>
+
+          {canEdit && (
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setSaving(true);
+                setBraintreeTestResult(null);
+                const body: Record<string, string> = {
+                  braintree_merchant_id: braintreeMerchantId,
+                  braintree_public_key: braintreePublicKey,
+                  braintree_environment: braintreeEnvironment,
+                };
+                if (braintreePrivateKey) body.braintree_private_key = braintreePrivateKey;
+                const r = await fetch(`/api/workspaces/${workspace.id}/integrations`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(body),
+                });
+                setSaving(false);
+                if (r.ok) {
+                  setBraintreeConnected(!!(braintreeMerchantId && (braintreePrivateKey || braintreePrivateKeyHint)));
+                  if (braintreePrivateKey) {
+                    setBraintreePrivateKeyHint(`…${braintreePrivateKey.slice(-4)}`);
+                    setBraintreePrivateKey("");
+                  }
+                  setMessage("Braintree settings saved");
+                } else {
+                  setMessage("Failed to save Braintree settings");
+                }
+              }}
+              className="mt-5 grid max-w-md gap-4"
+            >
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">Merchant ID</label>
+                <input
+                  type="text"
+                  value={braintreeMerchantId}
+                  onChange={(e) => setBraintreeMerchantId(e.target.value)}
+                  placeholder="your_merchant_id"
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">Public Key</label>
+                <input
+                  type="text"
+                  value={braintreePublicKey}
+                  onChange={(e) => setBraintreePublicKey(e.target.value)}
+                  placeholder="public_key"
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-mono text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">
+                  Private Key {braintreePrivateKeyHint && <span className="ml-1 font-mono text-xs text-zinc-400">({braintreePrivateKeyHint})</span>}
+                </label>
+                <input
+                  type="password"
+                  value={braintreePrivateKey}
+                  onChange={(e) => setBraintreePrivateKey(e.target.value)}
+                  placeholder={braintreePrivateKeyHint ? "Leave blank to keep saved key" : "private_key"}
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">Environment</label>
+                <select
+                  value={braintreeEnvironment}
+                  onChange={(e) => setBraintreeEnvironment(e.target.value as "production" | "sandbox")}
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                >
+                  <option value="production">Production</option>
+                  <option value="sandbox">Sandbox</option>
+                </select>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="submit"
+                  disabled={saving || !braintreeMerchantId || !braintreePublicKey || (!braintreePrivateKey && !braintreePrivateKeyHint)}
+                  className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  {saving ? "Saving..." : "Save"}
+                </button>
+                <button
+                  type="button"
+                  disabled={braintreeTesting || !braintreeMerchantId}
+                  onClick={async () => {
+                    setBraintreeTesting(true);
+                    setBraintreeTestResult(null);
+                    const body: Record<string, string> = {
+                      merchant_id: braintreeMerchantId,
+                      public_key: braintreePublicKey,
+                      environment: braintreeEnvironment,
+                    };
+                    if (braintreePrivateKey) body.private_key = braintreePrivateKey;
+                    const r = await fetch(`/api/workspaces/${workspace.id}/integrations/braintree/verify`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(body),
+                    });
+                    const data = await r.json();
+                    setBraintreeTesting(false);
+                    if (data.ok) setBraintreeTestResult({ ok: true, msg: `Connected to ${data.environment} — clientToken generated.` });
+                    else setBraintreeTestResult({ ok: false, msg: data.error || "Verify failed" });
+                  }}
+                  className="rounded-md border border-indigo-300 px-4 py-2 text-sm font-medium text-indigo-600 transition-colors hover:bg-indigo-50 disabled:opacity-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
+                >
+                  {braintreeTesting ? "Testing..." : "Verify connection"}
+                </button>
+                {braintreeConnected && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!confirm("Disconnect Braintree? Checkout will stop accepting payments until re-connected.")) return;
+                      setSaving(true);
+                      await fetch(`/api/workspaces/${workspace.id}/integrations`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          braintree_merchant_id: "",
+                          braintree_public_key: "",
+                          braintree_private_key: "",
+                        }),
+                      });
+                      setBraintreeConnected(false);
+                      setBraintreeMerchantId("");
+                      setBraintreePublicKey("");
+                      setBraintreePrivateKey("");
+                      setBraintreePrivateKeyHint(null);
+                      setSaving(false);
+                    }}
+                    disabled={saving}
+                    className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                  >
+                    Disconnect
+                  </button>
+                )}
+              </div>
+
+              {braintreeTestResult && (
+                <p className={`text-sm ${braintreeTestResult.ok ? "text-emerald-600" : "text-red-600"}`}>
+                  {braintreeTestResult.msg}
+                </p>
+              )}
+            </form>
+          )}
+        </div>
       )}
     </div>
   );

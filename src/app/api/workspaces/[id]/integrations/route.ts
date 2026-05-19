@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted, storefront_domain, storefront_slug, shortlink_domain, twilio_phone_number, google_ads_developer_token_encrypted, google_ads_client_id, google_ads_client_secret_encrypted, google_ads_refresh_token_encrypted, google_ads_customer_id, google_search_console_credentials_encrypted, google_search_console_site_url"
+      "resend_api_key_encrypted, resend_domain, support_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted, storefront_domain, storefront_slug, shortlink_domain, twilio_phone_number, google_ads_developer_token_encrypted, google_ads_client_id, google_ads_client_secret_encrypted, google_ads_refresh_token_encrypted, google_ads_customer_id, google_search_console_credentials_encrypted, google_search_console_site_url, braintree_merchant_id, braintree_public_key, braintree_private_key_encrypted, braintree_environment"
     )
     .eq("id", workspaceId)
     .single();
@@ -128,6 +128,15 @@ export async function GET(
     easypost_test_mode: workspace.easypost_test_mode ?? true,
     return_address: workspace.return_address || null,
     default_return_parcel: workspace.default_return_parcel || { length: 12, width: 10, height: 6, weight: 16 },
+
+    // Braintree
+    braintree_connected: !!(workspace.braintree_merchant_id && workspace.braintree_private_key_encrypted),
+    braintree_merchant_id: workspace.braintree_merchant_id || null,
+    braintree_public_key: workspace.braintree_public_key || null,
+    braintree_environment: workspace.braintree_environment || "production",
+    braintree_private_key_hint: workspace.braintree_private_key_encrypted
+      ? `…${decrypt(workspace.braintree_private_key_encrypted).slice(-4)}`
+      : null,
 
     // Census
     census_connected: !!workspace.census_api_key_encrypted,
@@ -431,6 +440,23 @@ export async function PATCH(
       updates.default_return_parcel = body.default_return_parcel || { length: 12, width: 10, height: 6, weight: 16 };
     }
 
+    // Braintree
+    if ("braintree_merchant_id" in body) {
+      updates.braintree_merchant_id = body.braintree_merchant_id || null;
+    }
+    if ("braintree_public_key" in body) {
+      updates.braintree_public_key = body.braintree_public_key || null;
+    }
+    if ("braintree_private_key" in body) {
+      updates.braintree_private_key_encrypted = body.braintree_private_key
+        ? encrypt(body.braintree_private_key)
+        : null;
+    }
+    if ("braintree_environment" in body) {
+      const env = body.braintree_environment;
+      updates.braintree_environment = env === "sandbox" ? "sandbox" : "production";
+    }
+
     // VIP threshold
     if ("vip_retention_threshold" in body) {
       updates.vip_retention_threshold = parseInt(body.vip_retention_threshold) || 85;
@@ -577,6 +603,19 @@ export async function PATCH(
 
   if (error) {
     return NextResponse.json({ error: "Failed to update" }, { status: 500 });
+  }
+
+  // Invalidate the in-memory Braintree gateway cache if any of the
+  // Braintree credential columns were touched. The next call to
+  // getBraintreeGateway will read fresh from the DB.
+  if (
+    "braintree_merchant_id" in updates ||
+    "braintree_public_key" in updates ||
+    "braintree_private_key_encrypted" in updates ||
+    "braintree_environment" in updates
+  ) {
+    const { invalidateBraintreeCache } = await import("@/lib/integrations/braintree");
+    invalidateBraintreeCache(workspaceId);
   }
 
   return NextResponse.json({ success: true });
