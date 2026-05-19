@@ -40,14 +40,31 @@ function selectResearchRecipes(issues: Array<{ type: string; description: string
   const slugs = new Set<string>();
   for (const issue of issues) {
     const text = (issue.description || "").toLowerCase();
-    if (
-      (issue.type === "false_promise" || issue.type === "broken_action" || issue.type === "inaccuracy") &&
-      (text.includes("coupon") || text.includes("loyalty") || text.includes("reward") || text.includes("discount"))
-    ) {
+    const severe = issue.type === "false_promise" || issue.type === "broken_action" || issue.type === "inaccuracy";
+    if (!severe) continue;
+
+    if (text.includes("coupon") || text.includes("loyalty") || text.includes("reward") || text.includes("discount")) {
       slugs.add("verify_coupon_promises");
     }
+    // Wide net for any subscription-mutation claim. Cheap to run when the
+    // analyzer already flagged a likely issue — recipe itself is idempotent
+    // and bails fast if no claims are extracted.
+    if (
+      text.includes("subscription") || text.includes("subscribe") ||
+      text.includes("paus") || text.includes("resum") ||
+      text.includes("skip") || text.includes("skipped") ||
+      text.includes("swap") || text.includes("swit") ||  // switch/switched/swap
+      text.includes("cancel") || text.includes("cancell") ||
+      text.includes("flavor") || text.includes("variant") ||
+      text.includes("frequen") || text.includes("interval") ||
+      text.includes("next order") || text.includes("next billing") || text.includes("next ship") ||
+      text.includes("delivery date") || text.includes("billing date") || text.includes("ship date") ||
+      text.includes("removed") || text.includes("added") ||
+      text.includes("price") || text.includes("$")
+    ) {
+      slugs.add("verify_subscription_changes");
+    }
     // Future recipes wire in here:
-    //   - verify_subscription_changes — pause/resume/skip/swap claims
     //   - verify_replacement_promises — replacement order claims
     //   - verify_refund_issued — refund claims
   }

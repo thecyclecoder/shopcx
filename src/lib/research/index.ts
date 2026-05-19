@@ -8,10 +8,12 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { verifyCouponPromises } from "@/lib/research/recipes/verify-coupon-promises";
+import { verifySubscriptionChanges } from "@/lib/research/recipes/verify-subscription-changes";
 import type { ResearchRecipe, ResearchResult } from "@/lib/research/types";
 
 export const RECIPE_REGISTRY: Record<string, ResearchRecipe> = {
   [verifyCouponPromises.slug]: verifyCouponPromises,
+  [verifySubscriptionChanges.slug]: verifySubscriptionChanges,
 };
 
 export function listRecipes(): ResearchRecipe[] {

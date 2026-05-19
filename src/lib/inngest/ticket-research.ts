@@ -268,6 +268,11 @@ async function sendHealFollowUp(
   const params = proposed.params as Record<string, unknown>;
   if (typeof params.coupon_code === "string") subs.coupon_code = params.coupon_code;
   if (typeof params.contract_id === "string") subs.contract_id = params.contract_id;
+  if (typeof params.variant_title === "string") subs.variant_title = params.variant_title;
+  if (typeof params.interval === "string") subs.interval = params.interval.toLowerCase();
+  if (typeof params.interval_count === "number") subs.interval_count = String(params.interval_count);
+  if (typeof params.date === "string") subs.next_date = formatFriendlyDate(params.date);
+  if (typeof params.base_price_cents === "number") subs.value = ((params.base_price_cents) / 100).toFixed(2);
   // Direct actions often surface generated values on the result
   const er = execResult as ActionResult & { couponCode?: string; discount_value?: number };
   if (er.couponCode) subs.coupon_code = er.couponCode;
@@ -323,4 +328,10 @@ async function sendHealFollowUp(
     body_clean: body,
   });
   return { sent: true, body };
+}
+
+function formatFriendlyDate(iso: string): string {
+  const t = iso.length >= 10 ? new Date(`${iso.slice(0, 10)}T00:00:00`) : new Date(iso);
+  if (isNaN(t.getTime())) return iso;
+  return t.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
 }

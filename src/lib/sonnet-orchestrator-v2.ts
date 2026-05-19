@@ -1116,6 +1116,42 @@ export async function callSonnetOrchestratorV2(
       if (toolUseBlocks.length === 0) {
         // No tool calls — Sonnet is done, parse as JSON
         const text = textBlocks.map((b: { text: string }) => b.text).join("");
+        // Anthropic occasionally returns a 200 with no content at all
+        // (no tool_use, no text). Without this retry, parseSonnetDecision
+        // would fall through to FALLBACK_DECISION and escalate a
+        // perfectly handleable message (see Joseph 2d4a45dc, 2026-05-18).
+        // Single retry with a short delay — same messages, same tools.
+        if (text.trim().length === 0) {
+          console.warn(`Orchestrator (${modelKey}): empty content, retrying in 1.5s...`);
+          await new Promise(r => setTimeout(r, 1500));
+          const retry = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+            body: JSON.stringify({ model: modelId, max_tokens: 2000, tools, messages }),
+          });
+          if (retry.ok) {
+            const retryData = await retry.json();
+            logUsage(retryData.usage, `round${round}-retry-empty`);
+            const retryContent = retryData.content || [];
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const retryToolUse = retryContent.filter((b: any) => b.type === "tool_use");
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const retryText = retryContent.filter((b: any) => b.type === "text");
+            if (retryToolUse.length === 0) {
+              return parseSonnetDecision(retryText.map((b: { text: string }) => b.text).join(""));
+            }
+            // Has tool calls — execute them and continue this round's loop
+            const retryResults: unknown[] = [];
+            for (const tc of retryToolUse) {
+              const result = await executeToolCall(tc.name, tc.input || {}, workspaceId, customerId, ticketId);
+              retryResults.push({ type: "tool_result", tool_use_id: tc.id, content: result });
+            }
+            messages.push({ role: "assistant", content: retryContent });
+            messages.push({ role: "user", content: retryResults });
+            continue;
+          }
+          console.warn(`Orchestrator (${modelKey}): empty-content retry failed (status ${retry.status})`);
+        }
         return parseSonnetDecision(text);
       }
 
