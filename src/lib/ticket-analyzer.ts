@@ -602,7 +602,7 @@ async function applySeverityActions(
   // truth — auto-reopening overrides their judgment, frustrates them,
   // and creates churn (close → analyze → reopen → close again loop).
   const { data: tBefore } = await admin.from("tickets")
-    .select("agent_intervened, status, closed_at, resolved_at")
+    .select("agent_intervened, status, closed_at, resolved_at, active_playbook_id, playbook_step")
     .eq("id", ticketId).single();
   if (tBefore?.agent_intervened) {
     // Log the would-be escalation as a system note but don't actually
@@ -614,6 +614,28 @@ async function applySeverityActions(
       visibility: "internal",
       author_type: "system",
       body: `[Auto-Analysis] Score ${score}/10 — would have ${action === "escalate_with_message" ? "re-opened + escalated" : "re-opened silently"}, but skipped because an agent already handled this ticket. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+    return;
+  }
+
+  // ── Respect in-flight playbooks ──
+  // A playbook running its stand-firm / exception tiers is BY DESIGN
+  // terse, policy-anchored, and intentionally doesn't address every
+  // tangential claim the customer raises. The grader, evaluating each
+  // message on its own merits, will score these in the 5-6 range and
+  // try to escalate (see Jennifer e4ac25cd: refund playbook at tier 0
+  // pre-exception stand-firm, scored 6 for "didn't address customer's
+  // notification claim"). That's the playbook working correctly, not
+  // an AI failure — so unless we hit a severe issue type or customer
+  // threat language (which we always escalate regardless), let the
+  // playbook continue and log the analysis as a non-actionable note.
+  if (tBefore?.active_playbook_id && !hasSevereIssue && !customerThreat) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — would have ${action === "escalate_with_message" ? "re-opened + escalated" : "re-opened silently"}, but skipped because a playbook is actively handling this ticket (step ${tBefore.playbook_step ?? "?"}). The playbook's stand-firm/exception path is the expected behavior. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
     });
     return;
   }
