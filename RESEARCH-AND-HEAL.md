@@ -159,7 +159,7 @@ Looks for "your replacement is on the way" claims in recent messages. Verifies:
 - `replacements` row exists for this ticket (DB) AND
 - Shopify draft order / order exists (OG truth — catches Eric's case)
 
-### `verify_subscription_changes` (planned Phase 1 — high priority)
+### `verify_subscription_changes` (shipped Phase 1)
 The big one. Parses the most recent AI/agent messages on the ticket for ANY claim that touched a subscription, and verifies the live Appstle state matches. Covers:
 
   - **Pause** — "I've paused your subscription until Aug 15" → Appstle contract.status == "PAUSED" AND pause_resume_at matches the claimed date
@@ -178,14 +178,20 @@ Each individual claim → one finding (correct) or one gap (mismatch). Gaps prop
 
 This recipe alone catches the majority of "AI lied silently" patterns we see.
 
+### `verify_grandfathered_pricing` (shipped Phase 1 — proactive)
+Doesn't need an AI claim to trigger. Walks the customer's active subs and, per line item, compares the current `price_cents` against the customer's full historical order pattern for that variant (across linked accounts, up to last 100 orders). Builds a frequency map; the most common historical price (tie-broken to the lowest) is the customer's "typical" rate.
+
+If `current_cents − typical_cents` exceeds **$4/box** AND **5%**, emits a `pricing_drift:{contract_id}:{variant_id}` gap. The proposed heal is `update_line_item_price` with `base_price_cents = typical_cents / 0.75` (Appstle applies the 25% sellingPlan discount → customer pays the historical rate at next renewal).
+
+Heal proposal is gated: requires at least **3 confirming occurrences** of the typical price to rule out one-off discount events or returns. Below that threshold the gap is still surfaced but with no `proposed_heal` → escalates for agent review.
+
+Catches Nancy-style and Sheryl-style drift where the customer paid one rate for years and now sees a higher renewal — without anyone having to remember to check.
+
 ### `verify_refund_issued` (future)
 "$X refund is on its way" → Shopify order refunds list for matching amount.
 
 ### `verify_return_label_sent` (future)
 "You'll receive a return label" → `returns` table with `label_url` populated + email_events for delivery.
-
-### `check_grandfathered_pricing` (future)
-Subscription line item price vs. customer's historical pricing. Catches Nancy-style drift.
 
 ### `check_loyalty_state` (composed helper)
 Points balance, unused vs applied coupons (verifying via Shopify `asyncUsageCount` — our `status` column is stale). Used by other recipes.

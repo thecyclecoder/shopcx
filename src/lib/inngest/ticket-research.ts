@@ -272,7 +272,12 @@ async function sendHealFollowUp(
   if (typeof params.interval === "string") subs.interval = params.interval.toLowerCase();
   if (typeof params.interval_count === "number") subs.interval_count = String(params.interval_count);
   if (typeof params.date === "string") subs.next_date = formatFriendlyDate(params.date);
-  if (typeof params.base_price_cents === "number") subs.value = ((params.base_price_cents) / 100).toFixed(2);
+  // {{value}} renders as the customer-paid per-unit price — base * 0.75
+  // since Appstle applies the 25% sellingPlan discount at renewal.
+  // Customers should see their actual paid amount, not the internal base.
+  if (typeof params.base_price_cents === "number") {
+    subs.value = (params.base_price_cents * 0.75 / 100).toFixed(2);
+  }
   // Direct actions often surface generated values on the result
   const er = execResult as ActionResult & { couponCode?: string; discount_value?: number };
   if (er.couponCode) subs.coupon_code = er.couponCode;

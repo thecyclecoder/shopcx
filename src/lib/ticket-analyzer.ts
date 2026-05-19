@@ -64,6 +64,20 @@ function selectResearchRecipes(issues: Array<{ type: string; description: string
     ) {
       slugs.add("verify_subscription_changes");
     }
+    // Proactive pricing-drift detection. Fires on any severe issue
+    // mentioning pricing — the recipe itself compares the customer's
+    // current sub prices to their historical order pattern and emits
+    // a gap only when there's a meaningful drift. No AI claim required.
+    if (
+      text.includes("price") || text.includes("pricing") || text.includes("$") ||
+      text.includes("charge") || text.includes("expensive") ||
+      text.includes("grandfather") || text.includes("used to pay") ||
+      text.includes("more than") || text.includes("went up") ||
+      text.includes("raised") || text.includes("higher") ||
+      text.includes("cost")
+    ) {
+      slugs.add("verify_grandfathered_pricing");
+    }
     // Future recipes wire in here:
     //   - verify_replacement_promises — replacement order claims
     //   - verify_refund_issued — refund claims

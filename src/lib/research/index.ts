@@ -9,11 +9,13 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { verifyCouponPromises } from "@/lib/research/recipes/verify-coupon-promises";
 import { verifySubscriptionChanges } from "@/lib/research/recipes/verify-subscription-changes";
+import { verifyGrandfatheredPricing } from "@/lib/research/recipes/verify-grandfathered-pricing";
 import type { ResearchRecipe, ResearchResult } from "@/lib/research/types";
 
 export const RECIPE_REGISTRY: Record<string, ResearchRecipe> = {
   [verifyCouponPromises.slug]: verifyCouponPromises,
   [verifySubscriptionChanges.slug]: verifySubscriptionChanges,
+  [verifyGrandfatheredPricing.slug]: verifyGrandfatheredPricing,
 };
 
 export function listRecipes(): ResearchRecipe[] {
