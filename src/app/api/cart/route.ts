@@ -53,6 +53,14 @@ interface PostBody {
   mode?: "subscribe" | "onetime";
   frequency_days?: number | null;
   discount_code?: string | null;
+  /**
+   * Product handle of the PDP the customer was on when they added to
+   * cart. Persisted on the draft so the customize page can offer a
+   * "← Keep shopping" link back to the originating product instead of
+   * the homepage — keeps the funnel exclusive. Set on first create;
+   * subsequent mutations don't overwrite a stamped value.
+   */
+  source_product_handle?: string | null;
 }
 
 interface StoredLineItem {
@@ -184,6 +192,21 @@ export async function POST(request: NextRequest) {
   const nowIso = new Date().toISOString();
   const expiresAt = new Date(Date.now() + COOKIE_DAYS * 86_400_000).toISOString();
 
+  // Don't overwrite an already-stamped source_product_handle on
+  // subsequent mutations (the customize page adds upsells via this
+  // same endpoint, and those calls don't include the handle —
+  // overwriting with null would lose the original PDP attribution).
+  let existingHandle: string | null = null;
+  if (existingToken) {
+    const { data: prior } = await admin
+      .from("cart_drafts")
+      .select("source_product_handle")
+      .eq("token", existingToken)
+      .maybeSingle();
+    existingHandle = (prior?.source_product_handle as string | null) || null;
+  }
+  const sourceHandle = existingHandle || body.source_product_handle || null;
+
   // Upsert the draft. The unique index on token resolves the conflict.
   const { data: cart, error } = await admin
     .from("cart_drafts")
@@ -203,6 +226,7 @@ export async function POST(request: NextRequest) {
         tax_cents: taxCents,
         total_cents: totalCents,
         status: "open",
+        source_product_handle: sourceHandle,
         expires_at: expiresAt,
         updated_at: nowIso,
       },

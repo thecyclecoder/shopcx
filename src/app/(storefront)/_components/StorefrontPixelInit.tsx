@@ -168,6 +168,9 @@ export function StorefrontPixelInit({
 
       // POST to /api/cart, then navigate. Errors keep the customer
       // on the PDP and surface to console — no toast UI yet.
+      // source_product_handle is stamped on first create so the
+      // customize page's "Keep shopping" link returns the customer to
+      // THIS product instead of the homepage.
       void fetch("/api/cart", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -178,6 +181,7 @@ export function StorefrontPixelInit({
           line_items: cta.line_items,
           mode: cta.mode,
           frequency_days: cta.frequency_days,
+          source_product_handle: productHandle,
         }),
       })
         .then(async (res) => {

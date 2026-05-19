@@ -1,18 +1,29 @@
 "use client";
 
 /**
- * Client island for the customize page. Handles:
- *   - Funnel events: customize_view on mount, upsell_added /
- *     upsell_skipped per offered candidate.
- *   - "Add this" buttons on each upsell card — POSTs to /api/cart to
- *     mutate the draft, then re-renders with the updated cart.
- *   - "Continue to checkout" CTA. Stub redirect until our /checkout
- *     page exists: builds a Shopify cart permalink from the cart's
- *     line items.
+ * Customize worksheet — the post-Shopify funnel's "finalize your order"
+ * step. Reads as a worksheet, not a cart view. Per cart-product group:
+ *
+ *   1. Linked-product chips      Swap Instant ↔ K-Cups inline.
+ *   2. Variant allocation        Tap chips when qty=1, drag bars when qty>1.
+ *                                Drag rebalances against the largest peer.
+ *   3. Quantity pills            1 / 2 / 3 — drives total per product.
+ *   4. (Coming) Subscribe toggle Per item. Off by default for one-time carts.
+ *
+ * Plus order-level:
+ *   - Frequency picker (when subscribing and the rule offers > 1 option)
+ *   - Sticky total + continue CTA
+ *   - "Back to {originating PDP}" link
+ *
+ * Every change POSTs to /api/cart with the new line_items shape and
+ * the server re-validates pricing. Local state is optimistic but the
+ * server return value always wins.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { initPixel, track } from "@/lib/storefront-pixel";
+
+// ── Shared types ───────────────────────────────────────────────────
 
 export interface CartDraft {
   id: string;
@@ -31,6 +42,7 @@ export interface CartDraft {
   email: string | null;
   phone: string | null;
   expires_at: string;
+  source_product_handle?: string | null;
 }
 
 export interface StoredLineItem {
@@ -46,6 +58,36 @@ export interface StoredLineItem {
   line_total_cents: number;
   mode: "subscribe" | "onetime";
   frequency_days: number | null;
+}
+
+export interface ProductCatalogEntry {
+  product: {
+    id: string;
+    handle: string;
+    title: string;
+    image_url: string | null;
+  };
+  variants: Array<{
+    id: string;
+    shopify_variant_id: string | null;
+    title: string;
+    image_url: string | null;
+    price_cents: number;
+    position: number;
+  }>;
+  pricing_rule: {
+    subscribe_discount_pct: number;
+    available_frequencies: Array<{ interval_days: number; label: string; default?: boolean }>;
+  } | null;
+  linked_products: Array<{
+    product_id: string;
+    handle: string;
+    title: string;
+    image_url: string | null;
+    value: string;
+    display_order: number;
+  }>;
+  linked_group_name: string | null;
 }
 
 export interface UpsellCandidate {
@@ -64,24 +106,30 @@ interface Workspace {
   name: string;
   logo_url: string | null;
   primary_color: string;
-  shopify_domain: string | null;
+  storefront_domain: string | null;
+  storefront_slug: string | null;
 }
+
+// ── Component ──────────────────────────────────────────────────────
 
 export function CustomizeClient({
   cart: initialCart,
-  upsells,
+  productCatalog,
+  upsells: _upsells,
   workspace,
+  sourceProductHandle,
 }: {
   cart: CartDraft;
+  productCatalog: Record<string, ProductCatalogEntry>;
   upsells: UpsellCandidate[];
   workspace: Workspace;
+  sourceProductHandle: string | null;
 }) {
   const [cart, setCart] = useState(initialCart);
-  const [addedUpsells, setAddedUpsells] = useState<Set<string>>(new Set());
-  const [busyId, setBusyId] = useState<string | null>(null);
   const [continueBusy, setContinueBusy] = useState(false);
+  const [, setBusyKey] = useState<string | null>(null);
 
-  // ── Pixel: initialize + fire customize_view once ─────────────────
+  // Fire customize_view once on mount.
   useEffect(() => {
     initPixel({
       workspaceId: workspace.id,
@@ -95,19 +143,44 @@ export function CustomizeClient({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const subscribeMode = cart.line_items.some((l) => l.mode === "subscribe");
+  // ── Group lines by product_id ───────────────────────────────────
+  // The cart's line_items array can hold multiple entries per product
+  // (one per variant). The worksheet treats those collectively: a
+  // "group" is "all the boxes of this product" with a per-variant
+  // breakdown inside.
+  const groups = useMemo(() => groupLinesByProduct(cart.line_items), [cart.line_items]);
 
-  async function addUpsell(u: UpsellCandidate) {
-    if (!u.variant_id) return;
-    setBusyId(u.product_id);
+  // ── Order-level subscribe + frequency ───────────────────────────
+  // Single source of truth on the cart for now (the upsell pass will
+  // make subscribe per-product). Pull the dominant rule's frequencies
+  // — most carts have one product so this is unambiguous.
+  const subscribing = cart.line_items.some((l) => l.mode === "subscribe");
+  const orderFrequencyDays = cart.subscription_frequency_days;
+  const orderFrequencyLabel = useMemo(
+    () => pickFrequencyLabel(groups, productCatalog, orderFrequencyDays),
+    [groups, productCatalog, orderFrequencyDays],
+  );
+  const availableFrequencies = useMemo(() => {
+    // Use the first product with a rule that has options — same
+    // logic as orderFrequencyLabel.
+    for (const g of groups) {
+      const rule = productCatalog[g.product_id]?.pricing_rule;
+      if (rule && rule.available_frequencies?.length > 1) return rule.available_frequencies;
+    }
+    return [];
+  }, [groups, productCatalog]);
+
+  // ── Mutation helper ──────────────────────────────────────────────
+  // All edits flow through a single POST to /api/cart so the server is
+  // the price authority. Returns the fresh cart; never trust the
+  // optimistic local state for totals.
+  async function mutate(
+    nextLines: Array<{ variant_id: string; quantity: number }>,
+    opts?: { mode?: "subscribe" | "onetime"; frequency_days?: number | null },
+    busyKey?: string,
+  ) {
+    if (busyKey) setBusyKey(busyKey);
     try {
-      // Mirror the cart's existing subscription cadence — adding an
-      // upsell to a subscribe cart subscribes it; adding to a one-time
-      // cart adds it one-time.
-      const nextLines = [
-        ...cart.line_items.map((l) => ({ variant_id: l.variant_id, quantity: l.quantity })),
-        { variant_id: u.variant_id, quantity: 1 },
-      ];
       const res = await fetch("/api/cart", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -116,8 +189,8 @@ export function CustomizeClient({
           workspace_id: workspace.id,
           anonymous_id: cart.anonymous_id,
           line_items: nextLines,
-          mode: subscribeMode ? "subscribe" : "onetime",
-          frequency_days: cart.subscription_frequency_days,
+          mode: opts?.mode ?? (subscribing ? "subscribe" : "onetime"),
+          frequency_days: opts?.frequency_days ?? cart.subscription_frequency_days,
           email: cart.email,
           phone: cart.phone,
         }),
@@ -125,29 +198,66 @@ export function CustomizeClient({
       if (res.ok) {
         const json = (await res.json()) as { cart: CartDraft };
         setCart(json.cart);
-        setAddedUpsells((prev) => new Set(prev).add(u.product_id));
-        track("upsell_added", {
-          product_id: u.product_id,
-          variant_id: u.variant_id,
-          cart_token: cart.token,
-        });
       }
     } finally {
-      setBusyId(null);
+      if (busyKey) setBusyKey(null);
     }
   }
 
-  function skipUpsell(u: UpsellCandidate) {
-    setAddedUpsells((prev) => {
-      const next = new Set(prev);
-      next.add(u.product_id);
-      return next;
-    });
-    track("upsell_skipped", {
-      product_id: u.product_id,
-      cart_token: cart.token,
-    });
+  // ── Group mutations ──────────────────────────────────────────────
+
+  function applyGroupChange(
+    productId: string,
+    nextAllocation: Record<string, number>, // variant_id -> qty
+  ) {
+    // Replace just this product's lines, preserve others.
+    const nextLines: Array<{ variant_id: string; quantity: number }> = [];
+    const productIds = new Set(groups.map((g) => g.product_id));
+    for (const g of groups) {
+      if (g.product_id === productId) {
+        for (const [vid, q] of Object.entries(nextAllocation)) {
+          if (q > 0) nextLines.push({ variant_id: vid, quantity: q });
+        }
+      } else {
+        for (const a of g.allocation) {
+          if (a.quantity > 0) nextLines.push({ variant_id: a.variant_id, quantity: a.quantity });
+        }
+      }
+    }
+    // Defensive: if for any reason we lost a productId, drop nothing.
+    void productIds;
+    return mutate(nextLines, undefined, `group:${productId}`);
   }
+
+  function swapLinkedProduct(currentProductId: string, targetProductId: string, targetVariantId: string) {
+    // Replace the current product's lines wholesale with ONE line of the
+    // first variant of the target product (qty = current group total).
+    const nextLines: Array<{ variant_id: string; quantity: number }> = [];
+    for (const g of groups) {
+      if (g.product_id === currentProductId) {
+        nextLines.push({ variant_id: targetVariantId, quantity: g.totalQty });
+      } else {
+        for (const a of g.allocation) {
+          if (a.quantity > 0) nextLines.push({ variant_id: a.variant_id, quantity: a.quantity });
+        }
+      }
+    }
+    track("linked_product_swapped", {
+      cart_token: cart.token,
+      from_product: currentProductId,
+      to_product: targetProductId,
+    });
+    return mutate(nextLines, undefined, `swap:${currentProductId}`);
+  }
+
+  // ── Order-level mutations ────────────────────────────────────────
+
+  function changeFrequency(intervalDays: number) {
+    const nextLines = cart.line_items.map((l) => ({ variant_id: l.variant_id, quantity: l.quantity }));
+    return mutate(nextLines, { mode: "subscribe", frequency_days: intervalDays }, "frequency");
+  }
+
+  // ── Continue → checkout ──────────────────────────────────────────
 
   async function onContinue() {
     setContinueBusy(true);
@@ -156,32 +266,21 @@ export function CustomizeClient({
       total_cents: cart.total_cents,
       line_item_count: cart.line_items.length,
     });
-    // STUB: redirect to a Shopify cart permalink with our line items.
-    // Will be replaced with `/checkout?token=...` once the Braintree
-    // checkout ships.
-    const shopifyDomain = workspace.shopify_domain;
-    if (shopifyDomain) {
-      const cartParts = cart.line_items
-        .filter((l) => l.shopify_variant_id)
-        .map((l) => `${l.shopify_variant_id}:${l.quantity}`);
-      if (cartParts.length > 0) {
-        const url = `https://${shopifyDomain}/cart/${cartParts.join(",")}`;
-        window.location.href = url;
-        return;
-      }
-    }
-    // No Shopify domain configured — bail to the store root.
-    window.location.href = "/";
+    // STUB until /checkout ships. Send the customer there directly;
+    // they'll get bounced back to / if the route doesn't exist yet.
+    window.location.href = `/checkout?token=${encodeURIComponent(cart.token)}`;
   }
 
-  const visibleUpsells = upsells.filter((u) => !addedUpsells.has(u.product_id));
+  // ── Render ───────────────────────────────────────────────────────
 
   const themeStyle = {
     "--storefront-primary": workspace.primary_color,
   } as React.CSSProperties;
 
+  const backLink = sourceProductHandle ? `/${sourceProductHandle}` : null;
+
   return (
-    <div style={themeStyle} className="mx-auto max-w-3xl px-4 py-8 sm:py-12">
+    <div style={themeStyle} className="mx-auto max-w-3xl px-4 pb-32 pt-6 sm:pt-10">
       <header className="mb-6 flex items-center justify-between">
         {workspace.logo_url ? (
           // eslint-disable-next-line @next/next/no-img-element
@@ -189,136 +288,67 @@ export function CustomizeClient({
         ) : (
           <span className="text-lg font-semibold">{workspace.name}</span>
         )}
-        <a href="/" className="text-sm text-zinc-500 hover:text-zinc-800">
-          ← Keep shopping
-        </a>
+        {backLink && (
+          <a href={backLink} className="text-sm text-zinc-500 hover:text-zinc-800">
+            ← Back
+          </a>
+        )}
       </header>
 
-      <h1 className="text-2xl font-bold text-zinc-900 sm:text-3xl">Your order</h1>
-      <p className="mt-1 text-sm text-zinc-600">
-        Review your selection below. Add anything else you&apos;d like before checking out.
+      <h1 className="text-3xl font-bold text-zinc-900 sm:text-4xl">Build your order</h1>
+      <p className="mt-2 text-base text-zinc-600">
+        Customize each item, then checkout. Tap or drag — your changes save automatically.
       </p>
 
-      <section className="mt-6 rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
-          In your cart
-        </h2>
-        <ul className="mt-3 space-y-3">
-          {cart.line_items.map((l, i) => (
-            <li
-              key={`${l.variant_id}-${i}`}
-              className="flex items-center gap-3 rounded-xl bg-zinc-50 p-3"
-            >
-              {l.image_url ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={l.image_url}
-                  alt={l.title}
-                  className="h-14 w-14 flex-shrink-0 rounded-lg object-cover"
-                />
-              ) : (
-                <div className="h-14 w-14 flex-shrink-0 rounded-lg bg-zinc-200" />
-              )}
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-semibold text-zinc-900">
-                  {l.title}
-                  {l.variant_title && l.variant_title !== "Default Title" && (
-                    <span className="ml-1 text-zinc-500">— {l.variant_title}</span>
-                  )}
-                </div>
-                <div className="text-xs text-zinc-500">
-                  Qty {l.quantity}
-                  {l.mode === "subscribe" && (
-                    <span className="ml-1">
-                      · Delivers every{" "}
-                      {l.frequency_days ? `${l.frequency_days}d` : "regular cadence"}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div className="text-right">
-                <div className="text-sm font-semibold text-zinc-900">
-                  ${(l.line_total_cents / 100).toFixed(2)}
-                </div>
-                {l.unit_msrp_cents > l.unit_price_cents && (
-                  <div className="text-xs text-zinc-400 line-through">
-                    ${((l.unit_msrp_cents * l.quantity) / 100).toFixed(2)}
-                  </div>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
-
-        <dl className="mt-4 space-y-1.5 border-t border-zinc-200 pt-4 text-sm">
-          <Row label="Subtotal" value={fmt(cart.subtotal_cents)} />
-          {cart.discount_cents > 0 && (
-            <Row label="Discount" value={`-${fmt(cart.discount_cents)}`} muted />
-          )}
-          <Row
-            label="Total"
-            value={fmt(cart.total_cents)}
-            emphasis
+      {/* Per-product worksheet cards */}
+      <div className="mt-8 space-y-6">
+        {groups.map((group) => (
+          <ProductWorksheetCard
+            key={group.product_id}
+            group={group}
+            catalog={productCatalog[group.product_id]}
+            primaryColor={workspace.primary_color}
+            onAllocationChange={(allocation) => applyGroupChange(group.product_id, allocation)}
+            onSwap={(targetProductId, targetVariantId) =>
+              swapLinkedProduct(group.product_id, targetProductId, targetVariantId)
+            }
           />
-          <p className="pt-1 text-xs text-zinc-500">
-            Shipping &amp; tax calculated at checkout.
-          </p>
-        </dl>
-      </section>
+        ))}
+      </div>
 
-      {visibleUpsells.length > 0 && (
-        <section className="mt-6">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
-            Add to your order
-          </h2>
-          <ul className="mt-3 grid gap-3 sm:grid-cols-3">
-            {visibleUpsells.map((u) => (
-              <li
-                key={u.product_id}
-                className="flex flex-col rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm"
-              >
-                {u.image_url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={u.image_url}
-                    alt={u.title}
-                    className="mb-3 h-24 w-full rounded-xl object-cover"
-                  />
-                ) : (
-                  <div className="mb-3 h-24 w-full rounded-xl bg-zinc-100" />
-                )}
-                <div className="flex-1">
-                  <div className="text-sm font-semibold text-zinc-900">{u.title}</div>
-                  <div className="text-xs text-zinc-500">{fmt(u.price_cents)}</div>
-                </div>
-                <div className="mt-3 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => addUpsell(u)}
-                    disabled={!u.variant_id || busyId === u.product_id}
-                    style={{ backgroundColor: workspace.primary_color }}
-                    className="flex-1 rounded-full px-3 py-2 text-xs font-bold uppercase tracking-wide text-white disabled:opacity-50"
-                  >
-                    {busyId === u.product_id ? "Adding…" : "Add"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => skipUpsell(u)}
-                    className="rounded-full border border-zinc-300 px-3 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
-                  >
-                    No thanks
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
+      {/* Order-level frequency (only if subscribing and multiple options) */}
+      {subscribing && availableFrequencies.length > 1 && (
+        <section className="mt-6 rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Delivery cadence</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {availableFrequencies.map((f) => {
+              const selected = f.interval_days === orderFrequencyDays;
+              return (
+                <button
+                  key={f.interval_days}
+                  type="button"
+                  onClick={() => changeFrequency(f.interval_days)}
+                  style={{
+                    backgroundColor: selected ? workspace.primary_color : undefined,
+                    borderColor: selected ? workspace.primary_color : undefined,
+                  }}
+                  className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${selected ? "text-white" : "border-zinc-300 text-zinc-700 hover:bg-zinc-50"}`}
+                >
+                  {f.label}
+                </button>
+              );
+            })}
+          </div>
         </section>
       )}
 
-      <section className="sticky bottom-0 mt-8 -mx-4 border-t border-zinc-200 bg-white/95 px-4 py-4 backdrop-blur sm:mx-0 sm:rounded-2xl sm:border sm:px-6">
-        <div className="flex items-center justify-between gap-4">
+      {/* Sticky bottom CTA */}
+      <section className="fixed inset-x-0 bottom-0 z-10 border-t border-zinc-200 bg-white/95 px-4 py-3 backdrop-blur sm:relative sm:mt-8 sm:rounded-2xl sm:border sm:px-6 sm:py-4 sm:shadow-lg">
+        <div className="mx-auto flex max-w-3xl items-center justify-between gap-4">
           <div>
-            <div className="text-xs uppercase tracking-wider text-zinc-500">Total</div>
+            <div className="text-[10px] uppercase tracking-wider text-zinc-500">
+              {subscribing && orderFrequencyLabel ? `Ships ${orderFrequencyLabel}` : "Total"}
+            </div>
             <div className="text-2xl font-bold text-zinc-900">{fmt(cart.total_cents)}</div>
           </div>
           <button
@@ -326,9 +356,9 @@ export function CustomizeClient({
             onClick={onContinue}
             disabled={continueBusy || cart.line_items.length === 0}
             style={{ backgroundColor: workspace.primary_color }}
-            className="rounded-full px-8 py-3 text-sm font-extrabold uppercase tracking-wider text-white shadow-lg disabled:opacity-50"
+            className="rounded-full px-7 py-3 text-sm font-extrabold uppercase tracking-wider text-white shadow-md disabled:opacity-50"
           >
-            {continueBusy ? "One moment…" : "Continue to checkout →"}
+            {continueBusy ? "One moment…" : "Continue →"}
           </button>
         </div>
       </section>
@@ -336,31 +366,558 @@ export function CustomizeClient({
   );
 }
 
-function Row({
-  label,
-  value,
-  emphasis,
-  muted,
+// ── Product worksheet card ─────────────────────────────────────────
+
+interface GroupedProduct {
+  product_id: string;
+  totalQty: number;
+  allocation: Array<{ variant_id: string; quantity: number; title: string; variant_title: string | null; image_url: string | null; unit_price_cents: number; unit_msrp_cents: number }>;
+  productTitle: string;
+  primaryImage: string | null;
+}
+
+function ProductWorksheetCard({
+  group,
+  catalog,
+  primaryColor,
+  onAllocationChange,
+  onSwap,
 }: {
-  label: string;
-  value: string;
-  emphasis?: boolean;
-  muted?: boolean;
+  group: GroupedProduct;
+  catalog: ProductCatalogEntry | undefined;
+  primaryColor: string;
+  onAllocationChange: (allocation: Record<string, number>) => void;
+  onSwap: (targetProductId: string, targetVariantId: string) => void;
+}) {
+  // Build local allocation state keyed by variant_id. Server is source
+  // of truth — when the parent rerenders the group prop, we sync.
+  const initialAllocation = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const a of group.allocation) out[a.variant_id] = a.quantity;
+    return out;
+  }, [group.allocation]);
+  const [allocation, setAllocation] = useState<Record<string, number>>(initialAllocation);
+  const [totalQty, setTotalQty] = useState<number>(group.totalQty);
+  useEffect(() => {
+    setAllocation(initialAllocation);
+    setTotalQty(group.totalQty);
+  }, [initialAllocation, group.totalQty]);
+
+  if (!catalog) {
+    return (
+      <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+        <p className="text-sm text-zinc-600">Loading {group.productTitle}…</p>
+      </div>
+    );
+  }
+
+  const variants = catalog.variants;
+  const hasVariants = variants.length > 1;
+  const linked = catalog.linked_products;
+  const lineSubtotal = group.allocation.reduce((s, a) => s + a.unit_price_cents * a.quantity, 0);
+  const lineMsrp = group.allocation.reduce((s, a) => s + a.unit_msrp_cents * a.quantity, 0);
+
+  function setVariantQty(variantId: string, next: Record<string, number>) {
+    setAllocation(next);
+    void variantId;
+    onAllocationChange(next);
+  }
+
+  function changeQty(nextTotal: number) {
+    setTotalQty(nextTotal);
+    // Redistribute the new total across the existing chosen variants,
+    // preserving proportions where possible. Simplest correct behavior:
+    // if exactly one variant has weight, dump everything there; else
+    // proportionally scale, then fix the rounding remainder on the
+    // largest entry.
+    const currentTotal = Object.values(allocation).reduce((s, v) => s + v, 0);
+    const next: Record<string, number> = {};
+    if (currentTotal === 0) {
+      // Nothing selected — put everything on the first variant.
+      const first = variants[0]?.id;
+      if (first) next[first] = nextTotal;
+    } else if (hasVariants) {
+      const entries = Object.entries(allocation);
+      let remaining = nextTotal;
+      // Initial proportional pass with floor
+      for (const [vid, q] of entries) {
+        const scaled = Math.floor((q / currentTotal) * nextTotal);
+        next[vid] = scaled;
+        remaining -= scaled;
+      }
+      // Distribute the remainder onto largest current
+      const sortedDesc = [...entries].sort((a, b) => b[1] - a[1]);
+      let i = 0;
+      while (remaining > 0 && sortedDesc.length > 0) {
+        next[sortedDesc[i % sortedDesc.length][0]] += 1;
+        remaining -= 1;
+        i += 1;
+      }
+    } else {
+      // No variant choice — single variant takes the full count.
+      const only = variants[0]?.id || Object.keys(allocation)[0];
+      if (only) next[only] = nextTotal;
+    }
+    setAllocation(next);
+    onAllocationChange(next);
+  }
+
+  return (
+    <section className="overflow-hidden rounded-3xl border border-zinc-200 bg-white shadow-sm">
+      {/* Header: image + title + line total */}
+      <div className="flex items-center gap-4 border-b border-zinc-100 p-4 sm:p-5">
+        {group.primaryImage ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={group.primaryImage}
+            alt={group.productTitle}
+            className="h-16 w-16 flex-shrink-0 rounded-2xl object-cover sm:h-20 sm:w-20"
+          />
+        ) : (
+          <div className="h-16 w-16 flex-shrink-0 rounded-2xl bg-zinc-100 sm:h-20 sm:w-20" />
+        )}
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate text-lg font-bold text-zinc-900 sm:text-xl">{group.productTitle}</h3>
+          <div className="mt-0.5 flex items-baseline gap-2">
+            <span className="text-base font-semibold text-zinc-900">{fmt(lineSubtotal)}</span>
+            {lineMsrp > lineSubtotal && (
+              <span className="text-xs text-zinc-400 line-through">{fmt(lineMsrp)}</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Linked-product swap */}
+      {linked.length > 0 && (
+        <div className="border-b border-zinc-100 px-4 py-4 sm:px-5">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+            {catalog.linked_group_name || "Format"}
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {/* Current product as a selected chip */}
+            <Chip selected primaryColor={primaryColor}>
+              {currentLinkedValue(linked, group.product_id) || group.productTitle}
+            </Chip>
+            {linked
+              .filter((p) => p.product_id !== group.product_id)
+              .map((p) => (
+                <button
+                  key={p.product_id}
+                  type="button"
+                  onClick={() => {
+                    // Look up the first variant of the target product.
+                    // The page server-side catalog only loaded the
+                    // current product's variants — we need to fetch the
+                    // target's. For now this swap is best-effort: we
+                    // POST to /api/cart with the target's product_id as
+                    // a hint and let the server pick first variant.
+                    // Until that endpoint exists we route through the
+                    // PDP for a clean change.
+                    window.location.href = `/${p.handle}`;
+                    void onSwap;
+                  }}
+                  className="rounded-full border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+                >
+                  {p.value || p.title}
+                </button>
+              ))}
+          </div>
+        </div>
+      )}
+
+      {/* Quantity pills */}
+      <div className="border-b border-zinc-100 px-4 py-4 sm:px-5">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">How many?</p>
+        <div className="mt-2 flex gap-2">
+          {[1, 2, 3].map((q) => {
+            const selected = totalQty === q;
+            return (
+              <button
+                key={q}
+                type="button"
+                onClick={() => changeQty(q)}
+                style={{
+                  backgroundColor: selected ? primaryColor : undefined,
+                  borderColor: selected ? primaryColor : undefined,
+                }}
+                className={`flex-1 rounded-2xl border-2 px-4 py-3 text-center text-base font-bold transition ${selected ? "text-white" : "border-zinc-200 text-zinc-700 hover:border-zinc-300"}`}
+              >
+                {q} {q === 1 ? "Box" : "Boxes"}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Variant picker / allocation */}
+      {hasVariants && (
+        <div className="px-4 py-4 sm:px-5">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+            {totalQty === 1 ? "Pick your flavor" : `Pick your ${totalQty} flavors`}
+          </p>
+          {totalQty === 1 ? (
+            <FlavorChips
+              variants={variants}
+              selectedVariantId={topAllocatedVariantId(allocation)}
+              onPick={(vid) => setVariantQty(vid, { [vid]: 1 })}
+              primaryColor={primaryColor}
+            />
+          ) : (
+            <AllocationBars
+              variants={variants}
+              totalQty={totalQty}
+              allocation={allocation}
+              onChange={(next) => {
+                setAllocation(next);
+                onAllocationChange(next);
+              }}
+              primaryColor={primaryColor}
+            />
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ── Subcomponents ──────────────────────────────────────────────────
+
+function FlavorChips({
+  variants,
+  selectedVariantId,
+  onPick,
+  primaryColor,
+}: {
+  variants: ProductCatalogEntry["variants"];
+  selectedVariantId: string | null;
+  onPick: (variantId: string) => void;
+  primaryColor: string;
 }) {
   return (
-    <div className="flex items-baseline justify-between">
-      <dt className={`${muted ? "text-zinc-500" : "text-zinc-700"} text-sm`}>{label}</dt>
-      <dd
-        className={
-          emphasis ? "text-base font-bold text-zinc-900" : muted ? "text-zinc-500" : "text-zinc-700"
-        }
-      >
-        {value}
-      </dd>
+    <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+      {variants.map((v) => {
+        const selected = v.id === selectedVariantId;
+        return (
+          <button
+            key={v.id}
+            type="button"
+            onClick={() => onPick(v.id)}
+            style={{
+              borderColor: selected ? primaryColor : undefined,
+              boxShadow: selected ? `0 0 0 2px ${primaryColor} inset` : undefined,
+            }}
+            className={`flex items-center gap-2 rounded-2xl border-2 bg-white p-2 text-left transition ${selected ? "" : "border-zinc-200 hover:border-zinc-300"}`}
+          >
+            {v.image_url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={v.image_url} alt={v.title} className="h-10 w-10 flex-shrink-0 rounded-lg object-cover" />
+            ) : (
+              <div className="h-10 w-10 flex-shrink-0 rounded-lg bg-zinc-100" />
+            )}
+            <span className="min-w-0 flex-1 text-sm font-semibold text-zinc-900">
+              {prettyVariantTitle(v.title)}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
 
+function AllocationBars({
+  variants,
+  totalQty,
+  allocation,
+  onChange,
+  primaryColor,
+}: {
+  variants: ProductCatalogEntry["variants"];
+  totalQty: number;
+  allocation: Record<string, number>;
+  onChange: (next: Record<string, number>) => void;
+  primaryColor: string;
+}) {
+  // Track which variant the user last touched — releasing a unit goes
+  // back to the most-recent peer for a "drag/undo" feel.
+  const lastTouched = useRef<string | null>(null);
+
+  function setForVariant(vid: string, nextValue: number) {
+    nextValue = Math.max(0, Math.min(totalQty, Math.round(nextValue)));
+    const current = allocation[vid] || 0;
+    if (nextValue === current) return;
+
+    const next = { ...allocation };
+    // Ensure all variants have an entry
+    for (const v of variants) if (!(v.id in next)) next[v.id] = 0;
+
+    const delta = nextValue - current;
+    next[vid] = nextValue;
+
+    if (delta > 0) {
+      // Steal from the largest other(s) until we balance.
+      let needed = delta;
+      while (needed > 0) {
+        const other = Object.entries(next)
+          .filter(([id]) => id !== vid)
+          .sort((a, b) => b[1] - a[1])[0];
+        if (!other || other[1] <= 0) break;
+        next[other[0]] = other[1] - 1;
+        needed -= 1;
+      }
+    } else {
+      // Released units → most-recently-touched OTHER variant first;
+      // falls back to the first variant that has room.
+      let extra = -delta;
+      const preferred = lastTouched.current && lastTouched.current !== vid ? lastTouched.current : null;
+      while (extra > 0) {
+        const target =
+          (preferred && (next[preferred] ?? 0) < totalQty ? preferred : null) ||
+          Object.keys(next).find((id) => id !== vid && (next[id] ?? 0) < totalQty);
+        if (!target) break;
+        next[target] = (next[target] ?? 0) + 1;
+        extra -= 1;
+      }
+    }
+
+    // Snap any negatives to 0 (paranoia)
+    for (const k of Object.keys(next)) if (next[k] < 0) next[k] = 0;
+
+    lastTouched.current = vid;
+    onChange(next);
+    if (typeof navigator !== "undefined" && navigator.vibrate) navigator.vibrate(4);
+  }
+
+  // Stacked summary bar at the top of the section.
+  const summarySegments = variants
+    .map((v) => ({ id: v.id, value: allocation[v.id] || 0, title: v.title, image: v.image_url }))
+    .filter((s) => s.value > 0);
+
+  return (
+    <div className="mt-3 space-y-3">
+      {/* Live stacked summary */}
+      <div className="flex h-3 overflow-hidden rounded-full bg-zinc-100">
+        {summarySegments.map((s, idx) => (
+          <div
+            key={s.id}
+            style={{
+              width: `${(s.value / totalQty) * 100}%`,
+              backgroundColor: idx === 0 ? primaryColor : tintColor(primaryColor, idx),
+            }}
+          />
+        ))}
+      </div>
+
+      {/* Per-variant draggable rows */}
+      <div className="space-y-2">
+        {variants.map((v) => {
+          const value = allocation[v.id] || 0;
+          return (
+            <VariantSliderRow
+              key={v.id}
+              variant={v}
+              value={value}
+              totalQty={totalQty}
+              primaryColor={primaryColor}
+              onChange={(next) => setForVariant(v.id, next)}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function VariantSliderRow({
+  variant,
+  value,
+  totalQty,
+  primaryColor,
+  onChange,
+}: {
+  variant: ProductCatalogEntry["variants"][number];
+  value: number;
+  totalQty: number;
+  primaryColor: string;
+  onChange: (next: number) => void;
+}) {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+
+  function pointerToValue(clientX: number): number {
+    const el = trackRef.current;
+    if (!el) return value;
+    const r = el.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (clientX - r.left) / Math.max(1, r.width)));
+    return Math.round(pct * totalQty);
+  }
+
+  function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    onChange(pointerToValue(e.clientX));
+  }
+  function onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.buttons !== 1 && e.pressure === 0) return;
+    onChange(pointerToValue(e.clientX));
+  }
+
+  const fillPct = totalQty > 0 ? (value / totalQty) * 100 : 0;
+
+  return (
+    <div className="flex items-center gap-3 rounded-2xl border border-zinc-200 bg-white p-2">
+      {variant.image_url ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={variant.image_url} alt={variant.title} className="h-12 w-12 flex-shrink-0 rounded-xl object-cover" />
+      ) : (
+        <div className="h-12 w-12 flex-shrink-0 rounded-xl bg-zinc-100" />
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-semibold text-zinc-900">{prettyVariantTitle(variant.title)}</span>
+          <span className="text-sm font-bold tabular-nums text-zinc-900">
+            {value} / {totalQty}
+          </span>
+        </div>
+        <div
+          ref={trackRef}
+          role="slider"
+          aria-valuemin={0}
+          aria-valuemax={totalQty}
+          aria-valuenow={value}
+          aria-label={`${variant.title} quantity`}
+          tabIndex={0}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowLeft" || e.key === "ArrowDown") onChange(value - 1);
+            if (e.key === "ArrowRight" || e.key === "ArrowUp") onChange(value + 1);
+          }}
+          className="mt-2 h-7 cursor-pointer touch-none select-none rounded-full bg-zinc-100"
+        >
+          <div
+            className="relative h-full rounded-full transition-[width] duration-100 ease-out"
+            style={{
+              width: `${fillPct}%`,
+              backgroundColor: primaryColor,
+            }}
+          >
+            <div
+              className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-1/2 rounded-full bg-white shadow-md"
+              style={{ width: 26, height: 26, border: `3px solid ${primaryColor}` }}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Chip({
+  selected,
+  primaryColor,
+  children,
+}: {
+  selected: boolean;
+  primaryColor: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <span
+      style={{
+        backgroundColor: selected ? primaryColor : undefined,
+        borderColor: selected ? primaryColor : undefined,
+      }}
+      className={`inline-flex items-center rounded-full border-2 px-4 py-2 text-sm font-semibold ${selected ? "text-white" : "border-zinc-200 text-zinc-700"}`}
+    >
+      {children}
+    </span>
+  );
+}
+
+// ── Helpers ────────────────────────────────────────────────────────
+
+function groupLinesByProduct(lines: StoredLineItem[]): GroupedProduct[] {
+  const map = new Map<string, GroupedProduct>();
+  for (const l of lines) {
+    if (!map.has(l.product_id)) {
+      map.set(l.product_id, {
+        product_id: l.product_id,
+        totalQty: 0,
+        allocation: [],
+        productTitle: l.title,
+        primaryImage: l.image_url,
+      });
+    }
+    const g = map.get(l.product_id)!;
+    g.totalQty += l.quantity;
+    g.allocation.push({
+      variant_id: l.variant_id,
+      quantity: l.quantity,
+      title: l.title,
+      variant_title: l.variant_title,
+      image_url: l.image_url,
+      unit_price_cents: l.unit_price_cents,
+      unit_msrp_cents: l.unit_msrp_cents,
+    });
+  }
+  return [...map.values()];
+}
+
+function topAllocatedVariantId(allocation: Record<string, number>): string | null {
+  let best: { id: string; q: number } | null = null;
+  for (const [id, q] of Object.entries(allocation)) {
+    if (q > 0 && (!best || q > best.q)) best = { id, q };
+  }
+  return best?.id || null;
+}
+
+function currentLinkedValue(
+  linked: ProductCatalogEntry["linked_products"],
+  productId: string,
+): string | null {
+  const me = linked.find((p) => p.product_id === productId);
+  return me?.value || null;
+}
+
+function pickFrequencyLabel(
+  groups: GroupedProduct[],
+  catalog: Record<string, ProductCatalogEntry>,
+  intervalDays: number | null,
+): string | null {
+  if (!intervalDays) return null;
+  for (const g of groups) {
+    const rule = catalog[g.product_id]?.pricing_rule;
+    if (!rule) continue;
+    const f = rule.available_frequencies?.find((x) => x.interval_days === intervalDays);
+    if (f?.label) return f.label.toLowerCase();
+  }
+  return null;
+}
+
+function prettyVariantTitle(title: string | null | undefined): string {
+  if (!title) return "Select";
+  // "Default Title" is Shopify's placeholder for products with no variants —
+  // never surface that text to customers.
+  if (title === "Default Title") return "Original";
+  return title;
+}
+
 function fmt(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
+}
+
+// Lightweight color tint helper — darkens the brand color N steps for
+// summary-bar segments after the primary one. Pure visual variety, not
+// a designed palette.
+function tintColor(hex: string, step: number): string {
+  // Strip "#", parse rgb, blend toward black by 12% per step.
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return hex;
+  const num = parseInt(m[1], 16);
+  let r = (num >> 16) & 0xff;
+  let g = (num >> 8) & 0xff;
+  let b = num & 0xff;
+  const f = Math.max(0, 1 - step * 0.12);
+  r = Math.round(r * f);
+  g = Math.round(g * f);
+  b = Math.round(b * f);
+  return `#${[r, g, b].map((n) => n.toString(16).padStart(2, "0")).join("")}`;
 }
