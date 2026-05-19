@@ -622,7 +622,7 @@ function ProductWorksheetCard({
                 }}
                 className={`flex-1 rounded-2xl border-2 px-4 py-3 text-center text-base font-bold transition ${selected ? "text-white" : "border-zinc-200 text-zinc-700 hover:border-zinc-300"}`}
               >
-                {q} {q === 1 ? "Box" : "Boxes"}
+                {q} Pack
               </button>
             );
           })}
@@ -869,20 +869,52 @@ function VariantSliderRow({
             if (e.key === "ArrowLeft" || e.key === "ArrowDown") onChange(value - 1);
             if (e.key === "ArrowRight" || e.key === "ArrowUp") onChange(value + 1);
           }}
-          className="mt-2 h-7 cursor-pointer touch-none select-none rounded-full bg-zinc-100"
+          className="relative mt-2 h-7 cursor-pointer touch-none select-none rounded-full bg-zinc-100"
         >
+          {/* Filled portion */}
           <div
-            className="relative h-full rounded-full transition-[width] duration-100 ease-out"
+            className="absolute left-0 top-0 h-full rounded-full transition-[width] duration-100 ease-out"
             style={{
               width: `${fillPct}%`,
               backgroundColor: primaryColor,
             }}
-          >
-            <div
-              className="absolute right-1 top-1/2 -translate-y-1/2 rounded-full bg-white shadow-md"
-              style={{ width: 22, height: 22, border: `3px solid ${primaryColor}` }}
-            />
-          </div>
+          />
+          {/* Tick marks — one per integer stop. Clickable via the
+              parent's pointer handler since they sit inside the track.
+              Skip 0 and totalQty so the knob isn't fighting an edge
+              tick at the extremes. */}
+          {Array.from({ length: Math.max(0, totalQty - 1) }, (_, i) => {
+            const stop = i + 1;
+            const pct = (stop / totalQty) * 100;
+            const reached = stop <= value;
+            return (
+              <span
+                key={stop}
+                aria-hidden
+                className="pointer-events-none absolute top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full"
+                style={{
+                  left: `${pct}%`,
+                  width: 4,
+                  height: 4,
+                  backgroundColor: reached ? "rgba(255,255,255,0.85)" : "rgba(0,0,0,0.18)",
+                }}
+              />
+            );
+          })}
+          {/* Knob — positioned with knob-width inset math so it stays
+              fully inside the track at both extremes:
+                value=0   → left: 0  (knob flush at left edge)
+                value=N   → left: 100% - 22px (knob flush at right edge)
+              In between the knob's center tracks the fill end. */}
+          <div
+            className="absolute top-1/2 -translate-y-1/2 rounded-full bg-white shadow-md transition-[left] duration-100 ease-out"
+            style={{
+              left: `calc((100% - 22px) * ${fillPct / 100})`,
+              width: 22,
+              height: 22,
+              border: `3px solid ${primaryColor}`,
+            }}
+          />
         </div>
       </div>
     </div>
