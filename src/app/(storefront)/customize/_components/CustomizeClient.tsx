@@ -367,30 +367,37 @@ export function CustomizeClient({
         ))}
       </div>
 
-      {/* Order-level frequency (only if subscribing and multiple options) */}
+      {/* Order-level frequency — subtle inline select. The default
+          reflects what the customer chose on the PDP (carried via
+          cart.subscription_frequency_days). Click to open and pick a
+          different cadence. Hidden when not subscribing or when the
+          rule offers only one option. */}
       {subscribing && availableFrequencies.length > 1 && (
-        <section className="mt-6 rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Delivery cadence</p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {availableFrequencies.map((f) => {
-              const selected = f.interval_days === orderFrequencyDays;
-              return (
-                <button
-                  key={f.interval_days}
-                  type="button"
-                  onClick={() => changeFrequency(f.interval_days)}
-                  style={{
-                    backgroundColor: selected ? workspace.primary_color : undefined,
-                    borderColor: selected ? workspace.primary_color : undefined,
-                  }}
-                  className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${selected ? "text-white" : "border-zinc-300 text-zinc-700 hover:bg-zinc-50"}`}
-                >
-                  {f.label}
-                </button>
-              );
-            })}
+        <div className="mt-5 flex items-center gap-2 text-sm text-zinc-600">
+          <span>Delivers</span>
+          <div className="relative">
+            <select
+              value={orderFrequencyDays ?? ""}
+              onChange={(e) => changeFrequency(Number(e.target.value))}
+              className="appearance-none rounded-md border border-zinc-300 bg-white py-1 pl-2.5 pr-7 text-sm font-medium text-zinc-800 hover:border-zinc-400 focus:border-zinc-500 focus:outline-none"
+            >
+              {availableFrequencies.map((f) => (
+                <option key={f.interval_days} value={f.interval_days}>
+                  {f.label.toLowerCase()}
+                </option>
+              ))}
+            </select>
+            <svg
+              className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2.5}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            </svg>
           </div>
-        </section>
+        </div>
       )}
 
       {/* Sticky bottom CTA */}
@@ -724,7 +731,6 @@ function AllocationBars({
 
     lastTouched.current = vid;
     onChange(next);
-    if (typeof navigator !== "undefined" && navigator.vibrate) navigator.vibrate(4);
   }
 
   // Stacked summary bar at the top of the section.
@@ -840,8 +846,8 @@ function VariantSliderRow({
             }}
           >
             <div
-              className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-1/2 rounded-full bg-white shadow-md"
-              style={{ width: 26, height: 26, border: `3px solid ${primaryColor}` }}
+              className="absolute right-1 top-1/2 -translate-y-1/2 rounded-full bg-white shadow-md"
+              style={{ width: 22, height: 22, border: `3px solid ${primaryColor}` }}
             />
           </div>
         </div>
