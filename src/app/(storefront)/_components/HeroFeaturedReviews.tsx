@@ -77,10 +77,15 @@ export function HeroFeaturedReviews({
     };
   }, [workspaceSlug, slug]);
 
-  // Stable shuffle for this mount — order doesn't jump as the user
-  // expands/collapses. Re-randomizes on every new pool (i.e. every
-  // page visit since the component remounts).
-  const usable = useMemo(() => shuffle(pool), [pool]);
+  // Initial render uses the pool order as-is so SSR HTML matches the
+  // client's first hydration paint (Math.random() would diverge — React
+  // #418). After mount we shuffle once and rerender so each visit still
+  // surfaces different stories. Re-shuffles whenever `pool` changes
+  // (i.e. when the bootstrap-cache refresh swaps in a new featured set).
+  const [usable, setUsable] = useState<Review[]>(pool);
+  useEffect(() => {
+    setUsable(shuffle(pool));
+  }, [pool]);
   const [idx, setIdx] = useState(0);
   const [fadeOut, setFadeOut] = useState(false);
   const [expanded, setExpanded] = useState(false);

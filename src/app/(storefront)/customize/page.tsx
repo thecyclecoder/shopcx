@@ -163,8 +163,11 @@ export default async function CustomizePage({ searchParams }: PageProps) {
                 }
               : null;
           })
-          .filter((p): p is NonNullable<typeof p> => p !== null)
-          .filter((p) => p.product_id !== pid);
+          .filter((p): p is NonNullable<typeof p> => p !== null);
+        // Keep the CURRENT product in linked_products so the
+        // worksheet can look up its `value` (e.g. "Instant") for the
+        // selected chip's label. The render filters peers on the
+        // client side when listing the other chips.
 
         // Hydrate each peer with its variants so the worksheet can swap
         // inline (no PDP round-trip). Variant-title matching lets us
