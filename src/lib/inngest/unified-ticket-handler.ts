@@ -60,6 +60,16 @@ function isPositive(body: string): boolean {
   const beforeSig = beforeQuote.split(/(?:^|[\.\!\?\n\s])(?:thanks[-,\s]+(?:your\s+|warmly|cheers)|warmly,|best,|regards,|sincerely,|kind regards,|cheers,|--\s)/i)[0].trim();
   const c = beforeSig || beforeQuote;
 
+  // Action-intent veto — ALWAYS overrides positive close. A message
+  // that asks for something is never closure even when it's wrapped
+  // in politeness. Joan Drewry: "Please cancel my subscription. Thank
+  // you for your assistance" fired positive-close because "thank you"
+  // matched, and Suzie sent "your subscription has been canceled" with
+  // no actual cancel. The keyword list mirrors the prior-unanswered
+  // sniff later in this file.
+  const actionIntent = /\b(cancel|cancell|refund|return|stop|paus|skip|swap|change|update|exchange|replace|replac|missing|damaged|wrong|chargeback|dispute|delivery|tracking|address|reactivate|resume|where is|haven'?t (received|gotten|got))\b/i;
+  if (actionIntent.test(c)) return false;
+
   // Reject obvious data-only replies — short messages whose meaningful
   // content is nothing more than an order/SKU/tracking ID. Sherri's
   // "And SC127037" tripped positive-close because the signature contained
