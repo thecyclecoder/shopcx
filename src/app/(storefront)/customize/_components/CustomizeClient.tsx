@@ -442,10 +442,10 @@ export function CustomizeClient({
       {/* Sticky bottom CTA */}
       <section className="fixed inset-x-0 bottom-0 z-10 border-t border-zinc-200 bg-white/95 px-4 py-3 backdrop-blur sm:relative sm:mt-8 sm:rounded-2xl sm:border sm:px-6 sm:py-4 sm:shadow-lg">
         <div className="mx-auto flex max-w-3xl items-center justify-between gap-4">
-          <div className="flex items-baseline gap-2">
-            <div className="text-2xl font-bold text-zinc-900">{fmt(cart.total_cents)}</div>
+          <div>
+            <div className="text-2xl font-bold leading-tight text-zinc-900">{fmt(cart.total_cents)}</div>
             {orderSavingsCents > 0 && (
-              <div className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+              <div className="mt-0.5 text-xs font-semibold text-emerald-700">
                 Save {fmt(orderSavingsCents)}
               </div>
             )}
