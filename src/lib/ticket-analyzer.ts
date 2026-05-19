@@ -29,6 +29,31 @@ const SKIP_TAGS = new Set(["spam:bot", "outreach", "cls:outreach"]);
 // "Severe issue" types that force escalation regardless of overall score
 const SEVERE_ISSUE_TYPES = new Set(["inaccuracy", "false_promise", "broken_action"]);
 
+/**
+ * Map analyzer issue types to research recipe slugs that can verify
+ * whether the AI's claim matches reality. Keep this conservative —
+ * only fire recipes whose result might unlock an auto-heal. Misses are
+ * cheap (admin can still run manually) but false-positive runs cost
+ * Anthropic calls + Shopify queries.
+ */
+function selectResearchRecipes(issues: Array<{ type: string; description: string }>): string[] {
+  const slugs = new Set<string>();
+  for (const issue of issues) {
+    const text = (issue.description || "").toLowerCase();
+    if (
+      (issue.type === "false_promise" || issue.type === "broken_action" || issue.type === "inaccuracy") &&
+      (text.includes("coupon") || text.includes("loyalty") || text.includes("reward") || text.includes("discount"))
+    ) {
+      slugs.add("verify_coupon_promises");
+    }
+    // Future recipes wire in here:
+    //   - verify_subscription_changes — pause/resume/skip/swap claims
+    //   - verify_replacement_promises — replacement order claims
+    //   - verify_refund_issued — refund claims
+  }
+  return Array.from(slugs);
+}
+
 // Customer-message keywords that force escalation regardless of score
 const CUSTOMER_ESCALATION_KEYWORDS = [
   "lawyer", "attorney", "bbb", "better business bureau",
@@ -523,6 +548,32 @@ async function applySeverityActions(
     action = "escalate_with_message";
   } else if (score === 6 || forceEscalate) {
     action = "escalate_silent";
+  }
+
+  // ── Research & Heal hook ──
+  // Severe issues (false_promise / broken_action) are the prime case for
+  // auto-recovery. Fire a research request to verify what's broken; if a
+  // recipe finds a healable gap, the admin can one-click heal from the
+  // ticket detail page (Phase 1) or it auto-heals from the allowlist
+  // (Phase 2). Recipes are inferred from the issue types. Safe to fire
+  // regardless of escalation action — research+heal is non-destructive
+  // until the heal step explicitly runs.
+  const recipesToRun = selectResearchRecipes(issues);
+  if (recipesToRun.length > 0) {
+    try {
+      const { inngest } = await import("@/lib/inngest/client");
+      await inngest.send({
+        name: "ticket/research.requested",
+        data: {
+          ticket_id: ticketId,
+          recipes: recipesToRun.map(slug => ({ slug })),
+          source_analysis_id: analysisId,
+          triggered_by: "ai_analysis",
+        },
+      });
+    } catch (err) {
+      console.warn("[ticket-analyzer] research.requested send failed:", err);
+    }
   }
 
   if (action === "none") return;

@@ -12,6 +12,7 @@ import ReturnsList from "@/components/shared/ReturnsList";
 import { ReplacementsList } from "@/components/shared/ReplacementsList";
 import type { ReplacementItem } from "@/components/shared/ReplacementsList";
 import SubscriptionsList from "@/components/shared/SubscriptionsList";
+import ResearchPanel from "@/components/tickets/ResearchPanel";
 import LoyaltyCard from "@/components/shared/LoyaltyCard";
 import CrisisEnrollmentCard from "@/components/crisis-enrollment-card";
 import type { LoyaltyMemberData, LoyaltyRedemption } from "@/components/shared/LoyaltyCard";
@@ -2918,6 +2919,9 @@ export default function TicketDetailPage() {
             <CrisisEnrollmentCard workspaceId={workspace.id} customerId={customer.id} />
           </div>
         )}
+
+        {/* ═══ RESEARCH & HEAL PANEL ═══ */}
+        <ResearchPanel workspaceId={workspace.id} ticketId={id} />
 
         {/* ═══ SUBSCRIPTIONS CARD ═══ */}
         <div className={`${mobileSection !== "subscriptions" && mobileSection !== "conversation" ? "hidden md:block" : ""}`}>

@@ -30,7 +30,7 @@ export interface SonnetDecision {
   clarification_question?: string;
 }
 
-interface ActionParams {
+export interface ActionParams {
   type: string;
   contract_id?: string;
   variant_id?: string;
@@ -95,7 +95,7 @@ export interface ActionContext {
 type SendFn = (msg: string, sandbox: boolean) => Promise<void>;
 type SysNoteFn = (msg: string) => Promise<void>;
 
-interface ActionResult {
+export interface ActionResult {
   success: boolean;
   error?: string;
   summary?: string;
