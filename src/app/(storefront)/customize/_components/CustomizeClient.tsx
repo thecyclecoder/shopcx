@@ -80,6 +80,13 @@ export interface ProductCatalogEntry {
   pricing_rule: {
     subscribe_discount_pct: number;
     available_frequencies: Array<{ interval_days: number; label: string; default?: boolean }>;
+    quantity_breaks: Array<{ quantity: number; discount_pct: number; label: string }>;
+    free_gift_variant_id: string | null;
+    free_gift_product_title: string | null;
+    free_gift_image_url: string | null;
+    free_gift_min_quantity: number;
+    free_gift_subscription_only: boolean;
+    free_gift_price_cents: number | null;
   } | null;
   linked_products: Array<{
     product_id: string;
@@ -377,6 +384,7 @@ export function CustomizeClient({
             group={group}
             catalog={productCatalog[group.product_id]}
             primaryColor={workspace.primary_color}
+            subscribing={subscribing}
             onAllocationChange={(allocation) => applyGroupChange(group.product_id, allocation)}
             onSwap={(targetProductId) => swapLinkedProduct(group.product_id, targetProductId)}
           />
@@ -471,12 +479,14 @@ function ProductWorksheetCard({
   group,
   catalog,
   primaryColor,
+  subscribing,
   onAllocationChange,
   onSwap,
 }: {
   group: GroupedProduct;
   catalog: ProductCatalogEntry | undefined;
   primaryColor: string;
+  subscribing: boolean;
   onAllocationChange: (allocation: Record<string, number>) => void;
   onSwap: (targetProductId: string) => void;
 }) {
@@ -605,12 +615,14 @@ function ProductWorksheetCard({
         </div>
       )}
 
-      {/* Quantity pills */}
+      {/* Quantity pills — show tier discount + free-gift indicator */}
       <div className="border-b border-zinc-100 px-4 py-4 sm:px-5">
         <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">How many?</p>
         <div className="mt-2 flex gap-2">
           {[1, 2, 3].map((q) => {
             const selected = totalQty === q;
+            const discountPct = discountPctForQty(catalog.pricing_rule, q);
+            const giftUnlocked = giftAppliesAtQty(catalog.pricing_rule, q, subscribing);
             return (
               <button
                 key={q}
@@ -620,14 +632,68 @@ function ProductWorksheetCard({
                   backgroundColor: selected ? primaryColor : undefined,
                   borderColor: selected ? primaryColor : undefined,
                 }}
-                className={`flex-1 rounded-2xl border-2 px-4 py-3 text-center text-base font-bold transition ${selected ? "text-white" : "border-zinc-200 text-zinc-700 hover:border-zinc-300"}`}
+                className={`relative flex-1 rounded-2xl border-2 px-3 py-3 text-center transition ${selected ? "text-white" : "border-zinc-200 text-zinc-700 hover:border-zinc-300"}`}
               >
-                {q} Pack
+                <div className="text-base font-bold leading-tight">{q} Pack</div>
+                {discountPct > 0 && (
+                  <div
+                    className={`mt-0.5 text-[11px] font-semibold ${selected ? "text-white/90" : "text-emerald-700"}`}
+                  >
+                    {discountPct}% OFF
+                  </div>
+                )}
+                {giftUnlocked && (
+                  <div
+                    className={`mt-0.5 text-[10px] font-semibold uppercase tracking-wide ${selected ? "text-white/90" : "text-amber-700"}`}
+                  >
+                    + Free Gift
+                  </div>
+                )}
               </button>
             );
           })}
         </div>
       </div>
+
+      {/* Free gift unlocked card — shows the actual gift image + value */}
+      {(() => {
+        const giftActive = giftAppliesAtQty(catalog.pricing_rule, totalQty, subscribing);
+        const rule = catalog.pricing_rule;
+        if (!giftActive || !rule || !rule.free_gift_product_title) return null;
+        const valueLabel = rule.free_gift_price_cents
+          ? `$${(rule.free_gift_price_cents / 100).toFixed(2)} value, yours free`
+          : "Yours free with this order";
+        return (
+          <div className="border-b border-zinc-100 px-4 py-4 sm:px-5">
+            <div
+              className="flex items-center gap-3 rounded-2xl border-2 border-amber-200 bg-amber-50 p-3"
+              style={{ borderStyle: "dashed" }}
+            >
+              {rule.free_gift_image_url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={rule.free_gift_image_url}
+                  alt={rule.free_gift_product_title}
+                  className="h-14 w-14 flex-shrink-0 rounded-xl object-cover"
+                />
+              ) : (
+                <div className="flex h-14 w-14 flex-shrink-0 items-center justify-center rounded-xl bg-amber-100 text-2xl">
+                  🎁
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-amber-700">
+                  Unlocked at {totalQty} Pack
+                </div>
+                <div className="truncate text-sm font-bold text-zinc-900">
+                  {prettyVariantTitle(rule.free_gift_product_title)}
+                </div>
+                <div className="text-xs font-semibold text-emerald-700">{valueLabel}</div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Variant picker / allocation */}
       {hasVariants && (
@@ -659,6 +725,33 @@ function ProductWorksheetCard({
     </section>
   );
 }
+
+// ── Pricing-rule helpers ──────────────────────────────────────────
+
+function discountPctForQty(
+  rule: ProductCatalogEntry["pricing_rule"] | null,
+  qty: number,
+): number {
+  if (!rule || !rule.quantity_breaks?.length) return 0;
+  // quantity_breaks are typically [{quantity:1,discount_pct:0}, {quantity:2,discount_pct:8}, ...].
+  // Pick the break that matches exactly; fall back to the highest break <= qty.
+  const exact = rule.quantity_breaks.find((b) => b.quantity === qty);
+  if (exact) return exact.discount_pct || 0;
+  const sorted = [...rule.quantity_breaks].sort((a, b) => b.quantity - a.quantity);
+  const fallback = sorted.find((b) => b.quantity <= qty);
+  return fallback?.discount_pct || 0;
+}
+
+function giftAppliesAtQty(
+  rule: ProductCatalogEntry["pricing_rule"] | null,
+  qty: number,
+  subscribing: boolean,
+): boolean {
+  if (!rule || !rule.free_gift_variant_id) return false;
+  if (rule.free_gift_subscription_only && !subscribing) return false;
+  return qty >= (rule.free_gift_min_quantity || 1);
+}
+
 
 // ── Subcomponents ──────────────────────────────────────────────────
 
