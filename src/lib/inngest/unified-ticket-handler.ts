@@ -668,14 +668,20 @@ export const unifiedTicketHandler = inngest.createFunction(
       }
     }
 
-    // ── 1a. Auto-merge: combine ALL recent open/pending tickets from
-    // the same customer (or linked accounts) into this new one. The
-    // previous LLM-driven topic-matching was too conservative — two
-    // tickets about the same Mixed Berry order with slightly different
-    // subjects wouldn't merge. The simpler rule:
-    //   Same customer (or linked) + status open|pending + last 14 days
+    // ── 1a. Auto-merge: combine ALL recent tickets from the same
+    // customer (or linked accounts) into this new one. The previous
+    // LLM-driven topic-matching was too conservative — two tickets
+    // about the same Mixed Berry order with slightly different subjects
+    // wouldn't merge. The simpler rule:
+    //   Same customer (or linked) + status open|pending|closed + last 14 days
     //   + not system-initiated (crisis email, do_not_reply, test)
     //   → merge them all.
+    // We include "closed" because the AI auto-closes after every turn
+    // (per the auto-resolve rule), which means almost every prior ticket
+    // is closed when a new email arrives — limiting to open/pending
+    // skipped almost all merge candidates. mergeTickets() archives the
+    // sources and reopens the target if it was closed, so semantics are
+    // safe (Yolanda, Joseph, Barbara all had this regression).
     // Risk: customer with multiple unrelated topics gets one mega-thread.
     // Mitigation: trust the orchestrator + agents to handle the drift
     // (they already deal with multi-topic threads from real conversations).
@@ -686,7 +692,7 @@ export const unifiedTicketHandler = inngest.createFunction(
           .eq("workspace_id", wsId)
           .eq("customer_id", st.custId!)
           .neq("id", tid)
-          .in("status", ["open", "pending"])
+          .in("status", ["open", "pending", "closed"])
           .is("merged_into", null)
           .order("created_at", { ascending: false })
           .limit(10);
@@ -701,7 +707,7 @@ export const unifiedTicketHandler = inngest.createFunction(
               .select("id, subject, status, created_at, customer_id, tags, merged_into")
               .eq("workspace_id", wsId)
               .in("customer_id", linked.map(l => l.customer_id))
-              .in("status", ["open", "pending"])
+              .in("status", ["open", "pending", "closed"])
               .is("merged_into", null)
               .order("created_at", { ascending: false })
               .limit(10);
