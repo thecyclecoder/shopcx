@@ -655,7 +655,38 @@ function ProductWorksheetCard({
         </div>
       </div>
 
-      {/* Free gift unlocked card — shows the actual gift image + value */}
+      {/* Variant picker / allocation */}
+      {hasVariants && (
+        <div className="border-b border-zinc-100 px-4 py-4 sm:px-5">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+            {totalQty === 1 ? "Pick your flavor" : `Pick your ${totalQty} flavors`}
+          </p>
+          {totalQty === 1 ? (
+            <FlavorChips
+              variants={variants}
+              selectedVariantId={topAllocatedVariantId(allocation)}
+              onPick={(vid) => setVariantQty(vid, { [vid]: 1 })}
+              primaryColor={primaryColor}
+            />
+          ) : (
+            <AllocationBars
+              variants={variants}
+              totalQty={totalQty}
+              allocation={allocation}
+              onChange={(next) => {
+                setAllocation(next);
+                onAllocationChange(next);
+              }}
+              primaryColor={primaryColor}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Free gift unlocked card — shows the actual gift image + value.
+          Sits below the flavor picker so customers finish their core
+          decisions first; the gift then reads as "here's what you
+          earned" rather than "here's another thing to think about". */}
       {(() => {
         const giftActive = giftAppliesAtQty(catalog.pricing_rule, totalQty, subscribing);
         const rule = catalog.pricing_rule;
@@ -664,7 +695,7 @@ function ProductWorksheetCard({
           ? `$${(rule.free_gift_price_cents / 100).toFixed(2)} value, yours free`
           : "Yours free with this order";
         return (
-          <div className="border-b border-zinc-100 px-4 py-4 sm:px-5">
+          <div className="px-4 py-4 sm:px-5">
             <div
               className="flex items-center gap-3 rounded-2xl border-2 border-amber-200 bg-amber-50 p-3"
               style={{ borderStyle: "dashed" }}
@@ -694,34 +725,6 @@ function ProductWorksheetCard({
           </div>
         );
       })()}
-
-      {/* Variant picker / allocation */}
-      {hasVariants && (
-        <div className="px-4 py-4 sm:px-5">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-            {totalQty === 1 ? "Pick your flavor" : `Pick your ${totalQty} flavors`}
-          </p>
-          {totalQty === 1 ? (
-            <FlavorChips
-              variants={variants}
-              selectedVariantId={topAllocatedVariantId(allocation)}
-              onPick={(vid) => setVariantQty(vid, { [vid]: 1 })}
-              primaryColor={primaryColor}
-            />
-          ) : (
-            <AllocationBars
-              variants={variants}
-              totalQty={totalQty}
-              allocation={allocation}
-              onChange={(next) => {
-                setAllocation(next);
-                onAllocationChange(next);
-              }}
-              primaryColor={primaryColor}
-            />
-          )}
-        </div>
-      )}
     </section>
   );
 }
@@ -994,15 +997,15 @@ function VariantSliderRow({
               />
             );
           })}
-          {/* Knob — positioned with knob-width inset math so it stays
-              fully inside the track at both extremes:
-                value=0   → left: 0  (knob flush at left edge)
-                value=N   → left: 100% - 22px (knob flush at right edge)
-              In between the knob's center tracks the fill end. */}
+          {/* Knob — right edge tracks the fill end, clamped to stay
+              inside the track. At our integer stops (0, 1/N, 2/N, …,
+              1) on a typical track width this lands cleanly so the
+              knob sits flush against the fill on the right and at
+              left:0 only when value=0 (fill invisible anyway). */}
           <div
             className="absolute top-1/2 -translate-y-1/2 rounded-full bg-white shadow-md transition-[left] duration-100 ease-out"
             style={{
-              left: `calc((100% - 22px) * ${fillPct / 100})`,
+              left: `max(0%, calc(${fillPct}% - 22px))`,
               width: 22,
               height: 22,
               border: `3px solid ${primaryColor}`,
