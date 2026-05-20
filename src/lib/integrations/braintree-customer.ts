@@ -147,6 +147,9 @@ export async function savePaymentMethod(input: PaymentMethodSaveInput): Promise<
 
   // Upsert by braintree_payment_method_token (UNIQUE) so re-running a
   // vault for the same card just refreshes its row instead of erroring.
+  // provider='braintree' stamps the row so dunning + renewal know to
+  // charge through Braintree, never Shopify (the token is meaningless
+  // to Shopify's gateway).
   const { data: row, error } = await admin
     .from("customer_payment_methods")
     .upsert(
@@ -155,6 +158,7 @@ export async function savePaymentMethod(input: PaymentMethodSaveInput): Promise<
         customer_id: input.customerId,
         braintree_customer_id: input.braintreeCustomerId,
         braintree_payment_method_token: input.braintreePaymentMethodToken,
+        provider: "braintree",
         payment_type: input.paymentType,
         card_brand: input.cardBrand || null,
         last4: input.last4 || null,

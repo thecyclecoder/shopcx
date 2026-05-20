@@ -68,6 +68,7 @@ interface StoredLineItem {
   variant_id: string;
   product_id: string;
   shopify_variant_id: string | null;
+  sku: string | null;              // Amplifier needs this to fulfill
   title: string;
   variant_title: string | null;
   image_url: string | null;
@@ -179,6 +180,7 @@ export async function POST(request: NextRequest) {
       variant_id: variant.id,
       product_id: variant.product_id,
       shopify_variant_id: variant.shopify_variant_id,
+      sku: variant.sku || null,
       title: product?.title || "Item",
       variant_title: variant.title || null,
       image_url: variant.image_url,

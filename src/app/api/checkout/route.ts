@@ -51,6 +51,7 @@ import { createAmplifierOrder } from "@/lib/integrations/amplifier";
 import { generateOrderNumber } from "@/lib/order-number";
 import { resolveRateForCart } from "@/lib/shipping-rates";
 import { readVisitorContext, stitchVisitor } from "@/lib/identity-stitch";
+import { checkOrderForFraud } from "@/lib/fraud-detector";
 import crypto from "crypto";
 
 interface AddressInput {
@@ -108,6 +109,7 @@ export async function POST(request: NextRequest) {
     variant_id: string;
     product_id: string;
     shopify_variant_id: string | null;
+    sku?: string | null;
     title: string;
     variant_title: string | null;
     image_url: string | null;
@@ -117,6 +119,7 @@ export async function POST(request: NextRequest) {
     line_total_cents: number;
     mode: "subscribe" | "onetime";
     frequency_days: number | null;
+    is_gift?: boolean;
   };
   const lines = cart.line_items as Line[];
   const subtotalCents = lines.reduce((s, l) => s + l.line_total_cents, 0);
@@ -363,7 +366,13 @@ export async function POST(request: NextRequest) {
     const nextBillingDate = new Date();
     nextBillingDate.setDate(nextBillingDate.getDate() + bucket.frequency_days);
     const contractId = `internal-${crypto.randomBytes(8).toString("hex")}`;
-    const { data: sub } = await admin
+    // delivery_price_cents = the shipping cost portion of the recurring
+    // charge. For subscriptions we currently default to free economy
+    // shipping; expedited would carry a non-zero value here on the
+    // recurring renewal too. The subscription's recurring total is the
+    // implicit sum of items[].price_cents * quantity + delivery_price_cents.
+    const subDeliveryCents = bucket.items.some((i) => i.mode === "subscribe") ? 0 : shippingCents;
+    const { data: sub, error: subErr } = await admin
       .from("subscriptions")
       .insert({
         workspace_id: cart.workspace_id,
@@ -384,15 +393,23 @@ export async function POST(request: NextRequest) {
           quantity: i.quantity,
           price_cents: i.unit_price_cents,
           sku: undefined,
+          is_gift: !!i.is_gift,
         })),
-        total_price_cents: bucket.items.reduce((s, i) => s + i.line_total_cents, 0),
+        delivery_price_cents: subDeliveryCents,
         applied_discounts: [],
         is_internal: true,
         shipping_protection_added: protectionAdded,
         shipping_protection_amount_cents: protectionAdded ? protectionCents : null,
+        shipping_method_code: shippingMethodCode,
+        shipping_rate_id: shippingRateId,
       })
       .select("id")
       .single();
+    if (subErr) {
+      // Don't swallow — the user's order succeeded but the recurring
+      // record didn't. Log loudly so we notice in Vercel + can replay.
+      console.error(`[checkout] subscription insert failed for cart ${cart.token}:`, subErr);
+    }
     if (sub?.id) {
       createdSubscriptionIds.push(sub.id as string);
       if (!primarySubscriptionId) primarySubscriptionId = sub.id as string;
@@ -476,45 +493,90 @@ export async function POST(request: NextRequest) {
     await admin.from("transactions").update({ order_id: order.id }).eq("id", transactionRecordId);
   }
 
-  // ── 8. Hand off to Amplifier for fulfillment. ────────────────────
-  // Non-fatal — if Amplifier fails we still mark the order paid and
-  // log the error so an operator can re-queue it. The user's policy:
-  // copy whichever address we have into both billing + shipping.
+  // ── 8. Post-payment fraud check. ─────────────────────────────────
+  // Runs the full rule engine (shared_address, high_velocity, address
+  // distance, name mismatch, amazon_reseller w/ fuzzy match) against
+  // the order row. Once Amplifier is fired the order is essentially
+  // un-cancellable at the 3PL, so this gate is non-negotiable — if
+  // ANY rule fires we hold and let ops review.
+  let fraudHeld = false;
   try {
-    const amplifierRes = await createAmplifierOrder({
-      workspaceId: cart.workspace_id,
-      orderNumber,
-      orderDate: new Date().toISOString(),
-      shippingAddress: ship,
-      billingAddress: bill,
-      email,
-      phone: body.phone || ship.phone || null,
-      lineItems: lines.map((l) => ({
-        sku: undefined, // line_items as stored don't carry sku; renewal flow does
-        title: l.title,
-        description: l.variant_title ? `${l.title} — ${l.variant_title}` : l.title,
-        quantity: l.quantity,
-        unit_price_cents: l.unit_price_cents,
-        reference_id: l.variant_id,
-      })),
-      totalCents,
-      subtotalCents,
-      shippingCents,
-      taxCents,
-    });
-    if (amplifierRes.success && amplifierRes.amplifier_order_id) {
+    await checkOrderForFraud(cart.workspace_id, order.id, customer.id);
+    const { data: openCases } = await admin
+      .from("fraud_cases")
+      .select("id, rule_type, severity")
+      .eq("workspace_id", cart.workspace_id)
+      .eq("order_id", order.id)
+      .neq("status", "dismissed");
+    if (openCases && openCases.length > 0) {
+      fraudHeld = true;
+      const ruleTypes = openCases.map((c) => c.rule_type).join(", ");
+      console.warn(`[checkout] order ${order.order_number} held post-payment: ${ruleTypes}`);
       await admin
         .from("orders")
-        .update({
-          amplifier_order_id: amplifierRes.amplifier_order_id,
-          amplifier_received_at: new Date().toISOString(),
-        })
+        .update({ tags: [...((order as { tags?: string[] }).tags || []), "fraud_hold"] })
         .eq("id", order.id);
-    } else {
-      console.warn(`[checkout] Amplifier order create failed for ${orderNumber}:`, amplifierRes.error, amplifierRes.details);
+      await admin.from("dashboard_notifications").insert({
+        workspace_id: cart.workspace_id,
+        type: "fraud_alert",
+        title: `${order.order_number} held — fraud review required`,
+        message: `Order paid via Braintree but NOT released to fulfillment. Rules fired: ${ruleTypes}. Review the fraud case before clearing.`,
+      }).then(() => undefined, () => undefined);
     }
   } catch (err) {
-    console.warn(`[checkout] Amplifier order create threw for ${orderNumber}:`, err);
+    // Don't bail the entire request — order is paid + saved. Log so
+    // an operator can re-run the fraud check.
+    console.warn(`[checkout] post-payment fraud check threw for ${orderNumber}:`, err);
+  }
+
+  // ── 9. Hand off to Amplifier for fulfillment. ────────────────────
+  // Once Amplifier ingests the order it goes to the warehouse pick
+  // queue almost immediately and cancelling becomes "ask the 3PL
+  // nicely and hope" — so we ONLY fire when the fraud gate above
+  // didn't hold the order.
+  if (fraudHeld) {
+    console.warn(`[checkout] skipping Amplifier for ${orderNumber} — fraud hold in place`);
+  } else {
+    try {
+      const amplifierRes = await createAmplifierOrder({
+        workspaceId: cart.workspace_id,
+        orderNumber,
+        orderDate: new Date().toISOString(),
+        shippingAddress: ship,
+        billingAddress: bill,
+        email,
+        phone: body.phone || ship.phone || null,
+        // Skip lines without SKUs (gifts have none today) — Amplifier
+        // doesn't need them and the helper errors out on missing skus.
+        lineItems: lines
+          .filter((l) => !l.is_gift && l.sku)
+          .map((l) => ({
+            sku: l.sku!,
+            title: l.title,
+            description: l.variant_title ? `${l.title} — ${l.variant_title}` : l.title,
+            quantity: l.quantity,
+            unit_price_cents: l.unit_price_cents,
+            reference_id: l.variant_id,
+          })),
+        totalCents,
+        subtotalCents,
+        shippingCents,
+        taxCents,
+      });
+      if (amplifierRes.success && amplifierRes.amplifier_order_id) {
+        await admin
+          .from("orders")
+          .update({
+            amplifier_order_id: amplifierRes.amplifier_order_id,
+            amplifier_received_at: new Date().toISOString(),
+          })
+          .eq("id", order.id);
+      } else {
+        console.warn(`[checkout] Amplifier order create failed for ${orderNumber}:`, amplifierRes.error, amplifierRes.details);
+      }
+    } catch (err) {
+      console.warn(`[checkout] Amplifier order create threw for ${orderNumber}:`, err);
+    }
   }
 
   // ── 9. Mark cart converted. ──────────────────────────────────────

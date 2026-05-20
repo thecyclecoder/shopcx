@@ -14,6 +14,7 @@ export interface CartLineLike {
   variant_id: string;
   product_id: string;
   shopify_variant_id: string | null;
+  sku?: string | null;
   title: string;
   variant_title: string | null;
   image_url: string | null;
@@ -121,6 +122,7 @@ export async function ensureFreeGifts(
       variant_id: giftVariant.id,
       product_id: giftVariant.product_id,
       shopify_variant_id: giftVariant.shopify_variant_id,
+      sku: giftVariant.sku || null,
       title: rule.free_gift_product_title || giftProduct?.title || "Free gift",
       variant_title: giftVariant.title || null,
       image_url: giftImage,
