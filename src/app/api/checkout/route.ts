@@ -1,17 +1,26 @@
 /**
  * POST /api/checkout
  *
- * The one-shot endpoint that turns a cart_draft into a paid order:
+ * The one-shot endpoint that turns a cart_draft into a paid order.
+ * Vault-first ordering: the card is in our payment_methods table
+ * BEFORE we ever attempt the charge, so a mid-flight transaction
+ * failure leaves us with a usable card to retry against (no
+ * "customer re-enters card data after a network blip").
  *
  *   1. Resolve + validate the cart by token
  *   2. Recompute pricing (server is the price authority — client never
  *      tells us what to charge)
  *   3. Resolve or create the customer record
- *   4. Charge via Braintree:
- *        - transaction.sale with the payment_method_nonce
- *        - storeInVaultOnSuccess: true so we get a paymentMethodToken
- *          back for future subscription renewals
- *   5. Insert the order row, mark the cart converted, return the
+ *   4. Resolve the Braintree customer id (local → BT search by email
+ *      → create — see lib/integrations/braintree-customer.ts)
+ *   5. Vault the card: paymentMethod.create(nonce, verifyCard=true).
+ *      Persist customer_payment_methods row with type / brand / last4 /
+ *      expiry / token. This row exists BEFORE the charge.
+ *   6. Charge: transaction.sale({ paymentMethodToken }) — the
+ *      already-vaulted token, not the original nonce. If this fails
+ *      we surface the error; the card is still in our DB and the
+ *      customer can retry.
+ *   7. Insert the order row, mark the cart converted, return the
  *      order id so the client can redirect to /thank-you.
  *
  * Shipping/tax for now:
@@ -33,6 +42,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getBraintreeGateway } from "@/lib/integrations/braintree";
+import {
+  resolveBraintreeCustomerId,
+  vaultPaymentMethod,
+  savePaymentMethod,
+} from "@/lib/integrations/braintree-customer";
 
 const ESTIMATED_SHIPPING_PER_ITEM_CENTS = 495;
 
@@ -138,9 +152,65 @@ export async function POST(request: NextRequest) {
     customer = created;
   }
 
-  // 3. Charge via Braintree. paymentMethodNonce is single-use; pairing
-  //    with storeInVaultOnSuccess returns a paymentMethodToken we keep
-  //    for subscription renewals.
+  // 3. Resolve the Braintree customer id (local → BT search → create)
+  //    BEFORE we touch the card so the new card attaches to a stable
+  //    BT customer record we'll reuse on the next checkout / renewal.
+  let braintreeCustomerId: string;
+  try {
+    braintreeCustomerId = await resolveBraintreeCustomerId({
+      workspaceId: cart.workspace_id,
+      customerId: customer.id,
+      email,
+      firstName: ship.first_name || customer.first_name,
+      lastName: ship.last_name || customer.last_name,
+      phone: body.phone || ship.phone,
+    });
+  } catch (err) {
+    return NextResponse.json(
+      { error: "braintree_customer_resolve_failed", details: err instanceof Error ? err.message : String(err) },
+      { status: 500 },
+    );
+  }
+
+  // 4. Vault FIRST — gateway.paymentMethod.create({ nonce, verifyCard }).
+  //    Card lives in our DB before we attempt the charge so a mid-flight
+  //    failure doesn't lose it. paymentMethod.create's verifyCard option
+  //    runs a $0 / $1 auth check, which means an invalid card surfaces
+  //    here instead of inside the transaction.sale call.
+  let vaulted;
+  try {
+    vaulted = await vaultPaymentMethod(
+      cart.workspace_id,
+      braintreeCustomerId,
+      body.payment_method_nonce,
+      body.device_data,
+    );
+  } catch (err) {
+    return NextResponse.json(
+      { error: "card_verification_failed", details: err instanceof Error ? err.message : String(err) },
+      { status: 402 },
+    );
+  }
+
+  // Persist the payment method. is_default=true via savePaymentMethod
+  // semantics (the newest vault wins) — customer/admin can flip later.
+  await savePaymentMethod({
+    workspaceId: cart.workspace_id,
+    customerId: customer.id,
+    braintreeCustomerId,
+    braintreePaymentMethodToken: vaulted.token,
+    paymentType: vaulted.paymentType,
+    cardBrand: vaulted.cardBrand,
+    last4: vaulted.last4,
+    expirationMonth: vaulted.expirationMonth,
+    expirationYear: vaulted.expirationYear,
+    cartToken: cart.token,
+    makeDefault: true,
+  });
+
+  // 5. Charge against the vaulted token (NOT the nonce — that's now
+  //    consumed). If the sale fails the card stays vaulted; the customer
+  //    can retry with the same payment method.
   let gateway;
   try {
     gateway = await getBraintreeGateway(cart.workspace_id);
@@ -154,14 +224,9 @@ export async function POST(request: NextRequest) {
   const amountDecimal = (totalCents / 100).toFixed(2);
   const txnInput = {
     amount: amountDecimal,
-    paymentMethodNonce: body.payment_method_nonce,
+    paymentMethodToken: vaulted.token,
+    customerId: braintreeCustomerId,
     deviceData: body.device_data,
-    customer: {
-      firstName: ship.first_name || customer.first_name || "",
-      lastName: ship.last_name || customer.last_name || "",
-      email,
-      phone: body.phone || ship.phone || undefined,
-    },
     billing: {
       firstName: bill.first_name || ship.first_name || "",
       lastName: bill.last_name || ship.last_name || "",
@@ -184,7 +249,6 @@ export async function POST(request: NextRequest) {
     },
     options: {
       submitForSettlement: true,
-      storeInVaultOnSuccess: true,
     },
   };
 
@@ -194,15 +258,16 @@ export async function POST(request: NextRequest) {
       txnResult.message ||
       (txnResult as { transaction?: { processorResponseText?: string } }).transaction?.processorResponseText ||
       "Braintree transaction failed";
-    return NextResponse.json({ error: "transaction_failed", details: message }, { status: 402 });
+    return NextResponse.json({
+      error: "transaction_failed",
+      details: message,
+      // Card stays vaulted; surface the token so a retry can reuse it.
+      braintree_payment_method_token: vaulted.token,
+      braintree_customer_id: braintreeCustomerId,
+    }, { status: 402 });
   }
   const transaction = txnResult.transaction;
-  const paymentMethodToken: string | null =
-    (transaction as unknown as { creditCard?: { token?: string } }).creditCard?.token ||
-    (transaction as unknown as { paymentInstrumentType?: string; paymentMethodToken?: string }).paymentMethodToken ||
-    null;
-  const braintreeCustomerId: string | null =
-    (transaction as unknown as { customer?: { id?: string } }).customer?.id || null;
+  const paymentMethodToken: string = vaulted.token;
 
   // 4. Insert the order row + mark cart converted.
   const orderNumber = `SX${Date.now().toString().slice(-8)}`;
