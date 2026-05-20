@@ -215,6 +215,7 @@ export default function TicketDetailPage() {
   // Composer state
   const [replyBody, setReplyBody] = useState("");
   const [replyMode, setReplyMode] = useState<"external" | "internal">("external");
+  const [pinForAi, setPinForAi] = useState(false);
   const [sending, setSending] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"messages" | "timeline" | "history" | "improve" | "api_logs">("messages");
@@ -767,6 +768,7 @@ export default function TicketDetailPage() {
         body: JSON.stringify({
           body,
           visibility: replyMode,
+          is_ai_guidance: replyMode === "internal" ? pinForAi : false,
         }),
       });
       if (res.ok) {
@@ -777,6 +779,7 @@ export default function TicketDetailPage() {
           : data.message;
         setMessages((prev) => [...prev, msg]);
         setReplyBody("");
+        setPinForAi(false);
         if (editorRef.current) editorRef.current.innerHTML = "";
         setEditorFocused(false);
 
@@ -2181,6 +2184,20 @@ export default function TicketDetailPage() {
                         className="h-3 w-3 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
                       />
                       Close with reply
+                    </label>
+                  )}
+                  {replyMode === "internal" && (
+                    <label
+                      className="flex items-center gap-1.5 text-sm text-zinc-500"
+                      title="Adds this note to the AI agent's context on every future turn."
+                    >
+                      <input
+                        type="checkbox"
+                        checked={pinForAi}
+                        onChange={(e) => setPinForAi(e.target.checked)}
+                        className="h-3 w-3 rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                      />
+                      Pin for AI
                     </label>
                   )}
                   <button

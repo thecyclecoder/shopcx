@@ -302,6 +302,26 @@ export async function analyzeTicket(
     .lte("created_at", windowEnd)
     .order("created_at", { ascending: true });
 
+  // Agent-pinned AI guidance — always pulled regardless of window so
+  // a guidance note pinned long before the analysis window still
+  // governs the grader's expectations (e.g. "stand firm on this
+  // policy — do not escalate even if customer pushes back").
+  const { data: guidanceRaw } = await admin.from("ticket_messages")
+    .select("body, body_clean, created_at")
+    .eq("ticket_id", ticketId)
+    .eq("is_ai_guidance", true)
+    .order("created_at", { ascending: true });
+  const guidanceBlock = (guidanceRaw || [])
+    .map((g: { body?: string; body_clean?: string }) =>
+      `- ${((g.body_clean || g.body || "")
+        .replace(/<[^>]*>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 2000))}`,
+    )
+    .filter((s) => s.length > 2)
+    .join("\n");
+
   // Strip out our own holding-message replies. The auto-analyzer inserts
   // a "we're taking another look" message tagged with an HTML sentinel
   // when it re-opens a ticket — grading that as if it were an AI turn
@@ -329,7 +349,7 @@ export async function analyzeTicket(
   // first step of the refund playbook by design.
   const playbookContext = await buildPlaybookContextForGrader(admin, ticket);
 
-  const userMsg = `Grade this conversation window. The window covers ${windowStart} → ${windowEnd}.${playbookContext ? `\n\n--- PLAYBOOK CONTEXT ---\n${playbookContext}` : ""}\n\n--- CONVERSATION ---\n${conversation}\n\nReturn the JSON only.`;
+  const userMsg = `Grade this conversation window. The window covers ${windowStart} → ${windowEnd}.${guidanceBlock ? `\n\n--- AGENT GUIDANCE (binding directives from a human agent for this ticket — the AI was expected to follow these; grade with these as the ground truth, not your default judgment) ---\n${guidanceBlock}` : ""}${playbookContext ? `\n\n--- PLAYBOOK CONTEXT ---\n${playbookContext}` : ""}\n\n--- CONVERSATION ---\n${conversation}\n\nReturn the JSON only.`;
 
   // Call Sonnet
   const res = await fetch("https://api.anthropic.com/v1/messages", {

@@ -154,13 +154,16 @@ export const HostedFieldsCard = forwardRef<HostedFieldsCardHandle, Props>(functi
               container: numberRef.current,
               placeholder: "1234 5678 9012 3456",
               type: "tel",
-              // formatInput:true → brand-aware spacing (4-4-4-4 for
-              // Visa/MC/Discover, 4-6-5 for Amex). The 3.141 SDK
-              // handles autofill paste correctly; on older versions
-              // the formatter raced against rapid paste events and
-              // dropped digits, which is why we'd previously disabled
-              // this. With the bump, both autofill and spacing work.
-              formatInput: true,
+              // formatInput:false. We re-tried true with the 3.141 SDK
+              // bump but autofill still drops digits — the formatter
+              // races with the browser pasting characters in bursts.
+              // CSS letter-spacing was floated as an alternative but
+              // can only do uniform spacing, not 4-4-4-4 grouping
+              // (you can't inject content between specific positions
+              // inside an <input>). Autofill reliability > in-iframe
+              // spacing; the card-art visualization above still gives
+              // the visual delight (brand logo, focus glow, validity ✓).
+              formatInput: false,
             },
             expirationDate: {
               container: expRef.current,

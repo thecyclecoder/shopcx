@@ -173,6 +173,7 @@ async function buildPreContext(
     { data: customer },
     { data: ticket },
     { data: messages },
+    { data: guidanceNotes },
     { data: journeys },
     { data: playbooks },
     { data: workflows },
@@ -184,10 +185,18 @@ async function buildPreContext(
       : Promise.resolve({ data: null }),
     admin.from("tickets").select("tags, active_playbook_id, page_context, subject, detected_language").eq("id", ticketId).single(),
     admin.from("ticket_messages")
-      .select("direction, body_clean, body, visibility, author_type")
+      .select("direction, body_clean, body, visibility, author_type, is_ai_guidance, created_at")
       .eq("ticket_id", ticketId)
       .order("created_at", { ascending: false })
       .limit(12),
+    // Agent-pinned AI guidance notes. Fetched separately so they're
+    // always included even if they fall outside the 12-message window
+    // (a long thread can push guidance out of context otherwise).
+    admin.from("ticket_messages")
+      .select("body, body_clean, created_at, author_id")
+      .eq("ticket_id", ticketId)
+      .eq("is_ai_guidance", true)
+      .order("created_at", { ascending: true }),
     admin.from("journey_definitions")
       .select("name, trigger_intent, description")
       .eq("workspace_id", workspaceId).eq("is_active", true),
@@ -258,6 +267,25 @@ async function buildPreContext(
       .join("\n");
   }
 
+  // Agent-pinned AI guidance — chronological. Rendered as a separate
+  // top-level block so Sonnet treats them as binding rules for THIS
+  // ticket, not just chat history. Agents use these to encode policy
+  // calls the AI can't infer (e.g. "stand firm — do not escalate even
+  // if customer repeats").
+  let guidanceBlock = "";
+  if (Array.isArray(guidanceNotes) && guidanceNotes.length > 0) {
+    guidanceBlock = guidanceNotes
+      .map((g: { body?: string; body_clean?: string }) =>
+        `- ${((g.body_clean || g.body || "")
+          .replace(/<[^>]*>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 2000))}`,
+      )
+      .filter((s) => s.length > 2)
+      .join("\n");
+  }
+
   // Handler names
   const journeyLines = (journeys || [])
     .filter((j: { trigger_intent?: string }) => !j.trigger_intent?.startsWith("crisis_"))
@@ -304,7 +332,10 @@ TICKET TAGS: ${tags}${activePlaybookNote}${(() => {
 })()}${agentContext?.assigned ? `
 AGENT CONTEXT: This ticket has been handled by a human agent. You should still respond to the customer, but limit your scope: handle positive closures (thank you, goodbye → close ticket with warm response), and for new requests say "We're reviewing your ticket and an agent will be back with you shortly!" Do NOT take direct actions or provide detailed information — just acknowledge and hold.` : ""}
 
-CONVERSATION:
+${guidanceBlock ? `AGENT GUIDANCE (binding for this ticket — written by a human agent who knows context the system doesn't. Follow these even if they conflict with default reasoning):
+${guidanceBlock}
+
+` : ""}CONVERSATION:
 ${convoBlock || `Customer: ${message.slice(0, 300)}`}
 
 AVAILABLE HANDLERS (interactive flows you can route customers to — you select them, the system builds the form):

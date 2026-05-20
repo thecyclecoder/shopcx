@@ -23,7 +23,7 @@ export async function POST(
 
   const admin = createAdminClient();
   const body = await request.json();
-  const { body: messageBody, visibility = "external" } = body;
+  const { body: messageBody, visibility = "external", is_ai_guidance = false } = body;
 
   if (!messageBody?.trim()) {
     return NextResponse.json({ error: "Message body is required" }, { status: 400 });
@@ -52,6 +52,10 @@ export async function POST(
     author_type: "agent",
     author_id: user.id,
     body: messageBody,
+    // AI guidance only applies to internal notes — silently ignore the
+    // flag on external replies so a misconfigured client can't flag a
+    // customer-visible reply as guidance.
+    is_ai_guidance: visibility === "internal" ? !!is_ai_guidance : false,
   };
 
   // Send reply via appropriate channel
