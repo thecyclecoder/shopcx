@@ -80,6 +80,29 @@ export async function applyDiscountWithReplace(
   discountCode: string,
 ): Promise<{ success: boolean; removed: string[]; error?: string; status?: number }> {
   const { logAppstleCall } = await import("@/lib/appstle-call-log");
+  // Internal sub fast path — skip Appstle entirely. We look up the
+  // workspace from the contract since this helper takes apiKey, not
+  // workspaceId. Mirrors the "remove existing then apply new" semantics
+  // via applied_discounts JSONB mutations.
+  {
+    const admin = createAdminClient();
+    const { data: sub } = await admin
+      .from("subscriptions")
+      .select("workspace_id, is_internal")
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    if (sub?.is_internal && sub.workspace_id) {
+      const { internalSubApplyDiscount } = await import("@/lib/internal-subscription");
+      // Clear existing discounts first (idempotent if none) then add.
+      await admin
+        .from("subscriptions")
+        .update({ applied_discounts: [], updated_at: new Date().toISOString() })
+        .eq("shopify_contract_id", contractId);
+      const r = await internalSubApplyDiscount(sub.workspace_id, contractId, discountCode);
+      return { success: r.success, removed: [], error: r.error };
+    }
+  }
+
   // Step 1: Remove existing discounts
   const { removed } = await removeExistingDiscounts(apiKey, contractId);
 

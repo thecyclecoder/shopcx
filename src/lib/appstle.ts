@@ -1,6 +1,14 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { loggedAppstleFetch } from "@/lib/appstle-call-log";
+import {
+  isInternalSubscription,
+  internalSubscriptionAction,
+  internalSubSkipNextOrder,
+  internalSubUpdateBillingInterval,
+  internalSubUpdateNextBillingDate,
+  internalSubNotYetSupported,
+} from "@/lib/internal-subscription";
 
 async function getAppstleCredentials(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
   const admin = createAdminClient();
@@ -27,6 +35,11 @@ export async function appstleSubscriptionAction(
   cancelReason?: string,
   cancelledBy?: string,
 ): Promise<{ success: boolean; error?: string }> {
+  // Internal subscriptions never touch Appstle — DB updates only.
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    return internalSubscriptionAction(workspaceId, contractId, action);
+  }
+
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -99,6 +112,9 @@ export async function appstleSkipNextOrder(
   workspaceId: string,
   contractId: string,
 ): Promise<{ success: boolean; error?: string }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    return internalSubSkipNextOrder(workspaceId, contractId);
+  }
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -127,6 +143,9 @@ export async function appstleUpdateBillingInterval(
   interval: "DAY" | "WEEK" | "MONTH" | "YEAR",
   intervalCount: number,
 ): Promise<{ success: boolean; error?: string }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    return internalSubUpdateBillingInterval(workspaceId, contractId, interval, intervalCount);
+  }
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -200,6 +219,9 @@ export async function appstleUpdateNextBillingDate(
   contractId: string,
   nextBillingDate: string, // YYYY-MM-DD or full ISO datetime
 ): Promise<{ success: boolean; error?: string }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    return internalSubUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
+  }
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -235,6 +257,23 @@ export async function appstleGetUpcomingOrders(
   workspaceId: string,
   contractId: string,
 ): Promise<{ success: boolean; orders?: { id: string; billingDate: string; status: string }[]; error?: string }> {
+  // Internal subs don't have a separate upcoming-orders ledger;
+  // next_billing_date on the subscription row IS the upcoming order.
+  // Synthesize a single-item list so the existing UI works unchanged.
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    const admin = createAdminClient();
+    const { data: sub } = await admin
+      .from("subscriptions")
+      .select("next_billing_date, status")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    if (!sub?.next_billing_date) return { success: true, orders: [] };
+    return {
+      success: true,
+      orders: [{ id: `internal-${contractId}`, billingDate: sub.next_billing_date, status: sub.status || "active" }],
+    };
+  }
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -341,6 +380,35 @@ export async function appstleSwitchPaymentMethod(
   contractId: string,
   paymentMethodId: string,
 ): Promise<{ success: boolean; error?: string }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    // Internal flow: the "paymentMethodId" passed in IS our
+    // braintree_payment_method_token (callers will be updated to pass
+    // it). Mark it as the customer's default active method so the
+    // next renewal picks it up.
+    const admin = createAdminClient();
+    const { data: sub } = await admin
+      .from("subscriptions")
+      .select("customer_id")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    if (!sub?.customer_id) return { success: false, error: "Internal subscription not found" };
+    // Demote the old default, promote the new token.
+    await admin
+      .from("customer_payment_methods")
+      .update({ is_default: false, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", sub.customer_id)
+      .eq("is_default", true);
+    const { error } = await admin
+      .from("customer_payment_methods")
+      .update({ is_default: true, status: "active", updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", sub.customer_id)
+      .eq("braintree_payment_method_token", paymentMethodId);
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  }
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -370,6 +438,12 @@ export async function appstleSendPaymentUpdateEmail(
   workspaceId: string,
   contractId: string,
 ): Promise<{ success: boolean; error?: string }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    // Internal subs don't piggyback on Appstle's payment-update email
+    // pipeline. Our own card-update flow will live elsewhere — return
+    // a clear "not yet" instead of pretending to send.
+    return internalSubNotYetSupported("send_payment_update_email");
+  }
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -398,6 +472,27 @@ export async function appstleAddFreeProduct(
   variantId: string,
   quantity: number = 1,
 ): Promise<{ success: boolean; error?: string }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    // Same DB shape as add_item, just with price_cents = 0.
+    const { internalSubAddItem } = await import("@/lib/internal-subscription");
+    const r = await internalSubAddItem(workspaceId, contractId, variantId, quantity);
+    if (!r.success) return r;
+    const admin = createAdminClient();
+    const { data: sub } = await admin
+      .from("subscriptions")
+      .select("id, items")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    if (sub) {
+      type Item = { variant_id?: string | number; price_cents?: number };
+      const items = ((sub.items as Item[]) || []).map((i: Item) =>
+        String(i.variant_id) === String(variantId) ? { ...i, price_cents: 0 } : i,
+      );
+      await admin.from("subscriptions").update({ items, updated_at: new Date().toISOString() }).eq("id", sub.id);
+    }
+    return { success: true };
+  }
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -433,6 +528,10 @@ export async function appstleSwapProduct(
   oldVariantId: string,
   newVariantId: string,
 ): Promise<{ success: boolean; error?: string }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    const { internalSubSwapVariant } = await import("@/lib/internal-subscription");
+    return internalSubSwapVariant(workspaceId, contractId, oldVariantId, newVariantId);
+  }
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 

@@ -1,0 +1,402 @@
+/**
+ * Internal subscription engine.
+ *
+ * Subscriptions with `is_internal = true` are managed entirely by
+ * shopcx — no Appstle in the loop. Every Appstle helper checks the
+ * flag and, if set, delegates to one of the handlers below. Same
+ * function signatures + return shape as Appstle so callers don't
+ * branch (the existing portal UI, the action_executor's direct
+ * actions, the Sonnet-orchestrator paths — all work unchanged).
+ *
+ * State the handlers mutate:
+ *   subscriptions.status                 active | paused | cancelled
+ *   subscriptions.next_billing_date      ISO date string
+ *   subscriptions.billing_interval       day | week | month | year (lowercase per our DB convention)
+ *   subscriptions.billing_interval_count integer
+ *   subscriptions.items                  JSONB array of line items
+ *   subscriptions.applied_discounts      JSONB array
+ *   subscriptions.pause_resume_at        ISO timestamp (for timed pauses)
+ *
+ * Anything that requires a Braintree charge (attemptBilling) is
+ * stubbed for now — the renewal scheduler lands in a future commit.
+ */
+import { createAdminClient } from "@/lib/supabase/admin";
+
+type ActionResult = { success: boolean; error?: string };
+
+interface SubRow {
+  id: string;
+  status: string;
+  next_billing_date: string | null;
+  billing_interval: string | null;
+  billing_interval_count: number | null;
+  items: Array<Record<string, unknown>> | null;
+  applied_discounts: Array<Record<string, unknown>> | null;
+  customer_id: string | null;
+}
+
+async function loadInternalSub(workspaceId: string, contractId: string): Promise<SubRow | null> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("subscriptions")
+    .select(
+      "id, status, next_billing_date, billing_interval, billing_interval_count, items, applied_discounts, customer_id, is_internal",
+    )
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (!data) return null;
+  if (!data.is_internal) return null;
+  // is_internal is in the select but we don't carry it on SubRow
+  return {
+    id: data.id as string,
+    status: data.status as string,
+    next_billing_date: data.next_billing_date as string | null,
+    billing_interval: data.billing_interval as string | null,
+    billing_interval_count: data.billing_interval_count as number | null,
+    items: (data.items as Array<Record<string, unknown>>) || [],
+    applied_discounts: (data.applied_discounts as Array<Record<string, unknown>>) || [],
+    customer_id: data.customer_id as string | null,
+  };
+}
+
+/**
+ * Returns true if this subscription is managed internally (no Appstle
+ * round-trip needed). Cheap — used as a guard at the top of every
+ * Appstle helper. Returns false when the sub isn't found so the legacy
+ * Appstle path is the safe default.
+ */
+export async function isInternalSubscription(workspaceId: string, contractId: string): Promise<boolean> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("subscriptions")
+    .select("is_internal")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  return !!data?.is_internal;
+}
+
+// Bump the customer's overall subscription_status to reflect the
+// active/paused/cancelled mix on their account. Mirrors what
+// appstleSubscriptionAction does so the customer page stays accurate.
+async function syncCustomerSubscriptionStatus(customerId: string): Promise<void> {
+  const admin = createAdminClient();
+  const { data: subs } = await admin
+    .from("subscriptions")
+    .select("status")
+    .eq("customer_id", customerId);
+  const statuses = new Set((subs || []).map((s) => s.status));
+  const next = statuses.has("active") ? "active"
+    : statuses.has("paused") ? "paused"
+    : statuses.has("cancelled") ? "cancelled"
+    : "never";
+  await admin
+    .from("customers")
+    .update({ subscription_status: next, updated_at: new Date().toISOString() })
+    .eq("id", customerId);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Status: pause / resume / cancel
+// ────────────────────────────────────────────────────────────────────
+
+export async function internalSubscriptionAction(
+  workspaceId: string,
+  contractId: string,
+  action: "pause" | "cancel" | "resume",
+): Promise<ActionResult> {
+  const admin = createAdminClient();
+  const sub = await loadInternalSub(workspaceId, contractId);
+  if (!sub) return { success: false, error: "Internal subscription not found" };
+
+  const statusMap: Record<string, string> = { pause: "paused", cancel: "cancelled", resume: "active" };
+  await admin
+    .from("subscriptions")
+    .update({ status: statusMap[action], updated_at: new Date().toISOString() })
+    .eq("id", sub.id);
+  if (sub.customer_id) await syncCustomerSubscriptionStatus(sub.customer_id);
+  return { success: true };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Schedule mutations
+// ────────────────────────────────────────────────────────────────────
+
+export async function internalSubSkipNextOrder(workspaceId: string, contractId: string): Promise<ActionResult> {
+  const admin = createAdminClient();
+  const sub = await loadInternalSub(workspaceId, contractId);
+  if (!sub) return { success: false, error: "Internal subscription not found" };
+
+  const interval = (sub.billing_interval || "month").toLowerCase();
+  const count = sub.billing_interval_count || 1;
+  const base = sub.next_billing_date ? new Date(sub.next_billing_date) : new Date();
+  const next = advanceDate(base, interval, count);
+  await admin
+    .from("subscriptions")
+    .update({ next_billing_date: next.toISOString(), updated_at: new Date().toISOString() })
+    .eq("id", sub.id);
+  return { success: true };
+}
+
+export async function internalSubUpdateBillingInterval(
+  workspaceId: string,
+  contractId: string,
+  interval: "DAY" | "WEEK" | "MONTH" | "YEAR",
+  intervalCount: number,
+): Promise<ActionResult> {
+  const admin = createAdminClient();
+  const sub = await loadInternalSub(workspaceId, contractId);
+  if (!sub) return { success: false, error: "Internal subscription not found" };
+
+  const normalized = String(interval).toUpperCase();
+  if (!["DAY", "WEEK", "MONTH", "YEAR"].includes(normalized)) {
+    return { success: false, error: `Invalid interval: ${interval}` };
+  }
+  await admin
+    .from("subscriptions")
+    .update({
+      billing_interval: normalized.toLowerCase(),
+      billing_interval_count: intervalCount,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", sub.id);
+  return { success: true };
+}
+
+export async function internalSubUpdateNextBillingDate(
+  workspaceId: string,
+  contractId: string,
+  date: string,
+): Promise<ActionResult> {
+  const admin = createAdminClient();
+  const sub = await loadInternalSub(workspaceId, contractId);
+  if (!sub) return { success: false, error: "Internal subscription not found" };
+
+  const iso = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00Z`).toISOString() : new Date(date).toISOString();
+  await admin
+    .from("subscriptions")
+    .update({ next_billing_date: iso, updated_at: new Date().toISOString() })
+    .eq("id", sub.id);
+  return { success: true };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Item mutations
+// ────────────────────────────────────────────────────────────────────
+
+type Item = {
+  variant_id?: string | number;
+  product_id?: string;
+  title?: string;
+  variant_title?: string;
+  quantity?: number;
+  price_cents?: number;
+  sku?: string;
+  selling_plan?: string | null;
+  line_id?: string;
+};
+
+export async function internalSubAddItem(
+  workspaceId: string,
+  contractId: string,
+  variantId: string,
+  quantity: number,
+): Promise<ActionResult> {
+  const admin = createAdminClient();
+  const sub = await loadInternalSub(workspaceId, contractId);
+  if (!sub) return { success: false, error: "Internal subscription not found" };
+
+  const items: Item[] = (sub.items as Item[]) || [];
+  const existing = items.find((i) => String(i.variant_id) === String(variantId));
+  let nextItems: Item[];
+  if (existing) {
+    nextItems = items.map((i) =>
+      String(i.variant_id) === String(variantId) ? { ...i, quantity: (i.quantity || 0) + quantity } : i,
+    );
+  } else {
+    // Hydrate from product_variants so the new item has a title + brand.
+    const { data: v } = await admin
+      .from("product_variants")
+      .select("id, shopify_variant_id, title, price_cents, product_id, products(title)")
+      .eq("shopify_variant_id", variantId)
+      .maybeSingle();
+    const productTitle = ((v?.products as { title?: string } | { title?: string }[] | null) || null) as { title?: string } | null;
+    nextItems = [
+      ...items,
+      {
+        variant_id: variantId,
+        product_id: v?.product_id as string | undefined,
+        title: productTitle?.title || "Item",
+        variant_title: v?.title || undefined,
+        quantity,
+        price_cents: v?.price_cents as number | undefined,
+      },
+    ];
+  }
+  await admin
+    .from("subscriptions")
+    .update({ items: nextItems, updated_at: new Date().toISOString() })
+    .eq("id", sub.id);
+  return { success: true };
+}
+
+export async function internalSubRemoveItem(
+  workspaceId: string,
+  contractId: string,
+  variantId: string,
+): Promise<ActionResult> {
+  const admin = createAdminClient();
+  const sub = await loadInternalSub(workspaceId, contractId);
+  if (!sub) return { success: false, error: "Internal subscription not found" };
+
+  const items: Item[] = (sub.items as Item[]) || [];
+  const nextItems = items.filter((i) => String(i.variant_id) !== String(variantId));
+  await admin
+    .from("subscriptions")
+    .update({ items: nextItems, updated_at: new Date().toISOString() })
+    .eq("id", sub.id);
+  return { success: true };
+}
+
+export async function internalSubSwapVariant(
+  workspaceId: string,
+  contractId: string,
+  oldVariantId: string,
+  newVariantId: string,
+  quantity?: number,
+): Promise<ActionResult> {
+  const admin = createAdminClient();
+  const sub = await loadInternalSub(workspaceId, contractId);
+  if (!sub) return { success: false, error: "Internal subscription not found" };
+
+  const items: Item[] = (sub.items as Item[]) || [];
+  const oldItem = items.find((i) => String(i.variant_id) === String(oldVariantId));
+  if (!oldItem) return { success: false, error: `Variant ${oldVariantId} not on subscription` };
+
+  const { data: v } = await admin
+    .from("product_variants")
+    .select("id, shopify_variant_id, title, price_cents, product_id, products(title)")
+    .eq("shopify_variant_id", newVariantId)
+    .maybeSingle();
+  const productTitle = ((v?.products as { title?: string } | { title?: string }[] | null) || null) as { title?: string } | null;
+
+  const nextItems = items.map((i) =>
+    String(i.variant_id) === String(oldVariantId)
+      ? {
+          ...i,
+          variant_id: newVariantId,
+          product_id: (v?.product_id as string | undefined) || i.product_id,
+          title: productTitle?.title || i.title,
+          variant_title: v?.title || i.variant_title,
+          price_cents: (v?.price_cents as number | undefined) ?? i.price_cents,
+          quantity: quantity ?? i.quantity,
+        }
+      : i,
+  );
+  await admin
+    .from("subscriptions")
+    .update({ items: nextItems, updated_at: new Date().toISOString() })
+    .eq("id", sub.id);
+  return { success: true };
+}
+
+export async function internalSubUpdateLineItemPrice(
+  workspaceId: string,
+  contractId: string,
+  variantId: string,
+  basePriceCents: number,
+): Promise<ActionResult> {
+  const admin = createAdminClient();
+  const sub = await loadInternalSub(workspaceId, contractId);
+  if (!sub) return { success: false, error: "Internal subscription not found" };
+
+  // Same convention as Appstle path: stored price is the customer-paid
+  // (post-25%-discount) value. Match the math in subUpdateLineItemPrice.
+  const discountedCents = Math.round(basePriceCents * 0.75);
+  const items: Item[] = (sub.items as Item[]) || [];
+  const nextItems = items.map((i) =>
+    String(i.variant_id) === String(variantId) ? { ...i, price_cents: discountedCents } : i,
+  );
+  await admin
+    .from("subscriptions")
+    .update({ items: nextItems, updated_at: new Date().toISOString() })
+    .eq("id", sub.id);
+  return { success: true };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Discount mutations — Appstle's apply/remove discount endpoints map
+// to applied_discounts JSONB on our side. Storefront pricing engine
+// already reads from this column.
+// ────────────────────────────────────────────────────────────────────
+
+export async function internalSubApplyDiscount(
+  workspaceId: string,
+  contractId: string,
+  discountCode: string,
+): Promise<ActionResult> {
+  const admin = createAdminClient();
+  const sub = await loadInternalSub(workspaceId, contractId);
+  if (!sub) return { success: false, error: "Internal subscription not found" };
+
+  const existing = (sub.applied_discounts as Array<{ title?: string }>) || [];
+  if (existing.some((d) => d.title === discountCode)) {
+    return { success: true }; // already applied — idempotent
+  }
+  const nextDiscounts = [...existing, { title: discountCode }];
+  await admin
+    .from("subscriptions")
+    .update({ applied_discounts: nextDiscounts, updated_at: new Date().toISOString() })
+    .eq("id", sub.id);
+  return { success: true };
+}
+
+export async function internalSubRemoveDiscount(
+  workspaceId: string,
+  contractId: string,
+  discountCodeOrId: string,
+): Promise<ActionResult> {
+  const admin = createAdminClient();
+  const sub = await loadInternalSub(workspaceId, contractId);
+  if (!sub) return { success: false, error: "Internal subscription not found" };
+
+  const existing = (sub.applied_discounts as Array<{ title?: string; id?: string }>) || [];
+  const nextDiscounts = existing.filter(
+    (d) => d.title !== discountCodeOrId && d.id !== discountCodeOrId,
+  );
+  await admin
+    .from("subscriptions")
+    .update({ applied_discounts: nextDiscounts, updated_at: new Date().toISOString() })
+    .eq("id", sub.id);
+  return { success: true };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Stubs — these wrap Appstle endpoints whose internal-mode equivalent
+// hasn't been wired yet. They return success=false with a clear error
+// so callers know to surface a "manual operator action needed" note
+// instead of pretending the action succeeded.
+// ────────────────────────────────────────────────────────────────────
+
+export function internalSubNotYetSupported(action: string): ActionResult {
+  return {
+    success: false,
+    error: `Internal subscription engine doesn't support "${action}" yet — agent must handle manually.`,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Date arithmetic — Appstle stores billing dates per cycle; for our
+// internal mode we compute the next date by adding (interval × count).
+// ────────────────────────────────────────────────────────────────────
+function advanceDate(base: Date, interval: string, count: number): Date {
+  const d = new Date(base);
+  const i = interval.toLowerCase();
+  if (i === "day") d.setUTCDate(d.getUTCDate() + count);
+  else if (i === "week") d.setUTCDate(d.getUTCDate() + count * 7);
+  else if (i === "month") d.setUTCMonth(d.getUTCMonth() + count);
+  else if (i === "year") d.setUTCFullYear(d.getUTCFullYear() + count);
+  else d.setUTCDate(d.getUTCDate() + count * 28);  // fallback ~ monthly
+  return d;
+}

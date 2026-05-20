@@ -3,6 +3,13 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import {
+  isInternalSubscription,
+  internalSubAddItem,
+  internalSubRemoveItem,
+  internalSubSwapVariant,
+  internalSubUpdateLineItemPrice,
+} from "@/lib/internal-subscription";
 
 /** Look up product title + variant title from our catalog by variant ID */
 export async function resolveVariantTitles(
@@ -313,6 +320,9 @@ export async function subAddItem(
   variantId: string,
   quantity: number = 1,
 ): Promise<{ success: boolean; error?: string }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    return internalSubAddItem(workspaceId, contractId, variantId, quantity);
+  }
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
@@ -340,8 +350,11 @@ export async function subRemoveItem(
   contractId: string,
   variantOrLine: string | { variantId?: string; lineGid?: string },
 ): Promise<{ success: boolean; error?: string }> {
-  // Use dedicated remove-line-item endpoint (not replaceVariants)
   const arg = typeof variantOrLine === "string" ? { variantId: variantOrLine } : variantOrLine;
+  if (arg.variantId && (await isInternalSubscription(workspaceId, contractId))) {
+    return internalSubRemoveItem(workspaceId, contractId, arg.variantId);
+  }
+  // Use dedicated remove-line-item endpoint (not replaceVariants)
   return appstleRemoveLineItem(workspaceId, contractId, arg);
 }
 
@@ -352,6 +365,23 @@ export async function subChangeQuantity(
   variantId: string,
   quantity: number,
 ): Promise<{ success: boolean; error?: string }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    // Internal path: rewrite the line's quantity directly.
+    const admin = createAdminClient();
+    const { data: sub } = await admin
+      .from("subscriptions")
+      .select("id, items")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    if (!sub) return { success: false, error: "Internal subscription not found" };
+    type Item = { variant_id?: string | number; quantity?: number };
+    const items = ((sub.items as Item[]) || []).map((i) =>
+      String(i.variant_id) === String(variantId) ? { ...i, quantity } : i,
+    );
+    await admin.from("subscriptions").update({ items, updated_at: new Date().toISOString() }).eq("id", sub.id);
+    return { success: true };
+  }
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
@@ -397,6 +427,11 @@ export async function subUpdateLineItemPrice(
   basePriceCents: number,
   lineGid?: string,
 ): Promise<{ success: boolean; error?: string }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    // lineGid only matters for Appstle's contract.line GID indirection;
+    // our DB items array is keyed by variant_id directly.
+    return internalSubUpdateLineItemPrice(workspaceId, contractId, variantId, basePriceCents);
+  }
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
@@ -512,6 +547,9 @@ export async function subSwapVariant(
   newVariantId: string,
   quantity: number = 1,
 ): Promise<{ success: boolean; error?: string; newLineGid?: string }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    return internalSubSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
+  }
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
