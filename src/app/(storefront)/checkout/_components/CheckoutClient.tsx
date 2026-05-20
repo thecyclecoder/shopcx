@@ -48,7 +48,15 @@ interface DropinInstance {
   teardown: (cb?: (err?: unknown) => void) => void;
 }
 interface BraintreeDropinGlobal {
-  create: (config: { authorization: string; container: HTMLElement }) => Promise<DropinInstance>;
+  create: (config: {
+    authorization: string;
+    container: HTMLElement;
+    card?: {
+      overrides?: {
+        fields?: Record<string, { formatInput?: boolean; placeholder?: string }>;
+      };
+    };
+  }) => Promise<DropinInstance>;
 }
 declare global {
   interface Window {
@@ -154,9 +162,24 @@ export function CheckoutClient({
         if (cancelled) return;
         const dropin = window.braintree?.dropin;
         if (!dropin || !containerRef.current) throw new Error("dropin_not_loaded");
+        // Disable Drop-in's input formatting on the card number + expiry
+        // fields. Braintree's auto-spacer ("4242 4242 4242 4242") races
+        // with the browser's autofill paste and drops digits — see the
+        // documented `formatInput: false` workaround:
+        // https://developer.paypal.com/braintree/docs/guides/hosted-fields/styling/javascript/v3#programmatic-formatting
+        // Tradeoff: no pretty spaces while typing manually, but cards
+        // autofill cleanly which matters more.
         const instance = await dropin.create({
           authorization: client_token,
           container: containerRef.current,
+          card: {
+            overrides: {
+              fields: {
+                number: { formatInput: false },
+                expirationDate: { formatInput: false },
+              },
+            },
+          },
         });
         if (cancelled) { instance.teardown(); return; }
         dropinRef.current = instance;
