@@ -52,94 +52,45 @@ export async function GET(
   let config = session.config_snapshot || (session.journey_definitions as { config: unknown })?.config || {};
 
   const configObj = config as Record<string, unknown>;
-  const triggerIntent = (session.journey_definitions as { trigger_intent?: string })?.trigger_intent
-    || (configObj.journeyType as string)
-    || "";
-  const isCancel = triggerIntent === "cancel_subscription" || triggerIntent === "cancel" || configObj.cancelJourney === true;
-  const isDiscount = triggerIntent === "discount_signup"
-    || triggerIntent === "marketing_signup"
-    || triggerIntent === "discount_&_marketing_signup"
-    || configObj.journeyType === "discount_signup"
-    || configObj.journeyType === "marketing_signup";
-  const isShippingAddress = triggerIntent === "shipping_address"
-    || triggerIntent === "address_change"
-    || configObj.journeyType === "shipping_address"
-    || configObj.journeyType === "address_change";
+  const definitionIntent = (session.journey_definitions as { trigger_intent?: string })?.trigger_intent || "";
+  const triggerIntent = definitionIntent || (configObj.journeyType as string) || "";
 
-  // ── Live-rendered journeys ──
-  // Orchestrator only inserted ids; we build the full config here from
-  // current data. Always overrides the snapshot — even old sessions get
-  // fresh data, which fixes the "subs went stale between send and click"
-  // class of bug (and the analogous "customer's phone/marketing state
-  // went stale" bug for discount signup). Mini-site reads
-  // metadata.subscriptions + steps just like before; only the source
-  // has changed.
-  if (isCancel) {
+  // Every journey is live-rendered. The orchestrator only inserted ids
+  // into config_snapshot; we rebuild steps + metadata here from
+  // current data on every click. No caching back to config_snapshot —
+  // even old sessions get fresh subscriptions, addresses, loyalty
+  // state, linked accounts, etc. Single code path means one less
+  // class of "data went stale between send and click" bugs.
+  const isCancel =
+    triggerIntent === "cancel_subscription" ||
+    triggerIntent === "cancel" ||
+    triggerIntent === "cancellation" ||
+    configObj.cancelJourney === true;
+
+  if (triggerIntent) {
     const { buildJourneySteps } = await import("@/lib/journey-step-builder");
     const built = await buildJourneySteps(
       session.workspace_id,
-      "cancel_subscription",
+      triggerIntent,
       session.customer_id,
       session.ticket_id || "",
     );
-    // If the orchestrator passed a subscription_id, pre-select it so the
-    // picker step is auto-completed.
-    if (session.subscription_id && built.metadata) {
-      const meta = built.metadata as Record<string, unknown>;
-      meta.selectedSubscriptionId = session.subscription_id;
+
+    // Cancel-specific affordance: if the orchestrator passed a
+    // subscription_id on the session, pre-select it so the picker step
+    // is auto-completed (single-sub customers never see it).
+    if (isCancel && session.subscription_id && built.metadata) {
+      (built.metadata as Record<string, unknown>).selectedSubscriptionId = session.subscription_id;
     }
+
     config = {
       ...configObj,
       ...built,
       codeDriven: true,
-      cancelJourney: true,
-      journeyType: "cancel_subscription",
+      liveRendered: true,
+      journeyType: triggerIntent,
+      ...(isCancel ? { cancelJourney: true } : {}),
     };
-  } else if (isDiscount) {
-    const { buildJourneySteps } = await import("@/lib/journey-step-builder");
-    const built = await buildJourneySteps(
-      session.workspace_id,
-      "discount_signup",
-      session.customer_id,
-      session.ticket_id || "",
-    );
-    config = {
-      ...configObj,
-      ...built,
-      codeDriven: true,
-      journeyType: "discount_signup",
-    };
-  } else if (isShippingAddress) {
-    // Live-rendered shipping address. Current address pulled from the
-    // most recent order at click time, not from a stale snapshot —
-    // matters when the orchestrator sends the journey today but the
-    // customer doesn't click until after their next order has shipped
-    // to a corrected address.
-    const { buildJourneySteps } = await import("@/lib/journey-step-builder");
-    const built = await buildJourneySteps(
-      session.workspace_id,
-      "shipping_address",
-      session.customer_id,
-      session.ticket_id || "",
-    );
-    config = {
-      ...configObj,
-      ...built,
-      codeDriven: true,
-      journeyType: "shipping_address",
-    };
-  } else if (configObj.codeDriven && configObj.journeyType && !(configObj.steps as unknown[])?.length) {
-    // Legacy code-driven journeys (non-cancel) still build steps once
-    // and cache to config_snapshot.
-    const { buildJourneySteps } = await import("@/lib/journey-step-builder");
-    const built = await buildJourneySteps(
-      session.workspace_id,
-      configObj.journeyType as string,
-      session.customer_id,
-      session.ticket_id || "",
-    );
-    config = { ...configObj, ...built };
-    await admin.from("journey_sessions").update({ config_snapshot: config }).eq("id", session.id);
   }
 
   // Merge workspace branding into config if not already present

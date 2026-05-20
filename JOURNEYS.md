@@ -1,34 +1,41 @@
 # Journeys System
 
-Journeys are deterministic, multi-step customer flows that guide customers through structured decisions without AI. They work across two channels with identical logic:
+Journeys are deterministic, multi-step customer flows that guide customers through structured decisions without AI. Every journey is **live-rendered**: the orchestrator's only job is to pick the journey id (and optionally a subscription id) and insert a session row. The mini-site at `/journey/{token}` rebuilds all steps + metadata from current data on every click. No AI-generated step trees, no config_snapshot to go stale, no embedded forms.
 
-- **Live chat**: Inline multi-step form embedded in chat bubble (`<!--JOURNEY:{token,steps}-->`)
-- **Email**: CTA email → branded mini-site at `/journey/{token}` with progress bar
+Every channel delivers the same way: send a CTA, customer clicks through to the mini-site.
 
 ## Channel Delivery
 
 | Channel | Delivery | Notes |
 |---------|----------|-------|
-| **Chat** | Embedded inline form (`<!--JOURNEY:{token,steps}-->`) | Widget renders `InlineJourneyForm` component |
+| **Chat** | CTA button in chat bubble → mini-site at `/journey/{token}` | Same render path as email — no embedded inline form |
 | **Email** | CTA button → mini-site at `/journey/{token}` | AI-generated lead-in text + branded button |
 | **Help Center** | Same as email | |
 | **SMS** | Plain text + URL link | |
 | **Meta DM** | Plain text + URL link | |
 | **Social Comments** | **NEVER** — journeys cannot be sent on social comments | |
 
-When chat customer is idle >3 min, delivery automatically switches to email (secondary channel system).
+When chat customer is idle >3 min, delivery automatically switches to email (secondary channel system) — same CTA shape, just sent over a different transport.
+
+**Note on legacy tickets:** the widget and the pending-send Inngest function still parse `<!--JOURNEY:{...}-->` tags for tickets that were already in flight when this pattern was removed. New sessions never produce them.
 
 ## Architecture
 
 ```
 Customer message → Sonnet orchestrator → Journey launcher
                                           │
-                          ┌───────────────┴───────────────┐
-                          │ Chat                          │ Email/SMS/DM
-                          │ Build steps + embed inline    │ Build steps + create session
-                          │ via <!--JOURNEY:{}-->         │ + send CTA email/link
-                          │ Widget renders InlineForm     │ Mini-site renders steps
-                          └───────────────┬───────────────┘
+                                          ▼
+                          Create session_row (token + ids only)
+                                          │
+                                          ▼
+                          Send CTA via the appropriate channel
+                                          │
+                                          ▼
+                       Customer clicks → /journey/{token}
+                                          │
+                                          ▼
+                          Mini-site loader rebuilds steps
+                          live from current data, every click
                                           │
                                           ▼
                           POST /api/journey/{token}/complete
@@ -121,7 +128,7 @@ The outcome tag is applied in `/api/journey/[token]/complete/route.ts` based on 
 7. Update `JOURNEYS.md` with the new journey documentation
 8. Update `CLAUDE.md` to reference any new docs
 9. All options/reasons/data must come from the database, never hardcoded
-10. Remember: chat = embedded form, email = CTA link, social_comments = never
+10. Remember: every channel ships a CTA link; the mini-site is the single rendering path. social_comments = never.
 
 ## Files
 

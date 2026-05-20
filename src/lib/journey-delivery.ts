@@ -40,33 +40,23 @@ interface LaunchParams {
                             // skips the picker step when set.
 }
 
-// Live-rendered journeys: the orchestrator's only job is to pick ids
-// and insert a session row; the API loader at /api/journey/[token]
-// handles all data fetching, step-building, and rendering at click
-// time. No config snapshot to go stale.
+// Every journey is live-rendered. The orchestrator's only job is to
+// pick a journey id + (optionally) a subscription id and insert a
+// session row. The API loader at /api/journey/[token] handles ALL
+// data fetching, step building, and rendering at click time. No
+// config_snapshot, no embedded forms, no AI-generated step trees.
 //
-// Cancel journey was the original member. Discount/marketing signup
-// joined because: (a) the chat embedded-form was repeatedly mis-
-// parsing inline phone-number replies as new submissions, sending
-// the form again instead of completing it (see ticket 2876a0b1),
-// and (b) it's a 3-step flow where the data (whether they have a
-// phone on file, etc) can change between when the journey was sent
-// and when the customer clicks.
-const LIVE_RENDERED_INTENTS = new Set([
-  "cancel_subscription",
-  "cancel",
-  "discount_signup",
-  "discount_&_marketing_signup",
-  "marketing_signup",
-  // Shipping-address joined for the same reason discount/marketing did:
-  // (a) the customer's actual delivery address can shift between the
-  // moment we send the journey and the moment they click (a more
-  // recent order may have a corrected address), and (b) in live chat
-  // we want a CTA to a mini-site, not an embedded address form that
-  // gets stuck if the customer types over it.
-  "shipping_address",
-  "address_change",
-]);
+// We deliberately killed two patterns that lived here historically:
+//   1. The chat `<!--JOURNEY:{...}-->` embedded form. Customers
+//      typing inline ("just send me the link") routinely tripped the
+//      widget's parser; the rendered form lagged actual state by
+//      whatever delta the orchestrator was working with; and the
+//      same flow had to maintain two render paths (widget inline +
+//      mini-site).
+//   2. The "build steps once, freeze into config_snapshot" pattern
+//      where subscription / address / loyalty data went stale the
+//      moment the customer didn't click for a minute.
+// Single path now: send a CTA, mini-site rebuilds at click.
 
 /**
  * Launch a journey for a ticket via the appropriate channel delivery.
@@ -135,49 +125,25 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
 
   if (!journeyDef) return false;
 
-  // Build config — detect code-driven journeys (empty config or specific types)
-  const rawConfig = journeyDef.config;
-  const isEmptyConfig = !rawConfig || (Array.isArray(rawConfig) && rawConfig.length === 0) || (typeof rawConfig === "object" && !Array.isArray(rawConfig) && Object.keys(rawConfig as Record<string, unknown>).length === 0);
-
-  const isLiveRendered = LIVE_RENDERED_INTENTS.has(triggerIntent);
-
-  let configSnapshot: Record<string, unknown>;
-  if (isLiveRendered) {
-    // Live-rendered journey — orchestrator's job is to pick ids; the
-    // mini-site loader does all data fetching and step building at
-    // click time. No builder call here, no snapshot to go stale.
-    configSnapshot = {
-      codeDriven: true,
-      liveRendered: true,
-      journeyType: triggerIntent,
-      ticketId,
-      workspaceId,
-    };
-  } else if (isEmptyConfig) {
-    // Code-driven journey (legacy snapshot path) — kept for journeys
-    // that haven't migrated to live-rendered yet.
-    configSnapshot = {
-      codeDriven: true,
-      journeyType: triggerIntent,
-      ticketId,
-      workspaceId,
-    };
-  } else {
-    configSnapshot = rawConfig as Record<string, unknown>;
-  }
+  // Every journey is live-rendered. Snapshot is purely identification —
+  // the loader fetches everything it needs at click time.
+  let configSnapshot: Record<string, unknown> = {
+    codeDriven: true,
+    liveRendered: true,
+    journeyType: triggerIntent,
+    ticketId,
+    workspaceId,
+  };
 
   if (prependAccountLinking) {
     configSnapshot = { ...configSnapshot, prependAccountLinking: true };
   }
 
-  // Create session. Live-rendered journeys (cancel, etc.) pull fresh
-  // data on every click, so a 24h expiry adds zero security value and
-  // a lot of "I tried to use your link, it expired" friction. Use 30
-  // days for those. Snapshot-based journeys still expire in 24h because
-  // their config_snapshot can drift from live state.
+  // Every link pulls fresh data on every click, so a 24h expiry adds
+  // zero security value and a lot of "I tried to use your link, it
+  // expired" friction. Default to 30 days.
   const token = crypto.randomBytes(24).toString("hex");
-  const expiryHours = isLiveRendered ? 24 * 30 : 24;
-  const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
   await admin.from("journey_sessions").insert({
     workspace_id: workspaceId,
@@ -242,10 +208,9 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
       subject: `Re: ${ticket?.subject || "Your request"}`,
       buttonLabel: ctaText,
       inReplyTo,
-      // Live-rendered journeys: suppress the "expires in 24 hours"
-      // line in the email since the link is good for 30 days and pulls
-      // fresh data on every click.
-      expiryHours: isLiveRendered ? null : 24,
+      // Every link lives 30 days + pulls fresh data on every click, so
+      // we don't bother surfacing an expiry line in the email.
+      expiryHours: null,
     });
 
     // Use a CLEAN HTML for the dashboard display — no inline colors,
@@ -260,9 +225,7 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
     const emailLabel = channelSwitched
       ? `<p><em>Sent via email (customer left chat)</em></p>`
       : "";
-    const expiryNote = isLiveRendered
-      ? "" // live-rendered links last 30 days, don't bother mentioning
-      : `<p><small>This link expires in 24 hours.</small></p>`;
+    const expiryNote = ""; // every link lives 30 days; not worth surfacing
     // Strip any trailing arrow / chevron callers may have included on
     // ctaText — the styled-button render is the single source of the
     // chevron, otherwise we end up with "Cancel Subscription → →"
@@ -311,36 +274,16 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
     }
 
   } else if (effectiveChannel === "chat") {
-    // Live-rendered journeys (cancel) always use a CTA link in chat —
-    // mini-site is the single rendering path. Drops the inline embed
-    // and its associated bug surface (out-of-sync snapshot, half-built
-    // steps, etc.). See feedback_orchestrator_minimal_payload.
-    if (isLiveRendered) {
-      const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
-      await admin.from("ticket_messages").insert({
-        ticket_id: ticketId, direction: "outbound", visibility: "external",
-        author_type: "system", body: ctaHtml,
-      });
-    } else {
-      // Legacy snapshot-based journeys still embed inline in chat.
-      const { buildJourneySteps } = await import("@/lib/journey-step-builder");
-      const built = await buildJourneySteps(workspaceId, triggerIntent, customerId, ticketId);
-
-      if (built.steps.length > 0) {
-        const journeyPayload = JSON.stringify({ token, steps: built.steps, ctaText });
-        const body = `${leadIn}<!--JOURNEY:${journeyPayload}-->`;
-        await admin.from("ticket_messages").insert({
-          ticket_id: ticketId, direction: "outbound", visibility: "external",
-          author_type: "system", body,
-        });
-      } else {
-        const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
-        await admin.from("ticket_messages").insert({
-          ticket_id: ticketId, direction: "outbound", visibility: "external",
-          author_type: "system", body: ctaHtml,
-        });
-      }
-    }
+    // Single render path — CTA link to the mini-site. No embedded
+    // form, no buildJourneySteps at send time. The widget and the
+    // pending-send Inngest function still parse `<!--JOURNEY:{...}-->`
+    // tags for backward compatibility with tickets already in flight,
+    // but new sessions never produce them.
+    const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId, direction: "outbound", visibility: "external",
+      author_type: "system", body: ctaHtml,
+    });
 
   } else if (effectiveChannel === "sms") {
     // Plain text + URL
