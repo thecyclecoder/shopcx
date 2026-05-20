@@ -69,6 +69,36 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
     .eq("id", cart.workspace_id)
     .single();
 
+  // Featured reviews for the right-sidebar widget (desktop) /
+  // bottom-of-page widget (mobile). Same source we use on customize.
+  const lineProductIds = ((cart.line_items as Array<{ product_id?: string }>) || [])
+    .map((l) => l.product_id)
+    .filter(Boolean);
+  let featuredReviews: Array<Record<string, unknown>> = [];
+  let primaryProductHandle: string | null = null;
+  if (lineProductIds.length > 0) {
+    const { data: reviewsRaw } = await admin
+      .from("product_reviews")
+      .select("id, reviewer_name, rating, title, body, images, smart_quote, created_at, status, featured, product_id")
+      .eq("workspace_id", cart.workspace_id)
+      .in("product_id", lineProductIds as string[])
+      .in("status", ["published", "featured"])
+      .not("body", "is", null)
+      .order("featured", { ascending: false })
+      .order("rating", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(24);
+    featuredReviews = (reviewsRaw || []).filter(
+      (r) => (r as { featured?: boolean; status?: string }).featured === true || (r as { status?: string }).status === "featured",
+    );
+    const { data: firstProduct } = await admin
+      .from("products")
+      .select("handle")
+      .eq("id", lineProductIds[0] as string)
+      .maybeSingle();
+    primaryProductHandle = (firstProduct as { handle?: string } | null)?.handle || null;
+  }
+
   return (
     <main className="min-h-screen bg-zinc-50">
       <CheckoutClient
@@ -79,8 +109,11 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
           logo_url: workspace?.storefront_logo_url || null,
           primary_color: workspace?.storefront_primary_color || "#18181b",
           storefront_domain: workspace?.storefront_domain || null,
+          storefront_slug: workspace?.storefront_slug || null,
         }}
         sourceProductHandle={(cart as { source_product_handle?: string | null }).source_product_handle || null}
+        featuredReviews={featuredReviews as unknown as Parameters<typeof CheckoutClient>[0]["featuredReviews"]}
+        primaryProductHandle={primaryProductHandle}
       />
     </main>
   );

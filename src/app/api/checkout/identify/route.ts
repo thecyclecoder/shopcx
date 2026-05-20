@@ -1,0 +1,119 @@
+/**
+ * POST /api/checkout/identify
+ *
+ * Pre-checkout customer identification — fires when the email +
+ * (optionally) phone fields on the checkout page are valid, BEFORE
+ * the customer submits. Lets us:
+ *
+ *   - Create the customers row early so abandoned-cart messaging
+ *     has someone to message.
+ *   - Match an existing customer by email (across linked accounts)
+ *     and reuse their record.
+ *   - Stash marketing consent on the customer (and the cart).
+ *   - Identity-stitch the cart's anonymous_id → customer_id so events
+ *     fired between identify and submit get attributed correctly.
+ *
+ * Body shape:
+ *   {
+ *     cart_token:               required
+ *     email:                    required
+ *     phone?:                   optional
+ *     first_name?, last_name?:  optional
+ *     email_marketing_consent?: bool, default true (UI sends explicit)
+ *     sms_marketing_consent?:   bool, default true
+ *   }
+ *
+ * Returns:
+ *   { customer_id, created: boolean }
+ *
+ * Idempotent — repeated calls with the same cart_token + email
+ * resolve to the same customer and just refresh consent fields.
+ */
+import { NextResponse } from "next/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+
+interface Body {
+  cart_token?: string;
+  email?: string;
+  phone?: string;
+  first_name?: string;
+  last_name?: string;
+  email_marketing_consent?: boolean;
+  sms_marketing_consent?: boolean;
+}
+
+export async function POST(request: Request) {
+  const body = (await request.json().catch(() => ({}))) as Body;
+  if (!body.cart_token) return NextResponse.json({ error: "cart_token required" }, { status: 400 });
+  if (!body.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
+    return NextResponse.json({ error: "invalid_email" }, { status: 400 });
+  }
+  const email = body.email.trim().toLowerCase();
+
+  const admin = createAdminClient();
+
+  const { data: cart } = await admin
+    .from("cart_drafts")
+    .select("workspace_id, status, customer_id")
+    .eq("token", body.cart_token)
+    .maybeSingle();
+  if (!cart) return NextResponse.json({ error: "cart_not_found" }, { status: 404 });
+  if (cart.status !== "open") return NextResponse.json({ error: "cart_not_open" }, { status: 400 });
+
+  // Match by email within the workspace.
+  let { data: customer } = await admin
+    .from("customers")
+    .select("id")
+    .eq("workspace_id", cart.workspace_id)
+    .ilike("email", email)
+    .maybeSingle();
+  let created = false;
+  if (!customer) {
+    const { data: row, error } = await admin
+      .from("customers")
+      .insert({
+        workspace_id: cart.workspace_id,
+        email,
+        first_name: body.first_name || null,
+        last_name: body.last_name || null,
+        phone: body.phone || null,
+        subscription_status: "never",
+        email_marketing_status: body.email_marketing_consent ? "subscribed" : "not_subscribed",
+        sms_marketing_status: body.sms_marketing_consent && body.phone ? "subscribed" : "not_subscribed",
+      })
+      .select("id")
+      .single();
+    if (error || !row) return NextResponse.json({ error: error?.message || "customer_create_failed" }, { status: 500 });
+    customer = row;
+    created = true;
+  } else {
+    // Refresh names + phone + marketing consent on the existing row.
+    const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (body.first_name) updates.first_name = body.first_name;
+    if (body.last_name) updates.last_name = body.last_name;
+    if (body.phone) updates.phone = body.phone;
+    if (typeof body.email_marketing_consent === "boolean") {
+      updates.email_marketing_status = body.email_marketing_consent ? "subscribed" : "unsubscribed";
+    }
+    if (typeof body.sms_marketing_consent === "boolean" && body.phone) {
+      updates.sms_marketing_status = body.sms_marketing_consent ? "subscribed" : "unsubscribed";
+    }
+    if (Object.keys(updates).length > 1) {
+      await admin.from("customers").update(updates).eq("id", customer.id);
+    }
+  }
+
+  // Stamp the cart with the customer id + email/phone so subsequent
+  // page reloads + the eventual /api/checkout call see them.
+  await admin
+    .from("cart_drafts")
+    .update({
+      customer_id: customer.id,
+      email,
+      phone: body.phone || null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("token", body.cart_token);
+
+  return NextResponse.json({ customer_id: customer.id, created });
+}

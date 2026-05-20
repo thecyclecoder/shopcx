@@ -1,25 +1,43 @@
 "use client";
 
 /**
- * Checkout client island.
+ * Checkout client — two-column desktop, single-column mobile.
  *
- *  - Loads Braintree's Drop-in script from the CDN (so we don't bundle
- *    it). Once it's ready we call `dropin.create` with the
- *    client_token fetched from /api/checkout/client-token.
- *  - Renders email + shipping address fields above the Drop-in.
- *  - On submit, calls `dropin.requestPaymentMethod()` to get the nonce
- *    plus deviceData, then POSTs everything to /api/checkout. On
- *    success the server returns an order id and we redirect to
- *    /thank-you.
+ * Desktop:
+ *   ┌──────────────────────────────┬──────────┐
+ *   │ Contact + Shipping + Payment │ Cart     │ (right sidebar, sticky)
+ *   │                              │ Reviews  │
+ *   └──────────────────────────────┴──────────┘
  *
- * Shipping/tax are computed server-side at /api/checkout time. The
- * client just shows the subtotal-based total it pulled from the cart
- * + a stubbed shipping line; the server's response is authoritative.
+ * Mobile:
+ *   ┌──────────────────────────────┐
+ *   │ Cart (collapsible)           │
+ *   │ Contact card                 │
+ *   │ Shipping card                │
+ *   │ Payment card                 │
+ *   │ Reviews                      │
+ *   │ Sticky Pay $X CTA            │
+ *   └──────────────────────────────┘
+ *
+ * Identity bootstrap: when email + (optionally) phone are valid we
+ * POST to /api/checkout/identify so the customer row is created BEFORE
+ * payment. Debounced 700ms after field blur so we don't fire on every
+ * keystroke. Pre-identifying gives us abandoned-cart attribution + a
+ * stable customer id to thread events through.
+ *
+ * Marketing consent: two checkboxes pre-checked. Transactional emails
+ * (order confirmations, shipping updates) are implied by the purchase
+ * under CAN-SPAM / TCPA — no separate checkbox.
+ *
+ * Auto-population: the name fields in the contact card flow into
+ * shipping (and billing) when shipping is still empty.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Script from "next/script";
 import { initPixel, track } from "@/lib/storefront-pixel";
+import { HeroFeaturedReviews } from "../../_components/HeroFeaturedReviews";
+import type { Review } from "../../_lib/page-data";
 import type { CartDraft, StoredLineItem } from "../../customize/_components/CustomizeClient";
 
 const DROPIN_SRC = "https://js.braintreegateway.com/web/dropin/1.43.0/js/dropin.min.js";
@@ -29,13 +47,9 @@ interface DropinInstance {
   requestPaymentMethod: () => Promise<{ nonce: string; deviceData?: string; type?: string }>;
   teardown: (cb?: (err?: unknown) => void) => void;
 }
-
-// Minimal shape we use off the global; full typings would bloat the
-// component without buying anything.
 interface BraintreeDropinGlobal {
   create: (config: { authorization: string; container: HTMLElement }) => Promise<DropinInstance>;
 }
-
 declare global {
   interface Window {
     braintree?: { dropin?: BraintreeDropinGlobal };
@@ -48,38 +62,55 @@ interface Workspace {
   logo_url: string | null;
   primary_color: string;
   storefront_domain: string | null;
+  storefront_slug: string | null;
 }
 
 export function CheckoutClient({
   cart,
   workspace,
   sourceProductHandle,
+  featuredReviews,
+  primaryProductHandle,
 }: {
   cart: CartDraft;
   workspace: Workspace;
   sourceProductHandle: string | null;
+  featuredReviews: Review[];
+  primaryProductHandle: string | null;
 }) {
-  // ── Pricing snapshot ─────────────────────────────────────────────
-  const totalUnits = useMemo(
-    () => cart.line_items.reduce((s, l) => s + l.quantity, 0),
-    [cart.line_items],
-  );
+  // ── Pricing ──────────────────────────────────────────────────────
+  const totalUnits = useMemo(() => cart.line_items.reduce((s, l) => s + l.quantity, 0), [cart.line_items]);
   const subscribing = cart.line_items.some((l) => l.mode === "subscribe");
   const shippingCents = subscribing ? 0 : totalUnits * ESTIMATED_SHIPPING_PER_ITEM_CENTS;
   const taxCents = 0;
   const totalCents = cart.subtotal_cents + shippingCents + taxCents;
+  const msrpSubtotalCents = useMemo(
+    () => cart.line_items.reduce((s, l) => s + (l.unit_msrp_cents || l.unit_price_cents) * l.quantity, 0),
+    [cart.line_items],
+  );
+  const youSaveCents = Math.max(0, msrpSubtotalCents - cart.subtotal_cents);
 
-  // ── Form state ───────────────────────────────────────────────────
+  // ── Form state ────────────────────────────────────────────────────
   const [email, setEmail] = useState(cart.email || "");
+  const [phone, setPhone] = useState(cart.phone || "");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
+  const [emailMarketingConsent, setEmailMarketingConsent] = useState(true);
+  const [smsMarketingConsent, setSmsMarketingConsent] = useState(true);
+
+  // Shipping fields (pre-populated from contact card when ship name is empty)
+  const [shipFirst, setShipFirst] = useState("");
+  const [shipLast, setShipLast] = useState("");
   const [address1, setAddress1] = useState("");
   const [address2, setAddress2] = useState("");
   const [city, setCity] = useState("");
   const [state, setState] = useState("");
   const [zip, setZip] = useState("");
-  const [phone, setPhone] = useState(cart.phone || "");
+  const [shipPhone, setShipPhone] = useState("");
   const [billingSameAsShipping, setBillingSameAsShipping] = useState(true);
+
+  // Mobile cart collapsed by default — same pattern Shopify uses.
+  const [cartOpen, setCartOpen] = useState(false);
 
   // ── Drop-in lifecycle ────────────────────────────────────────────
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -89,10 +120,7 @@ export function CheckoutClient({
   const [scriptLoaded, setScriptLoaded] = useState(false);
 
   useEffect(() => {
-    initPixel({
-      workspaceId: workspace.id,
-      customerId: cart.customer_id,
-    });
+    initPixel({ workspaceId: workspace.id, customerId: cart.customer_id });
     track("checkout_view", {
       cart_token: cart.token,
       line_item_count: cart.line_items.length,
@@ -101,12 +129,8 @@ export function CheckoutClient({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Mount the Drop-in once both the script + container are present.
   useEffect(() => {
-    if (!scriptLoaded) return;
-    if (!containerRef.current) return;
-    if (dropinRef.current) return;
-
+    if (!scriptLoaded || !containerRef.current || dropinRef.current) return;
     let cancelled = false;
     (async () => {
       try {
@@ -121,32 +145,65 @@ export function CheckoutClient({
         }
         const { client_token } = (await tokenRes.json()) as { client_token: string };
         if (cancelled) return;
-
         const dropin = window.braintree?.dropin;
         if (!dropin || !containerRef.current) throw new Error("dropin_not_loaded");
         const instance = await dropin.create({
           authorization: client_token,
           container: containerRef.current,
         });
-        if (cancelled) {
-          instance.teardown();
-          return;
-        }
+        if (cancelled) { instance.teardown(); return; }
         dropinRef.current = instance;
         setDropinReady(true);
       } catch (err) {
         setDropinError(err instanceof Error ? err.message : String(err));
       }
     })();
-
     return () => {
       cancelled = true;
-      if (dropinRef.current) {
-        dropinRef.current.teardown();
-        dropinRef.current = null;
-      }
+      if (dropinRef.current) { dropinRef.current.teardown(); dropinRef.current = null; }
     };
   }, [scriptLoaded, cart.token]);
+
+  // ── Identify (debounced) ─────────────────────────────────────────
+  // Fires when email is valid, debounced 700ms so we don't slam the
+  // server on every keystroke. Phone optional. Marketing consent
+  // flags ride along; the customer row gets created or refreshed.
+  const identifyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (identifyTimer.current) clearTimeout(identifyTimer.current);
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return;
+    identifyTimer.current = setTimeout(async () => {
+      try {
+        await fetch("/api/checkout/identify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cart_token: cart.token,
+            email,
+            phone: phone || undefined,
+            first_name: firstName || undefined,
+            last_name: lastName || undefined,
+            email_marketing_consent: emailMarketingConsent,
+            sms_marketing_consent: smsMarketingConsent,
+          }),
+        });
+      } catch { /* non-fatal */ }
+    }, 700);
+    return () => { if (identifyTimer.current) clearTimeout(identifyTimer.current); };
+    // We deliberately don't include marketing consent in deps to avoid
+    // re-firing on every checkbox toggle — those persist when the next
+    // legitimate change (email/phone/name edit) flows through.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [email, phone, firstName, lastName, cart.token]);
+
+  // ── Auto-populate name from contact → shipping when ship is empty ──
+  useEffect(() => {
+    if (firstName && !shipFirst) setShipFirst(firstName);
+    if (lastName && !shipLast) setShipLast(lastName);
+    // We only auto-fill, never overwrite. Customer can override the
+    // shipping name (e.g. shipping a gift).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firstName, lastName]);
 
   // ── Submit ───────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
@@ -155,7 +212,7 @@ export function CheckoutClient({
   function isFormValid(): boolean {
     return (
       !!email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) &&
-      !!firstName && !!lastName &&
+      !!shipFirst && !!shipLast &&
       !!address1 && !!city && !!state && !!zip
     );
   }
@@ -166,7 +223,7 @@ export function CheckoutClient({
       return;
     }
     if (!isFormValid()) {
-      setSubmitError("Please fill in your email + shipping address.");
+      setSubmitError("Please fill in your email and shipping address.");
       return;
     }
     setSubmitting(true);
@@ -174,15 +231,15 @@ export function CheckoutClient({
     try {
       const { nonce, deviceData } = await dropinRef.current.requestPaymentMethod();
       const shipping = {
-        first_name: firstName,
-        last_name: lastName,
+        first_name: shipFirst,
+        last_name: shipLast,
         address1,
         address2: address2 || undefined,
         city,
         province_code: state.toUpperCase(),
         zip,
         country_code: "US",
-        phone: phone || undefined,
+        phone: shipPhone || phone || undefined,
       };
       const res = await fetch("/api/checkout", {
         method: "POST",
@@ -194,16 +251,10 @@ export function CheckoutClient({
           email,
           phone: phone || undefined,
           shipping_address: shipping,
-          billing_address: billingSameAsShipping ? shipping : shipping, // TODO: separate fields when toggle off
+          billing_address: billingSameAsShipping ? shipping : shipping,
         }),
       });
-      const data = (await res.json()) as {
-        ok?: boolean;
-        order_id?: string;
-        order_number?: string;
-        error?: string;
-        details?: string;
-      };
+      const data = (await res.json()) as { ok?: boolean; order_id?: string; order_number?: string; error?: string; details?: string };
       if (!res.ok || !data.ok || !data.order_id) {
         setSubmitError(data.details || data.error || "Something went wrong with the payment.");
         setSubmitting(false);
@@ -228,13 +279,8 @@ export function CheckoutClient({
 
   return (
     <div style={themeStyle}>
-      <Script
-        src={DROPIN_SRC}
-        strategy="afterInteractive"
-        onLoad={() => setScriptLoaded(true)}
-        onReady={() => setScriptLoaded(true)}
-      />
-      <div className="mx-auto max-w-3xl px-4 pb-32 pt-6 sm:pt-10">
+      <Script src={DROPIN_SRC} strategy="afterInteractive" onLoad={() => setScriptLoaded(true)} onReady={() => setScriptLoaded(true)} />
+      <div className="mx-auto max-w-6xl px-4 pb-32 pt-6 sm:pt-10">
         <header className="mb-6 flex items-center justify-between">
           {workspace.logo_url ? (
             // eslint-disable-next-line @next/next/no-img-element
@@ -243,123 +289,274 @@ export function CheckoutClient({
             <span className="text-lg font-semibold">{workspace.name}</span>
           )}
           {backLink && (
-            <a href={backLink} className="text-sm text-zinc-500 hover:text-zinc-800">
-              ← Back
-            </a>
+            <a href={backLink} className="text-sm text-zinc-500 hover:text-zinc-800">← Back</a>
           )}
         </header>
 
         <h1 className="text-3xl font-bold text-zinc-900 sm:text-4xl">Checkout</h1>
         <p className="mt-2 text-base text-zinc-600">Final step — payment and shipping.</p>
 
-        {/* Order summary */}
-        <section className="mt-6 rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Your order</p>
-          <ul className="mt-3 space-y-2">
-            {cart.line_items.map((l: StoredLineItem, i) => (
-              <li key={`${l.variant_id}-${i}`} className="flex items-center gap-3 text-sm">
-                {l.image_url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={l.image_url} alt={l.title} className="h-10 w-10 flex-shrink-0 rounded-lg object-cover" />
-                ) : (
-                  <div className="h-10 w-10 flex-shrink-0 rounded-lg bg-zinc-100" />
-                )}
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-medium text-zinc-900">
-                    {l.title}
-                    {l.variant_title && l.variant_title !== "Default Title" && (
-                      <span className="ml-1 text-zinc-500">— {l.variant_title}</span>
-                    )}
-                  </div>
-                  <div className="text-xs text-zinc-500">Qty {l.quantity}</div>
-                </div>
-                <div className="text-sm font-semibold text-zinc-900">{fmt(l.line_total_cents)}</div>
-              </li>
-            ))}
-          </ul>
-          <dl className="mt-4 space-y-1 border-t border-zinc-200 pt-3 text-sm">
-            <Row label="Subtotal" value={fmt(cart.subtotal_cents)} />
-            <Row label="Shipping" value={shippingCents === 0 ? "Free" : fmt(shippingCents)} />
-            <Row label="Total" value={fmt(totalCents)} emphasis />
-          </dl>
-        </section>
-
-        {/* Contact + shipping */}
-        <section className="mt-6 rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Contact</p>
-          <input
-            type="email"
-            inputMode="email"
-            autoComplete="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
-            className="mt-3 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
-          />
-          <input
-            type="tel"
-            inputMode="tel"
-            autoComplete="tel"
-            value={phone}
-            onChange={(e) => setPhone(e.target.value)}
-            placeholder="Phone (optional)"
-            className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
-          />
-
-          <p className="mt-6 text-xs font-semibold uppercase tracking-wider text-zinc-500">Shipping address</p>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            <input value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="First name" autoComplete="given-name" className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none" />
-            <input value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder="Last name" autoComplete="family-name" className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none" />
-          </div>
-          <input value={address1} onChange={(e) => setAddress1(e.target.value)} placeholder="Street address" autoComplete="address-line1" className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none" />
-          <input value={address2} onChange={(e) => setAddress2(e.target.value)} placeholder="Apt, suite, etc. (optional)" autoComplete="address-line2" className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none" />
-          <div className="mt-2 grid gap-2 sm:grid-cols-[2fr_1fr_1fr]">
-            <input value={city} onChange={(e) => setCity(e.target.value)} placeholder="City" autoComplete="address-level2" className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none" />
-            <input value={state} onChange={(e) => setState(e.target.value.toUpperCase().slice(0, 2))} placeholder="State" maxLength={2} autoComplete="address-level1" className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base uppercase text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none" />
-            <input value={zip} onChange={(e) => setZip(e.target.value)} placeholder="ZIP" inputMode="numeric" autoComplete="postal-code" className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none" />
-          </div>
-
-          <label className="mt-4 flex items-center gap-2 text-sm text-zinc-700">
-            <input
-              type="checkbox"
-              checked={billingSameAsShipping}
-              onChange={(e) => setBillingSameAsShipping(e.target.checked)}
-              className="h-4 w-4 rounded border-zinc-300"
-            />
-            Billing address same as shipping
-          </label>
-        </section>
-
-        {/* Payment */}
-        <section className="mt-6 rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Payment</p>
-          {dropinError ? (
-            <div className="mt-3 rounded-lg bg-rose-50 px-3 py-3 text-sm text-rose-700">
-              Couldn&apos;t load payment form: {dropinError}
+        {/* Mobile cart summary (collapsible). Hidden on desktop where
+            the right sidebar shows the full cart. */}
+        <details
+          className="mt-5 rounded-2xl border border-zinc-200 bg-white shadow-sm lg:hidden"
+          open={cartOpen}
+          onToggle={(e) => setCartOpen((e.target as HTMLDetailsElement).open)}
+        >
+          <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 [&::-webkit-details-marker]:hidden">
+            <div className="flex items-center gap-2">
+              <svg className="h-4 w-4 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" />
+              </svg>
+              <span className="text-sm font-medium text-zinc-700">{cartOpen ? "Hide" : "Show"} order summary</span>
+              <svg className={`h-4 w-4 text-zinc-500 transition-transform ${cartOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
             </div>
-          ) : (
-            <>
-              <div ref={containerRef} className="mt-3 min-h-[200px]" />
-              {!dropinReady && (
-                <p className="mt-2 text-xs text-zinc-500">Loading secure payment…</p>
+            <div className="text-right">
+              <div className="text-lg font-bold text-zinc-900">{fmt(totalCents)}</div>
+              {youSaveCents > 0 && (
+                <div className="text-xs font-semibold text-emerald-700">Save {fmt(youSaveCents)}</div>
               )}
-            </>
-          )}
-        </section>
-
-        {submitError && (
-          <div className="mt-4 rounded-lg bg-rose-50 px-3 py-3 text-sm text-rose-700">
-            {submitError}
+            </div>
+          </summary>
+          <div className="border-t border-zinc-100 px-4 pb-4 pt-3">
+            <OrderSummary cart={cart} subtotalCents={cart.subtotal_cents} msrpSubtotalCents={msrpSubtotalCents} shippingCents={shippingCents} totalCents={totalCents} youSaveCents={youSaveCents} />
           </div>
+        </details>
+
+        <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_360px]">
+          {/* ── Left column: forms ──────────────────────────────── */}
+          <div className="space-y-5">
+            {/* Contact card */}
+            <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+              <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Your details</p>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <input
+                  value={firstName}
+                  onChange={(e) => setFirstName(e.target.value)}
+                  placeholder="First name"
+                  autoComplete="given-name"
+                  name="given-name"
+                  className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                />
+                <input
+                  value={lastName}
+                  onChange={(e) => setLastName(e.target.value)}
+                  placeholder="Last name"
+                  autoComplete="family-name"
+                  name="family-name"
+                  className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
+              <input
+                type="email"
+                inputMode="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                autoComplete="email"
+                name="email"
+                className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+              />
+              <input
+                type="tel"
+                inputMode="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="Phone (optional)"
+                autoComplete="tel"
+                name="tel"
+                className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+              />
+
+              {/* Marketing consent — pre-checked. Transactional sends
+                  (order confirmations, shipping updates) are implied
+                  by the purchase under CAN-SPAM/TCPA so we don't have
+                  a separate checkbox for those. */}
+              <div className="mt-3 space-y-2 text-sm text-zinc-700">
+                <label className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={emailMarketingConsent}
+                    onChange={(e) => setEmailMarketingConsent(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-zinc-300"
+                  />
+                  <span>Email me promotions, new products, and exclusive offers</span>
+                </label>
+                {phone && (
+                  <label className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      checked={smsMarketingConsent}
+                      onChange={(e) => setSmsMarketingConsent(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 rounded border-zinc-300"
+                    />
+                    <span>Text me promos (msg & data rates apply, reply STOP anytime)</span>
+                  </label>
+                )}
+              </div>
+            </section>
+
+            {/* Shipping card */}
+            <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+              <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Shipping address</p>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <input
+                  value={shipFirst}
+                  onChange={(e) => setShipFirst(e.target.value)}
+                  placeholder="First name"
+                  autoComplete="shipping given-name"
+                  name="ship-given-name"
+                  className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                />
+                <input
+                  value={shipLast}
+                  onChange={(e) => setShipLast(e.target.value)}
+                  placeholder="Last name"
+                  autoComplete="shipping family-name"
+                  name="ship-family-name"
+                  className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
+              <input
+                value={address1}
+                onChange={(e) => setAddress1(e.target.value)}
+                placeholder="Street address"
+                autoComplete="shipping address-line1"
+                name="ship-address1"
+                className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+              />
+              <input
+                value={address2}
+                onChange={(e) => setAddress2(e.target.value)}
+                placeholder="Apt, suite, etc. (optional)"
+                autoComplete="shipping address-line2"
+                name="ship-address2"
+                className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+              />
+              <div className="mt-2 grid gap-2 sm:grid-cols-[2fr_1fr_1fr]">
+                <input
+                  value={city}
+                  onChange={(e) => setCity(e.target.value)}
+                  placeholder="City"
+                  autoComplete="shipping address-level2"
+                  name="ship-city"
+                  className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                />
+                <input
+                  value={state}
+                  onChange={(e) => setState(e.target.value.toUpperCase().slice(0, 2))}
+                  placeholder="State"
+                  maxLength={2}
+                  autoComplete="shipping address-level1"
+                  name="ship-state"
+                  className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base uppercase text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                />
+                <input
+                  value={zip}
+                  onChange={(e) => setZip(e.target.value)}
+                  placeholder="ZIP"
+                  inputMode="numeric"
+                  autoComplete="shipping postal-code"
+                  name="ship-zip"
+                  className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                />
+              </div>
+              <input
+                type="tel"
+                inputMode="tel"
+                value={shipPhone}
+                onChange={(e) => setShipPhone(e.target.value)}
+                placeholder="Phone (for delivery questions, optional)"
+                autoComplete="shipping tel"
+                name="ship-tel"
+                className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+              />
+              <label className="mt-4 flex items-center gap-2 text-sm text-zinc-700">
+                <input
+                  type="checkbox"
+                  checked={billingSameAsShipping}
+                  onChange={(e) => setBillingSameAsShipping(e.target.checked)}
+                  className="h-4 w-4 rounded border-zinc-300"
+                />
+                Billing address same as shipping
+              </label>
+            </section>
+
+            {/* Payment card */}
+            <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+              <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Payment</p>
+              {dropinError ? (
+                <div className="mt-3 rounded-lg bg-rose-50 px-3 py-3 text-sm text-rose-700">
+                  Couldn&apos;t load payment form: {dropinError}
+                </div>
+              ) : (
+                <>
+                  <div ref={containerRef} className="mt-3 min-h-[200px]" />
+                  {!dropinReady && (
+                    <p className="mt-2 text-xs text-zinc-500">Loading secure payment…</p>
+                  )}
+                </>
+              )}
+            </section>
+
+            {submitError && (
+              <div className="rounded-lg bg-rose-50 px-3 py-3 text-sm text-rose-700">{submitError}</div>
+            )}
+          </div>
+
+          {/* ── Right sidebar: cart + reviews ────────────────────── */}
+          <aside className="hidden lg:block">
+            <div className="sticky top-6 space-y-5">
+              <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Your order</p>
+                <div className="mt-3">
+                  <OrderSummary cart={cart} subtotalCents={cart.subtotal_cents} msrpSubtotalCents={msrpSubtotalCents} shippingCents={shippingCents} totalCents={totalCents} youSaveCents={youSaveCents} />
+                </div>
+              </section>
+
+              {featuredReviews.length > 0 && (
+                <section>
+                  <h3 className="mb-3 text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                    What customers are saying
+                  </h3>
+                  <HeroFeaturedReviews
+                    reviews={featuredReviews}
+                    workspaceSlug={workspace.storefront_slug || undefined}
+                    slug={primaryProductHandle || undefined}
+                  />
+                </section>
+              )}
+            </div>
+          </aside>
+        </div>
+
+        {/* Reviews on mobile, at the end */}
+        {featuredReviews.length > 0 && (
+          <section className="mt-8 lg:hidden">
+            <h3 className="mb-3 text-center text-xs font-semibold uppercase tracking-wider text-zinc-500">
+              What customers are saying
+            </h3>
+            <HeroFeaturedReviews
+              reviews={featuredReviews}
+              workspaceSlug={workspace.storefront_slug || undefined}
+              slug={primaryProductHandle || undefined}
+            />
+          </section>
         )}
       </div>
 
-      {/* Sticky bottom CTA */}
-      <section className="fixed inset-x-0 bottom-0 z-10 border-t border-zinc-200 bg-white/95 px-4 py-3 backdrop-blur sm:relative sm:mx-auto sm:mt-6 sm:max-w-3xl sm:rounded-2xl sm:border sm:px-6 sm:py-4 sm:shadow-lg">
-        <div className="mx-auto flex max-w-3xl items-center justify-between gap-4">
+      {/* Sticky bottom CTA — mobile + desktop both */}
+      <section className="fixed inset-x-0 bottom-0 z-10 border-t border-zinc-200 bg-white/95 px-4 py-3 backdrop-blur">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4">
           <div>
             <div className="text-2xl font-bold leading-tight text-zinc-900">{fmt(totalCents)}</div>
-            <div className="mt-0.5 text-xs text-zinc-500">Charged today</div>
+            {youSaveCents > 0 ? (
+              <div className="mt-0.5 text-xs font-semibold text-emerald-700">You save {fmt(youSaveCents)}</div>
+            ) : (
+              <div className="mt-0.5 text-xs text-zinc-500">Charged today</div>
+            )}
           </div>
           <button
             type="button"
@@ -376,11 +573,82 @@ export function CheckoutClient({
   );
 }
 
-function Row({ label, value, emphasis }: { label: string; value: string; emphasis?: boolean }) {
+// ────────────────────────────────────────────────────────────────────
+// Order summary — line items + totals. Used in both the desktop right
+// sidebar and the mobile collapsible section.
+// ────────────────────────────────────────────────────────────────────
+function OrderSummary({
+  cart,
+  subtotalCents,
+  msrpSubtotalCents,
+  shippingCents,
+  totalCents,
+  youSaveCents,
+}: {
+  cart: CartDraft;
+  subtotalCents: number;
+  msrpSubtotalCents: number;
+  shippingCents: number;
+  totalCents: number;
+  youSaveCents: number;
+}) {
+  return (
+    <>
+      <ul className="space-y-2">
+        {cart.line_items.map((l: StoredLineItem, i) => {
+          const linePaidCents = l.line_total_cents;
+          const lineMsrpCents = (l.unit_msrp_cents || l.unit_price_cents) * l.quantity;
+          return (
+            <li key={`${l.variant_id}-${i}`} className="flex items-center gap-3 text-sm">
+              {l.image_url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={l.image_url} alt={l.title} className="h-12 w-12 flex-shrink-0 rounded-lg object-cover" />
+              ) : (
+                <div className="h-12 w-12 flex-shrink-0 rounded-lg bg-zinc-100" />
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium text-zinc-900">
+                  {l.title}
+                  {l.variant_title && l.variant_title !== "Default Title" && (
+                    <span className="ml-1 text-zinc-500">— {l.variant_title}</span>
+                  )}
+                </div>
+                <div className="text-xs text-zinc-500">Qty {l.quantity}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-sm font-semibold text-zinc-900">{fmt(linePaidCents)}</div>
+                {lineMsrpCents > linePaidCents && (
+                  <div className="text-xs text-zinc-400 line-through">{fmt(lineMsrpCents)}</div>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      <dl className="mt-4 space-y-1 border-t border-zinc-200 pt-3 text-sm">
+        <Row label="Subtotal" value={fmt(subtotalCents)} />
+        {msrpSubtotalCents > subtotalCents && (
+          <Row label="Discount" value={`-${fmt(msrpSubtotalCents - subtotalCents)}`} muted />
+        )}
+        <Row label="Shipping" value={shippingCents === 0 ? "Free" : fmt(shippingCents)} />
+        <Row label="Total" value={fmt(totalCents)} emphasis />
+        {youSaveCents > 0 && (
+          <div className="flex items-baseline justify-end pt-1">
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+              You save {fmt(youSaveCents)}
+            </span>
+          </div>
+        )}
+      </dl>
+    </>
+  );
+}
+
+function Row({ label, value, emphasis, muted }: { label: string; value: string; emphasis?: boolean; muted?: boolean }) {
   return (
     <div className="flex items-baseline justify-between">
-      <dt className={`text-sm ${emphasis ? "font-semibold text-zinc-900" : "text-zinc-600"}`}>{label}</dt>
-      <dd className={emphasis ? "text-base font-bold text-zinc-900" : "text-zinc-700"}>{value}</dd>
+      <dt className={`text-sm ${emphasis ? "font-semibold text-zinc-900" : muted ? "text-zinc-500" : "text-zinc-600"}`}>{label}</dt>
+      <dd className={emphasis ? "text-base font-bold text-zinc-900" : muted ? "text-zinc-500" : "text-zinc-700"}>{value}</dd>
     </div>
   );
 }
