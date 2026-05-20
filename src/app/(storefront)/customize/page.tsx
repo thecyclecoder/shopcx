@@ -19,6 +19,7 @@
 
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import type { Metadata } from "next";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { CustomizeClient } from "./_components/CustomizeClient";
 import type {
@@ -27,6 +28,24 @@ import type {
   UpsellCandidate,
 } from "./_components/CustomizeClient";
 import type { Review } from "../_lib/page-data";
+import { getStorefrontIcons } from "../_lib/storefront-metadata";
+
+export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
+  // Inherit the originating workspace's favicon so the customer's
+  // browser tab keeps the brand they started shopping on.
+  const params = await searchParams;
+  const cookieToken = (await cookies()).get("cart")?.value;
+  const token = params.token || cookieToken;
+  if (!token) return {};
+  const admin = createAdminClient();
+  const { data: cart } = await admin
+    .from("cart_drafts")
+    .select("workspace_id")
+    .eq("token", token)
+    .maybeSingle();
+  if (!cart?.workspace_id) return {};
+  return { icons: await getStorefrontIcons(cart.workspace_id as string) };
+}
 
 interface PageProps {
   searchParams: Promise<{ token?: string }>;

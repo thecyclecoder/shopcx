@@ -13,9 +13,26 @@
 
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import type { Metadata } from "next";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { CheckoutClient } from "./_components/CheckoutClient";
 import type { CartDraft } from "../customize/_components/CustomizeClient";
+import { getStorefrontIcons } from "../_lib/storefront-metadata";
+
+export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
+  const params = await searchParams;
+  const cookieToken = (await cookies()).get("cart")?.value;
+  const token = params.token || cookieToken;
+  if (!token) return {};
+  const admin = createAdminClient();
+  const { data: cart } = await admin
+    .from("cart_drafts")
+    .select("workspace_id")
+    .eq("token", token)
+    .maybeSingle();
+  if (!cart?.workspace_id) return {};
+  return { icons: await getStorefrontIcons(cart.workspace_id as string) };
+}
 
 interface PageProps {
   searchParams: Promise<{ token?: string }>;
