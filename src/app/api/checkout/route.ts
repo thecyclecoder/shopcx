@@ -52,6 +52,7 @@ import { generateOrderNumber } from "@/lib/order-number";
 import { resolveRateForCart } from "@/lib/shipping-rates";
 import { readVisitorContext, stitchVisitor } from "@/lib/identity-stitch";
 import { checkOrderForFraud } from "@/lib/fraud-detector";
+import { buildPackingSlipMessage } from "@/lib/packing-slip-message";
 import crypto from "crypto";
 
 interface AddressInput {
@@ -535,6 +536,18 @@ export async function POST(request: NextRequest) {
   if (fraudHeld) {
     console.warn(`[checkout] skipping Amplifier for ${orderNumber} — fraud hold in place`);
   } else {
+    // Founder note on the packing slip — first-timers get the warm
+    // welcome template; returning customers get a Haiku rewrite of
+    // an order-count thanks. Non-blocking semantically: the helper
+    // self-heals to the template on any AI failure.
+    const distinctProducts = new Set(lines.filter((l) => l.sku).map((l) => l.product_id)).size;
+    const packingSlipMessage = await buildPackingSlipMessage({
+      workspaceId: cart.workspace_id,
+      customerId: customer.id,
+      orderId: order.id,
+      firstName: ship.first_name || customer.first_name || "",
+      productCount: distinctProducts,
+    });
     try {
       const amplifierRes = await createAmplifierOrder({
         workspaceId: cart.workspace_id,
@@ -564,6 +577,7 @@ export async function POST(request: NextRequest) {
         subtotalCents,
         shippingCents,
         taxCents,
+        packingSlipMessage,
       });
       if (amplifierRes.success && amplifierRes.amplifier_order_id) {
         await admin

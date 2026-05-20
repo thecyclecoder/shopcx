@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { removeOrderTags } from "@/lib/shopify-order-tags";
 import { createAmplifierOrder } from "@/lib/integrations/amplifier";
+import { buildPackingSlipMessage } from "@/lib/packing-slip-message";
 
 // GET: Single fraud case with matches and history
 export async function GET(
@@ -217,7 +218,7 @@ export async function PATCH(
 
         const { data: order } = await admin
           .from("orders")
-          .select("id, order_number, source_name, shopify_order_id, amplifier_order_id, email, shipping_address, billing_address, line_items, total_cents, created_at")
+          .select("id, order_number, customer_id, source_name, shopify_order_id, amplifier_order_id, email, shipping_address, billing_address, line_items, total_cents, created_at")
           .eq("id", orderId)
           .maybeSingle();
         if (!order) continue;
@@ -231,10 +232,21 @@ export async function PATCH(
             quantity: number;
             unit_price_cents: number;
             variant_id?: string;
+            product_id?: string;
             is_gift?: boolean;
           };
-          const ship = order.shipping_address as { phone?: string } | null;
+          const ship = order.shipping_address as { phone?: string; first_name?: string } | null;
           const lines = (order.line_items as Line[]) || [];
+          // Founder note — same logic as checkout-time. Counts prior
+          // orders (this one excluded) to pick first-time vs returning.
+          const distinctProducts = new Set(lines.filter((l) => l.sku && l.product_id).map((l) => l.product_id as string)).size;
+          const packingSlipMessage = order.customer_id ? await buildPackingSlipMessage({
+            workspaceId,
+            customerId: order.customer_id as string,
+            orderId: order.id as string,
+            firstName: ship?.first_name || "",
+            productCount: distinctProducts,
+          }) : null;
           const res = await createAmplifierOrder({
             workspaceId,
             orderNumber: order.order_number as string,
@@ -259,6 +271,7 @@ export async function PATCH(
             subtotalCents: order.total_cents,
             shippingCents: 0,
             taxCents: 0,
+            packingSlipMessage: packingSlipMessage || undefined,
           });
           if (res.success && res.amplifier_order_id) {
             await admin
