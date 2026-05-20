@@ -34,35 +34,13 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import Script from "next/script";
 import { initPixel, track } from "@/lib/storefront-pixel";
 import { HeroFeaturedReviews } from "../../_components/HeroFeaturedReviews";
 import type { Review } from "../../_lib/page-data";
 import type { CartDraft, StoredLineItem } from "../../customize/_components/CustomizeClient";
+import { HostedFieldsCard, type HostedFieldsCardHandle } from "./HostedFieldsCard";
 
-const DROPIN_SRC = "https://js.braintreegateway.com/web/dropin/1.43.0/js/dropin.min.js";
 const ESTIMATED_SHIPPING_PER_ITEM_CENTS = 495;
-
-interface DropinInstance {
-  requestPaymentMethod: () => Promise<{ nonce: string; deviceData?: string; type?: string }>;
-  teardown: (cb?: (err?: unknown) => void) => void;
-}
-interface BraintreeDropinGlobal {
-  create: (config: {
-    authorization: string;
-    container: HTMLElement;
-    card?: {
-      overrides?: {
-        fields?: Record<string, { formatInput?: boolean; placeholder?: string }>;
-      };
-    };
-  }) => Promise<DropinInstance>;
-}
-declare global {
-  interface Window {
-    braintree?: { dropin?: BraintreeDropinGlobal };
-  }
-}
 
 interface Workspace {
   id: string;
@@ -79,12 +57,16 @@ export function CheckoutClient({
   sourceProductHandle,
   featuredReviews,
   primaryProductHandle,
+  initialFirstName,
+  initialLastName,
 }: {
   cart: CartDraft;
   workspace: Workspace;
   sourceProductHandle: string | null;
   featuredReviews: Review[];
   primaryProductHandle: string | null;
+  initialFirstName?: string;
+  initialLastName?: string;
 }) {
   // ── Pricing ──────────────────────────────────────────────────────
   const totalUnits = useMemo(() => cart.line_items.reduce((s, l) => s + l.quantity, 0), [cart.line_items]);
@@ -101,8 +83,8 @@ export function CheckoutClient({
   // ── Form state ────────────────────────────────────────────────────
   const [email, setEmail] = useState(cart.email || "");
   const [phone, setPhone] = useState(cart.phone || "");
-  const [firstName, setFirstName] = useState("");
-  const [lastName, setLastName] = useState("");
+  const [firstName, setFirstName] = useState(initialFirstName || "");
+  const [lastName, setLastName] = useState(initialLastName || "");
   const [emailMarketingConsent, setEmailMarketingConsent] = useState(true);
   const [smsMarketingConsent, setSmsMarketingConsent] = useState(true);
 
@@ -127,12 +109,13 @@ export function CheckoutClient({
   // Mobile cart collapsed by default — same pattern Shopify uses.
   const [cartOpen, setCartOpen] = useState(false);
 
-  // ── Drop-in lifecycle ────────────────────────────────────────────
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const dropinRef = useRef<DropinInstance | null>(null);
-  const [dropinReady, setDropinReady] = useState(false);
-  const [dropinError, setDropinError] = useState<string | null>(null);
-  const [scriptLoaded, setScriptLoaded] = useState(false);
+  // ── Braintree Hosted Fields ─────────────────────────────────────
+  // We fetch a client_token here, then pass it to the HostedFieldsCard
+  // which owns the visual mockup + iframe lifecycle.
+  const hostedFieldsRef = useRef<HostedFieldsCardHandle | null>(null);
+  const [clientToken, setClientToken] = useState<string | null>(null);
+  const [cardReady, setCardReady] = useState(false);
+  const [cardError, setCardError] = useState<string | null>(null);
 
   useEffect(() => {
     initPixel({ workspaceId: workspace.id, customerId: cart.customer_id });
@@ -145,54 +128,27 @@ export function CheckoutClient({
   }, []);
 
   useEffect(() => {
-    if (!scriptLoaded || !containerRef.current || dropinRef.current) return;
     let cancelled = false;
     (async () => {
       try {
-        const tokenRes = await fetch("/api/checkout/client-token", {
+        const res = await fetch("/api/checkout/client-token", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ cart_token: cart.token }),
         });
-        if (!tokenRes.ok) {
-          const err = await tokenRes.json().catch(() => ({ error: "client_token_failed" }));
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: "client_token_failed" }));
           throw new Error(err.error || "client_token_failed");
         }
-        const { client_token } = (await tokenRes.json()) as { client_token: string };
+        const { client_token } = (await res.json()) as { client_token: string };
         if (cancelled) return;
-        const dropin = window.braintree?.dropin;
-        if (!dropin || !containerRef.current) throw new Error("dropin_not_loaded");
-        // Disable Drop-in's input formatting on the card number + expiry
-        // fields. Braintree's auto-spacer ("4242 4242 4242 4242") races
-        // with the browser's autofill paste and drops digits — see the
-        // documented `formatInput: false` workaround:
-        // https://developer.paypal.com/braintree/docs/guides/hosted-fields/styling/javascript/v3#programmatic-formatting
-        // Tradeoff: no pretty spaces while typing manually, but cards
-        // autofill cleanly which matters more.
-        const instance = await dropin.create({
-          authorization: client_token,
-          container: containerRef.current,
-          card: {
-            overrides: {
-              fields: {
-                number: { formatInput: false },
-                expirationDate: { formatInput: false },
-              },
-            },
-          },
-        });
-        if (cancelled) { instance.teardown(); return; }
-        dropinRef.current = instance;
-        setDropinReady(true);
+        setClientToken(client_token);
       } catch (err) {
-        setDropinError(err instanceof Error ? err.message : String(err));
+        setCardError(err instanceof Error ? err.message : String(err));
       }
     })();
-    return () => {
-      cancelled = true;
-      if (dropinRef.current) { dropinRef.current.teardown(); dropinRef.current = null; }
-    };
-  }, [scriptLoaded, cart.token]);
+    return () => { cancelled = true; };
+  }, [cart.token]);
 
   // ── Identify (debounced) ─────────────────────────────────────────
   // Fires when email is valid, debounced 700ms so we don't slam the
@@ -255,7 +211,7 @@ export function CheckoutClient({
   }
 
   async function onSubmit() {
-    if (!dropinRef.current) {
+    if (!hostedFieldsRef.current || !cardReady) {
       setSubmitError("Payment isn't ready yet — please wait a moment and try again.");
       return;
     }
@@ -267,7 +223,7 @@ export function CheckoutClient({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const { nonce, deviceData } = await dropinRef.current.requestPaymentMethod();
+      const { nonce, deviceData } = await hostedFieldsRef.current.tokenize();
       const phoneE164 = phoneToE164(phone);
       const shipping = {
         first_name: shipFirst,
@@ -327,11 +283,14 @@ export function CheckoutClient({
 
   // ── Render ───────────────────────────────────────────────────────
   const themeStyle = { "--storefront-primary": workspace.primary_color } as React.CSSProperties;
-  const backLink = sourceProductHandle ? `/${sourceProductHandle}` : null;
+  // Back from checkout goes to /customize (one step back in the funnel)
+  // rather than the originating PDP. The cart cookie carries the
+  // session so the token query string is optional but safer.
+  const backLink = `/customize?token=${encodeURIComponent(cart.token)}`;
+  void sourceProductHandle; // reserved for future use (e.g. exit-to-PDP escape hatch)
 
   return (
     <div style={themeStyle}>
-      <Script src={DROPIN_SRC} strategy="afterInteractive" onLoad={() => setScriptLoaded(true)} onReady={() => setScriptLoaded(true)} />
       <div className="mx-auto max-w-6xl px-4 pb-32 pt-6 sm:pt-10">
         <header className="mb-6 flex items-center justify-between">
           {workspace.logo_url ? (
@@ -340,9 +299,7 @@ export function CheckoutClient({
           ) : (
             <span className="text-lg font-semibold">{workspace.name}</span>
           )}
-          {backLink && (
-            <a href={backLink} className="text-sm text-zinc-500 hover:text-zinc-800">← Back</a>
-          )}
+          <a href={backLink} className="text-sm text-zinc-500 hover:text-zinc-800">← Back</a>
         </header>
 
         <h1 className="text-3xl font-bold text-zinc-900 sm:text-4xl">Checkout</h1>
@@ -510,23 +467,30 @@ export function CheckoutClient({
               />
             </section>
 
-            {/* Payment card — Drop-in collects card fields. Billing
-                address lives here too: a toggle (default on = "same as
-                shipping") and, when off, the full billing form. Same
-                section because mentally that's all "payment info". */}
+            {/* Payment card — custom Hosted Fields with a card-js
+                style visual mockup. Billing address toggle + form
+                lives in this same card because, mentally, billing
+                belongs with payment info (AVS / processor expects
+                them paired). */}
             <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
               <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Payment</p>
-              {dropinError ? (
+              {cardError ? (
                 <div className="mt-3 rounded-lg bg-rose-50 px-3 py-3 text-sm text-rose-700">
-                  Couldn&apos;t load payment form: {dropinError}
+                  Couldn&apos;t load payment form: {cardError}
                 </div>
+              ) : !clientToken ? (
+                <p className="mt-3 text-xs text-zinc-500">Loading secure payment…</p>
               ) : (
-                <>
-                  <div ref={containerRef} className="mt-3 min-h-[200px]" />
-                  {!dropinReady && (
-                    <p className="mt-2 text-xs text-zinc-500">Loading secure payment…</p>
-                  )}
-                </>
+                <div className="mt-3">
+                  <HostedFieldsCard
+                    ref={hostedFieldsRef}
+                    clientToken={clientToken}
+                    primaryColor={workspace.primary_color}
+                    cardholderName={`${firstName} ${lastName}`.trim()}
+                    onReady={() => setCardReady(true)}
+                    onError={(msg) => setCardError(msg)}
+                  />
+                </div>
               )}
 
               {/* Billing address toggle + collapsible form. Lives in
@@ -668,7 +632,7 @@ export function CheckoutClient({
           <button
             type="button"
             onClick={onSubmit}
-            disabled={submitting || !dropinReady}
+            disabled={submitting || !cardReady}
             style={{ backgroundColor: workspace.primary_color }}
             className="rounded-full px-7 py-3 text-sm font-extrabold uppercase tracking-wider text-white shadow-md disabled:opacity-50"
           >

@@ -69,6 +69,22 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
     .eq("id", cart.workspace_id)
     .single();
 
+  // If the customer already identified via /api/checkout/identify, pull
+  // their first/last so the contact-card name fields re-hydrate after
+  // refresh. Cart already carries email/phone; first/last live on the
+  // customer record because they're not strictly cart properties.
+  let initialFirstName = "";
+  let initialLastName = "";
+  if (cart.customer_id) {
+    const { data: cust } = await admin
+      .from("customers")
+      .select("first_name, last_name")
+      .eq("id", cart.customer_id)
+      .maybeSingle();
+    initialFirstName = (cust?.first_name as string) || "";
+    initialLastName = (cust?.last_name as string) || "";
+  }
+
   // Featured reviews for the right-sidebar widget (desktop) /
   // bottom-of-page widget (mobile). Same source we use on customize.
   const lineProductIds = ((cart.line_items as Array<{ product_id?: string }>) || [])
@@ -114,6 +130,8 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
         sourceProductHandle={(cart as { source_product_handle?: string | null }).source_product_handle || null}
         featuredReviews={featuredReviews as unknown as Parameters<typeof CheckoutClient>[0]["featuredReviews"]}
         primaryProductHandle={primaryProductHandle}
+        initialFirstName={initialFirstName}
+        initialLastName={initialLastName}
       />
     </main>
   );
