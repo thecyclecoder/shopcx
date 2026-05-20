@@ -399,7 +399,7 @@ export function CheckoutClient({
                   }}
                   className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-300"
                 />
-                <span>Email &amp; text me order updates, special coupons and news</span>
+                <span>Email &amp; text me order updates, news &amp; coupons</span>
               </label>
             </section>
 
