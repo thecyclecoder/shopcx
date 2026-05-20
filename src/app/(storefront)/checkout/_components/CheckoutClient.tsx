@@ -106,7 +106,6 @@ export function CheckoutClient({
   const [city, setCity] = useState("");
   const [state, setState] = useState("");
   const [zip, setZip] = useState("");
-  const [shipPhone, setShipPhone] = useState("");
   const [billingSameAsShipping, setBillingSameAsShipping] = useState(true);
   // Separate billing fields used only when billingSameAsShipping is off.
   const [billFirst, setBillFirst] = useState("");
@@ -256,7 +255,7 @@ export function CheckoutClient({
         province_code: state.toUpperCase(),
         zip,
         country_code: "US",
-        phone: (shipPhone && phoneToE164(shipPhone)) || phoneE164 || undefined,
+        phone: phoneE164 || undefined,
       };
       const billing = billingSameAsShipping
         ? shipping
@@ -404,31 +403,24 @@ export function CheckoutClient({
                 className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
               />
 
-              {/* Combined consent. Pre-checked. Transactional sends
-                  (order confirmations, shipping updates) are implied
-                  by purchase under CAN-SPAM/TCPA — the language here
-                  rolls those into the same opt-in row for a single
-                  decision the customer can decline if they want. */}
-              <div className="mt-3 space-y-1.5 text-xs text-zinc-600">
-                <label className="flex items-start gap-2">
-                  <input
-                    type="checkbox"
-                    checked={emailMarketingConsent}
-                    onChange={(e) => setEmailMarketingConsent(e.target.checked)}
-                    className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-300"
-                  />
-                  <span>Email me order updates, special coupons and news</span>
-                </label>
-                <label className="flex items-start gap-2">
-                  <input
-                    type="checkbox"
-                    checked={smsMarketingConsent}
-                    onChange={(e) => setSmsMarketingConsent(e.target.checked)}
-                    className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-300"
-                  />
-                  <span>Text me order updates, special coupons and news</span>
-                </label>
-              </div>
+              {/* Single combined consent. Pre-checked. Setting one
+                  checkbox toggles both email + SMS marketing flags so
+                  the form stays clean. Transactional sends (order
+                  confirmations, shipping updates) are implied by
+                  purchase under CAN-SPAM/TCPA — covered by the same
+                  language without a separate checkbox. */}
+              <label className="mt-3 flex items-start gap-2 text-xs text-zinc-600">
+                <input
+                  type="checkbox"
+                  checked={emailMarketingConsent && smsMarketingConsent}
+                  onChange={(e) => {
+                    setEmailMarketingConsent(e.target.checked);
+                    setSmsMarketingConsent(e.target.checked);
+                  }}
+                  className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-300"
+                />
+                <span>Email &amp; text me order updates, special coupons and news</span>
+              </label>
             </section>
 
             {/* Shipping card */}
@@ -468,7 +460,7 @@ export function CheckoutClient({
                 name="ship-address2"
                 className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
               />
-              <div className="mt-2 grid gap-2 sm:grid-cols-[2fr_1fr_1fr]">
+              <div className="mt-2 grid grid-cols-2 gap-2">
                 <input
                   value={city}
                   onChange={(e) => setCity(e.target.value)}
@@ -477,33 +469,20 @@ export function CheckoutClient({
                   name="ship-city"
                   className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
                 />
-                <input
+                <StateSelect
                   value={state}
-                  onChange={(e) => setState(e.target.value.toUpperCase().slice(0, 2))}
-                  placeholder="State"
-                  maxLength={2}
+                  onChange={setState}
                   autoComplete="shipping address-level1"
                   name="ship-state"
-                  className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base uppercase text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
-                />
-                <input
-                  value={zip}
-                  onChange={(e) => setZip(e.target.value)}
-                  placeholder="ZIP"
-                  inputMode="numeric"
-                  autoComplete="shipping postal-code"
-                  name="ship-zip"
-                  className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
                 />
               </div>
               <input
-                type="tel"
+                value={zip}
+                onChange={(e) => setZip(e.target.value)}
+                placeholder="ZIP"
                 inputMode="numeric"
-                value={shipPhone}
-                onChange={(e) => setShipPhone(formatPhoneDisplay(e.target.value))}
-                placeholder="Phone (for delivery questions, optional)"
-                autoComplete="shipping tel-national"
-                name="ship-tel"
+                autoComplete="shipping postal-code"
+                name="ship-zip"
                 className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
               />
             </section>
@@ -577,7 +556,7 @@ export function CheckoutClient({
                     name="bill-address2"
                     className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
                   />
-                  <div className="grid gap-2 sm:grid-cols-[2fr_1fr_1fr]">
+                  <div className="grid grid-cols-2 gap-2">
                     <input
                       value={billCity}
                       onChange={(e) => setBillCity(e.target.value)}
@@ -586,25 +565,22 @@ export function CheckoutClient({
                       name="bill-city"
                       className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
                     />
-                    <input
+                    <StateSelect
                       value={billState}
-                      onChange={(e) => setBillState(e.target.value.toUpperCase().slice(0, 2))}
-                      placeholder="State"
-                      maxLength={2}
+                      onChange={setBillState}
                       autoComplete="billing address-level1"
                       name="bill-state"
-                      className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base uppercase text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
-                    />
-                    <input
-                      value={billZip}
-                      onChange={(e) => setBillZip(e.target.value)}
-                      placeholder="ZIP"
-                      inputMode="numeric"
-                      autoComplete="billing postal-code"
-                      name="bill-zip"
-                      className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
                     />
                   </div>
+                  <input
+                    value={billZip}
+                    onChange={(e) => setBillZip(e.target.value)}
+                    placeholder="ZIP"
+                    inputMode="numeric"
+                    autoComplete="billing postal-code"
+                    name="bill-zip"
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                  />
                 </div>
               )}
             </section>
@@ -784,4 +760,89 @@ function phoneToE164(raw: string): string {
 
 function isPhoneComplete(raw: string): boolean {
   return raw.replace(/\D/g, "").length === 10;
+}
+
+// All US states + DC + PR. Code/name pairs so the option label is
+// readable but the stored value is the 2-letter ISO 3166-2 code (which
+// is what Braintree / Amplifier / shipping carriers expect).
+const US_STATES: Array<{ code: string; name: string }> = [
+  { code: "AL", name: "Alabama" },
+  { code: "AK", name: "Alaska" },
+  { code: "AZ", name: "Arizona" },
+  { code: "AR", name: "Arkansas" },
+  { code: "CA", name: "California" },
+  { code: "CO", name: "Colorado" },
+  { code: "CT", name: "Connecticut" },
+  { code: "DE", name: "Delaware" },
+  { code: "DC", name: "District of Columbia" },
+  { code: "FL", name: "Florida" },
+  { code: "GA", name: "Georgia" },
+  { code: "HI", name: "Hawaii" },
+  { code: "ID", name: "Idaho" },
+  { code: "IL", name: "Illinois" },
+  { code: "IN", name: "Indiana" },
+  { code: "IA", name: "Iowa" },
+  { code: "KS", name: "Kansas" },
+  { code: "KY", name: "Kentucky" },
+  { code: "LA", name: "Louisiana" },
+  { code: "ME", name: "Maine" },
+  { code: "MD", name: "Maryland" },
+  { code: "MA", name: "Massachusetts" },
+  { code: "MI", name: "Michigan" },
+  { code: "MN", name: "Minnesota" },
+  { code: "MS", name: "Mississippi" },
+  { code: "MO", name: "Missouri" },
+  { code: "MT", name: "Montana" },
+  { code: "NE", name: "Nebraska" },
+  { code: "NV", name: "Nevada" },
+  { code: "NH", name: "New Hampshire" },
+  { code: "NJ", name: "New Jersey" },
+  { code: "NM", name: "New Mexico" },
+  { code: "NY", name: "New York" },
+  { code: "NC", name: "North Carolina" },
+  { code: "ND", name: "North Dakota" },
+  { code: "OH", name: "Ohio" },
+  { code: "OK", name: "Oklahoma" },
+  { code: "OR", name: "Oregon" },
+  { code: "PA", name: "Pennsylvania" },
+  { code: "PR", name: "Puerto Rico" },
+  { code: "RI", name: "Rhode Island" },
+  { code: "SC", name: "South Carolina" },
+  { code: "SD", name: "South Dakota" },
+  { code: "TN", name: "Tennessee" },
+  { code: "TX", name: "Texas" },
+  { code: "UT", name: "Utah" },
+  { code: "VT", name: "Vermont" },
+  { code: "VA", name: "Virginia" },
+  { code: "WA", name: "Washington" },
+  { code: "WV", name: "West Virginia" },
+  { code: "WI", name: "Wisconsin" },
+  { code: "WY", name: "Wyoming" },
+];
+
+function StateSelect({
+  value,
+  onChange,
+  autoComplete,
+  name,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  autoComplete: string;
+  name: string;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      autoComplete={autoComplete}
+      name={name}
+      className={`w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base focus:border-zinc-500 focus:outline-none ${value ? "text-zinc-900" : "text-zinc-400"}`}
+    >
+      <option value="">State</option>
+      {US_STATES.map((s) => (
+        <option key={s.code} value={s.code}>{s.name}</option>
+      ))}
+    </select>
+  );
 }
