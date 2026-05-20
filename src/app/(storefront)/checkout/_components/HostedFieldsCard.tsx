@@ -153,10 +153,11 @@ export const HostedFieldsCard = forwardRef<HostedFieldsCardHandle, Props>(functi
               // input-mode on Android) without bringing up the spell-
               // check / autocorrect chrome you'd get with type:text.
               type: "tel",
-              // formatInput:false because Braintree's auto-spacer races
-              // browser autofill and drops digits on the card number
-              // (where autofill is the dominant entry path).
-              formatInput: false,
+              // formatInput defaults to true → Braintree applies
+              // brand-aware spacing as the customer types or after
+              // autofill commits ("4 4 4 4" for Visa/MC/Discover,
+              // "4 6 5" for Amex). Don't display the card number as a
+              // wall of digits even after entry — that's user-hostile.
             },
             expirationDate: {
               container: expRef.current,
