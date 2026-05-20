@@ -47,6 +47,10 @@ import { todaySyncCron } from "@/lib/inngest/today-sync";
 import { ticketAutoArchive } from "@/lib/inngest/auto-archive";
 import { tagCancelRelevanceBulk, tagCancelRelevanceCron } from "@/lib/inngest/review-tagging";
 import { amplifierWebhookProcess } from "@/lib/inngest/amplifier-webhooks";
+import {
+  internalSubscriptionRenewalCron,
+  internalSubscriptionRenewalAttempt,
+} from "@/lib/inngest/internal-subscription-renewals";
 import { returnsProcessDelivery, returnsIssueRefund } from "@/lib/inngest/returns";
 import { macroAuditFunction } from "@/lib/inngest/macro-audit";
 import { deliveryNightlyAudit } from "@/lib/inngest/delivery-audit";
@@ -128,6 +132,8 @@ export const { GET, POST, PUT } = serve({
     tagCancelRelevanceBulk,
     tagCancelRelevanceCron,
     amplifierWebhookProcess,
+    internalSubscriptionRenewalCron,
+    internalSubscriptionRenewalAttempt,
     unifiedTicketHandler,
     returnsProcessDelivery,
     returnsIssueRefund,

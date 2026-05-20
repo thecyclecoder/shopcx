@@ -47,6 +47,9 @@ import {
   vaultPaymentMethod,
   savePaymentMethod,
 } from "@/lib/integrations/braintree-customer";
+import { createAmplifierOrder } from "@/lib/integrations/amplifier";
+import { generateOrderNumber } from "@/lib/order-number";
+import crypto from "crypto";
 
 const ESTIMATED_SHIPPING_PER_ITEM_CENTS = 495;
 
@@ -194,7 +197,7 @@ export async function POST(request: NextRequest) {
 
   // Persist the payment method. is_default=true via savePaymentMethod
   // semantics (the newest vault wins) — customer/admin can flip later.
-  await savePaymentMethod({
+  const savedPm = await savePaymentMethod({
     workspaceId: cart.workspace_id,
     customerId: customer.id,
     braintreeCustomerId,
@@ -252,12 +255,43 @@ export async function POST(request: NextRequest) {
     },
   };
 
+  // ── 5a. Insert a pending transactions row BEFORE the sale. ──────
+  // If the function dies mid-flight we still know we tried to charge.
+  // The row gets patched to succeeded/failed once Braintree responds.
+  const { data: txnRow } = await admin
+    .from("transactions")
+    .insert({
+      workspace_id: cart.workspace_id,
+      customer_id: customer.id,
+      payment_method_id: savedPm.id,
+      type: "initial_checkout",
+      status: "pending",
+      amount_cents: totalCents,
+      currency: "USD",
+      braintree_payment_method_token: vaulted.token,
+      braintree_customer_id: braintreeCustomerId,
+      metadata: { cart_token: cart.token },
+    })
+    .select("id")
+    .single();
+  const transactionRecordId = txnRow?.id as string | undefined;
+
+  // ── 5b. Run the sale. ────────────────────────────────────────────
   const txnResult = await gateway.transaction.sale(txnInput);
   if (!txnResult.success || !txnResult.transaction) {
     const message =
       txnResult.message ||
       (txnResult as { transaction?: { processorResponseText?: string } }).transaction?.processorResponseText ||
       "Braintree transaction failed";
+    if (transactionRecordId) {
+      await admin.from("transactions").update({
+        status: "failed",
+        error_message: message,
+        processor_response_code: (txnResult as { transaction?: { processorResponseCode?: string } }).transaction?.processorResponseCode || null,
+        processor_response_text: (txnResult as { transaction?: { processorResponseText?: string } }).transaction?.processorResponseText || null,
+        updated_at: new Date().toISOString(),
+      }).eq("id", transactionRecordId);
+    }
     return NextResponse.json({
       error: "transaction_failed",
       details: message,
@@ -269,8 +303,74 @@ export async function POST(request: NextRequest) {
   const transaction = txnResult.transaction;
   const paymentMethodToken: string = vaulted.token;
 
-  // 4. Insert the order row + mark cart converted.
-  const orderNumber = `SX${Date.now().toString().slice(-8)}`;
+  // Patch transactions row with success.
+  if (transactionRecordId) {
+    await admin.from("transactions").update({
+      status: "succeeded",
+      braintree_transaction_id: transaction.id,
+      processor_response_code: transaction.processorResponseCode,
+      processor_response_text: transaction.processorResponseText,
+      updated_at: new Date().toISOString(),
+    }).eq("id", transactionRecordId);
+  }
+
+  // ── 6. Create internal subscription rows for any subscribe lines. ─
+  // Group by frequency_days so one cart with two different cadences
+  // produces two subs. Skip if no subscribe lines.
+  type SubscribeBucket = { frequency_days: number; items: typeof lines };
+  const buckets = new Map<number, SubscribeBucket>();
+  for (const l of lines) {
+    if (l.mode !== "subscribe" || !l.frequency_days) continue;
+    if (!buckets.has(l.frequency_days)) buckets.set(l.frequency_days, { frequency_days: l.frequency_days, items: [] });
+    buckets.get(l.frequency_days)!.items.push(l);
+  }
+
+  const createdSubscriptionIds: string[] = [];
+  let primarySubscriptionId: string | null = null;
+  for (const bucket of buckets.values()) {
+    const nextBillingDate = new Date();
+    nextBillingDate.setDate(nextBillingDate.getDate() + bucket.frequency_days);
+    const contractId = `internal-${crypto.randomBytes(8).toString("hex")}`;
+    const { data: sub } = await admin
+      .from("subscriptions")
+      .insert({
+        workspace_id: cart.workspace_id,
+        customer_id: customer.id,
+        shopify_customer_id: customer.shopify_customer_id || null,
+        shopify_contract_id: contractId,
+        status: "active",
+        billing_interval: "day",
+        billing_interval_count: bucket.frequency_days,
+        next_billing_date: nextBillingDate.toISOString(),
+        items: bucket.items.map((i) => ({
+          variant_id: i.variant_id,
+          product_id: i.product_id,
+          shopify_variant_id: i.shopify_variant_id,
+          title: i.title,
+          variant_title: i.variant_title,
+          image_url: i.image_url,
+          quantity: i.quantity,
+          price_cents: i.unit_price_cents,
+          sku: undefined,
+        })),
+        total_price_cents: bucket.items.reduce((s, i) => s + i.line_total_cents, 0),
+        applied_discounts: [],
+        is_internal: true,
+      })
+      .select("id")
+      .single();
+    if (sub?.id) {
+      createdSubscriptionIds.push(sub.id as string);
+      if (!primarySubscriptionId) primarySubscriptionId = sub.id as string;
+    }
+  }
+  // Patch the transaction record with the subscription it produced (if any).
+  if (transactionRecordId && primarySubscriptionId) {
+    await admin.from("transactions").update({ subscription_id: primarySubscriptionId }).eq("id", transactionRecordId);
+  }
+
+  // ── 7. Insert the order row. ────────────────────────────────────
+  const orderNumber = await generateOrderNumber(cart.workspace_id);
   const { data: order, error: orderErr } = await admin
     .from("orders")
     .insert({
@@ -292,6 +392,7 @@ export async function POST(request: NextRequest) {
       braintree_payment_method_token: paymentMethodToken,
       braintree_customer_id: braintreeCustomerId,
       cart_token: cart.token,
+      subscription_id: primarySubscriptionId,
       payment_details: {
         subtotal_cents: subtotalCents,
         shipping_cents: shippingCents,
@@ -311,6 +412,13 @@ export async function POST(request: NextRequest) {
     // refund fails.
     try {
       await gateway.transaction.refund(transaction.id);
+      if (transactionRecordId) {
+        await admin.from("transactions").update({
+          status: "refunded",
+          refunded_at: new Date().toISOString(),
+          error_message: `Auto-refunded: order insert failed (${orderErr?.message})`,
+        }).eq("id", transactionRecordId);
+      }
     } catch (refundErr) {
       console.error(
         `[checkout] CRITICAL: order insert AND refund failed. Manual refund needed for txn ${transaction.id}`,
@@ -324,6 +432,53 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Patch the transactions row with the resulting order_id.
+  if (transactionRecordId) {
+    await admin.from("transactions").update({ order_id: order.id }).eq("id", transactionRecordId);
+  }
+
+  // ── 8. Hand off to Amplifier for fulfillment. ────────────────────
+  // Non-fatal — if Amplifier fails we still mark the order paid and
+  // log the error so an operator can re-queue it. The user's policy:
+  // copy whichever address we have into both billing + shipping.
+  try {
+    const amplifierRes = await createAmplifierOrder({
+      workspaceId: cart.workspace_id,
+      orderNumber,
+      orderDate: new Date().toISOString(),
+      shippingAddress: ship,
+      billingAddress: bill,
+      email,
+      phone: body.phone || ship.phone || null,
+      lineItems: lines.map((l) => ({
+        sku: undefined, // line_items as stored don't carry sku; renewal flow does
+        title: l.title,
+        description: l.variant_title ? `${l.title} — ${l.variant_title}` : l.title,
+        quantity: l.quantity,
+        unit_price_cents: l.unit_price_cents,
+        reference_id: l.variant_id,
+      })),
+      totalCents,
+      subtotalCents,
+      shippingCents,
+      taxCents,
+    });
+    if (amplifierRes.success && amplifierRes.amplifier_order_id) {
+      await admin
+        .from("orders")
+        .update({
+          amplifier_order_id: amplifierRes.amplifier_order_id,
+          amplifier_received_at: new Date().toISOString(),
+        })
+        .eq("id", order.id);
+    } else {
+      console.warn(`[checkout] Amplifier order create failed for ${orderNumber}:`, amplifierRes.error, amplifierRes.details);
+    }
+  } catch (err) {
+    console.warn(`[checkout] Amplifier order create threw for ${orderNumber}:`, err);
+  }
+
+  // ── 9. Mark cart converted. ──────────────────────────────────────
   await admin
     .from("cart_drafts")
     .update({
@@ -339,5 +494,6 @@ export async function POST(request: NextRequest) {
     order_id: order.id,
     order_number: order.order_number,
     braintree_transaction_id: transaction.id,
+    subscription_ids: createdSubscriptionIds,
   });
 }

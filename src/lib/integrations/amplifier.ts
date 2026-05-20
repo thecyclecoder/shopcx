@@ -1,0 +1,217 @@
+/**
+ * Amplifier 3PL — order creation helper.
+ *
+ * Reference: amplifier-api.md (POST /orders).
+ *
+ *   - Base URL:    https://api.amplifier.com
+ *   - Auth:        HTTP Basic with the workspace's amplifier API key as
+ *                  username, blank password. We use the auth_token query
+ *                  param form to keep header surface small.
+ *   - Order body:  order_source_code (workspace-configured), order_id (our
+ *                  order_number), order_date, billing_info, shipping_info,
+ *                  shipping_method, line_items.
+ *
+ * Address policy from the user spec: Amplifier requires BOTH billing
+ * and shipping. If we only have one we mirror to the other.
+ *
+ * Return shape: `{ id }` on success — that's the Amplifier order
+ * UUID, which we store on `orders.amplifier_order_id` so the
+ * existing order.received webhook flow stays consistent.
+ */
+
+import { createAdminClient } from "@/lib/supabase/admin";
+import { decrypt } from "@/lib/crypto";
+
+const AMPLIFIER_BASE = "https://api.amplifier.com";
+
+interface Address {
+  first_name?: string | null;
+  last_name?: string | null;
+  name?: string | null;
+  company_name?: string | null;
+  address1?: string | null;
+  address2?: string | null;
+  city?: string | null;
+  state?: string | null;
+  province_code?: string | null;
+  province?: string | null;
+  postal_code?: string | null;
+  zip?: string | null;
+  country_code?: string | null;
+  country?: string | null;
+  phone?: string | null;
+  email?: string | null;
+}
+
+interface LineItem {
+  sku?: string | null;
+  title?: string | null;
+  description?: string | null;
+  quantity?: number;
+  unit_price_cents?: number;
+  reference_id?: string | null;
+}
+
+export interface CreateAmplifierOrderInput {
+  workspaceId: string;
+  orderNumber: string;          // our order_number, used as the Amplifier order_id
+  orderDate?: string;           // ISO 8601; defaults to now
+  shippingAddress?: Address | null;
+  billingAddress?: Address | null;
+  email?: string | null;
+  phone?: string | null;
+  shippingMethod?: string;      // default "UPS Ground" — Amplifier picks automatically anyway
+  lineItems: LineItem[];
+  totalCents?: number;
+  subtotalCents?: number;
+  shippingCents?: number;
+  taxCents?: number;
+  discountCents?: number;
+}
+
+export interface CreateAmplifierOrderResult {
+  success: boolean;
+  amplifier_order_id?: string;
+  error?: string;
+  details?: string;
+}
+
+/**
+ * Get the workspace's Amplifier creds. Throws if missing — callers
+ * should surface a clear error to the operator.
+ */
+async function getAmplifierConfig(workspaceId: string): Promise<{ apiKey: string; orderSourceCode: string }> {
+  const admin = createAdminClient();
+  const { data: ws } = await admin
+    .from("workspaces")
+    .select("amplifier_api_key_encrypted, amplifier_order_source_code")
+    .eq("id", workspaceId)
+    .single();
+  if (!ws?.amplifier_api_key_encrypted) throw new Error("Amplifier API key not configured");
+  if (!ws?.amplifier_order_source_code) throw new Error("Amplifier order_source_code not configured");
+  return {
+    apiKey: decrypt(ws.amplifier_api_key_encrypted as string),
+    orderSourceCode: ws.amplifier_order_source_code as string,
+  };
+}
+
+/**
+ * Normalize one of our address shapes into Amplifier's expected
+ * billing/shipping shape. Amplifier wants `state` (not province_code),
+ * `postal_code` (not zip), `country_code` (not country).
+ */
+function normalizeAddress(addr: Address): Record<string, unknown> {
+  const first = addr.first_name || (addr.name ? addr.name.split(" ").slice(0, -1).join(" ") : "");
+  const last = addr.last_name || (addr.name ? addr.name.split(" ").slice(-1).join(" ") : "");
+  return {
+    first_name: (first || "").slice(0, 30),
+    last_name: (last || "").slice(0, 30),
+    address1: (addr.address1 || "").slice(0, 80),
+    address2: (addr.address2 || "").slice(0, 80) || undefined,
+    city: (addr.city || "").slice(0, 50),
+    state: (addr.province_code || addr.province || addr.state || "").toUpperCase().slice(0, 2),
+    postal_code: (addr.postal_code || addr.zip || "").slice(0, 50),
+    country_code: (addr.country_code || addr.country || "US").slice(0, 2).toUpperCase(),
+    phone: addr.phone || undefined,
+    email: addr.email || undefined,
+  };
+}
+
+/**
+ * Apply the user's address policy: if shipping or billing is missing,
+ * mirror the other one. If both are missing, throw.
+ */
+function reconcileAddresses(input: CreateAmplifierOrderInput): {
+  shipping: Address;
+  billing: Address;
+} {
+  const ship = input.shippingAddress;
+  const bill = input.billingAddress;
+  if (ship?.address1 && ship?.city && (ship?.zip || ship?.postal_code)) {
+    return { shipping: ship, billing: bill?.address1 ? bill : ship };
+  }
+  if (bill?.address1 && bill?.city && (bill?.zip || bill?.postal_code)) {
+    return { shipping: bill, billing: bill };
+  }
+  throw new Error("Order has no usable shipping or billing address");
+}
+
+export async function createAmplifierOrder(input: CreateAmplifierOrderInput): Promise<CreateAmplifierOrderResult> {
+  let cfg;
+  try {
+    cfg = await getAmplifierConfig(input.workspaceId);
+  } catch (err) {
+    return { success: false, error: "amplifier_not_configured", details: err instanceof Error ? err.message : String(err) };
+  }
+
+  let shipping: Address;
+  let billing: Address;
+  try {
+    ({ shipping, billing } = reconcileAddresses(input));
+  } catch (err) {
+    return { success: false, error: "missing_address", details: err instanceof Error ? err.message : String(err) };
+  }
+
+  // Amplifier requires SKU on every line item. Drop anything that has
+  // no SKU (shipping protection lines, fees) — those don't fulfill
+  // anyway. Set unit_price from cents.
+  const lineItems = input.lineItems
+    .filter((li) => li.sku && (li.quantity ?? 0) > 0)
+    .map((li) => ({
+      sku: li.sku || "",
+      description: (li.description || li.title || li.sku || "").slice(0, 255),
+      quantity: li.quantity || 1,
+      unit_price: typeof li.unit_price_cents === "number" ? (li.unit_price_cents / 100).toFixed(2) : undefined,
+      reference_id: li.reference_id || undefined,
+    }));
+  if (lineItems.length === 0) {
+    return { success: false, error: "no_skus", details: "Cart contains no fulfillable SKUs" };
+  }
+
+  // Amplifier rejects Unicode — strip to Latin range so a stray emoji
+  // in a product title doesn't tank the order.
+  const stripUnicode = (s: string) => s.replace(/[^\x00-\x7F]/g, "");
+  for (const li of lineItems) li.description = stripUnicode(li.description);
+
+  const body: Record<string, unknown> = {
+    order_source_code: cfg.orderSourceCode,
+    order_id: input.orderNumber,
+    order_date: input.orderDate || new Date().toISOString(),
+    billing_info: { ...normalizeAddress(billing), email: input.email || billing.email || undefined, phone: input.phone || billing.phone || undefined },
+    shipping_info: { ...normalizeAddress(shipping), email: input.email || shipping.email || undefined, phone: input.phone || shipping.phone || undefined, residential: true },
+    shipping_method: input.shippingMethod || "UPS Ground",
+    line_items: lineItems,
+  };
+  if (input.totalCents != null) body.total_amount = (input.totalCents / 100).toFixed(2);
+  if (input.subtotalCents != null) body.subtotal_amount = (input.subtotalCents / 100).toFixed(2);
+  if (input.shippingCents != null) body.shipping_amount = (input.shippingCents / 100).toFixed(2);
+  if (input.taxCents != null) body.tax_amount = (input.taxCents / 100).toFixed(2);
+  if (input.discountCents != null) body.discount_amount = (input.discountCents / 100).toFixed(2);
+
+  // Auth via query string keeps the header surface small; HTTP Basic
+  // would also work.
+  const url = `${AMPLIFIER_BASE}/orders?auth_token=${encodeURIComponent(cfg.apiKey)}`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const respText = await res.text();
+    if (!res.ok) {
+      return {
+        success: false,
+        error: `amplifier_${res.status}`,
+        details: respText.slice(0, 600),
+      };
+    }
+    let parsed: { id?: string } = {};
+    try { parsed = JSON.parse(respText); } catch { /* ignore */ }
+    if (!parsed.id) {
+      return { success: false, error: "amplifier_no_id", details: respText.slice(0, 600) };
+    }
+    return { success: true, amplifier_order_id: parsed.id };
+  } catch (err) {
+    return { success: false, error: "amplifier_fetch_failed", details: err instanceof Error ? err.message : String(err) };
+  }
+}
