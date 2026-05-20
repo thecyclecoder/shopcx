@@ -108,6 +108,14 @@ export function CheckoutClient({
   const [zip, setZip] = useState("");
   const [shipPhone, setShipPhone] = useState("");
   const [billingSameAsShipping, setBillingSameAsShipping] = useState(true);
+  // Separate billing fields used only when billingSameAsShipping is off.
+  const [billFirst, setBillFirst] = useState("");
+  const [billLast, setBillLast] = useState("");
+  const [billAddress1, setBillAddress1] = useState("");
+  const [billAddress2, setBillAddress2] = useState("");
+  const [billCity, setBillCity] = useState("");
+  const [billState, setBillState] = useState("");
+  const [billZip, setBillZip] = useState("");
 
   // Mobile cart collapsed by default — same pattern Shopify uses.
   const [cartOpen, setCartOpen] = useState(false);
@@ -209,12 +217,19 @@ export function CheckoutClient({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  function isFormValid(): boolean {
-    return (
-      !!email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) &&
-      !!shipFirst && !!shipLast &&
-      !!address1 && !!city && !!state && !!zip
-    );
+  function isFormValid(): { ok: true } | { ok: false; reason: string } {
+    if (!firstName || !lastName) return { ok: false, reason: "Please enter your first and last name." };
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false, reason: "Please enter a valid email." };
+    if (!isPhoneComplete(phone)) return { ok: false, reason: "Please enter a 10-digit phone number." };
+    if (!shipFirst || !shipLast || !address1 || !city || !state || !zip) {
+      return { ok: false, reason: "Please complete your shipping address." };
+    }
+    if (!billingSameAsShipping) {
+      if (!billFirst || !billLast || !billAddress1 || !billCity || !billState || !billZip) {
+        return { ok: false, reason: "Please complete your billing address." };
+      }
+    }
+    return { ok: true };
   }
 
   async function onSubmit() {
@@ -222,14 +237,16 @@ export function CheckoutClient({
       setSubmitError("Payment isn't ready yet — please wait a moment and try again.");
       return;
     }
-    if (!isFormValid()) {
-      setSubmitError("Please fill in your email and shipping address.");
+    const validity = isFormValid();
+    if (!validity.ok) {
+      setSubmitError(validity.reason);
       return;
     }
     setSubmitting(true);
     setSubmitError(null);
     try {
       const { nonce, deviceData } = await dropinRef.current.requestPaymentMethod();
+      const phoneE164 = phoneToE164(phone);
       const shipping = {
         first_name: shipFirst,
         last_name: shipLast,
@@ -239,8 +256,21 @@ export function CheckoutClient({
         province_code: state.toUpperCase(),
         zip,
         country_code: "US",
-        phone: shipPhone || phone || undefined,
+        phone: (shipPhone && phoneToE164(shipPhone)) || phoneE164 || undefined,
       };
+      const billing = billingSameAsShipping
+        ? shipping
+        : {
+            first_name: billFirst,
+            last_name: billLast,
+            address1: billAddress1,
+            address2: billAddress2 || undefined,
+            city: billCity,
+            province_code: billState.toUpperCase(),
+            zip: billZip,
+            country_code: "US",
+            phone: phoneE164 || undefined,
+          };
       const res = await fetch("/api/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -249,9 +279,9 @@ export function CheckoutClient({
           payment_method_nonce: nonce,
           device_data: deviceData,
           email,
-          phone: phone || undefined,
+          phone: phoneE164 || undefined,
           shipping_address: shipping,
-          billing_address: billingSameAsShipping ? shipping : shipping,
+          billing_address: billing,
         }),
       });
       const data = (await res.json()) as { ok?: boolean; order_id?: string; order_number?: string; error?: string; details?: string };
@@ -338,6 +368,7 @@ export function CheckoutClient({
                   placeholder="First name"
                   autoComplete="given-name"
                   name="given-name"
+                  required
                   className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
                 />
                 <input
@@ -346,6 +377,7 @@ export function CheckoutClient({
                   placeholder="Last name"
                   autoComplete="family-name"
                   name="family-name"
+                  required
                   className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
                 />
               </div>
@@ -357,44 +389,45 @@ export function CheckoutClient({
                 placeholder="you@example.com"
                 autoComplete="email"
                 name="email"
+                required
                 className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
               />
               <input
                 type="tel"
-                inputMode="tel"
+                inputMode="numeric"
                 value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                placeholder="Phone (optional)"
-                autoComplete="tel"
+                onChange={(e) => setPhone(formatPhoneDisplay(e.target.value))}
+                placeholder="(555) 555-5555"
+                autoComplete="tel-national"
                 name="tel"
+                required
                 className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
               />
 
-              {/* Marketing consent — pre-checked. Transactional sends
+              {/* Combined consent. Pre-checked. Transactional sends
                   (order confirmations, shipping updates) are implied
-                  by the purchase under CAN-SPAM/TCPA so we don't have
-                  a separate checkbox for those. */}
-              <div className="mt-3 space-y-2 text-sm text-zinc-700">
+                  by purchase under CAN-SPAM/TCPA — the language here
+                  rolls those into the same opt-in row for a single
+                  decision the customer can decline if they want. */}
+              <div className="mt-3 space-y-1.5 text-xs text-zinc-600">
                 <label className="flex items-start gap-2">
                   <input
                     type="checkbox"
                     checked={emailMarketingConsent}
                     onChange={(e) => setEmailMarketingConsent(e.target.checked)}
-                    className="mt-0.5 h-4 w-4 rounded border-zinc-300"
+                    className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-300"
                   />
-                  <span>Email me promotions, new products, and exclusive offers</span>
+                  <span>Email me order updates, special coupons and news</span>
                 </label>
-                {phone && (
-                  <label className="flex items-start gap-2">
-                    <input
-                      type="checkbox"
-                      checked={smsMarketingConsent}
-                      onChange={(e) => setSmsMarketingConsent(e.target.checked)}
-                      className="mt-0.5 h-4 w-4 rounded border-zinc-300"
-                    />
-                    <span>Text me promos (msg & data rates apply, reply STOP anytime)</span>
-                  </label>
-                )}
+                <label className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={smsMarketingConsent}
+                    onChange={(e) => setSmsMarketingConsent(e.target.checked)}
+                    className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-300"
+                  />
+                  <span>Text me order updates, special coupons and news</span>
+                </label>
               </div>
             </section>
 
@@ -465,26 +498,20 @@ export function CheckoutClient({
               </div>
               <input
                 type="tel"
-                inputMode="tel"
+                inputMode="numeric"
                 value={shipPhone}
-                onChange={(e) => setShipPhone(e.target.value)}
+                onChange={(e) => setShipPhone(formatPhoneDisplay(e.target.value))}
                 placeholder="Phone (for delivery questions, optional)"
-                autoComplete="shipping tel"
+                autoComplete="shipping tel-national"
                 name="ship-tel"
                 className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
               />
-              <label className="mt-4 flex items-center gap-2 text-sm text-zinc-700">
-                <input
-                  type="checkbox"
-                  checked={billingSameAsShipping}
-                  onChange={(e) => setBillingSameAsShipping(e.target.checked)}
-                  className="h-4 w-4 rounded border-zinc-300"
-                />
-                Billing address same as shipping
-              </label>
             </section>
 
-            {/* Payment card */}
+            {/* Payment card — Drop-in collects card fields. Billing
+                address lives here too: a toggle (default on = "same as
+                shipping") and, when off, the full billing form. Same
+                section because mentally that's all "payment info". */}
             <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
               <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Payment</p>
               {dropinError ? (
@@ -498,6 +525,87 @@ export function CheckoutClient({
                     <p className="mt-2 text-xs text-zinc-500">Loading secure payment…</p>
                   )}
                 </>
+              )}
+
+              {/* Billing address toggle + collapsible form. Lives in
+                  the Payment section because billing is part of the
+                  card-info gate (AVS, etc.). */}
+              <label className="mt-4 flex items-center gap-2 text-sm text-zinc-700">
+                <input
+                  type="checkbox"
+                  checked={billingSameAsShipping}
+                  onChange={(e) => setBillingSameAsShipping(e.target.checked)}
+                  className="h-4 w-4 rounded border-zinc-300"
+                />
+                Billing address same as shipping
+              </label>
+
+              {!billingSameAsShipping && (
+                <div className="mt-3 space-y-2 rounded-xl bg-zinc-50 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Billing address</p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <input
+                      value={billFirst}
+                      onChange={(e) => setBillFirst(e.target.value)}
+                      placeholder="First name"
+                      autoComplete="billing given-name"
+                      name="bill-given-name"
+                      className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                    />
+                    <input
+                      value={billLast}
+                      onChange={(e) => setBillLast(e.target.value)}
+                      placeholder="Last name"
+                      autoComplete="billing family-name"
+                      name="bill-family-name"
+                      className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                    />
+                  </div>
+                  <input
+                    value={billAddress1}
+                    onChange={(e) => setBillAddress1(e.target.value)}
+                    placeholder="Street address"
+                    autoComplete="billing address-line1"
+                    name="bill-address1"
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                  />
+                  <input
+                    value={billAddress2}
+                    onChange={(e) => setBillAddress2(e.target.value)}
+                    placeholder="Apt, suite, etc. (optional)"
+                    autoComplete="billing address-line2"
+                    name="bill-address2"
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                  />
+                  <div className="grid gap-2 sm:grid-cols-[2fr_1fr_1fr]">
+                    <input
+                      value={billCity}
+                      onChange={(e) => setBillCity(e.target.value)}
+                      placeholder="City"
+                      autoComplete="billing address-level2"
+                      name="bill-city"
+                      className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                    />
+                    <input
+                      value={billState}
+                      onChange={(e) => setBillState(e.target.value.toUpperCase().slice(0, 2))}
+                      placeholder="State"
+                      maxLength={2}
+                      autoComplete="billing address-level1"
+                      name="bill-state"
+                      className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base uppercase text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                    />
+                    <input
+                      value={billZip}
+                      onChange={(e) => setBillZip(e.target.value)}
+                      placeholder="ZIP"
+                      inputMode="numeric"
+                      autoComplete="billing postal-code"
+                      name="bill-zip"
+                      className="rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
               )}
             </section>
 
@@ -655,4 +763,25 @@ function Row({ label, value, emphasis, muted }: { label: string; value: string; 
 
 function fmt(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
+}
+
+// Mirrors the formatter we use in journey minisites — "(858) 334-9198"
+// rendering as the customer types. Caller stores the formatted value
+// in state; we E.164-ize at submit time.
+function formatPhoneDisplay(raw: string): string {
+  const digits = raw.replace(/\D/g, "").slice(0, 10);
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 6) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+}
+
+function phoneToE164(raw: string): string {
+  const digits = raw.replace(/\D/g, "");
+  if (digits.startsWith("1") && digits.length === 11) return `+${digits}`;
+  if (digits.length === 10) return `+1${digits}`;
+  return raw.startsWith("+") ? raw : `+1${digits}`;
+}
+
+function isPhoneComplete(raw: string): boolean {
+  return raw.replace(/\D/g, "").length === 10;
 }
