@@ -40,8 +40,6 @@ import type { Review } from "../../_lib/page-data";
 import type { CartDraft, StoredLineItem } from "../../customize/_components/CustomizeClient";
 import { HostedFieldsCard, type HostedFieldsCardHandle } from "./HostedFieldsCard";
 
-const ESTIMATED_SHIPPING_PER_ITEM_CENTS = 495;
-
 interface Workspace {
   id: string;
   name: string;
@@ -49,6 +47,11 @@ interface Workspace {
   primary_color: string;
   storefront_domain: string | null;
   storefront_slug: string | null;
+  shipping_protection: {
+    price_cents: number;
+    title: string;
+    description: string;
+  } | null;
 }
 
 export function CheckoutClient({
@@ -69,16 +72,70 @@ export function CheckoutClient({
   initialLastName?: string;
 }) {
   // ── Pricing ──────────────────────────────────────────────────────
-  const totalUnits = useMemo(() => cart.line_items.reduce((s, l) => s + l.quantity, 0), [cart.line_items]);
   const subscribing = cart.line_items.some((l) => l.mode === "subscribe");
-  const shippingCents = subscribing ? 0 : totalUnits * ESTIMATED_SHIPPING_PER_ITEM_CENTS;
+  // Shipping rates — fetched from /api/checkout/shipping-rates which
+  // reads shipping_rates table. We hold the chosen code in state and
+  // re-derive totals on every render so the customer's selection
+  // flows through to the displayed total + the submit payload.
+  const [shippingRates, setShippingRates] = useState<Array<{
+    id: string;
+    code: string;
+    name: string;
+    description: string | null;
+    transit_days_min: number | null;
+    transit_days_max: number | null;
+    total_cents: number;
+    is_default: boolean;
+  }>>([]);
+  // onetime_economy total — what the customer would have paid as a
+  // one-time shopper, regardless of current cart mode. Used to
+  // strike-through the shipping price on subscribing carts. Comes
+  // straight from the DB.
+  const [onetimeEconomyCents, setOnetimeEconomyCents] = useState<number>(0);
+  const [shippingCode, setShippingCode] = useState<string>("economy");
+  const chosenRate = useMemo(
+    () => shippingRates.find((r) => r.code === shippingCode) || shippingRates.find((r) => r.is_default) || shippingRates[0] || null,
+    [shippingRates, shippingCode],
+  );
+  // What we display as "would have paid":
+  //   • subscribing → onetime_economy from the DB
+  //   • onetime → the economy rate they're already paying (no strike)
+  const shippingValueCents = subscribing
+    ? onetimeEconomyCents
+    : (shippingRates.find((r) => r.code === "economy")?.total_cents ?? 0);
+  const shippingCents = chosenRate ? chosenRate.total_cents : 0;
+  const shippingSavedCents = Math.max(0, shippingValueCents - shippingCents);
   const taxCents = 0;
-  const totalCents = cart.subtotal_cents + shippingCents + taxCents;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/checkout/shipping-rates?cart_token=${encodeURIComponent(cart.token)}`);
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          rates: typeof shippingRates;
+          onetime_economy_cents: number | null;
+        };
+        if (cancelled) return;
+        setShippingRates(data.rates || []);
+        setOnetimeEconomyCents(data.onetime_economy_cents || 0);
+        const def = (data.rates || []).find((r) => r.is_default);
+        if (def) setShippingCode(def.code);
+      } catch { /* non-fatal */ }
+    })();
+    return () => { cancelled = true; };
+    // Reload when the cart shape changes (subscribe vs onetime) since
+    // applicable rates differ.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cart.token, subscribing]);
+  // MSRP subtotal includes gift "value" (gift has unit_msrp_cents=value,
+  // unit_price_cents=0) so the gift naturally lands in "you save".
   const msrpSubtotalCents = useMemo(
     () => cart.line_items.reduce((s, l) => s + (l.unit_msrp_cents || l.unit_price_cents) * l.quantity, 0),
     [cart.line_items],
   );
-  const youSaveCents = Math.max(0, msrpSubtotalCents - cart.subtotal_cents);
+  const youSaveCents = Math.max(0, msrpSubtotalCents - cart.subtotal_cents) + shippingSavedCents;
 
   // ── Form state ────────────────────────────────────────────────────
   const [email, setEmail] = useState(cart.email || "");
@@ -97,6 +154,12 @@ export function CheckoutClient({
   const [state, setState] = useState("");
   const [zip, setZip] = useState("");
   const [billingSameAsShipping, setBillingSameAsShipping] = useState(true);
+  // Shipping protection — default on when workspace has it enabled.
+  // Customer can uncheck to opt out. Adds price_cents to the total.
+  const protectionPriceCents = workspace.shipping_protection?.price_cents ?? 0;
+  const [shippingProtection, setShippingProtection] = useState(!!workspace.shipping_protection);
+  const protectionCents = shippingProtection && workspace.shipping_protection ? protectionPriceCents : 0;
+  const totalCents = cart.subtotal_cents + shippingCents + taxCents + protectionCents;
   // Separate billing fields used only when billingSameAsShipping is off.
   const [billFirst, setBillFirst] = useState("");
   const [billLast, setBillLast] = useState("");
@@ -108,6 +171,17 @@ export function CheckoutClient({
 
   // Mobile cart collapsed by default — same pattern Shopify uses.
   const [cartOpen, setCartOpen] = useState(false);
+
+  // Terms agreement — pre-checked. Customer must opt out explicitly.
+  // Blocks submit when off.
+  const [agreeToTerms, setAgreeToTerms] = useState(true);
+
+  // Recurring total = sum of subscription lines (the customer is going
+  // to see this billed every cycle). Shown when subscribing.
+  const recurringCents = useMemo(
+    () => cart.line_items.reduce((s, l) => (l.mode === "subscribe" ? s + l.line_total_cents : s), 0),
+    [cart.line_items],
+  );
 
   // ── Braintree Hosted Fields ─────────────────────────────────────
   // We fetch a client_token here, then pass it to the HostedFieldsCard
@@ -207,7 +281,41 @@ export function CheckoutClient({
         return { ok: false, reason: "Please complete your billing address." };
       }
     }
+    if (!agreeToTerms) return { ok: false, reason: "Please agree to the store policies and terms." };
     return { ok: true };
+  }
+
+  /**
+   * Switch the entire cart from one-time to subscribe at the default
+   * frequency. POSTs to /api/cart which re-prices every line with the
+   * subscribe discount + injects any qualifying free gifts.
+   */
+  async function switchToSubscribe() {
+    try {
+      const lines = cart.line_items
+        .filter((l) => !l.is_gift)
+        .map((l) => ({ variant_id: l.variant_id, quantity: l.quantity }));
+      const res = await fetch("/api/cart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          workspace_id: workspace.id,
+          line_items: lines,
+          mode: "subscribe",
+          frequency_days: cart.subscription_frequency_days || 30,
+          email,
+          phone: phoneToE164(phone) || undefined,
+        }),
+      });
+      if (res.ok) {
+        // Hard-reload so the server picks up the new pricing + gift
+        // injection and the page rehydrates cleanly.
+        window.location.href = `/checkout?token=${encodeURIComponent(cart.token)}`;
+      }
+    } catch {
+      /* non-fatal — user can retry */
+    }
   }
 
   async function onSubmit() {
@@ -260,6 +368,8 @@ export function CheckoutClient({
           phone: phoneE164 || undefined,
           shipping_address: shipping,
           billing_address: billing,
+          shipping_protection_added: shippingProtection && !!workspace.shipping_protection,
+          shipping_method_code: shippingCode,
         }),
       });
       const data = (await res.json()) as { ok?: boolean; order_id?: string; order_number?: string; error?: string; details?: string };
@@ -305,6 +415,36 @@ export function CheckoutClient({
         <h1 className="text-3xl font-bold text-zinc-900 sm:text-4xl">Checkout</h1>
         <p className="mt-2 text-base text-zinc-600">Final step — payment and shipping.</p>
 
+        {/* Switch-to-subscribe upsell. Only shows when cart is one-time.
+            Free shipping + 25% off, with reassurance copy: cancel
+            anytime + 30-day money-back guarantee. */}
+        {!subscribing && (
+          <div className="mt-5 rounded-2xl border-2 border-emerald-200 bg-emerald-50 p-4 sm:p-5">
+            <div className="flex items-start gap-3">
+              <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-emerald-600">
+                <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-base font-bold text-emerald-900">
+                  Subscribe &amp; save 25% + free shipping
+                </div>
+                <div className="mt-1 text-sm text-emerald-800">
+                  Cancel anytime · 30-day money-back guarantee
+                </div>
+                <button
+                  type="button"
+                  onClick={switchToSubscribe}
+                  className="mt-3 inline-flex items-center rounded-full bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800"
+                >
+                  Switch to Subscribe &amp; Save →
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Mobile cart summary (collapsible). Hidden on desktop where
             the right sidebar shows the full cart. */}
         <details
@@ -330,7 +470,20 @@ export function CheckoutClient({
             </div>
           </summary>
           <div className="border-t border-zinc-100 px-4 pb-4 pt-3">
-            <OrderSummary cart={cart} subtotalCents={cart.subtotal_cents} msrpSubtotalCents={msrpSubtotalCents} shippingCents={shippingCents} totalCents={totalCents} youSaveCents={youSaveCents} />
+            <OrderSummary
+              cart={cart}
+              subtotalCents={cart.subtotal_cents}
+              msrpSubtotalCents={msrpSubtotalCents}
+              shippingCents={shippingCents}
+              shippingValueCents={shippingValueCents}
+              totalCents={totalCents}
+              youSaveCents={youSaveCents}
+              protectionCents={protectionCents}
+              protectionTitle={workspace.shipping_protection?.title || null}
+              backLink={backLink}
+              recurringCents={recurringCents}
+              subscribing={subscribing}
+            />
           </div>
         </details>
 
@@ -465,7 +618,62 @@ export function CheckoutClient({
                 name="ship-zip"
                 className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:border-zinc-500 focus:outline-none"
               />
+
+              {workspace.shipping_protection && (
+                <label className="mt-4 flex items-start gap-2 text-xs text-zinc-600">
+                  <input
+                    type="checkbox"
+                    checked={shippingProtection}
+                    onChange={(e) => setShippingProtection(e.target.checked)}
+                    className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-300"
+                  />
+                  <span>
+                    {workspace.shipping_protection.description}{" "}
+                    <span className="text-zinc-500">({fmt(workspace.shipping_protection.price_cents)})</span>
+                  </span>
+                </label>
+              )}
             </section>
+
+            {/* Shipping options — radio list. Pre-selects the rate
+                flagged is_default in the DB. Only renders when we have
+                at least one rate available for this cart shape. */}
+            {shippingRates.length > 0 && (
+              <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Shipping method</p>
+                <div className="mt-3 space-y-2">
+                  {shippingRates.map((r) => {
+                    const selected = r.code === shippingCode;
+                    return (
+                      <label
+                        key={r.id}
+                        className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 transition ${selected ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
+                      >
+                        <input
+                          type="radio"
+                          name="shipping-method"
+                          value={r.code}
+                          checked={selected}
+                          onChange={() => setShippingCode(r.code)}
+                          className="mt-1 h-4 w-4 border-zinc-300"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="text-sm font-semibold text-zinc-900">{r.name}</span>
+                            <span className="text-sm font-semibold text-zinc-900">
+                              {r.total_cents === 0 ? "Free" : fmt(r.total_cents)}
+                            </span>
+                          </div>
+                          {r.description && (
+                            <div className="text-xs text-zinc-500">{r.description}</div>
+                          )}
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
 
             {/* Payment card — custom Hosted Fields with a card-js
                 style visual mockup. Billing address toggle + form
@@ -583,7 +791,20 @@ export function CheckoutClient({
               <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
                 <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Your order</p>
                 <div className="mt-3">
-                  <OrderSummary cart={cart} subtotalCents={cart.subtotal_cents} msrpSubtotalCents={msrpSubtotalCents} shippingCents={shippingCents} totalCents={totalCents} youSaveCents={youSaveCents} />
+                  <OrderSummary
+              cart={cart}
+              subtotalCents={cart.subtotal_cents}
+              msrpSubtotalCents={msrpSubtotalCents}
+              shippingCents={shippingCents}
+              shippingValueCents={shippingValueCents}
+              totalCents={totalCents}
+              youSaveCents={youSaveCents}
+              protectionCents={protectionCents}
+              protectionTitle={workspace.shipping_protection?.title || null}
+              backLink={backLink}
+              recurringCents={recurringCents}
+              subscribing={subscribing}
+            />
                 </div>
               </section>
 
@@ -618,26 +839,52 @@ export function CheckoutClient({
         )}
       </div>
 
-      {/* Sticky bottom CTA — mobile + desktop both */}
+      {/* Sticky bottom CTA — mobile + desktop both. Stacks a tiny
+          trust strip above the price row so customers see the
+          guarantee + terms before they tap. */}
       <section className="fixed inset-x-0 bottom-0 z-10 border-t border-zinc-200 bg-white/95 px-4 py-3 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4">
-          <div>
-            <div className="text-2xl font-bold leading-tight text-zinc-900">{fmt(totalCents)}</div>
-            {youSaveCents > 0 ? (
-              <div className="mt-0.5 text-xs font-semibold text-emerald-700">You save {fmt(youSaveCents)}</div>
-            ) : (
-              <div className="mt-0.5 text-xs text-zinc-500">Charged today</div>
-            )}
+        <div className="mx-auto max-w-6xl">
+          {/* Money-back guarantee — prominent, single line */}
+          <div className="mb-2 flex items-center justify-center gap-1.5 text-xs font-medium text-emerald-800">
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>30-day money-back guarantee{subscribing ? " · cancel anytime" : ""}</span>
           </div>
-          <button
-            type="button"
-            onClick={onSubmit}
-            disabled={submitting || !cardReady}
-            style={{ backgroundColor: workspace.primary_color }}
-            className="rounded-full px-7 py-3 text-sm font-extrabold uppercase tracking-wider text-white shadow-md disabled:opacity-50"
-          >
-            {submitting ? "Processing…" : `Pay ${fmt(totalCents)}`}
-          </button>
+          {/* Terms checkbox — pre-checked, blocks submit when off */}
+          <label className="mb-2 flex items-center justify-center gap-1.5 text-xs text-zinc-600">
+            <input
+              type="checkbox"
+              checked={agreeToTerms}
+              onChange={(e) => setAgreeToTerms(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-zinc-300"
+            />
+            <span>
+              I agree to the{" "}
+              <a href="/policies" target="_blank" rel="noreferrer" className="underline-offset-2 hover:underline">
+                store policies and terms
+              </a>
+            </span>
+          </label>
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="text-2xl font-bold leading-tight text-zinc-900">{fmt(totalCents)}</div>
+              {youSaveCents > 0 ? (
+                <div className="mt-0.5 text-xs font-semibold text-emerald-700">You save {fmt(youSaveCents)}</div>
+              ) : (
+                <div className="mt-0.5 text-xs text-zinc-500">Charged today</div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={onSubmit}
+              disabled={submitting || !cardReady || !agreeToTerms}
+              style={{ backgroundColor: workspace.primary_color }}
+              className="rounded-full px-7 py-3 text-sm font-extrabold uppercase tracking-wider text-white shadow-md disabled:opacity-50"
+            >
+              {submitting ? "Processing…" : "Complete order"}
+            </button>
+          </div>
         </div>
       </section>
     </div>
@@ -653,22 +900,38 @@ function OrderSummary({
   subtotalCents,
   msrpSubtotalCents,
   shippingCents,
+  shippingValueCents,
   totalCents,
   youSaveCents,
+  protectionCents,
+  protectionTitle,
+  backLink,
+  recurringCents,
+  subscribing,
 }: {
   cart: CartDraft;
   subtotalCents: number;
   msrpSubtotalCents: number;
   shippingCents: number;
+  shippingValueCents: number;
   totalCents: number;
   youSaveCents: number;
+  protectionCents: number;
+  protectionTitle: string | null;
+  backLink: string;
+  recurringCents: number;
+  subscribing: boolean;
 }) {
+  // Strikethrough on shipping only when free AND there was a non-zero
+  // value to strike through (no zero-zero strikethrough).
+  const showShippingStrike = shippingCents === 0 && shippingValueCents > 0;
   return (
     <>
       <ul className="space-y-2">
         {cart.line_items.map((l: StoredLineItem, i) => {
           const linePaidCents = l.line_total_cents;
           const lineMsrpCents = (l.unit_msrp_cents || l.unit_price_cents) * l.quantity;
+          const isGift = !!l.is_gift;
           return (
             <li key={`${l.variant_id}-${i}`} className="flex items-center gap-3 text-sm">
               {l.image_url ? (
@@ -684,25 +947,77 @@ function OrderSummary({
                     <span className="ml-1 text-zinc-500">— {l.variant_title}</span>
                   )}
                 </div>
-                <div className="text-xs text-zinc-500">Qty {l.quantity}</div>
+                <div className="text-xs text-zinc-500">
+                  {isGift ? <span className="font-semibold text-emerald-700">Free gift</span> : <>Qty {l.quantity}</>}
+                </div>
               </div>
               <div className="text-right">
-                <div className="text-sm font-semibold text-zinc-900">{fmt(linePaidCents)}</div>
-                {lineMsrpCents > linePaidCents && (
-                  <div className="text-xs text-zinc-400 line-through">{fmt(lineMsrpCents)}</div>
+                {isGift ? (
+                  <>
+                    <div className="text-sm font-semibold text-emerald-700">Free</div>
+                    {lineMsrpCents > 0 && (
+                      <div className="text-xs text-zinc-400 line-through">{fmt(lineMsrpCents)}</div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div className="text-sm font-semibold text-zinc-900">{fmt(linePaidCents)}</div>
+                    {lineMsrpCents > linePaidCents && (
+                      <div className="text-xs text-zinc-400 line-through">{fmt(lineMsrpCents)}</div>
+                    )}
+                  </>
                 )}
               </div>
             </li>
           );
         })}
+        {protectionCents > 0 && (
+          <li className="flex items-center gap-3 text-sm">
+            <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg bg-zinc-100">
+              <svg className="h-5 w-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-medium text-zinc-900">{protectionTitle || "Shipping protection"}</div>
+              <div className="text-xs text-zinc-500">This order is protected from loss or damage</div>
+            </div>
+            <div className="text-right">
+              <div className="text-sm font-semibold text-zinc-900">{fmt(protectionCents)}</div>
+            </div>
+          </li>
+        )}
       </ul>
-      <dl className="mt-4 space-y-1 border-t border-zinc-200 pt-3 text-sm">
+      <div className="mt-3 text-right text-xs">
+        <a href={backLink} className="text-zinc-500 underline-offset-2 hover:text-zinc-800 hover:underline">
+          Make changes
+        </a>
+      </div>
+      <dl className="mt-3 space-y-1 border-t border-zinc-200 pt-3 text-sm">
         <Row label="Subtotal" value={fmt(subtotalCents)} />
         {msrpSubtotalCents > subtotalCents && (
           <Row label="Discount" value={`-${fmt(msrpSubtotalCents - subtotalCents)}`} muted />
         )}
-        <Row label="Shipping" value={shippingCents === 0 ? "Free" : fmt(shippingCents)} />
+        {showShippingStrike ? (
+          <div className="flex items-baseline justify-between">
+            <dt className="text-sm text-zinc-600">Shipping</dt>
+            <dd className="text-sm text-zinc-700">
+              <span className="mr-1.5 text-zinc-400 line-through">{fmt(shippingValueCents)}</span>
+              <span className="font-semibold text-emerald-700">Free</span>
+            </dd>
+          </div>
+        ) : (
+          <Row label="Shipping" value={shippingCents === 0 ? "Free" : fmt(shippingCents)} />
+        )}
         <Row label="Total" value={fmt(totalCents)} emphasis />
+        {subscribing && recurringCents > 0 && (
+          <div className="mt-1 flex items-baseline justify-between text-xs text-zinc-500">
+            <dt>Recurring total</dt>
+            <dd>
+              {fmt(recurringCents)} <span className="text-zinc-400">· cancel anytime</span>
+            </dd>
+          </div>
+        )}
         {youSaveCents > 0 && (
           <div className="flex items-baseline justify-end pt-1">
             <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">

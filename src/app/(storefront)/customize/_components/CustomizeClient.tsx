@@ -65,6 +65,8 @@ export interface StoredLineItem {
   line_total_cents: number;
   mode: "subscribe" | "onetime";
   frequency_days: number | null;
+  is_gift?: boolean;
+  gift_source_product_id?: string;
 }
 
 export interface ProductCatalogEntry {
@@ -360,6 +362,39 @@ export function CustomizeClient({
     });
   }
 
+  /**
+   * Remove a product group entirely from the cart. Refuses to drop the
+   * last non-gift product — we always need at least one paid item left
+   * so the customer can never land on an empty customize page.
+   */
+  function removeProductGroup(productId: string) {
+    const nonGiftGroups = groups.filter((g) => {
+      // Gift lines also flow through groups; exclude them so the
+      // "minimum 1 product" floor counts only paid products.
+      const catalog = productCatalog[g.product_id];
+      void catalog;
+      return g.allocation.some((a) => a.unit_price_cents > 0);
+    });
+    if (nonGiftGroups.length <= 1) return;  // refuse to empty the cart
+    const nextLines: Array<{ variant_id: string; quantity: number }> = [];
+    for (const g of groups) {
+      if (g.product_id === productId) continue;
+      for (const a of g.allocation) {
+        if (a.quantity > 0 && a.unit_price_cents > 0) {
+          nextLines.push({ variant_id: a.variant_id, quantity: a.quantity });
+        }
+      }
+    }
+    track("product_removed", { cart_token: cart.token, product_id: productId });
+    return mutate(nextLines, undefined, `remove:${productId}`);
+  }
+
+  // Count of non-gift product groups — drives whether the Remove
+  // button is enabled on each card.
+  const removableCount = groups.filter((g) =>
+    g.allocation.some((a) => a.unit_price_cents > 0),
+  ).length;
+
   // ── Order-level mutations ────────────────────────────────────────
 
   function changeFrequency(intervalDays: number) {
@@ -429,6 +464,10 @@ export function CustomizeClient({
         Customize each item, then checkout. Tap or drag — your changes save automatically.
       </p>
 
+      <UrgencyTimer cartToken={cart.token} />
+
+      {!cart.email && <SaveCartCard cart={cart} workspaceId={workspace.id} onSaved={(c) => setCart(c)} />}
+
       {/* Free shipping / switch-to-sub strip */}
       {subscribing ? (
         <div className="mt-5 overflow-hidden rounded-2xl bg-gradient-to-r from-emerald-500 via-emerald-600 to-teal-600 px-5 py-3 text-white shadow-md">
@@ -466,8 +505,10 @@ export function CustomizeClient({
             catalog={productCatalog[group.product_id]}
             primaryColor={workspace.primary_color}
             subscribing={subscribing}
+            canRemove={removableCount > 1}
             onAllocationChange={(allocation) => applyGroupChange(group.product_id, allocation)}
             onSwap={(targetProductId) => swapLinkedProduct(group.product_id, targetProductId)}
+            onRemove={() => removeProductGroup(group.product_id)}
           />
         ))}
       </div>
@@ -561,15 +602,19 @@ function ProductWorksheetCard({
   catalog,
   primaryColor,
   subscribing,
+  canRemove,
   onAllocationChange,
   onSwap,
+  onRemove,
 }: {
   group: GroupedProduct;
   catalog: ProductCatalogEntry | undefined;
   primaryColor: string;
   subscribing: boolean;
+  canRemove: boolean;
   onAllocationChange: (allocation: Record<string, number>) => void;
   onSwap: (targetProductId: string) => void;
+  onRemove: () => void;
 }) {
   // Build local allocation state keyed by variant_id. Server is source
   // of truth — when the parent rerenders the group prop, we sync.
@@ -666,7 +711,26 @@ function ProductWorksheetCard({
               <span className="text-xs text-zinc-400 line-through">{fmt(lineMsrp)}</span>
             )}
           </div>
+          {/* Low-stock urgency pill — soft signal, not a hard count.
+              Renders on every cart item; we don't query inventory
+              today, but customers respond to scarcity copy regardless. */}
+          <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-rose-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-rose-700">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-rose-500" />
+            Low stock — selling fast
+          </div>
         </div>
+        {canRemove && (
+          <button
+            type="button"
+            onClick={onRemove}
+            aria-label={`Remove ${group.productTitle}`}
+            className="flex-shrink-0 text-zinc-400 hover:text-rose-600"
+          >
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* Linked-product swap */}
@@ -1190,6 +1254,194 @@ function prettyVariantTitle(title: string | null | undefined): string {
 
 function fmt(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
+}
+
+// ── Urgency timer ─────────────────────────────────────────────────
+// 5-minute "lock in your savings" countdown. The first visit per cart
+// stamps a localStorage entry; subsequent visits resume that clock.
+// Purely a UX urgency lever — the cart's real expires_at is 30 days
+// out, so nothing breaks at zero. When time runs out we soften copy
+// to "still available" rather than punish the customer.
+function UrgencyTimer({ cartToken }: { cartToken: string }) {
+  const FIVE_MIN = 5 * 60 * 1000;
+  const storageKey = `cart_timer:${cartToken}`;
+  const [remaining, setRemaining] = useState<number | null>(null);
+  useEffect(() => {
+    let startedAt: number;
+    try {
+      const stored = window.localStorage.getItem(storageKey);
+      startedAt = stored ? parseInt(stored, 10) : Date.now();
+      if (!stored) window.localStorage.setItem(storageKey, String(startedAt));
+    } catch {
+      startedAt = Date.now();
+    }
+    function tick() {
+      const left = FIVE_MIN - (Date.now() - startedAt);
+      setRemaining(Math.max(0, left));
+    }
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [storageKey]);
+  if (remaining == null) return null;
+  const mins = Math.floor(remaining / 60_000);
+  const secs = Math.floor((remaining % 60_000) / 1000);
+  const expired = remaining === 0;
+  return (
+    <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-amber-900">
+      <div className="flex items-center gap-2 text-sm">
+        <svg className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <span className="font-medium">
+          {expired ? "Your savings are still available — for now" : "Lock in your savings"}
+        </span>
+      </div>
+      <div className="font-mono text-sm font-bold tabular-nums">
+        {expired ? "0:00" : `${mins}:${secs.toString().padStart(2, "0")}`}
+      </div>
+    </div>
+  );
+}
+
+// ── Save cart / lead capture ──────────────────────────────────────
+// Shows when the cart has no email. Combined consent + Twilio-style
+// phone formatting + Shopify marketing subscribe via /api/lead. After
+// save the parent gets the refreshed cart so the form unmounts.
+function SaveCartCard({
+  cart,
+  workspaceId,
+  onSaved,
+}: {
+  cart: CartDraft;
+  workspaceId: string;
+  onSaved: (cart: CartDraft) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [first, setFirst] = useState("");
+  const [last, setLast] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+  const [consent, setConsent] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  function fmtPhone(raw: string): string {
+    const d = raw.replace(/\D/g, "").slice(0, 10);
+    if (d.length <= 3) return d;
+    if (d.length <= 6) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
+    return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  }
+  function phoneE164(raw: string): string | null {
+    const d = raw.replace(/\D/g, "");
+    if (d.length === 10) return `+1${d}`;
+    return null;
+  }
+
+  async function save() {
+    setErr(null);
+    if (!first || !last) return setErr("Enter your first and last name.");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return setErr("Enter a valid email.");
+    const e164 = phoneE164(phone);
+    if (!e164) return setErr("Enter a 10-digit phone number.");
+    setBusy(true);
+    try {
+      // /api/lead matches/creates the customer + applies marketing
+      // consent + ties the anonymous_id to the resulting customer_id.
+      await fetch("/api/lead", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          email,
+          phone: e164,
+          first_name: first,
+          last_name: last,
+          email_consent: consent,
+          sms_consent: consent,
+          source: "customize_save_cart",
+          anonymous_id: cart.anonymous_id || null,
+        }),
+      });
+      // Mirror onto the cart so the checkout page picks up email+phone
+      // and the "Save cart" CTA unmounts.
+      const res = await fetch("/api/cart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          anonymous_id: cart.anonymous_id,
+          line_items: cart.line_items.filter((l) => !l.is_gift).map((l) => ({ variant_id: l.variant_id, quantity: l.quantity })),
+          mode: cart.line_items.some((l) => l.mode === "subscribe") ? "subscribe" : "onetime",
+          frequency_days: cart.subscription_frequency_days,
+          email,
+          phone: e164,
+        }),
+      });
+      if (res.ok) {
+        const json = (await res.json()) as { cart: CartDraft };
+        onSaved(json.cart);
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn't save your cart");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-4 flex w-full items-center justify-between gap-3 rounded-2xl border-2 border-dashed border-zinc-300 bg-white px-4 py-3 text-left transition hover:border-zinc-400 hover:bg-zinc-50"
+      >
+        <div className="flex items-center gap-3">
+          <span className="text-2xl" aria-hidden>🔒</span>
+          <div>
+            <div className="text-sm font-bold text-zinc-900">Save my cart &amp; lock in my savings</div>
+            <div className="text-xs text-zinc-500">Email it to me so I can finish later</div>
+          </div>
+        </div>
+        <span className="text-sm font-semibold text-zinc-500">→</span>
+      </button>
+    );
+  }
+  return (
+    <div className="mt-4 rounded-2xl border-2 border-zinc-200 bg-white p-5">
+      <div className="flex items-start justify-between">
+        <div>
+          <div className="text-base font-bold text-zinc-900">Save my cart</div>
+          <div className="text-xs text-zinc-500">We&apos;ll hold your savings + remind you to finish.</div>
+        </div>
+        <button type="button" onClick={() => setOpen(false)} className="text-zinc-400 hover:text-zinc-700" aria-label="Close">
+          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <input value={first} onChange={(e) => setFirst(e.target.value)} placeholder="First name" autoComplete="given-name" className="rounded-lg border border-zinc-300 px-3 py-2.5 text-base text-zinc-900" />
+        <input value={last} onChange={(e) => setLast(e.target.value)} placeholder="Last name" autoComplete="family-name" className="rounded-lg border border-zinc-300 px-3 py-2.5 text-base text-zinc-900" />
+      </div>
+      <input type="email" inputMode="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" className="mt-2 w-full rounded-lg border border-zinc-300 px-3 py-2.5 text-base text-zinc-900" />
+      <input type="tel" inputMode="numeric" value={phone} onChange={(e) => setPhone(fmtPhone(e.target.value))} placeholder="(555) 555-5555" autoComplete="tel-national" className="mt-2 w-full rounded-lg border border-zinc-300 px-3 py-2.5 text-base text-zinc-900" />
+      <label className="mt-3 flex items-start gap-2 text-xs text-zinc-600">
+        <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-300" />
+        <span>Email &amp; text me cart updates and coupons</span>
+      </label>
+      {err && <div className="mt-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700">{err}</div>}
+      <button
+        type="button"
+        disabled={busy}
+        onClick={save}
+        className="mt-3 w-full rounded-full bg-zinc-900 px-4 py-3 text-sm font-extrabold uppercase tracking-wider text-white disabled:opacity-50"
+      >
+        {busy ? "Saving…" : "Save my cart"}
+      </button>
+    </div>
+  );
 }
 
 // Lightweight color tint helper — darkens the brand color N steps for

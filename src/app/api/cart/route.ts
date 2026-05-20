@@ -32,6 +32,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { findVariant } from "@/lib/product-variants";
+import { ensureFreeGifts } from "@/lib/cart-gifts";
 import crypto from "crypto";
 
 const COOKIE_NAME = "cart";
@@ -77,6 +78,17 @@ interface StoredLineItem {
   line_total_cents: number;        // unit_price_cents * quantity
   mode: "subscribe" | "onetime";
   frequency_days: number | null;
+  /**
+   * True when this line was injected by the server as a qualifying
+   * free gift from a pricing_rules.free_gift_* config. Gift lines have
+   * unit_price_cents=0 and line_total_cents=0; their unit_msrp_cents
+   * holds the gift's perceived value (used to surface "save $X" math).
+   * Gifts are excluded from per-item shipping calc and from Amplifier
+   * line_items (no fulfillment SKU to ship through the 3PL).
+   */
+  is_gift?: boolean;
+  /** When is_gift=true, the product_id of the qualifying product that triggered the gift. */
+  gift_source_product_id?: string;
 }
 
 export async function GET(request: NextRequest) {
@@ -180,7 +192,10 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  const subtotalCents = resolvedLines.reduce((sum, l) => sum + l.line_total_cents, 0);
+  // Inject qualifying free gifts as $0 lines (server is the authority).
+  const linesWithGifts = await ensureFreeGifts(body.workspace_id, resolvedLines);
+
+  const subtotalCents = linesWithGifts.reduce((sum, l) => sum + l.line_total_cents, 0);
   const discountCents = 0;        // TODO when discount_code is applied
   const shippingCents = 0;        // computed at /api/checkout
   const taxCents = 0;             // computed at /api/checkout
@@ -217,7 +232,7 @@ export async function POST(request: NextRequest) {
         anonymous_id: body.anonymous_id || null,
         email: body.email || null,
         phone: body.phone || null,
-        line_items: resolvedLines,
+        line_items: linesWithGifts,
         discount_code: body.discount_code || null,
         subscription_frequency_days: mode === "subscribe" ? freqDays : null,
         subtotal_cents: subtotalCents,

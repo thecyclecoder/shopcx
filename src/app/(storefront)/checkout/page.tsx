@@ -18,6 +18,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { CheckoutClient } from "./_components/CheckoutClient";
 import type { CartDraft } from "../customize/_components/CustomizeClient";
 import { getStorefrontIcons } from "../_lib/storefront-metadata";
+import { ensureFreeGifts, type CartLineLike } from "@/lib/cart-gifts";
 
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
   const params = await searchParams;
@@ -61,10 +62,31 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
     redirect("/");
   }
 
+  // Backfill any qualifying free gifts onto carts that pre-date the
+  // gift-injection logic. ensureFreeGifts is a no-op when gifts are
+  // already present, so this is safe to run on every render.
+  const baseLines = (cart.line_items as CartLineLike[]) || [];
+  const linesWithGifts = await ensureFreeGifts(cart.workspace_id as string, baseLines);
+  if (linesWithGifts.length !== baseLines.length) {
+    const newSubtotalCents = linesWithGifts.reduce((s, l) => s + l.line_total_cents, 0);
+    await admin
+      .from("cart_drafts")
+      .update({
+        line_items: linesWithGifts,
+        subtotal_cents: newSubtotalCents,
+        total_cents: newSubtotalCents,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("token", token);
+    cart.line_items = linesWithGifts;
+    cart.subtotal_cents = newSubtotalCents;
+    cart.total_cents = newSubtotalCents;
+  }
+
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "id, name, storefront_slug, storefront_primary_color, storefront_logo_url, storefront_domain",
+      "id, name, storefront_slug, storefront_primary_color, storefront_logo_url, storefront_domain, shipping_protection_enabled, shipping_protection_price_cents, shipping_protection_title, shipping_protection_description",
     )
     .eq("id", cart.workspace_id)
     .single();
@@ -126,6 +148,13 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
           primary_color: workspace?.storefront_primary_color || "#18181b",
           storefront_domain: workspace?.storefront_domain || null,
           storefront_slug: workspace?.storefront_slug || null,
+          shipping_protection: workspace?.shipping_protection_enabled
+            ? {
+                price_cents: (workspace?.shipping_protection_price_cents as number) || 495,
+                title: (workspace?.shipping_protection_title as string) || "Shipping protection",
+                description: (workspace?.shipping_protection_description as string) || "Protect this order against loss, damage or theft during shipping.",
+              }
+            : null,
         }}
         sourceProductHandle={(cart as { source_product_handle?: string | null }).source_product_handle || null}
         featuredReviews={featuredReviews as unknown as Parameters<typeof CheckoutClient>[0]["featuredReviews"]}

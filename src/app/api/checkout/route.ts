@@ -49,9 +49,8 @@ import {
 } from "@/lib/integrations/braintree-customer";
 import { createAmplifierOrder } from "@/lib/integrations/amplifier";
 import { generateOrderNumber } from "@/lib/order-number";
+import { resolveRateForCart } from "@/lib/shipping-rates";
 import crypto from "crypto";
-
-const ESTIMATED_SHIPPING_PER_ITEM_CENTS = 495;
 
 interface AddressInput {
   first_name?: string;
@@ -73,6 +72,8 @@ interface PostBody {
   phone?: string;
   shipping_address?: AddressInput;
   billing_address?: AddressInput;
+  shipping_protection_added?: boolean;
+  shipping_method_code?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -116,11 +117,39 @@ export async function POST(request: NextRequest) {
   };
   const lines = cart.line_items as Line[];
   const subtotalCents = lines.reduce((s, l) => s + l.line_total_cents, 0);
-  const totalUnits = lines.reduce((s, l) => s + l.quantity, 0);
   const subscribing = lines.some((l) => l.mode === "subscribe");
-  const shippingCents = subscribing ? 0 : totalUnits * ESTIMATED_SHIPPING_PER_ITEM_CENTS;
+
+  // Resolve the customer's selected shipping method against current
+  // shipping_rates. The server is authoritative — even if the client
+  // sent a method code that doesn't apply for this cart shape (e.g.
+  // asked for expedited on a subscription where it's disabled),
+  // resolveRateForCart falls back to the default. If the workspace
+  // has no rates configured, error out — never fabricate a number.
+  const resolved = await resolveRateForCart(cart.workspace_id, lines, body.shipping_method_code);
+  if (!resolved) {
+    return NextResponse.json(
+      { error: "no_shipping_rate", details: "No shipping rates configured for this workspace." },
+      { status: 500 },
+    );
+  }
+  const shippingCents = resolved.total_cents;
+  const shippingMethodCode: string | null = resolved.rate.code;
+  const shippingRateId: string | null = resolved.rate.id;
   const taxCents = 0;  // TODO: TaxJar / Avalara integration
-  const totalCents = subtotalCents + shippingCents + taxCents;
+
+  // Shipping protection — server validates against the workspace's
+  // configured rate (client can't fabricate a different protection
+  // price). When the workspace has it disabled, the flag is ignored.
+  const { data: wsProtection } = await admin
+    .from("workspaces")
+    .select("shipping_protection_enabled, shipping_protection_price_cents")
+    .eq("id", cart.workspace_id)
+    .single();
+  const protectionEnabled = !!wsProtection?.shipping_protection_enabled;
+  const protectionAdded = protectionEnabled && body.shipping_protection_added === true;
+  const protectionCents = protectionAdded ? (wsProtection?.shipping_protection_price_cents || 0) : 0;
+
+  const totalCents = subtotalCents + shippingCents + taxCents + protectionCents;
 
   if (totalCents <= 0) {
     return NextResponse.json({ error: "invalid_total" }, { status: 400 });
@@ -356,6 +385,8 @@ export async function POST(request: NextRequest) {
         total_price_cents: bucket.items.reduce((s, i) => s + i.line_total_cents, 0),
         applied_discounts: [],
         is_internal: true,
+        shipping_protection_added: protectionAdded,
+        shipping_protection_amount_cents: protectionAdded ? protectionCents : null,
       })
       .select("id")
       .single();
@@ -397,10 +428,15 @@ export async function POST(request: NextRequest) {
         subtotal_cents: subtotalCents,
         shipping_cents: shippingCents,
         tax_cents: taxCents,
+        protection_cents: protectionCents,
         gateway: "braintree",
         processor_response_code: transaction.processorResponseCode,
         processor_response_text: transaction.processorResponseText,
       },
+      shipping_protection_added: protectionAdded,
+      shipping_protection_amount_cents: protectionAdded ? protectionCents : null,
+      shipping_method_code: shippingMethodCode,
+      shipping_rate_id: shippingRateId,
     })
     .select("id, order_number")
     .single();

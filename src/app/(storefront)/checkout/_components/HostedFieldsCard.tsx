@@ -40,7 +40,11 @@ import Script from "next/script";
 
 // Pinned to a recent stable braintree-web version. Hosted Fields +
 // Client are loaded as separate modules; both required.
-const BT_VERSION = "3.97.4";
+// Bumped from 3.97.4 → 3.116.0 → 3.141.0. The 3.116 → 3.141 range
+// includes additional Hosted Fields polish (iOS cursor-jump fix in
+// 3.128, expiration regex tighten in 3.134, etc.) — taking the
+// latest stable so brand-aware spacing + autofill coexist cleanly.
+const BT_VERSION = "3.141.0";
 const CLIENT_SRC = `https://js.braintreegateway.com/web/${BT_VERSION}/js/client.min.js`;
 const HF_SRC = `https://js.braintreegateway.com/web/${BT_VERSION}/js/hosted-fields.min.js`;
 const DATA_COLLECTOR_SRC = `https://js.braintreegateway.com/web/${BT_VERSION}/js/data-collector.min.js`;
@@ -149,15 +153,14 @@ export const HostedFieldsCard = forwardRef<HostedFieldsCardHandle, Props>(functi
             number: {
               container: numberRef.current,
               placeholder: "1234 5678 9012 3456",
-              // type:tel forces the iOS numeric keypad (and a sensible
-              // input-mode on Android) without bringing up the spell-
-              // check / autocorrect chrome you'd get with type:text.
               type: "tel",
-              // formatInput defaults to true → Braintree applies
-              // brand-aware spacing as the customer types or after
-              // autofill commits ("4 4 4 4" for Visa/MC/Discover,
-              // "4 6 5" for Amex). Don't display the card number as a
-              // wall of digits even after entry — that's user-hostile.
+              // formatInput:true → brand-aware spacing (4-4-4-4 for
+              // Visa/MC/Discover, 4-6-5 for Amex). The 3.141 SDK
+              // handles autofill paste correctly; on older versions
+              // the formatter raced against rapid paste events and
+              // dropped digits, which is why we'd previously disabled
+              // this. With the bump, both autofill and spacing work.
+              formatInput: true,
             },
             expirationDate: {
               container: expRef.current,
