@@ -139,7 +139,9 @@ export function CheckoutClient({
 
   // ── Form state ────────────────────────────────────────────────────
   const [email, setEmail] = useState(cart.email || "");
-  const [phone, setPhone] = useState(cart.phone || "");
+  // Cart phones are stored E.164 ("+18583349198"); hydrate as the
+  // pretty national format so the customer never sees the country code.
+  const [phone, setPhone] = useState(formatPhoneDisplay(cart.phone || ""));
   const [firstName, setFirstName] = useState(initialFirstName || "");
   const [lastName, setLastName] = useState(initialLastName || "");
   const [emailMarketingConsent, setEmailMarketingConsent] = useState(true);
@@ -534,6 +536,10 @@ export function CheckoutClient({
                 inputMode="numeric"
                 value={phone}
                 onChange={(e) => setPhone(formatPhoneDisplay(e.target.value))}
+                // onBlur catches Safari autofill that bypasses onChange,
+                // so an autofilled "+18583349198" gets normalized to
+                // "(858) 334-9198" the moment focus leaves the field.
+                onBlur={(e) => setPhone(formatPhoneDisplay(e.target.value))}
                 placeholder="(555) 555-5555"
                 autoComplete="tel-national"
                 name="tel"
@@ -1070,11 +1076,30 @@ function fmt(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
-// Mirrors the formatter we use in journey minisites — "(858) 334-9198"
-// rendering as the customer types. Caller stores the formatted value
-// in state; we E.164-ize at submit time.
+/**
+ * Format a phone string for display as "(858) 334-9198" regardless of
+ * what the customer (or their browser autofill) shoves in.
+ *
+ * Handles three input shapes:
+ *   - typed digits: "8583349198" → "(858) 334-9198"
+ *   - autofilled E.164: "+18583349198" → "(858) 334-9198"
+ *   - 11-digit with leading "1": "18583349198" → "(858) 334-9198"
+ *
+ * Customers should never see the +1; we E.164-ize silently at submit
+ * time. Anything beyond 10 significant digits gets truncated.
+ */
 function formatPhoneDisplay(raw: string): string {
-  const digits = raw.replace(/\D/g, "").slice(0, 10);
+  let digits = raw.replace(/\D/g, "");
+  // Strip US country code if present so the formatter always works
+  // on the 10-digit national number. Avoids the autofill bug where
+  // "+18583349198" → 11 digits → slice(0,10) drops the trailing 8.
+  if (digits.length === 11 && digits.startsWith("1")) {
+    digits = digits.slice(1);
+  } else if (digits.length > 10) {
+    // Anything longer (unexpected): keep the last 10 digits, which
+    // matches "human reading right-to-left" intuition.
+    digits = digits.slice(-10);
+  }
   if (digits.length <= 3) return digits;
   if (digits.length <= 6) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
   return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
@@ -1088,7 +1113,9 @@ function phoneToE164(raw: string): string {
 }
 
 function isPhoneComplete(raw: string): boolean {
-  return raw.replace(/\D/g, "").length === 10;
+  const d = raw.replace(/\D/g, "");
+  // Accept either 10 digits (national) or 11 starting with 1 (US E.164).
+  return d.length === 10 || (d.length === 11 && d.startsWith("1"));
 }
 
 // All US states + DC + PR. Code/name pairs so the option label is

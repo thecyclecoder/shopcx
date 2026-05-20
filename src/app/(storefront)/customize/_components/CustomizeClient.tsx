@@ -1327,13 +1327,19 @@ function SaveCartCard({
   const [err, setErr] = useState<string | null>(null);
 
   function fmtPhone(raw: string): string {
-    const d = raw.replace(/\D/g, "").slice(0, 10);
+    let d = raw.replace(/\D/g, "");
+    // Strip US country code (E.164 autofill) so the displayed value is
+    // always the 10-digit national format. Without this, autofill of
+    // "+18583349198" would slice(0,10) and drop the last digit.
+    if (d.length === 11 && d.startsWith("1")) d = d.slice(1);
+    else if (d.length > 10) d = d.slice(-10);
     if (d.length <= 3) return d;
     if (d.length <= 6) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
     return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
   }
   function phoneE164(raw: string): string | null {
-    const d = raw.replace(/\D/g, "");
+    let d = raw.replace(/\D/g, "");
+    if (d.length === 11 && d.startsWith("1")) d = d.slice(1);
     if (d.length === 10) return `+1${d}`;
     return null;
   }
@@ -1426,7 +1432,7 @@ function SaveCartCard({
         <input value={last} onChange={(e) => setLast(e.target.value)} placeholder="Last name" autoComplete="family-name" className="rounded-lg border border-zinc-300 px-3 py-2.5 text-base text-zinc-900" />
       </div>
       <input type="email" inputMode="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" className="mt-2 w-full rounded-lg border border-zinc-300 px-3 py-2.5 text-base text-zinc-900" />
-      <input type="tel" inputMode="numeric" value={phone} onChange={(e) => setPhone(fmtPhone(e.target.value))} placeholder="(555) 555-5555" autoComplete="tel-national" className="mt-2 w-full rounded-lg border border-zinc-300 px-3 py-2.5 text-base text-zinc-900" />
+      <input type="tel" inputMode="numeric" value={phone} onChange={(e) => setPhone(fmtPhone(e.target.value))} onBlur={(e) => setPhone(fmtPhone(e.target.value))} placeholder="(555) 555-5555" autoComplete="tel-national" className="mt-2 w-full rounded-lg border border-zinc-300 px-3 py-2.5 text-base text-zinc-900" />
       <label className="mt-3 flex items-start gap-2 text-xs text-zinc-600">
         <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-300" />
         <span>Email &amp; text me cart updates and coupons</span>
