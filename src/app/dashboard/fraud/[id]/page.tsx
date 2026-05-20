@@ -89,6 +89,8 @@ export default function FraudCaseDetailPage() {
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [resellerAdding, setResellerAdding] = useState(false);
+  const [resellerResult, setResellerResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
   // Review form
   const [reviewNotes, setReviewNotes] = useState("");
@@ -465,6 +467,68 @@ export default function FraudCaseDetailPage() {
                 >
                   Confirmed Fraud
                 </button>
+
+                {/* Mark as reseller — pushes the case's addresses into
+                    known_resellers so any future order to those
+                    addresses auto-trips the amazon_reseller rule.
+                    Independent of confirming fraud — sometimes we
+                    spot reseller behavior before having proof. */}
+                <button
+                  onClick={async () => {
+                    if (!confirm("Add this person's address(es) to the reseller list? Any future order to a matching address will be auto-flagged as fraud.")) return;
+                    setResellerAdding(true);
+                    setResellerResult(null);
+                    try {
+                      const res = await fetch(
+                        `/api/workspaces/${workspace.id}/fraud-cases/${caseId}/add-to-resellers`,
+                        { method: "POST" },
+                      );
+                      const data = await res.json();
+                      if (!res.ok || !data.ok) {
+                        setResellerResult({ ok: false, msg: data.error || "Failed to add to resellers" });
+                      } else {
+                        const parts: string[] = [];
+                        if (data.added) parts.push(`${data.added} added`);
+                        if (data.reactivated) parts.push(`${data.reactivated} reactivated`);
+                        if (data.skipped) parts.push(`${data.skipped} already active`);
+                        setResellerResult({
+                          ok: true,
+                          msg: parts.length > 0
+                            ? `Reseller list updated — ${parts.join(", ")}.`
+                            : "Reseller list updated.",
+                        });
+                      }
+                    } catch (err) {
+                      setResellerResult({ ok: false, msg: err instanceof Error ? err.message : String(err) });
+                    } finally {
+                      setResellerAdding(false);
+                    }
+                  }}
+                  disabled={resellerAdding || saving}
+                  className="w-full rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-amber-700 disabled:opacity-50"
+                >
+                  {resellerAdding ? "Adding…" : "Mark as Reseller"}
+                </button>
+
+                {resellerResult && (
+                  <div
+                    className={`rounded-md px-3 py-2 text-xs ${
+                      resellerResult.ok
+                        ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                        : "bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                    }`}
+                  >
+                    {resellerResult.msg}
+                    {resellerResult.ok && (
+                      <>
+                        {" "}
+                        <a href="/dashboard/resellers" className="underline">
+                          View list →
+                        </a>
+                      </>
+                    )}
+                  </div>
+                )}
 
                 {/* Dismiss */}
                 <div className="rounded-md border border-zinc-200 p-3 dark:border-zinc-700">
