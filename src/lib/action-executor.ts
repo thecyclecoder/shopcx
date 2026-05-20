@@ -71,6 +71,14 @@ export interface ActionParams {
     last_name?: string;
     phone?: string;
   };
+  // update_customer_info — change any subset of contact fields on
+  // the customer's account profile (separate from a shipping/billing
+  // address tied to a specific order/sub). All optional; the handler
+  // only touches fields that were provided.
+  email?: string;
+  phone_number?: string;       // any common format; helper E.164-izes
+  first_name?: string;
+  last_name?: string;
 }
 
 export interface ActionContext {
@@ -1411,6 +1419,102 @@ export const directActionHandlers: Record<
       return { success: false, error: "in_amplifier", summary: summaries.join("; ") };
     }
     return { success: true, summary: summaries.join("; ") || "No changes" };
+  },
+
+  /**
+   * update_customer_info — change any subset of the customer's
+   * account contact fields (phone, email, first_name, last_name).
+   * Distinct from update_shipping_address, which touches addresses
+   * on orders/subs. This action lives on the customer profile.
+   *
+   * Behavior:
+   *   - Validates phone (E.164 US) and email format up front.
+   *   - Updates our customers row.
+   *   - Pushes to Shopify via customerUpdate mutation so the
+   *     customer's "My Account" reflects the change next time they
+   *     log in.
+   *   - Applies to the active customer only — does NOT cascade to
+   *     linked profiles (that's a separate intent and the operator
+   *     should confirm before touching multiple identities).
+   *
+   * Pass any subset of: { email, phone_number, first_name, last_name }.
+   */
+  update_customer_info: async (ctx, p) => {
+    if (!ctx.customerId) return { success: false, error: "No customer in context" };
+    const { toE164US, updateShopifyCustomer } = await import("@/lib/shopify-customer-update");
+
+    const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    let phoneE164: string | undefined;
+    if (p.phone_number) {
+      const normalized = toE164US(p.phone_number);
+      if (!normalized) {
+        return { success: false, error: `Invalid phone "${p.phone_number}" — need 10 digits` };
+      }
+      phoneE164 = normalized;
+      updates.phone = phoneE164;
+    }
+    if (p.email != null) {
+      const email = p.email.trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return { success: false, error: `Invalid email "${p.email}"` };
+      }
+      updates.email = email;
+    }
+    if (p.first_name != null) updates.first_name = p.first_name.trim();
+    if (p.last_name != null) updates.last_name = p.last_name.trim();
+
+    if (Object.keys(updates).length <= 1) {
+      return { success: false, error: "No fields to update" };
+    }
+
+    // Pull the Shopify ID before we mutate locally so we can hand off.
+    const { data: cust } = await ctx.admin.from("customers")
+      .select("shopify_customer_id")
+      .eq("id", ctx.customerId)
+      .single();
+
+    // Local DB write first — it's the source of truth for the
+    // dashboard. If Shopify rejects we can show the local update
+    // succeeded but flag that Shopify is out of sync.
+    const { error: dbErr } = await ctx.admin
+      .from("customers")
+      .update(updates)
+      .eq("id", ctx.customerId);
+    if (dbErr) return { success: false, error: `DB update failed: ${dbErr.message}` };
+
+    const changed: string[] = [];
+    if (phoneE164) changed.push("phone");
+    if (updates.email) changed.push("email");
+    if (updates.first_name != null) changed.push("first name");
+    if (updates.last_name != null) changed.push("last name");
+
+    // Shopify push
+    let shopifyNote = "";
+    if (cust?.shopify_customer_id) {
+      const r = await updateShopifyCustomer({
+        workspaceId: ctx.workspaceId,
+        shopifyCustomerId: cust.shopify_customer_id as string,
+        phone: phoneE164,
+        email: (updates.email as string) || undefined,
+        firstName: updates.first_name as string | undefined,
+        lastName: updates.last_name as string | undefined,
+      });
+      if (r.success) {
+        shopifyNote = " (synced to Shopify)";
+      } else {
+        // Local update stands; flag the sync gap so an operator can
+        // reconcile manually. Common cause: another customer in the
+        // same shop already owns this email/phone.
+        shopifyNote = ` (Shopify rejected: ${r.error})`;
+      }
+    } else {
+      shopifyNote = " (no Shopify ID on record)";
+    }
+
+    return {
+      success: true,
+      summary: `Updated ${changed.join(", ")} on customer profile${shopifyNote}`,
+    };
   },
 
   create_replacement_order: async (ctx, p) => {
