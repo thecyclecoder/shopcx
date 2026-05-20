@@ -149,20 +149,32 @@ export const HostedFieldsCard = forwardRef<HostedFieldsCardHandle, Props>(functi
             number: {
               container: numberRef.current,
               placeholder: "1234 5678 9012 3456",
-              formatInput: false,  // autofill-safe (see CheckoutClient note)
+              // type:tel forces the iOS numeric keypad (and a sensible
+              // input-mode on Android) without bringing up the spell-
+              // check / autocorrect chrome you'd get with type:text.
+              type: "tel",
+              // formatInput:false because Braintree's auto-spacer races
+              // browser autofill and drops digits on the card number
+              // (where autofill is the dominant entry path).
+              formatInput: false,
             },
             expirationDate: {
               container: expRef.current,
-              placeholder: "MM/YY",
-              formatInput: false,
+              placeholder: "MM / YY",
+              type: "tel",
+              // formatInput defaults to true → Braintree auto-inserts
+              // the slash after MM as the customer types. Expiration
+              // autofill is rare enough that the typing UX wins.
             },
             cvv: {
               container: cvvRef.current,
               placeholder: "CVV",
+              type: "tel",
             },
             postalCode: {
               container: postalRef.current,
               placeholder: "ZIP",
+              type: "tel",
             },
           },
         });
