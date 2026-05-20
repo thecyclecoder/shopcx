@@ -67,6 +67,13 @@ export interface CreateAmplifierOrderInput {
   shippingCents?: number;
   taxCents?: number;
   discountCents?: number;
+  /**
+   * Custom message printed on the Amplifier packing slip. Max 2000
+   * chars, Latin-only (Amplifier strips Unicode upstream so emojis +
+   * accents won't survive). Use sparingly — every printed slip costs
+   * a few cents of ink + a real second of pick-pack time.
+   */
+  packingSlipMessage?: string | null;
 }
 
 export interface CreateAmplifierOrderResult {
@@ -187,6 +194,12 @@ export async function createAmplifierOrder(input: CreateAmplifierOrderInput): Pr
   if (input.shippingCents != null) body.shipping_amount = (input.shippingCents / 100).toFixed(2);
   if (input.taxCents != null) body.tax_amount = (input.taxCents / 100).toFixed(2);
   if (input.discountCents != null) body.discount_amount = (input.discountCents / 100).toFixed(2);
+  if (input.packingSlipMessage) {
+    // Strip Unicode (same as line descriptions) + cap at 2000 chars.
+    // Amplifier rejects emoji / accents at validation, so we keep the
+    // pipeline clean here rather than failing the whole order.
+    body.packing_slip_message = stripUnicode(input.packingSlipMessage).slice(0, 2000);
+  }
 
   // Auth via query string keeps the header surface small; HTTP Basic
   // would also work.

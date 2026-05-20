@@ -495,32 +495,32 @@ export async function POST(request: NextRequest) {
 
   // ── 8. Post-payment fraud check. ─────────────────────────────────
   // Runs the full rule engine (shared_address, high_velocity, address
-  // distance, name mismatch, amazon_reseller w/ fuzzy match) against
-  // the order row. Once Amplifier is fired the order is essentially
-  // un-cancellable at the 3PL, so this gate is non-negotiable — if
-  // ANY rule fires we hold and let ops review.
+  // distance, name mismatch, amazon_reseller w/ fuzzy match) on the
+  // new order row. Once Amplifier ingests the order it goes to the
+  // 3PL pick queue and becomes effectively un-cancellable, so this
+  // gate is non-negotiable. The held state is implicit: an order
+  // with no amplifier_order_id + an open fraud_case is held.
+  // The dismiss action on the case is what eventually fires Amplifier.
   let fraudHeld = false;
   try {
     await checkOrderForFraud(cart.workspace_id, order.id, customer.id);
+    // fraud_cases.order_ids is a text[] array — use contains() to find
+    // cases that include this order's UUID.
     const { data: openCases } = await admin
       .from("fraud_cases")
       .select("id, rule_type, severity")
       .eq("workspace_id", cart.workspace_id)
-      .eq("order_id", order.id)
+      .contains("order_ids", [order.id])
       .neq("status", "dismissed");
     if (openCases && openCases.length > 0) {
       fraudHeld = true;
       const ruleTypes = openCases.map((c) => c.rule_type).join(", ");
       console.warn(`[checkout] order ${order.order_number} held post-payment: ${ruleTypes}`);
-      await admin
-        .from("orders")
-        .update({ tags: [...((order as { tags?: string[] }).tags || []), "fraud_hold"] })
-        .eq("id", order.id);
       await admin.from("dashboard_notifications").insert({
         workspace_id: cart.workspace_id,
         type: "fraud_alert",
         title: `${order.order_number} held — fraud review required`,
-        message: `Order paid via Braintree but NOT released to fulfillment. Rules fired: ${ruleTypes}. Review the fraud case before clearing.`,
+        message: `Order paid via Braintree but NOT released to fulfillment. Rules fired: ${ruleTypes}. Dismiss the case to release it to Amplifier.`,
       }).then(() => undefined, () => undefined);
     }
   } catch (err) {
@@ -530,10 +530,8 @@ export async function POST(request: NextRequest) {
   }
 
   // ── 9. Hand off to Amplifier for fulfillment. ────────────────────
-  // Once Amplifier ingests the order it goes to the warehouse pick
-  // queue almost immediately and cancelling becomes "ask the 3PL
-  // nicely and hope" — so we ONLY fire when the fraud gate above
-  // didn't hold the order.
+  // Skipped when fraud is held; the fraud-dismiss handler will fire
+  // Amplifier when an operator clears the case.
   if (fraudHeld) {
     console.warn(`[checkout] skipping Amplifier for ${orderNumber} — fraud hold in place`);
   } else {
@@ -546,15 +544,19 @@ export async function POST(request: NextRequest) {
         billingAddress: bill,
         email,
         phone: body.phone || ship.phone || null,
-        // Skip lines without SKUs (gifts have none today) — Amplifier
-        // doesn't need them and the helper errors out on missing skus.
+        // Send EVERY line with a SKU — including free gifts. Gifts
+        // are physical products that need to ship; only filter out
+        // lines that genuinely lack a fulfillment SKU.
         lineItems: lines
-          .filter((l) => !l.is_gift && l.sku)
+          .filter((l) => l.sku)
           .map((l) => ({
             sku: l.sku!,
             title: l.title,
             description: l.variant_title ? `${l.title} — ${l.variant_title}` : l.title,
             quantity: l.quantity,
+            // Gifts ship at $0 — Amplifier records the line at zero
+            // so the warehouse pick sheet shows the item but the
+            // value rolls into the totals as zero.
             unit_price_cents: l.unit_price_cents,
             reference_id: l.variant_id,
           })),

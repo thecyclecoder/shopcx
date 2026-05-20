@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { removeOrderTags } from "@/lib/shopify-order-tags";
+import { createAmplifierOrder } from "@/lib/integrations/amplifier";
 
 // GET: Single fraud case with matches and history
 export async function GET(
@@ -185,7 +186,14 @@ export async function PATCH(
     );
   }
 
-  // If dismissed → remove "suspicious" tag from held orders to release them
+  // If dismissed → release each held order to fulfillment.
+  //   - Internal storefront orders: never sent to Amplifier in the
+  //     first place (the held state IS the absence of an
+  //     amplifier_order_id). Fire Amplifier now. If it fails, abort
+  //     the dismiss with a 502 so the operator sees the error and can
+  //     retry — silent fallback would leave an "approved" case with a
+  //     paid order that the warehouse never sees.
+  //   - Shopify-sourced orders: remove the "suspicious" tag in Shopify.
   if (status === "dismissed") {
     const { data: dismissedCase } = await admin
       .from("fraud_cases")
@@ -194,19 +202,105 @@ export async function PATCH(
       .single();
 
     if (dismissedCase?.order_ids?.length) {
+      const amplifierFailures: Array<{ order_number: string; error?: string; details?: string }> = [];
+
       for (const orderId of dismissedCase.order_ids as string[]) {
-        if (orderId) {
-          // Resolve Shopify order ID (order_ids may be internal UUIDs or Shopify IDs)
-          let shopifyOrderId = orderId;
-          if (orderId.includes("-")) {
-            // UUID — look up Shopify ID
-            const { data: order } = await admin.from("orders").select("shopify_order_id").eq("id", orderId).single();
-            shopifyOrderId = order?.shopify_order_id || orderId;
+        if (!orderId) continue;
+
+        // Non-UUID → legacy/Shopify-side only; no local row to look up.
+        if (!orderId.includes("-")) {
+          removeOrderTags(workspaceId, orderId, ["suspicious"]).catch((err) => {
+            console.error(`Failed to remove suspicious tag from order ${orderId}:`, err);
+          });
+          continue;
+        }
+
+        const { data: order } = await admin
+          .from("orders")
+          .select("id, order_number, source_name, shopify_order_id, amplifier_order_id, email, shipping_address, billing_address, line_items, total_cents, created_at")
+          .eq("id", orderId)
+          .maybeSingle();
+        if (!order) continue;
+
+        if (order.source_name === "storefront") {
+          if (order.amplifier_order_id) continue; // already released
+          type Line = {
+            sku?: string | null;
+            title: string;
+            variant_title?: string | null;
+            quantity: number;
+            unit_price_cents: number;
+            variant_id?: string;
+            is_gift?: boolean;
+          };
+          const ship = order.shipping_address as { phone?: string } | null;
+          const lines = (order.line_items as Line[]) || [];
+          const res = await createAmplifierOrder({
+            workspaceId,
+            orderNumber: order.order_number as string,
+            orderDate: order.created_at as string,
+            shippingAddress: order.shipping_address,
+            billingAddress: order.billing_address,
+            email: order.email as string,
+            phone: ship?.phone || null,
+            // Send every line with a SKU including gifts; gifts ship
+            // at $0 so the warehouse pick sheet shows them.
+            lineItems: lines
+              .filter((l) => l.sku)
+              .map((l) => ({
+                sku: l.sku!,
+                title: l.title,
+                description: l.variant_title ? `${l.title} — ${l.variant_title}` : l.title,
+                quantity: l.quantity,
+                unit_price_cents: l.unit_price_cents,
+                reference_id: l.variant_id,
+              })),
+            totalCents: order.total_cents,
+            subtotalCents: order.total_cents,
+            shippingCents: 0,
+            taxCents: 0,
+          });
+          if (res.success && res.amplifier_order_id) {
+            await admin
+              .from("orders")
+              .update({
+                amplifier_order_id: res.amplifier_order_id,
+                amplifier_received_at: new Date().toISOString(),
+              })
+              .eq("id", order.id);
+          } else {
+            console.error(`[fraud-dismiss] Amplifier release failed for ${order.order_number}:`, res.error, res.details);
+            amplifierFailures.push({ order_number: order.order_number as string, error: res.error, details: res.details });
           }
-          removeOrderTags(workspaceId, shopifyOrderId, ["suspicious"]).catch((err) => {
-            console.error(`Failed to remove suspicious tag from order ${shopifyOrderId}:`, err);
+        } else if (order.shopify_order_id) {
+          removeOrderTags(workspaceId, order.shopify_order_id, ["suspicious"]).catch((err) => {
+            console.error(`Failed to remove suspicious tag from order ${order.shopify_order_id}:`, err);
           });
         }
+      }
+
+      // If ANY internal-order release failed, surface a 502 instead of
+      // silently completing the dismiss — the operator needs to know
+      // there's a paid order sitting un-fulfilled. We still let the
+      // status field update succeed (above) so the case isn't
+      // re-evaluated by the engine, but flag it so retry is possible.
+      if (amplifierFailures.length > 0) {
+        await admin.from("dashboard_notifications").insert({
+          workspace_id: workspaceId,
+          type: "fraud_alert",
+          title: `Amplifier release failed on ${amplifierFailures.length} order(s)`,
+          message: amplifierFailures
+            .map((f) => `${f.order_number}: ${f.error || ""} ${f.details || ""}`.trim())
+            .join(" · "),
+        }).then(() => undefined, () => undefined);
+        return NextResponse.json(
+          {
+            error: "amplifier_release_failed",
+            details: "Case is marked dismissed but the order(s) below failed to release to Amplifier. Retry the dismiss to re-fire, or place the order manually in Amplifier.",
+            failures: amplifierFailures,
+          },
+          { status: 502 },
+        );
       }
 
       // Mark orders as no longer held
