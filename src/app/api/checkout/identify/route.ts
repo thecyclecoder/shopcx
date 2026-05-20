@@ -31,6 +31,7 @@
  */
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { readVisitorContext, stitchVisitor } from "@/lib/identity-stitch";
 
 interface Body {
   cart_token?: string;
@@ -54,7 +55,7 @@ export async function POST(request: Request) {
 
   const { data: cart } = await admin
     .from("cart_drafts")
-    .select("workspace_id, status, customer_id")
+    .select("workspace_id, status, customer_id, anonymous_id")
     .eq("token", body.cart_token)
     .maybeSingle();
   if (!cart) return NextResponse.json({ error: "cart_not_found" }, { status: 404 });
@@ -114,6 +115,17 @@ export async function POST(request: Request) {
       updated_at: new Date().toISOString(),
     })
     .eq("token", body.cart_token);
+
+  // Stitch the anonymous_id → customer_id on storefront_sessions /
+  // _events + enrich the session with device + IP-geo. Backfills any
+  // pre-identify pixel events with the customer_id so funnel queries
+  // attribute correctly.
+  await stitchVisitor({
+    workspaceId: cart.workspace_id as string,
+    customerId: customer.id,
+    anonymousId: (cart.anonymous_id as string | null) || null,
+    context: readVisitorContext(request),
+  });
 
   return NextResponse.json({ customer_id: customer.id, created });
 }

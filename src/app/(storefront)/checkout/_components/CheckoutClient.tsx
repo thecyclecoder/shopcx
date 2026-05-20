@@ -445,10 +445,15 @@ export function CheckoutClient({
           </div>
         )}
 
+        {/* Money-back guarantee strip — mobile (just above the cart) */}
+        <div className="mt-5 lg:hidden">
+          <GuaranteeBadge subscribing={subscribing} />
+        </div>
+
         {/* Mobile cart summary (collapsible). Hidden on desktop where
             the right sidebar shows the full cart. */}
         <details
-          className="mt-5 rounded-2xl border border-zinc-200 bg-white shadow-sm lg:hidden"
+          className="mt-3 rounded-2xl border border-zinc-200 bg-white shadow-sm lg:hidden"
           open={cartOpen}
           onToggle={(e) => setCartOpen((e.target as HTMLDetailsElement).open)}
         >
@@ -787,7 +792,8 @@ export function CheckoutClient({
 
           {/* ── Right sidebar: cart + reviews ────────────────────── */}
           <aside className="hidden lg:block">
-            <div className="sticky top-6 space-y-5">
+            <div className="sticky top-6 space-y-4">
+              <GuaranteeBadge subscribing={subscribing} />
               <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
                 <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Your order</p>
                 <div className="mt-3">
@@ -839,20 +845,13 @@ export function CheckoutClient({
         )}
       </div>
 
-      {/* Sticky bottom CTA — mobile + desktop both. Stacks a tiny
-          trust strip above the price row so customers see the
-          guarantee + terms before they tap. */}
+      {/* Sticky bottom CTA — mobile + desktop both. */}
       <section className="fixed inset-x-0 bottom-0 z-10 border-t border-zinc-200 bg-white/95 px-4 py-3 backdrop-blur">
         <div className="mx-auto max-w-6xl">
-          {/* Money-back guarantee — prominent, single line */}
-          <div className="mb-2 flex items-center justify-center gap-1.5 text-xs font-medium text-emerald-800">
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span>30-day money-back guarantee{subscribing ? " · cancel anytime" : ""}</span>
-          </div>
-          {/* Terms checkbox — pre-checked, blocks submit when off */}
-          <label className="mb-2 flex items-center justify-center gap-1.5 text-xs text-zinc-600">
+          {/* Terms checkbox — pre-checked, blocks submit when off.
+              Left-aligned on mobile (matches the price block below);
+              still anchored left at all sizes for consistency. */}
+          <label className="mb-2 flex items-center gap-1.5 text-xs text-zinc-600">
             <input
               type="checkbox"
               checked={agreeToTerms}
@@ -1027,6 +1026,34 @@ function OrderSummary({
         )}
       </dl>
     </>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Money-back guarantee strip — bold, can't-miss color pop. Renders
+// above each cart card (desktop sidebar + mobile collapsible). Uses
+// a gradient + check icon + concise copy. Adds "cancel anytime" when
+// the cart has subscribing lines.
+// ─────────────────────────────────────────────────────────────────
+function GuaranteeBadge({ subscribing }: { subscribing: boolean }) {
+  return (
+    <div className="overflow-hidden rounded-2xl bg-gradient-to-br from-emerald-500 via-emerald-600 to-teal-600 px-4 py-3 text-white shadow-md">
+      <div className="flex items-center gap-3">
+        <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-white/15 ring-1 ring-white/30">
+          <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.25}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-extrabold uppercase tracking-wider">
+            30-day money-back guarantee
+          </div>
+          <div className="mt-0.5 text-xs text-white/90">
+            Not happy? Get a full refund — no questions asked{subscribing ? " · cancel anytime" : ""}.
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 

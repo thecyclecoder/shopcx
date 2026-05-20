@@ -50,6 +50,7 @@ import {
 import { createAmplifierOrder } from "@/lib/integrations/amplifier";
 import { generateOrderNumber } from "@/lib/order-number";
 import { resolveRateForCart } from "@/lib/shipping-rates";
+import { readVisitorContext, stitchVisitor } from "@/lib/identity-stitch";
 import crypto from "crypto";
 
 interface AddressInput {
@@ -88,6 +89,8 @@ export async function POST(request: NextRequest) {
   const bill = body.billing_address || ship;
 
   const admin = createAdminClient();
+
+  const visitorCtx = readVisitorContext(request);
 
   // 1. Load + validate cart
   const { data: cart } = await admin
@@ -524,6 +527,17 @@ export async function POST(request: NextRequest) {
       updated_at: new Date().toISOString(),
     })
     .eq("token", cart.token);
+
+  // ── 10. Stitch identity + enrich session with device + IP-geo. ──
+  // Backfills the customer_id onto any prior storefront_events with
+  // this anonymous_id so the order_placed event ties to the full
+  // pre-checkout funnel for attribution.
+  await stitchVisitor({
+    workspaceId: cart.workspace_id,
+    customerId: customer.id,
+    anonymousId: (cart.anonymous_id as string | null) || null,
+    context: visitorCtx,
+  });
 
   return NextResponse.json({
     ok: true,

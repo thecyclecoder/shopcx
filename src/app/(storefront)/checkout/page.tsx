@@ -62,12 +62,14 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
     redirect("/");
   }
 
-  // Backfill any qualifying free gifts onto carts that pre-date the
-  // gift-injection logic. ensureFreeGifts is a no-op when gifts are
-  // already present, so this is safe to run on every render.
+  // Backfill / heal free gifts on every render. ensureFreeGifts
+  // strips existing gift lines and re-derives them from the current
+  // rules, so stale fields (image_url, title) refresh automatically.
+  // We persist back to the cart so subsequent loads + the eventual
+  // /api/checkout call see the healed lines.
   const baseLines = (cart.line_items as CartLineLike[]) || [];
   const linesWithGifts = await ensureFreeGifts(cart.workspace_id as string, baseLines);
-  if (linesWithGifts.length !== baseLines.length) {
+  if (JSON.stringify(baseLines) !== JSON.stringify(linesWithGifts)) {
     const newSubtotalCents = linesWithGifts.reduce((s, l) => s + l.line_total_cents, 0);
     await admin
       .from("cart_drafts")

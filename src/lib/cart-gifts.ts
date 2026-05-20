@@ -44,20 +44,19 @@ export async function ensureFreeGifts(
   const subscribing = lines.some((l) => l.mode === "subscribe");
   const cartMode: "subscribe" | "onetime" = subscribing ? "subscribe" : "onetime";
 
-  // Already-present gift variant ids — avoid double-injecting if /api/cart
-  // wrote one and we run again on render.
-  const existingGiftIds = new Set(
-    lines.filter((l) => l.is_gift).map((l) => l.variant_id),
-  );
+  // Strip any existing gift lines so this run re-derives them from
+  // the current rules. Heals stale metadata (image, title) on carts
+  // committed before a rule was tightened up.
+  const nonGiftLines = lines.filter((l) => !l.is_gift);
+  const existingGiftIds = new Set<string>();
 
   // Sum non-gift qty per product so gift items themselves don't count
   // toward the threshold.
   const qtyByProduct = new Map<string, number>();
-  for (const l of lines) {
-    if (l.is_gift) continue;
+  for (const l of nonGiftLines) {
     qtyByProduct.set(l.product_id, (qtyByProduct.get(l.product_id) || 0) + l.quantity);
   }
-  if (qtyByProduct.size === 0) return lines;
+  if (qtyByProduct.size === 0) return nonGiftLines;
 
   const admin = createAdminClient();
   const productIds = Array.from(qtyByProduct.keys());
@@ -72,14 +71,22 @@ export async function ensureFreeGifts(
 
   const { data: rules } = await admin
     .from("pricing_rules")
-    .select("id, free_gift_variant_id, free_gift_min_quantity, free_gift_subscription_only")
+    .select("id, free_gift_variant_id, free_gift_min_quantity, free_gift_subscription_only, free_gift_image_url, free_gift_product_title")
     .in("id", ruleIds);
-  const rulesById = new Map<string, { free_gift_variant_id: string | null; free_gift_min_quantity: number; free_gift_subscription_only: boolean }>();
+  const rulesById = new Map<string, {
+    free_gift_variant_id: string | null;
+    free_gift_min_quantity: number;
+    free_gift_subscription_only: boolean;
+    free_gift_image_url: string | null;
+    free_gift_product_title: string | null;
+  }>();
   for (const r of rules || []) {
     rulesById.set(r.id as string, {
       free_gift_variant_id: (r.free_gift_variant_id as string | null) || null,
       free_gift_min_quantity: (r.free_gift_min_quantity as number) || 1,
       free_gift_subscription_only: !!r.free_gift_subscription_only,
+      free_gift_image_url: (r.free_gift_image_url as string | null) || null,
+      free_gift_product_title: (r.free_gift_product_title as string | null) || null,
     });
   }
 
@@ -97,16 +104,26 @@ export async function ensureFreeGifts(
     if (!giftVariant) continue;
     const { data: giftProduct } = await admin
       .from("products")
-      .select("title")
+      .select("title, image_url")
       .eq("id", giftVariant.product_id)
       .single();
+    // Image priority: rule's explicit gift image (admin-curated) →
+    // variant image → parent product's primary image. Shopify variants
+    // routinely have null image_url because the product carries the
+    // shot; without the product fallback the gift renders as a blank
+    // tile in the cart.
+    const giftImage =
+      rule.free_gift_image_url ||
+      giftVariant.image_url ||
+      ((giftProduct as { image_url?: string | null } | null)?.image_url) ||
+      null;
     additions.push({
       variant_id: giftVariant.id,
       product_id: giftVariant.product_id,
       shopify_variant_id: giftVariant.shopify_variant_id,
-      title: giftProduct?.title || "Free gift",
+      title: rule.free_gift_product_title || giftProduct?.title || "Free gift",
       variant_title: giftVariant.title || null,
-      image_url: giftVariant.image_url,
+      image_url: giftImage,
       quantity: 1,
       unit_price_cents: 0,
       unit_msrp_cents: giftVariant.price_cents,
@@ -120,6 +137,7 @@ export async function ensureFreeGifts(
     existingGiftIds.add(rule.free_gift_variant_id);
   }
 
-  if (additions.length === 0) return lines;
-  return [...lines, ...additions];
+  // Return non-gift lines + freshly-derived gifts. If no gifts apply,
+  // still return nonGiftLines (we've stripped any stale gifts above).
+  return [...nonGiftLines, ...additions];
 }
