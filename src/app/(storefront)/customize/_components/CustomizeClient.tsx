@@ -1304,19 +1304,38 @@ function UrgencyTimer({ cartToken }: { cartToken: string }) {
   const secs = Math.floor((remaining % 60_000) / 1000);
   const expired = remaining === 0;
   return (
-    <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-amber-900">
-      <div className="flex items-center gap-2 text-sm">
-        <svg className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
-        <span className="font-medium">
-          {expired ? "Your savings are still available — for now" : "Lock in your savings"}
-        </span>
+    <>
+      {/* Local pulse keyframes — slow heartbeat between two warm
+          stops. Inline so the bar doesn't depend on a global stylesheet. */}
+      <style jsx>{`
+        @keyframes sx-urgency-pulse {
+          0%   { background-color: #fef3c7; border-color: #fde68a; }
+          50%  { background-color: #fee2e2; border-color: #fca5a5; }
+          100% { background-color: #fef3c7; border-color: #fde68a; }
+        }
+        .sx-urgency-bar { animation: sx-urgency-pulse 1.6s ease-in-out infinite; }
+        @keyframes sx-urgency-dot {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50%      { opacity: 0.4; transform: scale(0.85); }
+        }
+        .sx-urgency-dot { animation: sx-urgency-dot 1s ease-in-out infinite; }
+      `}</style>
+      <div
+        className={`mt-4 flex items-center justify-between gap-3 rounded-2xl border-2 px-4 py-3 text-rose-900 shadow-sm ${expired ? "border-amber-200 bg-amber-50" : "sx-urgency-bar"}`}
+      >
+        <div className="flex items-center gap-2.5 text-sm">
+          <span className="sx-urgency-dot inline-block h-2.5 w-2.5 flex-shrink-0 rounded-full bg-rose-600" />
+          <span className="font-semibold">
+            {expired
+              ? "Time's up — items may sell out"
+              : "Items in your cart are low stock. Check out before the timer ends."}
+          </span>
+        </div>
+        <div className={`font-mono text-base font-extrabold tabular-nums ${expired ? "text-amber-700" : "text-rose-700"}`}>
+          {expired ? "0:00" : `${mins}:${secs.toString().padStart(2, "0")}`}
+        </div>
       </div>
-      <div className="font-mono text-sm font-bold tabular-nums">
-        {expired ? "0:00" : `${mins}:${secs.toString().padStart(2, "0")}`}
-      </div>
-    </div>
+    </>
   );
 }
 
