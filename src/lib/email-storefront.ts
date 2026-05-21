@@ -110,6 +110,95 @@ function formatAddress(a: AddressLike | null | undefined): string {
   return lines.map(escapeHtml).join("<br>");
 }
 
+/**
+ * Pick one review to spotlight in the order-confirmation email.
+ * Strategy:
+ *   1. Featured reviews on any of the cart's products (highest tier
+ *      of social proof — manually curated).
+ *   2. Fall back to 5-star published reviews.
+ *   3. Random within the matching pool so the customer doesn't see
+ *      the same review on every order.
+ *
+ * Returns null when the workspace has no usable reviews for these
+ * products (don't render the block at all in that case — empty
+ * social-proof slot is worse than no slot).
+ */
+async function pickFeaturedReview(workspaceId: string, productIds: string[]): Promise<{
+  reviewer_name: string | null;
+  rating: number | null;
+  title: string | null;
+  body: string | null;
+  smart_quote: string | null;
+  product_title: string | null;
+} | null> {
+  if (productIds.length === 0) return null;
+  const admin = createAdminClient();
+  // Featured first
+  const sel = "reviewer_name, rating, title, body, smart_quote, product_id";
+  const { data: featured } = await admin
+    .from("product_reviews")
+    .select(sel)
+    .eq("workspace_id", workspaceId)
+    .in("product_id", productIds)
+    .eq("featured", true)
+    .not("body", "is", null)
+    .limit(20);
+  let pool: typeof featured = featured || [];
+  // Fallback to 5-star published if nothing featured
+  if (pool.length === 0) {
+    const { data: fiveStar } = await admin
+      .from("product_reviews")
+      .select(sel)
+      .eq("workspace_id", workspaceId)
+      .in("product_id", productIds)
+      .in("status", ["published", "featured"])
+      .eq("rating", 5)
+      .not("body", "is", null)
+      .limit(50);
+    pool = fiveStar || [];
+  }
+  if (pool.length === 0) return null;
+  const picked = pool[Math.floor(Math.random() * pool.length)];
+  // Look up product title for attribution ("on Amazing Coffee").
+  const { data: prod } = await admin
+    .from("products")
+    .select("title")
+    .eq("id", picked.product_id)
+    .maybeSingle();
+  return {
+    reviewer_name: picked.reviewer_name,
+    rating: picked.rating,
+    title: picked.title,
+    body: picked.body,
+    smart_quote: picked.smart_quote,
+    product_title: (prod?.title as string | null) || null,
+  };
+}
+
+function renderReviewBlock(review: NonNullable<Awaited<ReturnType<typeof pickFeaturedReview>>>): string {
+  const rating = Math.max(0, Math.min(5, review.rating || 5));
+  const stars = "★★★★★".slice(0, rating) + "☆☆☆☆☆".slice(0, 5 - rating);
+  // Use smart_quote when present (AI-extracted excerpt, max ~140
+  // chars), otherwise truncate the body to keep the block readable.
+  const text = review.smart_quote || (review.body || "").trim();
+  const trimmed = text.length > 320 ? text.slice(0, 317).trim() + "…" : text;
+  const reviewer = (review.reviewer_name || "").trim() || "A verified customer";
+  const productLine = review.product_title
+    ? ` · <span style="color:#71717a;">on ${escapeHtml(review.product_title)}</span>`
+    : "";
+  return `
+      <tr><td style="padding:16px 32px 8px 32px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#fafafa;border-radius:8px;">
+          <tr><td style="padding:18px 20px;">
+            <div style="color:#eab308;font-size:15px;letter-spacing:2px;">${stars}</div>
+            ${review.title ? `<div style="font-size:15px;font-weight:700;color:#18181b;margin-top:6px;">${escapeHtml(review.title)}</div>` : ""}
+            <div style="font-size:14px;color:#27272a;line-height:1.55;margin-top:6px;">"${escapeHtml(trimmed)}"</div>
+            <div style="font-size:12px;color:#52525b;margin-top:8px;">— ${escapeHtml(reviewer)}${productLine}</div>
+          </td></tr>
+        </table>
+      </td></tr>`;
+}
+
 function trackingUrl(carrier: string | null | undefined, trackingNumber: string): string | null {
   if (!trackingNumber) return null;
   const c = (carrier || "").toLowerCase();
@@ -166,8 +255,29 @@ function shellHtml(opts: {
   // configured, otherwise fall back to the brand name in the workspace
   // primary color. Many inbox renderers (Gmail, Outlook) block external
   // images by default, so we always set an alt text to the brand name.
+  // Logo rendering — the user reported blurry output when we let the
+  // email client downsample a large source image (their 1650×810 WebP
+  // was being scaled down with poor filtering in some clients). Two
+  // fixes layered:
+  //   1. Append Supabase Storage's image-transform `?width=560` so the
+  //      CDN returns a pre-resized PNG (~2x the 280px display target,
+  //      crisp on retina). Falls back to the raw URL for non-Supabase
+  //      logos.
+  //   2. Set explicit width="280" + height calculated to preserve the
+  //      ~2:1 brand-mark aspect ratio. Email clients respect the width
+  //      attr and downsample more carefully when they have a target.
+  // Rewrite Supabase /object/public/ to /render/image/public/ so the
+  // CDN runs server-side resize + format conversion (WebP → PNG with
+  // broader email-client support). Falls through unchanged for any
+  // non-Supabase logo host.
+  function transformLogoUrl(url: string): string {
+    if (!url.includes("supabase.co/storage/v1/object/public/")) return url;
+    const rendered = url.replace("/storage/v1/object/public/", "/storage/v1/render/image/public/");
+    const sep = rendered.includes("?") ? "&" : "?";
+    return `${rendered}${sep}width=560`;
+  }
   const logoRow = opts.brand.logoUrl
-    ? `<img src="${escapeHtml(opts.brand.logoUrl)}" alt="${escapeHtml(opts.brand.brandName)}" height="72" style="display:block;height:72px;max-height:72px;width:auto;border:0;" />`
+    ? `<img src="${escapeHtml(transformLogoUrl(opts.brand.logoUrl))}" alt="${escapeHtml(opts.brand.brandName)}" width="280" style="display:block;max-width:280px;width:100%;height:auto;border:0;" />`
     : `<div style="font-size:18px;font-weight:700;color:${escapeHtml(opts.brand.primaryColor)};">${escapeHtml(opts.brand.brandName)}</div>`;
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8" /><title>${escapeHtml(opts.title)}</title></head>
@@ -234,6 +344,19 @@ export async function sendOrderConfirmationEmail(opts: {
     const welcome = isFirstOrder
       ? `Welcome to the Superfoods family, ${escapeHtml(firstName)}! `
       : `Thanks ${escapeHtml(firstName)}, `;
+
+    // Pick a featured review on one of the products the customer
+    // bought (excluding gifts so the social proof is about something
+    // they actually paid for). Random within the qualifying pool so
+    // repeat customers see a different review each time.
+    const reviewProductIds = Array.from(new Set(
+      order.line_items
+        .filter((l) => !l.is_gift)
+        .map((l) => (l as unknown as { product_id?: string }).product_id)
+        .filter((id): id is string => !!id),
+    ));
+    const featuredReview = await pickFeaturedReview(opts.workspaceId, reviewProductIds);
+    const reviewBlock = featuredReview ? renderReviewBlock(featuredReview) : "";
     const protectionBadge = order.shipping_protection_added
       ? `
       <tr><td style="padding:0 32px 8px 32px;">
@@ -263,6 +386,8 @@ export async function sendOrderConfirmationEmail(opts: {
           ${lineRows}
         </table>
       </td></tr>
+
+      ${reviewBlock}
 
       <tr><td style="padding:16px 32px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="font-size:14px;color:#52525b;">
