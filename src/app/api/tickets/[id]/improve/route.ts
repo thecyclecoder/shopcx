@@ -49,6 +49,8 @@ REMEDIATION (fix the ticket):
   • partial_refund(shopify_order_id, amount_cents, reason?)
   • update_line_item_price(contract_id, variant_id, base_price_cents)
   • swap_variant(contract_id, old_variant_id, new_variant_id, quantity?)
+  • remove_item(contract_id, variant_id?, line_id?)
+       — Remove a product from a subscription. Pass variant_id to remove ALL line_items of that variant (handles split-line cases). Pass line_id to remove one specific line.
   • change_next_date(contract_id, date)        — date format: 2026-05-15
   • change_frequency(contract_id, interval, interval_count)
   • update_shipping_address(contract_id, address: {address1, city, province, zip, country, first_name, last_name})

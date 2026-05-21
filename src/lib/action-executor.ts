@@ -376,10 +376,68 @@ export const directActionHandlers: Record<
     return { ...r, summary: `Added item (qty: ${p.quantity || 1})` };
   },
 
+  /**
+   * remove_item — remove all line_items of a given variant from a
+   * subscription. Robust to the two failure modes observed in the
+   * wild:
+   *   1. Sonnet sometimes emits `variantId` (camelCase) instead of
+   *      `variant_id`. We accept both.
+   *   2. Customers split the same product across multiple lines
+   *      (e.g. Channing Choate had Salted Caramel × 2 AND × 1 as two
+   *      separate line items, qty=3 total). Sonnet's "remove the
+   *      creamer" intent should clear ALL lines of that variant, not
+   *      just the first match. The handler now loops Appstle's
+   *      single-line endpoint until no lines of the variant remain.
+   */
   remove_item: async (ctx, p) => {
     const { subRemoveItem } = await import("@/lib/subscription-items");
-    const r = await subRemoveItem(ctx.workspaceId, p.contract_id!, p.variant_id!);
-    return { ...r, summary: "Removed item" };
+    const pe = p as { variantId?: string; line_id?: string; lineId?: string };
+    const variantId = p.variant_id || pe.variantId;
+    const lineId = pe.line_id || pe.lineId;
+
+    if (!p.contract_id) return { success: false, error: "remove_item missing contract_id" };
+    if (!variantId && !lineId) return { success: false, error: "remove_item needs variant_id or line_id" };
+
+    // Single-line removal (caller already knows the lineId)
+    if (lineId && !variantId) {
+      const r = await subRemoveItem(ctx.workspaceId, p.contract_id, { lineGid: lineId });
+      return { ...r, summary: "Removed item" };
+    }
+
+    // Variant-driven removal — fetch live contract lines, then loop
+    // over EVERY line matching the variant_id. Multi-line case (same
+    // variant, different lines) is common when customers built up the
+    // sub over time. Stop on first failure so we don't keep hammering
+    // Appstle if its credentials died mid-loop.
+    type Line = { id?: string; variantId?: string };
+    const { getAppstleConfig } = await import("@/lib/subscription-items");
+    const cfg = await getAppstleConfig(ctx.workspaceId);
+    if (!cfg) return { success: false, error: "Appstle not configured" };
+    const cRes = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${p.contract_id}?api_key=${cfg.apiKey}`,
+      { cache: "no-store" },
+    );
+    if (!cRes.ok) return { success: false, error: `Contract fetch failed: ${cRes.status}` };
+    const cJson = await cRes.json();
+    const lines = ((cJson.lines?.nodes || []) as Line[])
+      .filter((l) => {
+        const vid = String(l.variantId || "").split("/").pop();
+        return vid === String(variantId);
+      });
+    if (lines.length === 0) {
+      return { success: false, error: `No lines matching variant ${variantId} on contract` };
+    }
+
+    let removed = 0;
+    for (const ln of lines) {
+      if (!ln.id) continue;
+      const r = await subRemoveItem(ctx.workspaceId, p.contract_id, { lineGid: ln.id });
+      if (!r.success) {
+        return { success: removed > 0, error: `Removed ${removed} of ${lines.length} lines, then failed: ${r.error}` };
+      }
+      removed++;
+    }
+    return { success: true, summary: `Removed ${removed} line${removed > 1 ? "s" : ""} of variant ${variantId}` };
   },
 
   swap_variant: async (ctx, p) => {

@@ -107,6 +107,57 @@ export async function runImproveActions(
           results.push(r.success ? `Variant swapped (${a.old_variant_id} → ${a.new_variant_id})` : `Swap failed: ${r.error}`);
           break;
         }
+        case "remove_item": {
+          // Removes every line of a variant from the sub. Loops because
+          // the same product can be split across multiple line_items
+          // (e.g. Channing Choate's Salted Caramel x2 AND x1).
+          const variantId = a.variant_id || a.variantId;
+          const lineId = a.line_id || a.lineId;
+          if (!a.contract_id || (!variantId && !lineId)) {
+            results.push(`remove_item: missing contract_id or variant_id/line_id`);
+            break;
+          }
+          const { subRemoveItem, getAppstleConfig } = await import("@/lib/subscription-items");
+          if (lineId && !variantId) {
+            const r = await subRemoveItem(workspaceId, a.contract_id, { lineGid: lineId });
+            results.push(r.success ? `Removed line ${lineId}` : `Remove failed: ${r.error}`);
+            break;
+          }
+          // Variant-driven: enumerate lines on the contract, remove ALL
+          // matching. Stops on first failure to avoid hammering Appstle
+          // if its creds died mid-loop.
+          const cfg = await getAppstleConfig(workspaceId);
+          if (!cfg) { results.push(`remove_item: Appstle not configured`); break; }
+          const cRes = await fetch(
+            `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${a.contract_id}?api_key=${cfg.apiKey}`,
+            { cache: "no-store" },
+          );
+          if (!cRes.ok) { results.push(`remove_item: contract fetch ${cRes.status}`); break; }
+          const cJson = await cRes.json();
+          type Line = { id?: string; variantId?: string };
+          const lines = ((cJson.lines?.nodes || []) as Line[]).filter((l) => {
+            const vid = String(l.variantId || "").split("/").pop();
+            return vid === String(variantId);
+          });
+          if (lines.length === 0) {
+            results.push(`remove_item: no lines matching variant ${variantId} on contract`);
+            break;
+          }
+          let removed = 0;
+          let failure: string | null = null;
+          for (const ln of lines) {
+            if (!ln.id) continue;
+            const r = await subRemoveItem(workspaceId, a.contract_id, { lineGid: ln.id });
+            if (!r.success) { failure = r.error || "unknown"; break; }
+            removed++;
+          }
+          if (failure) {
+            results.push(`remove_item: removed ${removed} of ${lines.length}, then failed: ${failure}`);
+          } else {
+            results.push(`Removed ${removed} line${removed > 1 ? "s" : ""} of variant ${variantId}`);
+          }
+          break;
+        }
         case "change_next_date": {
           const { appstleUpdateNextBillingDate } = await import("@/lib/appstle");
           const r = await appstleUpdateNextBillingDate(workspaceId, a.contract_id, a.date);
