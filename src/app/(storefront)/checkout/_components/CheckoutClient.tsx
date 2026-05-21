@@ -407,7 +407,11 @@ export function CheckoutClient({
         <header className="mb-6 flex items-center justify-between">
           {workspace.logo_url ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={workspace.logo_url} alt={workspace.name} className="h-8" />
+            <img
+              src={transformLogoForDisplay(workspace.logo_url, 96)}
+              alt={workspace.name}
+              className="h-12 w-auto"
+            />
           ) : (
             <span className="text-lg font-semibold">{workspace.name}</span>
           )}
@@ -1074,6 +1078,20 @@ function Row({ label, value, emphasis, muted }: { label: string; value: string; 
 
 function fmt(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
+}
+
+/**
+ * Rewrite Supabase Storage logo URLs to the render endpoint for
+ * server-side resize + WebP→PNG conversion. Resize=contain preserves
+ * aspect ratio (without it Supabase center-crops). Falls through
+ * unchanged for non-Supabase URLs.
+ */
+function transformLogoForDisplay(url: string, heightPx: number): string {
+  if (!url.includes("supabase.co/storage/v1/object/public/")) return url;
+  const base = url.replace("/storage/v1/object/public/", "/storage/v1/render/image/public/");
+  const sep = base.includes("?") ? "&" : "?";
+  // 2x the display height for retina sharpness.
+  return `${base}${sep}height=${heightPx * 2}&resize=contain`;
 }
 
 /**
