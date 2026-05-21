@@ -46,9 +46,10 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
   const [supportEmail, setSupportEmail] = useState("");
   const [supportEmails, setSupportEmails] = useState<{ id: string; email: string; label: string | null; is_default: boolean }[]>([]);
 
-  // Transactional messaging (from, reply-to, brand name) — used by
-  // order confirmation, shipping notification, and future SMS sends.
-  const [txFromEmail, setTxFromEmail] = useState("");
+  // Transactional messaging — used by order confirmation, shipping
+  // notification, and future SMS sends. The "from" address is
+  // automatically built from the Resend sender domain (orders@
+  // {resend_domain}); only the from-name and reply-to are user-set.
   const [txFromName, setTxFromName] = useState("");
   const [txReplyToEmail, setTxReplyToEmail] = useState("");
   const [txSaving, setTxSaving] = useState(false);
@@ -156,7 +157,6 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
         setResendHint(data.resend_api_key_hint);
         setSupportEmail(data.support_email || "");
         setResendDomain(data.resend_domain || "");
-        setTxFromEmail(data.transactional_from_email || "");
         setTxFromName(data.transactional_from_name || "");
         setTxReplyToEmail(data.transactional_reply_to_email || "");
         setSandboxMode(data.sandbox_mode ?? true);
@@ -1089,7 +1089,6 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
                     method: "PATCH",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
-                      transactional_from_email: txFromEmail.trim() || null,
                       transactional_from_name: txFromName.trim() || null,
                       transactional_reply_to_email: txReplyToEmail.trim() || null,
                     }),
@@ -1110,16 +1109,8 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
                     className="block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
                   />
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">From email</label>
-                  <p className="text-xs text-zinc-400 mb-1">Defaults to <code>orders@{resendDomain || "yourdomain.com"}</code>. Must be on a domain you&apos;ve verified in Resend.</p>
-                  <input
-                    type="email"
-                    value={txFromEmail}
-                    onChange={(e) => setTxFromEmail(e.target.value)}
-                    placeholder={resendDomain ? `orders@${resendDomain}` : "orders@yourdomain.com"}
-                    className="block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
-                  />
+                <div className="rounded-md bg-zinc-50 px-3 py-2.5 text-xs text-zinc-500 dark:bg-zinc-900/50">
+                  Sender address: <code className="text-zinc-700 dark:text-zinc-300">orders@{resendDomain || "<resend-domain>"}</code> — uses the domain configured for your Resend sender above. Change that to change the sending address.
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Reply-to email</label>

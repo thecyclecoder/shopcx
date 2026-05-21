@@ -33,7 +33,7 @@ async function getBrand(workspaceId: string, resendDomain: string): Promise<{
   const admin = createAdminClient();
   const { data: ws } = await admin
     .from("workspaces")
-    .select("name, storefront_logo_url, storefront_primary_color, transactional_from_email, transactional_from_name, transactional_reply_to_email")
+    .select("name, storefront_logo_url, storefront_primary_color, transactional_from_name, transactional_reply_to_email")
     .eq("id", workspaceId)
     .single();
   const brandName = (ws?.transactional_from_name as string | null) || (ws?.name as string) || FROM_NAME;
@@ -41,7 +41,13 @@ async function getBrand(workspaceId: string, resendDomain: string): Promise<{
     logoUrl: (ws?.storefront_logo_url as string | null) || null,
     primaryColor: (ws?.storefront_primary_color as string) || "#18181b",
     brandName,
-    fromEmail: (ws?.transactional_from_email as string | null) || `orders@${resendDomain}`,
+    // From-local is always `orders@`; the domain comes from the
+    // workspace's Resend sender config (which already enforces
+    // verification + DNS). We don't expose a separate setting for
+    // this — the brand uses the same `updates.<brand>.com` (or
+    // whatever the workspace set as resend_domain) across all
+    // transactional sends.
+    fromEmail: `orders@${resendDomain}`,
     replyToEmail: (ws?.transactional_reply_to_email as string | null) || `no-reply@${resendDomain}`,
   };
 }
