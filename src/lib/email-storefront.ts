@@ -178,10 +178,10 @@ async function pickFeaturedReview(workspaceId: string, productIds: string[]): Pr
 function renderReviewBlock(review: NonNullable<Awaited<ReturnType<typeof pickFeaturedReview>>>): string {
   const rating = Math.max(0, Math.min(5, review.rating || 5));
   const stars = "★★★★★".slice(0, rating) + "☆☆☆☆☆".slice(0, 5 - rating);
-  // Use smart_quote when present (AI-extracted excerpt, max ~140
-  // chars), otherwise truncate the body to keep the block readable.
-  const text = review.smart_quote || (review.body || "").trim();
-  const trimmed = text.length > 320 ? text.slice(0, 317).trim() + "…" : text;
+  // Always render the FULL review body — smart_quote (AI excerpt)
+  // is reserved for spaces where length is tight; the email has
+  // room for the whole thing and customers deserve to read it.
+  const text = (review.body || "").trim();
   const reviewer = (review.reviewer_name || "").trim() || "A verified customer";
   const productLine = review.product_title
     ? ` · <span style="color:#71717a;">on ${escapeHtml(review.product_title)}</span>`
@@ -192,7 +192,7 @@ function renderReviewBlock(review: NonNullable<Awaited<ReturnType<typeof pickFea
           <tr><td style="padding:18px 20px;">
             <div style="color:#eab308;font-size:15px;letter-spacing:2px;">${stars}</div>
             ${review.title ? `<div style="font-size:15px;font-weight:700;color:#18181b;margin-top:6px;">${escapeHtml(review.title)}</div>` : ""}
-            <div style="font-size:14px;color:#27272a;line-height:1.55;margin-top:6px;">"${escapeHtml(trimmed)}"</div>
+            <div style="font-size:14px;color:#27272a;line-height:1.55;margin-top:6px;white-space:pre-wrap;">${escapeHtml(text)}</div>
             <div style="font-size:12px;color:#52525b;margin-top:8px;">— ${escapeHtml(reviewer)}${productLine}</div>
           </td></tr>
         </table>
@@ -276,8 +276,14 @@ function shellHtml(opts: {
     const sep = rendered.includes("?") ? "&" : "?";
     return `${rendered}${sep}width=560`;
   }
+  // Hard-pin width (no percentage, no max-width). Some clients —
+  // Apple Mail full-screen in particular — ignore max-width on
+  // images and combine width:100% with the parent cell's actual
+  // rendered width (not the 600px table max-width), which makes the
+  // logo overflow at 1000+ px. A fixed pixel width is the only thing
+  // every client respects.
   const logoRow = opts.brand.logoUrl
-    ? `<img src="${escapeHtml(transformLogoUrl(opts.brand.logoUrl))}" alt="${escapeHtml(opts.brand.brandName)}" width="280" style="display:block;max-width:280px;width:100%;height:auto;border:0;" />`
+    ? `<img src="${escapeHtml(transformLogoUrl(opts.brand.logoUrl))}" alt="${escapeHtml(opts.brand.brandName)}" width="240" height="auto" style="display:block;width:240px;height:auto;border:0;outline:none;" />`
     : `<div style="font-size:18px;font-weight:700;color:${escapeHtml(opts.brand.primaryColor)};">${escapeHtml(opts.brand.brandName)}</div>`;
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8" /><title>${escapeHtml(opts.title)}</title></head>
