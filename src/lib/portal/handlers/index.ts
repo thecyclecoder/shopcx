@@ -58,6 +58,8 @@ import { updateAccount } from "./account";
 export { updateAccount } from "./account";
 import { supportList, supportTicket, supportReply, supportCreate } from "./support";
 export { supportList, supportTicket, supportReply, supportCreate } from "./support";
+import { paymentMethods } from "./payment-methods";
+export { paymentMethods } from "./payment-methods";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -123,4 +125,7 @@ export const routeMap: Record<string, RouteHandler> = {
   supportCreate,
   supportcreate: supportCreate,
   support_create: supportCreate,
+  paymentMethods,
+  paymentmethods: paymentMethods,
+  payment_methods: paymentMethods,
 };

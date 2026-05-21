@@ -34,6 +34,7 @@ import { OrdersSection } from "./_sections/OrdersSection";
 import { HomeSection } from "./_sections/HomeSection";
 import { ResourcesSection } from "./_sections/ResourcesSection";
 import { SupportSection } from "./_sections/SupportSection";
+import { PaymentMethodsSection } from "./_sections/PaymentMethodsSection";
 
 interface Props {
   slug: string;
@@ -230,7 +231,9 @@ export default function PortalClient(props: Props) {
           {section === "orders" && (
             <OrdersSection orders={props.orders} primaryColor={props.workspace.primaryColor} />
           )}
-          {section === "payment_methods" && <Placeholder label="Payment Methods" />}
+          {section === "payment_methods" && (
+            <PaymentMethodsSection primaryColor={props.workspace.primaryColor} />
+          )}
           {section === "support" && (
             <SupportSection primaryColor={props.workspace.primaryColor} />
           )}
@@ -250,17 +253,6 @@ export default function PortalClient(props: Props) {
           )}
         </div>
       </main>
-    </div>
-  );
-}
-
-function Placeholder({ label }: { label: string }) {
-  return (
-    <div className="rounded-2xl border border-dashed border-zinc-300 bg-white p-10 text-center">
-      <p className="text-sm font-medium text-zinc-700">{label} is on the way.</p>
-      <p className="mt-1 text-xs text-zinc-500">
-        We&apos;re building this section next — check back soon.
-      </p>
     </div>
   );
 }
