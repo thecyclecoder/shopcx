@@ -17,21 +17,32 @@ import { createAdminClient } from "@/lib/supabase/admin";
 const FROM_NAME = "Superfoods Company";
 
 /**
- * Pull the workspace's storefront branding so the email header
- * matches what the customer sees on the site. Returns sensible
- * defaults so emails still render if branding hasn't been uploaded.
+ * Pull the workspace's storefront branding + transactional messaging
+ * config so the email header matches the site and the from/reply-to
+ * addresses match what the workspace set in Settings → Transactional
+ * Messaging. Defaults: brand name → workspace.name, primary color →
+ * neutral zinc, from-local → "orders", reply-to → no-reply@{domain}.
  */
-async function getBrand(workspaceId: string): Promise<{ logoUrl: string | null; primaryColor: string; brandName: string }> {
+async function getBrand(workspaceId: string, resendDomain: string): Promise<{
+  logoUrl: string | null;
+  primaryColor: string;
+  brandName: string;
+  fromEmail: string;
+  replyToEmail: string;
+}> {
   const admin = createAdminClient();
   const { data: ws } = await admin
     .from("workspaces")
-    .select("name, storefront_logo_url, storefront_primary_color")
+    .select("name, storefront_logo_url, storefront_primary_color, transactional_from_email, transactional_from_name, transactional_reply_to_email")
     .eq("id", workspaceId)
     .single();
+  const brandName = (ws?.transactional_from_name as string | null) || (ws?.name as string) || FROM_NAME;
   return {
     logoUrl: (ws?.storefront_logo_url as string | null) || null,
     primaryColor: (ws?.storefront_primary_color as string) || "#18181b",
-    brandName: (ws?.name as string) || FROM_NAME,
+    brandName,
+    fromEmail: (ws?.transactional_from_email as string | null) || `orders@${resendDomain}`,
+    replyToEmail: (ws?.transactional_reply_to_email as string | null) || `no-reply@${resendDomain}`,
   };
 }
 
@@ -40,6 +51,7 @@ interface OrderLineLike {
   variant_title?: string | null;
   quantity: number;
   unit_price_cents?: number;
+  unit_msrp_cents?: number;
   line_total_cents?: number;
   is_gift?: boolean;
   image_url?: string | null;
@@ -112,9 +124,16 @@ function renderLineItemsRows(lines: OrderLineLike[]): string {
       const giftBadge = l.is_gift
         ? ` <span style="display:inline-block;padding:2px 6px;background:#dcfce7;color:#166534;font-size:11px;border-radius:4px;font-weight:600;margin-left:4px;">FREE GIFT</span>`
         : "";
-      const lineTotal = l.is_gift
-        ? '<span style="color:#16a34a;font-weight:600;">Free</span>'
-        : fmtCents((l.line_total_cents ?? (l.unit_price_cents || 0) * l.quantity) || 0);
+      const paidLine = (l.line_total_cents ?? (l.unit_price_cents || 0) * l.quantity) || 0;
+      const msrpLine = (l.unit_msrp_cents || l.unit_price_cents || 0) * l.quantity;
+      // Strikethrough MSRP whenever the customer paid less than MSRP
+      // — same treatment as the storefront cart so the savings are
+      // visible at every step (cart → checkout → email).
+      const priceCell = l.is_gift
+        ? `<div style="color:#a1a1aa;text-decoration:line-through;font-size:13px;">${fmtCents(msrpLine)}</div><div style="color:#16a34a;font-weight:600;">Free</div>`
+        : msrpLine > paidLine
+          ? `<div style="font-weight:600;">${fmtCents(paidLine)}</div><div style="color:#a1a1aa;text-decoration:line-through;font-size:13px;">${fmtCents(msrpLine)}</div>`
+          : `<div style="font-weight:600;">${fmtCents(paidLine)}</div>`;
       const img = l.image_url
         ? `<img src="${escapeHtml(l.image_url)}" alt="" width="56" height="56" style="display:block;border-radius:6px;object-fit:cover;" />`
         : `<div style="width:56px;height:56px;background:#f4f4f5;border-radius:6px;"></div>`;
@@ -125,7 +144,7 @@ function renderLineItemsRows(lines: OrderLineLike[]): string {
             <div style="font-weight:600;">${title}${variant}${giftBadge}</div>
             <div style="color:#71717a;font-size:13px;margin-top:2px;">Qty ${l.quantity}</div>
           </td>
-          <td style="padding:8px 0;text-align:right;vertical-align:top;font-size:14px;color:#18181b;">${lineTotal}</td>
+          <td style="padding:8px 0;text-align:right;vertical-align:top;font-size:14px;color:#18181b;">${priceCell}</td>
         </tr>`;
     })
     .join("");
@@ -142,7 +161,7 @@ function shellHtml(opts: {
   // primary color. Many inbox renderers (Gmail, Outlook) block external
   // images by default, so we always set an alt text to the brand name.
   const logoRow = opts.brand.logoUrl
-    ? `<img src="${escapeHtml(opts.brand.logoUrl)}" alt="${escapeHtml(opts.brand.brandName)}" height="36" style="display:block;height:36px;max-height:36px;width:auto;border:0;" />`
+    ? `<img src="${escapeHtml(opts.brand.logoUrl)}" alt="${escapeHtml(opts.brand.brandName)}" height="72" style="display:block;height:72px;max-height:72px;width:auto;border:0;" />`
     : `<div style="font-size:18px;font-weight:700;color:${escapeHtml(opts.brand.primaryColor)};">${escapeHtml(opts.brand.brandName)}</div>`;
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8" /><title>${escapeHtml(opts.title)}</title></head>
@@ -170,6 +189,11 @@ export async function sendOrderConfirmationEmail(opts: {
   /** Personal note from the founder — same message that prints on the
    *  packing slip. Wraps in a styled blockquote with attribution. */
   founderNote?: string | null;
+  /** What the customer WOULD have paid for shipping had they checked
+   *  out as a one-time shopper. Used for the strikethrough → Free
+   *  treatment on subscribing orders. When omitted we don't show a
+   *  strikethrough. */
+  shippingValueCents?: number | null;
 }): Promise<{ success: boolean; error?: string }> {
   try {
     const client = await getResendClient(opts.workspaceId, opts.order.email);
@@ -185,6 +209,19 @@ export async function sendOrderConfirmationEmail(opts: {
     const nextBillingPretty = nextBillingDate
       ? new Date(nextBillingDate).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })
       : null;
+
+    // ── Savings math (mirror of storefront cart) ─────────────────
+    // MSRP subtotal includes gift "value" (gift has unit_msrp_cents
+    // but unit_price=0) so the gift counts toward "you save". A line
+    // with no unit_msrp falls back to its paid price (no savings).
+    const msrpSubtotalCents = order.line_items.reduce((s, l) => {
+      const msrpLine = (l.unit_msrp_cents || l.unit_price_cents || 0) * l.quantity;
+      return s + msrpLine;
+    }, 0);
+    const discountCents = Math.max(0, msrpSubtotalCents - subtotalCents);
+    const shippingValueCents = opts.shippingValueCents ?? 0;
+    const shippingSavedCents = Math.max(0, shippingValueCents - shippingCents);
+    const youSaveCents = discountCents + shippingSavedCents;
 
     const lineRows = renderLineItemsRows(order.line_items);
     const ship = order.shipping_address;
@@ -223,10 +260,20 @@ export async function sendOrderConfirmationEmail(opts: {
 
       <tr><td style="padding:16px 32px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="font-size:14px;color:#52525b;">
-          <tr><td style="padding:4px 0;">Subtotal</td><td style="padding:4px 0;text-align:right;color:#18181b;">${fmtCents(subtotalCents)}</td></tr>
-          <tr><td style="padding:4px 0;">Shipping</td><td style="padding:4px 0;text-align:right;color:#18181b;">${shippingCents === 0 ? "Free" : fmtCents(shippingCents)}</td></tr>
+          <tr><td style="padding:4px 0;">Subtotal</td><td style="padding:4px 0;text-align:right;color:#18181b;">${fmtCents(msrpSubtotalCents)}</td></tr>
+          ${discountCents > 0 ? `<tr><td style="padding:4px 0;color:#15803d;">Discount</td><td style="padding:4px 0;text-align:right;color:#15803d;">-${fmtCents(discountCents)}</td></tr>` : ""}
+          <tr><td style="padding:4px 0;">Shipping</td><td style="padding:4px 0;text-align:right;color:#18181b;">${
+            shippingCents === 0 && shippingValueCents > 0
+              ? `<span style="color:#a1a1aa;text-decoration:line-through;margin-right:6px;">${fmtCents(shippingValueCents)}</span><span style="color:#16a34a;font-weight:600;">Free</span>`
+              : shippingCents === 0
+                ? '<span style="color:#16a34a;font-weight:600;">Free</span>'
+                : fmtCents(shippingCents)
+          }</td></tr>
           ${taxCents > 0 ? `<tr><td style="padding:4px 0;">Tax</td><td style="padding:4px 0;text-align:right;color:#18181b;">${fmtCents(taxCents)}</td></tr>` : ""}
           <tr><td style="padding:8px 0 4px 0;border-top:1px solid #e4e4e7;font-weight:700;color:#18181b;">Total</td><td style="padding:8px 0 4px 0;border-top:1px solid #e4e4e7;text-align:right;font-weight:700;color:#18181b;">${fmtCents(order.total_cents)}</td></tr>
+          ${youSaveCents > 0 ? `<tr><td colspan="2" style="padding:10px 0 0 0;text-align:right;">
+            <span style="display:inline-block;background:#dcfce7;color:#166534;padding:6px 12px;border-radius:999px;font-size:13px;font-weight:700;">You saved ${fmtCents(youSaveCents)}</span>
+          </td></tr>` : ""}
         </table>
       </td></tr>
 
@@ -259,7 +306,7 @@ export async function sendOrderConfirmationEmail(opts: {
       </td></tr>
     `;
 
-    const brand = await getBrand(opts.workspaceId);
+    const brand = await getBrand(opts.workspaceId, client.domain);
     const html = shellHtml({
       title: `Order confirmation — ${order.order_number}`,
       preheader: `Your order ${order.order_number} is confirmed. We'll send tracking once it ships.`,
@@ -268,14 +315,13 @@ export async function sendOrderConfirmationEmail(opts: {
     });
 
     const { error } = await client.resend.emails.send({
-      from: `${brand.brandName} <orders@${client.domain}>`,
+      from: `${brand.brandName} <${brand.fromEmail}>`,
       to: order.email,
-      // Replies route to no-reply@ which the workspace has an
-      // autoresponder on (deflects "cancel my order" reply attempts
-      // and points the customer to the account portal). Stops random
-      // mutation requests from sneaking in via the order receipt
-      // thread.
-      replyTo: `no-reply@${client.domain}`,
+      // Reply-to is workspace-configured (Settings → Transactional
+      // Messaging). Defaults to no-reply@{domain}; the workspace
+      // has an autoresponder there that deflects "cancel my order"
+      // replies back to the account portal.
+      replyTo: brand.replyToEmail,
       subject: `Order confirmed — ${order.order_number}`,
       html,
     });
@@ -354,7 +400,7 @@ export async function sendShippingNotificationEmail(opts: {
       </td></tr>
     `;
 
-    const brand = await getBrand(opts.workspaceId);
+    const brand = await getBrand(opts.workspaceId, client.domain);
     const html = shellHtml({
       title: `Your order ${order.order_number} has shipped`,
       preheader: `Tracking ${tracking} — your order is on its way.`,
@@ -363,11 +409,9 @@ export async function sendShippingNotificationEmail(opts: {
     });
 
     const { error } = await client.resend.emails.send({
-      from: `${brand.brandName} <orders@${client.domain}>`,
+      from: `${brand.brandName} <${brand.fromEmail}>`,
       to: order.email,
-      // See note on the confirmation send — replies go to the
-      // workspace's autoresponder, not a real human inbox.
-      replyTo: `no-reply@${client.domain}`,
+      replyTo: brand.replyToEmail,
       subject: `Your order is on its way — ${order.order_number}`,
       html,
     });

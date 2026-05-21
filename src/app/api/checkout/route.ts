@@ -643,6 +643,30 @@ export async function POST(request: NextRequest) {
         .maybeSingle();
       nextBillingDate = (sub?.next_billing_date as string | null) || null;
     }
+    // Compute "would have paid for shipping" so the email mirrors the
+    // cart's strikethrough → Free treatment. Look up onetime_economy
+    // shipping rate from the DB and price it against this cart's
+    // chargeable units. Best-effort — falls through to no strikethrough
+    // if the rate is missing.
+    let shippingValueCentsForEmail: number | null = null;
+    try {
+      const { data: economyRate } = await admin
+        .from("shipping_rates")
+        .select("base_cents, per_item_cents, max_total_cents")
+        .eq("workspace_id", cart.workspace_id)
+        .eq("applies_to", "onetime")
+        .eq("code", "economy")
+        .eq("enabled", true)
+        .maybeSingle();
+      if (economyRate) {
+        const chargeableUnits = lines.reduce((s, l) => (l.unit_price_cents > 0 ? s + l.quantity : s), 0);
+        const raw = (economyRate.base_cents as number) + (economyRate.per_item_cents as number) * chargeableUnits;
+        const capped = economyRate.max_total_cents != null && raw > (economyRate.max_total_cents as number)
+          ? (economyRate.max_total_cents as number) : raw;
+        shippingValueCentsForEmail = capped;
+      }
+    } catch { /* non-fatal */ }
+
     const sendRes = await sendOrderConfirmationEmail({
       workspaceId: cart.workspace_id,
       order: {
@@ -670,6 +694,7 @@ export async function POST(request: NextRequest) {
       // didn't skip Amplifier. If we DID skip (fraud hold), no note
       // since the customer hasn't yet been promised a delivery.
       founderNote: (order as { _founderNote?: string })._founderNote || null,
+      shippingValueCents: shippingValueCentsForEmail,
     });
     if (!sendRes.success) {
       console.warn(`[checkout] order confirmation email failed for ${orderNumber}: ${sendRes.error}`);

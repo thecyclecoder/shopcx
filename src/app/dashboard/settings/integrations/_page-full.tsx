@@ -45,6 +45,14 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
   // Support emails + webhook
   const [supportEmail, setSupportEmail] = useState("");
   const [supportEmails, setSupportEmails] = useState<{ id: string; email: string; label: string | null; is_default: boolean }[]>([]);
+
+  // Transactional messaging (from, reply-to, brand name) — used by
+  // order confirmation, shipping notification, and future SMS sends.
+  const [txFromEmail, setTxFromEmail] = useState("");
+  const [txFromName, setTxFromName] = useState("");
+  const [txReplyToEmail, setTxReplyToEmail] = useState("");
+  const [txSaving, setTxSaving] = useState(false);
+  const [txSaveMessage, setTxSaveMessage] = useState("");
   const [newSupportEmail, setNewSupportEmail] = useState("");
   const [newSupportLabel, setNewSupportLabel] = useState("");
   const [webhookConfigured, setWebhookConfigured] = useState(false);
@@ -148,6 +156,9 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
         setResendHint(data.resend_api_key_hint);
         setSupportEmail(data.support_email || "");
         setResendDomain(data.resend_domain || "");
+        setTxFromEmail(data.transactional_from_email || "");
+        setTxFromName(data.transactional_from_name || "");
+        setTxReplyToEmail(data.transactional_reply_to_email || "");
         setSandboxMode(data.sandbox_mode ?? true);
         if (data.resend_connected) {
           fetch(`/api/workspaces/${workspace.id}/integrations/resend/webhook`)
@@ -1048,6 +1059,98 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
             <p className="mt-4 text-sm text-zinc-400">Only owners and admins can manage integrations.</p>
           )}
         </div>
+        )}
+
+        {/* ── Transactional Messaging ── */}
+        {show("transactional") && resendConnected && (
+          <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-100 dark:bg-emerald-900/30">
+                <svg className="h-5 w-5 text-emerald-700 dark:text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Transactional Messaging</h2>
+                <p className="text-sm text-zinc-500">Sender + reply-to settings for order confirmations, shipping notifications, and other automated customer emails.</p>
+              </div>
+            </div>
+
+            {!canEdit ? (
+              <p className="mt-4 text-sm text-zinc-400">Only owners and admins can manage these settings.</p>
+            ) : (
+              <form
+                className="mt-5 space-y-4"
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  setTxSaving(true);
+                  setTxSaveMessage("");
+                  const res = await fetch(`/api/workspaces/${workspace.id}/integrations`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      transactional_from_email: txFromEmail.trim() || null,
+                      transactional_from_name: txFromName.trim() || null,
+                      transactional_reply_to_email: txReplyToEmail.trim() || null,
+                    }),
+                  });
+                  setTxSaving(false);
+                  setTxSaveMessage(res.ok ? "Saved." : "Failed to save.");
+                  setTimeout(() => setTxSaveMessage(""), 2500);
+                }}
+              >
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Sender name</label>
+                  <p className="text-xs text-zinc-400 mb-1">Shown as the &quot;from name&quot; in the inbox (e.g. <code>Superfoods Company</code>).</p>
+                  <input
+                    type="text"
+                    value={txFromName}
+                    onChange={(e) => setTxFromName(e.target.value)}
+                    placeholder="Workspace name (default)"
+                    className="block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">From email</label>
+                  <p className="text-xs text-zinc-400 mb-1">Defaults to <code>orders@{resendDomain || "yourdomain.com"}</code>. Must be on a domain you&apos;ve verified in Resend.</p>
+                  <input
+                    type="email"
+                    value={txFromEmail}
+                    onChange={(e) => setTxFromEmail(e.target.value)}
+                    placeholder={resendDomain ? `orders@${resendDomain}` : "orders@yourdomain.com"}
+                    className="block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Reply-to email</label>
+                  <p className="text-xs text-zinc-400 mb-1">Where replies are routed. Common pattern: use an inbox with an autoresponder (e.g. <code>no-reply@yourbrand.com</code>) so &quot;cancel my order&quot; replies get a templated bounce-back instead of creating tickets.</p>
+                  <input
+                    type="email"
+                    value={txReplyToEmail}
+                    onChange={(e) => setTxReplyToEmail(e.target.value)}
+                    placeholder={resendDomain ? `no-reply@${resendDomain}` : "no-reply@yourbrand.com"}
+                    className="block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                  />
+                </div>
+
+                {/* SMS placeholder — will fill in once we wire transactional SMS sends. */}
+                <div className="rounded-md border border-dashed border-zinc-200 bg-zinc-50 px-3 py-2.5 text-xs text-zinc-500 dark:border-zinc-700 dark:bg-zinc-900/50">
+                  Transactional SMS settings (sender, opt-out language) will appear here when we wire SMS receipts.
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    type="submit"
+                    disabled={txSaving}
+                    className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                  >
+                    {txSaving ? "Saving..." : "Save"}
+                  </button>
+                  {txSaveMessage && <span className="text-sm text-zinc-500">{txSaveMessage}</span>}
+                </div>
+              </form>
+            )}
+          </div>
         )}
 
         {/* ── Shopify Multipass ── */}
