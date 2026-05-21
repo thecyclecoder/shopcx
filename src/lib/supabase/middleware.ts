@@ -245,6 +245,12 @@ export async function updateSession(request: NextRequest) {
         // ── Purpose-bound rewrite — host alone determines route prefix
         // so the customer never sees /kb or /portal in the URL.
         if (purpose === "portal") {
+          // Skip if the path is ALREADY rewritten (avoids the
+          // double-prefix bug where /portal/{slug}/login would become
+          // /portal/{slug}/portal/{slug}/login — produced a 404 on
+          // every login redirect from /portal/[slug]/page.tsx).
+          if (pathname.startsWith(`/portal/${slug}`)) return supabaseResponse;
+
           // Portal mini-site on its own subdomain (portal.example.com).
           // Map / → /portal/{slug}, /login → /portal/{slug}/login (real
           // server route), everything else → /portal/{slug} (the SPA
@@ -257,6 +263,9 @@ export async function updateSession(request: NextRequest) {
           return NextResponse.rewrite(url);
         }
         if (purpose === "help") {
+          // Skip if already rewritten (same double-prefix protection
+          // as the portal branch).
+          if (pathname.startsWith(`/help/${slug}`)) return supabaseResponse;
           // Help center on its own subdomain (help.example.com).
           // Map every path 1:1 under /help/{slug}.
           if (pathname === "/") {
