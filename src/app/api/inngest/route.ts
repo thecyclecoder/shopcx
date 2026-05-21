@@ -74,6 +74,7 @@ import { orderAddressFallback } from "@/lib/inngest/order-address-fallback";
 import { resellerDiscoveryWeeklyCron, resellerDiscoveryManual } from "@/lib/inngest/reseller-discovery";
 import { textCampaignScheduled, textCampaignSendTick } from "@/lib/inngest/marketing-text";
 import { marketingCouponAutoDisable } from "@/lib/inngest/marketing-coupon-cron";
+import { abandonedCartReminder } from "@/lib/inngest/abandoned-cart";
 import { klaviyoSmsImport } from "@/lib/inngest/klaviyo-sms-import";
 import { klaviyoEventsImport } from "@/lib/inngest/klaviyo-events-import";
 import { klaviyoAttributionCompute } from "@/lib/inngest/klaviyo-attribution-compute";
@@ -159,6 +160,7 @@ export const { GET, POST, PUT } = serve({
     textCampaignScheduled,
     textCampaignSendTick,
     marketingCouponAutoDisable,
+    abandonedCartReminder,
     klaviyoSmsImport,
     klaviyoEventsImport,
     klaviyoAttributionCompute,

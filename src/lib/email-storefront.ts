@@ -681,3 +681,103 @@ export async function sendShippingNotificationEmail(opts: {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
+
+/**
+ * Abandoned-cart reminder. Fires once per cart_draft when the
+ * customer has been idle for 30+ minutes without converting. The cart
+ * token survives so the CTA drops them back into /customize with all
+ * their line items intact — no re-picking products, no losing their
+ * subscribe-vs-onetime selection.
+ */
+interface AbandonedCartLine {
+  title: string;
+  variant_title?: string | null;
+  quantity: number;
+  unit_price_cents?: number;
+  unit_msrp_cents?: number;
+  line_total_cents?: number;
+  image_url?: string | null;
+  is_gift?: boolean;
+}
+
+export async function sendAbandonedCartEmail(opts: {
+  workspaceId: string;
+  to: string;
+  firstName?: string | null;
+  cartToken: string;
+  lineItems: AbandonedCartLine[];
+  subtotalCents: number;
+  storefrontDomain: string | null;
+}): Promise<{ success: boolean; error?: string }> {
+  try {
+    const client = await getResendClient(opts.workspaceId, opts.to);
+    if (!client) return { success: false, error: "resend_not_configured_or_blocked" };
+    if (!opts.lineItems || opts.lineItems.length === 0) {
+      return { success: false, error: "empty_cart" };
+    }
+
+    // CTA lands on the customer's storefront, not the dashboard. When
+    // the workspace has no custom storefront domain set we fall back
+    // to NEXT_PUBLIC_SITE_URL so test workspaces still get a usable
+    // link.
+    const storefrontBase = opts.storefrontDomain
+      ? `https://${opts.storefrontDomain.replace(/^https?:\/\//, "").replace(/\/+$/, "")}`
+      : (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai");
+    const ctaUrl = `${storefrontBase}/customize?token=${encodeURIComponent(opts.cartToken)}`;
+
+    const greeting = opts.firstName
+      ? `Hi ${escapeHtml(opts.firstName)}, `
+      : "Hi there, ";
+    const brand = await getBrand(opts.workspaceId, client.domain);
+    const lineRows = renderLineItemsRows(opts.lineItems as OrderLineLike[]);
+
+    const bodyHtml = `
+      <tr><td class="sx-pad" style="padding:32px 32px 16px 32px;">
+        <div style="font-size:13px;color:#71717a;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;">Your cart</div>
+        <h1 class="sx-h1" style="margin:8px 0 12px 0;font-size:24px;color:#18181b;font-weight:700;">You left something behind</h1>
+        <p class="sx-body" style="margin:0;color:#52525b;font-size:15px;line-height:1.55;">
+          ${greeting}your cart is still waiting. Pick up where you left off — we saved everything for you.
+        </p>
+      </td></tr>
+
+      <tr><td class="sx-pad" style="padding:8px 32px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-top:1px solid #e4e4e7;border-bottom:1px solid #e4e4e7;">
+          ${lineRows}
+        </table>
+      </td></tr>
+
+      <tr><td class="sx-pad" style="padding:16px 32px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="sx-totals" style="font-size:14px;color:#52525b;">
+          <tr><td style="padding:8px 0;font-weight:700;color:#18181b;">Subtotal</td><td style="padding:8px 0;text-align:right;font-weight:700;color:#18181b;">${fmtCents(opts.subtotalCents)}</td></tr>
+        </table>
+      </td></tr>
+
+      <tr><td class="sx-pad" style="padding:8px 32px 32px 32px;" align="center">
+        <a href="${escapeHtml(ctaUrl)}" style="display:inline-block;background:${escapeHtml(brand.primaryColor)};color:#ffffff;font-weight:700;font-size:16px;padding:14px 28px;border-radius:8px;text-decoration:none;">Complete your order</a>
+      </td></tr>
+
+      <tr><td class="sx-pad" style="padding:20px 32px;border-top:1px solid #e4e4e7;text-align:center;font-size:13px;color:#71717a;line-height:1.6;">
+        — The ${escapeHtml(brand.brandName)} team
+      </td></tr>
+    `;
+
+    const html = await shellHtml({
+      title: "You left something behind",
+      preheader: "Your cart is still waiting — pick up where you left off.",
+      bodyHtml,
+      brand,
+    });
+
+    const { error } = await client.resend.emails.send({
+      from: `${brand.brandName} <${brand.fromEmail}>`,
+      to: opts.to,
+      replyTo: brand.replyToEmail,
+      subject: "You left something behind",
+      html,
+    });
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
