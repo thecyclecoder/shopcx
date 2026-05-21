@@ -70,6 +70,24 @@ function isPositive(body: string): boolean {
   const actionIntent = /\b(cancel|cancell|refund|return|stop|paus|skip|swap|change|update|exchange|replace|replac|missing|damaged|wrong|chargeback|dispute|delivery|tracking|address|reactivate|resume|where is|haven'?t (received|gotten|got))\b/i;
   if (actionIntent.test(c)) return false;
 
+  // Question veto — a message containing a question is never closure
+  // even when it ends with "thanks". Customers routinely sign off
+  // polite emails like "How do I update my default card? Thanks" —
+  // the prior heuristic fired on "thanks" and ignored the question.
+  // Dawn Krahn (ticket 744760ef): "how do I make a particular card the
+  // default payment? Thanks" closed before we answered. "Thanks in
+  // advance" is also pre-emptive politeness, not closure.
+  //
+  // Detection: ? anywhere OR common interrogative phrasings at the
+  // sentence head. We deliberately avoid catching bare "what's up"
+  // / standalone "how are you" — those are greetings, not real
+  // questions about our service.
+  const questionPhrasing = /\b(how\s+(do|can|to|would|should|long|much|many)|what(?:'s|\s+is|\s+are|\s+about|\s+if|\s+happens|\s+will|\s+do\s+i)|when\s+(will|do|can|is|are|does)|where\s+(is|are|can|do|does)|why\s+(is|are|do|does|did)|which\s+(one|card|sub|order|product|works?)|can\s+(you|i|we)|could\s+(you|i)|would\s+(you|i)|will\s+(you|i|it|my)|do\s+(you|i)\s+(have|need|get|use|know|see)|is\s+there\s+(a|any)|are\s+there|is\s+it\s+(possible|ok|okay|alright|safe|too))\b/i;
+  // "thanks in advance" → never closure (the customer is pre-thanking
+  // for an answer they haven't received yet)
+  const thanksInAdvance = /\bthanks?\s+(?:so\s+much\s+)?in\s+advance\b/i;
+  if (c.includes("?") || questionPhrasing.test(c) || thanksInAdvance.test(c)) return false;
+
   // Reject obvious data-only replies — short messages whose meaningful
   // content is nothing more than an order/SKU/tracking ID. Sherri's
   // "And SC127037" tripped positive-close because the signature contained

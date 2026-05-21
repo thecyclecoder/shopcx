@@ -119,6 +119,11 @@ function buildToolDefinitions() {
       description: "Get payment failure and recovery status. Use when customer has billing issues or payment failures.",
       input_schema: { type: "object" as const, properties: {}, required: [] as string[] },
     },
+    {
+      name: "get_payment_methods",
+      description: "Get the cards/payment methods the customer has on file (both our local Braintree-vaulted cards from storefront checkout AND Shopify Payments cards). Use when the customer asks about which cards we have, wants to change/default/delete a card, or mentions a specific card by last4. Returns brand, last4, expiry, default flag, and revocation status for each.",
+      input_schema: { type: "object" as const, properties: {}, required: [] as string[] },
+    },
   ];
 }
 
@@ -395,6 +400,8 @@ export async function executeToolCall(
         return await getEmailHistory(admin, workspaceId, customerId);
       case "get_dunning_status":
         return await getDunningStatus(admin, workspaceId, customerId);
+      case "get_payment_methods":
+        return await getPaymentMethods(admin, workspaceId, customerId);
       default:
         return `Unknown tool: ${name}`;
     }
@@ -1044,6 +1051,103 @@ async function getDunningStatus(admin: Admin, wsId: string, custId: string): Pro
       parts.push(`- ${new Date(f.created_at).toLocaleDateString()} | ${f.attempt_type} | ${f.result} | Card: *${f.card_last4 || "?"}`);
     }
   }
+  return parts.join("\n");
+}
+
+/**
+ * Payment methods on file. Pulls from BOTH sources so the customer
+ * gets a complete picture regardless of how they checked out:
+ *   - Our local customer_payment_methods (Braintree-vaulted from
+ *     storefront checkout, provider='braintree')
+ *   - Shopify's Customer.paymentMethods (Shopify Payments — what the
+ *     legacy storefront uses)
+ *
+ * Customers most often ask about this when (a) they want to change
+ * the default card, (b) they deleted an old card and it's still
+ * showing, (c) they added a new card and want to confirm we see it.
+ */
+async function getPaymentMethods(admin: Admin, wsId: string, custId: string): Promise<string> {
+  const allCustIds = await resolveLinkedCustomerIds(admin, custId);
+
+  // Local (Braintree-vaulted)
+  const { data: local } = await admin
+    .from("customer_payment_methods")
+    .select("provider, card_brand, last4, expiration_month, expiration_year, is_default, status, created_at")
+    .eq("workspace_id", wsId)
+    .in("customer_id", allCustIds)
+    .order("created_at", { ascending: false });
+
+  // Shopify side
+  const { data: customers } = await admin
+    .from("customers")
+    .select("shopify_customer_id")
+    .in("id", allCustIds);
+  const shopifyIds = (customers || [])
+    .map((c) => c.shopify_customer_id as string | null)
+    .filter((s): s is string => !!s);
+
+  type ShopifyPM = { brand: string; last4: string; exp: string; status: string; name: string };
+  const shopifyMethods: ShopifyPM[] = [];
+  if (shopifyIds.length > 0) {
+    try {
+      const { decrypt } = await import("@/lib/crypto");
+      const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
+      const { data: ws } = await admin
+        .from("workspaces")
+        .select("shopify_myshopify_domain, shopify_access_token_encrypted")
+        .eq("id", wsId)
+        .single();
+      const shop = ws?.shopify_myshopify_domain as string | undefined;
+      if (shop && ws?.shopify_access_token_encrypted) {
+        const token = decrypt(ws.shopify_access_token_encrypted as string);
+        for (const sid of shopifyIds) {
+          const query = `query { customer(id: "gid://shopify/Customer/${sid}") { paymentMethods(first: 30) { edges { node { id revokedAt instrument { ... on CustomerCreditCard { brand lastDigits expiryMonth expiryYear name } } } } } } }`;
+          const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+            method: "POST",
+            headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" },
+            body: JSON.stringify({ query }),
+          });
+          if (!res.ok) continue;
+          const data = await res.json();
+          const edges = data?.data?.customer?.paymentMethods?.edges as Array<{ node: { revokedAt: string | null; instrument: { brand?: string; lastDigits?: string; expiryMonth?: number; expiryYear?: number; name?: string } } }> | undefined;
+          for (const e of edges || []) {
+            const inst = e.node.instrument || {};
+            shopifyMethods.push({
+              brand: (inst.brand || "card").toLowerCase(),
+              last4: inst.lastDigits || "?",
+              exp: `${inst.expiryMonth || "?"}/${inst.expiryYear || "?"}`,
+              status: e.node.revokedAt ? "revoked" : "active",
+              name: inst.name || "",
+            });
+          }
+        }
+      }
+    } catch (err) {
+      // Non-fatal — fall back to local-only.
+      void err;
+    }
+  }
+
+  const parts: string[] = [];
+  if (local?.length) {
+    parts.push("STOREFRONT-VAULTED CARDS (charged via Braintree on internal subscriptions):");
+    for (const p of local) {
+      parts.push(`- ${p.card_brand || "card"} ending ${p.last4} | exp ${p.expiration_month}/${p.expiration_year} | ${p.is_default ? "DEFAULT" : "not default"} | ${p.status}`);
+    }
+  }
+  if (shopifyMethods.length) {
+    parts.push(`${parts.length ? "\n" : ""}SHOPIFY PAYMENT METHODS (charged via Shopify Payments on legacy subscriptions):`);
+    for (const m of shopifyMethods) {
+      parts.push(`- ${m.brand} ending ${m.last4} | exp ${m.exp} | ${m.status}${m.name ? ` | name: ${m.name}` : ""}`);
+    }
+  }
+  if (parts.length === 0) {
+    return "No payment methods on file for this customer.";
+  }
+  parts.push(
+    "\nManage payment methods URL: https://account.superfoodscompany.com/profile (customer can add/remove/set-default there). " +
+    "Shopify Payments does NOT expose a way to programmatically set the default; the customer must do it from their account portal.",
+  );
   return parts.join("\n");
 }
 
