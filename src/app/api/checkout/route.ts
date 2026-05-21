@@ -536,10 +536,9 @@ export async function POST(request: NextRequest) {
   if (fraudHeld) {
     console.warn(`[checkout] skipping Amplifier for ${orderNumber} — fraud hold in place`);
   } else {
-    // Founder note on the packing slip — first-timers get the warm
-    // welcome template; returning customers get a Haiku rewrite of
-    // an order-count thanks. Non-blocking semantically: the helper
-    // self-heals to the template on any AI failure.
+    // Founder note used BOTH on the packing slip AND in the order
+    // confirmation email below — single source of truth so the
+    // customer reads the same wording in the box and in the inbox.
     const distinctProducts = new Set(lines.filter((l) => l.sku).map((l) => l.product_id)).size;
     const packingSlipMessage = await buildPackingSlipMessage({
       workspaceId: cart.workspace_id,
@@ -548,6 +547,9 @@ export async function POST(request: NextRequest) {
       firstName: ship.first_name || customer.first_name || "",
       productCount: distinctProducts,
     });
+    // Stash on the order so the confirmation-email step picks it up
+    // without a second Haiku call.
+    (order as { _founderNote?: string })._founderNote = packingSlipMessage;
     try {
       const amplifierRes = await createAmplifierOrder({
         workspaceId: cart.workspace_id,
@@ -616,6 +618,65 @@ export async function POST(request: NextRequest) {
     anonymousId: (cart.anonymous_id as string | null) || null,
     context: visitorCtx,
   });
+
+  // ── 11. Order confirmation email. ────────────────────────────────
+  // Best-effort — failure logs but doesn't break the response. The
+  // packing slip handles the in-the-box copy; this is the inbox copy
+  // with line items, totals, and (if subscribing) the next billing
+  // date so the customer can see when they'll be charged next.
+  try {
+    const { sendOrderConfirmationEmail } = await import("@/lib/email-storefront");
+    // Was this their first order with us across linked accounts?
+    const { data: priorOrders } = await admin
+      .from("orders")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", cart.workspace_id)
+      .eq("customer_id", customer.id)
+      .neq("id", order.id);
+    const isFirstOrder = !priorOrders || (priorOrders as unknown as { length?: number }).length === 0;
+    let nextBillingDate: string | null = null;
+    if (primarySubscriptionId) {
+      const { data: sub } = await admin
+        .from("subscriptions")
+        .select("next_billing_date")
+        .eq("id", primarySubscriptionId)
+        .maybeSingle();
+      nextBillingDate = (sub?.next_billing_date as string | null) || null;
+    }
+    const sendRes = await sendOrderConfirmationEmail({
+      workspaceId: cart.workspace_id,
+      order: {
+        id: order.id,
+        order_number: order.order_number as string,
+        email,
+        total_cents: totalCents,
+        line_items: lines,
+        shipping_address: ship,
+        shipping_method_code: shippingMethodCode,
+        payment_details: {
+          subtotal_cents: subtotalCents,
+          shipping_cents: shippingCents,
+          tax_cents: taxCents,
+          protection_cents: protectionCents,
+        },
+        shipping_protection_added: protectionAdded,
+        shipping_protection_amount_cents: protectionAdded ? protectionCents : null,
+        subscription_id: primarySubscriptionId,
+      },
+      isFirstOrder,
+      subscribing,
+      nextBillingDate,
+      // Same founder note as the packing slip — set above when we
+      // didn't skip Amplifier. If we DID skip (fraud hold), no note
+      // since the customer hasn't yet been promised a delivery.
+      founderNote: (order as { _founderNote?: string })._founderNote || null,
+    });
+    if (!sendRes.success) {
+      console.warn(`[checkout] order confirmation email failed for ${orderNumber}: ${sendRes.error}`);
+    }
+  } catch (err) {
+    console.warn(`[checkout] order confirmation email threw for ${orderNumber}:`, err);
+  }
 
   return NextResponse.json({
     ok: true,

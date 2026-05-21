@@ -99,6 +99,55 @@ export const amplifierWebhookProcess = inngest.createFunction(
           .eq("id", orderId);
       });
 
+      // Send the customer's "your order shipped" email with tracking.
+      // Step-isolated so the email send is idempotent on Inngest retries
+      // (and won't fire if it already succeeded once).
+      await step.run("email-customer-shipped", async () => {
+        const sel = await admin.from("orders")
+          .select(
+            "id, order_number, email, total_cents, line_items, shipping_address, " +
+            "shipping_protection_added, shipping_protection_amount_cents, " +
+            "amplifier_tracking_number, amplifier_carrier, subscription_id",
+          )
+          .eq("id", orderId)
+          .single();
+        if (sel.error || !sel.data) return { skipped: true, reason: "order_fetch_failed" };
+        const order = sel.data as unknown as {
+          id: string;
+          order_number: string;
+          email: string | null;
+          total_cents: number;
+          line_items: Array<{ title: string; variant_title?: string | null; quantity: number; unit_price_cents?: number; line_total_cents?: number; is_gift?: boolean; image_url?: string | null; sku?: string | null }> | null;
+          shipping_address: { first_name?: string; last_name?: string; address1?: string; address2?: string | null; city?: string; province_code?: string; zip?: string } | null;
+          shipping_protection_added: boolean | null;
+          shipping_protection_amount_cents: number | null;
+          amplifier_tracking_number: string | null;
+          amplifier_carrier: string | null;
+          subscription_id: string | null;
+        };
+        if (!order.email) return { skipped: true, reason: "no_email" };
+        if (!order.amplifier_tracking_number) return { skipped: true, reason: "no_tracking_number" };
+        const { sendShippingNotificationEmail } = await import("@/lib/email-storefront");
+        const r = await sendShippingNotificationEmail({
+          workspaceId,
+          order: {
+            id: order.id,
+            order_number: order.order_number,
+            email: order.email,
+            total_cents: order.total_cents,
+            line_items: order.line_items || [],
+            shipping_address: order.shipping_address,
+            shipping_protection_added: !!order.shipping_protection_added,
+            shipping_protection_amount_cents: order.shipping_protection_amount_cents,
+            amplifier_tracking_number: order.amplifier_tracking_number,
+            amplifier_carrier: order.amplifier_carrier,
+            subscription_id: order.subscription_id,
+          },
+        });
+        if (!r.success) console.warn(`[amplifier-webhook] shipping email failed for order ${orderId}: ${r.error}`);
+        return r;
+      });
+
       return { matched: true, orderId, type: "shipped" };
     }
 
