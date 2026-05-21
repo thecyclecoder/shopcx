@@ -79,6 +79,12 @@ export interface ActionParams {
   phone_number?: string;       // any common format; helper E.164-izes
   first_name?: string;
   last_name?: string;
+  // switch_payment_method — set a card as the active payment method
+  // on one or all of the customer's active subscriptions. Sonnet
+  // identifies the card by last4 (what the customer references in
+  // chat); the handler matches it against the Shopify payment methods
+  // on file and applies the switch.
+  card_last4?: string;
 }
 
 export interface ActionContext {
@@ -1515,6 +1521,91 @@ export const directActionHandlers: Record<
       success: true,
       summary: `Updated ${changed.join(", ")} on customer profile${shopifyNote}`,
     };
+  },
+
+  /**
+   * switch_payment_method — set a specific card as the active payment
+   * method on one (or all) of the customer's active subscriptions.
+   * Identified by last4 since that's what the customer cites in chat.
+   *
+   * Reuses the dunning-system helper appstleSwitchPaymentMethod, which
+   * already handles BOTH internal (Braintree-vaulted) subs AND legacy
+   * Appstle/Shopify-Payments subs — for Appstle ones it calls
+   * subscription-contracts-update-existing-payment-method.
+   *
+   * Pass:
+   *   - card_last4 (required) — e.g. "8924"
+   *   - contract_id (optional) — limit to one sub; defaults to ALL
+   *     active subs on the customer.
+   *
+   * Returns success: false if no card matches the last4, or if the
+   * customer has multiple cards ending in the same digits (ambiguous —
+   * needs more disambiguation from the customer).
+   */
+  switch_payment_method: async (ctx, p) => {
+    if (!p.card_last4) return { success: false, error: "card_last4 required" };
+    const last4 = p.card_last4.replace(/\D/g, "").slice(-4);
+    if (last4.length !== 4) return { success: false, error: `card_last4 must be 4 digits, got "${p.card_last4}"` };
+
+    // Pull the customer's Shopify ID + linked accounts so we cover all
+    // active subs across the link group.
+    const { data: cust } = await ctx.admin.from("customers")
+      .select("shopify_customer_id").eq("id", ctx.customerId).single();
+    if (!cust?.shopify_customer_id) return { success: false, error: "No Shopify customer ID on record" };
+
+    // Match by last4 against Shopify payment methods (active only).
+    const { getCustomerPaymentMethods } = await import("@/lib/dunning");
+    const cards = await getCustomerPaymentMethods(ctx.workspaceId, cust.shopify_customer_id as string);
+    const matches = cards.filter((c) => c.last4 === last4);
+    if (matches.length === 0) {
+      return { success: false, error: `No active card ending in ${last4} on file. Cards on file: ${cards.map((c) => `*${c.last4}`).join(", ") || "(none)"}` };
+    }
+    if (matches.length > 1) {
+      // Disambiguate by expiry — if the customer mentioned brand or
+      // expiry we'd extend the param shape; for now just refuse and
+      // surface the duplicates so Sonnet asks the customer.
+      return { success: false, error: `Multiple active cards end in ${last4}: ${matches.map((c) => `${c.brand} exp ${c.expiryMonth}/${c.expiryYear}`).join("; ")}. Ask the customer which one.` };
+    }
+    const card = matches[0];
+
+    // Resolve which subs to update.
+    const ids = await (async () => {
+      const { data: link } = await ctx.admin.from("customer_links")
+        .select("group_id").eq("customer_id", ctx.customerId).maybeSingle();
+      if (!link?.group_id) return [ctx.customerId];
+      const { data: g } = await ctx.admin.from("customer_links")
+        .select("customer_id").eq("group_id", link.group_id);
+      return (g || []).map((r) => r.customer_id as string);
+    })();
+
+    let subQuery = ctx.admin.from("subscriptions")
+      .select("shopify_contract_id, items, status")
+      .in("customer_id", ids)
+      .eq("status", "active");
+    if (p.contract_id) subQuery = subQuery.eq("shopify_contract_id", p.contract_id);
+    const { data: subs } = await subQuery;
+    if (!subs || subs.length === 0) {
+      return { success: false, error: p.contract_id ? `Subscription ${p.contract_id} not found or not active` : "Customer has no active subscriptions to update" };
+    }
+
+    // Loop the switch across each active sub.
+    const { appstleSwitchPaymentMethod } = await import("@/lib/appstle");
+    const summaries: string[] = [];
+    const failures: string[] = [];
+    for (const sub of subs) {
+      const r = await appstleSwitchPaymentMethod(ctx.workspaceId, sub.shopify_contract_id as string, card.id);
+      if (r.success) {
+        summaries.push(sub.shopify_contract_id as string);
+      } else {
+        failures.push(`${sub.shopify_contract_id}: ${r.error}`);
+      }
+    }
+
+    if (summaries.length === 0) {
+      return { success: false, error: `All updates failed. ${failures.join("; ")}` };
+    }
+    const summary = `Switched ${summaries.length} subscription${summaries.length > 1 ? "s" : ""} to ${card.brand || "card"} ending ${card.last4}${failures.length ? ` (${failures.length} failed: ${failures.join("; ")})` : ""}`;
+    return { success: true, summary };
   },
 
   create_replacement_order: async (ctx, p) => {
