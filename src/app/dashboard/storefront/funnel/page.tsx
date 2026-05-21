@@ -26,6 +26,24 @@ interface FunnelStepRow {
   drop_from_prev: number;
 }
 
+interface AbandonedCartsBlock {
+  emailed: number;
+  recovered: number;
+  revenue_recovered_cents: number;
+  open_with_email: number;
+  recovery_rate_pct: number;
+  recent: Array<{
+    id: string;
+    email: string;
+    item_count: number;
+    subtotal_cents: number;
+    status: string;
+    abandoned_email_sent_at: string | null;
+    converted_order_id: string | null;
+    created_at: string;
+  }>;
+}
+
 interface FunnelData {
   range: { start: string; end: string };
   total_sessions: number;
@@ -34,6 +52,7 @@ interface FunnelData {
   deviceBreakdown: Array<{ device_type: string; sessions: number }>;
   countryBreakdown: Array<{ ip_country: string; sessions: number }>;
   sourceBreakdown: Array<{ utm_source: string; sessions: number }>;
+  abandonedCarts?: AbandonedCartsBlock;
   recentEvents: Array<{
     id: string;
     event_type: string;
@@ -170,6 +189,10 @@ export default function StorefrontFunnelPage() {
               rows={data.countryBreakdown.map(c => ({ label: c.ip_country, value: c.sessions }))}
             />
           </div>
+
+          {data.abandonedCarts && (
+            <AbandonedCartsPanel block={data.abandonedCarts} />
+          )}
 
           <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
             <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">
@@ -383,6 +406,86 @@ function BreakdownCard({
         </ul>
       )}
     </div>
+  );
+}
+
+function AbandonedCartsPanel({ block }: { block: AbandonedCartsBlock }) {
+  const recoveredPct = block.recovery_rate_pct;
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-4 flex items-baseline justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
+          Abandoned carts
+        </h2>
+        <span className="text-[11px] text-zinc-400">
+          Reminder fires after 30 min idle, once per cart.
+        </span>
+      </div>
+      <div className="mb-5 grid gap-3 sm:grid-cols-4">
+        <StatCard label="Open now (has email)" value={block.open_with_email.toLocaleString()} />
+        <StatCard label="Reminders sent" value={block.emailed.toLocaleString()} />
+        <StatCard
+          label="Recovered"
+          value={block.recovered.toLocaleString()}
+          tone={block.recovered > 0 ? "good" : "neutral"}
+        />
+        <StatCard
+          label="Recovery rate"
+          value={`${recoveredPct.toFixed(1)}%`}
+          tone={recoveredPct >= 5 ? "good" : "neutral"}
+        />
+      </div>
+      <div className="mb-4 rounded-md border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-300">
+        Revenue recovered:&nbsp;
+        <strong>${(block.revenue_recovered_cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+      </div>
+      {block.recent.length === 0 ? (
+        <p className="text-xs text-zinc-400">No abandoned carts in this range yet.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
+                <th className="py-2 pr-2">Created</th>
+                <th className="py-2 pr-2">Email</th>
+                <th className="py-2 pr-2">Items</th>
+                <th className="py-2 pr-2 text-right">Subtotal</th>
+                <th className="py-2 pr-2">Reminder</th>
+                <th className="py-2 pr-2">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {block.recent.map(c => (
+                <tr key={c.id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                  <td className="whitespace-nowrap py-2 pr-2 text-zinc-500">
+                    {new Date(c.created_at).toLocaleString()}
+                  </td>
+                  <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{c.email}</td>
+                  <td className="py-2 pr-2 tabular-nums text-zinc-700 dark:text-zinc-300">{c.item_count}</td>
+                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-900 dark:text-zinc-100">
+                    ${(c.subtotal_cents / 100).toFixed(2)}
+                  </td>
+                  <td className="whitespace-nowrap py-2 pr-2 text-xs text-zinc-500">
+                    {c.abandoned_email_sent_at
+                      ? new Date(c.abandoned_email_sent_at).toLocaleString()
+                      : <span className="text-amber-600">pending</span>}
+                  </td>
+                  <td className="py-2 pr-2">
+                    {c.status === "converted" ? (
+                      <span className="inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold bg-emerald-100 text-emerald-800">recovered</span>
+                    ) : c.status === "abandoned" ? (
+                      <span className="inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold bg-zinc-100 text-zinc-600">abandoned</span>
+                    ) : (
+                      <span className="inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold bg-amber-100 text-amber-800">open</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 

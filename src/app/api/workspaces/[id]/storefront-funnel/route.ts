@@ -154,6 +154,104 @@ export async function GET(
     .order("created_at", { ascending: false })
     .limit(30);
 
+  // ── Abandoned cart panel ────────────────────────────────────────
+  // Within the same date window (against cart_drafts.created_at):
+  //   - emailed: count where abandoned_email_sent_at IS NOT NULL
+  //   - recovered: emailed AND status='converted' AND converted after email
+  //   - open_now: status='open' AND email NOT NULL — eligible pool
+  //   - revenue_recovered: sum total_cents of converted+emailed drafts
+  // Recovery rate = recovered / emailed.
+  const { data: cartRows } = await admin
+    .from("cart_drafts")
+    .select("id, email, status, line_items, total_cents, subtotal_cents, abandoned_email_sent_at, converted_order_id, created_at, updated_at")
+    .eq("workspace_id", workspaceId)
+    .gte("created_at", startIso)
+    .lte("created_at", endIso);
+
+  let emailed = 0;
+  let recovered = 0;
+  let revenueRecoveredCents = 0;
+  let openWithEmail = 0;
+  const recentAbandoned: Array<{
+    id: string;
+    email: string;
+    item_count: number;
+    subtotal_cents: number;
+    status: string;
+    abandoned_email_sent_at: string | null;
+    converted_order_id: string | null;
+    created_at: string;
+  }> = [];
+
+  for (const c of (cartRows || []) as Array<{
+    id: string;
+    email: string | null;
+    status: string;
+    line_items: unknown[];
+    total_cents: number;
+    subtotal_cents: number;
+    abandoned_email_sent_at: string | null;
+    converted_order_id: string | null;
+    created_at: string;
+    updated_at: string;
+  }>) {
+    if (c.abandoned_email_sent_at) {
+      emailed++;
+      if (c.status === "converted") {
+        recovered++;
+        revenueRecoveredCents += c.total_cents || 0;
+      }
+    }
+    if (c.status === "open" && c.email) {
+      openWithEmail++;
+    }
+  }
+
+  // Recent abandoned carts (had email + idle 30+min OR already emailed),
+  // newest first. Drives the table on the dashboard panel.
+  const cutoffIso = new Date(Date.now() - 30 * 60_000).toISOString();
+  const { data: recentAbandonedRows } = await admin
+    .from("cart_drafts")
+    .select("id, email, status, line_items, subtotal_cents, abandoned_email_sent_at, converted_order_id, created_at, updated_at")
+    .eq("workspace_id", workspaceId)
+    .not("email", "is", null)
+    .or(`abandoned_email_sent_at.not.is.null,and(status.eq.open,updated_at.lte.${cutoffIso})`)
+    .gte("created_at", startIso)
+    .lte("created_at", endIso)
+    .order("updated_at", { ascending: false })
+    .limit(25);
+
+  for (const c of (recentAbandonedRows || []) as Array<{
+    id: string;
+    email: string;
+    status: string;
+    line_items: unknown[];
+    subtotal_cents: number;
+    abandoned_email_sent_at: string | null;
+    converted_order_id: string | null;
+    created_at: string;
+  }>) {
+    recentAbandoned.push({
+      id: c.id,
+      email: c.email,
+      item_count: Array.isArray(c.line_items) ? c.line_items.length : 0,
+      subtotal_cents: c.subtotal_cents,
+      status: c.status,
+      abandoned_email_sent_at: c.abandoned_email_sent_at,
+      converted_order_id: c.converted_order_id,
+      created_at: c.created_at,
+    });
+  }
+
+  const abandonedCarts = {
+    emailed,
+    recovered,
+    revenue_recovered_cents: revenueRecoveredCents,
+    open_with_email: openWithEmail,
+    recovery_rate_pct: emailed > 0 ? Math.round((recovered / emailed) * 100 * 10) / 10 : 0,
+    recent: recentAbandoned,
+  };
+
   return NextResponse.json({
     range: { start, end },
     total_sessions: (sessionRows || []).length,
@@ -162,6 +260,7 @@ export async function GET(
     deviceBreakdown,
     countryBreakdown,
     sourceBreakdown,
+    abandonedCarts,
     recentEvents: (recent || []).map(e => ({
       id: e.id,
       event_type: e.event_type,
