@@ -187,12 +187,12 @@ function renderReviewBlock(review: NonNullable<Awaited<ReturnType<typeof pickFea
     ? ` · <span style="color:#71717a;">on ${escapeHtml(review.product_title)}</span>`
     : "";
   return `
-      <tr><td style="padding:16px 32px 8px 32px;">
+      <tr><td class="sx-pad" style="padding:16px 32px 8px 32px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#fafafa;border-radius:8px;">
           <tr><td style="padding:18px 20px;">
             <div style="color:#eab308;font-size:15px;letter-spacing:2px;">${stars}</div>
             ${review.title ? `<div style="font-size:15px;font-weight:700;color:#18181b;margin-top:6px;">${escapeHtml(review.title)}</div>` : ""}
-            <div style="font-size:14px;color:#27272a;line-height:1.55;margin-top:6px;white-space:pre-wrap;">${escapeHtml(text)}</div>
+            <div class="sx-review-body" style="font-size:14px;color:#27272a;line-height:1.55;margin-top:6px;white-space:pre-wrap;">${escapeHtml(text)}</div>
             <div style="font-size:12px;color:#52525b;margin-top:8px;">— ${escapeHtml(reviewer)}${productLine}</div>
           </td></tr>
         </table>
@@ -236,63 +236,169 @@ function renderLineItemsRows(lines: OrderLineLike[]): string {
         <tr>
           <td style="padding:8px 0;width:64px;vertical-align:top;">${img}</td>
           <td style="padding:8px 0 8px 12px;vertical-align:top;font-size:14px;color:#18181b;">
-            <div style="font-weight:600;">${title}${variant}${giftBadge}</div>
-            <div style="color:#71717a;font-size:13px;margin-top:2px;">Qty ${l.quantity}</div>
+            <div class="sx-line-title" style="font-weight:600;">${title}${variant}${giftBadge}</div>
+            <div class="sx-line-meta" style="color:#71717a;font-size:13px;margin-top:2px;">Qty ${l.quantity}</div>
           </td>
-          <td style="padding:8px 0;text-align:right;vertical-align:top;font-size:14px;color:#18181b;">${priceCell}</td>
+          <td class="sx-line-price" style="padding:8px 0;text-align:right;vertical-align:top;font-size:14px;color:#18181b;">${priceCell}</td>
         </tr>`;
     })
     .join("");
 }
 
-function shellHtml(opts: {
+/**
+ * Probe an image's aspect ratio by fetching the first chunk of the
+ * file and parsing the dimensions out of the header. Supports
+ * WebP / PNG / JPEG — every format Resend likes to render. Uses an
+ * HTTP Range request so we only download ~16KB even if the source
+ * is megabytes. Returns null on any parse failure; caller falls back
+ * to a sane default.
+ */
+async function probeImageAspectRatio(url: string): Promise<number | null> {
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(url, { headers: { Range: "bytes=0-16383" }, signal: controller.signal });
+    clearTimeout(t);
+    if (!res.ok && res.status !== 206) return null;
+    const buf = new Uint8Array(await res.arrayBuffer());
+    // PNG: 8-byte sig, then IHDR chunk with width(4)+height(4) at byte 16.
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+      const w = (buf[16] << 24) | (buf[17] << 16) | (buf[18] << 8) | buf[19];
+      const h = (buf[20] << 24) | (buf[21] << 16) | (buf[22] << 8) | buf[23];
+      if (w > 0 && h > 0) return w / h;
+    }
+    // WebP container: "RIFF" .. "WEBP", then chunk header.
+    if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 && buf[8] === 0x57) {
+      const chunk = String.fromCharCode(buf[12], buf[13], buf[14], buf[15]);
+      if (chunk === "VP8X") {
+        const w = ((buf[24] | (buf[25] << 8) | (buf[26] << 16)) >>> 0) + 1;
+        const h = ((buf[27] | (buf[28] << 8) | (buf[29] << 16)) >>> 0) + 1;
+        if (w > 0 && h > 0) return w / h;
+      } else if (chunk === "VP8 ") {
+        const w = ((buf[26] | (buf[27] << 8)) & 0x3fff);
+        const h = ((buf[28] | (buf[29] << 8)) & 0x3fff);
+        if (w > 0 && h > 0) return w / h;
+      } else if (chunk === "VP8L") {
+        const b0 = buf[21], b1 = buf[22], b2 = buf[23], b3 = buf[24];
+        const w = 1 + (((b1 & 0x3f) << 8) | b0);
+        const h = 1 + (((b3 & 0x0f) << 10) | (b2 << 2) | ((b1 & 0xc0) >> 6));
+        if (w > 0 && h > 0) return w / h;
+      }
+    }
+    // JPEG: scan for SOF marker.
+    if (buf[0] === 0xff && buf[1] === 0xd8) {
+      let i = 2;
+      while (i < buf.length - 8) {
+        if (buf[i] !== 0xff) { i++; continue; }
+        const marker = buf[i + 1];
+        const sof = marker === 0xc0 || marker === 0xc1 || marker === 0xc2;
+        if (sof) {
+          const h = (buf[i + 5] << 8) | buf[i + 6];
+          const w = (buf[i + 7] << 8) | buf[i + 8];
+          if (w > 0 && h > 0) return w / h;
+          return null;
+        }
+        const len = (buf[i + 2] << 8) | buf[i + 3];
+        i += 2 + len;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Render the logo row with dimensions calculated from the source's
+ * actual aspect ratio. Display height is fixed at 160px; width is
+ * height × aspect_ratio. Falls back to height:160 width:auto if the
+ * probe fails — works in most clients, just less reliable in Outlook.
+ */
+async function buildLogoBlock(rawLogoUrl: string, brandName: string): Promise<string> {
+  const displayH = 160;
+  // Rewrite Supabase /object/public/ to /render/image/public/ + size
+  // hints. resize=contain is REQUIRED; without it Supabase center-
+  // crops to fill the requested dimension box. Earlier renderings
+  // showed only "ERFO / MPAN" because of this.
+  let renderUrl = rawLogoUrl;
+  let aspect: number | null = await probeImageAspectRatio(rawLogoUrl);
+  if (rawLogoUrl.includes("supabase.co/storage/v1/object/public/")) {
+    const base = rawLogoUrl.replace("/storage/v1/object/public/", "/storage/v1/render/image/public/");
+    const sep = base.includes("?") ? "&" : "?";
+    // Ask for 2x retina at the display height.
+    renderUrl = `${base}${sep}height=${displayH * 2}&resize=contain`;
+  }
+  const safeAlt = escapeHtml(brandName);
+  if (aspect && aspect > 0) {
+    const displayW = Math.round(displayH * aspect);
+    return `<img src="${escapeHtml(renderUrl)}" alt="${safeAlt}" width="${displayW}" height="${displayH}" style="display:block;width:${displayW}px;height:${displayH}px;border:0;outline:none;" />`;
+  }
+  // Fallback when the probe failed — height-locked, width:auto.
+  return `<img src="${escapeHtml(renderUrl)}" alt="${safeAlt}" height="${displayH}" style="display:block;height:${displayH}px;width:auto;border:0;outline:none;" />`;
+}
+
+async function shellHtml(opts: {
   title: string;
   preheader: string;
   bodyHtml: string;
   brand: { logoUrl: string | null; primaryColor: string; brandName: string };
-}): string {
+}): Promise<string> {
   // Logo header row — render the workspace's storefront_logo_url when
   // configured, otherwise fall back to the brand name in the workspace
-  // primary color. Many inbox renderers (Gmail, Outlook) block external
-  // images by default, so we always set an alt text to the brand name.
-  // Logo rendering — the user reported blurry output when we let the
-  // email client downsample a large source image (their 1650×810 WebP
-  // was being scaled down with poor filtering in some clients). Two
-  // fixes layered:
-  //   1. Append Supabase Storage's image-transform `?width=560` so the
-  //      CDN returns a pre-resized PNG (~2x the 280px display target,
-  //      crisp on retina). Falls back to the raw URL for non-Supabase
-  //      logos.
-  //   2. Set explicit width="280" + height calculated to preserve the
-  //      ~2:1 brand-mark aspect ratio. Email clients respect the width
-  //      attr and downsample more carefully when they have a target.
-  // Rewrite Supabase /object/public/ to /render/image/public/ so the
-  // CDN runs server-side resize + format conversion (WebP → PNG with
-  // broader email-client support). Falls through unchanged for any
-  // non-Supabase logo host.
-  function transformLogoUrl(url: string): string {
-    if (!url.includes("supabase.co/storage/v1/object/public/")) return url;
-    const rendered = url.replace("/storage/v1/object/public/", "/storage/v1/render/image/public/");
-    const sep = rendered.includes("?") ? "&" : "?";
-    return `${rendered}${sep}width=560`;
-  }
-  // Hard-pin width (no percentage, no max-width). Some clients —
-  // Apple Mail full-screen in particular — ignore max-width on
-  // images and combine width:100% with the parent cell's actual
-  // rendered width (not the 600px table max-width), which makes the
-  // logo overflow at 1000+ px. A fixed pixel width is the only thing
-  // every client respects.
-  const logoRow = opts.brand.logoUrl
-    ? `<img src="${escapeHtml(transformLogoUrl(opts.brand.logoUrl))}" alt="${escapeHtml(opts.brand.brandName)}" width="240" height="auto" style="display:block;width:240px;height:auto;border:0;outline:none;" />`
+  // primary color. The logo block is built async (probes source
+  // dimensions, generates correctly-sized Supabase render URL).
+  // Build the logo row dynamically: probe the source's actual
+  // aspect ratio (parsed from the file header — only ~64 bytes
+  // needed), compute width from a fixed 160px display height, then
+  // ask Supabase for a 2x-retina PNG at exactly those dimensions
+  // with resize=contain. Sets BOTH HTML width/height attrs AND
+  // CSS — Outlook & older clients need the attrs; modern ones use
+  // CSS. Every client gets the correct shape.
+  const logoBlock = opts.brand.logoUrl
+    ? await buildLogoBlock(opts.brand.logoUrl, opts.brand.brandName)
     : `<div style="font-size:18px;font-weight:700;color:${escapeHtml(opts.brand.primaryColor)};">${escapeHtml(opts.brand.brandName)}</div>`;
+  const logoRow = logoBlock;
 
-  return `<!DOCTYPE html><html><head><meta charset="utf-8" /><title>${escapeHtml(opts.title)}</title></head>
+  // Mobile typography — iOS/Android Mail apps shrink emails to fit
+  // the screen if `viewport` isn't set, which makes 14-15px body
+  // text look ~9-10px on a 600-px-wide email. Setting the viewport
+  // + telling clients NOT to auto-scale means the desktop sizes
+  // render at their actual size on mobile. We ALSO bump key text up
+  // a notch via a media query so on smaller phones the totals row
+  // and review block stay legible.
+  return `<!DOCTYPE html><html lang="en"><head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="x-apple-disable-message-reformatting" />
+  <meta name="color-scheme" content="light" />
+  <title>${escapeHtml(opts.title)}</title>
+  <style>
+    /* Body resets — block Gmail/iOS auto-scaling. */
+    body, table, td, p, div, span { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; }
+    /* Mobile (phones) — bump body text from 14 to 16, headings
+       slightly up, tighten the padding. Width:100% on the email card
+       so it fills the viewport instead of leaving white margins. */
+    @media only screen and (max-width: 480px) {
+      .sx-card { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; }
+      .sx-pad { padding-left: 20px !important; padding-right: 20px !important; }
+      .sx-body { font-size: 16px !important; line-height: 1.6 !important; }
+      .sx-h1 { font-size: 22px !important; }
+      .sx-totals td { font-size: 15px !important; padding-top: 6px !important; padding-bottom: 6px !important; }
+      .sx-review-body { font-size: 15px !important; }
+      .sx-line-title { font-size: 15px !important; }
+      .sx-line-meta { font-size: 14px !important; }
+      .sx-line-price { font-size: 15px !important; }
+    }
+  </style>
+</head>
 <body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#18181b;">
 <div style="display:none;font-size:1px;color:#f4f4f5;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${escapeHtml(opts.preheader)}</div>
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f4f4f5;padding:24px 12px;">
   <tr><td align="center">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width:600px;background:#ffffff;border-radius:12px;overflow:hidden;">
-      <tr><td style="padding:24px 32px 0 32px;border-bottom:1px solid #f4f4f5;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" class="sx-card" style="max-width:600px;background:#ffffff;border-radius:12px;overflow:hidden;">
+      <tr><td class="sx-pad" style="padding:24px 32px 0 32px;border-bottom:1px solid #f4f4f5;">
         ${logoRow}
       </td></tr>
       ${opts.bodyHtml}
@@ -365,7 +471,7 @@ export async function sendOrderConfirmationEmail(opts: {
     const reviewBlock = featuredReview ? renderReviewBlock(featuredReview) : "";
     const protectionBadge = order.shipping_protection_added
       ? `
-      <tr><td style="padding:0 32px 8px 32px;">
+      <tr><td class="sx-pad" style="padding:0 32px 8px 32px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;">
           <tr>
             <td style="padding:10px 12px;width:24px;vertical-align:middle;">
@@ -379,15 +485,15 @@ export async function sendOrderConfirmationEmail(opts: {
       </td></tr>` : "";
 
     const bodyHtml = `
-      <tr><td style="padding:32px 32px 16px 32px;">
+      <tr><td class="sx-pad" style="padding:32px 32px 16px 32px;">
         <div style="font-size:13px;color:#71717a;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;">Order ${escapeHtml(order.order_number)}</div>
-        <h1 style="margin:8px 0 12px 0;font-size:24px;color:#18181b;font-weight:700;">Order confirmed</h1>
-        <p style="margin:0;color:#52525b;font-size:15px;line-height:1.55;">
+        <h1 class="sx-h1" style="margin:8px 0 12px 0;font-size:24px;color:#18181b;font-weight:700;">Order confirmed</h1>
+        <p class="sx-body" style="margin:0;color:#52525b;font-size:15px;line-height:1.55;">
           ${welcome}we received your order and we're getting it ready to ship. We'll send you tracking as soon as it leaves our warehouse.
         </p>
       </td></tr>
 
-      <tr><td style="padding:8px 32px;">
+      <tr><td class="sx-pad" style="padding:8px 32px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-top:1px solid #e4e4e7;border-bottom:1px solid #e4e4e7;">
           ${lineRows}
         </table>
@@ -395,8 +501,8 @@ export async function sendOrderConfirmationEmail(opts: {
 
       ${reviewBlock}
 
-      <tr><td style="padding:16px 32px;">
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="font-size:14px;color:#52525b;">
+      <tr><td class="sx-pad" style="padding:16px 32px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="sx-totals" style="font-size:14px;color:#52525b;">
           <tr><td style="padding:4px 0;">Subtotal</td><td style="padding:4px 0;text-align:right;color:#18181b;">${fmtCents(msrpSubtotalCents)}</td></tr>
           ${discountCents > 0 ? `<tr><td style="padding:4px 0;color:#15803d;">Discount</td><td style="padding:4px 0;text-align:right;color:#15803d;">-${fmtCents(discountCents)}</td></tr>` : ""}
           <tr><td style="padding:4px 0;">Shipping</td><td style="padding:4px 0;text-align:right;color:#18181b;">${
@@ -417,20 +523,20 @@ export async function sendOrderConfirmationEmail(opts: {
       ${protectionBadge}
 
       ${subscribing && nextBillingPretty ? `
-      <tr><td style="padding:8px 32px 16px 32px;">
+      <tr><td class="sx-pad" style="padding:8px 32px 16px 32px;">
         <div style="background:#f4f4f5;border-radius:8px;padding:14px 16px;font-size:14px;color:#3f3f46;">
           <strong style="color:#18181b;">Your subscription is active.</strong> Your next delivery will charge on <strong>${escapeHtml(nextBillingPretty)}</strong>. Cancel or change it anytime from your account.
         </div>
       </td></tr>` : ""}
 
       ${ship ? `
-      <tr><td style="padding:8px 32px 16px 32px;">
+      <tr><td class="sx-pad" style="padding:8px 32px 16px 32px;">
         <div style="font-size:13px;color:#71717a;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;margin-bottom:8px;">Shipping to</div>
         <div style="font-size:14px;color:#18181b;line-height:1.6;">${formatAddress(ship)}</div>
       </td></tr>` : ""}
 
       ${opts.founderNote ? `
-      <tr><td style="padding:16px 32px 24px 32px;">
+      <tr><td class="sx-pad" style="padding:16px 32px 24px 32px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#fafafa;border-left:3px solid #18181b;border-radius:4px;">
           <tr><td style="padding:18px 20px;font-size:15px;color:#27272a;line-height:1.65;font-style:italic;">
             ${escapeHtml(opts.founderNote)}
@@ -438,13 +544,13 @@ export async function sendOrderConfirmationEmail(opts: {
         </table>
       </td></tr>` : ""}
 
-      <tr><td style="padding:20px 32px;border-top:1px solid #e4e4e7;text-align:center;font-size:13px;color:#71717a;line-height:1.6;">
+      <tr><td class="sx-pad" style="padding:20px 32px;border-top:1px solid #e4e4e7;text-align:center;font-size:13px;color:#71717a;line-height:1.6;">
         — The Superfoods Company team
       </td></tr>
     `;
 
     const brand = await getBrand(opts.workspaceId, client.domain);
-    const html = shellHtml({
+    const html = await shellHtml({
       title: `Order confirmation — ${order.order_number}`,
       preheader: `Your order ${order.order_number} is confirmed. We'll send tracking once it ships.`,
       bodyHtml,
@@ -489,7 +595,7 @@ export async function sendShippingNotificationEmail(opts: {
     const ship = order.shipping_address;
     const protectionBadge = order.shipping_protection_added
       ? `
-      <tr><td style="padding:0 32px 8px 32px;">
+      <tr><td class="sx-pad" style="padding:0 32px 8px 32px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;">
           <tr>
             <td style="padding:10px 12px;width:24px;vertical-align:middle;">
@@ -507,7 +613,7 @@ export async function sendShippingNotificationEmail(opts: {
       : "";
 
     const bodyHtml = `
-      <tr><td style="padding:32px 32px 16px 32px;">
+      <tr><td class="sx-pad" style="padding:32px 32px 16px 32px;">
         <div style="font-size:13px;color:#71717a;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;">Order ${escapeHtml(order.order_number)}</div>
         <h1 style="margin:8px 0 12px 0;font-size:24px;color:#18181b;font-weight:700;">Your order is on its way</h1>
         <p style="margin:0 0 16px 0;color:#52525b;font-size:15px;line-height:1.55;">
@@ -517,7 +623,7 @@ export async function sendShippingNotificationEmail(opts: {
         <div style="font-size:13px;color:#71717a;">Tracking number: <span style="font-family:monospace;color:#18181b;">${escapeHtml(tracking)}</span></div>
       </td></tr>
 
-      <tr><td style="padding:8px 32px;">
+      <tr><td class="sx-pad" style="padding:8px 32px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-top:1px solid #e4e4e7;border-bottom:1px solid #e4e4e7;">
           ${lineRows}
         </table>
@@ -526,19 +632,19 @@ export async function sendShippingNotificationEmail(opts: {
       ${protectionBadge}
 
       ${ship ? `
-      <tr><td style="padding:16px 32px 24px 32px;">
+      <tr><td class="sx-pad" style="padding:16px 32px 24px 32px;">
         <div style="font-size:13px;color:#71717a;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;margin-bottom:8px;">Shipping to</div>
         <div style="font-size:14px;color:#18181b;line-height:1.6;">${formatAddress(ship)}</div>
       </td></tr>` : ""}
 
-      <tr><td style="padding:24px 32px;border-top:1px solid #e4e4e7;text-align:center;font-size:13px;color:#71717a;line-height:1.6;">
+      <tr><td class="sx-pad" style="padding:24px 32px;border-top:1px solid #e4e4e7;text-align:center;font-size:13px;color:#71717a;line-height:1.6;">
         Questions? Just reply to this email.<br>
         — The Superfoods Company team
       </td></tr>
     `;
 
     const brand = await getBrand(opts.workspaceId, client.domain);
-    const html = shellHtml({
+    const html = await shellHtml({
       title: `Your order ${order.order_number} has shipped`,
       preheader: `Tracking ${tracking} — your order is on its way.`,
       bodyHtml,
