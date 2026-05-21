@@ -249,7 +249,7 @@ export async function updateSession(request: NextRequest) {
           // double-prefix bug where /portal/{slug}/login would become
           // /portal/{slug}/portal/{slug}/login — produced a 404 on
           // every login redirect from /portal/[slug]/page.tsx).
-          if (pathname.startsWith(`/portal/${slug}`)) return supabaseResponse;
+          if (pathname.startsWith(`/portal/${slug}`)) return NextResponse.next({ request });
 
           // Portal mini-site on its own subdomain (portal.example.com).
           // Map / → /portal/{slug}, /login → /portal/{slug}/login (real
@@ -265,7 +265,7 @@ export async function updateSession(request: NextRequest) {
         if (purpose === "help") {
           // Skip if already rewritten (same double-prefix protection
           // as the portal branch).
-          if (pathname.startsWith(`/help/${slug}`)) return supabaseResponse;
+          if (pathname.startsWith(`/help/${slug}`)) return NextResponse.next({ request });
           // Help center on its own subdomain (help.example.com).
           // Map every path 1:1 under /help/{slug}.
           if (pathname === "/") {
