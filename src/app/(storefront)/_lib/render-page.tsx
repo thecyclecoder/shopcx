@@ -6,6 +6,7 @@ import { pictureSources } from "./image-urls";
 // Above-the-fold: imported directly, rendered in initial HTML, part of
 // main JS bundle (or zero JS, for server components).
 import { HeroSection } from "../_sections/HeroSection";
+import { CompleteOrderBanner } from "../_components/CompleteOrderBanner";
 import { HowItWorksSection } from "../_sections/HowItWorksSection";
 import { NutritionistEndorsementSection } from "../_sections/NutritionistEndorsementSection";
 import { WhatToExpectTimeline } from "../_sections/WhatToExpectTimeline";
@@ -162,6 +163,7 @@ export function StorefrontPage({
           }
         >
           <main className="flex w-full flex-col">
+            <CompleteOrderBanner />
             <HeroSection data={data} />
             {/* HowItWorksSection ("Why this works") now absorbs what
                 MechanismSection used to render — single block below the

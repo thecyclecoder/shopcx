@@ -9,7 +9,7 @@
  *   4. Pass a hydrated initial payload to PortalClient — the client
  *      can render its first frame without an extra API hop.
  */
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
@@ -20,6 +20,16 @@ export default async function PortalHome({ params }: { params: Promise<{ slug: s
 
   // ── Auth ──
   const cookieStore = await cookies();
+  const headerStore = await headers();
+  // Read the host so we can decide which redirect target keeps the
+  // URL bar clean: on the customer-facing portal subdomain (e.g.
+  // portal.superfoodscompany.com) middleware rewrites /login →
+  // /portal/{slug}/login server-side, so we redirect to "/login"
+  // and the browser shows just /login. On shopcx.ai admin preview
+  // the prefix has to stay since there's no middleware rewrite.
+  const host = headerStore.get("host") || "";
+  const isOnCustomDomain = !host.endsWith("shopcx.ai") && !host.includes("localhost") && !host.includes("127.0.0.1");
+  const loginRedirect = isOnCustomDomain ? "/login" : `/portal/${slug}/login`;
   const magicCustomerId = cookieStore.get("portal_customer_id")?.value;
   const magicWorkspaceId = cookieStore.get("portal_workspace_id")?.value;
   const legacySession = cookieStore.get("portal_session")?.value;
@@ -48,7 +58,7 @@ export default async function PortalHome({ params }: { params: Promise<{ slug: s
   }
 
   if (!customerId || !workspaceId) {
-    return redirect(`/portal/${slug}/login`);
+    return redirect(loginRedirect);
   }
 
   const admin = createAdminClient();

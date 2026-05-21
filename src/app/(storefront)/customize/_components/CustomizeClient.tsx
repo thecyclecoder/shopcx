@@ -1321,19 +1321,23 @@ function UrgencyTimer({ cartToken }: { cartToken: string }) {
         .sx-urgency-dot { animation: sx-urgency-dot 1s ease-in-out infinite; }
       `}</style>
       <div
-        className={`mt-4 flex items-center justify-between gap-3 rounded-2xl border-2 px-4 py-3 text-rose-900 shadow-sm ${expired ? "border-amber-200 bg-amber-50" : "sx-urgency-bar"}`}
+        className={`mt-4 flex items-center justify-between gap-3 rounded-2xl border-2 px-4 py-3 text-rose-900 shadow-sm ${expired ? "border-rose-200 bg-rose-50" : "sx-urgency-bar"}`}
       >
         <div className="flex items-center gap-2.5 text-sm">
-          <span className="sx-urgency-dot inline-block h-2.5 w-2.5 flex-shrink-0 rounded-full bg-rose-600" />
+          <span className={`inline-block h-2.5 w-2.5 flex-shrink-0 rounded-full bg-rose-600 ${expired ? "" : "sx-urgency-dot"}`} />
           <span className="font-semibold">
             {expired
-              ? "Time's up — items may sell out"
+              ? "Limited stock remaining — complete your order today"
               : "Items in your cart are low stock. Check out before the timer ends."}
           </span>
         </div>
-        <div className={`font-mono text-base font-extrabold tabular-nums ${expired ? "text-amber-700" : "text-rose-700"}`}>
-          {expired ? "0:00" : `${mins}:${secs.toString().padStart(2, "0")}`}
-        </div>
+        {/* Hide the clock once expired — a stuck "0:00" reads as
+            broken; the urgency now lives entirely in the copy. */}
+        {!expired && (
+          <div className="font-mono text-base font-extrabold tabular-nums text-rose-700">
+            {`${mins}:${secs.toString().padStart(2, "0")}`}
+          </div>
+        )}
       </div>
     </>
   );

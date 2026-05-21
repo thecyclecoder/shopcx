@@ -61,19 +61,20 @@ export function UGCSection({ data, workspaceSlug, slug }: {
     };
   }, [workspaceSlug, slug]);
 
-  // Random shuffle on every mount — same pool, different order each
-  // visit. Memo guard keeps the order stable through interactions
-  // (expand toggles, etc.) instead of jumping on every render.
-  const shuffled = useMemo(() => {
+  // SSR rendered pool order vs client shuffle would diverge (server
+  // Math.random ≠ client Math.random → React #418 hydration error).
+  // Mirror HeroFeaturedReviews: render pool-order on first paint,
+  // shuffle in useEffect AFTER mount so the customer still sees a
+  // different order on each visit.
+  const [featured, setFeatured] = useState<Review[]>(() => featuredPool.slice(0, 8));
+  useEffect(() => {
     const arr = [...featuredPool];
     for (let i = arr.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [arr[i], arr[j]] = [arr[j], arr[i]];
     }
-    return arr.slice(0, 8);
+    setFeatured(arr.slice(0, 8));
   }, [featuredPool]);
-
-  const featured = shuffled;
   if (!hasPair && featured.length === 0) return null;
 
   const sideBySideCount = hasPair ? 2 : 0;
