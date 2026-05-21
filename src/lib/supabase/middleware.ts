@@ -251,12 +251,29 @@ export async function updateSession(request: NextRequest) {
           // every login redirect from /portal/[slug]/page.tsx).
           if (pathname.startsWith(`/portal/${slug}`)) return NextResponse.next({ request });
 
-          // Portal mini-site on its own subdomain (portal.example.com).
-          // Map / → /portal/{slug}, /login → /portal/{slug}/login (real
-          // server route), everything else → /portal/{slug} (the SPA
-          // handles its own sub-routing client-side).
-          const isServerRoute = pathname === "/login" || pathname === "/callback"
-            || pathname.endsWith("/login") || pathname.endsWith("/callback");
+          // Skip API routes / static assets — those shouldn't be
+          // rewritten under the portal slug at all.
+          if (pathname.startsWith("/api/") || pathname.startsWith("/_next/")) {
+            return NextResponse.next({ request });
+          }
+
+          // Portal sections — clean per-section URLs (/subscriptions,
+          // /orders, /payment-methods, /support, /account). Rewrite to
+          // /portal/{slug}?section={name} so the same page handles all
+          // of them. URL bar stays clean (rewrite, not redirect).
+          const PORTAL_SECTIONS = new Set([
+            "subscriptions", "orders", "payment-methods", "support", "account", "resources",
+          ]);
+          const sectionFromPath = pathname.replace(/^\/+/, "").replace(/\/+$/, "");
+          if (PORTAL_SECTIONS.has(sectionFromPath)) {
+            url.pathname = `/portal/${slug}`;
+            url.searchParams.set("section", sectionFromPath);
+            return NextResponse.rewrite(url);
+          }
+
+          // Server routes (login, callback, logout) — rewrite path as-is.
+          const isServerRoute = pathname === "/login" || pathname === "/callback" || pathname === "/logout"
+            || pathname.endsWith("/login") || pathname.endsWith("/callback") || pathname.endsWith("/logout");
           url.pathname = isServerRoute
             ? `/portal/${slug}${pathname}`
             : `/portal/${slug}`;

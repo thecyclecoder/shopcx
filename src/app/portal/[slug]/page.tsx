@@ -15,8 +15,15 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import PortalClient from "./portal-client";
 
-export default async function PortalHome({ params }: { params: Promise<{ slug: string }> }) {
+export default async function PortalHome({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ slug: string }>;
+  searchParams: Promise<{ section?: string }>;
+}) {
   const { slug } = await params;
+  const sp = await searchParams;
 
   // ── Auth ──
   const cookieStore = await cookies();
@@ -116,9 +123,19 @@ export default async function PortalHome({ params }: { params: Promise<{ slug: s
     .in("status", ["active", "paused"])
     .order("created_at", { ascending: false });
 
+  // ── Recent orders for the Orders section.
+  const { data: orders } = await admin
+    .from("orders")
+    .select("id, order_number, created_at, total_cents, financial_status, line_items, source_name, amplifier_tracking_number, amplifier_carrier, amplifier_status, amplifier_shipped_at, shipping_address")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", linkedIds)
+    .order("created_at", { ascending: false })
+    .limit(50);
+
   return (
     <PortalClient
       slug={slug}
+      initialSection={normalizeSection(sp?.section)}
       workspace={{
         id: workspace.id as string,
         name: (workspace.name as string) || "",
@@ -134,11 +151,55 @@ export default async function PortalHome({ params }: { params: Promise<{ slug: s
         linkedIds,
       }}
       subscriptions={(subs || []) as unknown as PortalSubscription[]}
+      orders={(orders || []) as unknown as PortalOrder[]}
     />
   );
 }
 
-// Re-export the shape the client expects so we can keep types in sync.
+function normalizeSection(raw: string | undefined): "home" | "subscriptions" | "orders" | "payment_methods" | "support" | "account" | "resources" {
+  if (raw === "subscriptions") return "subscriptions";
+  if (raw === "orders") return "orders";
+  if (raw === "payment-methods" || raw === "payment_methods") return "payment_methods";
+  if (raw === "support") return "support";
+  if (raw === "account") return "account";
+  if (raw === "resources") return "resources";
+  return "home";
+}
+
+// Re-export shapes the client expects so we can keep types in sync.
+export interface PortalOrder {
+  id: string;
+  order_number: string;
+  created_at: string;
+  total_cents: number;
+  financial_status: string | null;
+  line_items: Array<{
+    title: string;
+    variant_title?: string | null;
+    quantity: number;
+    unit_price_cents?: number;
+    line_total_cents?: number;
+    image_url?: string | null;
+    is_gift?: boolean;
+    variant_id?: string;
+    sku?: string | null;
+  }>;
+  source_name: string | null;
+  amplifier_tracking_number: string | null;
+  amplifier_carrier: string | null;
+  amplifier_status: string | null;
+  amplifier_shipped_at: string | null;
+  shipping_address: {
+    first_name?: string;
+    last_name?: string;
+    address1?: string;
+    address2?: string | null;
+    city?: string;
+    province_code?: string;
+    zip?: string;
+  } | null;
+}
+
 export interface PortalSubscription {
   id: string;
   shopify_contract_id: string;

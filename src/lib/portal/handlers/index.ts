@@ -54,6 +54,10 @@ import { loyaltyBalance } from "./loyalty-balance";
 import { loyaltyRedeem } from "./loyalty-redeem";
 import { loyaltyApplyToSubscription } from "./loyalty-apply-subscription";
 import { linkAccounts } from "./link-accounts";
+import { updateAccount } from "./account";
+export { updateAccount } from "./account";
+import { supportList, supportTicket, supportReply, supportCreate } from "./support";
+export { supportList, supportTicket, supportReply, supportCreate } from "./support";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -104,4 +108,19 @@ export const routeMap: Record<string, RouteHandler> = {
   linkaccounts: linkAccounts,
   linkAccounts,
   link_accounts: linkAccounts,
+  updateAccount,
+  updateaccount: updateAccount,
+  update_account: updateAccount,
+  supportList,
+  supportlist: supportList,
+  support_list: supportList,
+  supportTicket,
+  supportticket: supportTicket,
+  support_ticket: supportTicket,
+  supportReply,
+  supportreply: supportReply,
+  support_reply: supportReply,
+  supportCreate,
+  supportcreate: supportCreate,
+  support_create: supportCreate,
 };

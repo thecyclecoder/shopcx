@@ -46,7 +46,10 @@ export async function POST(request: Request) {
     cookieStore.set("portal_customer_id", customer.id, cookieOpts);
     cookieStore.set("portal_workspace_id", payload.workspaceId, cookieOpts);
 
-    return NextResponse.json({ success: true, redirectUrl: "/portal" });
+    // Redirect to "/" — on the portal custom subdomain the middleware
+    // rewrites that to /portal/{slug} server-side, so the URL bar
+    // stays clean (portal.superfoodscompany.com/ instead of …/portal).
+    return NextResponse.json({ success: true, redirectUrl: "/" });
   }
 
   // ── Email login → send magic link ──
