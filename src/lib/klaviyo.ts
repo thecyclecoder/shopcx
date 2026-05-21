@@ -243,11 +243,33 @@ export async function syncReviewPage(
   }
 
   // Step 4: Batch upsert
+  //
+  // Reviews flagged with body_locked_at have been hand-edited by an admin
+  // (typo fix, profanity scrub, etc). The sync must update everything ELSE
+  // on the row — rating, status, smart_quote, engagement, product link —
+  // but leave the body alone so the manual fix isn't steamrolled.
   let synced = 0;
   if (rows.length > 0) {
+    const reviewIds = rows.map(r => r.klaviyo_review_id as string);
+    const { data: lockedRows } = await admin
+      .from("product_reviews")
+      .select("klaviyo_review_id")
+      .eq("workspace_id", workspaceId)
+      .in("klaviyo_review_id", reviewIds)
+      .not("body_locked_at", "is", null);
+    const lockedIds = new Set((lockedRows || []).map(r => r.klaviyo_review_id as string));
+
+    const finalRows = rows.map(r => {
+      if (lockedIds.has(r.klaviyo_review_id as string)) {
+        const { body: _body, ...rest } = r;
+        return rest;
+      }
+      return r;
+    });
+
     const { error, count } = await admin
       .from("product_reviews")
-      .upsert(rows, { onConflict: "workspace_id,klaviyo_review_id", count: "exact" });
+      .upsert(finalRows, { onConflict: "workspace_id,klaviyo_review_id", count: "exact" });
 
     if (error) {
       console.error(`Batch upsert error:`, error.message);

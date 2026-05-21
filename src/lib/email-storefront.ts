@@ -593,6 +593,21 @@ export async function sendShippingNotificationEmail(opts: {
     const tUrl = trackingUrl(order.amplifier_carrier, tracking);
     const lineRows = renderLineItemsRows(order.line_items);
     const ship = order.shipping_address;
+
+    // Mirror the order-confirmation email's review block here too —
+    // every customer touchpoint earns a piece of social proof. Pool
+    // is workspace-featured reviews on the customer's purchased
+    // products; falls back to 5-star published. Random pick so the
+    // shipping email doesn't repeat the confirmation's review.
+    const reviewProductIds = Array.from(new Set(
+      order.line_items
+        .filter((l) => !l.is_gift)
+        .map((l) => (l as unknown as { product_id?: string }).product_id)
+        .filter((id): id is string => !!id),
+    ));
+    const featuredReview = await pickFeaturedReview(opts.workspaceId, reviewProductIds);
+    const reviewBlock = featuredReview ? renderReviewBlock(featuredReview) : "";
+
     const protectionBadge = order.shipping_protection_added
       ? `
       <tr><td class="sx-pad" style="padding:0 32px 8px 32px;">
@@ -628,6 +643,8 @@ export async function sendShippingNotificationEmail(opts: {
           ${lineRows}
         </table>
       </td></tr>
+
+      ${reviewBlock}
 
       ${protectionBadge}
 
