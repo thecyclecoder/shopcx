@@ -146,7 +146,7 @@ export default function PortalClient(props: Props) {
           {props.workspace.logoUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={transformLogoUrl(props.workspace.logoUrl, 128)}
+              src={transformLogoUrl(props.workspace.logoUrl, 256)}
               alt={props.workspace.name}
               className="h-16 w-auto"
             />
@@ -169,7 +169,7 @@ export default function PortalClient(props: Props) {
 
         <div className="border-t border-zinc-200 p-3">
           <a
-            href={`/portal/${props.slug}/logout`}
+            href="/logout"
             className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900"
           >
             <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>

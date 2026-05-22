@@ -128,6 +128,11 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [actionPhase, setActionPhase] = useState<ActionPhase>("idle");
   const [actionDescription, setActionDescription] = useState<string | undefined>(undefined);
+  // When true, the screen renders <CancelFlow/> instead of the detail
+  // cards. Cancel runs inside the same portal shell so the customer
+  // never leaves the page — escape-hatch is the "Never mind" button
+  // which sets this back to false.
+  const [cancelMode, setCancelMode] = useState(false);
 
   // Branded full-screen overlay — never a corner toast. See
   // feedback_portal_action_overlay memory.
@@ -226,6 +231,18 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
     realLines.map((l) => String(l.productId || "")).filter(Boolean),
   ));
 
+  if (cancelMode) {
+    return (
+      <CancelFlow
+        contract={contract}
+        primaryColor={workspace.primaryColor}
+        onAbort={() => setCancelMode(false)}
+        onMutate={loadContract}
+        action={action}
+      />
+    );
+  }
+
   return (
     <div className="space-y-5">
       <a
@@ -321,7 +338,7 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
           <PaymentMethodCard contract={contract} />
           <RewardsCard contract={contract} primaryColor={workspace.primaryColor} action={action} />
           {productIdsForReviews.length > 0 && <ReviewsCard productIds={productIdsForReviews} />}
-          <CancelCard contract={contract} action={action} />
+          <CancelCard onStart={() => setCancelMode(true)} />
         </>
       )}
 
@@ -1902,35 +1919,7 @@ function PaymentMethodCard({ contract }: { contract: Contract }) {
   );
 }
 
-function CancelCard({ contract, action }: { contract: Contract; action: ActionApi }) {
-  const [busy, setBusy] = useState(false);
-  async function startCancel() {
-    if (busy) return;
-    setBusy(true);
-    action.startAction();
-    try {
-      const res = await fetch("/api/portal?route=cancelJourney", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ contractId: contract.id }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (data?.journeyUrl) {
-        window.location.href = data.journeyUrl as string;
-        return;
-      }
-      if (data?.token) {
-        window.location.href = `/journey/${data.token}`;
-        return;
-      }
-      action.failAction(data?.message || data?.error || "Could not start cancellation");
-    } catch {
-      action.failAction();
-    } finally {
-      setBusy(false);
-    }
-  }
+function CancelCard({ onStart }: { onStart: () => void }) {
   return (
     <article className="overflow-hidden rounded-2xl border border-zinc-200 bg-white">
       <div className="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between">
@@ -1940,14 +1929,309 @@ function CancelCard({ contract, action }: { contract: Contract; action: ActionAp
         </div>
         <button
           type="button"
-          disabled={busy}
-          onClick={startCancel}
-          className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-semibold text-rose-700 hover:border-rose-300 hover:text-rose-800 disabled:opacity-50 sm:flex-shrink-0"
+          onClick={onStart}
+          className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-semibold text-rose-700 hover:border-rose-300 hover:text-rose-800 sm:flex-shrink-0"
         >
-          {busy ? "Loading…" : "Cancel"}
+          Cancel
         </button>
       </div>
     </article>
+  );
+}
+
+// ────────────────────────── cancel flow ─────────────────────────────
+
+interface CancelReason { id: string; label: string; type?: string; suggested_remedy_id?: string | null }
+interface CancelRemedy { id: string; type: string; label: string; description?: string }
+interface CancelReview { reviewer_name?: string; rating?: number; title?: string; body?: string; summary?: string }
+
+function CancelFlow({
+  contract, primaryColor, onAbort, onMutate, action,
+}: {
+  contract: Contract;
+  primaryColor: string;
+  onAbort: () => void;
+  onMutate: () => Promise<void>;
+  action: ActionApi;
+}) {
+  const [step, setStep] = useState<"reason" | "remedies" | "confirm" | "done">("reason");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [reasons, setReasons] = useState<CancelReason[]>([]);
+  const [firstName, setFirstName] = useState<string>("");
+  const [pickedReason, setPickedReason] = useState<CancelReason | null>(null);
+  const [leadIn, setLeadIn] = useState<string | null>(null);
+  const [remedies, setRemedies] = useState<CancelRemedy[]>([]);
+  const [reviews, setReviews] = useState<CancelReview[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Step 1: fetch reasons + remedy catalog on mount
+  useEffect(() => {
+    let alive = true;
+    const url = `/api/portal?route=cancelJourney&contractId=${encodeURIComponent(contract.id)}`;
+    fetch(url, { credentials: "same-origin" })
+      .then((r) => r.ok ? r.json() : Promise.reject(r))
+      .then((data) => {
+        if (!alive) return;
+        setReasons((data.cancel_reasons || []) as CancelReason[]);
+        setFirstName(String(data.customerFirstName || ""));
+      })
+      .catch(() => { if (alive) setError("Couldn't load cancel options"); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [contract.id]);
+
+  async function pickReason(reason: CancelReason) {
+    if (busy) return;
+    setBusy(true);
+    setPickedReason(reason);
+    action.startAction();
+    try {
+      const res = await fetch("/api/portal?route=cancelJourney", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          contractId: contract.id,
+          step: "reason",
+          reason: reason.id,
+          reasonLabel: reason.label,
+          reasonType: reason.type || "remedy",
+          suggested_remedy_id: reason.suggested_remedy_id,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) {
+        action.failAction(data?.message || data?.error || undefined);
+        setBusy(false);
+        return;
+      }
+      action.completeAction("");
+      setRemedies((data.remedies || []) as CancelRemedy[]);
+      setReviews((data.reviews || []) as CancelReview[]);
+      setLeadIn(data.lead_in || null);
+      setSessionId(data.sessionId || null);
+      setStep("remedies");
+    } catch {
+      action.failAction();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function acceptRemedy(remedy: CancelRemedy) {
+    if (busy) return;
+    setBusy(true);
+    action.startAction();
+    try {
+      const res = await fetch("/api/portal?route=cancelJourney", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          contractId: contract.id,
+          step: "remedy",
+          remedyId: remedy.id,
+          accepted: true,
+          sessionId,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) {
+        action.failAction(data?.message || data?.error || undefined);
+        return;
+      }
+      action.completeAction(remedy.label ? `${remedy.label} applied` : "Saved!");
+      await onMutate();
+      setStep("done");
+    } catch { action.failAction(); }
+    finally { setBusy(false); }
+  }
+
+  async function confirmCancel() {
+    if (busy) return;
+    setBusy(true);
+    action.startAction();
+    try {
+      const res = await fetch("/api/portal?route=cancelJourney", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          contractId: contract.id,
+          step: "confirm_cancel",
+          reason: pickedReason?.label || "Customer cancelled via portal",
+          sessionId,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) {
+        action.failAction(data?.message || data?.error || undefined);
+        return;
+      }
+      action.completeAction("Subscription cancelled");
+      await onMutate();
+      setStep("done");
+    } catch { action.failAction(); }
+    finally { setBusy(false); }
+  }
+
+  // ── chrome ──
+  const back = (
+    <button
+      type="button"
+      onClick={onAbort}
+      className="inline-flex items-center gap-1 text-sm font-medium text-zinc-500 hover:text-zinc-900"
+    >
+      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+      </svg>
+      Never mind, take me back
+    </button>
+  );
+
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        {back}
+        <div className="h-48 animate-pulse rounded-2xl bg-zinc-100" />
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="space-y-4">
+        {back}
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-800">{error}</div>
+      </div>
+    );
+  }
+
+  if (step === "done") {
+    return (
+      <div className="space-y-4">
+        <article className="rounded-2xl border border-zinc-200 bg-white p-6 text-center">
+          <p className="text-base font-semibold text-zinc-900">All set, {firstName || "thanks"}.</p>
+          <p className="mt-1 text-sm text-zinc-600">We&apos;ve recorded your decision. You can manage things anytime from here.</p>
+          <button
+            type="button"
+            onClick={onAbort}
+            className="mt-4 rounded-lg px-4 py-2 text-sm font-semibold text-white"
+            style={{ background: primaryColor }}
+          >
+            Back to subscription
+          </button>
+        </article>
+      </div>
+    );
+  }
+
+  if (step === "reason") {
+    return (
+      <div className="space-y-5">
+        {back}
+        <article className="overflow-hidden rounded-2xl border border-zinc-200 bg-white p-6">
+          <h2 className="text-xl font-bold text-zinc-900">
+            {firstName ? `${firstName}, ` : ""}before you go…
+          </h2>
+          <p className="mt-1 text-sm text-zinc-600">Mind sharing what&apos;s prompting this? It helps us help you.</p>
+          <ul className="mt-5 space-y-2">
+            {reasons.length === 0 ? (
+              <li className="rounded-lg bg-zinc-50 p-4 text-sm text-zinc-500">
+                No cancel reasons configured yet — set them up in Settings → Cancel Flow.
+              </li>
+            ) : reasons.map((r) => (
+              <li key={r.id}>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => pickReason(r)}
+                  className="flex w-full items-center justify-between rounded-lg border border-zinc-200 bg-white p-4 text-left transition hover:border-zinc-400 disabled:opacity-50"
+                >
+                  <span className="text-sm font-medium text-zinc-900">{r.label}</span>
+                  <svg className="h-4 w-4 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                  </svg>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </article>
+      </div>
+    );
+  }
+
+  // step === "remedies"
+  return (
+    <div className="space-y-5">
+      {back}
+      <article className="rounded-2xl border border-zinc-200 bg-white p-6">
+        <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+          Because you said
+        </p>
+        <h2 className="mt-1 text-xl font-bold text-zinc-900">{pickedReason?.label}</h2>
+        {leadIn && <p className="mt-2 text-sm leading-relaxed text-zinc-700">{leadIn}</p>}
+      </article>
+
+      {remedies.length > 0 && (
+        <div className="space-y-3">
+          <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+            Here&apos;s what we can do
+          </p>
+          {remedies.map((r) => (
+            <article key={r.id} className="overflow-hidden rounded-2xl border border-zinc-200 bg-white p-5">
+              <h3 className="text-base font-semibold text-zinc-900">{r.label}</h3>
+              {r.description && <p className="mt-1 text-sm leading-relaxed text-zinc-600">{r.description}</p>}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => acceptRemedy(r)}
+                className="mt-3 w-full rounded-lg px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+                style={{ background: primaryColor }}
+              >
+                Yes, let&apos;s do this
+              </button>
+            </article>
+          ))}
+        </div>
+      )}
+
+      {reviews.length > 0 && (
+        <article className="rounded-2xl border border-zinc-200 bg-zinc-50 p-5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">What other customers say</p>
+          {reviews.slice(0, 1).map((r, i) => (
+            <div key={i} className="mt-2">
+              <div className="text-amber-500" aria-label={`${r.rating || 5} stars`}>{"★".repeat(r.rating || 5)}</div>
+              {(r.summary || r.title) && (
+                <p className="mt-1 text-sm font-semibold text-zinc-900">
+                  {r.summary || r.title}
+                </p>
+              )}
+              {r.body && r.body !== (r.summary || r.title) && (
+                <p className="mt-1 text-sm italic text-zinc-600">“{r.body.slice(0, 220)}{r.body.length > 220 ? "…" : ""}”</p>
+              )}
+              {r.reviewer_name && <p className="mt-2 text-xs text-zinc-500">— {r.reviewer_name}</p>}
+            </div>
+          ))}
+        </article>
+      )}
+
+      {/* Stand firm: confirm cancel */}
+      <article className="rounded-2xl border border-zinc-200 bg-white p-5">
+        <p className="text-sm text-zinc-700">
+          Still want to cancel? We&apos;ll stop future deliveries.
+        </p>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={confirmCancel}
+          className="mt-3 w-full rounded-lg border border-rose-300 bg-white px-4 py-2.5 text-sm font-semibold text-rose-700 hover:border-rose-400 hover:text-rose-800 disabled:opacity-50"
+        >
+          Yes, cancel my subscription
+        </button>
+      </article>
+    </div>
   );
 }
 
