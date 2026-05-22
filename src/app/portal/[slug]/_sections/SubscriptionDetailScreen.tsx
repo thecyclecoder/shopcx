@@ -248,6 +248,21 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
         action={action}
       />
 
+      {/* Cadence + lifecycle controls — status-dependent */}
+      {status === "active" && (
+        <>
+          <OrderActionsCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+          <FrequencyCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+          <PauseCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+        </>
+      )}
+      {status === "paused" && (
+        <ResumeCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+      )}
+      {isCancelled && (
+        <ReactivateCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+      )}
+
       <ActionOverlay
         phase={actionPhase}
         description={actionDescription}
@@ -938,6 +953,417 @@ function QuantityModal({
       </div>
     </ModalShell>
   );
+}
+
+// ────────────────────── status-action cards (chunk 3) ──────────────────────
+
+function ActionCard({
+  title, subtitle, children,
+}: {
+  title: string;
+  subtitle?: string | null;
+  children: React.ReactNode;
+}) {
+  return (
+    <article className="overflow-hidden rounded-2xl border border-zinc-200 bg-white">
+      <header className="border-b border-zinc-100 p-5">
+        <h3 className="text-base font-semibold text-zinc-900">{title}</h3>
+        {subtitle && <p className="mt-0.5 text-sm text-zinc-500">{subtitle}</p>}
+      </header>
+      <div className="space-y-2 p-5">{children}</div>
+    </article>
+  );
+}
+
+function PrimaryButton({
+  busy, disabled, onClick, children, primaryColor,
+}: {
+  busy?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+  primaryColor: string;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={busy || disabled}
+      onClick={onClick}
+      className="w-full rounded-lg px-4 py-2.5 text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-50"
+      style={{ background: primaryColor }}
+    >
+      {busy ? "Working…" : children}
+    </button>
+  );
+}
+
+function GhostButton({
+  busy, disabled, onClick, children, danger,
+}: {
+  busy?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={busy || disabled}
+      onClick={onClick}
+      className={`w-full rounded-lg border border-zinc-300 bg-white px-4 py-2.5 text-sm font-semibold transition hover:border-zinc-400 disabled:opacity-50 ${
+        danger ? "text-rose-700 hover:text-rose-800" : "text-zinc-700 hover:text-zinc-900"
+      }`}
+    >
+      {busy ? "Working…" : children}
+    </button>
+  );
+}
+
+// useMutator — shared "call /api/portal?route=X, drive the overlay,
+// refresh the contract" hook so each card stays short.
+function useMutator(action: ActionApi, onMutate: () => Promise<void>) {
+  const [busy, setBusy] = useState(false);
+  async function run(
+    route: string,
+    payload: Record<string, unknown>,
+    success: string,
+    onSuccess?: () => void,
+  ) {
+    if (busy) return;
+    setBusy(true);
+    action.startAction();
+    try {
+      const res = await fetch(`/api/portal?route=${route}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) {
+        action.failAction(data?.message || data?.error || undefined);
+        return;
+      }
+      action.completeAction(success);
+      onSuccess?.();
+      await onMutate();
+    } catch {
+      action.failAction();
+    } finally {
+      setBusy(false);
+    }
+  }
+  return { busy, run };
+}
+
+function PauseCard({ contract, primaryColor, onMutate, action }: {
+  contract: Contract; primaryColor: string; onMutate: () => Promise<void>; action: ActionApi;
+}) {
+  const { busy, run } = useMutator(action, onMutate);
+  function doPause(days: number) {
+    const resumeDate = new Date();
+    resumeDate.setDate(resumeDate.getDate() + days);
+    const label = resumeDate.toLocaleDateString("en-US", { month: "long", day: "numeric" });
+    run("pause", { contractId: contract.id, pauseDays: days }, `Subscription paused until ${label}`);
+  }
+  return (
+    <ActionCard title="Pause subscription" subtitle="Take a break without losing your subscriber perks.">
+      <PrimaryButton busy={busy} onClick={() => doPause(30)} primaryColor={primaryColor}>Pause 30 days</PrimaryButton>
+      <GhostButton busy={busy} onClick={() => doPause(60)}>Pause 60 days</GhostButton>
+    </ActionCard>
+  );
+}
+
+function ResumeCard({ contract, primaryColor, onMutate, action }: {
+  contract: Contract; primaryColor: string; onMutate: () => Promise<void>; action: ActionApi;
+}) {
+  const { busy, run } = useMutator(action, onMutate);
+  return (
+    <ActionCard title="Resume subscription" subtitle="Restart your deliveries when you're ready.">
+      <PrimaryButton
+        busy={busy}
+        primaryColor={primaryColor}
+        onClick={() => run("resume", { contractId: contract.id }, "Subscription resumed!")}
+      >
+        Resume subscription
+      </PrimaryButton>
+    </ActionCard>
+  );
+}
+
+function ReactivateCard({ contract, primaryColor, onMutate, action }: {
+  contract: Contract; primaryColor: string; onMutate: () => Promise<void>; action: ActionApi;
+}) {
+  const [modal, setModal] = useState(false);
+  const [date, setDate] = useState("");
+  const { busy, run } = useMutator(action, onMutate);
+  const { minStr, maxStr } = dateBounds();
+  return (
+    <ActionCard title="Reactivate subscription" subtitle="Pick up where you left off.">
+      <PrimaryButton busy={false} onClick={() => { setDate(""); setModal(true); }} primaryColor={primaryColor}>
+        Reactivate
+      </PrimaryButton>
+      {modal && (
+        <ModalShell
+          title="Reactivate subscription"
+          onClose={() => setModal(false)}
+          footer={
+            <>
+              <button
+                type="button"
+                disabled={busy || !date}
+                onClick={() => {
+                  setModal(false);
+                  run("reactivate", { contractId: contract.id, nextBillingDate: date }, "Subscription reactivated!");
+                }}
+                className="rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                style={{ background: primaryColor }}
+              >
+                {busy ? "Reactivating…" : "Reactivate"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setModal(false)}
+                disabled={busy}
+                className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-semibold text-zinc-700 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </>
+          }
+        >
+          <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-zinc-500">
+            Choose your next order date
+          </label>
+          <input
+            type="date"
+            min={minStr}
+            max={maxStr}
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
+          />
+        </ModalShell>
+      )}
+    </ActionCard>
+  );
+}
+
+function OrderActionsCard({ contract, primaryColor, onMutate, action }: {
+  contract: Contract; primaryColor: string; onMutate: () => Promise<void>; action: ActionApi;
+}) {
+  const [dateModal, setDateModal] = useState(false);
+  const [confirmNow, setConfirmNow] = useState(false);
+  const [date, setDate] = useState("");
+  const { busy, run } = useMutator(action, onMutate);
+  const { minStr, maxStr } = dateBounds();
+
+  return (
+    <ActionCard title="Order actions" subtitle="Manage your next shipment.">
+      <PrimaryButton busy={busy} onClick={() => setConfirmNow(true)} primaryColor={primaryColor}>
+        Order now
+      </PrimaryButton>
+      <GhostButton busy={busy} onClick={() => { setDate(""); setDateModal(true); }}>
+        Change next order date
+      </GhostButton>
+
+      {confirmNow && (
+        <ModalShell
+          title="Order now"
+          onClose={() => setConfirmNow(false)}
+          footer={
+            <>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setConfirmNow(false);
+                  run("orderNow", { contractId: contract.id }, "Order placed! Check your email for confirmation.");
+                }}
+                className="rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                style={{ background: primaryColor }}
+              >
+                {busy ? "Placing…" : "Order now"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmNow(false)}
+                disabled={busy}
+                className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-semibold text-zinc-700 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </>
+          }
+        >
+          <p className="text-sm text-zinc-700">
+            This will process your next subscription order immediately. Your card on file will be charged.
+          </p>
+        </ModalShell>
+      )}
+
+      {dateModal && (
+        <ModalShell
+          title="Change next order date"
+          onClose={() => setDateModal(false)}
+          footer={
+            <>
+              <button
+                type="button"
+                disabled={busy || !date}
+                onClick={() => {
+                  if (date < minStr || date > maxStr) {
+                    action.failAction("Pick a date within the next 90 days.");
+                    return;
+                  }
+                  setDateModal(false);
+                  const pretty = new Date(date + "T00:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+                  run("changeDate", { contractId: contract.id, nextBillingDate: date }, `Next order date changed to ${pretty}`);
+                }}
+                className="rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                style={{ background: primaryColor }}
+              >
+                {busy ? "Saving…" : "Save"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDateModal(false)}
+                disabled={busy}
+                className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-semibold text-zinc-700 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </>
+          }
+        >
+          <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-zinc-500">
+            Next order date
+          </label>
+          <input
+            type="date"
+            min={minStr}
+            max={maxStr}
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
+          />
+        </ModalShell>
+      )}
+    </ActionCard>
+  );
+}
+
+function FrequencyCard({ contract, primaryColor, onMutate, action }: {
+  contract: Contract; primaryColor: string; onMutate: () => Promise<void>; action: ActionApi;
+}) {
+  const [modal, setModal] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+  const { busy, run } = useMutator(action, onMutate);
+
+  // Three default cadences in week units — match the Shopify-extension
+  // portal so the customer sees the same option set across surfaces.
+  const options = [
+    { label: "Twice a Month", interval: "WEEK", count: 2 },
+    { label: "Monthly", interval: "WEEK", count: 4 },
+    { label: "Every 2 Months", interval: "WEEK", count: 8 },
+  ];
+  const currentInterval = (contract.billingPolicy?.interval || contract.billingInterval || "").toUpperCase();
+  const currentCount = Number(contract.billingPolicy?.intervalCount || contract.billingIntervalCount || 0);
+  const isCurrent = (o: typeof options[number]) => o.interval === currentInterval && o.count === currentCount;
+  const currentLabel = options.find(isCurrent)?.label || (() => {
+    const interval = (contract.billingPolicy?.interval || contract.billingInterval || "month").toLowerCase();
+    const count = contract.billingPolicy?.intervalCount || contract.billingIntervalCount || 1;
+    return `Every ${count} ${interval}${count > 1 ? "s" : ""}`;
+  })();
+
+  function save() {
+    const opt = options.find((o) => o.label === selected);
+    if (!opt) return;
+    setModal(false);
+    run("frequency", { contractId: contract.id, intervalCount: opt.count, interval: opt.interval }, `Delivery frequency changed to ${opt.label}`);
+  }
+
+  return (
+    <ActionCard title="Delivery frequency" subtitle={currentLabel}>
+      <GhostButton busy={busy} onClick={() => { setSelected(null); setModal(true); }}>
+        Change frequency
+      </GhostButton>
+      {modal && (
+        <ModalShell
+          title="Change delivery frequency"
+          onClose={() => setModal(false)}
+          footer={
+            <>
+              <button
+                type="button"
+                disabled={busy || !selected}
+                onClick={save}
+                className="rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                style={{ background: primaryColor }}
+              >
+                {busy ? "Saving…" : "Save"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setModal(false)}
+                disabled={busy}
+                className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-semibold text-zinc-700 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </>
+          }
+        >
+          <ul className="space-y-2">
+            {options.map((o) => {
+              const current = isCurrent(o);
+              return (
+                <li key={o.label}>
+                  <label
+                    className={`flex items-center gap-3 rounded-lg border p-3 ${
+                      current
+                        ? "border-zinc-200 bg-zinc-50 opacity-60"
+                        : selected === o.label
+                          ? "border-zinc-900 bg-zinc-50"
+                          : "border-zinc-200 bg-white hover:border-zinc-300"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="freq"
+                      value={o.label}
+                      disabled={current}
+                      checked={selected === o.label}
+                      onChange={() => setSelected(o.label)}
+                      className="h-4 w-4"
+                    />
+                    <span className="flex-1 text-sm font-medium text-zinc-900">{o.label}</span>
+                    {current && (
+                      <span className="rounded-full bg-zinc-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-700">
+                        Current
+                      </span>
+                    )}
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        </ModalShell>
+      )}
+    </ActionCard>
+  );
+}
+
+function dateBounds() {
+  // Tomorrow+1 → 90 days out — matches the Preact source's bounds
+  // (Appstle won't accept same-day or past dates).
+  const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 2);
+  const maxDate = new Date(); maxDate.setDate(maxDate.getDate() + 90);
+  return {
+    minStr: tomorrow.toISOString().split("T")[0],
+    maxStr: maxDate.toISOString().split("T")[0],
+  };
 }
 
 // ─────────────────────────────── pills ──────────────────────────────
