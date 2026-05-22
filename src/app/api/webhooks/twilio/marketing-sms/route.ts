@@ -24,7 +24,7 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { validateTwilioSignature } from "@/lib/twilio";
-import { unsubscribeFromSmsMarketing } from "@/lib/shopify-marketing";
+import { unsubscribeFromSmsMarketing, subscribeToSmsMarketing } from "@/lib/shopify-marketing";
 
 const AUTORESPONSE_TEXT =
   "This number isn't monitored. For help, please visit https://help.superfoodscompany.com — our team responds within a few hours.";
@@ -49,6 +49,20 @@ function isStopMessage(body: string): boolean {
   if (/^(PLEASE\s+STOP|REMOVE\s+ME|STOP\s+MESSAGES|STOP\s+TEXTS|STOP\s+ALL)\b/i.test(body.trim())) {
     return true;
   }
+  return false;
+}
+
+// Opt-in keywords. Twilio's Advanced Opt-Out auto-handles the carrier
+// side (removing the number from the block list + replying with
+// confirmation) — this set just flips our DB column back.
+const START_KEYWORDS = new Set([
+  "START", "UNSTOP", "YES", "SUBSCRIBE", "OPTIN", "OPT-IN", "OPT IN",
+]);
+
+function isStartMessage(body: string): boolean {
+  const trimmed = body.trim().toUpperCase();
+  if (START_KEYWORDS.has(trimmed)) return true;
+  if (/^(RESUBSCRIBE|RE-?SUBSCRIBE\s+ME|RESUME)\b/i.test(body.trim())) return true;
   return false;
 }
 
@@ -105,36 +119,60 @@ export async function POST(request: Request) {
   // including the row until we flip the column).
   const optOutType = (params.OptOutType || "").toUpperCase();
   const isOptOut = optOutType === "STOP" || isStopMessage(messageBody);
-  if (isOptOut) {
-    // Find every customer in this workspace with this phone — opt-out
-    // applies to every linked record sharing the number.
-    const { data: matches } = await admin
-      .from("customers")
-      .select("id, workspace_id, shopify_customer_id")
-      .eq("phone", from)
-      .eq("sms_marketing_status", "subscribed");
+  const isOptIn = optOutType === "START" || isStartMessage(messageBody);
 
-    for (const cust of matches || []) {
-      // Mirror the opt-out to Shopify so the customer's profile
-      // there carries the same state. Non-fatal — log + continue if
-      // it fails; the DB flip is what gates our future audience
-      // builds.
-      if (cust.shopify_customer_id) {
-        try {
-          await unsubscribeFromSmsMarketing(cust.workspace_id, cust.shopify_customer_id);
-        } catch (err) {
-          console.error("[marketing-sms] Shopify SMS unsubscribe failed:", cust.id, err);
-        }
+  if (isOptOut || isOptIn) {
+    // Resolve workspace by the shortcode the inbound came TO. The
+    // shortcode field on workspaces (`twilio_phone_number`) stores
+    // the bare digits (e.g. "85041"). Twilio sends `To` as the same
+    // digits for short codes.
+    const { data: ws } = await admin
+      .from("workspaces")
+      .select("id")
+      .eq("twilio_phone_number", to.replace(/^\+/, ""))
+      .maybeSingle();
+
+    if (ws?.id) {
+      // Look up every customer whose phone normalizes to the inbound
+      // `From`. The RPC strips non-digits on both sides so rows
+      // stored as +18583349198 / (858) 334-9198 / 858-334-9198 all
+      // match. Returns rows regardless of current sms_marketing_status
+      // so START can flip 'unsubscribed' rows back.
+      const { data: matches, error: rpcErr } = await admin.rpc(
+        "find_customers_by_phone",
+        { p_workspace_id: ws.id, p_phone: from },
+      );
+      if (rpcErr) {
+        console.error("[marketing-sms] phone lookup RPC failed:", rpcErr.message);
       }
-      await admin.from("customers").update({
-        sms_marketing_status: "unsubscribed",
-        updated_at: new Date().toISOString(),
-      }).eq("id", cust.id);
+
+      const newStatus = isOptOut ? "unsubscribed" : "subscribed";
+      for (const cust of (matches || []) as Array<{ id: string; workspace_id: string; shopify_customer_id: string | null; sms_marketing_status: string | null }>) {
+        // Idempotency: skip rows already in the target state. Cheaper
+        // than always firing a Shopify mutation, and avoids needless
+        // updated_at churn for the dashboard.
+        if (cust.sms_marketing_status === newStatus) continue;
+        if (cust.shopify_customer_id) {
+          try {
+            if (isOptOut) {
+              await unsubscribeFromSmsMarketing(cust.workspace_id, cust.shopify_customer_id);
+            } else {
+              await subscribeToSmsMarketing(cust.workspace_id, cust.shopify_customer_id);
+            }
+          } catch (err) {
+            console.error(`[marketing-sms] Shopify SMS ${isOptOut ? "unsubscribe" : "subscribe"} failed:`, cust.id, err);
+          }
+        }
+        await admin.from("customers").update({
+          sms_marketing_status: newStatus,
+          updated_at: new Date().toISOString(),
+        }).eq("id", cust.id);
+      }
     }
 
-    // Log the inbound + skip our autoresponder — Twilio's Default
+    // Log the inbound + skip our autoresponder — Twilio's Advanced
     // Opt-Out already auto-replies with the carrier-mandated
-    // confirmation. Two replies look broken.
+    // confirmation for both STOP and START. Two replies look broken.
     await admin.from("sms_marketing_inbound").insert({
       shortcode: to,
       from_phone: from,
