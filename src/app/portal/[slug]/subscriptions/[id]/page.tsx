@@ -15,6 +15,7 @@ import { cookies, headers } from "next/headers";
 import { redirect, notFound } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { enrichLineItemImages } from "@/lib/portal/helpers/image-fallback";
 import PortalClient from "../../portal-client";
 import type { PortalSubscription, PortalOrder } from "../../page";
 
@@ -155,8 +156,8 @@ export default async function SubscriptionDetailPage({
         phone: (customer.phone as string | null) || "",
         linkedIds,
       }}
-      subscriptions={(subs || []) as unknown as PortalSubscription[]}
-      orders={(orders || []) as unknown as PortalOrder[]}
+      subscriptions={(await enrichLineItemImages(admin, workspaceId, subs || [])) as unknown as PortalSubscription[]}
+      orders={(await enrichLineItemImages(admin, workspaceId, orders || [])) as unknown as PortalOrder[]}
     />
   );
 }

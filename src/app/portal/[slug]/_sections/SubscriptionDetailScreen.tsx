@@ -1988,7 +1988,7 @@ function CancelFlow({
     setPickedReason(reason);
     action.startAction();
     try {
-      const res = await fetch("/api/portal?route=cancelJourney", {
+      const res = await fetch(`/api/portal?route=cancelJourney&contractId=${encodeURIComponent(contract.id)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
@@ -2025,7 +2025,7 @@ function CancelFlow({
     setBusy(true);
     action.startAction();
     try {
-      const res = await fetch("/api/portal?route=cancelJourney", {
+      const res = await fetch(`/api/portal?route=cancelJourney&contractId=${encodeURIComponent(contract.id)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
@@ -2054,7 +2054,7 @@ function CancelFlow({
     setBusy(true);
     action.startAction();
     try {
-      const res = await fetch("/api/portal?route=cancelJourney", {
+      const res = await fetch(`/api/portal?route=cancelJourney&contractId=${encodeURIComponent(contract.id)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",

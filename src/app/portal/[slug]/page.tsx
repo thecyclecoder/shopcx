@@ -13,6 +13,7 @@ import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { enrichLineItemImages } from "@/lib/portal/helpers/image-fallback";
 import PortalClient from "./portal-client";
 
 export default async function PortalHome({
@@ -132,6 +133,13 @@ export default async function PortalHome({
     .order("created_at", { ascending: false })
     .limit(50);
 
+  // Hydrate line-item images from the products catalog so the cards
+  // never render a gray placeholder when we have a Shopify image
+  // available. Cheap — one products + one product_media query, both
+  // covered by partial indexes.
+  const enrichedSubs = await enrichLineItemImages(admin, workspaceId, subs || []);
+  const enrichedOrders = await enrichLineItemImages(admin, workspaceId, orders || []);
+
   return (
     <PortalClient
       slug={slug}
@@ -150,8 +158,8 @@ export default async function PortalHome({
         phone: (customer.phone as string | null) || "",
         linkedIds,
       }}
-      subscriptions={(subs || []) as unknown as PortalSubscription[]}
-      orders={(orders || []) as unknown as PortalOrder[]}
+      subscriptions={enrichedSubs as unknown as PortalSubscription[]}
+      orders={enrichedOrders as unknown as PortalOrder[]}
     />
   );
 }
