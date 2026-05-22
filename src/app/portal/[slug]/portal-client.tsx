@@ -35,10 +35,15 @@ import { HomeSection } from "./_sections/HomeSection";
 import { ResourcesSection } from "./_sections/ResourcesSection";
 import { SupportSection } from "./_sections/SupportSection";
 import { PaymentMethodsSection } from "./_sections/PaymentMethodsSection";
+import { SubscriptionDetailScreen } from "./_sections/SubscriptionDetailScreen";
 
 interface Props {
   slug: string;
   initialSection?: SectionId;
+  /** When set, the Subscriptions section renders the detail view for
+   *  this subscriptions.id instead of the list. URL bar shows
+   *  /subscriptions/{id} thanks to the middleware rewrite. */
+  detailSubscriptionId?: string | null;
   workspace: {
     id: string;
     name: string;
@@ -205,13 +210,17 @@ export default function PortalClient(props: Props) {
         </header>
 
         <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-8 lg:px-10 lg:py-10">
-          {/* Desktop section header — hidden on mobile (top bar shows it) */}
-          <div className="mb-6 hidden lg:block">
-            <p className="text-sm text-zinc-500">{greeting}</p>
-            <h1 className="mt-1 text-3xl font-bold text-zinc-900">
-              {NAV_ITEMS.find((n) => n.id === section)?.label}
-            </h1>
-          </div>
+          {/* Desktop section header — hidden on mobile (top bar shows it).
+              Suppressed on the subscription detail screen since that
+              screen renders its own header + breadcrumb. */}
+          {!(section === "subscriptions" && props.detailSubscriptionId) && (
+            <div className="mb-6 hidden lg:block">
+              <p className="text-sm text-zinc-500">{greeting}</p>
+              <h1 className="mt-1 text-3xl font-bold text-zinc-900">
+                {NAV_ITEMS.find((n) => n.id === section)?.label}
+              </h1>
+            </div>
+          )}
 
           {section === "home" && (
             <HomeSection
@@ -223,10 +232,17 @@ export default function PortalClient(props: Props) {
             />
           )}
           {section === "subscriptions" && (
-            <SubscriptionsSection
-              subscriptions={props.subscriptions}
-              workspace={props.workspace}
-            />
+            props.detailSubscriptionId ? (
+              <SubscriptionDetailScreen
+                subscriptionId={props.detailSubscriptionId}
+                workspace={props.workspace}
+              />
+            ) : (
+              <SubscriptionsSection
+                subscriptions={props.subscriptions}
+                workspace={props.workspace}
+              />
+            )
           )}
           {section === "orders" && (
             <OrdersSection orders={props.orders} primaryColor={props.workspace.primaryColor} />

@@ -271,6 +271,16 @@ export async function updateSession(request: NextRequest) {
             return NextResponse.rewrite(url);
           }
 
+          // Subscription detail route — /subscriptions/{uuid} rewrites
+          // to /portal/{slug}/subscriptions/{uuid}. UUID is our internal
+          // subscriptions.id (not Shopify/Appstle contract id) so the
+          // URL survives a future Shopify cutover.
+          const subDetailMatch = pathname.match(/^\/subscriptions\/([0-9a-f-]{36})\/?$/i);
+          if (subDetailMatch) {
+            url.pathname = `/portal/${slug}/subscriptions/${subDetailMatch[1]}`;
+            return NextResponse.rewrite(url);
+          }
+
           // Server routes (login, callback, logout) — rewrite path as-is.
           const isServerRoute = pathname === "/login" || pathname === "/callback" || pathname === "/logout"
             || pathname.endsWith("/login") || pathname.endsWith("/callback") || pathname.endsWith("/logout");

@@ -73,7 +73,12 @@ export function transformSubscription(
   });
 
   return {
+    // `id` is the Shopify contract id for compatibility with existing
+    // mini-site/extension consumers. `internal_id` is our row UUID,
+    // which the new admin-styled portal uses in its URLs so links
+    // survive the eventual Shopify cutover.
     id: sub.shopify_contract_id || sub.id,
+    internal_id: sub.id,
     shopify_contract_id: sub.shopify_contract_id,
     status: String(sub.status || "active").toUpperCase(),
     lastPaymentStatus: String(sub.last_payment_status || "SUCCEEDED").toUpperCase(),
