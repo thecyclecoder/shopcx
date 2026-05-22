@@ -42,6 +42,26 @@ export interface ContractLine {
   is_gift?: boolean;
 }
 
+export interface AppliedDiscount {
+  id?: string;
+  code?: string;
+  title?: string;
+  value?: number | string;
+  valueType?: "PERCENTAGE" | "FIXED_AMOUNT";
+  type?: "MANUAL" | "CODE_DISCOUNT" | "AUTOMATIC_DISCOUNT" | "code" | "percentage";
+}
+
+export interface DeliveryAddress {
+  firstName?: string;
+  lastName?: string;
+  address1?: string;
+  address2?: string;
+  city?: string;
+  province?: string;
+  provinceCode?: string;
+  zip?: string;
+}
+
 export interface Contract {
   id: string;                  // shopify_contract_id (legacy)
   internal_id?: string;        // our UUID
@@ -52,8 +72,12 @@ export interface Contract {
   billingInterval?: string;
   billingIntervalCount?: number;
   lines?: ContractLine[];
-  appliedDiscounts?: Array<{ title?: string; value?: number; valueType?: string }>;
+  appliedDiscounts?: AppliedDiscount[];
+  appliedDiscount?: AppliedDiscount | null;
   shippingAddress?: Record<string, string> | null;
+  deliveryMethod?: { address?: DeliveryAddress } | null;
+  paymentMethod?: { brand?: string; last4?: string; expiry?: string } | null;
+  paymentManageUrl?: string | null;
   is_internal?: boolean | null;
   portalState?: {
     bucket?: string;
@@ -261,6 +285,16 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
       )}
       {isCancelled && (
         <ReactivateCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+      )}
+
+      {/* Account-level cards — only on live subs */}
+      {!isCancelled && (
+        <>
+          <AddressCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+          <CouponCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+          <PaymentMethodCard contract={contract} />
+          <CancelCard contract={contract} action={action} />
+        </>
       )}
 
       <ActionOverlay
@@ -1352,6 +1386,536 @@ function FrequencyCard({ contract, primaryColor, onMutate, action }: {
         </ModalShell>
       )}
     </ActionCard>
+  );
+}
+
+// ─────────────────────────── chunk 4 cards ──────────────────────────
+
+const US_STATES: Array<[string, string]> = [
+  ["AL","Alabama"],["AK","Alaska"],["AZ","Arizona"],["AR","Arkansas"],["CA","California"],
+  ["CO","Colorado"],["CT","Connecticut"],["DE","Delaware"],["FL","Florida"],["GA","Georgia"],
+  ["HI","Hawaii"],["ID","Idaho"],["IL","Illinois"],["IN","Indiana"],["IA","Iowa"],
+  ["KS","Kansas"],["KY","Kentucky"],["LA","Louisiana"],["ME","Maine"],["MD","Maryland"],
+  ["MA","Massachusetts"],["MI","Michigan"],["MN","Minnesota"],["MS","Mississippi"],["MO","Missouri"],
+  ["MT","Montana"],["NE","Nebraska"],["NV","Nevada"],["NH","New Hampshire"],["NJ","New Jersey"],
+  ["NM","New Mexico"],["NY","New York"],["NC","North Carolina"],["ND","North Dakota"],["OH","Ohio"],
+  ["OK","Oklahoma"],["OR","Oregon"],["PA","Pennsylvania"],["RI","Rhode Island"],["SC","South Carolina"],
+  ["SD","South Dakota"],["TN","Tennessee"],["TX","Texas"],["UT","Utah"],["VT","Vermont"],
+  ["VA","Virginia"],["WA","Washington"],["WV","West Virginia"],["WI","Wisconsin"],["WY","Wyoming"],
+  ["DC","District of Columbia"],
+];
+
+interface VerificationResult {
+  valid?: boolean;
+  errors?: string[];
+  suggested?: { address1?: string; address2?: string; city?: string; province?: string; zip?: string };
+  entered?: { address1?: string; address2?: string; city?: string; province?: string; zip?: string };
+}
+
+function AddressCard({ contract, primaryColor, onMutate, action }: {
+  contract: Contract; primaryColor: string; onMutate: () => Promise<void>; action: ActionApi;
+}) {
+  const addr = contract.deliveryMethod?.address || {};
+  const [editing, setEditing] = useState(false);
+  const [verification, setVerification] = useState<VerificationResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({
+    firstName: addr.firstName || "",
+    lastName: addr.lastName || "",
+    address1: addr.address1 || "",
+    address2: addr.address2 || "",
+    city: addr.city || "",
+    province: addr.province || addr.provinceCode || "",
+    zip: addr.zip || "",
+  });
+
+  async function save(skipVerification: boolean) {
+    setBusy(true);
+    setVerification(null);
+    action.startAction();
+    try {
+      const res = await fetch("/api/portal?route=address", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ contractId: contract.id, ...form, skipVerification }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) {
+        action.failAction(data?.message || data?.error || undefined);
+        setBusy(false);
+        return;
+      }
+      if (data?.verification && data.verification.valid === false) {
+        // EasyPost says the address is suspicious — let the customer
+        // choose between suggested + entered without firing the
+        // success overlay yet.
+        setVerification(data.verification as VerificationResult);
+        setBusy(false);
+        action.completeAction("Please confirm your address");
+        return;
+      }
+      action.completeAction("Address updated");
+      setEditing(false);
+      await onMutate();
+    } catch {
+      action.failAction();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function useSuggested() {
+    if (!verification?.suggested) return;
+    const s = verification.suggested;
+    setForm((prev) => ({
+      ...prev,
+      address1: s.address1 || prev.address1,
+      address2: s.address2 || "",
+      city: s.city || prev.city,
+      province: s.province || prev.province,
+      zip: s.zip || prev.zip,
+    }));
+    setVerification(null);
+    // Re-save bypassing verification — EasyPost already gave us its
+    // normalized form, no point re-checking.
+    setTimeout(() => save(true), 50);
+  }
+
+  const display = [
+    addr.address1,
+    addr.address2,
+    [addr.city, addr.province || addr.provinceCode, addr.zip].filter(Boolean).join(", "),
+  ].filter(Boolean).join("\n");
+
+  const textFields: Array<keyof typeof form> = ["firstName", "lastName", "address1", "address2", "city", "zip"];
+  const labels: Record<string, string> = {
+    firstName: "First name", lastName: "Last name", address1: "Address",
+    address2: "Apt / Suite", city: "City", zip: "ZIP code",
+  };
+
+  return (
+    <ActionCard title="Shipping address">
+      <p className="whitespace-pre-line text-sm text-zinc-600">{display || "No address on file"}</p>
+      <GhostButton busy={false} onClick={() => { setVerification(null); setEditing(true); }}>
+        Change address
+      </GhostButton>
+
+      {editing && (
+        <ModalShell
+          title="Change shipping address"
+          onClose={() => { setEditing(false); setVerification(null); }}
+          footer={
+            verification ? undefined : (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => save(false)}
+                  className="rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                  style={{ background: primaryColor }}
+                >
+                  {busy ? "Verifying…" : "Save"}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => { setEditing(false); setVerification(null); }}
+                  className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-semibold text-zinc-700 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              </>
+            )
+          }
+        >
+          {verification ? (
+            <div className="space-y-3">
+              {verification.errors && verification.errors.length > 0 && (
+                <div className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+                  {verification.errors.map((e, i) => <div key={i}>{e}</div>)}
+                </div>
+              )}
+              {verification.suggested ? (
+                <>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Suggested address</div>
+                  <button
+                    type="button"
+                    onClick={useSuggested}
+                    className="block w-full rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-left text-sm"
+                  >
+                    <div>{verification.suggested.address1}</div>
+                    {verification.suggested.address2 && <div>{verification.suggested.address2}</div>}
+                    <div>{verification.suggested.city}, {verification.suggested.province} {verification.suggested.zip}</div>
+                    <span className="mt-2 inline-block rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white">
+                      Use this address
+                    </span>
+                  </button>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">You entered</div>
+                  <button
+                    type="button"
+                    onClick={() => { setVerification(null); save(true); }}
+                    className="block w-full rounded-lg border border-zinc-200 bg-white p-3 text-left text-sm"
+                  >
+                    <div>{verification.entered?.address1}</div>
+                    {verification.entered?.address2 && <div>{verification.entered.address2}</div>}
+                    <div>{verification.entered?.city}, {verification.entered?.province} {verification.entered?.zip}</div>
+                    <span className="mt-2 inline-block rounded-full bg-zinc-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-700">
+                      Use as entered
+                    </span>
+                  </button>
+                </>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setVerification(null)}
+                    className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-semibold text-zinc-700"
+                  >
+                    Edit address
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setVerification(null); save(true); }}
+                    className="rounded-lg px-4 py-2 text-sm font-semibold text-white"
+                    style={{ background: primaryColor }}
+                  >
+                    Save anyway
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {textFields.map((k) => (
+                <div key={k}>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">{labels[k]}</label>
+                  <input
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
+                    value={form[k]}
+                    onChange={(e) => setForm((p) => ({ ...p, [k]: e.target.value }))}
+                  />
+                </div>
+              ))}
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">State</label>
+                <select
+                  className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
+                  value={form.province}
+                  onChange={(e) => setForm((p) => ({ ...p, province: e.target.value }))}
+                >
+                  <option value="">Select state</option>
+                  {US_STATES.map(([code, name]) => (
+                    <option key={code} value={code}>{name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
+        </ModalShell>
+      )}
+    </ActionCard>
+  );
+}
+
+interface LoyaltyCoupon { id: string; code: string; discount_value: number; status: string }
+interface LoyaltyTier { index: number; label: string; points_cost: number; affordable: boolean }
+interface LoyaltyResp { ok?: boolean; enabled?: boolean; unused_coupons?: LoyaltyCoupon[]; tiers?: LoyaltyTier[] }
+
+function CouponCard({ contract, primaryColor, onMutate, action }: {
+  contract: Contract; primaryColor: string; onMutate: () => Promise<void>; action: ActionApi;
+}) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [loyalty, setLoyalty] = useState<LoyaltyResp | null>(null);
+  const [loyaltyBusy, setLoyaltyBusy] = useState<string | null>(null);
+
+  const allDiscounts = contract.appliedDiscounts || [];
+  const hasManual = allDiscounts.some((d) => d.type === "MANUAL" || d.type === "AUTOMATIC_DISCOUNT");
+  const hasCode = allDiscounts.some((d) => d.type === "CODE_DISCOUNT" || d.type === "code");
+
+  // Pull the loyalty balance lazily — only when no code is applied, so
+  // we don't hit the loyalty endpoint for customers who already used a
+  // coupon this cycle.
+  useEffect(() => {
+    if (hasCode) return;
+    let alive = true;
+    fetch("/api/portal?route=loyaltyBalance", { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (alive && data?.ok && data?.enabled) setLoyalty(data as LoyaltyResp); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [hasCode]);
+
+  async function apply() {
+    if (!code.trim() || busy) return;
+    setBusy(true);
+    action.startAction();
+    try {
+      const res = await fetch("/api/portal?route=coupon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ contractId: contract.id, discountCode: code.trim(), mode: "apply" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) {
+        action.failAction(data?.message || data?.error || undefined);
+      } else {
+        action.completeAction("Coupon applied");
+        setCode("");
+        await onMutate();
+      }
+    } catch { action.failAction(); }
+    finally { setBusy(false); }
+  }
+
+  async function removeDiscount(d: AppliedDiscount) {
+    if (busy) return;
+    setBusy(true);
+    action.startAction();
+    try {
+      const res = await fetch("/api/portal?route=coupon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ contractId: contract.id, discountId: d.id, mode: "remove" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) {
+        action.failAction(data?.message || data?.error || undefined);
+      } else {
+        action.completeAction("Discount removed");
+        await onMutate();
+      }
+    } catch { action.failAction(); }
+    finally { setBusy(false); }
+  }
+
+  async function applyLoyaltyCoupon(c: LoyaltyCoupon) {
+    setLoyaltyBusy(c.id);
+    action.startAction();
+    try {
+      const res = await fetch("/api/portal?route=loyaltyApplyToSubscription", {
+        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
+        body: JSON.stringify({ contractId: contract.id, redemptionId: c.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        action.failAction(data?.error || data?.message || undefined);
+      } else {
+        action.completeAction(`$${data.discount_value} loyalty coupon applied`);
+        await onMutate();
+      }
+    } catch { action.failAction(); }
+    finally { setLoyaltyBusy(null); }
+  }
+
+  async function redeemTier(t: LoyaltyTier) {
+    setLoyaltyBusy("tier-" + t.index);
+    action.startAction();
+    try {
+      const res = await fetch("/api/portal?route=loyaltyApplyToSubscription", {
+        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
+        body: JSON.stringify({ contractId: contract.id, tierId: t.index }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        action.failAction(data?.error || data?.message || undefined);
+      } else {
+        action.completeAction(`$${data.discount_value} loyalty coupon redeemed & applied`);
+        await onMutate();
+      }
+    } catch { action.failAction(); }
+    finally { setLoyaltyBusy(null); }
+  }
+
+  const activeLoyaltyCoupons = (loyalty?.unused_coupons || []).filter((c) => c.status === "active");
+  const affordableTiers = (loyalty?.tiers || []).filter((t) => t.affordable);
+  const showLoyalty = !hasCode && (activeLoyaltyCoupons.length > 0 || affordableTiers.length > 0);
+
+  return (
+    <ActionCard title="Coupon">
+      {allDiscounts.length > 0 && (
+        <ul className="space-y-2">
+          {allDiscounts.map((d, i) => {
+            const label = d.code || d.title || "Discount";
+            const valueLabel = d.value != null
+              ? d.valueType === "PERCENTAGE" || d.type === "percentage"
+                ? `${d.value}% off`
+                : `$${Number(d.value).toFixed(2)} off`
+              : null;
+            return (
+              <li key={d.id || i} className="flex items-center justify-between rounded-lg border border-zinc-200 bg-zinc-50 p-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold text-zinc-900">{label}</span>
+                    {d.type === "MANUAL" && (
+                      <span className="rounded-full bg-zinc-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-700">
+                        Auto
+                      </span>
+                    )}
+                    {valueLabel && <span className="text-xs text-zinc-600">{valueLabel}</span>}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => removeDiscount(d)}
+                  className="ml-3 rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs font-semibold text-zinc-700 hover:border-zinc-400 disabled:opacity-50"
+                >
+                  Remove
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {hasCode ? null : hasManual ? (
+        <p className="text-sm text-zinc-600">Remove the existing discount to apply a coupon code.</p>
+      ) : (
+        <>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              className="flex-1 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm uppercase text-zinc-900 placeholder:text-zinc-400 placeholder:normal-case"
+              placeholder="Discount code"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") apply(); }}
+            />
+            <button
+              type="button"
+              disabled={busy || !code.trim()}
+              onClick={apply}
+              className="rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+              style={{ background: primaryColor }}
+            >
+              {busy ? "…" : "Apply"}
+            </button>
+          </div>
+
+          {showLoyalty && (
+            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wider text-amber-900">Use reward points</p>
+              <div className="mt-2 space-y-2">
+                {activeLoyaltyCoupons.map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    disabled={loyaltyBusy != null}
+                    onClick={() => applyLoyaltyCoupon(c)}
+                    className="block w-full rounded-md border border-amber-300 bg-white px-3 py-2 text-left text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                  >
+                    {loyaltyBusy === c.id ? "Applying…" : `Apply $${Math.round(c.discount_value)} coupon — ${c.code}`}
+                  </button>
+                ))}
+                {activeLoyaltyCoupons.length === 0 && affordableTiers.map((t) => (
+                  <button
+                    key={t.index}
+                    type="button"
+                    disabled={loyaltyBusy != null}
+                    onClick={() => redeemTier(t)}
+                    className="block w-full rounded-md border border-amber-300 bg-white px-3 py-2 text-left text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                  >
+                    {loyaltyBusy === "tier-" + t.index
+                      ? "Redeeming…"
+                      : `Redeem ${t.label} & apply — ${t.points_cost.toLocaleString()} pts`}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </ActionCard>
+  );
+}
+
+function PaymentMethodCard({ contract }: { contract: Contract }) {
+  const pm = contract.paymentMethod;
+  const manageUrl = contract.paymentManageUrl;
+  if (!pm && !manageUrl) return null;
+
+  return (
+    <ActionCard title="Payment method">
+      {pm ? (
+        <div className="flex items-center gap-3">
+          <span className="text-2xl" aria-hidden>💳</span>
+          <div>
+            <div className="text-sm font-semibold text-zinc-900">
+              {pm.brand || "Card"} ending in {pm.last4 || "••••"}
+            </div>
+            {pm.expiry && <div className="text-xs text-zinc-500">Expires {pm.expiry}</div>}
+          </div>
+        </div>
+      ) : (
+        <p className="text-sm text-zinc-600">No payment method on file.</p>
+      )}
+      {manageUrl && (
+        <a
+          href={manageUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:border-zinc-400"
+        >
+          Manage payment methods
+          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+          </svg>
+        </a>
+      )}
+    </ActionCard>
+  );
+}
+
+function CancelCard({ contract, action }: { contract: Contract; action: ActionApi }) {
+  const [busy, setBusy] = useState(false);
+  async function startCancel() {
+    if (busy) return;
+    setBusy(true);
+    action.startAction();
+    try {
+      const res = await fetch("/api/portal?route=cancelJourney", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ contractId: contract.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data?.journeyUrl) {
+        window.location.href = data.journeyUrl as string;
+        return;
+      }
+      if (data?.token) {
+        window.location.href = `/journey/${data.token}`;
+        return;
+      }
+      action.failAction(data?.message || data?.error || "Could not start cancellation");
+    } catch {
+      action.failAction();
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <article className="overflow-hidden rounded-2xl border border-zinc-200 bg-white">
+      <div className="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h3 className="text-base font-semibold text-zinc-900">Cancel subscription</h3>
+          <p className="mt-0.5 text-sm text-zinc-500">We&apos;ll ask a couple of quick questions first.</p>
+        </div>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={startCancel}
+          className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-semibold text-rose-700 hover:border-rose-300 hover:text-rose-800 disabled:opacity-50 sm:flex-shrink-0"
+        >
+          {busy ? "Loading…" : "Cancel"}
+        </button>
+      </div>
+    </article>
   );
 }
 
