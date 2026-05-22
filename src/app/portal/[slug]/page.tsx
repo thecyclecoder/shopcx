@@ -117,7 +117,7 @@ export default async function PortalHome({
   //    Subscriptions section's first paint).
   const { data: subs } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count, next_billing_date, applied_discounts, is_internal, total_price_cents, delivery_price_cents")
+    .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count, next_billing_date, applied_discounts, is_internal, delivery_price_cents")
     .eq("workspace_id", workspaceId)
     .in("customer_id", linkedIds)
     .in("status", ["active", "paused"])
@@ -218,6 +218,5 @@ export interface PortalSubscription {
   next_billing_date: string | null;
   applied_discounts: Array<{ title?: string; value?: number; valueType?: string }> | null;
   is_internal: boolean | null;
-  total_price_cents: number | null;
   delivery_price_cents: number | null;
 }

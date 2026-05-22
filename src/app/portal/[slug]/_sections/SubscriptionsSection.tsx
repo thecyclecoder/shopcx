@@ -67,7 +67,6 @@ export function SubscriptionsSection({ subscriptions: initialSubs, workspace }: 
         next_billing_date: (c.nextBillingDate as string | null) || null,
         applied_discounts: null,
         is_internal: (c.is_internal as boolean) ?? null,
-        total_price_cents: null,
         delivery_price_cents: null,
       }));
       setSubs(mapped);
