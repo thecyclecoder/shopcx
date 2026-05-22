@@ -11,6 +11,11 @@ interface DbItem {
   selling_plan?: string;
   variant_title?: string;
   line_id?: string;
+  /** Some checkout paths (internal-sub creation) stamp image_url
+   *  directly on the item — use it as the final fallback when the
+   *  catalog lookup chain comes back empty. */
+  image_url?: string | null;
+  is_gift?: boolean;
 }
 
 interface VariantInfo {
@@ -49,10 +54,21 @@ export function transformSubscription(
       resolvedVariantId = product.variantsByTitle[item.variant_title].id;
     }
 
-    // Resolve variant image: by title → by SKU → product image
+    // Resolve variant image:
+    //   1. catalog lookup (variant by title → variant by SKU → product hero)
+    //   2. item.image_url stamped at checkout (handles internal subs
+    //      whose product_id may point at a row that doesn't carry the
+    //      legacy variants JSONB the catalog lookup relies on)
+    // Keeps the customer from ever seeing a gray placeholder when ANY
+    // upstream system has a valid URL on file.
     const variantByTitle = product?.variantsByTitle?.[item.variant_title || ""];
     const variantBySku = product?.variantsBySku?.[item.sku || ""];
-    const imageUrl = variantByTitle?.image_url || variantBySku?.image_url || product?.productImage || "";
+    const imageUrl =
+      variantByTitle?.image_url ||
+      variantBySku?.image_url ||
+      product?.productImage ||
+      item.image_url ||
+      "";
 
     return {
       id: item.line_id || "",
@@ -69,6 +85,7 @@ export function transformSubscription(
       variantImage: {
         transformedSrc: imageUrl,
       },
+      is_gift: !!item.is_gift,
     };
   });
 
