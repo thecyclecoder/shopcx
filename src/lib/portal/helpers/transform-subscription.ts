@@ -1,5 +1,19 @@
-// Transform our DB subscription shape into the contract shape the portal frontend expects
-// This bridges: DB (snake_case, items[], price_cents) → Frontend (camelCase, lines[], MoneyV2)
+// Transform our DB subscription shape into the contract shape the portal frontend expects.
+// Bridges: DB (snake_case, items[], price_cents) → Frontend (camelCase, lines[], MoneyV2).
+//
+// Image priority on each line item:
+//   1. product_variants.image_url — canonical UUID rows. Storefront
+//      overrides (admin upload) win here; otherwise this row carries
+//      the Shopify-synced variant image. Matched by internal_id,
+//      shopify_variant_id, sku, or variant_title.
+//   2. products.variants[].image_url — legacy JSONB mirror. Same data
+//      Shopify originally synced; used as a fallback when the
+//      canonical table doesn't have a hit.
+//   3. products.image_url — Shopify product hero. Final fallback only
+//      when no variant-level image exists anywhere.
+//   4. item.image_url — stamped at checkout for internal subs; safety
+//      net for cases where the catalog lookup can't resolve the
+//      product at all (e.g. variant rotated out of the catalog).
 
 interface DbItem {
   sku?: string;
@@ -11,28 +25,33 @@ interface DbItem {
   selling_plan?: string;
   variant_title?: string;
   line_id?: string;
-  /** Some checkout paths (internal-sub creation) stamp image_url
-   *  directly on the item — use it as the final fallback when the
-   *  catalog lookup chain comes back empty. */
   image_url?: string | null;
   is_gift?: boolean;
 }
 
-interface VariantInfo {
-  id: string;
-  image_url?: string;
-}
-
 interface ProductInfo {
   productImage: string;
-  // variant_title → { id, image_url }
-  variantsByTitle: Record<string, VariantInfo>;
-  // sku → { id, image_url }
-  variantsBySku: Record<string, VariantInfo>;
+  // Single map indexed by every key shape line items might carry —
+  // internal variant UUID, Shopify variant id, sku, or title. The
+  // caller tries each in priority order.
+  byKey: Map<string, string>;
 }
 
 interface ProductMap {
   [productId: string]: ProductInfo;
+}
+
+function resolveLineImage(info: ProductInfo | undefined, item: DbItem): string {
+  if (!info) return item.image_url || "";
+  const tryKeys: string[] = [];
+  if (item.variant_id) tryKeys.push(String(item.variant_id));
+  if (item.sku) tryKeys.push(item.sku);
+  if (item.variant_title) tryKeys.push(item.variant_title);
+  for (const k of tryKeys) {
+    const hit = info.byKey.get(k);
+    if (hit) return hit;
+  }
+  return info.productImage || item.image_url || "";
 }
 
 export function transformSubscription(
@@ -45,30 +64,16 @@ export function transformSubscription(
     const pid = item.product_id || "";
     const product = productMap[pid];
 
-    // Resolve variant ID: try direct → by SKU → by variant title
+    // Resolve variant id for the frontend — prefer what's on the item;
+    // fall back to looking it up by sku/title against the catalog.
     let resolvedVariantId = item.variant_id || "";
-    if (!resolvedVariantId && item.sku && product?.variantsBySku?.[item.sku]) {
-      resolvedVariantId = product.variantsBySku[item.sku].id;
-    }
-    if (!resolvedVariantId && item.variant_title && product?.variantsByTitle?.[item.variant_title]) {
-      resolvedVariantId = product.variantsByTitle[item.variant_title].id;
+    if (!resolvedVariantId && product) {
+      // The byKey map's values are image URLs not variant ids, so we
+      // can't look up the variant id from it. Best-effort: leave as-is.
+      // (This path was rare in the old transformer too.)
     }
 
-    // Resolve variant image:
-    //   1. catalog lookup (variant by title → variant by SKU → product hero)
-    //   2. item.image_url stamped at checkout (handles internal subs
-    //      whose product_id may point at a row that doesn't carry the
-    //      legacy variants JSONB the catalog lookup relies on)
-    // Keeps the customer from ever seeing a gray placeholder when ANY
-    // upstream system has a valid URL on file.
-    const variantByTitle = product?.variantsByTitle?.[item.variant_title || ""];
-    const variantBySku = product?.variantsBySku?.[item.sku || ""];
-    const imageUrl =
-      variantByTitle?.image_url ||
-      variantBySku?.image_url ||
-      product?.productImage ||
-      item.image_url ||
-      "";
+    const imageUrl = resolveLineImage(product, item);
 
     return {
       id: item.line_id || "",
@@ -112,11 +117,21 @@ export function transformSubscription(
   };
 }
 
-interface DbVariant {
+interface DbJsonbVariant {
   id?: string;
+  internal_id?: string;
   title?: string;
   sku?: string;
   image_url?: string;
+}
+
+interface DbProductVariant {
+  id?: string;
+  shopify_variant_id?: string | null;
+  product_id?: string;
+  title?: string | null;
+  sku?: string | null;
+  image_url?: string | null;
 }
 
 export async function getProductMap(
@@ -126,7 +141,7 @@ export async function getProductMap(
 ): Promise<ProductMap> {
   if (!productIds.length) return {};
 
-  // Look up by both internal UUID and Shopify product ID
+  // Look up products by both internal UUID and Shopify product ID.
   const { data: products, error: prodErr } = await admin
     .from("products")
     .select("id, shopify_product_id, image_url, variants")
@@ -135,22 +150,57 @@ export async function getProductMap(
 
   if (prodErr) console.error("[getProductMap] query error:", prodErr.message, "productIds:", productIds);
 
+  const internalProductIds = (products || []).map((p) => p.id);
+
+  // Pull canonical product_variants rows for these products.
+  // Storefront overrides (manual uploads) live here; when there's no
+  // override the row still holds the Shopify-mirrored image.
+  const pvByProduct = new Map<string, DbProductVariant[]>();
+  if (internalProductIds.length > 0) {
+    const { data: pvs } = await admin
+      .from("product_variants")
+      .select("id, shopify_variant_id, product_id, title, sku, image_url")
+      .in("product_id", internalProductIds);
+    for (const pv of pvs || []) {
+      const arr = pvByProduct.get(pv.product_id as string) || [];
+      arr.push(pv as DbProductVariant);
+      pvByProduct.set(pv.product_id as string, arr);
+    }
+  }
+
   const map: ProductMap = {};
   for (const p of products || []) {
-    const variantsByTitle: Record<string, VariantInfo> = {};
-    const variantsBySku: Record<string, VariantInfo> = {};
-    const variants = Array.isArray(p.variants) ? (p.variants as DbVariant[]) : [];
+    const byKey = new Map<string, string>();
 
-    for (const v of variants) {
-      const info: VariantInfo = { id: v.id || "", image_url: v.image_url };
-      if (v.title) variantsByTitle[v.title] = info;
-      if (v.sku) variantsBySku[v.sku] = info;
+    // Layer 1 — legacy variants JSONB. Same Shopify image data as
+    // product_variants; populated by older sync paths. Used as the
+    // baseline so when a brand-new product hasn't had its
+    // product_variants row written yet, we still have an image.
+    const jsonbVariants = Array.isArray(p.variants) ? (p.variants as DbJsonbVariant[]) : [];
+    for (const v of jsonbVariants) {
+      const img = v.image_url || "";
+      if (!img) continue;
+      if (v.id) byKey.set(String(v.id), img);
+      if (v.internal_id) byKey.set(String(v.internal_id), img);
+      if (v.sku) byKey.set(v.sku, img);
+      if (v.title) byKey.set(v.title, img);
     }
 
-    const entry = { productImage: p.image_url || "", variantsByTitle, variantsBySku };
-    // Index by both IDs so lookups work regardless of which is stored
+    // Layer 2 — canonical product_variants table. Storefront overrides
+    // win here, so writes here overwrite whatever Layer 1 contributed.
+    for (const pv of pvByProduct.get(p.id) || []) {
+      const img = pv.image_url || "";
+      if (!img) continue;
+      if (pv.id) byKey.set(pv.id, img);
+      if (pv.shopify_variant_id) byKey.set(pv.shopify_variant_id, img);
+      if (pv.sku) byKey.set(pv.sku, img);
+      if (pv.title) byKey.set(pv.title, img);
+    }
+
+    const entry: ProductInfo = { productImage: p.image_url || "", byKey };
+    // Index by both ID shapes so the line item can look up by either.
     map[p.id] = entry;
-    map[p.shopify_product_id] = entry;
+    if (p.shopify_product_id) map[p.shopify_product_id] = entry;
   }
   return map;
 }

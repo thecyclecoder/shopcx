@@ -1,15 +1,20 @@
 /**
  * Hydrate `image_url` on subscription + order line items by falling
- * back through the products catalog:
- *   1. Manual product_media slot='hero' (admin-uploaded storefront image)
- *   2. products.variants[].image_url matching by variant_id, sku, or
- *      variant_title (Shopify-synced per-variant image)
- *   3. products.image_url (Shopify-synced product hero)
+ * through the variant-image priority chain:
+ *
+ *   1. product_variants.image_url — canonical UUID rows; storefront
+ *      override (admin upload) wins here when present, otherwise this
+ *      row carries the Shopify-synced variant image. Matched against
+ *      the item by internal_id, shopify_variant_id, sku, or title.
+ *   2. products.variants[].image_url — legacy JSONB mirror. Same data
+ *      Shopify originally synced; used as a fallback when the
+ *      canonical table doesn't have a hit.
+ *   3. products.image_url — Shopify product hero. Final fallback only
+ *      when no variant-level image exists anywhere.
  *
  * Server-side only — designed for SSR enrichment in /portal/[slug]/page.tsx
  * and /portal/[slug]/subscriptions/[id]/page.tsx so the customer's first
- * paint never shows a gray placeholder for an item that has a Shopify
- * image available.
+ * paint always shows whatever's available upstream.
  */
 
 import type { createAdminClient } from "@/lib/supabase/admin";
@@ -24,32 +29,19 @@ interface LineItemLike {
   image_url?: string | null;
 }
 
-interface VariantRow {
-  id?: string;
-  title?: string;
-  sku?: string;
-  image_url?: string;
-}
-
-interface ProductRow {
-  id: string;
-  shopify_product_id: string | null;
-  image_url: string | null;
-  variants: VariantRow[] | null;
-}
-
 interface ProductLookup {
   productImage: string;
-  byVariantId: Map<string, string>;
-  bySku: Map<string, string>;
-  byVariantTitle: Map<string, string>;
+  // All keyed by string. Different rows may write the same image under
+  // different keys (internal_id, shopify_id, sku, title) so we keep
+  // separate maps and let the caller try each in priority order.
+  byKey: Map<string, string>;
 }
 
 /**
  * Build a lookup map keyed by both internal_id and shopify_product_id.
  * `ids` may contain either UUIDs or Shopify ids — we accept both since
- * the line items in older orders + subs use Shopify ids while newer rows
- * use the internal UUID.
+ * the line items in older orders + subs use Shopify ids while newer
+ * rows use the internal UUID.
  */
 async function buildLookup(admin: AdminClient, workspaceId: string, ids: string[]): Promise<Map<string, ProductLookup>> {
   const map = new Map<string, ProductLookup>();
@@ -61,38 +53,57 @@ async function buildLookup(admin: AdminClient, workspaceId: string, ids: string[
     .eq("workspace_id", workspaceId)
     .or(ids.map((id) => `id.eq.${id},shopify_product_id.eq.${id}`).join(","));
 
-  // Manually-uploaded storefront media (slot='hero') takes precedence
-  // over the Shopify-synced product image when the admin has bothered
-  // to set one. Tracked in product_media keyed by our internal UUID.
-  const internalIds = (products || []).map((p) => p.id);
-  const heroByProduct = new Map<string, string>();
-  if (internalIds.length > 0) {
-    const { data: media } = await admin
-      .from("product_media")
-      .select("product_id, url")
-      .in("product_id", internalIds)
-      .eq("slot", "hero")
-      .order("display_order", { ascending: true });
-    for (const m of media || []) {
-      if (m.url && !heroByProduct.has(m.product_id as string)) {
-        heroByProduct.set(m.product_id as string, m.url as string);
-      }
+  const internalProductIds = (products || []).map((p) => p.id);
+
+  // Pull product_variants — canonical UUID rows. Storefront overrides
+  // live here; if no override, the row still carries the Shopify image
+  // mirrored from Shopify sync.
+  const variantsByProduct = new Map<string, Array<{
+    id?: string;
+    shopify_variant_id?: string | null;
+    sku?: string | null;
+    title?: string | null;
+    image_url?: string | null;
+  }>>();
+  if (internalProductIds.length > 0) {
+    const { data: pvs } = await admin
+      .from("product_variants")
+      .select("id, shopify_variant_id, sku, title, image_url, product_id")
+      .in("product_id", internalProductIds);
+    for (const pv of pvs || []) {
+      const arr = variantsByProduct.get(pv.product_id as string) || [];
+      arr.push(pv);
+      variantsByProduct.set(pv.product_id as string, arr);
     }
   }
 
-  for (const p of (products || []) as ProductRow[]) {
-    const byVariantId = new Map<string, string>();
-    const bySku = new Map<string, string>();
-    const byVariantTitle = new Map<string, string>();
+  for (const p of (products || []) as Array<{ id: string; shopify_product_id: string | null; image_url: string | null; variants: Array<{ id?: string; sku?: string; title?: string; image_url?: string; internal_id?: string }> | null }>) {
+    const byKey = new Map<string, string>();
+
+    // Layer 2 first (legacy JSONB) — gives us a baseline by every key
+    // shape it knows about. Layer 1 then overwrites where it has a
+    // better value.
     for (const v of p.variants || []) {
       const img = v.image_url || "";
       if (!img) continue;
-      if (v.id) byVariantId.set(String(v.id), img);
-      if (v.sku) bySku.set(v.sku, img);
-      if (v.title) byVariantTitle.set(v.title, img);
+      if (v.id) byKey.set(String(v.id), img);
+      if (v.internal_id) byKey.set(String(v.internal_id), img);
+      if (v.sku) byKey.set(v.sku, img);
+      if (v.title) byKey.set(v.title, img);
     }
-    const productImage = heroByProduct.get(p.id) || p.image_url || "";
-    const entry: ProductLookup = { productImage, byVariantId, bySku, byVariantTitle };
+
+    // Layer 1 (canonical product_variants table) — storefront overrides
+    // win here. Index by every key shape the line items might carry.
+    for (const pv of variantsByProduct.get(p.id) || []) {
+      const img = pv.image_url || "";
+      if (!img) continue;
+      if (pv.id) byKey.set(pv.id, img);
+      if (pv.shopify_variant_id) byKey.set(pv.shopify_variant_id, img);
+      if (pv.sku) byKey.set(pv.sku, img);
+      if (pv.title) byKey.set(pv.title, img);
+    }
+
+    const entry: ProductLookup = { productImage: p.image_url || "", byKey };
     map.set(p.id, entry);
     if (p.shopify_product_id) map.set(p.shopify_product_id, entry);
   }
@@ -101,13 +112,15 @@ async function buildLookup(admin: AdminClient, workspaceId: string, ids: string[
 
 function resolveImage(lookup: ProductLookup | undefined, item: LineItemLike): string | null {
   if (!lookup) return null;
-  const vid = item.variant_id != null ? String(item.variant_id) : "";
-  const variantImg =
-    (vid && lookup.byVariantId.get(vid)) ||
-    (item.sku && lookup.bySku.get(item.sku)) ||
-    (item.variant_title && lookup.byVariantTitle.get(item.variant_title)) ||
-    "";
-  return variantImg || lookup.productImage || null;
+  const tryKeys: string[] = [];
+  if (item.variant_id != null) tryKeys.push(String(item.variant_id));
+  if (item.sku) tryKeys.push(item.sku);
+  if (item.variant_title) tryKeys.push(item.variant_title);
+  for (const k of tryKeys) {
+    const hit = lookup.byKey.get(k);
+    if (hit) return hit;
+  }
+  return lookup.productImage || null;
 }
 
 /**
@@ -119,8 +132,6 @@ function resolveImage(lookup: ProductLookup | undefined, item: LineItemLike): st
 export async function enrichLineItemImages<
   T extends { items?: LineItemLike[] | unknown; line_items?: LineItemLike[] | unknown },
 >(admin: AdminClient, workspaceId: string, rows: T[]): Promise<T[]> {
-  // Collect every product_id we'll need to look up — across both
-  // subscriptions (rows.items) and orders (rows.line_items).
   const ids = new Set<string>();
   for (const r of rows) {
     const items = (Array.isArray(r.items) ? r.items : Array.isArray(r.line_items) ? r.line_items : []) as LineItemLike[];
