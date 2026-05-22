@@ -123,6 +123,7 @@ interface Props {
 export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
   const [contract, setContract] = useState<Contract | null>(null);
   const [catalog, setCatalog] = useState<CatalogProduct[]>([]);
+  const [shipProtVariantIds, setShipProtVariantIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionPhase, setActionPhase] = useState<ActionPhase>("idle");
@@ -152,7 +153,9 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
       const r = await fetch("/api/portal?route=bootstrap", { credentials: "same-origin" });
       if (!r.ok) return;
       const data = await r.json();
-      if (Array.isArray(data?.catalog)) setCatalog(data.catalog as CatalogProduct[]);
+      const cfg = (data?.config || {}) as { catalog?: CatalogProduct[]; shippingProtectionProductIds?: string[] };
+      if (Array.isArray(cfg.catalog)) setCatalog(cfg.catalog);
+      if (Array.isArray(cfg.shippingProtectionProductIds)) setShipProtVariantIds(cfg.shippingProtectionProductIds);
     } catch { /* non-fatal — items card just disables add/swap */ }
   }, []);
 
@@ -204,12 +207,24 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
         weekday: "long", month: "long", day: "numeric", year: "numeric",
       })
     : null;
-  const realLines = (contract.lines || []).filter((l) => !l.is_gift);
+  // Shipping protection lives as a line item on the contract (the
+  // warehouse charges $3.75 per shipment). We detect it by variant id
+  // against the workspace's configured shipping-protection variants
+  // so we can pull it out of the items card and surface it as its
+  // own toggle below.
+  const shipProtSet = new Set(shipProtVariantIds.map(String));
+  const shipLine = (contract.lines || []).find((l) => shipProtSet.has(String(l.variantId || "")));
+  const realLines = (contract.lines || []).filter(
+    (l) => !l.is_gift && !shipProtSet.has(String(l.variantId || "")),
+  );
   const subtotalCents = realLines.reduce((s, l) => {
     const price = parseFloat(l.currentPrice?.amount || "0");
     return s + Math.round(price * 100) * (l.quantity || 1);
   }, 0);
   const isCancelled = status === "cancelled";
+  const productIdsForReviews = Array.from(new Set(
+    realLines.map((l) => String(l.productId || "")).filter(Boolean),
+  ));
 
   return (
     <div className="space-y-5">
@@ -262,7 +277,8 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
         </header>
       </article>
 
-      {/* Items + per-line actions */}
+      {/* Items + per-line actions — shipping protection has its own
+          dedicated toggle card below, so hide it from the items list. */}
       <ItemsActionsCard
         contract={contract}
         catalog={catalog}
@@ -270,6 +286,7 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
         primaryColor={workspace.primaryColor}
         onMutate={loadContract}
         action={action}
+        excludeVariantIds={shipProtVariantIds}
       />
 
       {/* Cadence + lifecycle controls — status-dependent */}
@@ -290,9 +307,20 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
       {/* Account-level cards — only on live subs */}
       {!isCancelled && (
         <>
+          {shipProtVariantIds.length > 0 && (
+            <ShippingProtectionCard
+              contract={contract}
+              shipLine={shipLine}
+              variantIds={shipProtVariantIds}
+              onMutate={loadContract}
+              action={action}
+            />
+          )}
           <AddressCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
           <CouponCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
           <PaymentMethodCard contract={contract} />
+          <RewardsCard contract={contract} primaryColor={workspace.primaryColor} action={action} />
+          {productIdsForReviews.length > 0 && <ReviewsCard productIds={productIdsForReviews} />}
           <CancelCard contract={contract} action={action} />
         </>
       )}
@@ -309,7 +337,7 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
 // ──────────────────────────── items card ────────────────────────────
 
 function ItemsActionsCard({
-  contract, catalog, isCancelled, primaryColor, onMutate, action,
+  contract, catalog, isCancelled, primaryColor, onMutate, action, excludeVariantIds,
 }: {
   contract: Contract;
   catalog: CatalogProduct[];
@@ -317,13 +345,17 @@ function ItemsActionsCard({
   primaryColor: string;
   onMutate: () => Promise<void>;
   action: ActionApi;
+  excludeVariantIds?: string[];
 }) {
   const [modal, setModal] = useState<
     | { type: "addSwap"; mode: "add" | "swap"; line?: ContractLine }
     | { type: "quantity"; line: ContractLine }
     | null
   >(null);
-  const lines = (contract.lines || []).filter((l) => !l.is_gift);
+  const excluded = new Set((excludeVariantIds || []).map(String));
+  const lines = (contract.lines || []).filter(
+    (l) => !l.is_gift && !excluded.has(String(l.variantId || "")),
+  );
   const canRemove = lines.length > 1;
 
   return (
@@ -1916,6 +1948,377 @@ function CancelCard({ contract, action }: { contract: Contract; action: ActionAp
         </button>
       </div>
     </article>
+  );
+}
+
+// ───────────────────── chunk 5 cards (cross-sell trio) ─────────────────────
+
+function ShippingProtectionCard({
+  contract, shipLine, variantIds, onMutate, action,
+}: {
+  contract: Contract;
+  shipLine?: ContractLine;
+  variantIds: string[];
+  onMutate: () => Promise<void>;
+  action: ActionApi;
+}) {
+  const hasShipProt = !!shipLine;
+  const [busy, setBusy] = useState(false);
+
+  async function toggle() {
+    if (busy) return;
+    setBusy(true);
+    action.startAction();
+    try {
+      if (hasShipProt && shipLine) {
+        const res = await fetch("/api/portal?route=removeLineItem", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ contractId: contract.id, lineId: shipLine.id, variantId: shipLine.variantId }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data?.error) { action.failAction(data?.message || data?.error || undefined); return; }
+        action.completeAction("Shipping protection removed");
+      } else {
+        const res = await fetch("/api/portal?route=replaceVariants", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ contractId: contract.id, newVariants: [{ variantId: String(variantIds[0]), quantity: 1 }] }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data?.error) { action.failAction(data?.message || data?.error || undefined); return; }
+        action.completeAction("Shipping protection added");
+      }
+      await onMutate();
+    } catch { action.failAction(); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <article
+      className={`overflow-hidden rounded-2xl border p-5 ${
+        hasShipProt ? "border-emerald-200 bg-emerald-50" : "border-zinc-200 bg-white"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <div className={hasShipProt ? "text-emerald-600" : "text-zinc-400"}>
+            <svg className="h-7 w-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              {hasShipProt && <polyline points="9 12 11 14 15 10" />}
+            </svg>
+          </div>
+          <div>
+            <h3 className="text-base font-semibold text-zinc-900">Shipping protection</h3>
+            <p className={`mt-0.5 text-xs font-semibold uppercase tracking-wider ${
+              hasShipProt ? "text-emerald-700" : "text-zinc-500"
+            }`}>
+              {hasShipProt ? "Protected" : "Not protected"}
+            </p>
+          </div>
+        </div>
+        <ToggleSwitch on={hasShipProt} disabled={busy} onChange={toggle} />
+      </div>
+      <p className="mt-3 text-sm text-zinc-600">
+        {hasShipProt
+          ? "Your orders are protected against loss, theft, and damage."
+          : "Protect against loss, theft, and damage."}
+      </p>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm">
+          <span className="text-zinc-400 line-through">$5.00</span>{" "}
+          <strong className="text-zinc-900">$3.75</strong>
+        </div>
+        <span className="rounded-full bg-zinc-900 px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white">
+          85% of customers choose this
+        </span>
+      </div>
+    </article>
+  );
+}
+
+function ToggleSwitch({ on, disabled, onChange }: { on: boolean; disabled?: boolean; onChange: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onChange}
+      disabled={disabled}
+      role="switch"
+      aria-checked={on}
+      className={`relative inline-flex h-7 w-12 flex-shrink-0 items-center rounded-full transition disabled:opacity-50 ${
+        on ? "bg-emerald-600" : "bg-zinc-300"
+      }`}
+    >
+      <span
+        className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${
+          on ? "translate-x-6" : "translate-x-1"
+        }`}
+      />
+    </button>
+  );
+}
+
+interface LoyaltyBalance {
+  ok?: boolean;
+  enabled?: boolean;
+  points_balance?: number;
+  dollar_value?: number;
+  tiers?: Array<{ index: number; label: string; points_cost: number; points_needed?: number; affordable: boolean }>;
+  unused_coupons?: Array<{ id: string; code: string; discount_value: number; status: string; expires_at?: string }>;
+}
+
+function RewardsCard({ contract, primaryColor, action }: { contract: Contract; primaryColor: string; action: ActionApi }) {
+  const [data, setData] = useState<LoyaltyBalance | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  void contract;
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/portal?route=loyaltyBalance", { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: LoyaltyBalance | null) => { if (alive && d?.ok && d?.enabled) setData(d); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  async function redeemTier(tierIndex: number) {
+    setBusy(String(tierIndex));
+    action.startAction();
+    try {
+      const res = await fetch("/api/portal?route=loyaltyRedeem", {
+        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
+        body: JSON.stringify({ tierId: tierIndex }),
+      });
+      const r = await res.json().catch(() => ({}));
+      if (!r?.ok) { action.failAction(r?.error || undefined); return; }
+      action.completeAction(`Coupon ${r.code} created — $${r.discount_value} off`);
+      const fresh = await fetch("/api/portal?route=loyaltyBalance", { credentials: "same-origin" }).then((rr) => (rr.ok ? rr.json() : null));
+      if (fresh?.ok && fresh?.enabled) setData(fresh as LoyaltyBalance);
+    } catch { action.failAction(); }
+    finally { setBusy(null); }
+  }
+
+  if (!data) return null;
+  const { points_balance = 0, dollar_value = 0, tiers = [], unused_coupons = [] } = data;
+  const hasCoupons = unused_coupons.length > 0;
+
+  return (
+    <ActionCard title="Rewards" subtitle="Your points and perks.">
+      <div className="flex items-center gap-3 rounded-xl bg-gradient-to-br from-amber-50 to-orange-50 p-4">
+        <div className="text-3xl">🎁</div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm text-zinc-700">
+            You have <strong>{points_balance.toLocaleString()}</strong> reward points
+          </div>
+          {dollar_value > 0 && (
+            <div className="mt-0.5 text-xs text-zinc-600">
+              That&apos;s worth <strong>${dollar_value.toFixed(2)}</strong> in rewards
+            </div>
+          )}
+        </div>
+        {dollar_value > 0 && (
+          <span
+            className="rounded-full px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-white"
+            style={{ background: primaryColor }}
+          >
+            ${dollar_value.toFixed(0)} value
+          </span>
+        )}
+      </div>
+
+      {tiers.length > 0 && (
+        <div>
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Redeem your points</div>
+          <ul className="space-y-2">
+            {tiers.map((t) => (
+              <li key={t.index}>
+                <button
+                  type="button"
+                  disabled={!t.affordable || busy != null}
+                  onClick={() => redeemTier(t.index)}
+                  className={`flex w-full items-center justify-between rounded-lg border p-3 text-left transition ${
+                    t.affordable
+                      ? "border-amber-300 bg-amber-50 hover:bg-amber-100"
+                      : "border-zinc-200 bg-zinc-50 opacity-60"
+                  } disabled:cursor-not-allowed`}
+                >
+                  <span className="text-sm font-semibold text-zinc-900">{t.label}</span>
+                  <span className="text-xs font-medium text-zinc-600">
+                    {busy === String(t.index)
+                      ? "Redeeming…"
+                      : t.affordable
+                        ? `${t.points_cost.toLocaleString()} pts`
+                        : `Need ${(t.points_needed || 0).toLocaleString()} more`}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {hasCoupons && (
+        <div>
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Your coupons</div>
+          <ul className="space-y-2">
+            {unused_coupons.map((c) => (
+              <li key={c.id} className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white p-3">
+                <div className="min-w-0 flex-1">
+                  <span className="font-mono text-sm font-semibold text-zinc-900">{c.code}</span>
+                  <span className="ml-2 text-xs text-zinc-600">${Math.round(c.discount_value)} off</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {c.status === "active" && (
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-700">
+                      Ready
+                    </span>
+                  )}
+                  {c.status === "applied" && (
+                    <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-blue-700">
+                      Applied
+                    </span>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </ActionCard>
+  );
+}
+
+interface ReviewRow {
+  summary?: string;
+  title?: string;
+  body?: string;
+  author?: string;
+  rating?: number;
+  featured?: boolean;
+}
+
+const REVIEWS_ROTATE_MS = 15000;
+const REVIEW_TRUNCATE = 260;
+
+function truncateReview(str: string, max: number): { text: string; cut: boolean } {
+  if (!str || str.length <= max) return { text: str || "", cut: false };
+  let cut = str.slice(0, max);
+  const sp = cut.lastIndexOf(" ");
+  if (sp > max * 0.6) cut = cut.slice(0, sp);
+  return { text: cut.replace(/\s+$/, "") + "…", cut: true };
+}
+
+function ReviewsCard({ productIds }: { productIds: string[] }) {
+  const [reviews, setReviews] = useState<ReviewRow[]>([]);
+  const [idx, setIdx] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    const ids = productIds.filter(Boolean).join(",");
+    if (!ids) return;
+    fetch(`/api/portal?route=reviews&productIds=${encodeURIComponent(ids)}`, { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { ok?: boolean; by_product_id?: Record<string, { ok?: boolean; reviews?: ReviewRow[] }> } | null) => {
+        if (!alive || !data?.ok || !data.by_product_id) return;
+        const byPid = data.by_product_id;
+        // Round-robin: pick the next review from each product per round,
+        // featured-first within each product. Same as the Preact source.
+        const orderedPids = productIds.filter((pid) => {
+          const e = byPid[pid];
+          return e?.ok && Array.isArray(e.reviews) && e.reviews.length > 0;
+        });
+        const sorted: Record<string, ReviewRow[]> = {};
+        for (const pid of orderedPids) {
+          const rs = [...(byPid[pid].reviews || [])].filter((r) => r.summary || r.title || r.body);
+          rs.sort((a, b) => {
+            if (a.featured && !b.featured) return -1;
+            if (!a.featured && b.featured) return 1;
+            return (b.rating || 0) - (a.rating || 0);
+          });
+          sorted[pid] = rs;
+        }
+        const seq: ReviewRow[] = [];
+        const maxRounds = Math.max(0, ...orderedPids.map((pid) => sorted[pid].length));
+        for (let round = 0; round < maxRounds; round++) {
+          for (const pid of orderedPids) {
+            if (round < sorted[pid].length) seq.push(sorted[pid][round]);
+          }
+        }
+        setReviews(seq);
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [productIds]);
+
+  useEffect(() => {
+    if (reviews.length <= 1) return;
+    const t = setInterval(() => setIdx((i) => (i + 1) % reviews.length), REVIEWS_ROTATE_MS);
+    return () => clearInterval(t);
+  }, [reviews.length]);
+
+  if (!reviews.length) return null;
+
+  const r = reviews[idx % reviews.length] || {};
+  const headline = r.summary || r.title || (r.body ? r.body.split(/[.!?]/)[0] + "." : "Loved it");
+  const bodyRaw = r.body || "";
+  const showBody = bodyRaw && bodyRaw !== headline;
+  const { text: bodyText, cut } = showBody ? truncateReview(bodyRaw, REVIEW_TRUNCATE) : { text: "", cut: false };
+  const author = r.author || "Verified Customer";
+
+  return (
+    <ActionCard title="Reviews" subtitle="What customers are saying.">
+      <div className="text-2xl text-amber-500" aria-label="5 out of 5 stars">★★★★★</div>
+      <div className="text-base font-semibold text-zinc-900">
+        <span className="mr-1 text-2xl text-zinc-300" aria-hidden>“</span>
+        {headline}
+      </div>
+      {showBody && bodyText && (
+        <p className="text-sm italic text-zinc-600">“{bodyText}”</p>
+      )}
+      {cut && (
+        <button
+          type="button"
+          onClick={(e) => e.preventDefault()}
+          className="text-xs font-semibold text-zinc-600 underline"
+        >
+          Read full review
+        </button>
+      )}
+      <div className="flex items-center justify-between">
+        <div className="text-xs text-zinc-500">
+          <strong className="text-zinc-700">{author}</strong>
+          <span className="mx-2 text-zinc-300">•</span>
+          <span className="inline-flex items-center gap-1 text-emerald-600">
+            <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20" aria-hidden>
+              <path fillRule="evenodd" d="M16.7 5.3a1 1 0 010 1.4l-7.4 7.4a1 1 0 01-1.4 0L3.3 9.5a1 1 0 011.4-1.4l3.9 3.9 6.7-6.7a1 1 0 011.4 0z" clipRule="evenodd" />
+            </svg>
+            Verified
+          </span>
+        </div>
+        {reviews.length > 1 && (
+          <div className="flex gap-1">
+            <button
+              type="button"
+              aria-label="Previous review"
+              onClick={() => setIdx((i) => (i - 1 + reviews.length) % reviews.length)}
+              className="rounded-md border border-zinc-200 bg-white px-2 py-1 text-xs text-zinc-600 hover:border-zinc-300"
+            >
+              ‹
+            </button>
+            <button
+              type="button"
+              aria-label="Next review"
+              onClick={() => setIdx((i) => (i + 1) % reviews.length)}
+              className="rounded-md border border-zinc-200 bg-white px-2 py-1 text-xs text-zinc-600 hover:border-zinc-300"
+            >
+              ›
+            </button>
+          </div>
+        )}
+      </div>
+    </ActionCard>
   );
 }
 

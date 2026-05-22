@@ -142,16 +142,16 @@ export default function PortalClient(props: Props) {
             : "hidden lg:block")
         }
       >
-        <div className="flex h-16 items-center justify-between border-b border-zinc-200 px-5">
+        <div className="flex h-20 items-center justify-between border-b border-zinc-200 px-5">
           {props.workspace.logoUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={transformLogoUrl(props.workspace.logoUrl, 80)}
+              src={transformLogoUrl(props.workspace.logoUrl, 128)}
               alt={props.workspace.name}
-              className="h-10 w-auto"
+              className="h-16 w-auto"
             />
           ) : (
-            <span className="text-lg font-semibold text-zinc-900">{props.workspace.name}</span>
+            <span className="text-xl font-semibold text-zinc-900">{props.workspace.name}</span>
           )}
           <button
             type="button"
