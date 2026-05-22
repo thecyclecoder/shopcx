@@ -136,7 +136,7 @@ function SubCard({ sub, primaryColor }: { sub: PortalSubscription; primaryColor:
         ))}
       </ul>
 
-      <div className="border-t border-zinc-100 bg-zinc-50 p-4 sm:p-5">
+      <div className="flex justify-end border-t border-zinc-100 bg-zinc-50 px-4 py-3 sm:px-5">
         <a
           href={`/subscriptions/${sub.id}`}
           onClick={(e) => {
@@ -146,10 +146,13 @@ function SubCard({ sub, primaryColor }: { sub: PortalSubscription; primaryColor:
             e.preventDefault();
             window.location.href = `/subscriptions/${sub.id}`;
           }}
-          className="block w-full rounded-lg px-4 py-2.5 text-center text-sm font-semibold text-white transition hover:opacity-90"
+          className="inline-flex items-center gap-1 rounded-lg px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90"
           style={{ background: primaryColor }}
         >
           Manage subscription
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+          </svg>
         </a>
       </div>
     </article>
