@@ -315,6 +315,43 @@ export const textCampaignSendTick = inngest.createFunction(
       }));
     });
 
+    // ── Inline shortcode safety net ────────────────────────────────
+    // If any recipient's customer is missing a short_code (e.g. a
+    // legacy row pre-dating the trigger migration), generate one
+    // before we build the personalized shortlink. Without this, the
+    // send falls back to the bare campaign slug and we lose click
+    // attribution to that customer. The trigger from migration
+    // 20260518160000 fires on a no-op UPDATE that touches the
+    // sms_marketing_status column, so we kick it that way.
+    const missingCode = due.filter((r) => r.customer_id && !r.customer_short_code);
+    if (missingCode.length > 0) {
+      await step.run("ensure-shortcodes", async () => {
+        const admin = createAdminClient();
+        const ids = [...new Set(missingCode.map((r) => r.customer_id as string))];
+        // Trigger needs the OF column actually present in the UPDATE.
+        // Setting sms_marketing_status to itself is a no-op value-wise
+        // but does fire BEFORE UPDATE OF sms_marketing_status.
+        for (const cid of ids) {
+          await admin
+            .from("customers")
+            .update({ sms_marketing_status: "subscribed", updated_at: new Date().toISOString() })
+            .eq("id", cid)
+            .eq("sms_marketing_status", "subscribed")
+            .is("short_code", null);
+        }
+        const { data: refreshed } = await admin
+          .from("customers")
+          .select("id, short_code")
+          .in("id", ids);
+        const map = new Map((refreshed || []).map((c) => [c.id as string, c.short_code as string | null]));
+        for (const r of due) {
+          if (r.customer_id && !r.customer_short_code) {
+            r.customer_short_code = map.get(r.customer_id) || null;
+          }
+        }
+      });
+    }
+
     if (due.length === 0) return { sent: 0 };
 
     // ── 12-hour rate limit safety net ────────────────────────────
