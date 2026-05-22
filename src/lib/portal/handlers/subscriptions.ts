@@ -89,15 +89,24 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
   const general = (portalConfig.general || {}) as Record<string, unknown>;
   const lockDays = Number(general.lock_days) || 7;
 
-  // Get product images for all items across all subscriptions
+  // Get product images for all items across all subscriptions. Collect
+  // both product_ids and variant_ids — Appstle webhook items may carry
+  // either or both, and the getProductMap helper resolves through both.
   const allProductIds = new Set<string>();
+  const allVariantIds = new Set<string>();
   for (const sub of allSubs) {
     const items = Array.isArray(sub.items) ? sub.items : [];
     for (const item of items) {
       if (item?.product_id) allProductIds.add(item.product_id);
+      if (item?.variant_id) allVariantIds.add(String(item.variant_id));
     }
   }
-  const productMap = await getProductMap(admin, auth.workspaceId, Array.from(allProductIds));
+  const productMap = await getProductMap(
+    admin,
+    auth.workspaceId,
+    Array.from(allProductIds),
+    Array.from(allVariantIds),
+  );
 
   // Load dunning status for all contracts
   const contractIds = allSubs.map(s => s.shopify_contract_id).filter(Boolean);

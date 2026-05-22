@@ -137,18 +137,59 @@ interface DbProductVariant {
 export async function getProductMap(
   admin: ReturnType<typeof import("@/lib/supabase/admin").createAdminClient>,
   workspaceId: string,
-  productIds: string[]
+  productIds: string[],
+  variantIds: string[] = [],
 ): Promise<ProductMap> {
-  if (!productIds.length) return {};
+  if (!productIds.length && !variantIds.length) return {};
 
-  // Look up products by both internal UUID and Shopify product ID.
-  const { data: products, error: prodErr } = await admin
-    .from("products")
+  // Partition each set by id shape — UUIDs go to the `id`/`product_id`
+  // columns, numeric Shopify ids go to `shopify_*_id`. Mixing them in
+  // a single OR makes Postgres reject the whole query with "invalid
+  // input syntax for type uuid" when any branch passes a numeric
+  // string to a UUID column.
+  const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+  const variantUuids = variantIds.filter(isUuid);
+  const variantShopifyIds = variantIds.filter((s) => !isUuid(s));
+
+  // Variant-direct seed pass — when subscription items carry only a
+  // variant_id (or carry a variant_id we can't link to a product via
+  // the product_ids set) we still need a way to find the product.
+  const variantSeededProductIds: string[] = [];
+  if (variantUuids.length > 0 || variantShopifyIds.length > 0) {
+    let q = admin.from("product_variants").select("product_id").eq("workspace_id", workspaceId);
+    if (variantUuids.length > 0 && variantShopifyIds.length > 0) {
+      q = q.or(`id.in.(${variantUuids.join(",")}),shopify_variant_id.in.(${variantShopifyIds.map(s => `"${s}"`).join(",")})`);
+    } else if (variantUuids.length > 0) {
+      q = q.in("id", variantUuids);
+    } else {
+      q = q.in("shopify_variant_id", variantShopifyIds);
+    }
+    const { data: pvSeed } = await q;
+    for (const pv of pvSeed || []) {
+      if (pv.product_id) variantSeededProductIds.push(pv.product_id as string);
+    }
+  }
+  const allProductIds = Array.from(new Set([...productIds, ...variantSeededProductIds]));
+  if (allProductIds.length === 0) return {};
+
+  const productUuids = allProductIds.filter(isUuid);
+  const productShopifyIds = allProductIds.filter((s) => !isUuid(s));
+
+  // Look up products by id-shape. Same UUID/numeric split as above so
+  // Postgres doesn't reject the query.
+  let prodQuery = admin.from("products")
     .select("id, shopify_product_id, image_url, variants")
-    .eq("workspace_id", workspaceId)
-    .or(productIds.map(id => `id.eq.${id},shopify_product_id.eq.${id}`).join(","));
+    .eq("workspace_id", workspaceId);
+  if (productUuids.length > 0 && productShopifyIds.length > 0) {
+    prodQuery = prodQuery.or(`id.in.(${productUuids.join(",")}),shopify_product_id.in.(${productShopifyIds.map(s => `"${s}"`).join(",")})`);
+  } else if (productUuids.length > 0) {
+    prodQuery = prodQuery.in("id", productUuids);
+  } else {
+    prodQuery = prodQuery.in("shopify_product_id", productShopifyIds);
+  }
+  const { data: products, error: prodErr } = await prodQuery;
 
-  if (prodErr) console.error("[getProductMap] query error:", prodErr.message, "productIds:", productIds);
+  if (prodErr) console.error("[getProductMap] query error:", prodErr.message, "productIds:", allProductIds);
 
   const internalProductIds = (products || []).map((p) => p.id);
 

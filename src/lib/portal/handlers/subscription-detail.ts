@@ -47,11 +47,18 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     }
   }
 
-  // Get product images for items
-  const productIds = (Array.isArray(sub.items) ? sub.items : [])
-    .map((item: { product_id?: string }) => item?.product_id)
-    .filter(Boolean) as string[];
-  const productMap = await getProductMap(admin, auth.workspaceId, [...new Set(productIds)]);
+  // Get product images for items — pass both product_ids and
+  // variant_ids so the helper can resolve via either path (Appstle
+  // items may not carry product_id).
+  const itemsArr = (Array.isArray(sub.items) ? sub.items : []) as Array<{ product_id?: string; variant_id?: string | number }>;
+  const productIds = itemsArr.map((it) => it.product_id).filter(Boolean) as string[];
+  const variantIds = itemsArr.map((it) => (it.variant_id != null ? String(it.variant_id) : "")).filter(Boolean);
+  const productMap = await getProductMap(
+    admin,
+    auth.workspaceId,
+    [...new Set(productIds)],
+    [...new Set(variantIds)],
+  );
 
   // Transform to frontend shape
   const contract = transformSubscription(sub, productMap);
