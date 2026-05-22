@@ -186,8 +186,30 @@ export const textCampaignScheduled = inngest.createFunction(
         q = q.in("subscription_status", subStatuses);
       }
 
-      const { data } = await q.limit(200000); // raised cap for SMS-subscribed bases
-      let rows = (data || []) as Array<CustomerForTzResolve & { id: string; phone: string; segments: string[] | null; preferred_sms_send_hour: number | null }>;
+      // Paginate explicitly — Supabase's PostgREST enforces a 1000-
+      // row server cap regardless of the .limit() value, so a one-shot
+      // .limit(200000) silently truncates at 1000 and we lose 80% of
+      // a large audience. Walk in 1000-row pages until we drain the
+      // result set.
+      type AudienceRow = CustomerForTzResolve & {
+        id: string;
+        phone: string;
+        segments: string[] | null;
+        preferred_sms_send_hour: number | null;
+      };
+      const pageSize = 1000;
+      let rows: AudienceRow[] = [];
+      let from = 0;
+      // Safety stop at 250k rows so a runaway query can't OOM the
+      // Inngest worker — our largest sendable audience is ~138K.
+      while (rows.length < 250000) {
+        const { data, error } = await q.range(from, from + pageSize - 1);
+        if (error) throw new Error(`audience query: ${error.message}`);
+        const page = (data || []) as AudienceRow[];
+        rows.push(...page);
+        if (page.length < pageSize) break;
+        from += pageSize;
+      }
 
       // Segment exclude — recipient must match 0 of the excluded set.
       // PostgREST doesn't expose a `NOT overlaps` operator cleanly,
