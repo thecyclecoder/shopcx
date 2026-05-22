@@ -158,7 +158,18 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
   const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
   if (banCheck) return banCheck;
 
-  const contractId = url.searchParams.get("contractId") || "";
+  // Parse the body once up front so we can fall back to body.contractId
+  // for POST callers that send it that way (older mini-site bundles,
+  // stale browser caches). The query string remains the canonical
+  // source — body is just a safety net.
+  let bodyPayload: Record<string, unknown> | null = null;
+  if (req.method === "POST") {
+    try { bodyPayload = await req.clone().json(); } catch { bodyPayload = null; }
+  }
+  const contractId =
+    url.searchParams.get("contractId") ||
+    (bodyPayload?.contractId ? String(bodyPayload.contractId) : "") ||
+    "";
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
 
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
@@ -248,9 +259,9 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
     });
   }
 
-  // POST: Process cancel journey response
-  let payload: Record<string, unknown> | null = null;
-  try { payload = await req.json(); } catch { payload = null; }
+  // POST: Process cancel journey response. We already parsed the body
+  // up at the top for the contractId fallback — reuse it.
+  const payload = bodyPayload;
 
   const step = String(payload?.step || "");
   const journeySessionId = String(payload?.journeySessionId || "");

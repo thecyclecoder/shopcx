@@ -384,18 +384,23 @@ export async function POST(request: NextRequest) {
         billing_interval: "day",
         billing_interval_count: bucket.frequency_days,
         next_billing_date: nextBillingDate.toISOString(),
-        items: bucket.items.map((i) => ({
-          variant_id: i.variant_id,
-          product_id: i.product_id,
-          shopify_variant_id: i.shopify_variant_id,
-          title: i.title,
-          variant_title: i.variant_title,
-          image_url: i.image_url,
-          quantity: i.quantity,
-          price_cents: i.unit_price_cents,
-          sku: undefined,
-          is_gift: !!i.is_gift,
-        })),
+        // Free gifts are first-order-only — they don't persist as
+        // recurring subscription line items. The customer keeps the
+        // gift from their initial order, but the next renewal ships
+        // only the paid products they actually subscribed to.
+        items: bucket.items
+          .filter((i) => !i.is_gift)
+          .map((i) => ({
+            variant_id: i.variant_id,
+            product_id: i.product_id,
+            shopify_variant_id: i.shopify_variant_id,
+            title: i.title,
+            variant_title: i.variant_title,
+            image_url: i.image_url,
+            quantity: i.quantity,
+            price_cents: i.unit_price_cents,
+            sku: undefined,
+          })),
         delivery_price_cents: subDeliveryCents,
         applied_discounts: [],
         is_internal: true,

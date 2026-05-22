@@ -15,6 +15,7 @@
  */
 
 import type { PortalSubscription } from "../page";
+import { friendlyCadence } from "@/lib/portal/helpers/cadence";
 
 interface Props {
   subscriptions: PortalSubscription[];
@@ -75,7 +76,7 @@ function SubCard({ sub, primaryColor }: { sub: PortalSubscription; primaryColor:
         weekday: "long", month: "long", day: "numeric", year: "numeric",
       })
     : null;
-  const cadence = `Every ${sub.billing_interval_count} ${sub.billing_interval}${sub.billing_interval_count > 1 ? "s" : ""}`;
+  const cadence = friendlyCadence(sub.billing_interval, sub.billing_interval_count);
 
   return (
     <article className="overflow-hidden rounded-2xl border border-zinc-200 bg-white">

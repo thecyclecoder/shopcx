@@ -26,6 +26,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ActionOverlay, type ActionPhase } from "../_components/ActionOverlay";
+import { friendlyCadence } from "@/lib/portal/helpers/cadence";
 
 // ─────────────────────────────── types ──────────────────────────────
 
@@ -202,11 +203,10 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
   }
 
   const status = (contract.status || "").toLowerCase();
-  const cadence = (() => {
-    const interval = (contract.billingPolicy?.interval || contract.billingInterval || "month").toLowerCase();
-    const count = contract.billingPolicy?.intervalCount || contract.billingIntervalCount || 1;
-    return `Every ${count} ${interval}${count > 1 ? "s" : ""}`;
-  })();
+  const cadence = friendlyCadence(
+    contract.billingPolicy?.interval || contract.billingInterval,
+    contract.billingPolicy?.intervalCount || contract.billingIntervalCount,
+  );
   const next = contract.nextBillingDate
     ? new Date(contract.nextBillingDate).toLocaleDateString("en-US", {
         weekday: "long", month: "long", day: "numeric", year: "numeric",
@@ -1354,11 +1354,11 @@ function FrequencyCard({ contract, primaryColor, onMutate, action }: {
   const currentInterval = (contract.billingPolicy?.interval || contract.billingInterval || "").toUpperCase();
   const currentCount = Number(contract.billingPolicy?.intervalCount || contract.billingIntervalCount || 0);
   const isCurrent = (o: typeof options[number]) => o.interval === currentInterval && o.count === currentCount;
-  const currentLabel = options.find(isCurrent)?.label || (() => {
-    const interval = (contract.billingPolicy?.interval || contract.billingInterval || "month").toLowerCase();
-    const count = contract.billingPolicy?.intervalCount || contract.billingIntervalCount || 1;
-    return `Every ${count} ${interval}${count > 1 ? "s" : ""}`;
-  })();
+  const currentLabel = options.find(isCurrent)?.label
+    || friendlyCadence(
+      contract.billingPolicy?.interval || contract.billingInterval,
+      contract.billingPolicy?.intervalCount || contract.billingIntervalCount,
+    );
 
   function save() {
     const opt = options.find((o) => o.label === selected);

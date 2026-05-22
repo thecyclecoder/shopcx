@@ -61,16 +61,21 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
 
   // Load portal config from workspace
   let portalConfig: Record<string, unknown> = {};
+  // Off-platform base review count from the storefront settings,
+  // added to each catalog product's count so the portal swap/add
+  // modal shows the same social proof the customer saw on the PDP.
+  let reviewBump = 0;
   if (auth.workspaceId) {
     const { data: ws } = await admin
       .from("workspaces")
-      .select("portal_config")
+      .select("portal_config, storefront_off_platform_review_count")
       .eq("id", auth.workspaceId)
       .single();
 
     if (ws?.portal_config && typeof ws.portal_config === "object") {
       portalConfig = ws.portal_config as Record<string, unknown>;
     }
+    reviewBump = Number(ws?.storefront_off_platform_review_count) || 0;
   }
 
   // Build product catalog for add/swap (from synced products table)
@@ -96,7 +101,7 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
         title: p.title,
         handle: p.handle,
         image: { src: p.image_url || "", alt: p.title },
-        rating: { value: p.rating || 0, count: p.rating_count || 0 },
+        rating: { value: p.rating || 0, count: (p.rating_count || 0) + reviewBump },
         variants: (Array.isArray(p.variants) ? p.variants : []).filter(
           (v: { inventory_quantity?: number }) => v.inventory_quantity == null || v.inventory_quantity > 0
         ),
