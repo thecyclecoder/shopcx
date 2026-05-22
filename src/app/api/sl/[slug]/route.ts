@@ -77,32 +77,21 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     resolvedCustomerId = cust?.id || null;
   }
 
-  // Fire-and-forget click logging. We don't await so the redirect
-  // is as fast as possible — typical SMS click is on cellular where
-  // every extra round-trip is felt.
-  void logClick(admin, request, shortlink, resolvedCustomerId);
-
-  // Engagement event for the segmentation pipeline (clicked_sms_60d
-  // bucket). Same shape as the Klaviyo-imported events so the
-  // segmentation scoring reads both sources uniformly.
-  if (resolvedCustomerId) {
-    // Look up the campaign id for the shortlink so we can attribute
-    // properly. Lightweight indexed lookup.
-    void (async () => {
-      const { data: link } = await admin
-        .from("marketing_shortlinks")
-        .select("campaign_id")
-        .eq("id", shortlink.id)
-        .maybeSingle();
-      await admin.from("profile_events").insert({
-        workspace_id: shortlink.workspace_id,
-        customer_id: resolvedCustomerId,
-        metric_name: "Clicked SMS",
-        datetime: new Date().toISOString(),
-        attributed_campaign_id: link?.campaign_id || null,
-      });
-    })();
-  }
+  // Click logging + engagement event. Both MUST be awaited — Vercel
+  // serverless kills any unresolved promises the moment the redirect
+  // response is returned, so a `void logClick(...)` pattern silently
+  // dropped the marketing_shortlink_clicks insert AND the
+  // profile_events insert. See feedback_vercel_fire_and_forget memory.
+  //
+  // Running in parallel keeps the added latency to a single DB round
+  // trip (~30-80ms), which is well under the cellular page-load wait
+  // the customer's already incurring.
+  await Promise.all([
+    logClick(admin, request, shortlink, resolvedCustomerId),
+    resolvedCustomerId
+      ? logEngagement(admin, shortlink, resolvedCustomerId)
+      : Promise.resolve(),
+  ]);
 
   const response = NextResponse.redirect(shortlink.target_url, 302);
   if (resolvedCustomerId) {
@@ -128,7 +117,10 @@ async function logClick(
     const referrer = request.headers.get("referer") || null;
     const recipientHint = request.nextUrl.searchParams.get("r"); // recipient id
 
-    await admin.from("marketing_shortlink_clicks").insert({
+    const now = new Date().toISOString();
+    // Run both writes in parallel — different rows, no ordering
+    // constraint between them, so we keep redirect latency tight.
+    const { error: insertErr } = await admin.from("marketing_shortlink_clicks").insert({
       workspace_id: shortlink.workspace_id,
       shortlink_id: shortlink.id,
       recipient_id: recipientHint || null,
@@ -137,9 +129,9 @@ async function logClick(
       ip_country: country,
       referrer,
     });
+    if (insertErr) console.error("[shortlink] click insert failed:", insertErr.message);
 
-    const now = new Date().toISOString();
-    await admin
+    const { error: updErr } = await admin
       .from("marketing_shortlinks")
       .update({
         click_count: shortlink.click_count + 1,
@@ -147,9 +139,37 @@ async function logClick(
         ...(shortlink.click_count === 0 ? { first_clicked_at: now } : {}),
       })
       .eq("id", shortlink.id);
-  } catch {
-    // Click logging is best-effort. A swallowed error here is far
-    // less bad than slowing down the redirect.
+    if (updErr) console.error("[shortlink] counter update failed:", updErr.message);
+  } catch (err) {
+    // Click logging is best-effort. Log the error so a real schema or
+    // RLS drift surfaces in Vercel logs instead of silently swallowing.
+    console.error("[shortlink] logClick threw:", err);
+  }
+}
+
+async function logEngagement(
+  admin: ReturnType<typeof createAdminClient>,
+  shortlink: { id: string; workspace_id: string },
+  customerId: string,
+) {
+  try {
+    // Lookup the campaign id so segmentation can attribute the click
+    // back to the campaign. Lightweight indexed lookup.
+    const { data: link } = await admin
+      .from("marketing_shortlinks")
+      .select("campaign_id")
+      .eq("id", shortlink.id)
+      .maybeSingle();
+    const { error } = await admin.from("profile_events").insert({
+      workspace_id: shortlink.workspace_id,
+      customer_id: customerId,
+      metric_name: "Clicked SMS",
+      datetime: new Date().toISOString(),
+      attributed_campaign_id: link?.campaign_id || null,
+    });
+    if (error) console.error("[shortlink] profile_event insert failed:", error.message);
+  } catch (err) {
+    console.error("[shortlink] logEngagement threw:", err);
   }
 }
 
