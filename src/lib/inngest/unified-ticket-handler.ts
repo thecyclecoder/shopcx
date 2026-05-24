@@ -67,7 +67,14 @@ function isPositive(body: string): boolean {
   // matched, and Suzie sent "your subscription has been canceled" with
   // no actual cancel. The keyword list mirrors the prior-unanswered
   // sniff later in this file.
-  const actionIntent = /\b(cancel|cancell|refund|return|stop|paus|skip|swap|change|update|exchange|replace|replac|missing|damaged|wrong|chargeback|dispute|delivery|tracking|address|reactivate|resume|where is|haven'?t (received|gotten|got))\b/i;
+  // NOTE on quantity verbs: Mary Ann Madden (ticket 992774c4) replied
+  // "August 21 works great. Please reduce the quantity too. Thanks!" —
+  // "works great"/"thanks" matched POSITIVE_PHRASES and "reduce"/"quantity"
+  // were NOT vetoed, so positive-close fired and the close generator
+  // invented "I'll get that updated with the reduced quantity right away"
+  // with no change_quantity action ever run. Quantity changes (reduce /
+  // fewer / lower / increase / "the quantity") are actionable requests.
+  const actionIntent = /\b(cancel|cancell|refund|return|stop|paus|skip|swap|reduce|reducing|reduced|fewer|lower|decrease|increase|quantity|qty|change|update|exchange|replace|replac|missing|damaged|wrong|chargeback|dispute|delivery|tracking|address|reactivate|resume|where is|haven'?t (received|gotten|got))\b/i;
   if (actionIntent.test(c)) return false;
 
   // Question veto — a message containing a question is never closure

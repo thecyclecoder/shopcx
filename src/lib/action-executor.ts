@@ -891,9 +891,17 @@ export const directActionHandlers: Record<
     if (r.success) {
       await notifySlack(ctx, p, amountDecimal);
     }
+    // When the refund went directly through Braintree (Shopify's native
+    // Braintree refund is broken), record that on the ticket so agents/AI
+    // reading the thread know the money moved off-Shopify, with the Braintree
+    // refund id for reconciliation. Note any failed Shopify-side bookkeeping.
+    let methodNote = "";
+    if (r.success && r.method === "braintree") {
+      methodNote = ` — refunded directly via Braintree${r.braintreeRefundId ? ` (txn ${r.braintreeRefundId})` : ""}${r.needsManualShopifyRecord ? "; Shopify record needs manual reconciliation" : ", recorded on the Shopify order"}`;
+    }
     return {
       ...r,
-      summary: r.success ? `Partial refund of $${amountDecimal} issued (${reason})` : undefined,
+      summary: r.success ? `Partial refund of $${amountDecimal} issued (${reason})${methodNote}` : undefined,
       // Drives {{refund_amount}} substitution in response_message. Without
       // this, the placeholder leaked through verbatim — see ticket
       // 8203dfe0 (May 5), Amanda Lederman's $6.95 shipping refund.

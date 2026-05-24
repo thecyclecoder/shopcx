@@ -1,5 +1,6 @@
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
+import { refundBraintreeTransaction } from "@/lib/integrations/braintree";
 
 // ── Shopify GraphQL with variables support ──
 
@@ -156,7 +157,7 @@ export async function partialRefundByAmount(
   shopifyOrderId: string,
   amountCents: number,
   reason?: string,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; method?: "shopify" | "braintree"; braintreeRefundId?: string; needsManualShopifyRecord?: boolean }> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const amountDecimal = (amountCents / 100).toFixed(2);
 
@@ -191,6 +192,18 @@ export async function partialRefundByAmount(
     ) || (txData?.transactions || [])[0];
     if (!saleTx) return { success: false, error: "No transaction found on order" };
 
+    // Braintree orders can't be refunded through Shopify — the Shopify↔Braintree
+    // gateway connection is gone, so Shopify's refund POST creates a refund record
+    // whose inner transaction FAILS ("undefined method 'refund' for nil" /
+    // ID_NOT_FOUND) while still returning a refund.id. We previously read that
+    // refund.id as success and reported a refund that never moved money (SC128233
+    // — 4 phantom "refunds", customer never paid back). Route Braintree gateways
+    // to the direct-Braintree path instead.
+    if (String(saleTx.gateway).toLowerCase().includes("braintree")) {
+      const r = await refundOrderViaBraintree(workspaceId, shopifyOrderId, amountCents, reason);
+      return { success: r.success, error: r.error, method: "braintree", braintreeRefundId: r.braintreeRefundId, needsManualShopifyRecord: r.needsManualShopifyRecord };
+    }
+
     // Step 2: Issue the partial refund with gateway from original transaction
     const refundRes = await fetch(
       `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}/refunds.json`,
@@ -213,13 +226,203 @@ export async function partialRefundByAmount(
       },
     );
     const refundData = await refundRes.json();
-    if (refundData?.refund?.id) {
-      return { success: true };
+    // A refund.id alone is NOT success — verify the inner refund transaction
+    // actually settled, or we'll repeat the SC128233 phantom-refund bug.
+    const refundTx = (refundData?.refund?.transactions || [])[0];
+    if (refundData?.refund?.id && refundTx?.status === "success") {
+      return { success: true, method: "shopify" };
+    }
+    if (refundData?.refund?.id && refundTx && refundTx.status !== "success") {
+      return { success: false, error: `Shopify recorded the refund but the gateway transaction is "${refundTx.status}" (${refundTx.message || "no message"}) — money did not move.` };
     }
     return { success: false, error: JSON.stringify(refundData?.errors || "Unknown refund error") };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : "Unknown error" };
   }
+}
+
+/** Append a note line and add a tag to a Shopify order (REST PUT, non-destructive). */
+async function appendOrderNoteAndTag(
+  shop: string,
+  accessToken: string,
+  shopifyOrderId: string,
+  noteLine: string,
+  tag: string,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const getRes = await fetch(
+      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}.json?fields=id,note,tags`,
+      { headers: { "X-Shopify-Access-Token": accessToken } },
+    );
+    const cur = (await getRes.json())?.order || {};
+    const note = cur.note ? `${cur.note}\n${noteLine}` : noteLine;
+    const tags = cur.tags ? `${cur.tags}, ${tag}` : tag;
+    const putRes = await fetch(
+      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}.json`,
+      {
+        method: "PUT",
+        headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+        body: JSON.stringify({ order: { id: Number(shopifyOrderId), note, tags } }),
+      },
+    );
+    if (!putRes.ok) return { success: false, error: `Shopify order update failed: ${putRes.status} ${await putRes.text()}` };
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : "Unknown error" };
+  }
+}
+
+/**
+ * Record a refund on a Shopify order WITHOUT moving money a second time. For
+ * refunds already issued out-of-band (e.g. directly via the Braintree API).
+ *
+ * Healthy gateways: posts a "manual" gateway refund transaction so the order
+ * shows (partially) refunded. Braintree orders REJECT every refund transaction
+ * (even gateway:"manual") with Braintree::AuthenticationError — the Shopify↔
+ * Braintree connection is gone — so for those we fall back to documenting the
+ * refund as an order note + tag and flip our own orders row's financial_status.
+ * Either way the customer already has their money; this is bookkeeping.
+ */
+export async function recordManualRefund(
+  workspaceId: string,
+  shopifyOrderId: string,
+  amountCents: number,
+  note?: string,
+): Promise<{ success: boolean; refundId?: string; recordedVia?: "transaction" | "note"; error?: string }> {
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+  const amountDecimal = (amountCents / 100).toFixed(2);
+
+  if (!/^\d+$/.test(shopifyOrderId)) {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const admin = createAdminClient();
+    const { data: order } = await admin.from("orders")
+      .select("shopify_order_id")
+      .eq("workspace_id", workspaceId)
+      .eq("order_number", shopifyOrderId)
+      .maybeSingle();
+    if (!order?.shopify_order_id) {
+      return { success: false, error: `Could not resolve order: "${shopifyOrderId}"` };
+    }
+    shopifyOrderId = order.shopify_order_id as string;
+  }
+
+  try {
+    const txRes = await fetch(
+      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}/transactions.json`,
+      { headers: { "X-Shopify-Access-Token": accessToken } },
+    );
+    const txData = await txRes.json();
+    const saleTx = (txData?.transactions || []).find((t: { kind: string; status: string }) =>
+      t.kind === "sale" && t.status === "success"
+    ) || (txData?.transactions || [])[0];
+    if (!saleTx) return { success: false, error: "No transaction found on order" };
+
+    const noteText = note || "Manual refund (processed externally)";
+    const isBraintree = String(saleTx.gateway).toLowerCase().includes("braintree");
+
+    // Braintree orders can't take refund transactions at all — skip straight to
+    // the note+tag record so we don't pile up phantom failed refund records.
+    if (!isBraintree) {
+      const refundRes = await fetch(
+        `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}/refunds.json`,
+        {
+          method: "POST",
+          headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            refund: {
+              currency: "USD",
+              notify: false,
+              note: noteText,
+              transactions: [{ parent_id: saleTx.id, amount: amountDecimal, kind: "refund", gateway: "manual" }],
+            },
+          }),
+        },
+      );
+      const refundData = await refundRes.json();
+      const refundTx = (refundData?.refund?.transactions || [])[0];
+      if (refundData?.refund?.id && (!refundTx || refundTx.status === "success")) {
+        return { success: true, refundId: String(refundData.refund.id), recordedVia: "transaction" };
+      }
+      // fall through to note+tag if the transaction record didn't take
+    }
+
+    // Note + tag fallback (and the only path for Braintree orders).
+    const marked = await appendOrderNoteAndTag(shop, accessToken, shopifyOrderId, `Refund recorded: $${amountDecimal} — ${noteText}`, "manual-refund");
+    if (!marked.success) return { success: false, error: marked.error };
+
+    // Reflect in our own orders row so the dashboard/AI sees it.
+    try {
+      const { createAdminClient } = await import("@/lib/supabase/admin");
+      const admin = createAdminClient();
+      await admin.from("orders")
+        .update({ financial_status: "partially_refunded" })
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_order_id", shopifyOrderId);
+    } catch { /* non-fatal */ }
+
+    return { success: true, recordedVia: "note" };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : "Unknown error" };
+  }
+}
+
+/**
+ * Refund an order paid through Braintree by refunding the Braintree transaction
+ * DIRECTLY (Shopify's native Braintree refund is broken — see partialRefundByAmount),
+ * then recording a manual refund on the Shopify order so the order reflects it.
+ *
+ * Two-step, and the order matters: money first (Braintree), bookkeeping second
+ * (Shopify). If the Braintree refund fails we never touch Shopify. If the
+ * Braintree refund succeeds but the Shopify record fails, the customer still got
+ * their money — we surface needsManualShopifyRecord so a human can reconcile.
+ */
+export async function refundOrderViaBraintree(
+  workspaceId: string,
+  shopifyOrderId: string,
+  amountCents: number,
+  reason?: string,
+): Promise<{ success: boolean; braintreeRefundId?: string; shopifyRefundId?: string; needsManualShopifyRecord?: boolean; error?: string }> {
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+
+  // Resolve order_number → numeric id if needed.
+  if (!/^\d+$/.test(shopifyOrderId)) {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const admin = createAdminClient();
+    const { data: order } = await admin.from("orders")
+      .select("shopify_order_id")
+      .eq("workspace_id", workspaceId)
+      .eq("order_number", shopifyOrderId)
+      .maybeSingle();
+    if (!order?.shopify_order_id) return { success: false, error: `Could not resolve order: "${shopifyOrderId}"` };
+    shopifyOrderId = order.shopify_order_id as string;
+  }
+
+  // Find the sale transaction → the Braintree transaction id lives in `authorization`.
+  const txRes = await fetch(
+    `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}/transactions.json`,
+    { headers: { "X-Shopify-Access-Token": accessToken } },
+  );
+  const txData = await txRes.json();
+  const saleTx = (txData?.transactions || []).find((t: { kind: string; status: string }) =>
+    t.kind === "sale" && t.status === "success"
+  );
+  if (!saleTx) return { success: false, error: "No successful sale transaction found on order" };
+  const braintreeTxnId = saleTx.authorization;
+  if (!braintreeTxnId) return { success: false, error: "Sale transaction has no Braintree authorization id" };
+
+  // 1) Refund the money in Braintree.
+  const bt = await refundBraintreeTransaction(workspaceId, braintreeTxnId, amountCents);
+  if (!bt.success) return { success: false, error: `Braintree refund failed: ${bt.error}` };
+
+  // 2) Record it on the Shopify order (manual gateway — no second money movement).
+  const note = `${reason || "Refund"} — refunded via Braintree (txn ${bt.refundId || braintreeTxnId})`;
+  const rec = await recordManualRefund(workspaceId, shopifyOrderId, amountCents, note);
+  if (!rec.success) {
+    // Money already returned — don't fail the whole op, but flag for reconciliation.
+    return { success: true, braintreeRefundId: bt.refundId, needsManualShopifyRecord: true, error: `Braintree refund succeeded but Shopify record failed: ${rec.error}` };
+  }
+
+  return { success: true, braintreeRefundId: bt.refundId, shopifyRefundId: rec.refundId };
 }
 
 // ── Cancel Order ──

@@ -104,6 +104,58 @@ export function invalidateBraintreeCache(workspaceId: string): void {
 }
 
 /**
+ * Refund a settled Braintree transaction directly via the Braintree API.
+ *
+ * Use this when Shopify's native gateway refund is unavailable — e.g. the
+ * Shopify↔Braintree payment-gateway connection was removed, so Shopify
+ * refunds fail with "undefined method 'refund' for nil" / ID_NOT_FOUND
+ * (seen on order SC128233, 2026-04). The Braintree transaction itself is
+ * still fully refundable; we just have to call Braintree directly.
+ *
+ * `transactionId` is the Braintree transaction id — Shopify stores it as
+ * `transaction.authorization` on the sale transaction.
+ *
+ * Status handling:
+ *  - settled / settling → partial or full refund (omit amountCents for full).
+ *  - submitted_for_settlement / authorized → NOT refundable yet; the only
+ *    reversal is a full `void`, so we surface a clear error instead of
+ *    silently voiding (which a partial-refund caller never wants).
+ */
+export async function refundBraintreeTransaction(
+  workspaceId: string,
+  transactionId: string,
+  amountCents?: number,
+): Promise<{ success: boolean; refundId?: string; error?: string }> {
+  try {
+    const gateway = await getBraintreeGateway(workspaceId);
+    const txn = await gateway.transaction.find(transactionId).catch(() => null);
+    if (!txn) return { success: false, error: `Braintree transaction ${transactionId} not found` };
+
+    if (txn.status === "submitted_for_settlement" || txn.status === "authorized") {
+      return {
+        success: false,
+        error: `Braintree transaction ${transactionId} is ${txn.status}, not settled — a partial refund isn't possible until it settles. Void the full transaction instead, or retry once settled.`,
+      };
+    }
+    if (txn.status !== "settled" && txn.status !== "settling") {
+      return { success: false, error: `Braintree transaction ${transactionId} status is ${txn.status} — not refundable.` };
+    }
+
+    const amount = amountCents != null ? (amountCents / 100).toFixed(2) : undefined;
+    const result = amount
+      ? await gateway.transaction.refund(transactionId, amount)
+      : await gateway.transaction.refund(transactionId);
+
+    if (!result.success) {
+      return { success: false, error: result.message || "Braintree refund was rejected" };
+    }
+    return { success: true, refundId: result.transaction?.id };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
  * Verify credentials by calling a cheap, read-only Braintree endpoint.
  * We use clientToken.generate — it's free, returns fast, and any
  * auth/merchant misconfiguration surfaces as an error.
