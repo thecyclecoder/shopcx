@@ -66,6 +66,30 @@ const FALLBACK_DECISION: SonnetDecision = {
   response_message: "Someone on my team is working on this and will send you an email shortly!",
 };
 
+// When the orchestrator parse-fails on a cancel-intent message, the
+// generic escalation boilerplate ("we'll get back to you") is the
+// worst possible response — it overpromises human follow-up and the
+// customer doesn't get the cancel journey until someone manually
+// recovers the ticket. Detect cancel intent on the raw message and
+// route to the cancel journey directly instead.
+function containsCancelIntent(message: string): boolean {
+  if (!message) return false;
+  return /\b(cancel(?:l?ed|ling|lation)?|unsubscribe|terminate\s+(?:my\s+)?subscription|end\s+(?:my\s+)?subscription|stop\s+(?:my\s+)?subscription|please\s+cancel)\b/i.test(message);
+}
+
+function fallbackWithCancelRoute(message: string, reason: string): SonnetDecision {
+  if (containsCancelIntent(message)) {
+    return {
+      reasoning: `${reason} — cancel intent detected on inbound, routing to cancel journey instead of generic escalation`,
+      action_type: "journey",
+      handler_name: "cancel_subscription",
+      response_message:
+        "Sorry to hear you're thinking about cancelling. Let me share a couple of options before you go.",
+    };
+  }
+  return { ...FALLBACK_DECISION, reasoning: reason };
+}
+
 // ── Tool Definitions (Anthropic format) ──
 
 function buildToolDefinitions() {
@@ -1166,7 +1190,7 @@ export async function callSonnetOrchestratorV2(
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     console.error("ANTHROPIC_API_KEY not set");
-    return FALLBACK_DECISION;
+    return fallbackWithCancelRoute(message, "ANTHROPIC_API_KEY not set");
   }
   const modelKey: OrchestratorModelKey = modelChoice?.model || "sonnet";
   const modelId = MODEL_IDS[modelKey];
@@ -1221,7 +1245,7 @@ export async function callSonnetOrchestratorV2(
             const retryToolUse = retryContent.filter((b: { type: string }) => b.type === "tool_use");
             const retryText = retryContent.filter((b: { type: string }) => b.type === "text");
             if (retryToolUse.length === 0) {
-              return parseSonnetDecision(retryText.map((b: { text: string }) => b.text).join(""));
+              return parseSonnetDecision(retryText.map((b: { text: string }) => b.text).join(""), message);
             }
             // Has tool calls — execute them and continue the loop
             const retryResults: unknown[] = [];
@@ -1235,7 +1259,7 @@ export async function callSonnetOrchestratorV2(
           }
         }
         console.error(`Orchestrator (${modelKey}) API error: ${res.status}`, errBody.slice(0, 300));
-        return { ...FALLBACK_DECISION, reasoning: `${modelKey} API error ${res.status}: ${errBody.slice(0, 100)}` };
+        return fallbackWithCancelRoute(message, `${modelKey} API error ${res.status}: ${errBody.slice(0, 100)}`);
       }
 
       const data = await res.json();
@@ -1273,7 +1297,7 @@ export async function callSonnetOrchestratorV2(
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const retryText = retryContent.filter((b: any) => b.type === "text");
             if (retryToolUse.length === 0) {
-              return parseSonnetDecision(retryText.map((b: { text: string }) => b.text).join(""));
+              return parseSonnetDecision(retryText.map((b: { text: string }) => b.text).join(""), message);
             }
             // Has tool calls — execute them and continue this round's loop
             const retryResults: unknown[] = [];
@@ -1287,7 +1311,7 @@ export async function callSonnetOrchestratorV2(
           }
           console.warn(`Orchestrator (${modelKey}): empty-content retry failed (status ${retry.status})`);
         }
-        return parseSonnetDecision(text);
+        return parseSonnetDecision(text, message);
       }
 
       // Execute tool calls
@@ -1339,7 +1363,7 @@ export async function callSonnetOrchestratorV2(
         const forceData = await forceRes.json();
         logUsage(forceData.usage, "force-decision");
         const text = (forceData.content || []).filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => b.text).join("");
-        if (text) return parseSonnetDecision(text);
+        if (text) return parseSonnetDecision(text, message);
         forceStatus = "ok but empty text";
       } else {
         const errBody = await forceRes.text().catch(() => "");
@@ -1349,49 +1373,39 @@ export async function callSonnetOrchestratorV2(
     } catch (err) {
       forceStatus = `throw: ${err instanceof Error ? err.message : String(err)}`;
     }
-    return {
-      ...FALLBACK_DECISION,
-      reasoning: `Max ${MAX_ROUNDS} tool rounds exceeded; force-decision retry: ${forceStatus}`,
-    };
+    return fallbackWithCancelRoute(message, `Max ${MAX_ROUNDS} tool rounds exceeded; force-decision retry: ${forceStatus}`);
   } catch (err) {
     console.error(`Orchestrator (${modelKey}) error:`, err);
-    return { ...FALLBACK_DECISION, reasoning: `${modelKey} error: ${err instanceof Error ? err.message : String(err)}` };
+    return fallbackWithCancelRoute(message, `${modelKey} error: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
 // ── JSON Parser ──
 
-function parseSonnetDecision(text: string): SonnetDecision {
+function parseSonnetDecision(text: string, inboundMessage: string = ""): SonnetDecision {
   // Each failure mode tags the reasoning so when a ticket lands in
   // the escalation pile we know which guardrail tripped — bare
   // "Orchestrator error" left us blind on Barbara's cancel ticket.
+  // Cancel-intent inbounds bypass the generic escalation and go
+  // straight to the cancel journey via fallbackWithCancelRoute.
   const snippet = (text || "").slice(0, 180).replace(/\s+/g, " ").trim();
   try {
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       console.error("Sonnet v2: no JSON found in response:", snippet);
-      return {
-        ...FALLBACK_DECISION,
-        reasoning: `Parse fail: no JSON block in response. Got: "${snippet}"`,
-      };
+      return fallbackWithCancelRoute(inboundMessage, `Parse fail: no JSON block in response. Got: "${snippet}"`);
     }
 
     const parsed = JSON.parse(jsonMatch[0]);
 
     if (!parsed.reasoning || !parsed.action_type) {
       console.error("Sonnet v2: missing required fields:", parsed);
-      return {
-        ...FALLBACK_DECISION,
-        reasoning: `Parse fail: missing reasoning/action_type. Got keys: ${Object.keys(parsed).join(", ")}`,
-      };
+      return fallbackWithCancelRoute(inboundMessage, `Parse fail: missing reasoning/action_type. Got keys: ${Object.keys(parsed).join(", ")}`);
     }
 
     return parsed as SonnetDecision;
   } catch (err) {
     console.error("Sonnet v2: JSON parse error:", err, "text:", snippet);
-    return {
-      ...FALLBACK_DECISION,
-      reasoning: `Parse fail: ${err instanceof Error ? err.message : String(err)}. Got: "${snippet}"`,
-    };
+    return fallbackWithCancelRoute(inboundMessage, `Parse fail: ${err instanceof Error ? err.message : String(err)}. Got: "${snippet}"`);
   }
 }
