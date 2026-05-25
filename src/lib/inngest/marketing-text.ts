@@ -42,7 +42,10 @@ export const textCampaignScheduled = inngest.createFunction(
   {
     id: "marketing-text-campaign-scheduled",
     name: "Marketing text — resolve audience + queue recipients",
-    concurrency: [{ limit: 4 }],
+    // Serialized — audience resolve seq-scans customers per page; running
+    // 4 in parallel saturated the pooler and produced 504s on unrelated
+    // routes during MDW scheduling.
+    concurrency: [{ limit: 1 }],
     triggers: [{ event: "marketing/text-campaign.scheduled" }],
   },
   async ({ event, step }) => {
@@ -162,35 +165,35 @@ export const textCampaignScheduled = inngest.createFunction(
       const included = (campaign.included_segments as string[]) || [];
       const excluded = (campaign.excluded_segments as string[]) || [];
 
-      let q = admin
-        .from("customers")
-        .select("id, phone, timezone, default_address, sms_marketing_status, subscription_status, segments, phone_status, preferred_sms_send_hour")
-        .eq("workspace_id", campaign.workspace_id)
-        .not("phone", "is", null);
-
-      // SMS consent gate — non-negotiable.
-      q = q.eq("sms_marketing_status", "subscribed");
-
-      // Bad-phone exclusion — phones marked invalid/unsubscribed/etc
-      // by past Twilio failures get a NULL-OR-good filter.
-      q = q.or("phone_status.is.null,phone_status.eq.good");
-
-      // Segment include — recipient must match ≥1.
-      if (included.length > 0) {
-        q = q.overlaps("segments", included);
-      }
-
-      // Optional sub-status filter (legacy, kept for back-compat).
+      // Rebuilt per page — PostgREST queries aren't reusable across calls
+      // (each .range() consumes the builder). Wrapping in a factory lets
+      // us add a fresh .gt("id", lastId) for keyset pagination each loop.
       const subStatuses = filter.subscription_status as string[] | undefined;
-      if (Array.isArray(subStatuses) && subStatuses.length > 0) {
-        q = q.in("subscription_status", subStatuses);
-      }
+      const buildBaseQuery = () => {
+        let q = admin
+          .from("customers")
+          .select("id, phone, timezone, default_address, sms_marketing_status, subscription_status, segments, phone_status, preferred_sms_send_hour")
+          .eq("workspace_id", campaign.workspace_id)
+          .not("phone", "is", null)
+          // SMS consent gate — non-negotiable.
+          .eq("sms_marketing_status", "subscribed")
+          // Bad-phone exclusion — phones marked invalid/unsubscribed/etc
+          // by past Twilio failures get a NULL-OR-good filter.
+          .or("phone_status.is.null,phone_status.eq.good");
+        // Segment include — recipient must match ≥1.
+        if (included.length > 0) q = q.overlaps("segments", included);
+        // Optional sub-status filter (legacy, kept for back-compat).
+        if (Array.isArray(subStatuses) && subStatuses.length > 0) {
+          q = q.in("subscription_status", subStatuses);
+        }
+        return q;
+      };
 
-      // Paginate explicitly — Supabase's PostgREST enforces a 1000-
-      // row server cap regardless of the .limit() value, so a one-shot
-      // .limit(200000) silently truncates at 1000 and we lose 80% of
-      // a large audience. Walk in 1000-row pages until we drain the
-      // result set.
+      // Keyset pagination — `id > lastId ORDER BY id LIMIT 1000`. Stays
+      // O(1) per page regardless of audience size. OFFSET-style
+      // pagination forced Postgres to re-evaluate the WHERE clause and
+      // skip N rows on each page; with 4 concurrent schedules pre-fix
+      // that became the saturation that locked the pool.
       type AudienceRow = CustomerForTzResolve & {
         id: string;
         phone: string;
@@ -199,16 +202,18 @@ export const textCampaignScheduled = inngest.createFunction(
       };
       const pageSize = 1000;
       let rows: AudienceRow[] = [];
-      let from = 0;
+      let lastId: string | null = null;
       // Safety stop at 250k rows so a runaway query can't OOM the
       // Inngest worker — our largest sendable audience is ~138K.
       while (rows.length < 250000) {
-        const { data, error } = await q.range(from, from + pageSize - 1);
+        let pageQ = buildBaseQuery().order("id", { ascending: true }).limit(pageSize);
+        if (lastId) pageQ = pageQ.gt("id", lastId);
+        const { data, error } = await pageQ;
         if (error) throw new Error(`audience query: ${error.message}`);
         const page = (data || []) as AudienceRow[];
         rows.push(...page);
         if (page.length < pageSize) break;
-        from += pageSize;
+        lastId = page[page.length - 1].id;
       }
 
       // Segment exclude — recipient must match 0 of the excluded set.

@@ -49,9 +49,11 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   const admin = createAdminClient();
 
   // Look up the shortlink. Prefer the workspace hint when present.
+  // campaign_id selected here so logEngagement doesn't need a second
+  // round-trip just to fetch it.
   let query = admin
     .from("marketing_shortlinks")
-    .select("id, workspace_id, target_url, is_active, expires_at, click_count")
+    .select("id, workspace_id, target_url, is_active, expires_at, campaign_id")
     .eq("slug", slug.toUpperCase())
     .eq("is_active", true);
   if (workspaceHint) {
@@ -108,7 +110,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 async function logClick(
   admin: ReturnType<typeof createAdminClient>,
   request: NextRequest,
-  shortlink: { id: string; workspace_id: string; click_count: number },
+  shortlink: { id: string; workspace_id: string },
   customerId: string | null,
 ) {
   try {
@@ -118,28 +120,28 @@ async function logClick(
     const recipientHint = request.nextUrl.searchParams.get("r"); // recipient id
 
     const now = new Date().toISOString();
-    // Run both writes in parallel — different rows, no ordering
-    // constraint between them, so we keep redirect latency tight.
-    const { error: insertErr } = await admin.from("marketing_shortlink_clicks").insert({
-      workspace_id: shortlink.workspace_id,
-      shortlink_id: shortlink.id,
-      recipient_id: recipientHint || null,
-      customer_id: customerId,
-      user_agent: ua,
-      ip_country: country,
-      referrer,
-    });
+    // INSERT and atomic-increment in parallel. The RPC does
+    //   UPDATE … SET click_count = click_count + 1
+    // server-side so concurrent clicks no longer serialize on a
+    // read-modify-write of the same row (the pre-fix pattern took a row
+    // lock per click and queued every other click on the same shortlink).
+    const [{ error: insertErr }, { error: rpcErr }] = await Promise.all([
+      admin.from("marketing_shortlink_clicks").insert({
+        workspace_id: shortlink.workspace_id,
+        shortlink_id: shortlink.id,
+        recipient_id: recipientHint || null,
+        customer_id: customerId,
+        user_agent: ua,
+        ip_country: country,
+        referrer,
+      }),
+      admin.rpc("increment_shortlink_click", {
+        p_shortlink_id: shortlink.id,
+        p_clicked_at: now,
+      }),
+    ]);
     if (insertErr) console.error("[shortlink] click insert failed:", insertErr.message);
-
-    const { error: updErr } = await admin
-      .from("marketing_shortlinks")
-      .update({
-        click_count: shortlink.click_count + 1,
-        last_clicked_at: now,
-        ...(shortlink.click_count === 0 ? { first_clicked_at: now } : {}),
-      })
-      .eq("id", shortlink.id);
-    if (updErr) console.error("[shortlink] counter update failed:", updErr.message);
+    if (rpcErr) console.error("[shortlink] counter increment failed:", rpcErr.message);
   } catch (err) {
     // Click logging is best-effort. Log the error so a real schema or
     // RLS drift surfaces in Vercel logs instead of silently swallowing.
@@ -149,23 +151,18 @@ async function logClick(
 
 async function logEngagement(
   admin: ReturnType<typeof createAdminClient>,
-  shortlink: { id: string; workspace_id: string },
+  shortlink: { id: string; workspace_id: string; campaign_id: string | null },
   customerId: string,
 ) {
   try {
-    // Lookup the campaign id so segmentation can attribute the click
-    // back to the campaign. Lightweight indexed lookup.
-    const { data: link } = await admin
-      .from("marketing_shortlinks")
-      .select("campaign_id")
-      .eq("id", shortlink.id)
-      .maybeSingle();
+    // campaign_id already selected by the main shortlink lookup — no
+    // second round-trip needed.
     const { error } = await admin.from("profile_events").insert({
       workspace_id: shortlink.workspace_id,
       customer_id: customerId,
       metric_name: "Clicked SMS",
       datetime: new Date().toISOString(),
-      attributed_campaign_id: link?.campaign_id || null,
+      attributed_campaign_id: shortlink.campaign_id || null,
     });
     if (error) console.error("[shortlink] profile_event insert failed:", error.message);
   } catch (err) {
