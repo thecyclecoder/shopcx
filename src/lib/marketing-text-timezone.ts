@@ -107,8 +107,10 @@ export function computeSendInstant(
   localDate: string,             // 'YYYY-MM-DD'
   localHour: number,             // 0-23
   timezone: string,              // IANA
+  localMinute: number = 0,       // 0-59 (defaults to top of the hour)
 ): Date {
   const hh = String(Math.max(0, Math.min(23, Math.floor(localHour)))).padStart(2, "0");
+  const mm = String(Math.max(0, Math.min(59, Math.floor(localMinute)))).padStart(2, "0");
 
   // Anchor at noon UTC on the target date — comfortably away from
   // midnight in either direction, so DST flip edge cases don't bite.
@@ -117,7 +119,7 @@ export function computeSendInstant(
 
   // Treat the desired wall time as if it were UTC, then shift by the
   // tz offset to land at the actual UTC instant.
-  const wallAsUtc = new Date(`${localDate}T${hh}:00:00.000Z`);
+  const wallAsUtc = new Date(`${localDate}T${hh}:${mm}:00.000Z`);
   return new Date(wallAsUtc.getTime() - offsetMinutes * 60_000);
 }
 

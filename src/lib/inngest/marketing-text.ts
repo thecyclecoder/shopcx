@@ -227,27 +227,38 @@ export const textCampaignScheduled = inngest.createFunction(
       const admin = createAdminClient();
       const fallback = campaign.fallback_timezone || "America/Chicago";
       const baseHour = campaign.target_local_hour;
+      const baseMinute = campaign.target_local_minute ?? 0;
       const fallbackHour = campaign.fallback_target_local_hour ?? 10;
+      const fallbackMinute = campaign.fallback_target_local_minute ?? 0;
 
       const rows = customers
         .map((c) => {
           const phone = normalizeUSPhone(c.phone || "");
           if (!phone) return null;
           const tz = resolveRecipientTimezone(c, fallback);
-          // Hour resolution chain:
-          //   1. Planned hour (fallback hour if recipient's tz was the
-          //      workspace fallback, target_local_hour otherwise).
+          // Hour/minute resolution chain:
+          //   1. Planned wall time (fallback hour:minute when recipient's
+          //      tz was the workspace fallback, target_local_hour:minute
+          //      otherwise).
           //   2. If customer has a preferred_sms_send_hour AND it's
-          //      LATER than the planned hour, use it. Never moves a
-          //      recipient earlier than the campaign's intended time.
+          //      LATER than the planned hour, use it (preference is
+          //      hour-granular only — minute resets to :00). Never
+          //      moves a recipient earlier than the campaign's
+          //      intended time.
           const plannedHour = tz.source === "fallback" ? fallbackHour : baseHour;
+          const plannedMinute = tz.source === "fallback" ? fallbackMinute : baseMinute;
           const preferred = c.preferred_sms_send_hour;
-          const finalHour = preferred != null && preferred > plannedHour ? preferred : plannedHour;
+          const useFinalHour = preferred != null && preferred > plannedHour ? preferred : plannedHour;
+          // Drop minutes when preference overrides — preference is
+          // hour-only and a 9:45 default would be misleading at the
+          // customer's preferred 11:00.
+          const useFinalMinute = preferred != null && preferred > plannedHour ? 0 : plannedMinute;
 
           const sendAt = computeSendInstant(
             campaign.send_date,
-            finalHour,
+            useFinalHour,
             tz.timezone,
+            useFinalMinute,
           );
           return {
             workspace_id: campaign.workspace_id,
@@ -257,7 +268,7 @@ export const textCampaignScheduled = inngest.createFunction(
             resolved_timezone: tz.timezone,
             timezone_source: tz.source as TimezoneSource,
             scheduled_send_at: sendAt.toISOString(),
-            preferred_hour_used: finalHour,
+            preferred_hour_used: useFinalHour,
             status: "pending",
           };
         })
