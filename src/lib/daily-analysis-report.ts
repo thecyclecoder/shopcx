@@ -92,20 +92,32 @@ export async function generateDailyReport(
   const adminCorrected = analyses.filter(a => a.admin_score != null).length;
 
   // Pull existing rules so Opus doesn't propose duplicates
-  const { data: existingSonnet } = await admin.from("sonnet_prompts")
-    .select("title")
-    .eq("workspace_id", workspaceId)
-    .in("status", ["approved", "proposed"]);
-  const { data: existingGrader } = await admin.from("grader_prompts")
-    .select("title")
-    .eq("workspace_id", workspaceId)
-    .in("status", ["approved", "proposed"]);
+  const [{ data: existingSonnet }, { data: existingGrader }, { data: activePolicies }] = await Promise.all([
+    admin.from("sonnet_prompts")
+      .select("title")
+      .eq("workspace_id", workspaceId)
+      .in("status", ["approved", "proposed"]),
+    admin.from("grader_prompts")
+      .select("title")
+      .eq("workspace_id", workspaceId)
+      .in("status", ["approved", "proposed"]),
+    // Active policies — Opus must not propose rules that contradict
+    // these. The same-day-void incident (2026-05-26) shipped because
+    // a proposed rule contradicted "Returns require fulfilled orders"
+    // without anyone catching the conflict at approval time.
+    admin.from("policies")
+      .select("slug, name, internal_summary")
+      .eq("workspace_id", workspaceId)
+      .eq("is_active", true)
+      .is("superseded_by", null)
+      .order("slug"),
+  ]);
 
   const existingSonnetTitles = (existingSonnet || []).map(r => r.title);
   const existingGraderTitles = (existingGrader || []).map(r => r.title);
 
   // Build prompt
-  const system = buildReportSystemPrompt(date, existingSonnetTitles, existingGraderTitles);
+  const system = buildReportSystemPrompt(date, existingSonnetTitles, existingGraderTitles, activePolicies || []);
   const userMsg = buildReportUserMessage(date, analyses as AnalysisInput[]);
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -215,9 +227,23 @@ export async function generateDailyReport(
   return { ok: true, reportId: report?.id, analyzed_count: analyses.length };
 }
 
-function buildReportSystemPrompt(date: string, existingSonnet: string[], existingGrader: string[]): string {
+function buildReportSystemPrompt(
+  date: string,
+  existingSonnet: string[],
+  existingGrader: string[],
+  policies: { slug: string; name: string; internal_summary: string }[],
+): string {
   const sonnetList = existingSonnet.length ? existingSonnet.map(t => `  - ${t}`).join("\n") : "  (none yet)";
   const graderList = existingGrader.length ? existingGrader.map(t => `  - ${t}`).join("\n") : "  (none yet)";
+
+  // Active policies — Opus must not propose rules that contradict these.
+  // Surfaced verbatim so it can reason about whether a proposed rule
+  // would conflict. The same-day-void incident on 2026-05-26 shipped
+  // because a proposed rule contradicted "Returns require fulfilled
+  // orders" and was approved without anyone catching the conflict.
+  const policyBlock = policies.length
+    ? policies.map(p => `## ${p.name} (slug: ${p.slug})\n${p.internal_summary}`).join("\n\n")
+    : "(no policies configured)";
 
   return `You are an AI Quality Analyst writing a daily report for the CX manager at Superfoods Company. Today you are summarizing ${date}.
 
@@ -236,10 +262,15 @@ ${sonnetList}
 EXISTING APPROVED/PROPOSED GRADER RULES — do NOT duplicate any title:
 ${graderList}
 
+CURRENT POLICIES (canonical — your proposed rules must NOT contradict these):
+${policyBlock}
+
 PROPOSAL RULES:
   - Quality > quantity. 0-2 proposals per category is normal. More than 3 means you're stretching.
   - If no clear pattern emerges, return an empty array for that category. Don't invent rules.
   - Be concrete and surgical. "Be more empathetic" is not a rule. "When a customer mentions a recurring issue, acknowledge the recurrence before offering a fix — current AI jumps straight to the fix" IS a rule.
+  - Your proposed rules MUST NOT contradict any policy listed above. If you observe a failure pattern that seems to require a contradicting rule, the right action is to call it out in 'recommendations' as a policy-change suggestion for human review — NOT to propose an AI rule that conflicts with policy.
+  - Procedural rules (how to fire a tool, how to format a response, multi-question handling, etc.) are welcome — they don't conflict with policy because policy is about WHAT we do, procedure is about HOW.
 
 OUTPUT (JSON only, no prose around it):
 {

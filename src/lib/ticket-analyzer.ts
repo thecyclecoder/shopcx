@@ -113,15 +113,32 @@ interface MessageRow {
  * approved grader_prompts (calibration rules learned from admin overrides).
  */
 async function buildGraderSystemPrompt(admin: Admin, workspaceId: string): Promise<string> {
-  const { data: rules } = await admin.from("grader_prompts")
-    .select("title, content")
-    .eq("workspace_id", workspaceId)
-    .eq("status", "approved")
-    .order("sort_order", { ascending: true });
+  const [{ data: rules }, { data: policies }] = await Promise.all([
+    admin.from("grader_prompts")
+      .select("title, content")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "approved")
+      .order("sort_order", { ascending: true }),
+    // Active policies — the grader needs these to judge "Rule Compliance"
+    // accurately. Without them it might penalize the AI for correctly
+    // denying an out-of-policy refund (e.g. a renewal-regret case where
+    // policy says "no refund, cancel/pause/skip future only").
+    admin.from("policies")
+      .select("slug, name, internal_summary")
+      .eq("workspace_id", workspaceId)
+      .eq("is_active", true)
+      .is("superseded_by", null)
+      .order("slug"),
+  ]);
 
   const rulesBlock = (rules || []).length
     ? "\n\nCALIBRATION RULES (apply these — they are admin-approved adjustments to the rubric):\n\n" +
       (rules || []).map(r => `• ${r.title}\n  ${r.content}`).join("\n\n")
+    : "";
+
+  const policyBlock = (policies || []).length
+    ? "\n\nCURRENT POLICIES (the AI's behavior should match these — judge Rule Compliance against them):\n\n" +
+      (policies || []).map(p => `## ${p.name} (slug: ${p.slug})\n${p.internal_summary}`).join("\n\n")
     : "";
 
   const { currentDateContext } = await import("@/lib/ai-date-context");
@@ -158,7 +175,7 @@ HARD CAPS:
   • Any repeated identical response (>2 times) = max score 5
 
 ISSUE TYPES (use these exact strings):
-  inaccuracy, robotic, frustration, missed_opportunity, kb_gap, broken_action, false_promise, drift, rule_violation${rulesBlock}
+  inaccuracy, robotic, frustration, missed_opportunity, kb_gap, broken_action, false_promise, drift, rule_violation${rulesBlock}${policyBlock}
 
 OUTPUT (JSON only, no prose around it):
 {

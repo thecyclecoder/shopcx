@@ -54,6 +54,7 @@ export default function SettingsPage() {
           <SettingsCard href="/dashboard/settings/journeys" title="Journeys" desc="Customer-facing retention flows" />
           <SettingsCard href="/dashboard/settings/views" title="Ticket Views" desc="Saved views and sidebar hierarchy" />
           <SettingsCard href="/dashboard/settings/tags" title="Tags" desc="Manage ticket tags" />
+          <SettingsCard href="/dashboard/settings/policies" title="Policies" desc="Canonical returns / refunds / subscriptions / exchanges / crisis policy" />
         </SettingsSection>
 
         <SettingsSection title="Subscriptions & Retention">
