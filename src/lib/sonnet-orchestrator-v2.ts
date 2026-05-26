@@ -741,15 +741,27 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
   const [
     { data: products },
     { data: variantRows },
+    { data: workspace },
     ragResults,
   ] = await Promise.all([
-    admin.from("products").select("id, title, description").eq("workspace_id", wsId).eq("status", "active"),
+    admin.from("products").select("id, title, handle, description").eq("workspace_id", wsId).eq("status", "active"),
     admin.from("product_variants")
       .select("product_id, title, option1, option2, sku, inventory_quantity, available, position, shopify_variant_id")
       .eq("workspace_id", wsId)
       .order("position"),
+    admin.from("workspaces").select("shopify_primary_domain").eq("id", wsId).maybeSingle(),
     retrieveContext(wsId, searchQuery, 10),
   ]);
+
+  // Customer-facing Shopify domain. NOT storefront_domain (that's our own
+  // first-party storefront — currently behind login, not the public store)
+  // and NOT shopify_domain (the .myshopify slug). Without this the AI was
+  // inventing product URLs (e.g. "amazing-coffee-k-cups" when the real
+  // handle was "amazing-coffee-pods") because product rows didn't surface
+  // the handle OR the host.
+  const storefrontHost = (workspace?.shopify_primary_domain || "").replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  const productUrl = (handle: string | null) =>
+    handle && storefrontHost ? `https://${storefrontHost}/products/${handle}` : null;
 
   const parts: string[] = [];
 
@@ -777,7 +789,9 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
   for (const p of products || []) {
     const variants = variantsByProduct.get(p.id) || [];
     const desc = p.description ? `: ${p.description.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 150)}` : "";
+    const url = productUrl((p as { handle?: string | null }).handle || null);
     parts.push(`- ${p.title}${desc}`);
+    if (url) parts.push(`    URL: ${url}`);
     // Skip variant list if there's only one default variant — most
     // products with a single SKU don't have a meaningful "flavor".
     if (variants.length <= 1) continue;
@@ -1201,11 +1215,28 @@ export async function callSonnetOrchestratorV2(
 
   try {
     const preContext = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext);
-    const tools = buildToolDefinitions();
+    // Cache-control breakpoints. The tools array is identical across
+    // every call, and the pre-context block is the heavy part of the
+    // input (~60K tokens) that doesn't change across the 1-3 tool-use
+    // rounds within a single decision. Marking both means subsequent
+    // rounds bill the cached prefix at 10% of input price instead of
+    // 100%. Without these markers the orchestrator paid full freight
+    // on every round (cache_create=0, cache_read=0 in logs) — that's
+    // the leak that produced the $5 K-cups ticket.
+    const baseTools = buildToolDefinitions();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tools = baseTools.map((t, i) => i === baseTools.length - 1
+      ? { ...t, cache_control: { type: "ephemeral" } }
+      : t) as any[];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let messages: any[] = [
-      { role: "user", content: preContext },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: preContext, cache_control: { type: "ephemeral" } },
+        ],
+      },
     ];
 
     const MAX_ROUNDS = 3;
