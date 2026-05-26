@@ -153,6 +153,24 @@ function buildToolDefinitions() {
 
 // ── Pre-loaded Context Builder (~300 tokens) ──
 
+/**
+ * Emit active policies as a single POLICIES: block at the top of the
+ * rule-set. These are the canonical source of truth for refunds, returns,
+ * subscriptions, exchanges, and crisis handling — they replace ~60 scattered
+ * prompts that previously paraphrased the same rules and drifted (a
+ * contradiction between two such prompts caused the same-day-void incident
+ * on 2026-05-26).
+ *
+ * Reads `internal_summary` from each active policy row. The customer_summary
+ * field is reserved for the storefront /policies/{slug} page and is NOT
+ * surfaced here.
+ */
+function buildPoliciesSection(policies: { slug: string; name: string; internal_summary: string }[]): string {
+  if (!policies.length) return "";
+  const blocks = policies.map(p => `## ${p.name} (slug: ${p.slug})\n${p.internal_summary}`).join("\n\n");
+  return `POLICIES (canonical — these supersede any conflicting older rule below):\n${blocks}`;
+}
+
 function buildPromptSections(prompts: { category: string; title: string; content: string }[]): string {
   const grouped: Record<string, string[]> = {};
   for (const p of prompts) {
@@ -207,6 +225,7 @@ async function buildPreContext(
     { data: playbooks },
     { data: workflows },
     { data: dbPrompts },
+    { data: policies },
   ] = await Promise.all([
     admin.from("workspaces").select("name").eq("id", workspaceId).single(),
     customerId
@@ -240,6 +259,17 @@ async function buildPreContext(
       .eq("workspace_id", workspaceId).eq("enabled", true)
       .eq("status", "approved")  // never load proposed/rejected prompts
       .order("category").order("sort_order"),
+    // Active policies — single source of truth for returns / refunds /
+    // subscriptions / exchanges / crisis. Replaces ~60 scattered prompts
+    // that previously paraphrased the same rules and drifted over time
+    // (the same-day-void incident on 2026-05-26 was a contradiction
+    // between two prompts that lived in different rule-bodies).
+    admin.from("policies")
+      .select("slug, name, internal_summary")
+      .eq("workspace_id", workspaceId)
+      .eq("is_active", true)
+      .is("superseded_by", null)
+      .order("slug"),
   ]);
 
   const wsName = workspace?.name || "our store";
@@ -377,6 +407,8 @@ ${workflowLines}
 
 PERSONALITY:
 ${persBlock}
+
+${buildPoliciesSection(policies || [])}
 
 ${buildPromptSections(dbPrompts || [])}
 
