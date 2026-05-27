@@ -182,30 +182,35 @@ export async function unsubscribeFromSmsMarketing(
 }
 
 // Unsubscribe a customer from all marketing (email + SMS) and update local DB
+/**
+ * Unsubscribe from both email AND SMS marketing on the Shopify side.
+ * Signature mirrors unsubscribeFromEmailMarketing / unsubscribeFromSmsMarketing
+ * (workspaceId + shopifyCustomerId) — the previous signature took OUR
+ * customer UUID and re-queried, which broke when callers passed the
+ * Shopify ID directly (every existing caller does). Beverly's ticket
+ * 8ad98c3e was the canary — handler passed shopify_customer_id and got
+ * "No Shopify ID" back because the helper queried `customers WHERE
+ * id = $shopifyId`, which never matched.
+ *
+ * Local-DB update is the caller's responsibility (the action handler
+ * already does it; doing it twice would race against the caller's
+ * intent if they wanted to override status names like
+ * "not_subscribed" vs "unsubscribed").
+ */
 export async function unsubscribeFromAllMarketing(
   workspaceId: string,
-  customerId: string,
+  shopifyCustomerId: string,
 ): Promise<{ success: boolean; error?: string }> {
-  const admin = createAdminClient();
-  const { data: customer } = await admin
-    .from("customers")
-    .select("shopify_customer_id")
-    .eq("id", customerId)
-    .single();
-
-  if (!customer?.shopify_customer_id) return { success: false, error: "No Shopify ID" };
+  if (!shopifyCustomerId) return { success: false, error: "No Shopify ID" };
 
   const [emailRes, smsRes] = await Promise.all([
-    unsubscribeFromEmailMarketing(workspaceId, customer.shopify_customer_id),
-    unsubscribeFromSmsMarketing(workspaceId, customer.shopify_customer_id),
+    unsubscribeFromEmailMarketing(workspaceId, shopifyCustomerId),
+    unsubscribeFromSmsMarketing(workspaceId, shopifyCustomerId),
   ]);
 
-  // Update local DB
-  await admin
-    .from("customers")
-    .update({ email_marketing_status: "unsubscribed", sms_marketing_status: "not_subscribed" })
-    .eq("id", customerId);
-
+  if (!emailRes.success && !smsRes.success) {
+    return { success: false, error: `email: ${emailRes.error}, sms: ${smsRes.error}` };
+  }
   return { success: emailRes.success || smsRes.success };
 }
 

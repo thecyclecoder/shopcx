@@ -334,6 +334,44 @@ export async function runImproveActions(
           results.push("Ticket reopened");
           break;
         }
+        case "unsubscribe_email_marketing":
+        case "unsubscribe_sms_marketing":
+        case "unsubscribe_all_marketing":
+        case "marketing_signup": {
+          // Route through the direct-action executor so the same code path
+          // serves both the AI orchestrator and the admin Improve tab.
+          // Keeps Shopify-side mutations + customer-row updates in one
+          // place. The handlers also touch Klaviyo/Twilio side effects
+          // where applicable; we don't want to re-implement that here.
+          const { executeSonnetDecision } = await import("@/lib/action-executor");
+          const { data: t } = await admin.from("tickets").select("customer_id, channel").eq("id", ticketId).single();
+          if (!t?.customer_id) { results.push(`${action.type}: no customer on ticket`); break; }
+          await executeSonnetDecision(
+            { admin, workspaceId, ticketId, customerId: t.customer_id, channel: t.channel || "email", sandbox: false },
+            {
+              reasoning: `Admin improve: ${action.type}`,
+              action_type: "direct_action",
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              actions: [{ type: action.type, code: a.code, reason: a.reason } as any],
+            },
+            null,
+            async () => { /* admin handles customer-facing message via send_message */ },
+            async (m) => {
+              await admin.from("ticket_messages").insert({
+                ticket_id: ticketId, direction: "outbound", visibility: "internal", author_type: "system", body: m,
+              });
+            },
+          );
+          // Reflect the change on the customer row immediately so the
+          // Improve panel UI shows the new status without waiting for a
+          // Shopify webhook round-trip.
+          const patch: Record<string, string> = {};
+          if (action.type === "unsubscribe_email_marketing" || action.type === "unsubscribe_all_marketing") patch.email_marketing_status = "unsubscribed";
+          if (action.type === "unsubscribe_sms_marketing" || action.type === "unsubscribe_all_marketing") patch.sms_marketing_status = "unsubscribed";
+          if (Object.keys(patch).length) await admin.from("customers").update(patch).eq("id", t.customer_id);
+          results.push(`${action.type} executed`);
+          break;
+        }
         default:
           results.push(`Unknown action: ${action.type}`);
       }

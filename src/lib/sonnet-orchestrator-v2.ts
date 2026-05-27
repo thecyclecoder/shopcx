@@ -495,6 +495,7 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
     { data: subs },
     { data: orders },
     { data: loyaltyMember },
+    { data: profile },
   ] = await Promise.all([
     admin.from("subscriptions")
       .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count, next_billing_date, created_at")
@@ -522,6 +523,15 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       .in("customer_id", allCustIds)
       .order("points_balance", { ascending: false })
       .limit(1)
+      .maybeSingle(),
+    // Marketing consent — surface so AI knows whether to fire
+    // unsubscribe_email_marketing / unsubscribe_sms_marketing actions
+    // when the customer asks to be removed from lists. Pulled on the
+    // primary customer only (not linked profiles — consent is per-row
+    // and Shopify mutations require the specific customer's identity).
+    admin.from("customers")
+      .select("email_marketing_status, sms_marketing_status, shopify_customer_id")
+      .eq("id", custId)
       .maybeSingle(),
   ]);
 
@@ -731,6 +741,18 @@ DRAFT ORDERS: orders flagged [DRAFT — not a renewal] are manual draft orders (
       }).join(", ");
       parts.push(`Unused coupons: ${coupons}`);
     }
+  }
+
+  // Marketing consent — explicit so AI knows whether to fire an
+  // unsubscribe direct action (vs. escalating). Includes the Shopify
+  // customer ID flag so AI knows whether the action is even runnable
+  // (no shopify_customer_id = the customer was created via lead-capture
+  // or other non-Shopify path; we have nowhere to push the unsubscribe).
+  if (profile) {
+    const emailStatus = profile.email_marketing_status || "unknown";
+    const smsStatus = profile.sms_marketing_status || "unknown";
+    const noShopify = !profile.shopify_customer_id;
+    parts.push(`\nMARKETING CONSENT: email=${emailStatus}, sms=${smsStatus}${noShopify ? " [WARNING: no shopify_customer_id — unsubscribe actions cannot push to Shopify; escalate so a human can remove from any external lists]" : ""}`);
   }
 
   // Linked accounts

@@ -58,6 +58,14 @@ REMEDIATION (fix the ticket):
   • reactivate(contract_id)
   • crisis_pause(contract_id, crisis_action_id)
   • skip_next_order(contract_id)
+  • unsubscribe_email_marketing
+       — Unsubscribes the customer from email marketing on Shopify + flips their email_marketing_status on our customer row. No params needed (acts on the ticket's customer). Use when the customer asks to stop receiving emails / "unsubscribe me" / "stop emailing me."
+  • unsubscribe_sms_marketing
+       — Same idea for SMS marketing. Use for "stop texting" / "remove me from text list."
+  • unsubscribe_all_marketing
+       — Both at once. Use for "stop ALL marketing" / "unsubscribe me from everything" / unanswered "I keep unsubscribing" complaints where the customer is clearly hostile to all marketing.
+  • marketing_signup(code, reason)
+       — Subscribe the customer to email and/or SMS marketing. code = phone number (US 10-digit). reason: "email" | "sms" | "both". Use when a customer explicitly opts in.
   • close_ticket
   • reopen_ticket
 

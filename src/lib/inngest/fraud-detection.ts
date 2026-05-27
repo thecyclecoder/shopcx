@@ -216,11 +216,22 @@ export const fraudGenerateSummary = inngest.createFunction(
       caseId,
     }).catch(() => {});
 
-    // Unsubscribe all flagged customers from email + SMS marketing
+    // Unsubscribe all flagged customers from email + SMS marketing.
+    // unsubscribeFromAllMarketing takes shopify_customer_id (not our UUID)
+    // since the change on 2026-05-27 — fetch each Shopify ID and pass that.
     await step.run("unsubscribe-flagged-customers", async () => {
       const customerIds = (fraudCase.customer_ids as string[]) || [];
-      for (const custId of customerIds) {
-        await unsubscribeFromAllMarketing(workspaceId, custId);
+      if (!customerIds.length) return;
+      const { data: custs } = await admin
+        .from("customers")
+        .select("id, shopify_customer_id")
+        .in("id", customerIds);
+      for (const c of custs || []) {
+        if (!c.shopify_customer_id) continue;
+        await unsubscribeFromAllMarketing(workspaceId, c.shopify_customer_id);
+        await admin.from("customers")
+          .update({ email_marketing_status: "unsubscribed", sms_marketing_status: "unsubscribed" })
+          .eq("id", c.id);
       }
     });
   }
