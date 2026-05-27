@@ -230,26 +230,74 @@ async function buildPlaybookContextForGrader(
 ): Promise<string | null> {
   if (!ticket.active_playbook_id) return null;
 
-  const { data: playbook } = await admin.from("playbooks")
-    .select("name, slug, description")
-    .eq("id", ticket.active_playbook_id)
-    .maybeSingle();
+  // Load playbook + its full step sequence + stand-firm cadence config. The
+  // grader needs ALL of this to correctly judge a mid-flow snapshot: it has
+  // to know what step the AI just executed (and what that step is documented
+  // to do), what steps come after, and how many stand-firm rounds are
+  // expected before exceptions are offered. Without this the grader
+  // penalizes correct behavior at apply_policy / stand_firm steps as
+  // "didn't address the customer's ask."
+  //
+  // Previously this used a static dictionary of hand-written hints that
+  // drifted as the playbooks evolved (the pb:refund hint described a flow
+  // that no longer existed and made the grader miss real failures while
+  // dinging correct executions of the new flow). Now we read from the DB.
+  const [{ data: playbook }, { data: allSteps }] = await Promise.all([
+    admin.from("playbooks")
+      .select("name, exception_limit, stand_firm_max, stand_firm_before_exceptions, stand_firm_between_tiers")
+      .eq("id", ticket.active_playbook_id)
+      .maybeSingle(),
+    admin.from("playbook_steps")
+      .select("step_order, type, name, instructions")
+      .eq("playbook_id", ticket.active_playbook_id)
+      .order("step_order"),
+  ]);
   if (!playbook) return null;
 
   const tags = (ticket.tags as string[]) || [];
-  const pbTag = tags.find(t => t.startsWith("pb:")) || `pb:${playbook.slug || "unknown"}`;
+  const pbTag = tags.find(t => t.startsWith("pb:")) || `pb:${(playbook.name || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "_")}`;
+  const currentStep = ticket.playbook_step ?? 0;
+  const steps = (allSteps || []) as { step_order: number; type: string; name: string; instructions: string | null }[];
+  const stepHere = steps.find(s => s.step_order === currentStep);
 
-  // Playbook-specific context. Some playbooks have intentional "do
-  // something before the obvious ask" steps that the grader needs to
-  // understand. Add per-playbook context as we encounter false-penalty
-  // patterns.
-  const playbookHints: Record<string, string> = {
-    "pb:refund": `The refund playbook is designed to NOT immediately offer a refund. Step 1 is to launch a cancel journey (or, if the sub is already paused, a pause-confirmation message), because sometimes giving the customer control over their subscription resolves their underlying complaint without needing a refund. So if the AI sent a "manage subscription" link or a "would you like to keep your subscription paused" question as its first response to a refund ask, that is the CORRECT playbook step and should NOT be graded as "didn't address the refund." The playbook proceeds to refund handling after the save attempt resolves.`,
-    "pb:replacement_order": `The replacement playbook asks clarifying questions ("did you receive your order? was something missing or damaged?") before issuing a replacement. Those questions are intentional verification steps, not stalling.`,
-    "pb:return_request": `The return-request playbook walks the customer through return eligibility before issuing a label. Questions about order number and product condition are intentional verification steps.`,
+  // Render the full step sequence so the grader sees where we are in the
+  // flow — what's done, what's next.
+  const stepLines = steps.map(s => {
+    const marker = s.step_order < currentStep ? "✓ done"
+      : s.step_order === currentStep ? "▶ CURRENT"
+      : "○ pending";
+    return `  ${s.step_order}. ${s.name} (${s.type}) — ${marker}`;
+  }).join("\n");
+
+  // Cadence breakdown — critical for grading offer_exception / stand_firm
+  // steps correctly. The Refund playbook is configured with
+  // stand_firm_before_exceptions=2, which means the AI MUST deny twice
+  // before offering Tier 1. Penalizing the AI for "not offering an
+  // exception yet" at this point is the inverse of correct grading.
+  const cadenceLines = [
+    `  • exception_limit: ${playbook.exception_limit ?? "n/a"}`,
+    `  • stand_firm_max: ${playbook.stand_firm_max ?? "n/a"}`,
+    `  • stand_firm_before_exceptions: ${playbook.stand_firm_before_exceptions ?? "n/a"} (deny policy this many times before offering Tier 1 exception)`,
+    `  • stand_firm_between_tiers: ${playbook.stand_firm_between_tiers ?? "n/a"} (deny this many times between offering Tier 1 and Tier 2)`,
+  ].join("\n");
+
+  // Per-step grading guidance. Each step type has documented "what the AI
+  // is supposed to do here" — grading should match the step's intent, not
+  // an idealized "resolve the customer's ultimate ask in one turn" framing.
+  const stepGuidance: Record<string, string> = {
+    identify_order: "AI's job at this step is to identify which order the customer is referencing. Asking for an order number or confirming one is correct behavior. Not offering a refund yet is correct.",
+    identify_subscription: "AI is gathering subscription context. Stating subscription facts ('created X, renewed N times') is correct. Not yet engaging the refund ask is correct.",
+    check_other_subscriptions: "AI is proactively naming other active subscriptions so the customer isn't surprised later. Not engaging refund yet is correct.",
+    apply_policy: "AI is explaining the policy outcome ('this order does/does not qualify, here's why'). It is documented to NOT hint at exceptions or alternatives at this step — that comes after stand-firm rounds. Penalizing 'didn't offer a refund' here is incorrect grading.",
+    offer_exception: "AI is offering a Tier 1 (store credit) or Tier 2 (cash refund) exception, framed as a special approval. This is only reached after stand_firm_before_exceptions rounds of policy denial.",
+    initiate_return: "AI is creating the return after customer accepted an exception offer. Should produce a label, set expectations on refund timing.",
+    cancel_subscription: "AI is confirming subscription cancellation. Should NOT re-open negotiation or offer additional alternatives at this point.",
+    stand_firm: "AI is restating the current position (policy or current offer) without escalating. NEVER hinting at future options is correct behavior. Penalizing 'didn't offer anything new' is incorrect.",
   };
 
-  const hint = playbookHints[pbTag] || `The ticket is following the "${playbook.name}" playbook. Its steps are intentional — don't penalize the AI for executing the playbook's documented behavior.`;
+  const stepHint = stepHere
+    ? `\nCURRENT STEP DETAIL (${stepHere.type} — "${stepHere.name}"):\n${stepGuidance[stepHere.type] || "(no specific guidance for this step type)"}\nDocumented instructions: ${(stepHere.instructions || "").slice(0, 400)}`
+    : "";
 
   // Context state from the playbook execution
   const ctx = (ticket.playbook_context || {}) as Record<string, unknown>;
@@ -257,14 +305,20 @@ async function buildPlaybookContextForGrader(
   if (ctx.paused_for_cancel) stateLines.push("- Currently waiting for customer to complete the cancel journey");
   if (ctx.paused_for_pause_confirmation) stateLines.push("- Currently waiting for customer to confirm whether to keep their subscription paused");
   if (ctx.cancel_journey_completed) stateLines.push("- Cancel journey already completed");
-  if (ctx.cancel_handled) stateLines.push("- Cancel/save step already resolved; refund discussion is the current focus");
-  if (ctx.exception_offered) stateLines.push("- Exception offer already made; waiting on customer acceptance");
+  if (ctx.cancel_handled) stateLines.push("- Cancel/save step already resolved");
+  if (ctx.exception_offered) stateLines.push(`- Exception offer already made: ${ctx.exception_offered} (${ctx.resolution_type || "?"})`);
   if (ctx.offer_accepted) stateLines.push("- Customer accepted the exception offer; return is being processed");
+  if (ctx.exception_stand_firm_count != null) stateLines.push(`- Stand-firm rounds completed at current tier: ${ctx.exception_stand_firm_count}`);
+  if (ctx.current_exception_tier != null) stateLines.push(`- Current exception tier: ${ctx.current_exception_tier}`);
+  if (ctx.exception_exhausted) stateLines.push("- All exception tiers exhausted; only stand-firm remains");
 
   return [
-    `Active playbook: ${playbook.name} (${pbTag}), currently at step ${ticket.playbook_step ?? "?"}.`,
-    hint,
-    stateLines.length ? "\nCurrent playbook state:\n" + stateLines.join("\n") : "",
+    `Active playbook: ${playbook.name} (${pbTag}). The ticket is MID-FLOW — grade the AI's response against the documented behavior of its current step, NOT against an idealized "resolve everything in one turn" framing.`,
+    `\nStep sequence:\n${stepLines}`,
+    `\nCadence config:\n${cadenceLines}`,
+    stepHint,
+    stateLines.length ? `\nCurrent playbook state:\n${stateLines.join("\n")}` : "",
+    `\nGRADING RULE: at the current step, if the AI executed the documented behavior — even if that means not yet addressing the customer's ultimate ask (e.g., not offering a refund at apply_policy) — score it normally. Only penalize when the AI deviated from the step's documented behavior (e.g., offered an exception too early, made up a refund amount, closed the ticket mid-flow, etc.).`,
   ].filter(Boolean).join("\n");
 }
 
