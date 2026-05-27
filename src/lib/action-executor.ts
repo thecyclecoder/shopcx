@@ -185,6 +185,104 @@ function substituteActionParams(
   return cloned as unknown as ActionParams;
 }
 
+/**
+ * Run a list of direct actions inline (used by handleJourney and
+ * handlePlaybook when Sonnet wants to fire actions alongside a routing
+ * decision — e.g. "create_return + launch cancel_subscription journey").
+ *
+ * Returns the action results so the caller can substitute placeholders
+ * in any follow-up message (e.g. embed the resulting label_url in the
+ * journey's lead-in copy).
+ *
+ * Skips: sandbox mode handling, verify/retry, response_message send —
+ * those are the caller's responsibility. This is intentionally a thin
+ * helper around firing + logging; handleDirectAction stays the canonical
+ * full-flow path.
+ */
+async function executeActionsInline(
+  ctx: ActionContext,
+  rawActions: ActionParams[],
+  sysNote: SysNoteFn,
+): Promise<{ action: ActionParams; result: ActionResult }[]> {
+  if (!rawActions.length) return [];
+
+  // Resolve contract IDs — Sonnet might return UUIDs instead of Shopify
+  // contract IDs (mirrors handleDirectAction's resolution step).
+  const actions = [...rawActions];
+  for (const action of actions) {
+    if (action.contract_id && action.contract_id.includes("-")) {
+      const { data: sub } = await ctx.admin.from("subscriptions")
+        .select("shopify_contract_id")
+        .eq("id", action.contract_id)
+        .maybeSingle();
+      if (sub?.shopify_contract_id) action.contract_id = sub.shopify_contract_id;
+    }
+  }
+
+  const { withActionContext } = await import("@/lib/appstle-call-log");
+  const results: { action: ActionParams; result: ActionResult }[] = [];
+
+  for (const action of actions) {
+    const handler = directActionHandlers[action.type];
+    if (!handler) {
+      results.push({ action, result: { success: false, error: `Unknown action type: ${action.type}` } });
+      continue;
+    }
+    const substituted = substituteActionParams(action, results);
+    try {
+      const result = await withActionContext(
+        { workspaceId: ctx.workspaceId, ticketId: ctx.ticketId, customerId: ctx.customerId, actionType: action.type },
+        () => handler(ctx, substituted),
+      );
+      results.push({ action: substituted, result });
+    } catch (err) {
+      results.push({
+        action: substituted,
+        result: { success: false, error: err instanceof Error ? err.message : String(err) },
+      });
+    }
+  }
+
+  for (const r of results) {
+    if (r.result.success) {
+      await sysNote(`Action completed: ${r.result.summary || r.action.type}`);
+    } else {
+      await sysNote(`Action failed: ${r.action.type} — ${r.result.error}`);
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Strip any unsubstituted `{{snake_case}}` or `[UPPER_CASE]` tokens from a
+ * message. Used in fallback paths (playbook-not-found, journey-not-found,
+ * etc.) where we send `decision.response_message` directly without running
+ * it through substituteActionPlaceholders.
+ *
+ * Real failure this prevents: ticket dcb2bf1e (Edward, 2026-05-27). Opus
+ * picked action_type=playbook with handler_name="Cancel Subscription"
+ * (which is a journey, not a playbook). handlePlaybook's lookup failed,
+ * fell through to the "send response_message + escalate" path — and the
+ * response_message contained `{{label_url}}`, `{{tracking_number}}`,
+ * `{{carrier}}` tokens for a create_return that was never fired. The
+ * tokens went to the customer verbatim.
+ */
+export function stripUnsubstitutedPlaceholders(message: string): string {
+  if (!/\{\{\s*\w+\s*\}\}|\[\s*[A-Z_]+\s*\]/.test(message)) return message;
+  console.warn("[stripUnsubstitutedPlaceholders] unsubstituted tokens in fallback message:",
+    message.match(/\{\{\s*\w+\s*\}\}|\[\s*[A-Z_]+\s*\]/g));
+  let out = message
+    .replace(/\{\{\s*\w+\s*\}\}/g, "")
+    .replace(/\[\s*[A-Z_]+\s*\]/g, "");
+  // Clean up empty paragraphs / orphan punctuation that the strip leaves behind
+  out = out.replace(/<p>\s*<\/p>/g, "");
+  out = out.replace(/\(\s*\)/g, "");
+  out = out.replace(/\s*Tracking:\s*\(\s*\)\.?/gi, "");
+  out = out.replace(/\s{2,}/g, " ");
+  return out;
+}
+
 function substituteActionPlaceholders(
   message: string,
   results: { action: ActionParams; result: ActionResult }[],
@@ -2141,7 +2239,8 @@ async function handleJourney(
     const reason = `Journey not found: "${decision.handler_name}". Sonnet's intent was: ${decision.reasoning || "unknown"}`;
     await sysNote(reason);
     await escalateTicket(ctx, reason);
-    await send(decision.response_message || "I need a little time to work on this and I'll get back to you.", ctx.sandbox);
+    const safeMsg = stripUnsubstitutedPlaceholders(decision.response_message || "I need a little time to work on this and I'll get back to you.");
+    await send(safeMsg, ctx.sandbox);
     return;
   }
 
@@ -2159,6 +2258,26 @@ async function handleJourney(
     if (sub?.id) subscriptionId = sub.id;
   }
 
+  // Fire any non-routing direct actions Sonnet emitted in actions[] —
+  // e.g. "create_return on SC131156" alongside an action_type=journey
+  // routing to cancel_subscription. The journey's leadIn then uses
+  // placeholder substitution from those results so the customer sees the
+  // label CTA in the same message as the cancel CTA.
+  //
+  // We skip actions that ARE the journey routing itself (handled by the
+  // journey launcher's own action layer).
+  const JOURNEY_ROUTING_TYPES = new Set(["cancel", "cancel_subscription", "pause", "skip_next_order"]);
+  const sideActions = (decision.actions || []).filter(a => !JOURNEY_ROUTING_TYPES.has(a.type));
+  let leadIn = decision.response_message || "";
+  if (sideActions.length && !ctx.sandbox) {
+    const results = await executeActionsInline(ctx, sideActions, sysNote);
+    leadIn = substituteActionPlaceholders(leadIn, results);
+  } else {
+    // No actions fired — strip any unsubstituted placeholders so we
+    // never send literal `{{label_url}}` to the customer.
+    leadIn = stripUnsubstitutedPlaceholders(leadIn);
+  }
+
   const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
   const launched = await launchJourneyForTicket({
     workspaceId: ctx.workspaceId,
@@ -2168,17 +2287,15 @@ async function handleJourney(
     journeyName: journey.name,
     triggerIntent: journey.trigger_intent,
     channel: ctx.channel,
-    leadIn: decision.response_message || "",
+    leadIn,
     ctaText: journey.name,
     subscriptionId,
   });
 
   if (!launched) {
     await sysNote(`Journey could not be launched on channel: ${ctx.channel}`);
-    // Fall back to sending the response message directly
-    if (decision.response_message) {
-      await send(decision.response_message, ctx.sandbox);
-    }
+    // Fall back to sending the (already-substituted, already-stripped) leadIn directly
+    if (leadIn) await send(leadIn, ctx.sandbox);
   }
 }
 
@@ -2214,10 +2331,32 @@ async function handlePlaybook(
   ) || null;
 
   if (!playbook) {
+    // Cross-check: did the model mis-classify a JOURNEY as a playbook?
+    // ("Cancel Subscription" is a journey, but Opus has been seen picking
+    // action_type=playbook for it.) If a matching journey exists, route
+    // there instead of escalating with raw placeholders in the message.
+    const { data: allJourneys } = await ctx.admin
+      .from("journey_definitions")
+      .select("id, name, trigger_intent")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("is_active", true);
+    const matchedJourney = (allJourneys || []).find(j =>
+      norm(j.name) === target ||
+      (j.trigger_intent && norm(j.trigger_intent) === target)
+    ) || null;
+
+    if (matchedJourney) {
+      await sysNote(`Playbook lookup miss for "${decision.handler_name}" — but matching journey "${matchedJourney.name}" found. Routing to journey.`);
+      const reroute: SonnetDecision = { ...decision, action_type: "journey" };
+      await handleJourney(ctx, reroute, send, sysNote);
+      return;
+    }
+
     const reason = `Playbook not found: "${decision.handler_name}". Sonnet's intent was: ${decision.reasoning || "unknown"}`;
     await sysNote(reason);
     await escalateTicket(ctx, reason);
-    await send(decision.response_message || "I need a little time to work on this and I'll get back to you.", ctx.sandbox);
+    const safeMsg = stripUnsubstitutedPlaceholders(decision.response_message || "I need a little time to work on this and I'll get back to you.");
+    await send(safeMsg, ctx.sandbox);
     return;
   }
 
