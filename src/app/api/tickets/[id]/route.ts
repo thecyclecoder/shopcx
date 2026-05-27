@@ -309,9 +309,40 @@ export async function DELETE(
     return NextResponse.json({ error: "Only owner or admin can delete tickets" }, { status: 403 });
   }
 
-  // Delete messages first (cascade should handle this, but be explicit)
-  await admin.from("ticket_messages").delete().eq("ticket_id", ticketId);
-  await admin.from("tickets").delete().eq("id", ticketId).eq("workspace_id", workspaceId);
+  // Pre-clear FK references that would block the delete. Most refs use
+  // ON DELETE SET NULL or CASCADE, but a few are NO ACTION and need
+  // explicit handling:
+  //   • tickets.merged_into → unmerge children before deleting the parent.
+  //     This was the silent-failure mode on f71a31e6 (2026-05-27):
+  //     messages CASCADE-deleted, parent ticket DELETE rejected by FK
+  //     constraint, error was swallowed and the UI showed success.
+  //   • returns.ticket_id, store_credit_log.ticket_id → also NO ACTION;
+  //     null them out to allow the delete. The returns/credit history
+  //     stays; only the back-pointer to the ticket is cleared.
+  await admin.from("tickets").update({ merged_into: null }).eq("merged_into", ticketId);
+  await admin.from("returns").update({ ticket_id: null }).eq("ticket_id", ticketId);
+  await admin.from("store_credit_log").update({ ticket_id: null }).eq("ticket_id", ticketId);
+
+  // Messages cascade on FK so this is belt-and-suspenders, but explicit
+  // is fine and surfaces errors if the table ever changes.
+  const { error: msgErr } = await admin.from("ticket_messages").delete().eq("ticket_id", ticketId);
+  if (msgErr) {
+    console.error("[delete-ticket] ticket_messages delete failed:", msgErr.message);
+    return NextResponse.json({ error: `Failed to delete messages: ${msgErr.message}` }, { status: 500 });
+  }
+
+  const { error: tErr, count } = await admin
+    .from("tickets")
+    .delete({ count: "exact" })
+    .eq("id", ticketId)
+    .eq("workspace_id", workspaceId);
+  if (tErr) {
+    console.error("[delete-ticket] ticket delete failed:", tErr.message);
+    return NextResponse.json({ error: `Failed to delete ticket: ${tErr.message}` }, { status: 500 });
+  }
+  if (count === 0) {
+    return NextResponse.json({ error: "Ticket not found or not in this workspace" }, { status: 404 });
+  }
 
   return NextResponse.json({ deleted: true });
 }

@@ -2592,7 +2592,12 @@ export default function TicketDetailPage() {
               onClick={async () => {
                 if (!confirm("Delete this ticket and all its messages? This cannot be undone.")) return;
                 const res = await fetch(`/api/tickets/${id}`, { method: "DELETE" });
-                if (res.ok) router.push("/dashboard/tickets");
+                if (res.ok) {
+                  router.push("/dashboard/tickets");
+                  return;
+                }
+                const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+                alert(`Could not delete: ${body.error || "unknown error"}`);
               }}
               className="w-full rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
             >
