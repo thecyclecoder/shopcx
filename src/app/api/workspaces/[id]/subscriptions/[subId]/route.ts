@@ -176,9 +176,15 @@ export async function PATCH(
       eventSummary = `Frequency changed to every ${intervalCount} ${interval.toLowerCase()}(s)`;
       break;
     }
-    case "change_date": {
-      const { nextBillingDate } = body;
-      if (!nextBillingDate) return NextResponse.json({ error: "nextBillingDate required" }, { status: 400 });
+    case "change_date":
+    case "change_next_date": {
+      // Accept both camelCase (legacy callers) and snake_case (the
+      // ticket-detail UI sends `next_billing_date`). Without the alias
+      // the dashboard quick-action "Change Next Order Date" reported
+      // "Unknown action: change_next_date" (Allyson's ticket 5ef58015,
+      // 2026-05-28).
+      const nextBillingDate = body.nextBillingDate || body.next_billing_date;
+      if (!nextBillingDate) return NextResponse.json({ error: "nextBillingDate / next_billing_date required" }, { status: 400 });
       result = await changeNextBillingDate(workspaceId, sub.shopify_contract_id, nextBillingDate);
       // Update local record
       if (result.success) {
