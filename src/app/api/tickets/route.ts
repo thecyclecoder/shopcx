@@ -40,8 +40,11 @@ export async function GET(request: Request) {
     query = query.eq("status", "archived");
   } else if (status && status !== "all") {
     query = query.eq("status", status);
-  } else {
-    // Default: exclude archived tickets
+  } else if (!search) {
+    // Default with no search term: exclude archived from list views so
+    // the queue isn't cluttered with closed-and-aged tickets. When the
+    // user actually searches, include archived — they typed something
+    // specific and want to find it regardless of state.
     query = query.neq("status", "archived");
   }
   if (channel && channel !== "all") query = query.eq("channel", channel);
