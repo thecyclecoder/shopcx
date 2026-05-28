@@ -232,6 +232,34 @@ export async function partialRefundByAmount(
     if (refundData?.refund?.id && refundTx?.status === "success") {
       return { success: true, method: "shopify" };
     }
+    // "pending" on shopify_payments is the normal transient state — the
+    // refund typically settles to "success" within 1–3 seconds. Re-poll
+    // the order's transactions briefly before declaring failure. Without
+    // this retry we've reported "money did not move" three times today
+    // (Edward, Clanay, Marilyn) for refunds that actually did land.
+    if (refundData?.refund?.id && refundTx?.status === "pending") {
+      const refundTxId = refundTx.id;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await new Promise(r => setTimeout(r, 1500));
+        const recheck = await fetch(
+          `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}/transactions.json`,
+          { headers: { "X-Shopify-Access-Token": accessToken } },
+        );
+        const recheckData = await recheck.json();
+        const found = (recheckData?.transactions || []).find((t: { id: number; kind: string; status: string }) =>
+          t.id === refundTxId && t.kind === "refund",
+        );
+        if (found?.status === "success") return { success: true, method: "shopify" };
+        if (found?.status === "failure" || found?.status === "error") {
+          return { success: false, error: `Shopify refund transaction failed after polling: ${found?.message || "no message"}` };
+        }
+      }
+      // Timed out still in pending after ~6s — surface as soft-failure so the
+      // caller can fall back to "team will confirm" language rather than
+      // claim the refund is done. Most resolve within 3s; staying pending
+      // past 6s is rare and usually signals a real gateway issue.
+      return { success: false, error: `Refund created but still pending after 6s of polling — needs manual reconciliation.` };
+    }
     if (refundData?.refund?.id && refundTx && refundTx.status !== "success") {
       return { success: false, error: `Shopify recorded the refund but the gateway transaction is "${refundTx.status}" (${refundTx.message || "no message"}) — money did not move.` };
     }
