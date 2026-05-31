@@ -228,7 +228,7 @@ export const textCampaignScheduled = inngest.createFunction(
       return rows;
     });
 
-    const enqueued = await step.run("enqueue-recipients", async () => {
+    const staged = await step.run("stage-candidates", async () => {
       const admin = createAdminClient();
       const fallback = campaign.fallback_timezone || "America/Chicago";
       const baseHour = campaign.target_local_hour;
@@ -236,27 +236,22 @@ export const textCampaignScheduled = inngest.createFunction(
       const fallbackHour = campaign.fallback_target_local_hour ?? 10;
       const fallbackMinute = campaign.fallback_target_local_minute ?? 0;
 
+      // Derive campaign priority for the cross-campaign dedup pass.
+      // Lower number wins. Per-campaign override on sms_campaigns.priority
+      // takes precedence; otherwise derive from included_segments.
+      const { computeCampaignPriority } = await import("@/lib/inngest/sms-wave-promote");
+      const includedSegmentsTyped = campaign.included_segments as string[] | null;
+      const effectivePriority = (campaign.priority as number | null) ?? computeCampaignPriority(includedSegmentsTyped);
+
       const rows = customers
         .map((c) => {
           const phone = normalizeUSPhone(c.phone || "");
           if (!phone) return null;
           const tz = resolveRecipientTimezone(c, fallback);
-          // Hour/minute resolution chain:
-          //   1. Planned wall time (fallback hour:minute when recipient's
-          //      tz was the workspace fallback, target_local_hour:minute
-          //      otherwise).
-          //   2. If customer has a preferred_sms_send_hour AND it's
-          //      LATER than the planned hour, use it (preference is
-          //      hour-granular only — minute resets to :00). Never
-          //      moves a recipient earlier than the campaign's
-          //      intended time.
           const plannedHour = tz.source === "fallback" ? fallbackHour : baseHour;
           const plannedMinute = tz.source === "fallback" ? fallbackMinute : baseMinute;
           const preferred = c.preferred_sms_send_hour;
           const useFinalHour = preferred != null && preferred > plannedHour ? preferred : plannedHour;
-          // Drop minutes when preference overrides — preference is
-          // hour-only and a 9:45 default would be misleading at the
-          // customer's preferred 11:00.
           const useFinalMinute = preferred != null && preferred > plannedHour ? 0 : plannedMinute;
 
           const sendAt = computeSendInstant(
@@ -274,40 +269,60 @@ export const textCampaignScheduled = inngest.createFunction(
             timezone_source: tz.source as TimezoneSource,
             scheduled_send_at: sendAt.toISOString(),
             preferred_hour_used: useFinalHour,
-            status: "pending",
+            priority: effectivePriority,
           };
         })
         .filter((r): r is NonNullable<typeof r> => !!r);
 
       if (rows.length === 0) return { inserted: 0 };
 
-      // Upsert with ignoreDuplicates so re-running Schedule on an
-      // already-queued campaign doesn't double-insert.
-      const { error } = await admin
-        .from("sms_campaign_recipients")
-        .upsert(rows, { onConflict: "campaign_id,phone", ignoreDuplicates: true });
-      if (error) throw new Error(`enqueue failed: ${error.message}`);
-
-      return { inserted: rows.length };
+      // Write to staging table — sms_send_candidates — not recipients
+      // directly. The wave-promote function will dedup across all
+      // campaigns scheduled for the same send_date and only the
+      // winners become sms_campaign_recipients. Idempotent on
+      // (campaign_id, phone) via the unique constraint.
+      let inserted = 0;
+      for (let i = 0; i < rows.length; i += 500) {
+        const chunk = rows.slice(i, i + 500);
+        const { error, count } = await admin
+          .from("sms_send_candidates")
+          .upsert(chunk, { onConflict: "campaign_id,phone", ignoreDuplicates: true, count: "exact" });
+        if (error) throw new Error(`stage failed: ${error.message}`);
+        inserted += count || chunk.length;
+      }
+      return { inserted };
     });
 
-    await step.run("mark-scheduled", async () => {
+    await step.run("mark-staged", async () => {
       const admin = createAdminClient();
       await admin
         .from("sms_campaigns")
         .update({
-          status: "scheduled",
-          recipients_total: enqueued.inserted,
-          scheduled_at: new Date().toISOString(),
+          status: "audience_staged",
+          audience_staged_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
         .eq("id", campaign.id);
     });
 
+    // Trigger the wave-promote handler. It debounces 2 min internally
+    // so additional campaigns scheduled into the same wave (same
+    // send_date) get included in the dedup pass before recipients are
+    // created. wave_key combines workspace + send_date so concurrent
+    // events for the same wave coalesce on the concurrency.key.
+    await step.sendEvent("trigger-wave-promote", {
+      name: "marketing/sms-wave.promote",
+      data: {
+        workspace_id: campaign.workspace_id,
+        send_date: campaign.send_date,
+        wave_key: `${campaign.workspace_id}:${campaign.send_date}`,
+      },
+    });
+
     return {
       campaign_id,
       audience_count: customers.length,
-      enqueued: enqueued.inserted,
+      staged: staged.inserted,
     };
   },
 );
@@ -470,50 +485,15 @@ export const textCampaignSendTick = inngest.createFunction(
         continue;
       }
 
-      // Claim the row + re-check 12-hour rate-limit in one step.
-      //
-      // The previous design built `recentlySent` in-memory at tick start
-      // and mutated it as each send completed. That isn't replay-safe
-      // under Inngest: when the function replays (which it does at every
-      // step boundary), the outer-scope Set mutation from a prior
-      // iteration's finalize-step is NOT reapplied — Inngest returns the
-      // cached step result without re-running the body. Net effect: on
-      // replay the second campaign for the same customer doesn't see the
-      // first send and re-submits. Dylan got SUMMERFIT engaged AND
-      // SUMMERFIT just_ordered on 2026-05-31 because of exactly this.
-      //
-      // Fix: the rate-limit check now lives INSIDE the claim step, which
-      // re-queries the live DB state (where the first send is recorded
-      // as status='sent'/'scheduled'/'delivered'). The claim step's
-      // boolean result is what gets cached by Inngest — replay-safe.
-      const claimResult = await step.run(`claim-${recipient.id}`, async () => {
+      // Atomic CAS claim — prevents two concurrent ticks from sending
+      // the same row twice. Cross-campaign dedup is now handled
+      // BEFORE recipients exist, by the wave-promote function reading
+      // sms_send_candidates and inserting only winners into this
+      // table. The previous per-recipient rate-limit subquery here
+      // was correct but expensive (N live queries per tick); pulling
+      // dedup forward to scheduling time removes the DB pressure.
+      const claimed = await step.run(`claim-${recipient.id}`, async () => {
         const admin = createAdminClient();
-        // 12h rate-limit check — query live DB for OTHER recipients of
-        // this same customer with a send in the rate-limit window. If
-        // any exist, mark this row skipped_rate_limit and bail.
-        if (recipient.customer_id) {
-          const sendMs = Date.parse(recipient.scheduled_send_at);
-          const windowStart = new Date(sendMs - 12 * 60 * 60 * 1000).toISOString();
-          const windowEnd = new Date(sendMs + 12 * 60 * 60 * 1000).toISOString();
-          const { data: conflict } = await admin
-            .from("sms_campaign_recipients")
-            .select("id")
-            .eq("customer_id", recipient.customer_id)
-            .neq("id", recipient.id)
-            .in("status", ["sent", "scheduled", "sending", "delivered"])
-            .gte("scheduled_send_at", windowStart)
-            .lte("scheduled_send_at", windowEnd)
-            .limit(1);
-          if (conflict && conflict.length > 0) {
-            await admin
-              .from("sms_campaign_recipients")
-              .update({ status: "skipped_rate_limit", updated_at: new Date().toISOString() })
-              .eq("id", recipient.id)
-              .eq("status", "pending");
-            return { status: "skipped_rate_limit" as const };
-          }
-        }
-        // Atomic CAS claim.
         const { data, error } = await admin
           .from("sms_campaign_recipients")
           .update({ status: "sending", updated_at: new Date().toISOString() })
@@ -521,13 +501,10 @@ export const textCampaignSendTick = inngest.createFunction(
           .eq("status", "pending")
           .select("id")
           .maybeSingle();
-        if (error) return { status: "claim_error" as const };
-        return { status: data ? "claimed" as const : "lost_race" as const };
+        if (error) return false;
+        return !!data;
       });
-      if (claimResult.status === "skipped_rate_limit") { skippedCount++; continue; }
-      if (claimResult.status !== "claimed") continue; // race or error
-      const claimed = true;
-      void claimed; // silence unused-var lint until further block uses it
+      if (!claimed) continue; // someone else picked it up
 
       // Decide: schedule via SendAt or send immediately?
       // Twilio's SendAt requires 15+ min in the future. For sends
