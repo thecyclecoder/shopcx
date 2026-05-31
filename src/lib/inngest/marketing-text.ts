@@ -392,34 +392,16 @@ export const textCampaignSendTick = inngest.createFunction(
 
     if (due.length === 0) return { sent: 0 };
 
-    // ── 12-hour rate limit safety net ────────────────────────────
-    // Even if exclusion config is wrong, no customer gets two
-    // campaign SMS within 12 hours. We check by scheduled_send_at
-    // (not sent_at) so already-scheduled-but-not-yet-delivered
-    // messages still count — otherwise two campaigns scheduled
-    // back-to-back could both submit to Twilio for the same person.
-    const customerIds = [...new Set(due.map((r) => r.customer_id).filter((c): c is string => !!c))];
-    const recentlySent = new Set<string>();
-    if (customerIds.length > 0) {
-      // Window: 12h before earliest due send → 12h after latest due
-      // send. Any prior message landing in that window blocks this one.
-      const earliest = Math.min(...due.map((r) => Date.parse(r.scheduled_send_at)));
-      const latest = Math.max(...due.map((r) => Date.parse(r.scheduled_send_at)));
-      const windowStart = new Date(earliest - 12 * 60 * 60 * 1000).toISOString();
-      const windowEnd = new Date(latest + 12 * 60 * 60 * 1000).toISOString();
-      const recent = await step.run("rate-limit-check", async () => {
-        const admin = createAdminClient();
-        const { data } = await admin
-          .from("sms_campaign_recipients")
-          .select("customer_id")
-          .in("customer_id", customerIds)
-          .in("status", ["sent", "scheduled", "delivered"])
-          .gte("scheduled_send_at", windowStart)
-          .lte("scheduled_send_at", windowEnd);
-        return (data || []) as Array<{ customer_id: string }>;
-      });
-      for (const r of recent) recentlySent.add(r.customer_id);
-    }
+    // 12-hour rate-limit enforcement moved INTO the per-recipient
+    // `claim-${id}` step below. The previous design built an
+    // in-memory `recentlySent` Set at tick start and mutated it as
+    // each send completed — but that pattern is broken under Inngest's
+    // step-replay model. Outer-scope mutations aren't reapplied on
+    // replay; cached step results are returned without re-running
+    // their bodies, so the dedup state from the first iteration
+    // disappears by the time the second runs. Result: Dylan got both
+    // SUMMERFIT engaged and SUMMERFIT just_ordered on 2026-05-31. The
+    // per-recipient live-DB query inside claim is replay-safe.
 
     // Group by campaign so we can load the message body once per
     // campaign instead of per recipient.
@@ -488,25 +470,50 @@ export const textCampaignSendTick = inngest.createFunction(
         continue;
       }
 
-      // 12-hour rate limit — hard floor. Catches misconfigured
-      // exclusions where the same customer ends up in two campaigns.
-      if (recipient.customer_id && recentlySent.has(recipient.customer_id)) {
-        await step.run(`rate-limit-${recipient.id}`, async () => {
-          const admin = createAdminClient();
-          await admin
-            .from("sms_campaign_recipients")
-            .update({ status: "skipped_rate_limit", updated_at: new Date().toISOString() })
-            .eq("id", recipient.id)
-            .eq("status", "pending");
-        });
-        skippedCount++;
-        continue;
-      }
-
-      // Claim the row before submitting so a slow Twilio call doesn't
-      // race with the next tick. Atomic CAS via the eq("status","pending").
-      const claimed = await step.run(`claim-${recipient.id}`, async () => {
+      // Claim the row + re-check 12-hour rate-limit in one step.
+      //
+      // The previous design built `recentlySent` in-memory at tick start
+      // and mutated it as each send completed. That isn't replay-safe
+      // under Inngest: when the function replays (which it does at every
+      // step boundary), the outer-scope Set mutation from a prior
+      // iteration's finalize-step is NOT reapplied — Inngest returns the
+      // cached step result without re-running the body. Net effect: on
+      // replay the second campaign for the same customer doesn't see the
+      // first send and re-submits. Dylan got SUMMERFIT engaged AND
+      // SUMMERFIT just_ordered on 2026-05-31 because of exactly this.
+      //
+      // Fix: the rate-limit check now lives INSIDE the claim step, which
+      // re-queries the live DB state (where the first send is recorded
+      // as status='sent'/'scheduled'/'delivered'). The claim step's
+      // boolean result is what gets cached by Inngest — replay-safe.
+      const claimResult = await step.run(`claim-${recipient.id}`, async () => {
         const admin = createAdminClient();
+        // 12h rate-limit check — query live DB for OTHER recipients of
+        // this same customer with a send in the rate-limit window. If
+        // any exist, mark this row skipped_rate_limit and bail.
+        if (recipient.customer_id) {
+          const sendMs = Date.parse(recipient.scheduled_send_at);
+          const windowStart = new Date(sendMs - 12 * 60 * 60 * 1000).toISOString();
+          const windowEnd = new Date(sendMs + 12 * 60 * 60 * 1000).toISOString();
+          const { data: conflict } = await admin
+            .from("sms_campaign_recipients")
+            .select("id")
+            .eq("customer_id", recipient.customer_id)
+            .neq("id", recipient.id)
+            .in("status", ["sent", "scheduled", "sending", "delivered"])
+            .gte("scheduled_send_at", windowStart)
+            .lte("scheduled_send_at", windowEnd)
+            .limit(1);
+          if (conflict && conflict.length > 0) {
+            await admin
+              .from("sms_campaign_recipients")
+              .update({ status: "skipped_rate_limit", updated_at: new Date().toISOString() })
+              .eq("id", recipient.id)
+              .eq("status", "pending");
+            return { status: "skipped_rate_limit" as const };
+          }
+        }
+        // Atomic CAS claim.
         const { data, error } = await admin
           .from("sms_campaign_recipients")
           .update({ status: "sending", updated_at: new Date().toISOString() })
@@ -514,10 +521,13 @@ export const textCampaignSendTick = inngest.createFunction(
           .eq("status", "pending")
           .select("id")
           .maybeSingle();
-        if (error) return false;
-        return !!data;
+        if (error) return { status: "claim_error" as const };
+        return { status: data ? "claimed" as const : "lost_race" as const };
       });
-      if (!claimed) continue; // someone else picked it up
+      if (claimResult.status === "skipped_rate_limit") { skippedCount++; continue; }
+      if (claimResult.status !== "claimed") continue; // race or error
+      const claimed = true;
+      void claimed; // silence unused-var lint until further block uses it
 
       // Decide: schedule via SendAt or send immediately?
       // Twilio's SendAt requires 15+ min in the future. For sends
@@ -567,7 +577,6 @@ export const textCampaignSendTick = inngest.createFunction(
               updated_at: new Date().toISOString(),
             })
             .eq("id", recipient.id);
-          if (recipient.customer_id) recentlySent.add(recipient.customer_id);
           sentCount++;
           // Log a `Received SMS` engagement event tied to our customer
           // UUID. Mirrors the Klaviyo metric shape so segmentation reads

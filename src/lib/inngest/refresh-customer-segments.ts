@@ -1,0 +1,204 @@
+/**
+ * Daily cron: recompute customers.segments for every SMS-subscribed
+ * customer in every workspace. Mirrors the logic in
+ * scripts/refresh-customer-segments.ts (which stays as the manual
+ * --all flag escape hatch), now wired as Inngest so it runs without
+ * anyone remembering to invoke it.
+ *
+ * Why this matters: campaigns target customers by `segments` overlap.
+ * Without a refresh, the tags drift — a customer who placed a new
+ * order last week still shows as `lapsed`, the engagement-derived
+ * `engaged` tag is missing the past 7 days, `active_sub` doesn't
+ * reflect recent cancels/resumes. Today's SUMMERFIT send (2026-05-31)
+ * went out against a snapshot from 2026-05-16 because nobody ran the
+ * script in two weeks.
+ *
+ * Predicates (kept identical to the script for parity):
+ *   cold          orders == 0
+ *   single_order  orders == 1
+ *   just_ordered  orders >= 2 AND ratio < 0.5
+ *   cycle_hitter  orders >= 2 AND 0.5 <= ratio <= 1.5
+ *   lapsed        orders >= 2 AND 1.5 < ratio <= 3.0
+ *   deep_lapsed   orders >= 2 AND ratio > 3.0
+ *   engaged       orders >= 1 AND (clicked_email_60d>=1 OR ATC_30d>=1
+ *                                  OR checkout_30d>=1 OR viewed_product_30d>=2)
+ *   active_sub    has any subscription with status='active'
+ *
+ * ratio = days_since_last_order / mean_reorder_gap_days
+ */
+import { inngest } from "@/lib/inngest/client";
+import { createAdminClient } from "@/lib/supabase/admin";
+
+const CUSTOMER_BATCH = 500;
+const ENGAGEMENT_BATCH = 100;
+const UPDATE_BATCH = 200;
+
+function computeSegments(opts: {
+  orderDates: number[];
+  hasActiveSub: boolean;
+  clickedEmail60d: number;
+  atc30d: number;
+  checkout30d: number;
+  viewedProduct30d: number;
+  now: number;
+}): string[] {
+  const out: string[] = [];
+  const orders = opts.orderDates.length;
+  if (orders === 0) out.push("cold");
+  else if (orders === 1) out.push("single_order");
+  else {
+    const sorted = [...opts.orderDates].sort((a, b) => a - b);
+    const lastOrder = sorted[sorted.length - 1];
+    const daysSinceLast = (opts.now - lastOrder) / 86_400_000;
+    const gaps: number[] = [];
+    for (let i = 1; i < sorted.length; i++) gaps.push((sorted[i] - sorted[i - 1]) / 86_400_000);
+    const meanGap = gaps.reduce((s, g) => s + g, 0) / gaps.length;
+    const ratio = meanGap > 0 ? daysSinceLast / meanGap : null;
+    if (ratio === null) out.push("cycle_hitter");
+    else if (ratio < 0.5) out.push("just_ordered");
+    else if (ratio <= 1.5) out.push("cycle_hitter");
+    else if (ratio <= 3.0) out.push("lapsed");
+    else out.push("deep_lapsed");
+  }
+  if (orders >= 1 && (opts.clickedEmail60d >= 1 || opts.atc30d >= 1 || opts.checkout30d >= 1 || opts.viewedProduct30d >= 2)) {
+    out.push("engaged");
+  }
+  if (opts.hasActiveSub) out.push("active_sub");
+  return out;
+}
+
+async function refreshOneWorkspace(workspaceId: string): Promise<{ processed: number; updated: number; errors: number }> {
+  const sb = createAdminClient();
+  const now = Date.now();
+  const since30 = new Date(now - 30 * 86_400_000).toISOString();
+  const since60 = new Date(now - 60 * 86_400_000).toISOString();
+
+  // Keyset-paginate SMS-subscribed customers.
+  const customerIds: string[] = [];
+  let lastId: string | null = null;
+  while (true) {
+    let q = sb
+      .from("customers")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("sms_marketing_status", "subscribed")
+      .order("id", { ascending: true })
+      .limit(1000);
+    if (lastId) q = q.gt("id", lastId);
+    const { data, error } = await q;
+    if (error) throw new Error(`customers fetch: ${error.message}`);
+    if (!data?.length) break;
+    for (const r of data) customerIds.push(r.id as string);
+    lastId = data[data.length - 1].id as string;
+    if (data.length < 1000) break;
+  }
+
+  let processed = 0;
+  let updated = 0;
+  let errors = 0;
+
+  for (let i = 0; i < customerIds.length; i += CUSTOMER_BATCH) {
+    const batch = customerIds.slice(i, i + CUSTOMER_BATCH);
+
+    const ordersByCustomer = new Map<string, number[]>();
+    for (let j = 0; j < batch.length; j += 100) {
+      const chunk = batch.slice(j, j + 100);
+      const { data } = await sb.from("orders").select("customer_id, created_at").in("customer_id", chunk);
+      for (const o of (data || []) as Array<{ customer_id: string; created_at: string }>) {
+        if (!ordersByCustomer.has(o.customer_id)) ordersByCustomer.set(o.customer_id, []);
+        ordersByCustomer.get(o.customer_id)!.push(Date.parse(o.created_at));
+      }
+    }
+
+    const activeSubCustomers = new Set<string>();
+    for (let j = 0; j < batch.length; j += 100) {
+      const chunk = batch.slice(j, j + 100);
+      const { data } = await sb.from("subscriptions").select("customer_id").in("customer_id", chunk).eq("status", "active");
+      for (const s of data || []) activeSubCustomers.add(s.customer_id);
+    }
+
+    const engByCustomer = new Map<string, { clicked_email_60d: number; atc_30d: number; checkout_30d: number; viewed_product_30d: number }>();
+    for (let j = 0; j < batch.length; j += ENGAGEMENT_BATCH) {
+      const chunk = batch.slice(j, j + ENGAGEMENT_BATCH);
+      const { data } = await sb
+        .from("profile_events")
+        .select("customer_id, metric_name, datetime")
+        .eq("workspace_id", workspaceId)
+        .in("customer_id", chunk)
+        .in("metric_name", ["Clicked Email", "Added to Cart", "Checkout Started", "Viewed Product"])
+        .gte("datetime", since60);
+      for (const e of data || []) {
+        if (!e.customer_id) continue;
+        if (!engByCustomer.has(e.customer_id)) {
+          engByCustomer.set(e.customer_id, { clicked_email_60d: 0, atc_30d: 0, checkout_30d: 0, viewed_product_30d: 0 });
+        }
+        const f = engByCustomer.get(e.customer_id)!;
+        const isWithin30 = e.datetime >= since30;
+        switch (e.metric_name) {
+          case "Clicked Email": f.clicked_email_60d++; break;
+          case "Added to Cart": if (isWithin30) f.atc_30d++; break;
+          case "Checkout Started": if (isWithin30) f.checkout_30d++; break;
+          case "Viewed Product": if (isWithin30) f.viewed_product_30d++; break;
+        }
+      }
+    }
+
+    const updates: Array<{ id: string; segments: string[] }> = [];
+    for (const id of batch) {
+      const eng = engByCustomer.get(id) || { clicked_email_60d: 0, atc_30d: 0, checkout_30d: 0, viewed_product_30d: 0 };
+      const segments = computeSegments({
+        orderDates: ordersByCustomer.get(id) || [],
+        hasActiveSub: activeSubCustomers.has(id),
+        clickedEmail60d: eng.clicked_email_60d,
+        atc30d: eng.atc_30d,
+        checkout30d: eng.checkout_30d,
+        viewedProduct30d: eng.viewed_product_30d,
+        now,
+      });
+      updates.push({ id, segments });
+      processed++;
+    }
+
+    const refreshedAt = new Date().toISOString();
+    for (let j = 0; j < updates.length; j += UPDATE_BATCH) {
+      const chunk = updates.slice(j, j + UPDATE_BATCH);
+      const results = await Promise.allSettled(
+        chunk.map(u => sb.from("customers").update({ segments: u.segments, segments_refreshed_at: refreshedAt }).eq("id", u.id)),
+      );
+      for (const r of results) {
+        if (r.status === "fulfilled") updated++;
+        else errors++;
+      }
+    }
+  }
+
+  return { processed, updated, errors };
+}
+
+export const refreshCustomerSegmentsCron = inngest.createFunction(
+  {
+    id: "refresh-customer-segments-cron",
+    name: "Refresh customer.segments daily (archetype + engagement + active_sub)",
+    concurrency: [{ limit: 1 }],
+    retries: 2,
+    // 11:00 UTC = 6 AM Central daily. Runs before the marketing-text
+    // send-tick processes recipients (campaigns schedule audience-resolve
+    // before the configured send time, so today's audience uses today's
+    // refreshed segments).
+    triggers: [{ cron: "0 11 * * *" }],
+  },
+  async ({ step }) => {
+    const sb = createAdminClient();
+    // All workspaces with SMS marketing subscribers — small fleet today,
+    // single-tenant in practice, but written to scale.
+    const { data: workspaces } = await sb.from("workspaces").select("id, name");
+    const results: Array<{ workspace_id: string; name: string; processed: number; updated: number; errors: number }> = [];
+    for (const ws of workspaces || []) {
+      const r = await step.run(`refresh-${ws.id}`, async () => {
+        return await refreshOneWorkspace(ws.id);
+      });
+      results.push({ workspace_id: ws.id, name: ws.name, ...r });
+    }
+    return { workspaces: results };
+  },
+);
