@@ -313,6 +313,141 @@ export function CheckoutClient({
     return () => { if (taxTimer.current) clearTimeout(taxTimer.current); };
   }, [cart.token, address1, address2, city, state, zip, shippingCode, shippingProtection]);
 
+  // ── OTP login (Shop Pay style) ───────────────────────────────────
+  // When the email field BLURS with a valid email, ping the
+  // start-OTP endpoint. If the response says we have a returning
+  // customer, surface the modal so they can log in to autofill
+  // name/address/saved cards. Triggered on blur (not keyup) so we
+  // don't bombard the API on every keystroke.
+  type OtpState = {
+    open: boolean;
+    sessionId: string | null;
+    channel: "sms" | "email";
+    maskedDestination: string;
+    hasSms: boolean;
+    hasEmail: boolean;
+    code: string;
+    busy: boolean;
+    error: string | null;
+    resendCountdown: number;
+    statusMsg: string | null;
+  };
+  const [otp, setOtp] = useState<OtpState>({
+    open: false, sessionId: null, channel: "sms", maskedDestination: "",
+    hasSms: false, hasEmail: false, code: "", busy: false, error: null,
+    resendCountdown: 0, statusMsg: null,
+  });
+  const [authedCustomerId, setAuthedCustomerId] = useState<string | null>(null);
+
+  async function triggerOtpStart(emailValue: string, channel?: "sms" | "email") {
+    const e = emailValue.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return;
+    setOtp((s) => ({ ...s, busy: true, error: null }));
+    try {
+      const res = await fetch("/api/checkout/otp/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cart_token: cart.token, email: e, channel }),
+      });
+      const data = await res.json();
+      if (!data.eligible) {
+        // Not a returning customer — silently skip. We don't want
+        // to nag first-time visitors with a "log in" prompt.
+        setOtp((s) => ({ ...s, busy: false, open: false }));
+        return;
+      }
+      setOtp({
+        open: true,
+        sessionId: data.session_id,
+        channel: data.channel,
+        maskedDestination: data.masked_destination,
+        hasSms: !!data.has_sms,
+        hasEmail: !!data.has_email,
+        code: "",
+        busy: false,
+        error: null,
+        resendCountdown: 60,
+        statusMsg: null,
+      });
+    } catch {
+      setOtp((s) => ({ ...s, busy: false }));
+    }
+  }
+
+  // 1-second countdown for the resend button after each send
+  useEffect(() => {
+    if (otp.resendCountdown <= 0) return;
+    const t = setTimeout(() => setOtp((s) => ({ ...s, resendCountdown: Math.max(0, s.resendCountdown - 1) })), 1000);
+    return () => clearTimeout(t);
+  }, [otp.resendCountdown]);
+
+  async function resendCode(opts?: { channel?: "sms" | "email" }) {
+    if (!otp.sessionId) return;
+    setOtp((s) => ({ ...s, busy: true, error: null, statusMsg: null }));
+    const res = await fetch("/api/checkout/otp/resend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: otp.sessionId, channel: opts?.channel }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setOtp((s) => ({ ...s, busy: false, error: data.error === "rate_limited" ? `Wait ${data.retry_after_seconds}s before resending` : (data.error || "Could not resend") }));
+      return;
+    }
+    setOtp((s) => ({
+      ...s,
+      busy: false,
+      channel: data.channel,
+      maskedDestination: data.masked_destination,
+      code: "",
+      resendCountdown: 60,
+      statusMsg: opts?.channel ? `Code sent via ${data.channel === "sms" ? "text" : "email"} to ${data.masked_destination}` : `New code sent to ${data.masked_destination}`,
+    }));
+  }
+
+  async function submitCode() {
+    if (!otp.sessionId || otp.code.length < 4) return;
+    setOtp((s) => ({ ...s, busy: true, error: null }));
+    const res = await fetch("/api/checkout/otp/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: otp.sessionId, code: otp.code }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setOtp((s) => ({ ...s, busy: false, error: data.error === "invalid_code" ? "That code didn't match. Try again." : (data.error || "Verification failed") }));
+      return;
+    }
+    // Success — autofill from the snapshot the server returned
+    setAuthedCustomerId(data.customer?.id || null);
+    if (data.customer?.first_name) setFirstName(data.customer.first_name);
+    if (data.customer?.last_name) setLastName(data.customer.last_name);
+    if (data.customer?.phone) setPhone(formatPhoneDisplay(data.customer.phone));
+    const a = data.last_shipping_address as Record<string, string> | null;
+    if (a) {
+      if (a.first_name && !shipFirst) setShipFirst(a.first_name);
+      if (a.last_name && !shipLast) setShipLast(a.last_name);
+      if (a.address1) setAddress1(a.address1);
+      if (a.address2) setAddress2(a.address2);
+      if (a.city) setCity(a.city);
+      if (a.province_code) setState(a.province_code);
+      if (a.zip) setZip(a.zip);
+    }
+    setOtp((s) => ({ ...s, open: false, busy: false, error: null, code: "" }));
+    // Force a client-token refetch so Braintree drop-in re-mounts
+    // with the authenticated customer's vaulted cards.
+    setClientToken(null);
+  }
+
+  function startOver() {
+    setEmail("");
+    setPhone("");
+    setFirstName("");
+    setLastName("");
+    setOtp({ open: false, sessionId: null, channel: "sms", maskedDestination: "", hasSms: false, hasEmail: false, code: "", busy: false, error: null, resendCountdown: 0, statusMsg: null });
+    setAuthedCustomerId(null);
+  }
+
   // ── Submit ───────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -577,6 +712,14 @@ export function CheckoutClient({
                 inputMode="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                // Fire OTP eligibility check on blur (not keyup) so
+                // we don't spam the server. Only triggers when a
+                // returning customer is detected; new emails get a
+                // silent no-op.
+                onBlur={(e) => {
+                  if (authedCustomerId) return;
+                  triggerOtpStart(e.target.value);
+                }}
                 placeholder="you@example.com"
                 autoComplete="email"
                 name="email"
@@ -946,6 +1089,105 @@ export function CheckoutClient({
           </div>
         </div>
       </section>
+
+      {/* OTP Modal — Shop Pay-style returning-customer login */}
+      {otp.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/60 px-4">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="flex items-start justify-between">
+              <div>
+                <h2 className="text-lg font-bold text-zinc-900">Welcome back</h2>
+                <p className="mt-1 text-sm text-zinc-600">
+                  {otp.statusMsg
+                    ? otp.statusMsg
+                    : <>We sent a 6-digit code to{" "}<span className="font-semibold">{otp.maskedDestination}</span>.</>}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={startOver}
+                aria-label="Close"
+                className="text-zinc-400 hover:text-zinc-600"
+              >
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <input
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              value={otp.code}
+              onChange={(e) => setOtp((s) => ({ ...s, code: e.target.value.replace(/\D/g, "").slice(0, 6), error: null }))}
+              onKeyDown={(e) => { if (e.key === "Enter" && otp.code.length >= 4) submitCode(); }}
+              placeholder="••••••"
+              className="mt-5 w-full rounded-lg border border-zinc-300 bg-white px-3 py-3 text-center text-2xl font-mono tracking-[0.6em] text-zinc-900 placeholder-zinc-300 focus:border-zinc-500 focus:outline-none"
+            />
+
+            {otp.error && (
+              <p className="mt-2 text-sm text-rose-600">{otp.error}</p>
+            )}
+
+            <button
+              type="button"
+              onClick={submitCode}
+              disabled={otp.busy || otp.code.length < 4}
+              style={{ backgroundColor: workspace.primary_color }}
+              className="mt-4 w-full rounded-full px-4 py-3 text-sm font-extrabold uppercase tracking-wider text-white shadow-md disabled:opacity-50"
+            >
+              {otp.busy ? "Verifying…" : "Verify & log in"}
+            </button>
+
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-x-3 gap-y-2 text-xs">
+              <button
+                type="button"
+                disabled={otp.busy || otp.resendCountdown > 0}
+                onClick={() => resendCode()}
+                className="text-zinc-600 underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {otp.resendCountdown > 0 ? `Resend in ${otp.resendCountdown}s` : "Resend code"}
+              </button>
+              {otp.channel === "sms" && otp.hasEmail && (
+                <>
+                  <span className="text-zinc-300">·</span>
+                  <button
+                    type="button"
+                    disabled={otp.busy}
+                    onClick={() => resendCode({ channel: "email" })}
+                    className="text-zinc-600 underline-offset-2 hover:underline disabled:opacity-50"
+                  >
+                    Email me a code instead
+                  </button>
+                </>
+              )}
+              {otp.channel === "email" && otp.hasSms && (
+                <>
+                  <span className="text-zinc-300">·</span>
+                  <button
+                    type="button"
+                    disabled={otp.busy}
+                    onClick={() => resendCode({ channel: "sms" })}
+                    className="text-zinc-600 underline-offset-2 hover:underline disabled:opacity-50"
+                  >
+                    Text me a code instead
+                  </button>
+                </>
+              )}
+              <span className="text-zinc-300">·</span>
+              <button
+                type="button"
+                onClick={startOver}
+                className="text-zinc-600 underline-offset-2 hover:underline"
+              >
+                Not me / start over
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
