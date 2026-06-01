@@ -346,6 +346,20 @@ export function CheckoutClient({
   const [savedMethods, setSavedMethods] = useState<SavedMethod[]>([]);
   const [selectedSavedToken, setSelectedSavedToken] = useState<string | null>(null);
 
+  // Existing internal subs (only when authenticated). Drives the
+  // three-way "what should we do with these items?" choice card.
+  type ExistingSub = { id: string; items_summary: string; frequency_days: number; next_billing_date: string | null };
+  const [existingSubs, setExistingSubs] = useState<ExistingSub[]>([]);
+  // Three modes:
+  //   "new_sub"      → current behavior, create a new sub from cart
+  //   "add_to_sub"   → order now + add cart items to selected sub
+  //   "renewal_only" → no order now; ride next renewal as one-time
+  // Default to "add_to_sub" when an existing sub exists (prevents
+  // accidental parallel subs).
+  type SubMode = "new_sub" | "add_to_sub" | "renewal_only";
+  const [subMode, setSubMode] = useState<SubMode>("new_sub");
+  const [chosenSubId, setChosenSubId] = useState<string | null>(null);
+
   useEffect(() => {
     // Refresh saved methods on page load + every time the client
     // token cycles (which happens after a successful OTP verify).
@@ -366,6 +380,35 @@ export function CheckoutClient({
     })();
     return () => { cancelled = true; };
   }, [cart.token, clientToken, authedCustomerId]);
+
+  // Fetch existing subs when authenticated. Only relevant when the
+  // cart contains subscribe items.
+  useEffect(() => {
+    let cancelled = false;
+    if (!authedCustomerId || !subscribing) {
+      setExistingSubs([]);
+      setSubMode("new_sub");
+      setChosenSubId(null);
+      return;
+    }
+    (async () => {
+      try {
+        const res = await fetch(`/api/checkout/existing-subs?cart_token=${encodeURIComponent(cart.token)}`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { subscriptions?: ExistingSub[] };
+        if (cancelled) return;
+        const subs = data.subscriptions || [];
+        setExistingSubs(subs);
+        if (subs.length > 0) {
+          // Default to "Order now + add to existing" — prevents
+          // accidental parallel subs, matches Dylan's preference.
+          setSubMode("add_to_sub");
+          setChosenSubId(subs[0].id);
+        }
+      } catch { /* non-fatal */ }
+    })();
+    return () => { cancelled = true; };
+  }, [cart.token, authedCustomerId, subscribing]);
 
   async function triggerOtpStart(emailValue: string, channel?: "sms" | "email") {
     const e = emailValue.trim().toLowerCase();
@@ -591,6 +634,11 @@ export function CheckoutClient({
           billing_address: billing,
           shipping_protection_added: shippingProtection && !!workspace.shipping_protection,
           shipping_method_code: shippingCode,
+          // Three-way subscription routing — server uses these to
+          // decide whether to create a new sub, append items to an
+          // existing sub, or ride the next renewal as one-time.
+          sub_mode: existingSubs.length > 0 ? subMode : "new_sub",
+          existing_sub_id: (subMode === "add_to_sub" || subMode === "renewal_only") ? chosenSubId : undefined,
         }),
       });
       const data = (await res.json()) as { ok?: boolean; order_id?: string; order_number?: string; error?: string; details?: string };
@@ -722,6 +770,110 @@ export function CheckoutClient({
         <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_360px]">
           {/* ── Left column: forms ──────────────────────────────── */}
           <div className="space-y-5">
+            {/* Subscription renewal info — only when cart has subscribe
+                items. Mirrors Shopify's "auto-deliver" reassurance
+                strip so the customer knows the recurring portion +
+                cadence before they confirm. */}
+            {subscribing && recurringCents > 0 && cart.subscription_frequency_days && (
+              <div className="flex items-start gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                <svg className="h-5 w-5 flex-shrink-0 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                </svg>
+                <div className="text-sm text-zinc-700">
+                  This order has items that will renew{" "}
+                  <span className="font-semibold">{frequencyToLabel(cart.subscription_frequency_days)}</span>
+                  {" "}for{" "}
+                  <span className="font-semibold">{fmt(recurringCents)}</span>.
+                  {" "}You can cancel or change frequency anytime in your account.
+                </div>
+              </div>
+            )}
+
+            {/* Three-way subscription choice card — only when the
+                customer is logged in AND has at least one existing
+                internal sub AND the cart contains subscribe items. */}
+            {authedCustomerId && subscribing && existingSubs.length > 0 && (
+              <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">You already have a subscription</p>
+                <p className="mt-1 text-sm text-zinc-600">
+                  How would you like to handle these items?
+                </p>
+
+                <div className="mt-3 space-y-2">
+                  <label className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-3 transition ${subMode === "add_to_sub" ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}>
+                    <input
+                      type="radio"
+                      name="sub-mode"
+                      checked={subMode === "add_to_sub"}
+                      onChange={() => setSubMode("add_to_sub")}
+                      className="mt-0.5 h-4 w-4"
+                    />
+                    <div className="text-sm">
+                      <div className="font-semibold text-zinc-900">Order now + add to my subscription</div>
+                      <div className="mt-0.5 text-xs text-zinc-500">Charge today and include these items on every future renewal.</div>
+                    </div>
+                  </label>
+
+                  <label className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-3 transition ${subMode === "renewal_only" ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}>
+                    <input
+                      type="radio"
+                      name="sub-mode"
+                      checked={subMode === "renewal_only"}
+                      onChange={() => setSubMode("renewal_only")}
+                      className="mt-0.5 h-4 w-4"
+                    />
+                    <div className="text-sm">
+                      <div className="font-semibold text-zinc-900">Add to my next renewal only</div>
+                      <div className="mt-0.5 text-xs text-zinc-500">Ship with your next scheduled order — no charge today.</div>
+                    </div>
+                  </label>
+
+                  <label className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-3 transition ${subMode === "new_sub" ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}>
+                    <input
+                      type="radio"
+                      name="sub-mode"
+                      checked={subMode === "new_sub"}
+                      onChange={() => setSubMode("new_sub")}
+                      className="mt-0.5 h-4 w-4"
+                    />
+                    <div className="text-sm">
+                      <div className="font-semibold text-zinc-900">Create a new subscription</div>
+                      <div className="mt-0.5 text-xs text-zinc-500">Keep your current subscription as-is and start a separate one.</div>
+                    </div>
+                  </label>
+                </div>
+
+                {(subMode === "add_to_sub" || subMode === "renewal_only") && existingSubs.length > 1 && (
+                  <div className="mt-4">
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Which subscription?</p>
+                    <div className="space-y-2">
+                      {existingSubs.map((s) => (
+                        <label
+                          key={s.id}
+                          className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2 text-sm transition ${chosenSubId === s.id ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
+                        >
+                          <input
+                            type="radio"
+                            name="chosen-sub"
+                            checked={chosenSubId === s.id}
+                            onChange={() => setChosenSubId(s.id)}
+                            className="h-4 w-4"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate font-medium text-zinc-900">{s.items_summary || "Subscription"}</div>
+                            <div className="text-xs text-zinc-500">
+                              {frequencyToLabel(s.frequency_days)}
+                              {s.next_billing_date && <> · next ships {new Date(s.next_billing_date).toLocaleDateString()}</>}
+                            </div>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+            )}
+
             {/* Contact card */}
             <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
               <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Your details</p>
@@ -1472,6 +1624,19 @@ function Row({ label, value, emphasis, muted }: { label: string; value: string; 
 
 function fmt(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
+}
+
+function frequencyToLabel(days: number): string {
+  if (days === 7) return "weekly";
+  if (days === 14) return "every 2 weeks";
+  if (days === 30) return "monthly";
+  if (days === 45) return "every 6 weeks";
+  if (days === 60) return "every 2 months";
+  if (days === 90) return "every 3 months";
+  if (days === 120) return "every 4 months";
+  if (days === 180) return "every 6 months";
+  if (days === 365) return "yearly";
+  return `every ${days} days`;
 }
 
 /**

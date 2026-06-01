@@ -83,11 +83,25 @@ interface PostBody {
   billing_address?: AddressInput;
   shipping_protection_added?: boolean;
   shipping_method_code?: string;
+  // Three-way routing when the cart contains subscribe items AND
+  // the authenticated customer already has an internal sub.
+  //   "new_sub"      → default: create a fresh internal sub
+  //   "add_to_sub"   → charge order today; subscribe lines also get
+  //                    appended to existing_sub_id as recurring;
+  //                    one-time lines (gifts) ride next renewal
+  //   "renewal_only" → no order today; cart items get added to
+  //                    existing_sub_id with one_time_next_renewal=true
+  //                    so they ship + bill at next renewal then drop
+  sub_mode?: "new_sub" | "add_to_sub" | "renewal_only";
+  existing_sub_id?: string;
 }
 
 export async function POST(request: NextRequest) {
   const body = (await request.json().catch(() => ({}))) as PostBody;
-  if (!body.cart_token || !body.email || (!body.payment_method_nonce && !body.payment_method_token)) {
+  // Renewal-only mode has no payment leg — skip the nonce/token
+  // requirement; everything else still must be present.
+  const isRenewalOnly = body.sub_mode === "renewal_only";
+  if (!body.cart_token || !body.email || (!isRenewalOnly && !body.payment_method_nonce && !body.payment_method_token)) {
     return NextResponse.json({ error: "missing_required_fields" }, { status: 400 });
   }
   const ship = body.shipping_address;
@@ -253,6 +267,54 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "customer_create_failed", details: createErr?.message }, { status: 500 });
     }
     customer = created;
+  }
+
+  // ── 2b. Short-circuit: renewal_only mode ─────────────────────────
+  // Customer picked "add to my next renewal only". No charge today,
+  // no separate order — just append the cart items to their existing
+  // sub with one_time_next_renewal=true so they ride the next ship
+  // then drop off.
+  if (isRenewalOnly) {
+    if (!body.existing_sub_id) {
+      return NextResponse.json({ error: "missing_existing_sub_id" }, { status: 400 });
+    }
+    const { appendCartItemsToSub } = await import("@/lib/subscription-add-items");
+    const appendRes = await appendCartItemsToSub(
+      cart.workspace_id,
+      body.existing_sub_id,
+      customer.id,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      lines as any[],
+      "renewal_only",
+    );
+    if (!appendRes.success) {
+      return NextResponse.json({ error: "append_failed", details: appendRes.error }, { status: 400 });
+    }
+    // Mark the cart converted (no order id — there's no order).
+    await admin
+      .from("cart_drafts")
+      .update({
+        status: "converted",
+        customer_id: customer.id,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("token", cart.token);
+    // Stitch identity so the funnel attribution flows through
+    await stitchVisitor({
+      workspaceId: cart.workspace_id,
+      customerId: customer.id,
+      anonymousId: (cart.anonymous_id as string | null) || null,
+      context: visitorCtx,
+    });
+    return NextResponse.json({
+      ok: true,
+      sub_mode: "renewal_only",
+      subscription_id: body.existing_sub_id,
+      // Front-end uses these to route to a confirmation page that
+      // doesn't pretend a new order was placed.
+      order_id: null,
+      order_number: null,
+    });
   }
 
   // 3. Resolve the Braintree customer id (local → BT search → create)
@@ -445,19 +507,52 @@ export async function POST(request: NextRequest) {
     }).eq("id", transactionRecordId);
   }
 
-  // ── 6. Create internal subscription rows for any subscribe lines. ─
+  // ── 6. Subscription routing ─────────────────────────────────────
+  // Three modes drive what we do with the subscribe-mode cart lines:
+  //   "new_sub"    (default) → create a fresh internal sub per
+  //                            frequency bucket
+  //   "add_to_sub"           → SKIP new-sub creation; instead append
+  //                            subscribe items to the existing sub
+  //                            as recurring, and any onetime/gift
+  //                            items as one_time_next_renewal=true
+  //   "renewal_only"         → handled earlier in the function as a
+  //                            short-circuit (no payment, no order)
+  const subMode = body.sub_mode || "new_sub";
+  const createdSubscriptionIds: string[] = [];
+  let primarySubscriptionId: string | null = null;
+
+  if (subMode === "add_to_sub" && body.existing_sub_id) {
+    const { appendCartItemsToSub } = await import("@/lib/subscription-add-items");
+    const appendRes = await appendCartItemsToSub(
+      cart.workspace_id,
+      body.existing_sub_id,
+      customer.id,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      lines as any[],
+      "add_to_sub",
+    );
+    if (appendRes.success) {
+      primarySubscriptionId = body.existing_sub_id;
+      createdSubscriptionIds.push(body.existing_sub_id);
+    } else {
+      // Loud — payment already went through, so this is a customer-
+      // facing problem an operator will need to fix manually.
+      console.error(`[checkout] add_to_sub append failed for cart ${cart.token}:`, appendRes.error);
+    }
+  }
+
   // Group by frequency_days so one cart with two different cadences
   // produces two subs. Skip if no subscribe lines.
   type SubscribeBucket = { frequency_days: number; items: typeof lines };
   const buckets = new Map<number, SubscribeBucket>();
-  for (const l of lines) {
-    if (l.mode !== "subscribe" || !l.frequency_days) continue;
-    if (!buckets.has(l.frequency_days)) buckets.set(l.frequency_days, { frequency_days: l.frequency_days, items: [] });
-    buckets.get(l.frequency_days)!.items.push(l);
+  if (subMode === "new_sub") {
+    for (const l of lines) {
+      if (l.mode !== "subscribe" || !l.frequency_days) continue;
+      if (!buckets.has(l.frequency_days)) buckets.set(l.frequency_days, { frequency_days: l.frequency_days, items: [] });
+      buckets.get(l.frequency_days)!.items.push(l);
+    }
   }
 
-  const createdSubscriptionIds: string[] = [];
-  let primarySubscriptionId: string | null = null;
   for (const bucket of buckets.values()) {
     const nextBillingDate = new Date();
     nextBillingDate.setDate(nextBillingDate.getDate() + bucket.frequency_days);

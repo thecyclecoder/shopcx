@@ -303,6 +303,10 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       return { id: order.id as string, order_number: order.order_number as string };
     });
 
+    // Drop any one_time_next_renewal items now that they've shipped
+    // on this renewal — they're spent. Recurring items stay.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const droppedAnyOneTime = ((ctx.sub.items as any[]) || []).some((i) => i?.one_time_next_renewal === true);
     // Advance next_billing_date by exactly `count` × `interval`.
     await step.run("advance-next-billing-date", async () => {
       const interval = (ctx.sub.billing_interval || "day").toLowerCase();
@@ -314,9 +318,19 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       else if (interval === "month") next.setUTCMonth(next.getUTCMonth() + count);
       else if (interval === "year") next.setUTCFullYear(next.getUTCFullYear() + count);
       else next.setUTCDate(next.getUTCDate() + count * 28);
+      // Filter out one-time items — they shipped on this renewal and
+      // shouldn't recur.
+      const update: Record<string, unknown> = {
+        next_billing_date: next.toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      if (droppedAnyOneTime) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        update.items = ((ctx.sub.items as any[]) || []).filter((i) => !i?.one_time_next_renewal);
+      }
       await admin
         .from("subscriptions")
-        .update({ next_billing_date: next.toISOString(), updated_at: new Date().toISOString() })
+        .update(update)
         .eq("id", subscription_id);
     });
 
