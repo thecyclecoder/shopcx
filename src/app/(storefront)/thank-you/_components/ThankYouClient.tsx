@@ -131,6 +131,23 @@ export function ThankYouClient({ order, workspace }: { order: OrderProps; worksp
         </section>
       )}
 
+      {/* Portal CTA — uses the sx_session cookie set during OTP-at-
+          checkout, so an authenticated buyer goes straight to the
+          portal. Anyone without a session can still reach /account
+          and enter their email there (OTP first, magic-link fallback). */}
+      <section className="mt-6 flex flex-col items-center gap-3 rounded-2xl border border-zinc-200 bg-white p-5 text-center shadow-sm">
+        <p className="text-sm text-zinc-600">
+          Manage your subscriptions, track orders, or update your shipping address anytime.
+        </p>
+        <a
+          href="/account"
+          className="rounded-full px-6 py-2.5 text-sm font-semibold text-white shadow-sm"
+          style={{ backgroundColor: workspace.primary_color }}
+        >
+          View my account →
+        </a>
+      </section>
+
       <p className="mt-8 text-center text-sm text-zinc-500">
         Questions about your order? Just reply to your confirmation email.
       </p>
