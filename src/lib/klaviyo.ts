@@ -298,6 +298,10 @@ export async function syncReviewsForWorkspace(
     url = result.nextUrl;
   }
 
+  // Polish before summarize: the summary should be generated against
+  // clean text, not a "manger to lose" body that Haiku will faithfully
+  // reproduce in the 15-word summary.
+  await polishReviewBodies(workspaceId);
   await generateMissingSummaries(workspaceId);
 
   const admin = createAdminClient();
@@ -432,6 +436,117 @@ export async function updateReviewType(
   } catch (err) {
     console.error("Klaviyo review type update error:", err);
     return { success: false, error: String(err) };
+  }
+}
+
+// ── Haiku polish pass for new review bodies ──
+//
+// Customers leave reviews on phones with autocorrect — "manger" instead of
+// "managed", "their" vs "there", missing commas, etc. We don't paraphrase
+// or rewrite; we just fix obvious typos and grammar mistakes so the
+// review reads cleanly when shown on the storefront. Voice and content
+// stay intact.
+//
+// Eligibility per row:
+//   body_polished_at IS NULL  — never polished
+//   body_locked_at   IS NULL  — admin hasn't hand-edited
+//   body             IS NOT NULL
+//   rating          >= 4      — we only display 4+ on the site
+//   review_type     IN review/store
+//
+// After polish, body_polished_at = now() so the row is skipped next time.
+export async function polishReviewBodies(workspaceId: string) {
+  const admin = createAdminClient();
+
+  const { data: reviews } = await admin
+    .from("product_reviews")
+    .select("id, body, smart_quote, title")
+    .eq("workspace_id", workspaceId)
+    .is("body_polished_at", null)
+    .is("body_locked_at", null)
+    .gte("rating", 4)
+    .in("review_type", ["review", "store"])
+    .not("body", "is", null)
+    .order("featured", { ascending: false })
+    .order("published_at", { ascending: false })
+    .limit(200);
+
+  if (!reviews?.length) return;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return;
+
+  for (const review of reviews) {
+    try {
+      const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: HAIKU_MODEL,
+          max_tokens: 1024,
+          messages: [
+            {
+              role: "user",
+              content: `You are proofreading a customer product review for display on a storefront. Fix ONLY obvious typos, autocorrect mistakes, and missing punctuation.
+
+DO:
+- Fix clear typos ("manger" → "managed", "thier" → "their", "wieght" → "weight")
+- Add missing periods, fix run-on sentences with appropriate punctuation
+- Capitalize the start of sentences
+- Fix obvious grammar errors that would embarrass the customer
+
+DO NOT:
+- Paraphrase, rewrite, or "improve" wording
+- Add or remove content, ideas, or sentences
+- Change voice, tone, or style
+- Translate informal phrases into formal ones
+- Add hedging or marketing language
+
+Return ONLY valid JSON in this exact shape, no markdown, no explanation:
+{"body": "<corrected body>", "smart_quote": "<corrected quote, or null if input was null>", "changed": <true|false>}
+
+If the text is already clean, set changed=false and return body/smart_quote unchanged.
+
+Title: ${review.title || ""}
+Body: ${review.body || ""}
+Smart quote: ${review.smart_quote || "null"}`,
+            },
+          ],
+        }),
+      });
+
+      if (!aiRes.ok) {
+        console.warn(`[polishReviewBodies] HTTP ${aiRes.status} for review ${review.id}`);
+        // Stamp polished_at anyway so we don't infinite-retry a broken row.
+        await admin.from("product_reviews").update({ body_polished_at: new Date().toISOString() }).eq("id", review.id);
+        continue;
+      }
+      const aiData = await aiRes.json();
+      const raw = (aiData.content?.[0] as { type: string; text: string })?.text?.trim() || "";
+      let parsed: { body?: string; smart_quote?: string | null; changed?: boolean };
+      try {
+        // Haiku occasionally wraps in ```json fences — strip them.
+        const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+        parsed = JSON.parse(cleaned);
+      } catch {
+        console.warn(`[polishReviewBodies] could not parse Haiku output for review ${review.id}; stamping as polished anyway`);
+        await admin.from("product_reviews").update({ body_polished_at: new Date().toISOString() }).eq("id", review.id);
+        continue;
+      }
+
+      const nowIso = new Date().toISOString();
+      const update: Record<string, unknown> = { body_polished_at: nowIso, updated_at: nowIso };
+      if (parsed.changed === true) {
+        if (typeof parsed.body === "string" && parsed.body.trim()) update.body = parsed.body;
+        if (typeof parsed.smart_quote === "string" && parsed.smart_quote.trim()) update.smart_quote = parsed.smart_quote;
+      }
+      await admin.from("product_reviews").update(update).eq("id", review.id);
+    } catch (err) {
+      console.error(`[polishReviewBodies] failed for review ${review.id}:`, err);
+    }
   }
 }
 
