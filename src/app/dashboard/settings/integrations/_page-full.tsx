@@ -73,6 +73,10 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
   // Twilio SMS
   const [twilioConnected, setTwilioConnected] = useState(false);
   const [twilioPhone, setTwilioPhone] = useState("");
+  // Twilio Verify (Checkout OTP login)
+  const [twilioVerifySid, setTwilioVerifySid] = useState<string | null>(null);
+  const [twilioVerifyBusy, setTwilioVerifyBusy] = useState(false);
+  const [twilioVerifyMsg, setTwilioVerifyMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [testSmsNumber, setTestSmsNumber] = useState("");
   const [testSmsStatus, setTestSmsStatus] = useState("");
 
@@ -234,6 +238,9 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
         setBraintreePublicKey(data.braintree_public_key || "");
         setBraintreeEnvironment((data.braintree_environment as "production" | "sandbox") || "production");
         setBraintreePrivateKeyHint(data.braintree_private_key_hint || null);
+        setTwilioConnected(!!(data.twilio_phone_number || data.twilio_verify_service_sid));
+        setTwilioPhone(data.twilio_phone_number || "");
+        setTwilioVerifySid(data.twilio_verify_service_sid || null);
         setAvalaraConnected(!!data.avalara_connected);
         setAvalaraEnabled(!!data.avalara_enabled);
         setAvalaraAccountId(data.avalara_account_id || "");
@@ -2342,6 +2349,115 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
               )}
             </form>
           )}
+        </div>
+      )}
+
+      {show("twilio") && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-rose-600/10">
+                <svg className="h-5 w-5 text-rose-600 dark:text-rose-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Twilio</h2>
+                <p className="text-sm text-zinc-500">SMS sender + Verify (transactional OTP for checkout login).</p>
+              </div>
+            </div>
+            {twilioConnected && (
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                Connected
+              </span>
+            )}
+          </div>
+
+          <div className="mt-5 space-y-5">
+            {/* Sender phone — read-only; managed at Settings → Text Marketing */}
+            <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-800">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">SMS sender phone</p>
+                  <p className="mt-0.5 text-xs text-zinc-500">{twilioPhone ? <code className="font-mono">{twilioPhone}</code> : "Not configured"}</p>
+                </div>
+                <a
+                  href="/dashboard/settings/text-marketing"
+                  className="text-xs font-medium text-indigo-600 hover:underline"
+                >
+                  Manage in Text Marketing →
+                </a>
+              </div>
+            </div>
+
+            {/* Verify (Checkout OTP) */}
+            <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-800">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Checkout OTP (Twilio Verify)</p>
+                  <p className="mt-0.5 text-xs text-zinc-500">
+                    Powers the &quot;log in to autofill&quot; flow on the storefront checkout. Twilio handles code generation, delivery, brute-force protection, and the high-deliverability OTP pool.
+                  </p>
+                  {twilioVerifySid && (
+                    <p className="mt-2 font-mono text-[11px] text-zinc-500">Service SID: <span className="text-zinc-700 dark:text-zinc-300">{twilioVerifySid}</span></p>
+                  )}
+                </div>
+                {twilioVerifySid ? (
+                  <span className="shrink-0 rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                    Enabled
+                  </span>
+                ) : (
+                  <span className="shrink-0 rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                    Not enabled
+                  </span>
+                )}
+              </div>
+
+              {canEdit && (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {!twilioVerifySid && (
+                    <button
+                      type="button"
+                      disabled={twilioVerifyBusy}
+                      onClick={async () => {
+                        setTwilioVerifyBusy(true);
+                        setTwilioVerifyMsg(null);
+                        const r = await fetch(`/api/workspaces/${workspace.id}/integrations/twilio-verify-setup`, { method: "POST" });
+                        const data = await r.json();
+                        setTwilioVerifyBusy(false);
+                        if (r.ok && data.sid) {
+                          setTwilioVerifySid(data.sid);
+                          setTwilioConnected(true);
+                          setTwilioVerifyMsg({ ok: true, text: `Provisioned · ${data.sid}` });
+                        } else {
+                          setTwilioVerifyMsg({ ok: false, text: data.error || "Setup failed" });
+                        }
+                      }}
+                      className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {twilioVerifyBusy ? "Provisioning…" : "Enable OTP"}
+                    </button>
+                  )}
+                  {twilioVerifySid && (
+                    <a
+                      href="https://console.twilio.com/us1/develop/verify/services"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs font-medium text-indigo-600 hover:underline"
+                    >
+                      View in Twilio console →
+                    </a>
+                  )}
+                </div>
+              )}
+
+              {twilioVerifyMsg && (
+                <p className={`mt-2 text-sm ${twilioVerifyMsg.ok ? "text-emerald-600" : "text-red-600"}`}>
+                  {twilioVerifyMsg.text}
+                </p>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

@@ -9,6 +9,7 @@ const NAMES: Record<string, string> = {
   appstle: "Appstle",
   easypost: "EasyPost / Returns",
   braintree: "Braintree",
+  twilio: "Twilio",
   avalara: "Avalara (AvaTax)",
   klaviyo: "Klaviyo",
   meta: "Meta",
