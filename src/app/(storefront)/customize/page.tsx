@@ -117,13 +117,15 @@ export default async function CustomizePage({ searchParams }: PageProps) {
         if (rule) {
           // Resolve free-gift variant's perceived value ("$X.XX value")
           // by joining product_variants on the free_gift_variant_id.
+          // The pricing-rules column holds the INTERNAL variant UUID
+          // (matches `product_variants.id`), not the Shopify numeric id.
           let freeGiftPriceCents: number | null = null;
           let freeGiftProductId: string | null = null;
           if (rule.free_gift_variant_id) {
             const { data: giftVariant } = await admin
               .from("product_variants")
               .select("price_cents, compare_at_price_cents, product_id")
-              .eq("shopify_variant_id", rule.free_gift_variant_id)
+              .eq("id", rule.free_gift_variant_id)
               .maybeSingle();
             if (giftVariant) {
               freeGiftPriceCents = Math.max(
