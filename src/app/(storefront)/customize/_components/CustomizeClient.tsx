@@ -589,11 +589,21 @@ export function CustomizeClient({
         <div className="mx-auto flex max-w-3xl items-center justify-between gap-4">
           <div>
             <div className="text-2xl font-bold leading-tight text-zinc-900">{fmt(cart.total_cents)}</div>
-            {orderSavingsCents > 0 && (
-              <div className="mt-0.5 text-xs font-semibold text-emerald-700">
-                Save {fmt(orderSavingsCents)}
-              </div>
-            )}
+            {orderSavingsCents > 0 && (() => {
+              // Savings % is against the would-have-paid amount
+              // (current paying total + savings). Matches the
+              // shorthand used in SMS/email ("Save 44%"), so
+              // customers see the same number on-site as in
+              // their inbox.
+              const wouldHavePaid = cart.total_cents + orderSavingsCents;
+              const pct = wouldHavePaid > 0 ? Math.round((orderSavingsCents / wouldHavePaid) * 100) : 0;
+              return (
+                <div className="mt-0.5 text-xs font-semibold text-emerald-700">
+                  Save {fmt(orderSavingsCents)}
+                  {pct > 0 ? ` · ${pct}% off` : ""}
+                </div>
+              );
+            })()}
           </div>
           <button
             type="button"
