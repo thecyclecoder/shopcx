@@ -69,6 +69,38 @@ export default async function CustomizePage({ searchParams }: PageProps) {
 
   if (!cart) redirect("/");
 
+  // ── Heal stale carts on load ───────────────────────────────────
+  // Re-run ensureFreeGifts (strips paid lines for gift-target
+  // products + re-derives $0 gift lines from current rules) and
+  // recompute totals. Idempotent: if nothing changes, we skip the
+  // write. Covers carts created before the gift-target strip rule
+  // landed and any future drift.
+  {
+    const { ensureFreeGifts } = await import("@/lib/cart-gifts");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const currentLines = (cart.line_items as any[]) || [];
+    const fixedLines = await ensureFreeGifts(cart.workspace_id as string, currentLines);
+    const fixedSubtotal = fixedLines.reduce((s, l) => s + (l.line_total_cents || 0), 0);
+    const fixedTotal = fixedSubtotal; // shipping/tax computed at checkout
+    const linesChanged = JSON.stringify(fixedLines) !== JSON.stringify(currentLines);
+    const totalsChanged = cart.subtotal_cents !== fixedSubtotal || cart.total_cents !== fixedTotal;
+    if (linesChanged || totalsChanged) {
+      await admin
+        .from("cart_drafts")
+        .update({
+          line_items: fixedLines,
+          subtotal_cents: fixedSubtotal,
+          total_cents: fixedTotal,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("token", token);
+      // Reflect the heal in the cart we pass downstream
+      cart.line_items = fixedLines;
+      cart.subtotal_cents = fixedSubtotal;
+      cart.total_cents = fixedTotal;
+    }
+  }
+
   // ── Per-product catalog ────────────────────────────────────────────
   // For every product the customer has in their cart, gather everything
   // they might want to swap to: all variants of that product, its
