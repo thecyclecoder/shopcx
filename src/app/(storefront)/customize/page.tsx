@@ -118,10 +118,11 @@ export default async function CustomizePage({ searchParams }: PageProps) {
           // Resolve free-gift variant's perceived value ("$X.XX value")
           // by joining product_variants on the free_gift_variant_id.
           let freeGiftPriceCents: number | null = null;
+          let freeGiftProductId: string | null = null;
           if (rule.free_gift_variant_id) {
             const { data: giftVariant } = await admin
               .from("product_variants")
-              .select("price_cents, compare_at_price_cents")
+              .select("price_cents, compare_at_price_cents, product_id")
               .eq("shopify_variant_id", rule.free_gift_variant_id)
               .maybeSingle();
             if (giftVariant) {
@@ -129,6 +130,7 @@ export default async function CustomizePage({ searchParams }: PageProps) {
                 giftVariant.compare_at_price_cents || 0,
                 giftVariant.price_cents || 0,
               );
+              freeGiftProductId = (giftVariant.product_id as string | null) || null;
             }
           }
           pricingRule = {
@@ -136,6 +138,7 @@ export default async function CustomizePage({ searchParams }: PageProps) {
             available_frequencies: (rule.available_frequencies as ProductCatalogEntry["pricing_rule"] extends infer T ? T extends { available_frequencies: infer F } ? F : never : never) || [],
             quantity_breaks: (rule.quantity_breaks as Array<{ quantity: number; discount_pct: number; label: string }>) || [],
             free_gift_variant_id: rule.free_gift_variant_id || null,
+            free_gift_product_id: freeGiftProductId,
             free_gift_product_title: rule.free_gift_product_title || null,
             free_gift_image_url: rule.free_gift_image_url || null,
             free_gift_min_quantity: rule.free_gift_min_quantity ?? 1,

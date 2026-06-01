@@ -105,7 +105,11 @@ export function CheckoutClient({
     : (shippingRates.find((r) => r.code === "economy")?.total_cents ?? 0);
   const shippingCents = chosenRate ? chosenRate.total_cents : 0;
   const shippingSavedCents = Math.max(0, shippingValueCents - shippingCents);
-  const taxCents = 0;
+  // Tax is computed by Avalara once the customer has a shipping
+  // address. Stays 0 until the quote returns; refreshes on address /
+  // shipping method / protection change. See the useEffect below.
+  const [taxCents, setTaxCents] = useState<number>(0);
+  const [taxLoading, setTaxLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -266,6 +270,48 @@ export function CheckoutClient({
     // shipping name (e.g. shipping a gift).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [firstName, lastName]);
+
+  // ── Tax quote (Avalara, debounced) ───────────────────────────────
+  // Re-quote whenever the customer changes anything that affects the
+  // tax base: shipping address, shipping method, shipping protection.
+  // Returns 0 silently when the address isn't complete or when
+  // Avalara isn't configured.
+  const taxTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (taxTimer.current) clearTimeout(taxTimer.current);
+    const ready = address1 && city && state && zip;
+    if (!ready) { setTaxCents(0); return; }
+    setTaxLoading(true);
+    taxTimer.current = setTimeout(async () => {
+      try {
+        const res = await fetch("/api/checkout/tax-quote", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cart_token: cart.token,
+            shipping_address: {
+              address1,
+              address2: address2 || undefined,
+              city,
+              province_code: state,
+              zip,
+              country_code: "US",
+            },
+            shipping_method_code: shippingCode,
+            shipping_protection_added: shippingProtection,
+          }),
+        });
+        if (!res.ok) { setTaxCents(0); return; }
+        const data = (await res.json()) as { tax_cents?: number };
+        setTaxCents(data.tax_cents || 0);
+      } catch {
+        setTaxCents(0);
+      } finally {
+        setTaxLoading(false);
+      }
+    }, 500);
+    return () => { if (taxTimer.current) clearTimeout(taxTimer.current); };
+  }, [cart.token, address1, address2, city, state, zip, shippingCode, shippingProtection]);
 
   // ── Submit ───────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
@@ -494,6 +540,8 @@ export function CheckoutClient({
               backLink={backLink}
               recurringCents={recurringCents}
               subscribing={subscribing}
+              taxCents={taxCents}
+              taxLoading={taxLoading}
             />
           </div>
         </details>
@@ -820,6 +868,8 @@ export function CheckoutClient({
               backLink={backLink}
               recurringCents={recurringCents}
               subscribing={subscribing}
+              taxCents={taxCents}
+              taxLoading={taxLoading}
             />
                 </div>
               </section>
@@ -917,6 +967,8 @@ function OrderSummary({
   backLink,
   recurringCents,
   subscribing,
+  taxCents,
+  taxLoading,
 }: {
   cart: CartDraft;
   subtotalCents: number;
@@ -930,6 +982,8 @@ function OrderSummary({
   backLink: string;
   recurringCents: number;
   subscribing: boolean;
+  taxCents: number;
+  taxLoading: boolean;
 }) {
   // Strikethrough on shipping only when free AND there was a non-zero
   // value to strike through (no zero-zero strikethrough).
@@ -1018,6 +1072,11 @@ function OrderSummary({
         ) : (
           <Row label="Shipping" value={shippingCents === 0 ? "Free" : fmt(shippingCents)} />
         )}
+        <Row
+          label="Sales tax"
+          value={taxLoading ? "Calculating…" : taxCents > 0 ? fmt(taxCents) : "—"}
+          muted={taxCents === 0}
+        />
         <Row label="Total" value={fmt(totalCents)} emphasis />
         {subscribing && recurringCents > 0 && (
           <div className="mt-1 flex items-baseline justify-between text-xs text-zinc-500">

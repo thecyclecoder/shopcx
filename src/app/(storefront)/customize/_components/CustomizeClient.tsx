@@ -89,6 +89,8 @@ export interface ProductCatalogEntry {
     available_frequencies: Array<{ interval_days: number; label: string; default?: boolean }>;
     quantity_breaks: Array<{ quantity: number; discount_pct: number; label: string }>;
     free_gift_variant_id: string | null;
+    /** Internal product UUID of the gift target — drives standalone-card suppression. */
+    free_gift_product_id: string | null;
     free_gift_product_title: string | null;
     free_gift_image_url: string | null;
     free_gift_min_quantity: number;
@@ -176,7 +178,24 @@ export function CustomizeClient({
   // (one per variant). The worksheet treats those collectively: a
   // "group" is "all the boxes of this product" with a per-variant
   // breakdown inside.
-  const groups = useMemo(() => groupLinesByProduct(cart.line_items), [cart.line_items]);
+  //
+  // Any product that's defined as a free-gift target in some pricing
+  // rule is filtered out here — the gift is communicated by the
+  // qualifying product's "Unlocked at N Pack" card, never as its own
+  // standalone worksheet card (no quantity picker, no $19.95 price
+  // tag, no confusion).
+  const giftProductIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const entry of Object.values(productCatalog)) {
+      const pid = entry?.pricing_rule?.free_gift_product_id;
+      if (pid) ids.add(pid);
+    }
+    return ids;
+  }, [productCatalog]);
+  const groups = useMemo(
+    () => groupLinesByProduct(cart.line_items).filter((g) => !giftProductIds.has(g.product_id)),
+    [cart.line_items, giftProductIds],
+  );
 
   // ── Order-level subscribe + frequency ───────────────────────────
   // Single source of truth on the cart for now (the upsell pass will
@@ -832,21 +851,33 @@ function ProductWorksheetCard({
         </div>
       )}
 
-      {/* Free gift unlocked card — shows the actual gift image + value.
-          Sits below the flavor picker so customers finish their core
-          decisions first; the gift then reads as "here's what you
-          earned" rather than "here's another thing to think about". */}
+      {/* Free gift card — two states:
+          • Unlocked: amber card with image + "Yours free with this order"
+          • Locked: greyed-out teaser with "Add N or more to unlock"
+          Always rendered so the customer can see what's available; never
+          shown as a configurable product with its own quantity picker. */}
       {(() => {
-        const giftActive = giftAppliesAtQty(catalog.pricing_rule, totalQty, subscribing);
         const rule = catalog.pricing_rule;
-        if (!giftActive || !rule || !rule.free_gift_product_title) return null;
+        if (!rule || !rule.free_gift_variant_id || !rule.free_gift_product_title) return null;
+        if (rule.free_gift_subscription_only && !subscribing) return null;
+        const giftActive = giftAppliesAtQty(rule, totalQty, subscribing);
+        const minQty = rule.free_gift_min_quantity || 1;
         const valueLabel = rule.free_gift_price_cents
           ? `$${(rule.free_gift_price_cents / 100).toFixed(2)} value, yours free`
           : "Yours free with this order";
+        const unlockedLabel = `Unlocked at ${totalQty} Pack`;
+        const lockedLabel = `Add ${minQty} or more to unlock`;
+        const lockedSubLabel = rule.free_gift_price_cents
+          ? `$${(rule.free_gift_price_cents / 100).toFixed(2)} value · free with ${minQty}+ pack`
+          : `Free with ${minQty}+ pack`;
         return (
           <div className="px-4 py-4 sm:px-5">
             <div
-              className="flex items-center gap-3 rounded-2xl border-2 border-amber-200 bg-amber-50 p-3"
+              className={
+                giftActive
+                  ? "flex items-center gap-3 rounded-2xl border-2 border-amber-200 bg-amber-50 p-3"
+                  : "flex items-center gap-3 rounded-2xl border-2 border-zinc-200 bg-zinc-50 p-3 opacity-70"
+              }
               style={{ borderStyle: "dashed" }}
             >
               {rule.free_gift_image_url ? (
@@ -854,21 +885,23 @@ function ProductWorksheetCard({
                 <img
                   src={rule.free_gift_image_url}
                   alt={rule.free_gift_product_title}
-                  className="h-14 w-14 flex-shrink-0 rounded-xl object-cover"
+                  className={`h-14 w-14 flex-shrink-0 rounded-xl object-cover ${giftActive ? "" : "grayscale"}`}
                 />
               ) : (
-                <div className="flex h-14 w-14 flex-shrink-0 items-center justify-center rounded-xl bg-amber-100 text-2xl">
+                <div className={`flex h-14 w-14 flex-shrink-0 items-center justify-center rounded-xl text-2xl ${giftActive ? "bg-amber-100" : "bg-zinc-200"}`}>
                   🎁
                 </div>
               )}
               <div className="min-w-0 flex-1">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-amber-700">
-                  Unlocked at {totalQty} Pack
+                <div className={`text-[10px] font-bold uppercase tracking-wider ${giftActive ? "text-amber-700" : "text-zinc-500"}`}>
+                  {giftActive ? unlockedLabel : lockedLabel}
                 </div>
-                <div className="truncate text-sm font-bold text-zinc-900">
+                <div className={`truncate text-sm font-bold ${giftActive ? "text-zinc-900" : "text-zinc-600"}`}>
                   {prettyVariantTitle(rule.free_gift_product_title)}
                 </div>
-                <div className="text-xs font-semibold text-emerald-700">{valueLabel}</div>
+                <div className={`text-xs font-semibold ${giftActive ? "text-emerald-700" : "text-zinc-500"}`}>
+                  {giftActive ? valueLabel : lockedSubLabel}
+                </div>
               </div>
             </div>
           </div>

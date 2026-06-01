@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
+import { classifyByShopifyCategory } from "@/lib/avalara-tax-codes";
 
 // POST: Sync products from Shopify Online Store channel
 export async function POST(
@@ -53,12 +54,13 @@ export async function POST(
           edges {
             node {
               id title handle productType vendor status tags
+              category { id fullName }
               images(first: 1) { edges { node { url } } }
               metafields(keys: ["reviews.rating", "reviews.rating_count"], first: 2) {
                 edges { node { key value } }
               }
               variants(first: 20) {
-                edges { node { id title sku price image { url } } }
+                edges { node { id title sku price image { url } taxable taxCode } }
               }
             }
           }
@@ -84,15 +86,22 @@ export async function POST(
       if (seen.has(shopifyId)) continue;
       seen.add(shopifyId);
 
-      const variants: Array<{ id: string | undefined; position: number; title: string; sku: string; price_cents: number; image_url: string | null }> =
-        (p.variants?.edges || []).map((v: { node: { id: string; title: string; sku: string; price: string; image?: { url?: string } } }, position: number) => ({
+      const variants: Array<{ id: string | undefined; position: number; title: string; sku: string; price_cents: number; image_url: string | null; taxable: boolean; shopify_tax_code: string | null }> =
+        (p.variants?.edges || []).map((v: { node: { id: string; title: string; sku: string; price: string; image?: { url?: string }; taxable?: boolean; taxCode?: string | null } }, position: number) => ({
           id: v.node.id.split("/").pop(),
           position,
           title: v.node.title,
           sku: v.node.sku,
           price_cents: Math.round(parseFloat(v.node.price || "0") * 100),
           image_url: v.node.image?.url || null,
+          taxable: v.node.taxable !== false,
+          shopify_tax_code: v.node.taxCode || null,
         }));
+
+      const shopifyCategory: string | null = p.category?.fullName || null;
+      const shopifyCategoryId: string | null = p.category?.id || null;
+      const productTaxable = variants.length === 0 ? true : variants.some((v) => v.taxable);
+      const classification = classifyByShopifyCategory(shopifyCategory, p.title);
 
       const imageUrl = p.images?.edges?.[0]?.node?.url || null;
 
@@ -112,6 +121,17 @@ export async function POST(
       }
       const ratingCount = ratingCountMeta?.value ? parseInt(ratingCountMeta.value) || null : null;
 
+      // Read any existing manual avalara_tax_code override so we don't
+      // clobber it on every sync. Classifier output only applies when
+      // the column is currently null.
+      const { data: existing } = await admin
+        .from("products")
+        .select("id, avalara_tax_code")
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_product_id", shopifyId)
+        .maybeSingle();
+      const avalaraTaxCode = existing?.avalara_tax_code ?? classification.taxCode;
+
       // Upsert the product row first so we have its UUID for the variants table
       const { data: productRow } = await admin.from("products").upsert({
         workspace_id: workspaceId,
@@ -126,6 +146,10 @@ export async function POST(
         variants, // legacy mirror — internal_id stamped after variant upsert
         rating: ratingValue,
         rating_count: ratingCount,
+        shopify_category: shopifyCategory,
+        shopify_category_id: shopifyCategoryId,
+        taxable: productTaxable,
+        avalara_tax_code: avalaraTaxCode,
         updated_at: new Date().toISOString(),
       }, { onConflict: "workspace_id,shopify_product_id" })
         .select("id")
@@ -147,6 +171,8 @@ export async function POST(
             price_cents: v.price_cents ?? 0,
             image_url: v.image_url ?? null,
             position: v.position ?? 0,
+            taxable: v.taxable,
+            shopify_tax_code: v.shopify_tax_code,
             updated_at: new Date().toISOString(),
           }, { onConflict: "workspace_id,shopify_variant_id" })
             .select("id")

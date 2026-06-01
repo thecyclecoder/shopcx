@@ -141,6 +141,21 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
   const [braintreeTesting, setBraintreeTesting] = useState(false);
   const [braintreeTestResult, setBraintreeTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
+  // Avalara
+  const [avalaraConnected, setAvalaraConnected] = useState(false);
+  const [avalaraEnabled, setAvalaraEnabled] = useState(false);
+  const [avalaraAccountId, setAvalaraAccountId] = useState("");
+  const [avalaraLicenseKey, setAvalaraLicenseKey] = useState("");
+  const [avalaraLicenseKeyHint, setAvalaraLicenseKeyHint] = useState<string | null>(null);
+  const [avalaraCompanyCode, setAvalaraCompanyCode] = useState("DEFAULT");
+  const [avalaraEnvironment, setAvalaraEnvironment] = useState<"sandbox" | "production">("sandbox");
+  const [avalaraDefaultTaxCode, setAvalaraDefaultTaxCode] = useState("");
+  const [avalaraOrigin, setAvalaraOrigin] = useState<{
+    line1: string; line2: string; city: string; region: string; postalCode: string; country: string;
+  }>({ line1: "", line2: "", city: "", region: "", postalCode: "", country: "US" });
+  const [avalaraTesting, setAvalaraTesting] = useState(false);
+  const [avalaraTestResult, setAvalaraTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+
   // Sandbox
   const [sandboxMode, setSandboxMode] = useState(true);
 
@@ -219,6 +234,19 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
         setBraintreePublicKey(data.braintree_public_key || "");
         setBraintreeEnvironment((data.braintree_environment as "production" | "sandbox") || "production");
         setBraintreePrivateKeyHint(data.braintree_private_key_hint || null);
+        setAvalaraConnected(!!data.avalara_connected);
+        setAvalaraEnabled(!!data.avalara_enabled);
+        setAvalaraAccountId(data.avalara_account_id || "");
+        setAvalaraCompanyCode(data.avalara_company_code || "DEFAULT");
+        setAvalaraEnvironment((data.avalara_environment as "sandbox" | "production") || "sandbox");
+        setAvalaraDefaultTaxCode(data.avalara_default_tax_code || "");
+        setAvalaraLicenseKeyHint(data.avalara_license_key_hint || null);
+        if (data.avalara_origin_address) {
+          setAvalaraOrigin({
+            line1: "", line2: "", city: "", region: "", postalCode: "", country: "US",
+            ...data.avalara_origin_address,
+          });
+        }
         setSlackConnected(!!data.slack_connected);
         setSlackTeamName(data.slack_team_name || null);
         setSlackConnectedAt(data.slack_connected_at || null);
@@ -2310,6 +2338,298 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
               {braintreeTestResult && (
                 <p className={`text-sm ${braintreeTestResult.ok ? "text-emerald-600" : "text-red-600"}`}>
                   {braintreeTestResult.msg}
+                </p>
+              )}
+            </form>
+          )}
+        </div>
+      )}
+
+      {show("avalara") && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-orange-600/10">
+                <svg className="h-5 w-5 text-orange-600 dark:text-orange-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Avalara (AvaTax)</h2>
+                <p className="text-sm text-zinc-500">Sales tax calc + filing for the new storefront and the in-house subscription program.</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {avalaraConnected && (
+                <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                  {avalaraEnabled ? "Enabled" : "Saved"}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {canEdit && (
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setSaving(true);
+                setAvalaraTestResult(null);
+                const body: Record<string, unknown> = {
+                  avalara_account_id: avalaraAccountId,
+                  avalara_company_code: avalaraCompanyCode,
+                  avalara_environment: avalaraEnvironment,
+                  avalara_default_tax_code: avalaraDefaultTaxCode,
+                  avalara_origin_address: avalaraOrigin,
+                };
+                if (avalaraLicenseKey) body.avalara_license_key = avalaraLicenseKey;
+                const r = await fetch(`/api/workspaces/${workspace.id}/integrations`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(body),
+                });
+                setSaving(false);
+                if (r.ok) {
+                  setAvalaraConnected(!!(avalaraAccountId && (avalaraLicenseKey || avalaraLicenseKeyHint)));
+                  if (avalaraLicenseKey) {
+                    setAvalaraLicenseKeyHint(`…${avalaraLicenseKey.slice(-4)}`);
+                    setAvalaraLicenseKey("");
+                  }
+                  setMessage("Avalara settings saved");
+                } else {
+                  setMessage("Failed to save Avalara settings");
+                }
+              }}
+              className="mt-5 grid max-w-2xl gap-4"
+            >
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-500">Account ID</label>
+                  <input
+                    type="text"
+                    value={avalaraAccountId}
+                    onChange={(e) => setAvalaraAccountId(e.target.value)}
+                    placeholder="2000000000"
+                    className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-mono text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-500">Company Code</label>
+                  <input
+                    type="text"
+                    value={avalaraCompanyCode}
+                    onChange={(e) => setAvalaraCompanyCode(e.target.value)}
+                    placeholder="DEFAULT"
+                    className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-mono text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">
+                  License Key {avalaraLicenseKeyHint && <span className="ml-1 font-mono text-xs text-zinc-400">({avalaraLicenseKeyHint})</span>}
+                </label>
+                <input
+                  type="password"
+                  value={avalaraLicenseKey}
+                  onChange={(e) => setAvalaraLicenseKey(e.target.value)}
+                  placeholder={avalaraLicenseKeyHint ? "Leave blank to keep saved key" : "Paste license key"}
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-mono text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-500">Environment</label>
+                  <select
+                    value={avalaraEnvironment}
+                    onChange={(e) => setAvalaraEnvironment(e.target.value as "sandbox" | "production")}
+                    className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  >
+                    <option value="sandbox">Sandbox</option>
+                    <option value="production">Production</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-500">
+                    Default Tax Code <span className="text-xs text-zinc-400">(per-product overrides allowed)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={avalaraDefaultTaxCode}
+                    onChange={(e) => setAvalaraDefaultTaxCode(e.target.value)}
+                    placeholder="PF050144 (supplements) or P0000000 (generic)"
+                    className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-mono text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-800">
+                <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Ship-from address</h3>
+                <p className="mt-1 text-xs text-zinc-500">Used as the origin for jurisdictional sourcing rules. Defaults to the EasyPost return warehouse.</p>
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-medium text-zinc-500">Address line 1</label>
+                    <input
+                      type="text"
+                      value={avalaraOrigin.line1}
+                      onChange={(e) => setAvalaraOrigin({ ...avalaraOrigin, line1: e.target.value })}
+                      className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-medium text-zinc-500">Address line 2</label>
+                    <input
+                      type="text"
+                      value={avalaraOrigin.line2}
+                      onChange={(e) => setAvalaraOrigin({ ...avalaraOrigin, line2: e.target.value })}
+                      className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-500">City</label>
+                    <input
+                      type="text"
+                      value={avalaraOrigin.city}
+                      onChange={(e) => setAvalaraOrigin({ ...avalaraOrigin, city: e.target.value })}
+                      className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-500">State (2-letter)</label>
+                      <input
+                        type="text"
+                        maxLength={2}
+                        value={avalaraOrigin.region}
+                        onChange={(e) => setAvalaraOrigin({ ...avalaraOrigin, region: e.target.value.toUpperCase() })}
+                        className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-mono text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-500">Country</label>
+                      <input
+                        type="text"
+                        maxLength={2}
+                        value={avalaraOrigin.country}
+                        onChange={(e) => setAvalaraOrigin({ ...avalaraOrigin, country: e.target.value.toUpperCase() })}
+                        className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-mono text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-500">Postal code</label>
+                    <input
+                      type="text"
+                      value={avalaraOrigin.postalCode}
+                      onChange={(e) => setAvalaraOrigin({ ...avalaraOrigin, postalCode: e.target.value })}
+                      className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-mono text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="submit"
+                  disabled={saving || !avalaraAccountId || (!avalaraLicenseKey && !avalaraLicenseKeyHint) || !avalaraOrigin.line1}
+                  className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  {saving ? "Saving..." : "Save"}
+                </button>
+                <button
+                  type="button"
+                  disabled={avalaraTesting || !avalaraAccountId || (!avalaraLicenseKey && !avalaraLicenseKeyHint)}
+                  onClick={async () => {
+                    setAvalaraTesting(true);
+                    setAvalaraTestResult(null);
+                    const body: Record<string, string> = {
+                      account_id: avalaraAccountId,
+                      environment: avalaraEnvironment,
+                    };
+                    if (avalaraLicenseKey) body.license_key = avalaraLicenseKey;
+                    const r = await fetch(`/api/workspaces/${workspace.id}/integrations/avalara/verify`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(body),
+                    });
+                    const data = await r.json();
+                    setAvalaraTesting(false);
+                    if (data.ok) {
+                      setAvalaraTestResult({
+                        ok: true,
+                        msg: data.company_name
+                          ? `Connected to ${data.environment} — ${data.company_name}`
+                          : `Connected to ${data.environment} — authenticated`,
+                      });
+                    } else {
+                      setAvalaraTestResult({ ok: false, msg: data.error || "Verify failed" });
+                    }
+                  }}
+                  className="rounded-md border border-indigo-300 px-4 py-2 text-sm font-medium text-indigo-600 transition-colors hover:bg-indigo-50 disabled:opacity-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
+                >
+                  {avalaraTesting ? "Testing..." : "Verify connection"}
+                </button>
+                <button
+                  type="button"
+                  disabled={saving || !avalaraConnected}
+                  onClick={async () => {
+                    const next = !avalaraEnabled;
+                    if (next && !avalaraTestResult?.ok) {
+                      if (!confirm("Enable Avalara without a successful Verify? You can verify first to make sure credentials work.")) return;
+                    }
+                    setSaving(true);
+                    const r = await fetch(`/api/workspaces/${workspace.id}/integrations`, {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ avalara_enabled: next }),
+                    });
+                    setSaving(false);
+                    if (r.ok) {
+                      setAvalaraEnabled(next);
+                      setMessage(next ? "Avalara enabled" : "Avalara disabled");
+                    }
+                  }}
+                  className={`rounded-md border px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 ${
+                    avalaraEnabled
+                      ? "border-zinc-300 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                      : "border-emerald-300 text-emerald-700 hover:bg-emerald-50 dark:border-emerald-800 dark:text-emerald-400 dark:hover:bg-emerald-950"
+                  }`}
+                >
+                  {avalaraEnabled ? "Disable" : "Enable"}
+                </button>
+                {avalaraConnected && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!confirm("Disconnect Avalara? Tax calc will stop until reconnected.")) return;
+                      setSaving(true);
+                      await fetch(`/api/workspaces/${workspace.id}/integrations`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          avalara_account_id: "",
+                          avalara_license_key: "",
+                          avalara_enabled: false,
+                        }),
+                      });
+                      setAvalaraConnected(false);
+                      setAvalaraEnabled(false);
+                      setAvalaraAccountId("");
+                      setAvalaraLicenseKey("");
+                      setAvalaraLicenseKeyHint(null);
+                      setSaving(false);
+                    }}
+                    disabled={saving}
+                    className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                  >
+                    Disconnect
+                  </button>
+                )}
+              </div>
+
+              {avalaraTestResult && (
+                <p className={`text-sm ${avalaraTestResult.ok ? "text-emerald-600" : "text-red-600"}`}>
+                  {avalaraTestResult.msg}
                 </p>
               )}
             </form>

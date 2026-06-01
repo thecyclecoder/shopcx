@@ -27,6 +27,19 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
 
   if (!sub) return jsonErr({ error: "subscription_not_found" }, 404);
 
+  // Tax quote. Internal subs only — Appstle subs are handled by
+  // Shopify's tax pipeline. Returns null when Avalara isn't enabled
+  // or the sub isn't quote-able yet (no address, no items, etc.).
+  let taxQuote: { tax_cents: number; total_cents: number } | null = null;
+  if (sub.is_internal && ["active", "paused"].includes(sub.status as string)) {
+    try {
+      const { ensureFreshSubscriptionTaxQuote } = await import("@/lib/avalara-subscription");
+      taxQuote = await ensureFreshSubscriptionTaxQuote(auth.workspaceId, sub.id);
+    } catch (err) {
+      console.warn(`[portal] ensureFreshSubscriptionTaxQuote threw for ${sub.id}:`, err);
+    }
+  }
+
   // Get lock_days from portal config
   const { data: wsConfig } = await admin.from("workspaces")
     .select("portal_config")
@@ -266,6 +279,13 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
       crisisBanner,
       paymentMethod,
       paymentManageUrl: "https://account.superfoodscompany.com/profile",
+      tax: taxQuote
+        ? {
+            tax_cents: taxQuote.tax_cents,
+            total_cents: taxQuote.total_cents,
+            quoted_at: sub.avalara_quote_at as string | null,
+          }
+        : null,
       portalState: {
         bucket: sub.status === "cancelled" ? "cancelled" : sub.status === "paused" ? "paused" : "active",
         needsAttention: sub.last_payment_status === "failed",

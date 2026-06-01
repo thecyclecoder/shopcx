@@ -91,6 +91,29 @@ export async function ensureFreeGifts(
     });
   }
 
+  // Any product currently listed as a free-gift target across the
+  // active rules can only enter the cart as a $0 gift line, never as
+  // a paid line. If a customer somehow already has a paid line for
+  // one (e.g. they added it manually before a rule was assigned),
+  // strip it here so we don't double-up: gift card + paid card.
+  const giftProductIds = new Set<string>();
+  for (const rule of rulesById.values()) {
+    if (!rule.free_gift_variant_id) continue;
+    const v = await findVariant(workspaceId, { id: rule.free_gift_variant_id });
+    if (v?.product_id) giftProductIds.add(v.product_id);
+  }
+  const cleanedNonGiftLines = giftProductIds.size
+    ? nonGiftLines.filter((l) => !giftProductIds.has(l.product_id))
+    : nonGiftLines;
+
+  // Recompute qty-by-product against the cleaned set so a stale paid
+  // line for a gift product doesn't artificially inflate the gift's
+  // qualifying threshold.
+  qtyByProduct.clear();
+  for (const l of cleanedNonGiftLines) {
+    qtyByProduct.set(l.product_id, (qtyByProduct.get(l.product_id) || 0) + l.quantity);
+  }
+
   const additions: CartLineLike[] = [];
   for (const [productId, totalQty] of qtyByProduct.entries()) {
     const assign = (assigns || []).find((a) => a.product_id === productId);
@@ -140,6 +163,7 @@ export async function ensureFreeGifts(
   }
 
   // Return non-gift lines + freshly-derived gifts. If no gifts apply,
-  // still return nonGiftLines (we've stripped any stale gifts above).
-  return [...nonGiftLines, ...additions];
+  // still return cleanedNonGiftLines (we've stripped any stale gifts
+  // and any paid lines for gift-target products above).
+  return [...cleanedNonGiftLines, ...additions];
 }

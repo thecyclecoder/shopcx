@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, transactional_from_name, transactional_reply_to_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted, storefront_domain, storefront_slug, shortlink_domain, twilio_phone_number, google_ads_developer_token_encrypted, google_ads_client_id, google_ads_client_secret_encrypted, google_ads_refresh_token_encrypted, google_ads_customer_id, google_search_console_credentials_encrypted, google_search_console_site_url, braintree_merchant_id, braintree_public_key, braintree_private_key_encrypted, braintree_environment"
+      "resend_api_key_encrypted, resend_domain, support_email, transactional_from_name, transactional_reply_to_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted, storefront_domain, storefront_slug, shortlink_domain, twilio_phone_number, google_ads_developer_token_encrypted, google_ads_client_id, google_ads_client_secret_encrypted, google_ads_refresh_token_encrypted, google_ads_customer_id, google_search_console_credentials_encrypted, google_search_console_site_url, braintree_merchant_id, braintree_public_key, braintree_private_key_encrypted, braintree_environment, avalara_account_id, avalara_license_key_encrypted, avalara_company_code, avalara_environment, avalara_origin_address, avalara_default_tax_code, avalara_enabled"
     )
     .eq("id", workspaceId)
     .single();
@@ -138,6 +138,18 @@ export async function GET(
     braintree_environment: workspace.braintree_environment || "production",
     braintree_private_key_hint: workspace.braintree_private_key_encrypted
       ? `…${decrypt(workspace.braintree_private_key_encrypted).slice(-4)}`
+      : null,
+
+    // Avalara (AvaTax)
+    avalara_connected: !!(workspace.avalara_account_id && workspace.avalara_license_key_encrypted),
+    avalara_enabled: !!workspace.avalara_enabled,
+    avalara_account_id: workspace.avalara_account_id || null,
+    avalara_company_code: workspace.avalara_company_code || null,
+    avalara_environment: workspace.avalara_environment || "sandbox",
+    avalara_origin_address: workspace.avalara_origin_address || null,
+    avalara_default_tax_code: workspace.avalara_default_tax_code || null,
+    avalara_license_key_hint: workspace.avalara_license_key_encrypted
+      ? `…${decrypt(workspace.avalara_license_key_encrypted).slice(-4)}`
       : null,
 
     // Census
@@ -464,6 +476,33 @@ export async function PATCH(
     if ("braintree_environment" in body) {
       const env = body.braintree_environment;
       updates.braintree_environment = env === "sandbox" ? "sandbox" : "production";
+    }
+
+    // Avalara (AvaTax)
+    if ("avalara_account_id" in body) {
+      updates.avalara_account_id = body.avalara_account_id || null;
+    }
+    if ("avalara_license_key" in body) {
+      updates.avalara_license_key_encrypted = body.avalara_license_key
+        ? encrypt(body.avalara_license_key)
+        : null;
+    }
+    if ("avalara_company_code" in body) {
+      updates.avalara_company_code = body.avalara_company_code || null;
+    }
+    if ("avalara_environment" in body) {
+      const env = body.avalara_environment;
+      updates.avalara_environment = env === "production" ? "production" : "sandbox";
+    }
+    if ("avalara_origin_address" in body) {
+      // Expect: { line1, line2?, city, region, postalCode, country }
+      updates.avalara_origin_address = body.avalara_origin_address || null;
+    }
+    if ("avalara_default_tax_code" in body) {
+      updates.avalara_default_tax_code = body.avalara_default_tax_code || null;
+    }
+    if ("avalara_enabled" in body) {
+      updates.avalara_enabled = !!body.avalara_enabled;
     }
 
     // VIP threshold

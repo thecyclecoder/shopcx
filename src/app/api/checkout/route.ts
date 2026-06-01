@@ -53,6 +53,8 @@ import { resolveRateForCart } from "@/lib/shipping-rates";
 import { readVisitorContext, stitchVisitor } from "@/lib/identity-stitch";
 import { checkOrderForFraud } from "@/lib/fraud-detector";
 import { buildPackingSlipMessage } from "@/lib/packing-slip-message";
+import { createTransaction as createAvalaraTx } from "@/lib/avalara";
+import { buildAvalaraLines } from "@/lib/avalara-cart";
 import crypto from "crypto";
 
 interface AddressInput {
@@ -142,19 +144,77 @@ export async function POST(request: NextRequest) {
   const shippingCents = resolved.total_cents;
   const shippingMethodCode: string | null = resolved.rate.code;
   const shippingRateId: string | null = resolved.rate.id;
-  const taxCents = 0;  // TODO: TaxJar / Avalara integration
 
   // Shipping protection — server validates against the workspace's
   // configured rate (client can't fabricate a different protection
   // price). When the workspace has it disabled, the flag is ignored.
   const { data: wsProtection } = await admin
     .from("workspaces")
-    .select("shipping_protection_enabled, shipping_protection_price_cents")
+    .select("shipping_protection_enabled, shipping_protection_price_cents, shipping_protection_title, avalara_enabled")
     .eq("id", cart.workspace_id)
     .single();
   const protectionEnabled = !!wsProtection?.shipping_protection_enabled;
   const protectionAdded = protectionEnabled && body.shipping_protection_added === true;
   const protectionCents = protectionAdded ? (wsProtection?.shipping_protection_price_cents || 0) : 0;
+  const protectionTitle = (wsProtection?.shipping_protection_title as string | null) || "Shipping Protection";
+
+  // ── Tax (Avalara) ────────────────────────────────────────────────
+  // Compute the authoritative tax BEFORE charging Braintree, using
+  // the order_number we're about to assign as the AvaTax document
+  // code. type=SalesInvoice + commit=true → the transaction is
+  // recorded for filing the moment the customer's card is charged.
+  //
+  // If Avalara isn't enabled OR fails, fall back to 0 so the
+  // checkout doesn't break. We log the failure so an operator can
+  // reconcile manually.
+  //
+  // We use the same `buildAvalaraLines` helper as the quote endpoint
+  // so the customer-displayed quote and the committed invoice agree
+  // (Avalara is deterministic for identical inputs).
+  const orderNumber = await generateOrderNumber(cart.workspace_id);
+
+  const customerEmailForAvalara = body.email.trim().toLowerCase();
+  let taxCents = 0;
+  let avalaraTransactionCode: string | null = null;
+  if (wsProtection?.avalara_enabled) {
+    try {
+      const avalaraLines = await buildAvalaraLines({
+        admin,
+        workspaceId: cart.workspace_id,
+        lines,
+        shippingCents,
+        shippingMethodLabel: resolved.rate.name || resolved.rate.code || "Shipping",
+        protectionCents,
+        protectionTitle,
+      });
+      if (avalaraLines.length > 0) {
+        const avalaraResult = await createAvalaraTx(cart.workspace_id, {
+          code: orderNumber,
+          customerCode: customerEmailForAvalara,
+          date: new Date().toISOString().slice(0, 10),
+          commit: true,
+          type: "SalesInvoice",
+          lines: avalaraLines,
+          shipTo: {
+            line1: ship.address1!,
+            line2: ship.address2,
+            city: ship.city!,
+            region: ship.province_code!.toUpperCase(),
+            postalCode: ship.zip!,
+            country: (ship.country_code || "US").toUpperCase(),
+          },
+        });
+        if (avalaraResult.success) {
+          taxCents = avalaraResult.totalTaxCents ?? 0;
+          avalaraTransactionCode = avalaraResult.transactionCode || orderNumber;
+        } else {
+          console.warn(`[checkout] Avalara commit failed for ${orderNumber}:`, avalaraResult.error);
+        }
+      }
+    } catch (err) {
+      console.warn(`[checkout] Avalara commit threw for ${orderNumber}:`, err);
+    }
+  }
 
   const totalCents = subtotalCents + shippingCents + taxCents + protectionCents;
 
@@ -328,6 +388,18 @@ export async function POST(request: NextRequest) {
         updated_at: new Date().toISOString(),
       }).eq("id", transactionRecordId);
     }
+    // We already committed the Avalara invoice for this orderNumber
+    // (locks it for filing). Since the customer never paid, void it
+    // so we don't owe tax on a non-transaction. The customer can
+    // retry — the next attempt re-quotes a fresh code.
+    if (avalaraTransactionCode) {
+      try {
+        const { voidTransaction } = await import("@/lib/avalara");
+        await voidTransaction(cart.workspace_id, avalaraTransactionCode);
+      } catch (err) {
+        console.warn(`[checkout] Avalara void after Braintree fail threw for ${orderNumber}:`, err);
+      }
+    }
     return NextResponse.json({
       error: "transaction_failed",
       details: message,
@@ -427,7 +499,8 @@ export async function POST(request: NextRequest) {
   }
 
   // ── 7. Insert the order row. ────────────────────────────────────
-  const orderNumber = await generateOrderNumber(cart.workspace_id);
+  // orderNumber was generated earlier so we could use it as the
+  // Avalara document code — same value used here for the orders row.
   const { data: order, error: orderErr } = await admin
     .from("orders")
     .insert({
@@ -463,6 +536,9 @@ export async function POST(request: NextRequest) {
       shipping_protection_amount_cents: protectionAdded ? protectionCents : null,
       shipping_method_code: shippingMethodCode,
       shipping_rate_id: shippingRateId,
+      avalara_transaction_code: avalaraTransactionCode,
+      avalara_total_tax_cents: avalaraTransactionCode ? taxCents : null,
+      avalara_committed_at: avalaraTransactionCode ? new Date().toISOString() : null,
     })
     .select("id, order_number")
     .single();
@@ -487,6 +563,16 @@ export async function POST(request: NextRequest) {
         orderErr,
         refundErr,
       );
+    }
+    // Also void the Avalara invoice since the order didn't actually
+    // exist — we don't want tax filed on a refunded non-transaction.
+    if (avalaraTransactionCode) {
+      try {
+        const { voidTransaction } = await import("@/lib/avalara");
+        await voidTransaction(cart.workspace_id, avalaraTransactionCode);
+      } catch (voidErr) {
+        console.warn(`[checkout] Avalara void after order_insert_failed threw for ${orderNumber}:`, voidErr);
+      }
     }
     return NextResponse.json(
       { error: "order_insert_failed", details: orderErr?.message, braintree_transaction_id: transaction.id },

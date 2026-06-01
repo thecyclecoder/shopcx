@@ -88,7 +88,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     const ctx = await step.run("load-context", async () => {
       const { data: sub } = await admin
         .from("subscriptions")
-        .select("id, workspace_id, customer_id, items, billing_interval, billing_interval_count, next_billing_date, status, applied_discounts, shopify_contract_id, is_internal")
+        .select("id, workspace_id, customer_id, items, billing_interval, billing_interval_count, next_billing_date, status, applied_discounts, shopify_contract_id, is_internal, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, shipping_address")
         .eq("id", subscription_id)
         .single();
       if (!sub?.is_internal) return { skip: true, reason: "not_internal" } as const;
@@ -138,12 +138,40 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     type Item = { quantity?: number; price_cents?: number };
     const items = (ctx.sub.items as Item[]) || [];
     const subtotalCents = items.reduce((s, i) => s + (i.price_cents || 0) * (i.quantity || 0), 0);
-    // Internal subs are subscribe-mode by definition → free shipping,
-    // $0 tax (real tax service ships later, same convention as
-    // /api/checkout).
-    const shippingCents = 0;
-    const taxCents = 0;
-    const totalCents = subtotalCents + shippingCents + taxCents;
+    // Internal subs are subscribe-mode by definition → free shipping
+    // unless the sub locked in a paid method at checkout.
+    const shippingCents = Number(ctx.sub.delivery_price_cents || 0);
+    const protectionCents = ctx.sub.shipping_protection_added
+      ? Number(ctx.sub.shipping_protection_amount_cents || 0)
+      : 0;
+
+    // Reserve the order number NOW so we can use it as the Avalara
+    // document code. The orders row gets inserted with this same
+    // value below.
+    const orderNumber = await step.run("reserve-order-number", async () => {
+      return generateOrderNumber(workspace_id);
+    });
+
+    // Authoritative tax via Avalara (commit=true, SalesInvoice).
+    // Returns null when Avalara isn't enabled or inputs are
+    // insufficient — in that case we fall back to $0 tax + log.
+    const taxResult = await step.run("avalara-commit", async () => {
+      const { commitSubscriptionRenewalTax } = await import("@/lib/avalara-subscription");
+      return commitSubscriptionRenewalTax(workspace_id, {
+        subscriptionId: subscription_id,
+        orderNumber,
+        items: ctx.sub.items,
+        shippingAddress: ctx.shipping_address || ctx.sub.shipping_address,
+        shippingCents,
+        shippingMethodLabel: (ctx.sub.shipping_method_code as string | null) || "Shipping",
+        protectionCents,
+        customerEmail: ctx.customer.email || null,
+      });
+    });
+    const taxCents = taxResult?.tax_cents ?? 0;
+    const avalaraTransactionCode = taxResult?.transaction_code || null;
+
+    const totalCents = subtotalCents + shippingCents + protectionCents + taxCents;
     if (totalCents <= 0) {
       return { skipped: true, reason: "zero_total" };
     }
@@ -200,6 +228,18 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     }
 
     if (!charge.success) {
+      // Void the Avalara invoice we committed before the charge —
+      // we filed tax for a renewal that didn't actually happen.
+      if (avalaraTransactionCode) {
+        await step.run("avalara-void-on-failed-charge", async () => {
+          try {
+            const { voidTransaction } = await import("@/lib/avalara");
+            await voidTransaction(workspace_id, avalaraTransactionCode);
+          } catch (err) {
+            console.warn(`[renewal] Avalara void after Braintree fail threw for ${orderNumber}:`, err);
+          }
+        });
+      }
       // Failure → dunning. We just fire the existing event so the
       // dunning pipeline picks it up. The dunning function decides
       // skip / pause / retry based on workspace config.
@@ -221,7 +261,6 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
 
     // ── 6. Create order + advance next_billing_date ─────────────
     const newOrder = await step.run("create-order", async () => {
-      const orderNumber = await generateOrderNumber(workspace_id);
       const { data: order, error } = await admin
         .from("orders")
         .insert({
@@ -246,11 +285,15 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           payment_details: {
             subtotal_cents: subtotalCents,
             shipping_cents: shippingCents,
+            protection_cents: protectionCents,
             tax_cents: taxCents,
             gateway: "braintree",
             processor_response_code: charge.processorResponseCode,
             processor_response_text: charge.processorResponseText,
           },
+          avalara_transaction_code: avalaraTransactionCode,
+          avalara_total_tax_cents: avalaraTransactionCode ? taxCents : null,
+          avalara_committed_at: avalaraTransactionCode ? new Date().toISOString() : null,
         })
         .select("id, order_number")
         .single();

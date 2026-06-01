@@ -476,14 +476,35 @@ function ItemsCard({ contract, lines, shipLine, onUpdate, onPatchLines, showToas
           return sum + (m || (getLinePrice(ln) * (ln.quantity || 1)));
         }, 0);
         const showMsrp = isFinite(msrpTotal) && msrpTotal > total;
+        // Tax + final total when Avalara has quoted the renewal.
+        // tax_cents and total_cents are absolute (include items +
+        // shipping + protection + tax) — see lib/avalara-subscription.ts.
+        const taxQuote = contract?.tax;
+        const taxCents = taxQuote?.tax_cents || 0;
+        const totalCents = taxQuote?.total_cents || 0;
+        const showTax = taxQuote && taxCents > 0;
         return (
-          <div class="sp-detail__totals" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span class="sp-muted">Subtotal</span>
-            <span class="sp-detail__total-price">
-              {showMsrp && <span class="sp-subtotal__msrp">{toMoney(msrpTotal)}</span>}
-              {toMoney(total)}
-            </span>
-          </div>
+          <>
+            <div class="sp-detail__totals" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span class="sp-muted">Subtotal</span>
+              <span class="sp-detail__total-price">
+                {showMsrp && <span class="sp-subtotal__msrp">{toMoney(msrpTotal)}</span>}
+                {toMoney(total)}
+              </span>
+            </div>
+            {showTax && (
+              <div class="sp-detail__totals" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                <span class="sp-muted">Sales tax</span>
+                <span class="sp-muted">{toMoney(taxCents / 100)}</span>
+              </div>
+            )}
+            {showTax && totalCents > 0 && (
+              <div class="sp-detail__totals" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, fontWeight: 600 }}>
+                <span>Total per renewal</span>
+                <span class="sp-detail__total-price">{toMoney(totalCents / 100)}</span>
+              </div>
+            )}
+          </>
         );
       })()}
       {!isCancelled && (
