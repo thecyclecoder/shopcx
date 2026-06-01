@@ -339,6 +339,34 @@ export function CheckoutClient({
   });
   const [authedCustomerId, setAuthedCustomerId] = useState<string | null>(null);
 
+  // Saved payment methods (only when authenticated via OTP or
+  // existing sx_session cookie). Used to render the "Pay with •••4242"
+  // picker above the new-card Hosted Fields form.
+  type SavedMethod = { id: string; token: string; brand: string | null; last4: string | null; exp_month: number | null; exp_year: number | null; is_default: boolean; payment_type: string | null };
+  const [savedMethods, setSavedMethods] = useState<SavedMethod[]>([]);
+  const [selectedSavedToken, setSelectedSavedToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Refresh saved methods on page load + every time the client
+    // token cycles (which happens after a successful OTP verify).
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/checkout/payment-methods?cart_token=${encodeURIComponent(cart.token)}`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { methods?: SavedMethod[] };
+        if (cancelled) return;
+        const methods = data.methods || [];
+        setSavedMethods(methods);
+        // Auto-select the default saved method so the "Pay with"
+        // radio is pre-checked → fewer customer clicks.
+        const defaultMethod = methods.find((m) => m.is_default) || methods[0] || null;
+        setSelectedSavedToken(defaultMethod?.token || null);
+      } catch { /* non-fatal */ }
+    })();
+    return () => { cancelled = true; };
+  }, [cart.token, clientToken, authedCustomerId]);
+
   async function triggerOtpStart(emailValue: string, channel?: "sms" | "email") {
     const e = emailValue.trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return;
@@ -502,7 +530,10 @@ export function CheckoutClient({
   }
 
   async function onSubmit() {
-    if (!hostedFieldsRef.current || !cardReady) {
+    // Two paths: saved-card (use vaulted token directly) OR new card
+    // (tokenize via Hosted Fields → nonce).
+    const usingSavedCard = !!selectedSavedToken;
+    if (!usingSavedCard && (!hostedFieldsRef.current || !cardReady)) {
       setSubmitError("Payment isn't ready yet — please wait a moment and try again.");
       return;
     }
@@ -514,7 +545,10 @@ export function CheckoutClient({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const { nonce, deviceData } = await hostedFieldsRef.current.tokenize();
+      const tokenizeRes = usingSavedCard
+        ? { nonce: "", deviceData: "" }
+        : await hostedFieldsRef.current!.tokenize();
+      const { nonce, deviceData } = tokenizeRes;
       const phoneE164 = phoneToE164(phone);
       const shipping = {
         first_name: shipFirst,
@@ -545,8 +579,12 @@ export function CheckoutClient({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           cart_token: cart.token,
-          payment_method_nonce: nonce,
-          device_data: deviceData,
+          // Saved-card path: pass the vault token directly so the
+          // server skips the vault step. Server validates the token
+          // actually belongs to the authenticated customer.
+          ...(usingSavedCard
+            ? { payment_method_token: selectedSavedToken }
+            : { payment_method_nonce: nonce, device_data: deviceData }),
           email,
           phone: phoneE164 || undefined,
           shipping_address: shipping,
@@ -888,24 +926,79 @@ export function CheckoutClient({
                 them paired). */}
             <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
               <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Payment</p>
-              {cardError ? (
-                <div className="mt-3 rounded-lg bg-rose-50 px-3 py-3 text-sm text-rose-700">
-                  Couldn&apos;t load payment form: {cardError}
-                </div>
-              ) : !clientToken ? (
-                <p className="mt-3 text-xs text-zinc-500">Loading secure payment…</p>
-              ) : (
-                <div className="mt-3">
-                  <HostedFieldsCard
-                    ref={hostedFieldsRef}
-                    clientToken={clientToken}
-                    primaryColor={workspace.primary_color}
-                    cardholderName={`${firstName} ${lastName}`.trim()}
-                    onReady={() => setCardReady(true)}
-                    onError={(msg) => setCardError(msg)}
-                  />
+
+              {/* Saved-cards picker (only when authenticated). Each
+                  radio is a vault token; selecting one skips the
+                  Hosted Fields tokenize at submit time. */}
+              {savedMethods.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {savedMethods.map((m) => {
+                    const checked = selectedSavedToken === m.token;
+                    return (
+                      <label
+                        key={m.id}
+                        className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-3 transition ${checked ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
+                      >
+                        <input
+                          type="radio"
+                          name="saved-card"
+                          checked={checked}
+                          onChange={() => setSelectedSavedToken(m.token)}
+                          className="h-4 w-4"
+                        />
+                        <div className="flex-1 text-sm">
+                          <div className="font-medium text-zinc-900">
+                            {m.brand || "Card"} •••• {m.last4}
+                            {m.is_default && <span className="ml-2 rounded-full bg-zinc-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-700">Default</span>}
+                          </div>
+                          {m.exp_month && m.exp_year && (
+                            <div className="text-xs text-zinc-500">
+                              Expires {String(m.exp_month).padStart(2, "0")}/{String(m.exp_year).slice(-2)}
+                            </div>
+                          )}
+                        </div>
+                      </label>
+                    );
+                  })}
+                  <label
+                    className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-3 transition ${selectedSavedToken === null ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 hover:border-zinc-300"}`}
+                  >
+                    <input
+                      type="radio"
+                      name="saved-card"
+                      checked={selectedSavedToken === null}
+                      onChange={() => setSelectedSavedToken(null)}
+                      className="h-4 w-4"
+                    />
+                    <div className="text-sm font-medium text-zinc-900">Use a new card</div>
+                  </label>
                 </div>
               )}
+
+              {/* New-card Hosted Fields — hidden when a saved card is
+                  selected. We still need it mounted (not just
+                  display:none) so Braintree's iframes don't tear down
+                  on toggle. */}
+              <div className={selectedSavedToken ? "hidden" : "block"}>
+                {cardError ? (
+                  <div className="mt-3 rounded-lg bg-rose-50 px-3 py-3 text-sm text-rose-700">
+                    Couldn&apos;t load payment form: {cardError}
+                  </div>
+                ) : !clientToken ? (
+                  <p className="mt-3 text-xs text-zinc-500">Loading secure payment…</p>
+                ) : (
+                  <div className="mt-3">
+                    <HostedFieldsCard
+                      ref={hostedFieldsRef}
+                      clientToken={clientToken}
+                      primaryColor={workspace.primary_color}
+                      cardholderName={`${firstName} ${lastName}`.trim()}
+                      onReady={() => setCardReady(true)}
+                      onError={(msg) => setCardError(msg)}
+                    />
+                  </div>
+                )}
+              </div>
 
               {/* Billing address toggle + collapsible form. Lives in
                   the Payment section because billing is part of the
@@ -1080,7 +1173,7 @@ export function CheckoutClient({
             <button
               type="button"
               onClick={onSubmit}
-              disabled={submitting || !cardReady || !agreeToTerms}
+              disabled={submitting || (!selectedSavedToken && !cardReady) || !agreeToTerms}
               style={{ backgroundColor: workspace.primary_color }}
               className="rounded-full px-7 py-3 text-sm font-extrabold uppercase tracking-wider text-white shadow-md disabled:opacity-50"
             >

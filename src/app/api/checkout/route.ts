@@ -72,6 +72,10 @@ interface AddressInput {
 interface PostBody {
   cart_token?: string;
   payment_method_nonce?: string;
+  // Vault-token path: an authenticated customer picked one of their
+  // saved cards. Server validates the token actually belongs to the
+  // sx_session customer before charging.
+  payment_method_token?: string;
   device_data?: string;
   email?: string;
   phone?: string;
@@ -83,7 +87,7 @@ interface PostBody {
 
 export async function POST(request: NextRequest) {
   const body = (await request.json().catch(() => ({}))) as PostBody;
-  if (!body.cart_token || !body.payment_method_nonce || !body.email) {
+  if (!body.cart_token || !body.email || (!body.payment_method_nonce && !body.payment_method_token)) {
     return NextResponse.json({ error: "missing_required_fields" }, { status: 400 });
   }
   const ship = body.shipping_address;
@@ -271,41 +275,60 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 4. Vault FIRST — gateway.paymentMethod.create({ nonce, verifyCard }).
-  //    Card lives in our DB before we attempt the charge so a mid-flight
-  //    failure doesn't lose it. paymentMethod.create's verifyCard option
-  //    runs a $0 / $1 auth check, which means an invalid card surfaces
-  //    here instead of inside the transaction.sale call.
-  let vaulted;
-  try {
-    vaulted = await vaultPaymentMethod(
-      cart.workspace_id,
+  // 4. Resolve the vault token to charge.
+  //    NEW path (saved card): customer picked one of their stored
+  //    methods. We validate the token actually belongs to this
+  //    customer (anti-token-replay) and skip the vault step entirely.
+  //    LEGACY path (nonce): vault the new card first so it survives a
+  //    mid-flight failure, then charge.
+  let savedPm: { id: string };
+  let chargeToken: string;
+  if (body.payment_method_token) {
+    const { data: existing } = await admin
+      .from("customer_payment_methods")
+      .select("id, braintree_payment_method_token")
+      .eq("workspace_id", cart.workspace_id)
+      .eq("customer_id", customer.id)
+      .eq("status", "active")
+      .eq("braintree_payment_method_token", body.payment_method_token)
+      .maybeSingle();
+    if (!existing) {
+      return NextResponse.json({ error: "saved_card_not_found" }, { status: 400 });
+    }
+    savedPm = { id: existing.id };
+    chargeToken = existing.braintree_payment_method_token;
+  } else {
+    let vaulted;
+    try {
+      vaulted = await vaultPaymentMethod(
+        cart.workspace_id,
+        braintreeCustomerId,
+        body.payment_method_nonce!,
+        body.device_data,
+      );
+    } catch (err) {
+      return NextResponse.json(
+        { error: "card_verification_failed", details: err instanceof Error ? err.message : String(err) },
+        { status: 402 },
+      );
+    }
+    // Persist the payment method. is_default=true via savePaymentMethod
+    // semantics (the newest vault wins) — customer/admin can flip later.
+    savedPm = await savePaymentMethod({
+      workspaceId: cart.workspace_id,
+      customerId: customer.id,
       braintreeCustomerId,
-      body.payment_method_nonce,
-      body.device_data,
-    );
-  } catch (err) {
-    return NextResponse.json(
-      { error: "card_verification_failed", details: err instanceof Error ? err.message : String(err) },
-      { status: 402 },
-    );
+      braintreePaymentMethodToken: vaulted.token,
+      paymentType: vaulted.paymentType,
+      cardBrand: vaulted.cardBrand,
+      last4: vaulted.last4,
+      expirationMonth: vaulted.expirationMonth,
+      expirationYear: vaulted.expirationYear,
+      cartToken: cart.token,
+      makeDefault: true,
+    });
+    chargeToken = vaulted.token;
   }
-
-  // Persist the payment method. is_default=true via savePaymentMethod
-  // semantics (the newest vault wins) — customer/admin can flip later.
-  const savedPm = await savePaymentMethod({
-    workspaceId: cart.workspace_id,
-    customerId: customer.id,
-    braintreeCustomerId,
-    braintreePaymentMethodToken: vaulted.token,
-    paymentType: vaulted.paymentType,
-    cardBrand: vaulted.cardBrand,
-    last4: vaulted.last4,
-    expirationMonth: vaulted.expirationMonth,
-    expirationYear: vaulted.expirationYear,
-    cartToken: cart.token,
-    makeDefault: true,
-  });
 
   // 5. Charge against the vaulted token (NOT the nonce — that's now
   //    consumed). If the sale fails the card stays vaulted; the customer
@@ -323,7 +346,7 @@ export async function POST(request: NextRequest) {
   const amountDecimal = (totalCents / 100).toFixed(2);
   const txnInput = {
     amount: amountDecimal,
-    paymentMethodToken: vaulted.token,
+    paymentMethodToken: chargeToken,
     customerId: braintreeCustomerId,
     deviceData: body.device_data,
     billing: {
@@ -364,7 +387,7 @@ export async function POST(request: NextRequest) {
       status: "pending",
       amount_cents: totalCents,
       currency: "USD",
-      braintree_payment_method_token: vaulted.token,
+      braintree_payment_method_token: chargeToken,
       braintree_customer_id: braintreeCustomerId,
       metadata: { cart_token: cart.token },
     })
@@ -404,12 +427,12 @@ export async function POST(request: NextRequest) {
       error: "transaction_failed",
       details: message,
       // Card stays vaulted; surface the token so a retry can reuse it.
-      braintree_payment_method_token: vaulted.token,
+      braintree_payment_method_token: chargeToken,
       braintree_customer_id: braintreeCustomerId,
     }, { status: 402 });
   }
   const transaction = txnResult.transaction;
-  const paymentMethodToken: string = vaulted.token;
+  const paymentMethodToken: string = chargeToken;
 
   // Patch transactions row with success.
   if (transactionRecordId) {
