@@ -28,7 +28,7 @@ import type {
   UpsellCandidate,
 } from "./_components/CustomizeClient";
 import type { Review } from "../_lib/page-data";
-import { getStorefrontIcons } from "../_lib/storefront-metadata";
+import { getStorefrontMetadata } from "../_lib/storefront-metadata";
 
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
   // Inherit the originating workspace's favicon so the customer's
@@ -44,7 +44,7 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
     .eq("token", token)
     .maybeSingle();
   if (!cart?.workspace_id) return {};
-  return { icons: await getStorefrontIcons(cart.workspace_id as string) };
+  return getStorefrontMetadata(cart.workspace_id as string, "Customize Your Order");
 }
 
 interface PageProps {

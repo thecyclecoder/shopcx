@@ -13,7 +13,7 @@ import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ThankYouClient } from "./_components/ThankYouClient";
-import { getStorefrontIcons } from "../_lib/storefront-metadata";
+import { getStorefrontMetadata } from "../_lib/storefront-metadata";
 
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
   const params = await searchParams;
@@ -25,7 +25,7 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
     .eq("id", params.order)
     .maybeSingle();
   if (!order?.workspace_id) return {};
-  return { icons: await getStorefrontIcons(order.workspace_id as string) };
+  return getStorefrontMetadata(order.workspace_id as string, "Thank You");
 }
 
 interface PageProps {

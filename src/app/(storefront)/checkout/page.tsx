@@ -17,7 +17,7 @@ import type { Metadata } from "next";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { CheckoutClient } from "./_components/CheckoutClient";
 import type { CartDraft } from "../customize/_components/CustomizeClient";
-import { getStorefrontIcons } from "../_lib/storefront-metadata";
+import { getStorefrontMetadata } from "../_lib/storefront-metadata";
 import { ensureFreeGifts, type CartLineLike } from "@/lib/cart-gifts";
 
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
@@ -32,7 +32,7 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
     .eq("token", token)
     .maybeSingle();
   if (!cart?.workspace_id) return {};
-  return { icons: await getStorefrontIcons(cart.workspace_id as string) };
+  return getStorefrontMetadata(cart.workspace_id as string, "Secure Checkout");
 }
 
 interface PageProps {
