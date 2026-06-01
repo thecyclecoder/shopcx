@@ -112,8 +112,13 @@ export async function POST(request: NextRequest) {
     .maybeSingle();
   const customerCode = cartFull?.customer_id || cartFull?.email || `cart-${body.cart_token}`;
 
+  // Avalara caps `code` at 50 chars. Cart tokens are 48 hex chars,
+  // so `cart-{token}` overflows. Truncate the token; the leading
+  // 24 hex chars (96 bits) is still unique enough for a non-filing
+  // quote document.
+  const quoteCode = `cart-${(body.cart_token || "").slice(0, 44)}`;
   const result = await createTransaction(cart.workspace_id as string, {
-    code: `cart-${body.cart_token}`,
+    code: quoteCode,
     customerCode,
     date: new Date().toISOString().slice(0, 10),
     commit: false,
