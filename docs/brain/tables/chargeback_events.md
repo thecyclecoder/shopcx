@@ -92,8 +92,12 @@ const { count } = await admin.from("chargeback_events")
 
 ## Gotchas
 
-- From Shopify dispute polling + webhook. `reason` maps to category for auto-action decisions.
-- `auto_action_taken` records what we did automatically (auto-cancel sub, etc.).
+- From Shopify dispute polling + webhook. `reason` drives auto-action routing.
+- `status`: `under_review` / `won` / `lost` (**lowercase**).
+- `reason` values seen in practice: `fraudulent`, `product_not_received`, `credit_not_processed`, `product_unacceptable`. `fraudulent` is the only one that triggers `auto_action_taken='subscriptions_cancelled'` — the rest get `flagged_for_review` and require an agent to act.
+- `auto_action_taken`: `subscriptions_cancelled` / `flagged_for_review` / `none`.
+- Sub-cancellations live in [[chargeback_subscription_actions]] keyed by `chargeback_event_id` — for the actual subscriptions cancelled, join that table. `auto_action_taken='subscriptions_cancelled'` tells you the action FIRED; the child rows tell you WHICH subs.
+- `initiated_at` is the dispute initiation date from Shopify, `created_at` is when WE first saw it via polling/webhook — use `initiated_at` when ordering for "newest disputes."
 
 ---
 
