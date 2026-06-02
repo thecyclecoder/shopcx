@@ -104,14 +104,21 @@ export async function sendMetaDM(
 }
 
 /**
- * Reply to a Facebook/Instagram comment
+ * Reply to a Facebook or Instagram comment. The endpoint differs:
+ *   FB:  POST /{comment_id}/comments
+ *   IG:  POST /{ig_comment_id}/replies
+ * Caller must pass `platform` ("facebook" | "instagram"). Falls back
+ * to the FB shape if not provided for backward compat, but the IG
+ * path will 100 / "Object does not exist" without the correct route.
  */
 export async function replyToComment(
   pageAccessToken: string,
   commentId: string,
-  message: string
+  message: string,
+  platform: "facebook" | "instagram" = "facebook",
 ): Promise<{ commentId?: string; error?: string }> {
-  const res = await fetch(`${GRAPH_BASE}/${commentId}/comments`, {
+  const path = platform === "instagram" ? "replies" : "comments";
+  const res = await fetch(`${GRAPH_BASE}/${commentId}/${path}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pageAccessToken}`,

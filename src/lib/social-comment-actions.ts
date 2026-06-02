@@ -129,6 +129,10 @@ export async function executeAction(args: ExecuteArgs): Promise<{ ok: boolean; e
   if (!token && action !== "ignore" && action !== "escalate") {
     return { ok: false, error: "Page access token not available" };
   }
+  // IG comment-reply uses a different Graph endpoint than FB
+  // (POST /{id}/replies vs /{id}/comments). Load platform once and
+  // thread it through.
+  const platform = await loadPagePlatform(admin, comment.meta_page_id);
 
   switch (action) {
     case "reply": {
@@ -152,7 +156,7 @@ export async function executeAction(args: ExecuteArgs): Promise<{ ok: boolean; e
         .select("id")
         .single();
 
-      const result = await replyToComment(token!, comment.meta_comment_id, replyBody);
+      const result = await replyToComment(token!, comment.meta_comment_id, replyBody, platform);
       if (result.error) {
         if (replyRow) {
           await admin
@@ -223,7 +227,7 @@ export async function executeAction(args: ExecuteArgs): Promise<{ ok: boolean; e
         .select("id")
         .single();
 
-      const replyResult = await replyToComment(token, comment.meta_comment_id, replyBody);
+      const replyResult = await replyToComment(token, comment.meta_comment_id, replyBody, platform);
       if (replyResult.error) {
         if (replyRow) {
           await admin.from("social_comment_replies")
@@ -458,6 +462,15 @@ async function loadPageAccessToken(admin: Admin, metaPagesId: string): Promise<s
   } catch {
     return null;
   }
+}
+
+async function loadPagePlatform(admin: Admin, metaPagesId: string): Promise<"facebook" | "instagram"> {
+  const { data: page } = await admin
+    .from("meta_pages")
+    .select("platform")
+    .eq("id", metaPagesId)
+    .maybeSingle();
+  return (page?.platform as "facebook" | "instagram") || "facebook";
 }
 
 /**
