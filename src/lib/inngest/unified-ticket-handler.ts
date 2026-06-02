@@ -1654,8 +1654,31 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         } else if (execResult.messageSent) {
           await setStatus(admin, tid, cfg.auto_resolve);
         } else {
-          await admin.from("tickets").update({ status: "open" }).eq("id", tid);
-          await sysNote(admin, tid, "[System] No customer message sent — ticket kept open for agent review.");
+          // Orchestrator chose no customer-facing action (no send, no
+          // close, no escalate). On an agent-involved ticket this is a
+          // gap: the assigned agent needs a signal that a customer
+          // message is waiting. Without escalation it just sits in the
+          // open queue with nobody paged. Suzanne Doucet 2026-06-02 hit
+          // this — she replied "thanks", orchestrator decided to do
+          // nothing, ticket sat open. Always escalate in this branch
+          // when the ticket is agent-involved; otherwise just keep it
+          // open for organic review.
+          if (agentAssigned) {
+            const { data: agents } = await admin.from("workspace_members")
+              .select("user_id").eq("workspace_id", wsId).in("role", ["owner", "admin", "agent"]).order("user_id");
+            const assignee = st.assignedTo || agents?.[0]?.user_id || null;
+            await admin.from("tickets").update({
+              status: "open",
+              assigned_to: assignee,
+              escalated_to: assignee,
+              escalated_at: new Date().toISOString(),
+              escalation_reason: "no_action_on_agent_ticket",
+            }).eq("id", tid);
+            await sysNote(admin, tid, "[System] Customer replied on agent-involved ticket; orchestrator took no action — escalated to assigned agent for review.");
+          } else {
+            await admin.from("tickets").update({ status: "open" }).eq("id", tid);
+            await sysNote(admin, tid, "[System] No customer message sent — ticket kept open for agent review.");
+          }
         }
       });
 
