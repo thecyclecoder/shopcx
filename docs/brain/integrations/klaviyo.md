@@ -47,7 +47,7 @@ The events-import job parses the parenthesized id into [[../tables/klaviyo_event
 
 - **API revision is in the header**, not the path. Pin a version per call (`revision: 2024-10-15` style). Klaviyo deprecates aggressively.
 - **profile.id ≠ profile.email**. Email match is fuzzy (Klaviyo lowercases + trims). Match-or-create flow lives in `src/lib/inngest/klaviyo-profile-staging.ts`.
-- **Engagement summary RPC `rebuild_engagement_summary` times out** at 2M+ rows — `profile_engagement_summary` is currently empty. Predicted-buyer segments compute on-the-fly until the RPC is reworked. See TEXT-MARKETING.md.
+- **Engagement summary RPC `rebuild_engagement_summary` times out** at 2M+ rows — `profile_engagement_summary` is currently empty. Predicted-buyer segments compute on-the-fly until the RPC is reworked. See [[../tables/sms_campaigns]].
 - **No webhook surface for events.** Everything is pull-based — daily cron + on-demand triggers.
 - **Klaviyo SMS sending is OFF**. All SMS campaigns since end of April 2026 ship through our pipeline ([[../inngest/marketing-text]]). Don't accidentally re-enable Klaviyo SMS.
 

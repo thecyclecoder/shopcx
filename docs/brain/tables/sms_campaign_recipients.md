@@ -1,6 +1,6 @@
 # sms_campaign_recipients
 
-Per-recipient SMS send row — local-time-resolved `send_time`, status, message_sid. See TEXT-MARKETING.md.
+Per-recipient SMS send row — local-time-resolved `send_time`, status, message_sid. See [[../tables/sms_campaigns]].
 
 **Primary key:** `id`
 

@@ -57,7 +57,7 @@ System User token (long-lived, no expiry) preferred over admin user token for CA
 
 - `src/lib/inngest/sinks/meta-capi.ts` — CAPI dispatcher (server-side event sink)
 - `src/lib/meta.ts` — Token + permission helpers shared with [[meta-graph]]
-- Ads spend rollup: `src/lib/inngest/...` (in flight — see TEXT-MARKETING.md ROAS roadmap)
+- Ads spend rollup: `src/lib/inngest/...` (in flight — see [[../tables/sms_campaigns]] ROAS roadmap)
 
 ## Related
 

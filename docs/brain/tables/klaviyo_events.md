@@ -1,6 +1,6 @@
 # klaviyo_events
 
-Imported Klaviyo events (Placed Order primarily) with UTM-attribution parsed back to `attributed_klaviyo_campaign_id`. See TEXT-MARKETING.md.
+Imported Klaviyo events (Placed Order primarily) with UTM-attribution parsed back to `attributed_klaviyo_campaign_id`. See [[../tables/sms_campaigns]].
 
 **Primary key:** `id`
 

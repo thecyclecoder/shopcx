@@ -46,7 +46,7 @@ But again — it only prepends; it never gets delivered on its own.
 
 After linking, marketing decisions still key off the **main** customer (the one initiating the journey), NOT the linked accounts. Email subscribes the main customer's email; phone subscribes the main customer's phone. Linked accounts' marketing status is not changed by this journey.
 
-See JOURNEYS.md "Main account only for marketing decisions."
+See [[../journeys/README]] "Main account only for marketing decisions."
 
 ## Outcomes
 

@@ -1,6 +1,6 @@
 # cart_drafts
 
-Server-side cart state for the custom storefront. Token-bound, server-validated pricing, lifecycle: pending → converted/abandoned. See STOREFRONT.md.
+Server-side cart state for the custom storefront. Token-bound, server-validated pricing, lifecycle: pending → converted/abandoned. See [[../lifecycles/storefront-checkout]].
 
 **Primary key:** `id`
 

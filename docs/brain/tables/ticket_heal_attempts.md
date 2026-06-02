@@ -1,6 +1,6 @@
 # ticket_heal_attempts
 
-Per-ticket auto-heal attempts (research-and-heal pipeline). See RESEARCH-AND-HEAL.md.
+Per-ticket auto-heal attempts (research-and-heal pipeline). See [[../lifecycles/research-and-heal]].
 
 **Primary key:** `id`
 

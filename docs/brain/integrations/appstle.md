@@ -33,8 +33,37 @@ Base: `https://subscription-admin.appstle.com/api/external/v2`
 | `/subscription-billing-attempts/top-orders?contractId` | GET | Get upcoming order details |
 | `/subscription-contracts-update-existing-payment-method?contractId&paymentMethodId` | PUT | Switch the vaulted card |
 | `/subscription-contracts/{id}/send-payment-update-email` | POST | Trigger Appstle's payment-update email |
+| `/subscription-contract-details/replace-variants-v3` | POST | **Batch line-item mutation** — add / remove / swap multiple variants in one call. See below. |
+| `/subscription-contracts-update-shipping-address?contractId={id}` | PUT (JSON body) | Update shipping address (countryCode/provinceCode required) |
+
+### `replace-variants-v3` body
+
+```json
+{
+  "shop": "store.myshopify.com",
+  "contractId": 123456,
+  "eventSource": "CUSTOMER_PORTAL",
+  "oldVariants": [123, 456],            // variant IDs to remove
+  "oldLineId": "gid://...",             // OR single line ID (mutually exclusive with oldVariants)
+  "oldOneTimeVariants": [789],
+  "newVariants": { "123": 2 },          // variant ID → quantity to add
+  "newOneTimeVariants": { "456": 1 },
+  "stopSwapEmails": false,
+  "carryForwardDiscount": "COUPON_CODE"
+}
+```
+
+Returns `200` with updated contract JSON. `lines` may be absent if processed async — re-fetch via `contract-raw-response` if you need to confirm.
 
 Internal-subscription guard: `isInternalSubscription()` short-circuits these calls and updates Postgres directly. See `src/lib/internal-subscription.ts`.
+
+## Response shape conventions
+
+- Most endpoints return `204 No Content` on success. Our wrapper code checks `!res.ok && res.status !== 204`.
+- `replace-variants-v3` returns `200` with body.
+- `contract-raw-response` (GET) returns the full Shopify subscription contract including discount nodes.
+- Coupon endpoints use specific status codes for errors: `409` (conflict — already applied), `404`, `422`, `400`.
+- Webhook signature verification uses Svix with `webhook-*` header prefix.
 
 ## Rate limits + retry
 
@@ -44,7 +73,7 @@ Internal-subscription guard: `isInternalSubscription()` short-circuits these cal
 
 ## Webhooks
 
-Documented separately — see `APPSTLE-WEBHOOKS.md`. Drives [[../tables/billing_forecast_events]] (sub created, cancelled, paused, frequency changed) and dunning entry via `dunning/payment-failed` event.
+Drives [[../tables/billing_forecast_events]] (sub created, cancelled, paused, frequency changed) and dunning entry via `dunning/payment-failed` event. Payloads: contract create / update / cancel / pause / resume; billing-attempt failure + success; line-item swap. Svix-signed via `webhook-id`, `webhook-timestamp`, `webhook-signature` headers, verified against `workspaces.appstle_webhook_secret_encrypted`.
 
 ## Gotchas
 

@@ -7,7 +7,7 @@
 @DATABASE.md
 @TEXT-MARKETING.md
 
-> **Table reference:** `docs/brain/` — one page per public.* table with columns, FKs, common queries, and gotchas. Start at `docs/brain/README.md`.
+> **Brain reference:** `docs/brain/` is the system map — one page per public.* table, Inngest function, integration, journey, playbook, library file, and lifecycle. Start at `docs/brain/README.md`. **Every new feature/table/Inngest function/integration/library file we ship from this point on must land in `docs/brain/` in the same PR.** Code without a brain page is incomplete. Update the relevant folder + README index when shipping; agents should expect to read the brain before grepping src/.
 
 # ShopCX.ai — The Retention Operating System
 

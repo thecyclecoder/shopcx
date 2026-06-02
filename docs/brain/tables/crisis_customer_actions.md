@@ -1,6 +1,6 @@
 # crisis_customer_actions
 
-Per-customer state in a crisis campaign — segment, current tier, responses, swap/pause/remove actions. See CRISIS-MANAGEMENT-SPEC.md.
+Per-customer state in a crisis campaign — segment, current tier, responses, swap/pause/remove actions. See [[../lifecycles/crisis-campaign]].
 
 **Primary key:** `id`
 

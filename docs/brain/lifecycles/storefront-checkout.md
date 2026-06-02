@@ -2,7 +2,7 @@
 
 The custom storefront's PDP → cart → tax-quote → Braintree checkout → order create → CAPI fan-out flow. Replaces Shopify Checkout (saves ~3% per order via Braintree) + Appstle subscription draft (the new flow vaults a Braintree token directly). This is the post-Shopify path; until full cutover, both paths coexist.
 
-See STOREFRONT.md for the system map.
+See [[../lifecycles/storefront-checkout]] for the system map.
 
 ## Cast
 

@@ -168,22 +168,34 @@ export async function sendCsatEmail({
   const { error } = await client.resend.emails.send({
     from: `${workspaceName} <support@${client.domain}>`,
     to: toEmail,
-    subject: `How did we do? - ${ticketSubject}`,
+    subject: `2 minutes — help shape our service`,
     html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px; text-align: center;">
-        <h2 style="color: #18181b; font-size: 20px; margin-bottom: 8px;">How was your experience?</h2>
-        <p style="color: #71717a; font-size: 14px; line-height: 1.6; margin-bottom: 24px;">
-          Your ticket "<strong>${ticketSubject}</strong>" has been closed. We'd love to hear how we did.
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+        <h2 style="color: #18181b; font-size: 22px; margin-bottom: 12px; text-align: center;">How did we do?</h2>
+        <p style="color: #52525b; font-size: 15px; line-height: 1.6; margin-bottom: 28px; text-align: center;">
+          Your ticket about "<strong>${ticketSubject}</strong>" is closed. Was your issue fully resolved?
+          We'll add <strong>500 loyalty points</strong> (worth $5) to your account as a thank you for sharing 2 minutes of feedback.
         </p>
-        <div style="display: inline-flex; gap: 8px;">
+        <table style="margin: 0 auto;"><tr>
+          <td style="padding: 0 4px;">
+            <a href="${csatUrl}" style="display: inline-block; padding: 14px 28px; border-radius: 10px; background: #10b981; color: #ffffff; text-decoration: none; font-size: 15px; font-weight: 600;">Yes, all good</a>
+          </td>
+          <td style="padding: 0 4px;">
+            <a href="${csatUrl}" style="display: inline-block; padding: 14px 28px; border-radius: 10px; background: #f4f4f5; color: #18181b; text-decoration: none; font-size: 15px; font-weight: 600;">Not yet</a>
+          </td>
+        </tr></table>
+        <p style="color: #a1a1aa; font-size: 12px; margin-top: 32px; text-align: center;">
+          You can also rate us 1-5 stars in one tap:
+        </p>
+        <div style="text-align: center; margin-top: 8px;">
           ${[1, 2, 3, 4, 5]
             .map(
               (n) =>
-                `<a href="${csatUrl}&score=${n}" style="display: inline-block; width: 48px; height: 48px; line-height: 48px; text-align: center; border-radius: 8px; background: ${n <= 2 ? "#fef2f2" : n <= 3 ? "#fefce8" : "#f0fdf4"}; color: ${n <= 2 ? "#dc2626" : n <= 3 ? "#ca8a04" : "#16a34a"}; text-decoration: none; font-size: 20px; font-weight: bold;">${n}</a>`
+                `<a href="${csatUrl}&score=${n}" style="display: inline-block; width: 44px; height: 44px; line-height: 44px; text-align: center; border-radius: 8px; background: ${n <= 2 ? "#fef2f2" : n <= 3 ? "#fefce8" : "#f0fdf4"}; color: ${n <= 2 ? "#dc2626" : n <= 3 ? "#ca8a04" : "#16a34a"}; text-decoration: none; font-size: 18px; font-weight: bold; margin: 0 3px;">${n}</a>`
             )
             .join("")}
         </div>
-        <p style="color: #a1a1aa; font-size: 11px; margin-top: 24px;">1 = Poor, 5 = Excellent</p>
+        <p style="color: #a1a1aa; font-size: 11px; margin-top: 8px; text-align: center;">1 = Poor &nbsp;·&nbsp; 5 = Excellent</p>
       </div>
     `,
   });

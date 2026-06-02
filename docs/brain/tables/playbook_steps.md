@@ -1,6 +1,6 @@
 # playbook_steps
 
-Steps inside a playbook — ordered, with action type and config. See PLAYBOOK-SPEC.md.
+Steps inside a playbook — ordered, with action type and config. See [[../playbooks/README]].
 
 **Primary key:** `id`
 

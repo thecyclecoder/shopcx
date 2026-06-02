@@ -23,7 +23,7 @@ Built by `src/lib/discount-journey-builder.ts`:
 2. **Phone input** — only if no phone on file. Auto-formats `(858) 334-9198` as user types, validates via [[../integrations/twilio]] Lookup v2 (rejects landlines).
 3. **Apply to subscription** — only if customer has an active sub that doesn't already have a coupon.
 
-If the customer has linked accounts, account-linking steps are silently **prepended** as Step 0 (see [[account-linking]] + JOURNEYS.md "Account linking is a prepend").
+If the customer has linked accounts, account-linking steps are silently **prepended** as Step 0 (see [[account-linking]] + [[../journeys/README]] "Account linking is a prepend").
 
 ## Consent → action
 
@@ -39,7 +39,7 @@ On Yes:
 
 ## Re-nudge for declines
 
-Per JOURNEYS.md "No coupon without signup":
+Per [[../journeys/README]] "No coupon without signup":
 
 - **First decline** (`tickets.journey_nudge_count = 0`):
   - Mini-site/chat shows: "Check your email shortly for a response from our team!"
@@ -70,7 +70,7 @@ Per JOURNEYS.md "No coupon without signup":
 
 ## Multi-step response storage
 
-Steps use `key` (e.g. `key: "consent"`, `key: "phone"`) not `id` — the mini-site's response storage looks at `form.id || form.key`. See JOURNEYS.md gotcha "Multi-step responses stored as `{"undefined": ...}`" — using `form.id` alone silently breaks marketing subscriptions, coupon applications, and action logging. Always coalesce.
+Steps use `key` (e.g. `key: "consent"`, `key: "phone"`) not `id` — the mini-site's response storage looks at `form.id || form.key`. See [[../journeys/README]] gotcha "Multi-step responses stored as `{"undefined": ...}`" — using `form.id` alone silently breaks marketing subscriptions, coupon applications, and action logging. Always coalesce.
 
 ## Step ticket status
 

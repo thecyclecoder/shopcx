@@ -142,7 +142,7 @@ const { data } = await admin.from("customers")
 
 ### Get the linked-account group for a customer
 ```ts
-// See DATABASE.md linkedIds() — always expand the group before scoping queries.
+// See [[../README]] linkedIds() — always expand the group before scoping queries.
 ```
 
 ## Gotchas

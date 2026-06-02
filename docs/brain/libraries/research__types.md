@@ -8,7 +8,7 @@ Research pipeline types.
 
 ```
 Shared types for the Research & Heal system.
-See RESEARCH-AND-HEAL.md for the design rationale.
+See [[../lifecycles/research-and-heal]] for the design rationale.
 ```
 
 ## Exports

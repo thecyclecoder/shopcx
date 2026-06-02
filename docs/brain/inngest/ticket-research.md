@@ -1,6 +1,6 @@
 # inngest/ticket-research
 
-Research-and-heal pipeline: deep investigation → recipe match → propose heal → auto-execute allowlisted. Writes `ticket_research_runs`, `ticket_heal_attempts`. See RESEARCH-AND-HEAL.md.
+Research-and-heal pipeline: deep investigation → recipe match → propose heal → auto-execute allowlisted. Writes `ticket_research_runs`, `ticket_heal_attempts`. See [[../lifecycles/research-and-heal]].
 
 **File:** `src/lib/inngest/ticket-research.ts`
 

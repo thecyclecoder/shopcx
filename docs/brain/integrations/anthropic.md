@@ -26,7 +26,7 @@ Model id constants live in `src/lib/ai-models.ts`. **Don't hardcode strings else
 
 | Feature | Where | Why |
 |---|---|---|
-| **Tool use** | Sonnet orchestrator v2 | Sonnet calls data tools (`get_customer_account`, `get_returns`, `get_crisis_status`, etc.) on demand instead of pre-loading everything. See SONNET-ORCHESTRATOR.md. |
+| **Tool use** | Sonnet orchestrator v2 | Sonnet calls data tools (`get_customer_account`, `get_returns`, `get_crisis_status`, etc.) on demand instead of pre-loading everything. See [[../lifecycles/ai-multi-turn]]. |
 | **Prompt caching** | Every orchestrator + agent turn | Customer-facing prompts are stable across turns within a ticket — caching cuts cost ~70% on multi-turn flows. Cache breakpoints set at the boundary between stable system prompt + dynamic per-turn context. |
 | **Streaming** | None in prod | Customer-facing UI doesn't stream — we batch and send via `pending_send_at` for delivery-delay control. |
 | **JSON mode** | Sonnet orchestrator decision output | Output must be valid `SonnetDecision` JSON. |

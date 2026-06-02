@@ -19,7 +19,7 @@ A linked group of [[../tables/customers]] sharing a `group_id`:
 - Drives accurate LTV and retention scoring.
 - Lets the AI orchestrator see "they bought this on the other email" without manual context-building.
 - Makes fraud detection aggregate across all profiles (shared addresses, velocity).
-- Marketing decisions key off the **main** customer in the group — see feedback in JOURNEYS.md.
+- Marketing decisions key off the **main** customer in the group — see feedback in [[../journeys/README]].
 
 ## Sources of evidence
 
@@ -68,7 +68,7 @@ If "yes":
 
 1. `randomUUID()` generates a new `group_id` (or reuses if either already linked).
 2. Upsert two [[../tables/customer_links]] rows with the same `group_id` — one for each customer.
-3. Mark the alternate as `is_primary=true` (typically the email-owning side — see feedback in JOURNEYS.md "Main account only for marketing decisions").
+3. Mark the alternate as `is_primary=true` (typically the email-owning side — see feedback in [[../journeys/README]] "Main account only for marketing decisions").
 4. Add `[System] Accounts linked: …` internal note to the ticket.
 5. Clear `playbook_context.awaiting_email_confirm`.
 6. **Re-trigger** `ticket/inbound-message` with the original message body so Sonnet now has full linked context.
@@ -93,7 +93,7 @@ If the customer never gives the email, the conversation continues as anonymous �
 
 ## Phase 5 — Account-linking journey (prepend mode)
 
-The account-linking journey is **never standalone** — it's silently prepended as the first step(s) of another journey. From JOURNEYS.md:
+The account-linking journey is **never standalone** — it's silently prepended as the first step(s) of another journey. From [[../journeys/README]]:
 
 > Account linking is a prepend, not an independent journey — silently inserted as the first step(s) of another journey. The CTA email doesn't mention it; it focuses on the main journey (e.g., "Claim my coupon"). Match patterns on account_linking are empty `[]` so it never fires solo.
 
@@ -128,7 +128,7 @@ Other never-link rules:
 
 Hard rule: marketing decisions key off the **main** customer, not the full group. Email subscribes the main customer's email; phone subscribes the main customer's phone. Linked accounts' marketing status doesn't factor into consent / email / phone steps.
 
-See feedback "Main account only for marketing decisions" in JOURNEYS.md.
+See feedback "Main account only for marketing decisions" in [[../journeys/README]].
 
 ## Files touched
 

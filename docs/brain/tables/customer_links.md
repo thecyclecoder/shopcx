@@ -51,7 +51,7 @@ const { data } = await admin.from("customer_link_rejections")
 ## Gotchas
 
 - Linkage is via `group_id`. All customers in the same group are the same real person.
-- Always expand to the group before scoping per-customer queries — see DATABASE.md `linkedIds()`.
+- Always expand to the group before scoping per-customer queries — see [[../README]] `linkedIds()`.
 - When suggesting links, check `customer_link_rejections` first — never re-offer a rejected link.
 
 ---

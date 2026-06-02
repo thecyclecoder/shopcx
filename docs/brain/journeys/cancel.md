@@ -2,7 +2,7 @@
 
 AI-powered retention flow. Database row in [[../tables/journey_definitions]]: `slug='cancel-subscription'`, `journey_type='cancellation'`, `trigger_intent='cancel_subscription'`. Replaces the legacy "Cancellation Flow" config-driven journey.
 
-See [[../lifecycles/cancel-flow]] for the end-to-end trace and CANCEL-FLOW.md for the historical spec.
+See [[../lifecycles/cancel-flow]] for the end-to-end trace.
 
 ## Trigger
 

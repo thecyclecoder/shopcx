@@ -1,86 +1,87 @@
+/**
+ * CSAT survey sender — cron-driven, not sleep-step.
+ *
+ * Runs every 15 minutes. Finds tickets that closed at least 48h ago
+ * with a customer email and no csat_sent_at marker, sends the CSAT
+ * email, stamps csat_sent_at. Idempotent (the index filters out
+ * already-sent rows).
+ *
+ * 48h delay so fulfillment outcomes (replacement orders arriving,
+ * refunds hitting the card) usually land before the customer rates.
+ *
+ * Stamp happens BEFORE the send call so a Resend hiccup doesn't
+ * cause a re-send storm on the next cron tick.
+ */
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendCsatEmail } from "@/lib/email";
 import { createHmac } from "crypto";
+
+const CSAT_DELAY_HOURS = 48;
+const BATCH_SIZE = 50;
 
 function generateCsatToken(ticketId: string): string {
   const secret = process.env.ENCRYPTION_KEY || "fallback";
   return createHmac("sha256", secret).update(ticketId).digest("hex").slice(0, 32);
 }
 
-export const ticketCsat = inngest.createFunction(
+export const ticketCsatCron = inngest.createFunction(
   {
-    id: "ticket-csat",
+    id: "ticket-csat-cron",
+    name: "CSAT — send surveys 48h after ticket close",
     retries: 2,
-    triggers: [{ event: "ticket/closed" }],
+    concurrency: [{ limit: 1 }],
+    triggers: [{ cron: "*/15 * * * *" }],
   },
-  async ({ event, step }) => {
-    const { ticket_id, workspace_id, customer_id, subject } = event.data as {
-      ticket_id: string;
-      workspace_id: string;
-      customer_id: string | null;
-      subject: string | null;
-    };
-
-    if (!customer_id) return { skipped: "no customer" };
-
-    // Wait 24 hours before sending CSAT
-    await step.sleep("wait-24h", "24h");
-
-    // Verify ticket is still closed (customer might have replied)
+  async ({ step }) => {
     const admin = createAdminClient();
-    const stillClosed: boolean = await step.run("check-still-closed", async () => {
-      const { data: ticket } = await admin
+    const since = new Date(Date.now() - CSAT_DELAY_HOURS * 60 * 60 * 1000).toISOString();
+
+    const due = await step.run("find-due", async () => {
+      const { data } = await admin
         .from("tickets")
-        .select("status")
-        .eq("id", ticket_id)
-        .single();
-      return ticket?.status === "closed";
+        .select("id, workspace_id, customer_id, subject")
+        .eq("status", "closed")
+        .is("csat_sent_at", null)
+        .not("customer_id", "is", null)
+        .not("closed_at", "is", null)
+        .lte("closed_at", since)
+        .order("closed_at", { ascending: true })
+        .limit(BATCH_SIZE);
+      return data || [];
     });
 
-    if (!stillClosed) return { skipped: "ticket reopened" };
+    if (!due.length) return { sent: 0 };
 
-    // Get customer email and workspace name
-    const info: { email: string; workspaceName: string } | null = await step.run(
-      "get-info",
-      async () => {
-        const { data: customer } = await admin
-          .from("customers")
-          .select("email")
-          .eq("id", customer_id)
-          .single();
+    let sent = 0;
+    for (const t of due) {
+      await step.run(`send-${t.id}`, async () => {
+        // Stamp first so a partial-failure doesn't re-fire next tick.
+        await admin.from("tickets")
+          .update({ csat_sent_at: new Date().toISOString() })
+          .eq("id", t.id);
 
-        const { data: workspace } = await admin
-          .from("workspaces")
-          .select("name")
-          .eq("id", workspace_id)
-          .single();
+        const [{ data: customer }, { data: workspace }] = await Promise.all([
+          admin.from("customers").select("email").eq("id", t.customer_id!).single(),
+          admin.from("workspaces").select("name").eq("id", t.workspace_id).single(),
+        ]);
+        if (!customer?.email) return;
 
-        if (!customer?.email) return null;
-        return {
-          email: customer.email,
+        const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
+        const token = generateCsatToken(t.id);
+        const csatUrl = `${siteUrl}/csat/${t.id}?token=${token}`;
+
+        await sendCsatEmail({
+          workspaceId: t.workspace_id,
+          toEmail: customer.email,
+          ticketSubject: t.subject || "Support Request",
+          csatUrl,
           workspaceName: workspace?.name || "ShopCX",
-        };
-      }
-    );
-
-    if (!info) return { skipped: "no customer email" };
-
-    // Send CSAT email
-    await step.run("send-csat", async () => {
-      const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
-      const token = generateCsatToken(ticket_id);
-      const csatUrl = `${siteUrl}/csat/${ticket_id}?token=${token}`;
-
-      await sendCsatEmail({
-        workspaceId: workspace_id,
-        toEmail: info.email,
-        ticketSubject: subject || "Support Request",
-        csatUrl,
-        workspaceName: info.workspaceName,
+        });
+        sent++;
       });
-    });
+    }
 
-    return { sent: true };
-  }
+    return { sent, batch_size: due.length };
+  },
 );

@@ -1,6 +1,6 @@
 # libraries/research/index
 
-Research-and-heal pipeline entry. See RESEARCH-AND-HEAL.md.
+Research-and-heal pipeline entry. See [[../lifecycles/research-and-heal]].
 
 **File:** `src/lib/research/index.ts`
 
@@ -10,7 +10,7 @@ Research-and-heal pipeline entry. See RESEARCH-AND-HEAL.md.
 Research recipe registry + runner.
 Each recipe lives under src/lib/research/recipes/<slug>.ts and gets
 registered below. Recipes are TypeScript (not config) — see
-RESEARCH-AND-HEAL.md for the design rationale.
+[[../lifecycles/research-and-heal]] for the design rationale.
 ```
 
 ## Exports

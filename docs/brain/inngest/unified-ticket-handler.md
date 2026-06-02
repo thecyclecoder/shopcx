@@ -1,6 +1,6 @@
 # inngest/unified-ticket-handler
 
-**THE main pipeline.** Every inbound message: resolve → playbook check → Sonnet orchestrator → execute decision. Touches almost every table. See UNIFIED-HANDLER.md.
+**THE main pipeline.** Every inbound message: resolve → playbook check → Sonnet orchestrator → execute decision. Touches almost every table. See [[../lifecycles/ticket-lifecycle]].
 
 **File:** `src/lib/inngest/unified-ticket-handler.ts`
 

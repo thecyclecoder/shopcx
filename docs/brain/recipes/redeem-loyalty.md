@@ -57,7 +57,7 @@ The canonical end-to-end implementation is `src/lib/portal/handlers/loyalty-rede
 - **Always `spendPoints` AND insert `loyalty_redemptions`.** Skipping the ledger insert breaks the customer's history view.
 - **`validateRedemption` checks tier eligibility** (tier-locked customers can only redeem within their tier).
 - **Discount code creation** is a separate Shopify GraphQL call — use the portal handler's implementation as the template.
-- **Don't issue twice.** If a previous redemption is still un-used, surface that first — see SONNET-ORCHESTRATOR.md "check unused coupons first."
+- **Don't issue twice.** If a previous redemption is still un-used, surface that first — see [[../lifecycles/ai-multi-turn]] "check unused coupons first."
 - **Internal subs** still need a Shopify discount code — loyalty redemptions go through Shopify regardless.
 
 ## Related

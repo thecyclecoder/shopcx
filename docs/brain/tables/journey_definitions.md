@@ -1,6 +1,6 @@
 # journey_definitions
 
-Journey configs — slug, channels, match_patterns, trigger_intent, step_ticket_status, priority. See JOURNEYS.md.
+Journey configs — slug, channels, match_patterns, trigger_intent, step_ticket_status, priority. See [[../journeys/README]].
 
 **Primary key:** `id`
 

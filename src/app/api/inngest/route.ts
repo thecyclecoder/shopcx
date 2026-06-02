@@ -1,8 +1,7 @@
 import { serve } from "inngest/next";
 import { inngest } from "@/lib/inngest/client";
 import { syncCustomers, syncOrders } from "@/lib/inngest/sync-shopify";
-// CSAT disabled — not currently in use, will be reimplemented differently
-// import { ticketCsat } from "@/lib/inngest/ticket-csat";
+import { ticketCsatCron } from "@/lib/inngest/ticket-csat";
 import {
   importFileUpload,
   importFileSplit,

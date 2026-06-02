@@ -90,7 +90,7 @@ For SMS, Twilio status callbacks fire `delivered` / `failed` events back to our 
 
 If the action was `ai_response` and the response was a complete reply (not a clarification question), the orchestrator auto-closes the ticket via `tickets.status = 'closed'` + `closed_at = now()`. The customer's next reply reopens it.
 
-Exception: if the action failed silently (e.g. Appstle call returned `{ success: false }`), the ticket stays open — Sonnet never tells the customer something was done unless [[../tables/customer_events]] confirms it. See SONNET-ORCHESTRATOR.md rule "Never fake confirmations."
+Exception: if the action failed silently (e.g. Appstle call returned `{ success: false }`), the ticket stays open — Sonnet never tells the customer something was done unless [[../tables/customer_events]] confirms it. See [[../lifecycles/ai-multi-turn]] rule "Never fake confirmations."
 
 Tags applied along the way (idempotent via `src/lib/ticket-tags.ts`):
 

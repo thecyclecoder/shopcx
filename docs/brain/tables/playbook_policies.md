@@ -1,6 +1,6 @@
 # playbook_policies
 
-Policies attached to playbooks — limits, escalation thresholds. See PLAYBOOK-SPEC.md.
+Policies attached to playbooks — limits, escalation thresholds. See [[../playbooks/README]].
 
 **Primary key:** `id`
 

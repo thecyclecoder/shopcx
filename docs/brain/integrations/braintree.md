@@ -1,6 +1,6 @@
 # braintree
 
-Braintree — payment gateway for the custom storefront + our subscription billing (replaces Shopify Payments + Appstle). ~2.59% + 0.49 per transaction vs Shopify's ~2.9% + 0.30 + platform fee. Saves ~3% per order — see STOREFRONT.md.
+Braintree — payment gateway for the custom storefront + our subscription billing (replaces Shopify Payments + Appstle). ~2.59% + 0.49 per transaction vs Shopify's ~2.9% + 0.30 + platform fee. Saves ~3% per order — see [[../lifecycles/storefront-checkout]].
 
 ## Auth
 

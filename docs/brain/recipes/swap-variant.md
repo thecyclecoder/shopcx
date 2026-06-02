@@ -38,7 +38,7 @@ const result = await subSwapVariant({
 
 ## Gotchas
 
-- **Crisis swaps must pass `preserveBasePriceCents`** to honor the customer's locked-in price across the swap — see feedback_crisis_action_subscription_id and CRISIS-MANAGEMENT-SPEC.md.
+- **Crisis swaps must pass `preserveBasePriceCents`** to honor the customer's locked-in price across the swap — see feedback_crisis_action_subscription_id and [[../lifecycles/crisis-campaign]].
 - **Customer portal flavor swaps preserve grandfathered pricing** automatically. Product swaps (different SKU) do NOT preserve it. See project_grandfathered_pricing.
 - **Internal-sub guard** runs first. Internal subs do the swap in our DB; no Appstle call.
 - **Variant ids are numeric Shopify ids**, not GIDs.

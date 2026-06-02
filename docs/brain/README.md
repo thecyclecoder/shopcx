@@ -85,7 +85,7 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/social_comments]] — Inbound social comments (Meta Page posts, Instagram). channel='social_comments'.
 - [[tables/support_emails]] — Per-workspace support@/help@ inbound email mailbox configs.
 - [[tables/ticket_analyses]] — Per-ticket AI analysis output — sentiment, intent, summary, suggested action.
-- [[tables/ticket_heal_attempts]] — Per-ticket auto-heal attempts (research-and-heal pipeline). See RESEARCH-AND-HEAL.md.
+- [[tables/ticket_heal_attempts]] — Per-ticket auto-heal attempts (research-and-heal pipeline). See [[../lifecycles/research-and-heal]].
 - [[tables/ticket_messages]] — Messages on a ticket. direction (in/out), visibility (public/internal), author_type (customer/agent/ai/system).
 - [[tables/ticket_research_runs]] — Per-ticket research runs (the deep-investigation pipeline that runs before a heal attempt).
 - [[tables/ticket_views]] — Saved ticket filter combos. Nested up to 2 levels via parent_id. Live in sidebar.
@@ -118,16 +118,16 @@ Five seconds of probing beats an hour of "why is my filter empty."
 ### Journeys
 
 - [[tables/chat_journeys]] — Active in-flight chat journey state per session (legacy — most chat journeys now use the same `journey_sessions` row as email).
-- [[tables/journey_definitions]] — Journey configs — slug, channels, match_patterns, trigger_intent, step_ticket_status, priority. See JOURNEYS.md.
+- [[tables/journey_definitions]] — Journey configs — slug, channels, match_patterns, trigger_intent, step_ticket_status, priority. See [[../journeys/README]].
 - [[tables/journey_sessions]] — Per-customer journey invocation. token (for `/journey/{token}`), responses, status. The customer-facing artifact.
 - [[tables/journey_step_events]] — Append-only audit log of every step response within a journey session.
 
 ### Playbooks
 
 - [[tables/playbook_exceptions]] — Per-(playbook, customer/ticket) one-off exception grants (e.g. tenured customer auto-approved).
-- [[tables/playbook_policies]] — Policies attached to playbooks — limits, escalation thresholds. See PLAYBOOK-SPEC.md.
+- [[tables/playbook_policies]] — Policies attached to playbooks — limits, escalation thresholds. See [[../playbooks/README]].
 - [[tables/playbook_simulations]] — Recorded playbook dry-runs for testing rule changes.
-- [[tables/playbook_steps]] — Steps inside a playbook — ordered, with action type and config. See PLAYBOOK-SPEC.md.
+- [[tables/playbook_steps]] — Steps inside a playbook — ordered, with action type and config. See [[../playbooks/README]].
 - [[tables/playbooks]] — Customer-service playbooks (e.g. unwanted_charge_subscription_dispute). Discoverable by Sonnet.
 
 ### Cancel & retention
@@ -140,8 +140,8 @@ Five seconds of probing beats an hour of "why is my filter empty."
 
 ### Crisis management
 
-- [[tables/crisis_customer_actions]] — Per-customer state in a crisis campaign — segment, current tier, responses, swap/pause/remove actions. See CRISIS-MANAGEMENT-SPEC.md.
-- [[tables/crisis_events]] — Crisis campaigns (e.g. Mixed Berry OOS) — affected variant, swap options, tiers, coupon. See CRISIS-MANAGEMENT-SPEC.md.
+- [[tables/crisis_customer_actions]] — Per-customer state in a crisis campaign — segment, current tier, responses, swap/pause/remove actions. See [[../lifecycles/crisis-campaign]].
+- [[tables/crisis_events]] — Crisis campaigns (e.g. Mixed Berry OOS) — affected variant, swap options, tiers, coupon. See [[../lifecycles/crisis-campaign]].
 
 ### Fraud & resellers
 
@@ -177,8 +177,8 @@ Five seconds of probing beats an hour of "why is my filter empty."
 
 ### Storefront & checkout
 
-- [[tables/cart_drafts]] — Server-side cart state for the custom storefront. Token-bound, server-validated pricing, lifecycle: pending → converted/abandoned. See STOREFRONT.md.
-- [[tables/event_dispatches]] — Per-(event, sink) dispatch state for the CAPI clearinghouse — pending/sent/failed/dlq. See STOREFRONT.md.
+- [[tables/cart_drafts]] — Server-side cart state for the custom storefront. Token-bound, server-validated pricing, lifecycle: pending → converted/abandoned. See [[../lifecycles/storefront-checkout]].
+- [[tables/event_dispatches]] — Per-(event, sink) dispatch state for the CAPI clearinghouse — pending/sent/failed/dlq. See [[../lifecycles/storefront-checkout]].
 - [[tables/event_sinks]] — Downstream destinations for storefront events — meta_capi, tiktok_events, google_enhanced, klaviyo, custom. Encrypted credentials.
 - [[tables/pricing_rules]] — Storefront pricing rules — tier qty, mode (subscription vs one-time), frequency, discount %, line-item price.
 - [[tables/shipping_rates]] — Storefront shipping rates per (region, weight) — referenced by orders + subscriptions.
@@ -208,13 +208,13 @@ Five seconds of probing beats an hour of "why is my filter empty."
 
 - [[tables/marketing_shortlink_clicks]] — Per-click log for marketing shortlinks (`superfd.co/XXXXXX`) — timestamp, IP geo, user agent.
 - [[tables/marketing_shortlinks]] — Shortlink slug ↔ target URL ↔ campaign mapping. Crockford base32 6-char slug, per-workspace `shortlink_domain`.
-- [[tables/sms_campaign_recipients]] — Per-recipient SMS send row — local-time-resolved `send_time`, status, message_sid. See TEXT-MARKETING.md.
+- [[tables/sms_campaign_recipients]] — Per-recipient SMS send row — local-time-resolved `send_time`, status, message_sid. See [[../tables/sms_campaigns]].
 - [[tables/sms_campaigns]] — SMS campaign — message body, MMS image, send_date, target_local_hour, audience filter, coupon config, shortlink target.
 - [[tables/sms_send_candidates]] — Pre-computed per-(profile, campaign) feature snapshot used at send time for predicted-buyer segment matching.
 
 ### Klaviyo & profiles
 
-- [[tables/klaviyo_events]] — Imported Klaviyo events (Placed Order primarily) with UTM-attribution parsed back to `attributed_klaviyo_campaign_id`. See TEXT-MARKETING.md.
+- [[tables/klaviyo_events]] — Imported Klaviyo events (Placed Order primarily) with UTM-attribution parsed back to `attributed_klaviyo_campaign_id`. See [[../tables/sms_campaigns]].
 - [[tables/klaviyo_profile_directory]] — Klaviyo profile metadata cache — id, email, phone, attributes — used for staging+matching during enrichment.
 - [[tables/klaviyo_profile_staging]] — Staging table for Klaviyo profile imports before they're merged into `customers`.
 - [[tables/klaviyo_sms_campaign_history]] — Historical Klaviyo SMS campaigns — message body, send time, audience segments, recomputed conversion stats.
@@ -295,7 +295,7 @@ Every background job, webhook fan-out, and cron lives here. Each page lists trig
 - [[inngest/sync-reviews]] — Nightly + on-demand Klaviyo review sync with AI summaries.
 - [[inngest/sync-shopify]] — Main Shopify bulk sync (customers, orders, products).
 - [[inngest/ticket-analysis-cron]] — Nightly cron over recent tickets → `ticket_analyses`.
-- [[inngest/ticket-csat]] — Sends CSAT 24h after ticket closes.
+- [[inngest/ticket-csat]] — Cron every 15 min; sends CSAT survey 48h after ticket closes. See [[lifecycles/csat]] + [[tables/ticket_csat]].
 - [[inngest/ticket-research]] — Research-and-heal pipeline: investigate → recipe → propose → auto-execute allowlisted.
 - [[inngest/ticket-snooze]] — Wakes snoozed tickets.
 - [[inngest/today-sync]] — Today-only incremental Shopify sync.
@@ -352,7 +352,7 @@ One page per row in [[tables/journey_definitions]]. See [[journeys/README]] for 
 
 ## Playbooks (`playbooks/`)
 
-One page per active row in [[tables/playbooks]]. See [[playbooks/README]] for the data model, step types, and the universal communication patterns from PLAYBOOK-PATTERNS.md.
+One page per active row in [[tables/playbooks]]. See [[playbooks/README]] for the data model, step types, and the universal communication patterns from [[../playbooks/README]].
 
 - [[playbooks/refund]] — Sub-renewal dispute → identify → policy → tiered exceptions → return / refund / store credit.
 - [[playbooks/replacement-order]] — Missing / damaged / lost → tracking check → missing-items checklist → fresh draft order at no cost.

@@ -33,7 +33,7 @@ Two-bucket reasoning:
 3. If first bucket doesn't have the answer → try the other.
 4. If neither → genuine knowledge gap → escalate to human, log to [[../tables/knowledge_gaps]].
 
-Tool definitions: `buildToolDefinitions()` in `src/lib/sonnet-orchestrator-v2.ts`. Adding a new customer_id table → add a tool here per the SONNET-ORCHESTRATOR.md convention.
+Tool definitions: `buildToolDefinitions()` in `src/lib/sonnet-orchestrator-v2.ts`. Adding a new customer_id table → add a tool here per the [[../lifecycles/ai-multi-turn]] convention.
 
 ## Phase 1 — route (turn 0)
 
@@ -131,7 +131,7 @@ If the action failed silently — for example, Appstle returned `{ success: fals
 - Inserts an internal note explaining the failure.
 - Escalates to human.
 
-This is the rule "Never tell a customer an action was done unless [[../tables/customer_events]] confirms it" — see feedback-driven design in SONNET-ORCHESTRATOR.md.
+This is the rule "Never tell a customer an action was done unless [[../tables/customer_events]] confirms it" — see feedback-driven design in [[../lifecycles/ai-multi-turn]].
 
 ## Cost model
 

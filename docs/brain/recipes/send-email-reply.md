@@ -78,7 +78,7 @@ The customer sees the message in the UI immediately; the actual transport call h
 
 ## Gotchas
 
-- **Thread via `email_message_id`** (Gmail Message-ID stored on the ticket). NOT `resend_email_id` — that's only on our outbound. See JOURNEYS.md § Email Threading.
+- **Thread via `email_message_id`** (Gmail Message-ID stored on the ticket). NOT `resend_email_id` — that's only on our outbound. See [[../journeys/README]] § Email Threading.
 - **`resend_email_id` not `resend_id`.** Supabase-js silently drops unknown columns on insert. Spelling matters. See [[../tables/ticket_messages]] gotchas.
 - **Open + click tracking** is self-hosted, not Resend's. The helper passes the tracking flag to the body rewriter.
 - **Sandbox mode**: when `workspaces.sandbox_mode=true`, outbound messages become internal notes. The helper checks this — don't bypass.

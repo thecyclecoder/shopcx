@@ -5,7 +5,7 @@ In-house recurring billing scheduler — the post-Appstle path. For internal sub
 ## Cast
 
 - Internal: [[../inngest/internal-subscription-renewals]] cron + `src/lib/internal-subscription.ts`.
-- Legacy: [[../integrations/appstle]] runs its own scheduler; we receive webhooks (APPSTLE-WEBHOOKS.md).
+- Legacy: [[../integrations/appstle]] runs its own scheduler; we receive webhooks ([[../integrations/appstle]]).
 - Tax: [[../integrations/avalara]].
 - Payment: [[../integrations/braintree]] (paymentMethodToken vault).
 - State: [[../tables/subscriptions]], [[../tables/orders]], [[../tables/transactions]].
@@ -112,7 +112,7 @@ Not in production yet. Sketch:
 3. Cancel the corresponding Appstle contract (no `cancellationFeedback` — we own it now).
 4. Watch [[../tables/transactions]] for the first internal charge.
 
-Until cutover, the two paths coexist. Out of scope for this doc — see CLAUDE.md § Phase 7 + STOREFRONT.md § subscription platform cutover.
+Until cutover, the two paths coexist. Out of scope for this doc — see CLAUDE.md § Phase 7 + [[../lifecycles/storefront-checkout]] § subscription platform cutover.
 
 ## Pause / resume / skip — both paths
 

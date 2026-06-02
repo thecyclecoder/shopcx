@@ -2,7 +2,7 @@
 
 Proactive retention campaign system for out-of-stock (or other crisis) situations. Automatically contacts affected subscribers with a tiered offer sequence before their next order ships, tracks responses, and handles auto-resume / re-add when the crisis resolves. This page traces the full lifecycle from "admin clicks activate" to "crisis resolved + customers restored."
 
-See CRISIS-MANAGEMENT-SPEC.md for the original design doc.
+See [[../lifecycles/crisis-campaign]] for the original design doc.
 
 ## Cast
 
@@ -180,7 +180,7 @@ This matters because crisis swaps shouldn't be a pricing event for the customer 
 
 When a customer messages in independently — e.g. "is Mixed Berry back yet?" — the Sonnet orchestrator's `get_crisis_status` tool surfaces the customer's crisis state ([[../tables/crisis_customer_actions]] + [[../tables/crisis_events]]). Sonnet then answers with context: "It's still on backorder — we expect restock by [date]. We've already swapped your next shipment to Strawberry Lemonade. Did you want to change to a different flavor instead?"
 
-See SONNET-ORCHESTRATOR.md crisis rules.
+See [[../lifecycles/ai-multi-turn]] crisis rules.
 
 ## Files touched
 

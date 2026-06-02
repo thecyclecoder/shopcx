@@ -45,7 +45,7 @@ Resend parses the email body and posts to our webhook. Handler:
 ## Gotchas
 
 - **`In-Reply-To` threading is the only way to thread.** Subject-only matching is unreliable. Always set `In-Reply-To` + `References` on outbound replies — see `src/lib/email.ts`.
-- **Journey CTA emails must thread into the original Gmail conversation.** Use `email_message_id` (the Gmail Message-ID) on the ticket — NOT `resend_email_id` (that's only on our outbound). See JOURNEYS.md § Email Threading.
+- **Journey CTA emails must thread into the original Gmail conversation.** Use `email_message_id` (the Gmail Message-ID) on the ticket — NOT `resend_email_id` (that's only on our outbound). See [[../journeys/README]] § Email Threading.
 - **`resend_email_id` is the join key** for all email events. If it's missing on a `ticket_messages` row, the tracking pixel can't attribute anything to it.
 - **Supabase-js silently drops unknown columns on insert.** If you typo `resend_id` instead of `resend_email_id`, the row inserts with NULL and you'll spend an hour debugging missing events. Always check `error` on insert.
 - **Inbound webhook is at-least-once.** Idempotency key: `email_message_id` (Gmail Message-ID). Bail if you've already seen it.

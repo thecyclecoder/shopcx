@@ -1,6 +1,6 @@
 # event_dispatches
 
-Per-(event, sink) dispatch state for the CAPI clearinghouse — pending/sent/failed/dlq. See STOREFRONT.md.
+Per-(event, sink) dispatch state for the CAPI clearinghouse — pending/sent/failed/dlq. See [[../lifecycles/storefront-checkout]].
 
 **Primary key:** `id`
 

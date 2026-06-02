@@ -1,6 +1,6 @@
 # inngest/crisis-campaign
 
-Daily crisis-campaign cron. Finds eligible subs per active `crisis_events`, advances tiers, auto-swaps default flavor. Writes `crisis_customer_actions`. See CRISIS-MANAGEMENT-SPEC.md.
+Daily crisis-campaign cron. Finds eligible subs per active `crisis_events`, advances tiers, auto-swaps default flavor. Writes `crisis_customer_actions`. See [[../lifecycles/crisis-campaign]].
 
 **File:** `src/lib/inngest/crisis-campaign.ts`
 

@@ -4,7 +4,7 @@ Structured decision trees that guide BOTH AI and human agents through complex cu
 
 Settings → Playbooks (own settings card, not under AI).
 
-See PLAYBOOK-SPEC.md for the full data model and PLAYBOOK-PATTERNS.md for the universal communication patterns that apply across playbooks.
+See [[../playbooks/README]] for the full data model and [[../playbooks/README]] for the universal communication patterns that apply across playbooks.
 
 ## Active playbooks
 
@@ -76,7 +76,7 @@ Common across playbooks (`playbook_steps.type`):
 
 ## Universal communication patterns
 
-From PLAYBOOK-PATTERNS.md. Applies to ALL playbooks regardless of issue type.
+From [[../playbooks/README]]. Applies to ALL playbooks regardless of issue type.
 
 ### Human touch
 

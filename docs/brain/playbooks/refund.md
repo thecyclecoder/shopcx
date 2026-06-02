@@ -79,7 +79,7 @@ Current policy contract:
 - Between exception tiers, stand firm up to 2 times.
 - Total stand-firm reps capped at 3 before AI declares the conversation closed.
 
-Final stand firm format: one sentence + "reply if you change your mind." See PLAYBOOK-PATTERNS.md.
+Final stand firm format: one sentence + "reply if you change your mind." See [[../playbooks/README]].
 
 ## Communication rules specific to this playbook
 
@@ -89,7 +89,7 @@ Final stand firm format: one sentence + "reply if you change your mind." See PLA
 
 ## Customer-facing formatting
 
-From PLAYBOOK-PATTERNS.md universal patterns:
+From [[../playbooks/README]] universal patterns:
 
 - Refer to orders by date + amount ("your April 4th order for $5.87"). Never the order number.
 - Timeline format for first policy explanation:
