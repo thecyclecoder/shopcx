@@ -7,6 +7,8 @@
 @DATABASE.md
 @TEXT-MARKETING.md
 
+> **Table reference:** `docs/brain/` — one page per public.* table with columns, FKs, common queries, and gotchas. Start at `docs/brain/README.md`.
+
 # ShopCX.ai — The Retention Operating System
 
 ## Project Overview

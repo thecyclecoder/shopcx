@@ -165,7 +165,7 @@ const SUMMARIES: Record<string, string> = {
   ticket_research_runs: "Per-ticket research runs (the deep-investigation pipeline that runs before a heal attempt).",
   ticket_views: "Saved ticket filter combos. Nested up to 2 levels via parent_id. Live in sidebar.",
   tickets: "Customer support tickets. status (open/pending/closed/archived), channel, handled_by, ai_turn_count, journey/playbook state.",
-  transactions: "Order transaction log — gateway, kind (sale/refund), amount, status. Sourced from Shopify/Braintree.",
+  transactions: "Per-(order, customer, subscription) Braintree transaction log — type, amount, status, processor response. attempted_at / settled_at / refunded_at.",
   widget_path_mappings: "Storefront widget — URL path patterns → widget config (which proactive prompt, what greeting).",
   widget_sessions: "Per-visitor chat-widget session state (anonymous chat tickets begin here).",
   workflows: "Template-based deterministic workflows (order_tracking, cancel_request, subscription_inquiry, account_login, end_chat).",
@@ -458,7 +458,7 @@ const { data: orders } = await admin.from("orders")
 const { data: order } = await admin.from("orders")
   .select("*").eq("order_number", "SC129467").maybeSingle();
 const { data: txns } = await admin.from("transactions")
-  .select("kind, amount_cents, status, created_at")
+  .select("type, amount_cents, status, created_at, settled_at, refunded_at")
   .eq("order_id", order.id);
 \`\`\`
 
@@ -492,7 +492,7 @@ const { count } = await admin.from("orders")
 \`\`\`ts
 const ids = await linkedIds(admin, customerId);
 const { data: subs } = await admin.from("subscriptions")
-  .select("id, shopify_contract_id, status, items, billing_interval, next_billing_date, total_price_cents")
+  .select("id, shopify_contract_id, status, items, billing_interval, next_billing_date, delivery_price_cents")
   .in("customer_id", ids)
   .eq("status", "active");   // lowercase
 \`\`\`
@@ -516,7 +516,7 @@ const { data } = await admin.from("subscriptions")
 \`\`\`ts
 const soon = new Date(Date.now() + 7*86400e3).toISOString();
 const { data } = await admin.from("subscriptions")
-  .select("id, customer_id, next_billing_date, total_price_cents")
+  .select("id, customer_id, next_billing_date, delivery_price_cents, items")
   .eq("workspace_id", workspaceId)
   .eq("status", "active")
   .lte("next_billing_date", soon);

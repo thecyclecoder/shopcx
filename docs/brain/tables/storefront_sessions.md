@@ -1,0 +1,86 @@
+# storefront_sessions
+
+One row per anonymous_id. Device fingerprint, UTMs, click IDs, _fbp/_fbc cookies, IP-derived geo. Indefinite retention.
+
+**Primary key:** `id`
+
+## Columns
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | `uuid` | — | PK · default: `gen_random_uuid()` |
+| `workspace_id` | `uuid` | — | → [[workspaces]].id |
+| `anonymous_id` | `text` | — |  |
+| `customer_id` | `uuid` | ✓ | → [[customers]].id |
+| `first_seen_at` | `timestamptz` | — | default: `now()` |
+| `last_seen_at` | `timestamptz` | — | default: `now()` |
+| `user_agent` | `text` | ✓ |  |
+| `device_type` | `text` | ✓ |  |
+| `os` | `text` | ✓ |  |
+| `browser` | `text` | ✓ |  |
+| `viewport_width` | `int4` | ✓ |  |
+| `viewport_height` | `int4` | ✓ |  |
+| `ip_country` | `text` | ✓ |  |
+| `ip_region` | `text` | ✓ |  |
+| `ip_city` | `text` | ✓ |  |
+| `landing_url` | `text` | ✓ |  |
+| `referrer` | `text` | ✓ |  |
+| `utm_source` | `text` | ✓ |  |
+| `utm_medium` | `text` | ✓ |  |
+| `utm_campaign` | `text` | ✓ |  |
+| `utm_content` | `text` | ✓ |  |
+| `utm_term` | `text` | ✓ |  |
+| `fbclid` | `text` | ✓ |  |
+| `gclid` | `text` | ✓ |  |
+| `ttclid` | `text` | ✓ |  |
+| `fbp` | `text` | ✓ |  |
+| `fbc` | `text` | ✓ |  |
+| `created_at` | `timestamptz` | — | default: `now()` |
+| `updated_at` | `timestamptz` | — | default: `now()` |
+
+## Foreign keys
+
+**Out (this → others):**
+
+- `customer_id` → [[customers]].`id`
+- `workspace_id` → [[workspaces]].`id`
+
+**In (others → this):**
+
+- [[storefront_events]].`session_id`
+- [[storefront_leads]].`session_id`
+
+## Common queries
+
+### List rows for a workspace
+```ts
+const { data } = await admin.from("storefront_sessions")
+  .select("id, created_at, updated_at")
+  .eq("workspace_id", workspaceId)
+  .order("created_at", { ascending: false }).limit(50);
+```
+
+### Rows for a customer (expand linked accounts first)
+```ts
+const ids = await linkedIds(admin, customerId);
+const { data } = await admin.from("storefront_sessions")
+  .select("*").in("customer_id", ids)
+  .order("created_at", { ascending: false });
+```
+
+### Count since a given time
+```ts
+const { count } = await admin.from("storefront_sessions")
+  .select("id", { count: "exact", head: true })
+  .gte("created_at", since);
+```
+
+## Gotchas
+
+- One row per anonymous_id (the `sid` cookie). 365-day cookie.
+- Indefinite retention — no raw PII; only IP-derived geo + UTMs + device fingerprint.
+- `customer_id` backfilled when the user identifies (lead capture / checkout / portal login).
+
+---
+
+[[../README]] · [[../../CLAUDE]] · [[../../DATABASE]]
