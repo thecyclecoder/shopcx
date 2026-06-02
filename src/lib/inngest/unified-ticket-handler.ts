@@ -1430,35 +1430,18 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           return { status: "positive_close_suppressed_prior_unanswered" };
         }
 
-        // Guard: if a journey form was just delivered and the customer
-        // never completed it, "thanks" almost always means they didn't
-        // realize they needed to click. Don't close the ticket — send a
-        // soft nudge so the form is still there for them. Surfaced on
-        // ticket e2e7c41d (Erin, May 5): she replied "Thank you!" right
-        // after we sent the discount-signup form, AI auto-closed, she
-        // never got the coupon she asked for.
-        const pendingJourney = await step.run("check-pending-journey", async () => {
-          const { data } = await admin.from("journey_sessions")
-            .select("id, current_step, created_at")
-            .eq("ticket_id", tid)
-            .eq("status", "pending")
-            .gte("created_at", new Date(Date.now() - 60 * 60 * 1000).toISOString())
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          // Only nudge if the customer hasn't actually started filling it
-          return data && (data.current_step === 0 || data.current_step === null) ? data : null;
-        });
-
-        if (pendingJourney) {
-          await step.run("send-journey-nudge", async () => {
-            if (await newerActivity(admin, tid, t0)) return;
-            const nudge = "Whenever you're ready, just fill in the quick form above and your discount will land right away!";
-            await sendWithDelay(admin, wsId, tid, st.ch, nudge, cfg.sandbox);
-            await sysNote(admin, tid, `[System] Positive close suppressed — journey form ${pendingJourney.id} is still pending. Sent nudge instead.`);
-          });
-          return { status: "positive_close_suppressed_pending_journey" };
-        }
+        // (Removed: the old "journey form pending → send nudge" guard
+        // assumed embedded forms inside the chat/email. We migrated to
+        // CTA-link mini-sites, so a pending journey_session just means
+        // "we sent a link"; customers who reply "thanks" after that are
+        // either acknowledging an action we ALREADY did (the
+        // unfulfilled-promise guard below catches the inverse) or have
+        // moved on. Cheri Byl, ticket 32a6eed8, got "Whenever you're
+        // ready, just fill in the quick form above" after we pushed her
+        // renewal — confusing because there's no form above and her
+        // ask was already handled. The unfulfilled-promise guard below
+        // is the right home for any "thanks while we still owe them
+        // something" case.)
 
         // Guard: if the prior AI message promised an action that was
         // never executed, "thanks" means the customer is trusting we
