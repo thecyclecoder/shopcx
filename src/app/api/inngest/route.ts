@@ -92,7 +92,7 @@ export const { GET, POST, PUT } = serve({
   functions: [
     syncCustomers,
     syncOrders,
-    // ticketCsat, // disabled
+    ticketCsatCron,
     importFileUpload,
     importFileSplit,
     importChunkProcess,
