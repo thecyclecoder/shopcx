@@ -220,3 +220,98 @@ function stripHost(value: string): string {
     .replace(/^www\./, "")
     .replace(/\/.*$/, "");
 }
+
+/**
+ * Haiku-based product match from a post's caption/message body.
+ *
+ * Use case: organic posts whose caption mentions the product by name
+ * but don't link to it ("Where are our Peach Mango fans at? ... Stay
+ * hydrated with Superfood Tabs ..."). The URL-based matcher returns
+ * null on these; Haiku reads the caption and picks from the workspace
+ * catalog.
+ *
+ * Returns the products.id of the best match, or null when nothing
+ * obvious. Never hallucinates — the model is told to return "none"
+ * when no product is clearly referenced.
+ *
+ * Cost: ~1k input tokens, <50 output. ~$0.0001/call. Result is cached
+ * on meta_post_cache.matched_product_id, so subsequent comments on
+ * the same post are a local DB read.
+ */
+const HAIKU_MODEL = "claude-haiku-4-5-20251001";
+const HAIKU_TIMEOUT_MS = 6000;
+
+export async function matchPostToProductViaAI(
+  admin: Admin,
+  workspaceId: string,
+  postMessage: string,
+): Promise<string | null> {
+  if (!postMessage?.trim()) return null;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+
+  // Load the catalog (id + handle + title). Skip shipping-protection /
+  // utility SKUs — they're never the subject of an organic post.
+  const { data: products } = await admin
+    .from("products")
+    .select("id, title, handle")
+    .eq("workspace_id", workspaceId);
+  if (!products?.length) return null;
+  const eligible = products.filter(p => {
+    const h = (p.handle as string || "").toLowerCase();
+    return !h.includes("shipping") && !h.includes("addon");
+  });
+  if (!eligible.length) return null;
+
+  const catalog = eligible
+    .map(p => `- id=${p.id} | handle=${p.handle} | title=${p.title}`)
+    .join("\n");
+
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), HAIKU_TIMEOUT_MS);
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: HAIKU_MODEL,
+        max_tokens: 80,
+        system:
+          `You match a social-media post caption to a product from a small catalog. ` +
+          `Read the caption and identify which catalog product (if any) is being shown or talked about. ` +
+          `Match on explicit product names, recognized variants (flavors, SKU keywords), and brand-specific terms. ` +
+          `If the caption doesn't clearly reference one of the catalog products, reply with "none". ` +
+          `Reply with ONLY the product id (UUID) or the literal word "none". ` +
+          `No prose, no preface, no explanation.`,
+        messages: [{
+          role: "user",
+          content:
+            `Catalog:\n${catalog}\n\n` +
+            `Post caption:\n${postMessage.slice(0, 2000)}\n\n` +
+            `Which product id? (or "none")`,
+        }],
+      }),
+    });
+    if (!res.ok) return null;
+    const json = await res.json() as { content?: Array<{ text?: string }> };
+    const raw = (json.content?.[0]?.text || "").trim();
+    if (!raw || raw.toLowerCase() === "none") return null;
+
+    // Pull the first UUID-shaped substring (model occasionally
+    // wraps the id with extra punctuation or context).
+    const m = raw.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+    if (!m) return null;
+    const candidate = m[0].toLowerCase();
+    // Confirm the id is actually in the catalog (no hallucinated UUIDs).
+    return eligible.find(p => (p.id as string).toLowerCase() === candidate)?.id ?? null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}

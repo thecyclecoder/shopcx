@@ -23,7 +23,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { decrypt } from "@/lib/crypto";
 import { hideComment, getPostMetadata } from "@/lib/meta";
-import { resolvePostProductMatch } from "@/lib/meta-product-match";
+import { resolvePostProductMatch, matchPostToProductViaAI } from "@/lib/meta-product-match";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -284,7 +284,16 @@ async function ensurePostCache(args: EnsurePostCacheArgs): Promise<{
 
   // Resolve a product match — follows shortlink redirects, matches
   // against products.handle.
-  const matchedProductId = await resolvePostProductMatch(admin, page.workspace_id, urls);
+  let matchedProductId = await resolvePostProductMatch(admin, page.workspace_id, urls);
+
+  // Haiku fallback: when URL matching comes up empty (common on
+  // organic posts whose captions mention the product but don't link
+  // to it — "Where are our Peach Mango fans at? ... Superfood Tabs"),
+  // read the caption with Haiku and match against the catalog. One
+  // call per uncached post; result cached below.
+  if (!matchedProductId && meta.message) {
+    matchedProductId = await matchPostToProductViaAI(admin, page.workspace_id, meta.message);
+  }
 
   // Mark as ad via a three-signal cascade, most authoritative first:
   //   1. Webhook ad_id → ad served via paid placement right now
