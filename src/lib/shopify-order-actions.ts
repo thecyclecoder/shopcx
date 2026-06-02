@@ -435,8 +435,37 @@ export async function refundOrderViaBraintree(
     t.kind === "sale" && t.status === "success"
   );
   if (!saleTx) return { success: false, error: "No successful sale transaction found on order" };
-  const braintreeTxnId = saleTx.authorization;
-  if (!braintreeTxnId) return { success: false, error: "Sale transaction has no Braintree authorization id" };
+
+  let braintreeTxnId: string | null = saleTx.authorization || null;
+
+  // Fallback: Appstle subscription renewal orders frequently have a
+  // null `authorization` field — Shopify just doesn't expose the BT
+  // id on those transaction rows. When that happens, search BT
+  // directly by customer email + amount + processed_at to find the
+  // matching transaction.
+  if (!braintreeTxnId) {
+    // Pull the order's email + processed_at — needed for the BT search.
+    const orderRes = await fetch(
+      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}.json?fields=email,contact_email,processed_at`,
+      { headers: { "X-Shopify-Access-Token": accessToken } },
+    );
+    const orderData = await orderRes.json();
+    const email = orderData?.order?.email || orderData?.order?.contact_email;
+    const processedAt = orderData?.order?.processed_at || saleTx.processed_at || saleTx.created_at;
+    if (!email || !processedAt) {
+      return { success: false, error: "Sale transaction has no Braintree authorization id, and order is missing email/processed_at for the BT search fallback" };
+    }
+    const { findBraintreeTransactionByMetadata } = await import("@/lib/integrations/braintree");
+    const match = await findBraintreeTransactionByMetadata(workspaceId, {
+      email: String(email).toLowerCase(),
+      amountDecimal: String(saleTx.amount),
+      processedAt: String(processedAt),
+    });
+    if (!match) {
+      return { success: false, error: `Sale transaction has no Braintree authorization id, and no matching BT transaction found via search (email=${email}, amount=${saleTx.amount}, processed_at=${processedAt})` };
+    }
+    braintreeTxnId = match.id;
+  }
 
   // 1) Refund the money in Braintree.
   const bt = await refundBraintreeTransaction(workspaceId, braintreeTxnId, amountCents);

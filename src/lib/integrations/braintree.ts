@@ -156,6 +156,55 @@ export async function refundBraintreeTransaction(
 }
 
 /**
+ * Find a Braintree transaction by external metadata when we don't
+ * have the BT id on hand. Used as the fallback when a Shopify order
+ * was paid through PayPal Braintree but Shopify's transaction row
+ * doesn't expose `authorization` (Appstle subscription renewals do
+ * this frequently — `source_name: subscription_contract_checkout_one`).
+ *
+ * Strategy:
+ *   1. Search by customerEmail + amount + day-bracketed createdAt.
+ *      This is precise enough that we typically get exactly one hit.
+ *   2. Prefer settled/settling status, fall back to first match.
+ *
+ * Returns the BT transaction id, or null if no match.
+ */
+export async function findBraintreeTransactionByMetadata(
+  workspaceId: string,
+  args: { email: string; amountDecimal: string; processedAt: string },
+): Promise<{ id: string; status: string } | null> {
+  const gateway = await getBraintreeGateway(workspaceId);
+  const start = new Date(args.processedAt);
+  // 24-hour window centered on the Shopify processed_at — accounts
+  // for tz drift between Shopify (UTC) and BT (merchant tz). Wide
+  // enough to be safe; narrow enough to avoid catching renewals
+  // from a different cycle.
+  const lower = new Date(start.getTime() - 12 * 60 * 60 * 1000);
+  const upper = new Date(start.getTime() + 12 * 60 * 60 * 1000);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const matches: any[] = await new Promise<any[]>((resolveP, rejectP) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stream: any = gateway.transaction.search((s: any) => {
+      s.customerEmail().is(args.email);
+      s.amount().is(args.amountDecimal);
+      s.createdAt().between(lower, upper);
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const out: any[] = [];
+    stream.on("data", (t: unknown) => out.push(t));
+    stream.on("end", () => resolveP(out));
+    stream.on("error", (e: Error) => rejectP(e));
+  }).catch(() => []);
+
+  if (!matches.length) return null;
+  const preferred = matches.find((t) =>
+    ["settled", "settling", "submitted_for_settlement"].includes(t.status as string)
+  ) || matches[0];
+  return { id: preferred.id as string, status: preferred.status as string };
+}
+
+/**
  * Verify credentials by calling a cheap, read-only Braintree endpoint.
  * We use clientToken.generate — it's free, returns fast, and any
  * auth/merchant misconfiguration surfaces as an error.
