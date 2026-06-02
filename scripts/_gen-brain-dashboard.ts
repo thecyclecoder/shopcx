@@ -1,0 +1,319 @@
+/**
+ * Generates docs/brain/dashboard/{name}.md and dashboard/settings/{name}.md
+ * for every src/app/dashboard/{*}/page.tsx and dashboard/settings/{*}/page.tsx.
+ *
+ *   npx tsx scripts/_gen-brain-dashboard.ts
+ */
+import { readFileSync, readdirSync, writeFileSync, mkdirSync, statSync, existsSync } from "fs";
+import { resolve, relative, basename, dirname } from "path";
+
+const projectRoot = resolve(__dirname, "..");
+const dashRoot = resolve(projectRoot, "src/app/dashboard");
+const outDir = resolve(projectRoot, "docs/brain/dashboard");
+mkdirSync(outDir, { recursive: true });
+mkdirSync(resolve(outDir, "settings"), { recursive: true });
+
+// ──────────────────────────────────────────────────────────────────────
+// Curated descriptions
+// ──────────────────────────────────────────────────────────────────────
+const PURPOSE: Record<string, string> = {
+  "tickets": "Master ticket queue. Filters by status, channel, assignee, tags, snooze, escalation. Paginated 25/page. Bulk actions: assign / archive / merge / status change.",
+  "subscriptions": "List of every subscription across the workspace. Filters by status + recovery (dunning) + payment status. Sort, search, paginate. Detail view at [id].",
+  "subscriptions/[id]": "Per-subscription detail. Actions card: pause / resume / cancel / skip / bill now / change frequency / change next date. Item management (add/remove/swap/qty). Coupon apply/remove. Recovery timeline. Order history.",
+  "customers": "Customer list with retention score, LTV, sub status, marketing consent, link group. Search + filters + bulk segment refresh.",
+  "customers/[id]": "Per-customer detail: orders, subscriptions, tickets, returns, events, demographics, linked accounts.",
+  "social-comments": "Moderation queue for inbound Meta + Instagram comments. Filters by sentiment / category / status. Per-comment: reply / hide / delete / regenerate AI / ban sender.",
+  "fraud": "Fraud cases list. Filters by status (open/reviewing/confirmed_fraud/dismissed) + rule type + severity. Detail view shows held orders, linked customers, rule evidence.",
+  "fraud/[id]": "Fraud case detail. Subscription cancel from fraud, dismiss case (releases held orders), confirm fraud (cancels subs + bans + flags).",
+  "chargebacks": "Shopify dispute list with active sub count column. Filters: status (open/won/lost) + reason category. Slideout: account linking + auto-action history.",
+  "returns": "Returns list with status, refund amount, tracking. Filters by status / source / freeLabel. Detail view shows label, tracking events, refund attempt history.",
+  "replacements": "Replacement orders list — originals + threshold tracking. Filters by reason / threshold-exceeded.",
+  "knowledge-base": "Help center article CRUD. Rich text editor (contentEditable + toolbar). Slug, published toggle, product mapping. Help center scraper trigger.",
+  "loyalty": "Loyalty members + redemptions dashboard. Tier breakdown, top earners, redemption history.",
+  "macros": "Macro library with acceptance rate badges. Inline editor, AI-suggestion counters, usage chart per macro.",
+  "marketing": "Hub: email marketing, text marketing, predictive segments. Sub-routes for campaigns + audience builder.",
+  "marketing/text": "SMS campaign builder + campaign list. iPhone-style phone preview. Phone-number validation. Coupon attachment. Per-recipient local-time send.",
+  "marketing/text/new": "SMS campaign builder. Audience selector, message body with {coupon} + {shortlink}, MMS image upload, send_date + target_local_hour.",
+  "marketing/text/[id]": "SMS campaign detail: stats, recipient breakdown, timezone resolution audit (how many fell to fallback).",
+  "analytics": "Revenue + sub + ROAS dashboards. Daily snapshots, monthly trends, archetype breakdowns.",
+  "storefront": "Storefront funnel dashboard — pdp_view → pdp_engaged → pack_selected → customize_view → checkout_view → order_placed conversion + drop-off rates.",
+  "crisis": "Crisis campaign list. Each: affected variant, active customers, per-tier response stats. Detail page for activation + resolve.",
+  "crisis/new": "Create a crisis campaign — pick affected variant, configure default swap + Tier 1/2/3 options + coupon.",
+  "crisis/[id]": "Crisis detail + per-customer-action stats + Resolve button (mass auto-resume + auto-readd).",
+  "csat": "CSAT survey dashboard. Resolution-gate stats (did we resolve?), rating distribution, comment list. Per-channel + per-agent breakdowns.",
+  "ai-analysis": "Daily AI quality analysis dashboard. Low-score tickets, gap patterns, research-and-heal status. Paused 2026-04-28; surface remains for review.",
+  "demographics": "Customer demographics dashboard. Age band, household income, geo. Cohort snapshots.",
+  "conversations": "All conversations across channels (alt view of tickets emphasizing message-level flow).",
+  "delivery": "Delivery audit dashboard — stuck-in-transit orders flagged by EasyPost polling.",
+  "products": "Product catalog list. Sync trigger, variant editor link, product intelligence + benefit angles.",
+  "orders": "Order list with filters. Detail view shows line items, fulfillments, transactions, attribution.",
+  "resellers": "Known resellers list (Amazon SP-API discoveries). Review queue for new entries before fraud rule activates.",
+  "reviews": "Product reviews dashboard. Klaviyo-synced. AI summaries, featured tagging, per-product breakdown.",
+  "portal-analytics": "Customer-portal usage stats. Action funnel (pause / cancel / address change / coupon apply).",
+  "team": "Workspace members list. Edit display_name + role per member. Invite flow.",
+  "": "Dashboard home — workspace overview, KPI cards (open tickets, customers, retention, AI resolution rate).",
+  // Settings
+  "settings": "Settings hub — cards linking to every workspace-level configuration page.",
+  "settings/ai": "AI configuration: personality, channel config (turn limit / confidence / auto-resolve), sonnet prompts editor.",
+  "settings/cancel-flow": "Cancel reasons (slug, label, type=remedy/ai_conversation, enabled, sort_order) + Remedies CRUD (type, config). Drives the cancel journey.",
+  "settings/chargebacks": "Chargeback automation: auto-cancel toggle, reasons that trigger auto-cancel, notify toggle, evidence reminder days.",
+  "settings/chat-widget": "Chat widget config: enabled, color, greeting, position, path mappings.",
+  "settings/coupons": "Coupon mappings — Shopify code ↔ internal mapping with VIP tier filtering.",
+  "settings/dunning": "Dunning settings: enabled, max card rotations, payday retry toggle, cycle 1 + cycle 2 actions (skip/pause/cancel).",
+  "settings/email-filters": "Inbound email filters — patterns to ignore (mailer-daemon, no-reply, OOO auto-responders).",
+  "settings/fraud": "Fraud rule configuration. Per-rule: active toggle, thresholds, disqualifiers.",
+  "settings/import": "Data import wizard: Gorgias tickets, Klaviyo profiles, Shopify backfills.",
+  "settings/integrations": "All external integrations: Shopify, Resend, Klaviyo, Twilio, EasyPost, Braintree, Avalara, Slack, Meta, Amazon, Google, Census, Versium. Per-integration: connect + status + key fields.",
+  "settings/journeys": "Journey definitions list + per-journey detail. Edit channels, match_patterns, trigger_intent, step_ticket_status, priority. Flow visualization.",
+  "settings/knowledge-base": "Help center configuration: slug, custom domain, logo, primary color. Scraper trigger.",
+  "settings/loyalty": "Loyalty program config: tier structure, point earn rates, redemption tiers.",
+  "settings/order-sources": "Shopify order source name → internal mapping (e.g. 'app:Amazon' → 'amazon').",
+  "settings/patterns": "Smart patterns CRUD — global + workspace-scoped, with embedding regeneration.",
+  "settings/playbooks": "Playbook CRUD: steps, policies, exceptions, disqualifiers, stand-firm tunables. Per-playbook simulator.",
+  "settings/policies": "5 canonical policies (returns, refunds, exchanges, shipping, etc.) — name + description + public URL + AI talking points.",
+  "settings/portal": "Customer portal config: branding, cancel reasons (shared with cancel-flow), enabled features.",
+  "settings/pricing-rules": "Storefront pricing rules — tier qty + mode + frequency + discount%.",
+  "settings/response-delay": "Per-channel outbound message delays (drives pending_send_at).",
+  "settings/rules": "Compound AND/OR rules engine. 8 action types: add/remove tags, set status, assign, auto-reply, internal note, customer update, Appstle action.",
+  "settings/sandbox": "Sandbox mode toggle. When on, AI drafts become internal notes; agents click 'Approve & Send' to deliver.",
+  "settings/slack": "Slack workspace connect + notification routing rules (which events go to which channel).",
+  "settings/amazon-pricing": "Amazon pricing strategy: raise prices N% to offset 25% Amazon fees and push buyers to the website.",
+  "settings/auto-close": "Auto-close reply template + per-channel timing.",
+  "settings/storefront-design": "Storefront branding: font, primary color, accent, logo, favicon.",
+  "settings/storefront-domain": "Custom domain + subdomain configuration for the storefront.",
+  "settings/subscription-settings": "Subscription default discount %, frequencies, free shipping threshold, free gift variant.",
+  "settings/tags": "Tag management — create / rename / merge / delete tags across tickets + customers.",
+  "settings/text-marketing": "Text marketing config: shortlink domain, sender phone, predicted-buyer segment toggle.",
+  "settings/tracking-sla": "Tracking SLA configuration for 3PL integration (Amplifier).",
+  "settings/views": "Ticket view CRUD with nested hierarchy (2 levels deep).",
+  "settings/workflows": "Template workflow CRUD — order_tracking, cancel_request, subscription_inquiry, account_login, end_chat.",
+};
+
+// ──────────────────────────────────────────────────────────────────────
+// Parse a page.tsx file
+// ──────────────────────────────────────────────────────────────────────
+function parsePage(absDir: string) {
+  const pageFile = resolve(absDir, "page.tsx");
+  if (!existsSync(pageFile)) return null;
+  const src = readFileSync(pageFile, "utf8");
+
+  const isClient = /^["']use client["'];?/m.test(src);
+  const isServer = /^["']use server["'];?/m.test(src);
+
+  // API endpoints fetched (deduped)
+  const endpoints = new Set<string>();
+  const fetchRe = /fetch\(\s*[`"]([^`"]*\/api\/[^`"]*)[`"]/g;
+  let m: RegExpExecArray | null;
+  while ((m = fetchRe.exec(src)) !== null) {
+    const path = m[1].split("?")[0].replace(/\$\{[^}]+\}/g, ":x");
+    endpoints.add(path);
+  }
+
+  // Role gates: distinguish a hard page-level redirect from "shows some
+  // admin-only buttons inline." Hard redirect = `if (role !== ...)
+  // router.push` or `redirect()` near the top. Inline checks just gate
+  // individual UI bits.
+  const hasRoleGate = /workspace\.role|workspace\?\.role|userRole/.test(src);
+  const hardRedirect = /if\s*\([^)]*role[^)]*\)\s*\{\s*[^}]*(?:router\.push|redirect)\(/.test(src);
+  const ownerOnly = hardRedirect && /role\s*!==?\s*["']owner["']/.test(src);
+  const adminOnly = hardRedirect && /role\s*!==?\s*["'](?:owner|admin)["']/.test(src);
+  const inlineAdminChecks = !hardRedirect && /role\s*===?\s*["'](?:owner|admin)["']/.test(src);
+
+  // Sub-routes
+  const subroutes: string[] = [];
+  for (const entry of readdirSync(absDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith("_")) continue;
+    if (entry.name === "node_modules") continue;
+    const sub = resolve(absDir, entry.name);
+    if (existsSync(resolve(sub, "page.tsx"))) subroutes.push(entry.name);
+  }
+
+  // Page title (h1 / h2)
+  const titleMatch = src.match(/<h[12][^>]*>\s*([^<{]+?)\s*</);
+  const title = titleMatch?.[1]?.trim();
+
+  // Filter inference — STATUS_OPTIONS, CHANNEL_OPTIONS, etc.
+  const filters: string[] = [];
+  const filterRe = /const\s+([A-Z_]+_OPTIONS)\s*=\s*\[([^\]]+)\]/g;
+  while ((m = filterRe.exec(src)) !== null) {
+    const name = m[1].replace(/_OPTIONS$/, "").toLowerCase();
+    const values = m[2].replace(/["']/g, "").trim();
+    filters.push(`${name}: ${values}`);
+  }
+
+  // Buttons that look meaningful (heuristic: onClick text)
+  const buttons: string[] = [];
+  const buttonRe = />\s*([A-Z][A-Za-z0-9 +&'/-]{2,40})\s*<\/button>/g;
+  while ((m = buttonRe.exec(src)) !== null) {
+    buttons.push(m[1].trim());
+  }
+
+  // Local component imports
+  const imports: string[] = [];
+  const importRe = /from\s+["']([./][^"']+)["']/g;
+  while ((m = importRe.exec(src)) !== null) {
+    if (m[1].startsWith(".")) imports.push(m[1]);
+  }
+
+  return {
+    isClient,
+    isServer,
+    endpoints: [...endpoints].sort(),
+    hasRoleGate,
+    ownerOnly,
+    adminOnly,
+    subroutes: subroutes.sort(),
+    title,
+    filters,
+    buttons: [...new Set(buttons)].slice(0, 10),
+    imports: imports.slice(0, 12),
+  };
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Render
+// ──────────────────────────────────────────────────────────────────────
+function renderPage(route: string, absDir: string): string {
+  const parsed = parsePage(absDir);
+  if (!parsed) return "";
+
+  const purpose = PURPOSE[route] || "_TODO: page purpose._";
+  const filePath = relative(projectRoot, resolve(absDir, "page.tsx"));
+
+  // Endpoints block — group by route family
+  let endpointsBlock = "_None detected via static fetch() scan._";
+  if (parsed.endpoints.length) {
+    endpointsBlock = parsed.endpoints.map((e) => `- \`${e}\``).join("\n");
+  }
+
+  // Sub-routes
+  let subroutesBlock = "_None._";
+  if (parsed.subroutes.length) {
+    subroutesBlock = parsed.subroutes.map((s) => {
+      const fullRoute = route ? `${route}/${s}` : s;
+      const link = fullRoute.startsWith("settings/") ? `[[${fullRoute.replace(/^settings\//, "settings/")}]]` : `[[${fullRoute}]]`;
+      return `- \`${s}/\` → ${link}`;
+    }).join("\n");
+  }
+
+  // Filters
+  const filtersBlock = parsed.filters.length
+    ? parsed.filters.map((f) => `- ${f}`).join("\n")
+    : "";
+
+  // Buttons
+  const buttonsBlock = parsed.buttons.length
+    ? parsed.buttons.map((b) => `- ${b}`).join("\n")
+    : "";
+
+  // Permissions
+  let permissions = "All workspace members. No role gate in the page itself; gated only by middleware auth + workspace membership.";
+  if (parsed.ownerOnly) permissions = "**Owner only** — hard redirect if `workspace.role !== 'owner'`.";
+  else if (parsed.adminOnly) permissions = "**Admin / Owner only** — hard redirect for lower roles.";
+  else if ((parsed as any).inlineAdminChecks) permissions = "All workspace members can view, but certain actions / buttons inline-gate to admin/owner via `workspace.role` checks. Read the source for the exact buttons.";
+  else if (parsed.hasRoleGate) permissions = "Role-aware UI — the page reads `workspace.role` to show / hide controls.";
+
+  const featuresParts: string[] = [];
+  if (parsed.title) featuresParts.push(`**Page title:** ${parsed.title}`);
+  if (filtersBlock) featuresParts.push(`**Filters:**\n${filtersBlock}`);
+  if (buttonsBlock) featuresParts.push(`**Visible buttons (heuristic — actual labels in source):**\n${buttonsBlock}`);
+  if (parsed.isClient) featuresParts.push("**Rendering:** `\"use client\"` component (client-side state + fetch).");
+  else if (parsed.isServer) featuresParts.push("**Rendering:** Server component.");
+  else featuresParts.push("**Rendering:** Server component (no `use client` directive).");
+
+  const featuresBlock = featuresParts.length
+    ? featuresParts.join("\n\n")
+    : "_Page is minimal — see source for details._";
+
+  // Files touched
+  const files: string[] = [`- \`${filePath}\` — the page itself`];
+  for (const sub of parsed.subroutes) {
+    const subPage = relative(projectRoot, resolve(absDir, sub, "page.tsx"));
+    if (existsSync(resolve(projectRoot, subPage))) files.push(`- \`${subPage}\` — sub-route`);
+  }
+  // Look for sibling components
+  for (const entry of readdirSync(absDir, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith(".tsx") && entry.name !== "page.tsx") {
+      const p = relative(projectRoot, resolve(absDir, entry.name));
+      files.push(`- \`${p}\` — component`);
+    }
+  }
+  // Find layout
+  if (existsSync(resolve(absDir, "layout.tsx"))) {
+    files.push(`- \`${relative(projectRoot, resolve(absDir, "layout.tsx"))}\` — layout wrapper`);
+  }
+
+  const routeLabel = route || "(home)";
+  const settingsPrefix = route.startsWith("settings") ? "Settings · " : "Dashboard · ";
+
+  return `# ${settingsPrefix}${routeLabel}
+
+${purpose}
+
+**Route:** \`/dashboard${route ? "/" + route : ""}\`
+
+## Features
+
+${featuresBlock}
+
+## Sub-routes
+
+${subroutesBlock}
+
+## API endpoints called
+
+${endpointsBlock}
+
+## Permissions
+
+${permissions}
+
+## Files touched
+
+${files.join("\n")}
+
+---
+
+[[../README]] · [[../../CLAUDE]]
+`;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Walk + render
+// ──────────────────────────────────────────────────────────────────────
+function walk(dir: string, relRoute: string, depth: number, written: string[]): void {
+  // Root dashboard itself
+  if (relRoute === "" && existsSync(resolve(dir, "page.tsx"))) {
+    const out = renderPage("", dir);
+    writeFileSync(resolve(outDir, "home.md"), out);
+    written.push("home");
+  }
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith("_") || entry.name === "node_modules") continue;
+    const sub = resolve(dir, entry.name);
+    const childRoute = relRoute ? `${relRoute}/${entry.name}` : entry.name;
+
+    // Don't recurse into [id] / [token] dynamic segments — captured as parent's "detail view"
+    if (entry.name.startsWith("[")) continue;
+
+    if (existsSync(resolve(sub, "page.tsx"))) {
+      // Settings → dashboard/settings/{flat-name}.md; everything else → dashboard/{flat-name}.md
+      const out = renderPage(childRoute, sub);
+      const targetDir = childRoute.startsWith("settings/") ? resolve(outDir, "settings") : outDir;
+      const cleanName = childRoute.startsWith("settings/")
+        ? childRoute.replace("settings/", "").replace(/\//g, "__")
+        : childRoute.replace(/\//g, "__");
+      writeFileSync(resolve(targetDir, `${cleanName}.md`), out);
+      written.push(childRoute);
+    }
+
+    if (depth < 3) walk(sub, childRoute, depth + 1, written);
+  }
+}
+
+const written: string[] = [];
+walk(dashRoot, "", 0, written);
+console.log(`Wrote ${written.length} dashboard pages:`);
+for (const w of written.sort()) console.log(`  ${w}`);
