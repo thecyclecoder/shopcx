@@ -157,6 +157,25 @@ export async function POST(
     .single();
   if (!comment) return NextResponse.json({ error: "Comment not found" }, { status: 404 });
 
+  if (action === "regenerate_ai") {
+    const { moderateSocialComment } = await import("@/lib/social-comment-orchestrator");
+    const decision = await moderateSocialComment(workspaceId, commentId);
+    await admin.from("social_comments").update({
+      ai_action: decision.action,
+      ai_reply_body: decision.reply_body,
+      ai_reasoning: decision.reasoning,
+      ai_ran_at: new Date().toISOString(),
+      ai_visibility: decision.visibility,
+      ai_considers: decision.considers,
+      ai_kb_sources: decision.kb_sources,
+      ai_model: decision.model,
+      sentiment: decision.sentiment,
+      moderation_source: "ai_suggested",
+      updated_at: new Date().toISOString(),
+    }).eq("id", commentId);
+    return NextResponse.json({ ok: true, decision });
+  }
+
   if (action === "set_status") {
     const next = String(body.status || "").toLowerCase();
     const ALLOWED = new Set(["open", "closed", "ignored"]);

@@ -557,32 +557,47 @@ export default function SocialCommentDetailPage({
               </Card>
             )}
 
-            {/* AI suggestion */}
-            {comment.ai_action && (
-              <Card title="AI suggestion" accent="purple">
-                <p className="text-sm font-medium capitalize text-zinc-900 dark:text-zinc-100">
-                  Action: {comment.ai_action}
-                </p>
-                {comment.ai_reasoning && (
-                  <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">{comment.ai_reasoning}</p>
-                )}
-                {comment.ai_reply_body && (
-                  <div className="mt-2 rounded-md bg-white p-2 text-xs text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
-                    {comment.ai_reply_body}
-                  </div>
-                )}
-                {comment.moderation_source === "ai_suggested" && (
-                  <button
-                    type="button"
-                    disabled={submitting}
-                    onClick={applyAiSuggestion}
-                    className="mt-2 w-full rounded-md bg-purple-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-purple-500 disabled:opacity-50"
-                  >
-                    Approve & {comment.ai_action}
-                  </button>
-                )}
-              </Card>
-            )}
+            {/* AI suggestion — always rendered (even when empty) so the
+                Regenerate button is always available. */}
+            <Card title="AI suggestion" accent="purple">
+              {comment.ai_action ? (
+                <>
+                  <p className="text-sm font-medium capitalize text-zinc-900 dark:text-zinc-100">
+                    Action: {comment.ai_action}
+                  </p>
+                  {comment.ai_reasoning && (
+                    <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">{comment.ai_reasoning}</p>
+                  )}
+                  {comment.ai_reply_body && (
+                    <div className="mt-2 rounded-md bg-white p-2 text-xs text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+                      {comment.ai_reply_body}
+                    </div>
+                  )}
+                  {comment.moderation_source === "ai_suggested" && (
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      onClick={applyAiSuggestion}
+                      className="mt-2 w-full rounded-md bg-purple-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-purple-500 disabled:opacity-50"
+                    >
+                      Approve & {comment.ai_action}
+                    </button>
+                  )}
+                </>
+              ) : (
+                <p className="text-xs text-zinc-500">No AI suggestion yet.</p>
+              )}
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={async () => {
+                  if (await act("regenerate_ai")) await load();
+                }}
+                className="mt-2 w-full rounded-md border border-purple-300 bg-white px-3 py-1.5 text-xs font-medium text-purple-700 transition-colors hover:bg-purple-50 disabled:opacity-50 dark:border-purple-800 dark:bg-zinc-900 dark:text-purple-400 dark:hover:bg-purple-950"
+              >
+                {comment.ai_action ? "Regenerate AI suggestion" : "Run AI moderation"}
+              </button>
+            </Card>
 
             {/* Post context */}
             <Card title="Post">
