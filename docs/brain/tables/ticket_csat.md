@@ -72,7 +72,8 @@ const { data } = await admin.from("ticket_csat")
 - **CSAT is gated.** The survey asks "did we resolve your issue?" FIRST. Customer answers "No" → ticket reopens via inbound `ticket_messages` row, gets tagged `csat:reopened`, and NO `ticket_csat` row is created. Only resolved-issue ratings land here. The dashboard infers reopen rate from the tag, not from this table.
 - **Points are awarded once.** `points_awarded > 0` means we've already given them 500 points; re-submit doesn't double-pay.
 - **Send marker lives on tickets.** `tickets.csat_sent_at` is set by the cron when the email goes out — used for response-rate calcs.
-- **Cron is the trigger, not Inngest events.** `ticket-csat-cron` ([[../inngest/ticket-csat]]) runs every 15 min, finds closed tickets where `closed_at <= now() - 48h AND csat_sent_at IS NULL`, sends, stamps. Sleep-step pattern was replaced because long sleeps are fragile.
+- **Cron is the trigger, not Inngest events.** `ticket-csat-cron` ([[../inngest/ticket-csat]]) runs every 15 min, finds closed tickets where `closed_at` is 48h-7d old AND `csat_sent_at IS NULL`, sends, stamps. Sleep-step pattern was replaced because long sleeps are fragile.
+- **Eligibility window: 48h-7d.** Tickets closed >7d ago with `csat_sent_at IS NULL` get auto-stamped as skipped (prevents the migration-day backlog from triggering blast emails on tickets from months ago, which read as spam). A ticket that closes and reopens before 48h doesn't get a CSAT this cycle; if it closes again later, the same 48h-7d window applies.
 
 ## Related
 

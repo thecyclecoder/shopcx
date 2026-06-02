@@ -42,11 +42,13 @@ Original draft used `step.sleep("24h")` after a `ticket/closed` event. Two probl
 
 The cron polls the [[../tables/tickets]] table every 15 minutes. The marker column `tickets.csat_sent_at` is set BEFORE the send call, so a Resend failure doesn't cause a re-send storm on the next tick.
 
-### 3. 48-hour delay
-Splits the difference between "fresh in memory" (24h) and "fulfillment outcome confirmed" (72h):
+### 3. 48-hour delay + 7-day cap
+**Send window: 48h-7d after close.** Splits the difference between "fresh in memory" (24h) and "fulfillment outcome confirmed" (72h):
 - Replacement orders typically arrive within 48h
 - Subscription mutations take effect immediately, customer can confirm in portal
 - Refunds take 5-10 business days to appear, so even 72h won't help there — accept that physical-money outcomes lag
+
+The 7d upper bound prevents the migration-day backlog from blasting CSAT emails on every closed ticket since the dawn of time (those read as spam to the recipient). Tickets older than 7d with `csat_sent_at IS NULL` are stamped as skipped on the first cron tick, so they stop showing up in the query.
 
 ### 4. Points conditional on COMPLETION, not on RATING
 500 loyalty points (~$5 value) awarded for completing the rating regardless of stars given. Awarding only on positive ratings would be paying for positive reviews — gross, and Klaviyo / FTC would call that bait. Points are NOT awarded on the reopen path (you don't pay someone for opening a complaint).

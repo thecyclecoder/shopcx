@@ -1,13 +1,20 @@
 /**
  * CSAT survey sender — cron-driven, not sleep-step.
  *
- * Runs every 15 minutes. Finds tickets that closed at least 48h ago
- * with a customer email and no csat_sent_at marker, sends the CSAT
- * email, stamps csat_sent_at. Idempotent (the index filters out
- * already-sent rows).
+ * Runs every 15 minutes. Sends a CSAT email when a ticket has been
+ * closed for 48h-7d AND has a customer email AND no csat_sent_at
+ * marker. Idempotent (the index filters out already-sent rows).
  *
- * 48h delay so fulfillment outcomes (replacement orders arriving,
- * refunds hitting the card) usually land before the customer rates.
+ * Two windows:
+ *   - DELAY (48h)   — wait this long after close so fulfillment
+ *                     outcomes (replacement orders arriving, refunds
+ *                     hitting the card) usually land before the
+ *                     customer rates.
+ *   - MAX_AGE (7d)  — don't send to people whose ticket closed weeks
+ *                     ago. Asking 'how did we do?' on a 3-month-old
+ *                     ticket gets marked as spam. Tickets older than
+ *                     this get stamped as skipped so they don't keep
+ *                     showing up in the cron query.
  *
  * Stamp happens BEFORE the send call so a Resend hiccup doesn't
  * cause a re-send storm on the next cron tick.
@@ -18,6 +25,7 @@ import { sendCsatEmail } from "@/lib/email";
 import { createHmac } from "crypto";
 
 const CSAT_DELAY_HOURS = 48;
+const CSAT_MAX_AGE_HOURS = 7 * 24;
 const BATCH_SIZE = 50;
 
 function generateCsatToken(ticketId: string): string {
@@ -35,8 +43,33 @@ export const ticketCsatCron = inngest.createFunction(
   },
   async ({ step }) => {
     const admin = createAdminClient();
-    const since = new Date(Date.now() - CSAT_DELAY_HOURS * 60 * 60 * 1000).toISOString();
+    const now = Date.now();
+    const oldestEligible = new Date(now - CSAT_DELAY_HOURS * 60 * 60 * 1000).toISOString();
+    const tooOld = new Date(now - CSAT_MAX_AGE_HOURS * 60 * 60 * 1000).toISOString();
 
+    // First pass: any ticket closed BEFORE the max-age cutoff with no
+    // marker — stamp as skipped. This catches the migration-day
+    // backlog (every old closed ticket has csat_sent_at NULL because
+    // the column was just added) and prevents the cron from scanning
+    // them every 15 min forever.
+    const skippedCount = await step.run("skip-too-old", async () => {
+      const { data } = await admin
+        .from("tickets")
+        .select("id")
+        .eq("status", "closed")
+        .is("csat_sent_at", null)
+        .not("customer_id", "is", null)
+        .not("closed_at", "is", null)
+        .lt("closed_at", tooOld)
+        .limit(500);
+      if (!data?.length) return 0;
+      await admin.from("tickets")
+        .update({ csat_sent_at: new Date().toISOString() })
+        .in("id", data.map(t => t.id));
+      return data.length;
+    });
+
+    // Second pass: in-window tickets to send to.
     const due = await step.run("find-due", async () => {
       const { data } = await admin
         .from("tickets")
@@ -45,13 +78,14 @@ export const ticketCsatCron = inngest.createFunction(
         .is("csat_sent_at", null)
         .not("customer_id", "is", null)
         .not("closed_at", "is", null)
-        .lte("closed_at", since)
+        .gte("closed_at", tooOld)
+        .lte("closed_at", oldestEligible)
         .order("closed_at", { ascending: true })
         .limit(BATCH_SIZE);
       return data || [];
     });
 
-    if (!due.length) return { sent: 0 };
+    if (!due.length) return { sent: 0, skipped_too_old: skippedCount };
 
     let sent = 0;
     for (const t of due) {
@@ -82,6 +116,6 @@ export const ticketCsatCron = inngest.createFunction(
       });
     }
 
-    return { sent, batch_size: due.length };
+    return { sent, skipped_too_old: skippedCount, batch_size: due.length };
   },
 );
