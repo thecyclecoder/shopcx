@@ -50,7 +50,7 @@ const { data } = await admin.from("loyalty_members")
   .order("created_at", { ascending: false });
 ```
 
-### Cross-Shopify boundary lookup
+### Shopify boundary lookup (webhook ingest only — never for internal joins)
 ```ts
 const { data } = await admin.from("loyalty_members")
   .select("*").eq("shopify_customer_id", shopifyId).maybeSingle();

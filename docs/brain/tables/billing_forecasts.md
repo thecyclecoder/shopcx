@@ -75,7 +75,7 @@ const counts = new Map();
 for (const r of data || []) counts.set(r.status, (counts.get(r.status) || 0) + 1);
 ```
 
-### Cross-Shopify boundary lookup
+### Shopify boundary lookup (webhook ingest only — never for internal joins)
 ```ts
 const { data } = await admin.from("billing_forecasts")
   .select("*").eq("shopify_contract_id", shopifyId).maybeSingle();

@@ -13,7 +13,7 @@ One page per table in the `public` schema (138 total). Each page has:
 - One file per table: `tables/{table_name}.md`.
 - `[[wikilinks]]` use the table name as the link target — Obsidian-style, plain markdown elsewhere.
 - Encrypted column names always end with `_encrypted` and use AES-256-GCM via `src/lib/crypto.ts`.
-- `UUID PK` is canonical for internal joins. `shopify_*_id` columns are denormalized fallbacks for crossing the Shopify boundary.
+- **Internal joins ALWAYS use the UUID — never `shopify_*_id`.** Shopify is being sunset; every `shopify_contract_id`, `shopify_customer_id`, `shopify_order_id` will be deprecated. Those fields exist ONLY for crossing the Shopify boundary (webhooks ingesting Shopify payloads, outbound Shopify API calls). When joining between our own tables, use the UUID PK / FK. If a UUID FK column is marked nullable but is always populated in practice, that's a data invariant — treat a NULL as a bug to surface, not a fallback signal.
 - Status / enum-like text columns are **lowercase** everywhere — see [Gotchas](#probing-technique) before writing `.eq()`.
 
 ## Probing technique

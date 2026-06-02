@@ -53,7 +53,15 @@ const { data } = await admin.from("payment_failures")
   .order("created_at", { ascending: false });
 ```
 
-### Cross-Shopify boundary lookup
+### Most recent failure for a subscription (UUID join)
+```ts
+const { data } = await admin.from("payment_failures")
+  .select("attempt_number, attempt_type, error_code, payment_method_last4, created_at")
+  .eq("subscription_id", subscriptionId)
+  .order("created_at", { ascending: false }).limit(1).maybeSingle();
+```
+
+### Shopify boundary lookup (webhook ingest only — never for internal joins)
 ```ts
 const { data } = await admin.from("payment_failures")
   .select("*").eq("shopify_contract_id", shopifyId).maybeSingle();
@@ -68,8 +76,9 @@ const { count } = await admin.from("payment_failures")
 
 ## Gotchas
 
-- `attempt_type`: `initial` / `card_rotation` / `payday_retry` / `new_card_retry`.
+- `attempt_type`: `initial` / `card_rotation` / `payday_retry` / `new_card_retry` (**lowercase**).
 - Per-attempt — distinct from `dunning_cycles` which is per-billing-cycle aggregate.
+- **Internal joins use the UUID.** Join to [[subscriptions]] via `subscription_id` UUID — NOT `shopify_contract_id`. Shopify is being sunset; the contract id will be deprecated.
 
 ---
 

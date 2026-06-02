@@ -55,7 +55,7 @@ const { data } = await admin.from("store_credit_log")
   .order("created_at", { ascending: false });
 ```
 
-### Cross-Shopify boundary lookup
+### Shopify boundary lookup (webhook ingest only — never for internal joins)
 ```ts
 const { data } = await admin.from("store_credit_log")
   .select("*").eq("shopify_customer_id", shopifyId).maybeSingle();

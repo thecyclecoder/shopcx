@@ -70,11 +70,10 @@ const { data: subs } = await admin.from("subscriptions")
   .eq("status", "active");   // lowercase
 ```
 
-### Fallback when customer_id is wrong/missing
+### Lookup by internal sub UUID (preferred for internal joins)
 ```ts
-const { data: subs } = await admin.from("subscriptions")
-  .select("...")
-  .or(`customer_id.eq.${cid},shopify_customer_id.eq.${shopifyCid}`);
+const { data } = await admin.from("subscriptions")
+  .select("*").eq("id", subscriptionId).maybeSingle();
 ```
 
 ### All paused subscriptions in a workspace
@@ -108,7 +107,7 @@ const { data } = await admin.from("customer_events")
 
 - `status` is **lowercase**: `"active"`, `"paused"`, `"cancelled"`. `.eq("status", "ACTIVE")` returns zero rows.
 - No `cancelled_at` / `paused_at` columns — the timestamp lives in `customer_events`. To know *when* a sub was cancelled, query the event log.
-- `shopify_customer_id` is a denormalized fallback. When `customer_id` is wrong/missing, query by `shopify_customer_id` against `customers.shopify_customer_id` as a second pass.
+- **Internal joins ALWAYS use the UUID.** `id` (UUID) joins to `dunning_cycles.subscription_id`, `payment_failures.subscription_id`, `orders.subscription_id`, etc. `shopify_contract_id` + `shopify_customer_id` are Shopify-boundary fields ONLY — webhook ingest, Shopify API calls. Never use them as join keys between internal tables. They'll be deprecated once we sunset Shopify.
 - Always include linked customers — use `linkedIds(customerId)` helper, then `.in("customer_id", ids)`.
 - `items` is JSONB — variant ids live inside, not on a join table. Use `items->0->>'variantId'`.
 

@@ -39,7 +39,7 @@ const { data } = await admin.from("billing_forecast_events")
   .order("created_at", { ascending: false }).limit(50);
 ```
 
-### Cross-Shopify boundary lookup
+### Shopify boundary lookup (webhook ingest only — never for internal joins)
 ```ts
 const { data } = await admin.from("billing_forecast_events")
   .select("*").eq("shopify_contract_id", shopifyId).maybeSingle();

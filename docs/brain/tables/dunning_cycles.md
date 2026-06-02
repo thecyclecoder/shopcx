@@ -68,7 +68,13 @@ const counts = new Map();
 for (const r of data || []) counts.set(r.status, (counts.get(r.status) || 0) + 1);
 ```
 
-### Cross-Shopify boundary lookup
+### Lookup by internal subscription UUID
+```ts
+const { data } = await admin.from("dunning_cycles")
+  .select("*").eq("subscription_id", subscriptionId).maybeSingle();
+```
+
+### Shopify boundary lookup (webhook ingest only — never for internal joins)
 ```ts
 const { data } = await admin.from("dunning_cycles")
   .select("*").eq("shopify_contract_id", shopifyId).maybeSingle();
@@ -83,9 +89,10 @@ const { count } = await admin.from("dunning_cycles")
 
 ## Gotchas
 
-- Status: `active` / `skipped` / `paused` / `recovered` / `exhausted`.
+- Status: `active` / `skipped` / `paused` / `recovered` / `exhausted` (**lowercase**).
 - Per-(subscription, billing cycle). Don't conflate with `payment_failures` which is per-attempt within a cycle.
 - Driven by Inngest `dunning/payment-failed`. See Phase 5 in CLAUDE.md.
+- **Internal joins use the UUID.** Join to [[subscriptions]] via `subscription_id` UUID — NOT `shopify_contract_id`. Shopify is being sunset; the contract id will be deprecated. `subscription_id` is column-nullable but always populated in practice for cycles created by our Inngest path; a NULL is a data issue worth surfacing, not a fallback signal.
 
 ---
 
