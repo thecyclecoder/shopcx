@@ -268,6 +268,10 @@ export interface MetaPostMetadata {
    *  "inactive" | "eligible" | "ineligible" | "pending" | "not_eligible"
    *  = not currently an ad. */
   promotion_status?: string;
+  /** false on "dark posts" — page posts created solely as ad creatives
+   *  and never published to the page timeline. They have no
+   *  promotion_status but ARE ads. */
+  is_published?: boolean;
   attachments?: {
     data: Array<{
       type?: string;
@@ -290,7 +294,7 @@ export async function getPostMetadata(
   // instead. Values: "extendable" / "not_extendable" / "active" = ad
   // currently running; "inactive" / "eligible" / "ineligible" / "pending" /
   // "not_eligible" = not currently an ad.
-  const fields = "id,permalink_url,message,created_time,is_eligible_for_promotion,promotion_status,attachments{media,target,subattachments,type,url}";
+  const fields = "id,permalink_url,message,created_time,is_eligible_for_promotion,promotion_status,is_published,attachments{media,target,subattachments,type,url}";
   const url = `${GRAPH_BASE}/${postId}?fields=${encodeURIComponent(fields)}&access_token=${encodeURIComponent(pageAccessToken)}`;
   const res = await fetch(url);
   if (!res.ok) return null;
@@ -411,6 +415,72 @@ export async function getAdDestinationUrlsByMediaId(
   }
 
   return [];
+}
+
+/**
+ * Targeted JIT lookup — for a given FB post_id or IG media_id, find
+ * the ad creative referencing it (if any). Uses the Marketing API's
+ * `filtering` parameter (EQUAL operator on the indexed
+ * effective_object_story_id / effective_instagram_media_id fields)
+ * so each call is O(1) per ad account instead of paginating the
+ * whole creative library.
+ *
+ * Returns null when no creative references the post → the post is
+ * organic. On hit, returns the creative id + destination URL +
+ * the canonical reference id we matched against.
+ *
+ * Requires ads_read on the user token (Marketing API rejects page tokens).
+ */
+export async function findAdCreativeForPost(
+  userAccessToken: string,
+  adAccounts: Array<{ id: string }>,
+  postId: string,
+  platform: "instagram" | "facebook",
+): Promise<{ ad_creative_id: string; destination_url: string | null; ad_account_id: string } | null> {
+  const matchField = platform === "instagram"
+    ? "effective_instagram_media_id"
+    : "effective_object_story_id";
+  const fields = "id,name,effective_instagram_media_id,effective_object_story_id,object_story_spec{link_data{link,call_to_action},video_data{call_to_action},photo_data{call_to_action},text_data{call_to_action}},asset_feed_spec{link_urls}";
+  const filter = encodeURIComponent(JSON.stringify([
+    { field: matchField, operator: "EQUAL", value: postId },
+  ]));
+
+  for (const acct of adAccounts) {
+    const url = `${GRAPH_BASE}/${acct.id}/adcreatives?filtering=${filter}&fields=${encodeURIComponent(fields)}&limit=1&access_token=${encodeURIComponent(userAccessToken)}`;
+    try {
+      const r = await fetch(url);
+      if (!r.ok) continue;
+      const json = (await r.json()) as { data?: CreativeShape[] };
+      const creative = json.data?.[0];
+      if (creative) {
+        const urls = extractDestinationUrls(creative);
+        return {
+          ad_creative_id: (creative as unknown as { id: string }).id,
+          destination_url: urls[0] || null,
+          ad_account_id: acct.id,
+        };
+      }
+    } catch {
+      // try next account
+    }
+  }
+  return null;
+}
+
+/**
+ * List the user's accessible ad accounts. Called once at OAuth time
+ * and cached on workspaces.meta_ad_accounts so per-post lookups
+ * don't re-fetch the account list.
+ */
+export async function listUserAdAccounts(userAccessToken: string): Promise<Array<{ id: string; name: string | null; account_status: number }>> {
+  try {
+    const r = await fetch(`${GRAPH_BASE}/me/adaccounts?fields=id,name,account_status&limit=200&access_token=${encodeURIComponent(userAccessToken)}`);
+    if (!r.ok) return [];
+    const data = await r.json() as { data?: Array<{ id: string; name?: string; account_status?: number }> };
+    return (data.data || []).map(a => ({ id: a.id, name: a.name || null, account_status: a.account_status ?? 0 }));
+  } catch {
+    return [];
+  }
 }
 
 /**

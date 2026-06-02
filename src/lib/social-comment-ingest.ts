@@ -22,7 +22,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { decrypt } from "@/lib/crypto";
-import { hideComment, getPostMetadata, getAdDestinationUrlsByMediaId } from "@/lib/meta";
+import { hideComment, getPostMetadata, findAdCreativeForPost } from "@/lib/meta";
 import { resolvePostProductMatch } from "@/lib/meta-product-match";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -259,65 +259,97 @@ async function ensurePostCache(args: EnsurePostCacheArgs): Promise<{
   // Pull all candidate URLs from the post body + ad attachment targets.
   const messageUrls = extractUrls(meta.message || "");
   const attachmentUrls: string[] = [];
+  let imageUrl: string | null = null;
   for (const att of meta.attachments?.data || []) {
     if (att.target?.url) attachmentUrls.push(att.target.url);
     if (att.url) attachmentUrls.push(att.url);
+    if (!imageUrl && att.media?.image?.src) imageUrl = att.media.image.src;
     for (const sub of att.subattachments?.data || []) {
       if (sub.target?.url) attachmentUrls.push(sub.target.url);
     }
   }
-  // For ad comments, the destination URL lives on the ad CREATIVE, not on
-  // the post body or attachments. The post itself is just the IG media
-  // container — its message/attachments don't contain a click-through. Pull
-  // the ad's configured destination URL(s) directly via Marketing API.
-  // Requires the USER access token (Marketing API rejects page tokens)
-  // + ads_read scope.
-  // Resolve the ad's destination URL via the IG media id (postId for IG,
-  // or pageId_postId for FB). The webhook's `ad_id` is a placement alias
-  // that doesn't direct-lookup; media id is stable across title changes
-  // and points to the exact creative.
-  let adUrls: string[] = [];
-  if (adId && postId) {
+  void adTitle;  // no longer used for lookup — media id is the canonical key
+
+  // ── JIT ad-creative lookup ───────────────────────────────────────
+  // For every uncached post (ad OR organic), search the Marketing
+  // API for a creative whose effective_object_story_id (FB) or
+  // effective_instagram_media_id (IG) equals this post. This is the
+  // definitive "is this an ad?" signal — webhook ad_id is missing on
+  // dark posts whose campaigns have ended, and promotion_status lags
+  // by hours/days. A creative match also gives us the click-through
+  // URL which IG ad posts don't expose anywhere else.
+  //
+  // Cost: one Marketing API call per active ad account on first-comment
+  // ingest. Result is cached on meta_post_cache, so every subsequent
+  // comment on the same post is a local DB read.
+  let adCreativeId: string | null = null;
+  let adDestinationUrl: string | null = null;
+  let jitMatch = false;
+  if (postId) {
     const { data: ws } = await admin
       .from("workspaces")
       .select("meta_user_access_token_encrypted")
       .eq("id", page.workspace_id)
       .maybeSingle();
     if (ws?.meta_user_access_token_encrypted) {
-      const userToken = decrypt(ws.meta_user_access_token_encrypted as string);
-      adUrls = await getAdDestinationUrlsByMediaId(userToken, postId, platform);
+      const { data: accts } = await admin
+        .from("meta_ad_accounts")
+        .select("fb_act_id")
+        .eq("workspace_id", page.workspace_id)
+        .eq("account_status", 1);  // active only
+      if (accts && accts.length) {
+        try {
+          const userToken = decrypt(ws.meta_user_access_token_encrypted as string);
+          // FB feed comments give us `{page_id}_{post_id}` directly,
+          // which is exactly the `effective_object_story_id` shape.
+          // IG comments give us the media id, matched against
+          // `effective_instagram_media_id`. Pass platform through.
+          const hit = await findAdCreativeForPost(
+            userToken,
+            accts.map(a => ({ id: a.fb_act_id })),
+            postId,
+            platform,
+          );
+          if (hit) {
+            jitMatch = true;
+            adCreativeId = hit.ad_creative_id;
+            adDestinationUrl = hit.destination_url;
+          }
+        } catch (err) {
+          console.warn("findAdCreativeForPost failed:", err);
+        }
+      }
     }
   }
-  void adTitle;  // no longer used for lookup — media id is the canonical key
-  const urls = [...new Set([...adUrls, ...messageUrls, ...attachmentUrls])];
+
+  const urls = [...new Set([
+    ...(adDestinationUrl ? [adDestinationUrl] : []),
+    ...messageUrls,
+    ...attachmentUrls,
+  ])];
 
   // Resolve a product match — follows shortlink redirects, matches
   // against products.handle.
   const matchedProductId = await resolvePostProductMatch(admin, page.workspace_id, urls);
 
-  // Cache image URL from first attachment with media.
-  let imageUrl: string | null = null;
-  for (const att of meta.attachments?.data || []) {
-    if (att.media?.image?.src) {
-      imageUrl = att.media.image.src;
-      break;
-    }
-  }
-
-  // Mark as ad ONLY when we have a real signal:
-  //   1. The webhook delivered an ad_id (most direct signal), OR
-  //   2. Meta's promotion_status indicates the post IS currently being
-  //      promoted (extendable / not_extendable / active).
+  // Mark as ad with a four-signal cascade, most authoritative first:
+  //   1. JIT creative lookup hit → definitive (we found the actual ad)
+  //   2. Webhook ad_id present → ad served via paid placement right now
+  //   3. is_published === false → dark post (page post that only exists
+  //      as an ad creative, never published to timeline)
+  //   4. promotion_status currently active/extendable/not_extendable
+  //      → currently-running ad, may have been served from an older
+  //        campaign whose ad_id wasn't on this particular impression
   // We previously used `is_eligible_for_promotion` which is TRUE for
-  // nearly every public organic post on a business page — that caused
-  // organic posts like "Where are our Peach Mango fans at?" to be
-  // mislabeled as ads (Maria Gundlach's "I love this drink" comment,
-  // social-comment 58edf8de, surfaced the bug).
+  // nearly every public organic post on a business page (Maria Gundlach
+  // false-positive on "Where are our Peach Mango fans at?"). And we
+  // missed dark posts that had `promotion_status=inactive` because the
+  // campaign ended (Suzy Doucet false-negative).
   const promotionStatus = (meta.promotion_status || "").toLowerCase();
   const isCurrentlyPromoted = promotionStatus === "extendable"
     || promotionStatus === "not_extendable"
     || promotionStatus === "active";
-  const isAd = !!adId || isCurrentlyPromoted;
+  const isAd = jitMatch || !!adId || meta.is_published === false || isCurrentlyPromoted;
 
   await admin.from("meta_post_cache").insert({
     workspace_id: page.workspace_id,
@@ -325,6 +357,8 @@ async function ensurePostCache(args: EnsurePostCacheArgs): Promise<{
     meta_post_id: postId,
     is_ad: isAd,
     ad_id: adId,
+    ad_creative_id: adCreativeId,
+    ad_destination_url: adDestinationUrl,
     permalink_url: meta.permalink_url || null,
     message: meta.message || null,
     image_url: imageUrl,
