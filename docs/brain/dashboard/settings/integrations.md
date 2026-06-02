@@ -34,6 +34,10 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/settings/integrations/meta-ads/page.tsx` — sub-route
 - `src/app/dashboard/settings/integrations/_page-full.tsx` — component
 
+## Related
+
+[[../../integrations/shopify]] · [[../../integrations/appstle]] · [[../../integrations/klaviyo]] · [[../../integrations/resend]] · [[../../integrations/twilio]] · [[../../integrations/easypost]] · [[../../integrations/braintree]] · [[../../integrations/avalara]] · [[../../integrations/meta-graph]] · [[../../integrations/meta-marketing]] · [[../../integrations/anthropic]] · [[../../integrations/openai]] · [[../../integrations/inngest]]
+
 ---
 
 [[../README]] · [[../../CLAUDE]]

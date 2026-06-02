@@ -27,6 +27,10 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/ai-analysis/page.tsx` — the page itself
 - `src/app/dashboard/ai-analysis/[id]/page.tsx` — sub-route
 
+## Related
+
+[[../tables/ticket_analyses]] · [[../tables/daily_analysis_reports]] · [[../tables/ai_token_usage]] · [[../tables/knowledge_gaps]] · [[../inngest/ai-nightly-analysis]] · [[../lifecycles/research-and-heal]]
+
 ---
 
 [[../README]] · [[../../CLAUDE]]

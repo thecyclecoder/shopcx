@@ -70,6 +70,10 @@ Role-aware UI — the page reads `workspace.role` to show / hide controls.
 
 - `src/app/dashboard/settings/rules/page.tsx` — the page itself
 
+## Related
+
+[[../../tables/rules]] · [[../../libraries/rules-engine]] · [[../../libraries/rules-actions]]
+
 ---
 
 [[../README]] · [[../../CLAUDE]]

@@ -14,6 +14,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
 | [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 23 + README |
+| [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 40 + 37 settings |
 
 ## Tables (`tables/`)
 
@@ -392,6 +393,51 @@ Tickets + comms: [[recipes/escalate-ticket]] · [[recipes/send-email-reply]] · 
 Social: [[recipes/ban-meta-user]] · [[recipes/hide-comment]] · [[recipes/link-meta-sender-to-customer]]
 
 Infra: [[recipes/fire-an-inngest-event]] · [[recipes/write-a-migration-apply-script]]
+
+## Dashboard (`dashboard/`)
+
+One page per route family under `src/app/dashboard/*` (top-level operational pages) and one per `src/app/dashboard/settings/*` (workspace configuration). Each page covers purpose, visible features (filters + buttons), API endpoints called (extracted from `fetch()`), sub-routes, permissions, and files touched.
+
+### Operational pages
+
+- [[dashboard/tickets]] — master ticket queue
+- [[dashboard/subscriptions]] — all subs with recovery + status filters
+- [[dashboard/customers]] — customer list with retention + LTV + linked groups
+- [[dashboard/orders]] — order list + detail
+- [[dashboard/products]] — catalog + sync + intelligence
+- [[dashboard/social-comments]] — Meta + IG moderation queue
+- [[dashboard/conversations]] — message-level flow across channels
+- [[dashboard/fraud]] — fraud cases list + detail
+- [[dashboard/chargebacks]] — disputes with active-sub count
+- [[dashboard/returns]] — returns with status + refund tracking
+- [[dashboard/replacements]] — replacement orders + threshold tracking
+- [[dashboard/crisis]] — crisis campaigns
+- [[dashboard/delivery]] — stuck-in-transit audit
+- [[dashboard/knowledge-base]] — KB CRUD + scraper
+- [[dashboard/loyalty]] — members + redemptions
+- [[dashboard/macros]] — macro library with acceptance badges
+- [[dashboard/marketing]] — SMS / email campaigns hub
+- [[dashboard/analytics]] — revenue + ROAS + cohorts
+- [[dashboard/storefront]] — storefront funnel + drop-off
+- [[dashboard/csat]] — survey results + resolution-gate stats
+- [[dashboard/ai-analysis]] — nightly AI quality + research/heal
+- [[dashboard/demographics]] — customer demographic cohorts
+- [[dashboard/resellers]] — known reseller list with review queue
+- [[dashboard/reviews]] — Klaviyo-synced reviews + summaries
+- [[dashboard/portal-analytics]] — portal action funnel
+- [[dashboard/team]] — workspace members + invites
+- [[dashboard/home]] — overview KPIs
+
+### Settings pages
+
+Workspace configuration — most are owner/admin-gated:
+
+- AI brain: [[dashboard/settings/ai]] · [[dashboard/settings/policies]] · [[dashboard/settings/playbooks]] · [[dashboard/settings/journeys]] · [[dashboard/settings/cancel-flow]] · [[dashboard/settings/patterns]] · [[dashboard/settings/rules]] · [[dashboard/settings/workflows]] · [[dashboard/settings/sandbox]] · [[dashboard/settings/auto-close]]
+- Channels: [[dashboard/settings/integrations]] · [[dashboard/settings/chat-widget]] · [[dashboard/settings/email-filters]] · [[dashboard/settings/response-delay]] · [[dashboard/settings/slack]] · [[dashboard/settings/text-marketing]]
+- Subscriptions: [[dashboard/settings/dunning]] · [[dashboard/settings/subscription-settings]] · [[dashboard/settings/pricing-rules]] · [[dashboard/settings/coupons]] · [[dashboard/settings/loyalty]]
+- Risk: [[dashboard/settings/fraud]] · [[dashboard/settings/chargebacks]]
+- Storefront: [[dashboard/settings/storefront-design]] · [[dashboard/settings/storefront-domain]] · [[dashboard/settings/portal]]
+- Ops: [[dashboard/settings/import]] · [[dashboard/settings/knowledge-base]] · [[dashboard/settings/tags]] · [[dashboard/settings/views]] · [[dashboard/settings/order-sources]] · [[dashboard/settings/tracking-sla]] · [[dashboard/settings/amazon-pricing]]
 
 ---
 

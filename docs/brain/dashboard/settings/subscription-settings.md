@@ -29,6 +29,10 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/settings/subscription-settings/page.tsx` — the page itself
 
+## Related
+
+[[../../tables/workspaces]] · [[../../tables/subscriptions]]
+
 ---
 
 [[../README]] · [[../../CLAUDE]]

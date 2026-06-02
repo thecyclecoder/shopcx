@@ -80,6 +80,10 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/sidebar.tsx` — component
 - `src/app/dashboard/layout.tsx` — layout wrapper
 
+## Related
+
+[[../README]] · [[../lifecycles/ticket-lifecycle]] · [[../lifecycles/dunning]] · [[../lifecycles/subscription-billing]]
+
 ---
 
 [[../README]] · [[../../CLAUDE]]

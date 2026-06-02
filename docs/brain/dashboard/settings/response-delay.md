@@ -29,6 +29,10 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/settings/response-delay/page.tsx` — the page itself
 
+## Related
+
+[[../../tables/workspaces]] · [[../../inngest/deliver-pending-send]]
+
 ---
 
 [[../README]] · [[../../CLAUDE]]

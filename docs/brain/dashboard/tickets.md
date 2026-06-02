@@ -47,6 +47,13 @@ Role-aware UI — the page reads `workspace.role` to show / hide controls.
 
 - `src/app/dashboard/tickets/page.tsx` — the page itself
 - `src/app/dashboard/tickets/[id]/page.tsx` — sub-route
+- `src/app/api/tickets/route.ts` — list + create
+- `src/app/api/tickets/bulk/route.ts` — bulk operations
+- `src/app/api/tickets/merge/route.ts` — merge duplicates
+
+## Related
+
+[[../tables/tickets]] · [[../tables/ticket_messages]] · [[../tables/ticket_views]] · [[../lifecycles/ticket-lifecycle]] · [[../lifecycles/ai-multi-turn]] · [[../recipes/escalate-ticket]] · [[../recipes/send-email-reply]] · [[../recipes/send-chat-reply]] · [[settings/views]] · [[settings/rules]]
 
 ---
 

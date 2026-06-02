@@ -29,6 +29,10 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/demographics/page.tsx` — the page itself
 
+## Related
+
+[[../tables/customer_demographics]] · [[../tables/demographics_snapshots]] · [[../tables/zip_code_demographics]] · [[../inngest/customer-demographics]]
+
 ---
 
 [[../README]] · [[../../CLAUDE]]

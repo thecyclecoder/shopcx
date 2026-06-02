@@ -33,6 +33,10 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/orders/page.tsx` — the page itself
 - `src/app/dashboard/orders/[id]/page.tsx` — sub-route
 
+## Related
+
+[[../tables/orders]] · [[../tables/transactions]] · [[../integrations/shopify]]
+
 ---
 
 [[../README]] · [[../../CLAUDE]]

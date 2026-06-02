@@ -29,6 +29,10 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/products/[id]/page.tsx` — sub-route
 - `src/app/dashboard/products/new/page.tsx` — sub-route
 
+## Related
+
+[[../tables/products]] · [[../tables/product_variants]] · [[../tables/product_intelligence]] · [[../inngest/sync-shopify]]
+
 ---
 
 [[../README]] · [[../../CLAUDE]]
