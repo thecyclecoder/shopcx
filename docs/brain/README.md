@@ -9,9 +9,11 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 138 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 50 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 13 |
-| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 12 |
+| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 174 |
+| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 13 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
+| [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 23 + README |
 
 ## Tables (`tables/`)
 
@@ -352,11 +354,45 @@ One page per row in [[tables/journey_definitions]]. See [[journeys/README]] for 
 
 ## Playbooks (`playbooks/`)
 
-One page per active row in [[tables/playbooks]]. See [[playbooks/README]] for the data model, step types, and the universal communication patterns from [[../playbooks/README]].
+One page per active row in [[tables/playbooks]]. See [[playbooks/README]] for the data model, step types, and the universal communication patterns.
 
 - [[playbooks/refund]] — Sub-renewal dispute → identify → policy → tiered exceptions → return / refund / store credit.
 - [[playbooks/replacement-order]] — Missing / damaged / lost → tracking check → missing-items checklist → fresh draft order at no cost.
 
+## Libraries (`libraries/`)
+
+One page per `src/lib/*.ts` file (174 pages). Each page lists exports + signatures, callers grep'd across the codebase, and gotchas. The required-list files (orchestrator, action executor, subscription helpers, Appstle, returns, dunning, journeys, social comments, etc.) have curated descriptions and gotchas; the long tail uses each file's header comment.
+
+Most relevant entry points:
+
+- [[libraries/sonnet-orchestrator-v2]] — THE brain
+- [[libraries/action-executor]] — Dispatches `SonnetDecision`
+- [[libraries/subscription-items]] — Appstle line-item mutations (note 0.75 SubSave)
+- [[libraries/appstle]] · [[libraries/appstle-discount]] · [[libraries/appstle-call-log]]
+- [[libraries/shopify-returns]] · [[libraries/shopify-order-actions]] · [[libraries/replacement-order]]
+- [[libraries/dunning]] · [[libraries/dunning-webhook]]
+- [[libraries/journey-launcher]] · [[libraries/cancel-journey-builder]] · [[libraries/remedy-selector]]
+- [[libraries/social-comment-orchestrator]] · [[libraries/social-comment-actions]] · [[libraries/social-comment-ingest]]
+- [[libraries/email]] · [[libraries/email-tracking]] · [[libraries/crypto]] · [[libraries/rag]] · [[libraries/embeddings]]
+- [[libraries/fraud-detector]] · [[libraries/pattern-matcher]] · [[libraries/rules-engine]]
+- [[libraries/ticket-tags]] · [[libraries/first-touch]] · [[libraries/escalation]]
+
+## Recipes (`recipes/`)
+
+How-to pages for common operational tasks. Each page is structured the same: helper to call + file path, exact signature, minimal working example, gotchas. See [[recipes/README]] for the index.
+
+Subscription mutations: [[recipes/change-line-item-price]] · [[recipes/swap-variant]] · [[recipes/change-quantity]] · [[recipes/pause-sub]] · [[recipes/resume-sub]] · [[recipes/cancel-sub-via-journey]] · [[recipes/bill-now]] · [[recipes/change-next-date]] · [[recipes/apply-coupon]] · [[recipes/apply-loyalty-coupon]]
+
+Orders + returns: [[recipes/issue-replacement]] · [[recipes/create-return]] · [[recipes/issue-refund]] · [[recipes/partial-refund]]
+
+Loyalty: [[recipes/redeem-loyalty]] · [[recipes/apply-loyalty-coupon]]
+
+Tickets + comms: [[recipes/escalate-ticket]] · [[recipes/send-email-reply]] · [[recipes/send-chat-reply]]
+
+Social: [[recipes/ban-meta-user]] · [[recipes/hide-comment]] · [[recipes/link-meta-sender-to-customer]]
+
+Infra: [[recipes/fire-an-inngest-event]] · [[recipes/write-a-migration-apply-script]]
+
 ---
 
-[[../../CLAUDE]] · [[../../DATABASE]] · [[../../JOURNEYS]] · [[../../STOREFRONT]] · [[../../SONNET-ORCHESTRATOR]] · [[../../TEXT-MARKETING]]
+[[../../CLAUDE]]
