@@ -100,6 +100,10 @@ interface CommentContext {
   page: { name: string | null; type: string; platform: string };
   post: { permalink_url: string | null; message: string | null; is_ad: boolean } | null;
   matchedProduct: { title: string; description: string | null; url: string | null } | null;
+  /** Workspace-curated proof points (money-back guarantee, customer
+   *  count, science backing, etc.) the AI weaves into public replies
+   *  when a commenter raises a price/affordability objection. */
+  brandProofPoints: string | null;
   /** Active crisis affecting the matched product — drives "back in
    *  stock by July 9" style replies when commenters ask about it.
    *  Null when there's no crisis touching the matched product. */
@@ -313,8 +317,15 @@ function buildPass2Prompt(ctx: CommentContext, rag: string, policies: string, se
   lines.push("");
   lines.push("VISIBILITY — THE BIG DECISION:");
   lines.push("  - public  : reply is visible to everyone who scrolls the post. Use when the reply ALSO helps other readers, builds social proof, or moves a real customer concern toward resolution publicly.");
-  lines.push("  - hidden  : hide the comment from public view, then reply on the hidden thread. Only the commenter sees it. Use when the topic is sensitive (delivery problem, refund), when a public response would make us look bad even if accurate, or when the question is so individual it doesn't help other readers.");
+  lines.push("  - hidden  : hide the comment from public view, then reply on the hidden thread. Only the commenter sees it. Use when the topic is sensitive (delivery problem, refund, allergic reaction), when a public response would make us look bad even if accurate, or when the question is so individual it doesn't help other readers.");
   lines.push("  - For 'like' / 'ignore' / 'escalate', visibility = null.");
+  lines.push("");
+  lines.push("OBJECTION HANDLING — DO NOT HIDE THESE:");
+  lines.push("  Price / affordability objections ('too expensive', 'can't afford', 'too pricey', 'out of my budget', 'why so much', 'pricing is crazy', etc.) are PUBLIC value-building opportunities, not embarrassments to hide. Hundreds of other scrollers see the same objection — your reply is for them as much as for the commenter.");
+  lines.push("  Default: action='reply', visibility='public'.");
+  lines.push("  Reply formula: (1) brief empathy, (2) 1-2 concrete proof points from BRAND PROOF POINTS below, (3) acknowledge that promos/bundles do bring the cost down (without promising a specific code). Keep it warm and short — 1-2 sentences. No defensiveness.");
+  lines.push("  Skepticism about claims ('does this really work?', 'sounds too good') — also PUBLIC. Lean on proof points + reviews + the money-back guarantee.");
+  lines.push("  Hide is for: refund disputes, delivery failures, allergic reactions, anything where the SPECIFIC FACTS being discussed publicly could backfire. Cost is never a hide reason.");
   lines.push("");
   lines.push("ACTIONS:");
   lines.push("  - reply        — public reply with reply_body. visibility = 'public'.");
@@ -343,6 +354,11 @@ function buildPass2Prompt(ctx: CommentContext, rag: string, policies: string, se
     if (ctx.matchedProduct.url) {
       lines.push(`PRODUCT URL (canonical): ${ctx.matchedProduct.url}`);
     }
+  }
+  if (ctx.brandProofPoints) {
+    lines.push("");
+    lines.push("BRAND PROOF POINTS (weave 1-2 in when handling price/skepticism objections — don't recite the whole list):");
+    lines.push(ctx.brandProofPoints);
   }
   // Active crisis touching this product — surface the restock date so
   // stock-question replies cite a real date instead of "check the
@@ -454,7 +470,7 @@ async function buildContext(
     comment.matched_product_id
       ? admin.from("products").select("title, description, handle").eq("id", comment.matched_product_id).single()
       : Promise.resolve({ data: null }),
-    admin.from("workspaces").select("storefront_domain, shopify_domain, shopify_myshopify_domain, ad_destination_domains").eq("id", workspaceId).single(),
+    admin.from("workspaces").select("storefront_domain, shopify_domain, shopify_myshopify_domain, ad_destination_domains, social_brand_proof_points").eq("id", workspaceId).single(),
   ]);
 
   // Construct the canonical PDP URL from the workspace's primary
@@ -539,6 +555,7 @@ async function buildContext(
           url: buildProductUrl((productRow.data as { handle: string }).handle),
         }
       : null,
+    brandProofPoints: ((ws as { social_brand_proof_points: string | null } | null)?.social_brand_proof_points || null),
     crisis,
   };
 }
