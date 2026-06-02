@@ -107,6 +107,8 @@ export default function SocialCommentDetailPage({
   const [recentTicketsByCustomer, setRecentTicketsByCustomer] = useState<Record<string, RecentTicket[]>>({});
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [assigneePick, setAssigneePick] = useState<string>("");
+  const [regenContext, setRegenContext] = useState<string>("");
+  const [showRegenContext, setShowRegenContext] = useState(false);
   const [loading, setLoading] = useState(true);
   const [replyBody, setReplyBody] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -587,16 +589,63 @@ export default function SocialCommentDetailPage({
               ) : (
                 <p className="text-xs text-zinc-500">No AI suggestion yet.</p>
               )}
-              <button
-                type="button"
-                disabled={submitting}
-                onClick={async () => {
-                  if (await act("regenerate_ai")) await load();
-                }}
-                className="mt-2 w-full rounded-md border border-purple-300 bg-white px-3 py-1.5 text-xs font-medium text-purple-700 transition-colors hover:bg-purple-50 disabled:opacity-50 dark:border-purple-800 dark:bg-zinc-900 dark:text-purple-400 dark:hover:bg-purple-950"
-              >
-                {comment.ai_action ? "Regenerate AI suggestion" : "Run AI moderation"}
-              </button>
+              {showRegenContext ? (
+                <div className="mt-2 space-y-1.5">
+                  <textarea
+                    value={regenContext}
+                    onChange={(e) => setRegenContext(e.target.value)}
+                    placeholder="Optional context for the AI — e.g. 'this is a glowing review, not spam' or 'they're asking about Mixed Berry, which is out of stock'."
+                    rows={2}
+                    maxLength={800}
+                    className="w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-purple-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                  />
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      onClick={async () => {
+                        const ok = await act("regenerate_ai", regenContext.trim() ? { human_context: regenContext.trim() } : undefined);
+                        if (ok) {
+                          setRegenContext("");
+                          setShowRegenContext(false);
+                          await load();
+                        }
+                      }}
+                      className="flex-1 rounded-md bg-purple-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-purple-500 disabled:opacity-50"
+                    >
+                      {submitting ? "Regenerating…" : "Regenerate with context"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setShowRegenContext(false); setRegenContext(""); }}
+                      className="rounded-md border border-zinc-300 px-2 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-2 grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={async () => {
+                      if (await act("regenerate_ai")) await load();
+                    }}
+                    className="rounded-md border border-purple-300 bg-white px-2 py-1.5 text-xs font-medium text-purple-700 transition-colors hover:bg-purple-50 disabled:opacity-50 dark:border-purple-800 dark:bg-zinc-900 dark:text-purple-400 dark:hover:bg-purple-950"
+                  >
+                    {comment.ai_action ? "Regenerate" : "Run AI"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => setShowRegenContext(true)}
+                    className="rounded-md border border-purple-300 bg-white px-2 py-1.5 text-xs font-medium text-purple-700 transition-colors hover:bg-purple-50 disabled:opacity-50 dark:border-purple-800 dark:bg-zinc-900 dark:text-purple-400 dark:hover:bg-purple-950"
+                  >
+                    + with context
+                  </button>
+                </div>
+              )}
             </Card>
 
             {/* Post context */}

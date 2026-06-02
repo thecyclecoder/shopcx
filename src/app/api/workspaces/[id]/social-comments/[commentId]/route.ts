@@ -159,7 +159,10 @@ export async function POST(
 
   if (action === "regenerate_ai") {
     const { moderateSocialComment } = await import("@/lib/social-comment-orchestrator");
-    const decision = await moderateSocialComment(workspaceId, commentId);
+    const humanHint = typeof body.human_context === "string" && body.human_context.trim()
+      ? body.human_context.trim().slice(0, 800)
+      : null;
+    const decision = await moderateSocialComment(workspaceId, commentId, humanHint);
     await admin.from("social_comments").update({
       ai_action: decision.action,
       ai_reply_body: decision.reply_body,

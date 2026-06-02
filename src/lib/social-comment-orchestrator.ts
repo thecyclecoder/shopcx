@@ -104,6 +104,10 @@ interface CommentContext {
    *  count, science backing, etc.) the AI weaves into public replies
    *  when a commenter raises a price/affordability objection. */
   brandProofPoints: string | null;
+  /** Optional hint from an agent triggering a re-moderation, e.g.
+   *  "this is actually a glowing review, not spam". Overrides both
+   *  passes' default classifications when supplied. */
+  humanHint: string | null;
   /** Active crisis affecting the matched product — drives "back in
    *  stock by July 9" style replies when commenters ask about it.
    *  Null when there's no crisis touching the matched product. */
@@ -134,6 +138,11 @@ function buildPass1Prompt(ctx: CommentContext): string {
   lines.push(`From: ${ctx.comment.sender_name || "(unknown)"}${ctx.comment.sender_username ? ` (@${ctx.comment.sender_username})` : ""}`);
   lines.push(`On ${ctx.comment.is_ad ? "an AD" : "an ORGANIC POST"} for "${ctx.page.name || "(page)"}" (${ctx.page.platform})`);
   if (ctx.post?.message) lines.push(`Post caption: ${ctx.post.message.slice(0, 200)}`);
+  if (ctx.humanHint) {
+    lines.push("");
+    lines.push(`AGENT HINT (trusted operator who re-triggered this moderation): ${ctx.humanHint}`);
+    lines.push("Use the agent's framing to inform your classification. If they say the comment is a real customer / glowing review / sincere complaint, trust that over surface heuristics like 'short emoji-heavy text looks like spam'.");
+  }
   lines.push("");
   lines.push("Classify into EXACTLY ONE category:");
   lines.push("  - spam: link spam, contact-info dumps, fake promo codes, repeated promotional content unrelated to our brand");
@@ -344,6 +353,10 @@ function buildPass2Prompt(ctx: CommentContext, rag: string, policies: string, se
   lines.push("  - COUPONS: Coupons NEVER apply automatically. The customer must enter the code on the checkout page. NEVER say things like 'the coupon will apply automatically', 'we'll apply the discount', 'you'll see the discount at checkout', or anything implying it's pre-applied. If you mention a coupon, say the customer needs to enter it at checkout (or just don't mention coupons at all).");
   lines.push("  - PROMISES: Don't promise anything that requires us to take action — refunds, replacements, account changes, shipping updates, phone support. If a commenter is asking for action, escalate.");
   lines.push("");
+  if (ctx.humanHint) {
+    lines.push(`AGENT HINT (a trusted operator re-triggered this moderation with the following context — weight this heavily): ${ctx.humanHint}`);
+    lines.push("");
+  }
   lines.push(`COMMENT: ${ctx.comment.body.slice(0, 1500)}`);
   lines.push(`COMMENTER: ${ctx.comment.sender_name || "(unknown)"}${ctx.comment.sender_username ? ` (@${ctx.comment.sender_username})` : ""}`);
   lines.push(`PAGE: ${ctx.page.name || "(unnamed)"} (${ctx.page.platform} ${ctx.page.type})`);
@@ -457,6 +470,7 @@ async function buildContext(
   admin: Admin,
   workspaceId: string,
   socialCommentId: string,
+  humanHint: string | null = null,
 ): Promise<CommentContext | null> {
   const { data: comment } = await admin
     .from("social_comments")
@@ -556,6 +570,7 @@ async function buildContext(
         }
       : null,
     brandProofPoints: ((ws as { social_brand_proof_points: string | null } | null)?.social_brand_proof_points || null),
+    humanHint,
     crisis,
   };
 }
@@ -567,12 +582,13 @@ async function buildContext(
 export async function moderateSocialComment(
   workspaceId: string,
   socialCommentId: string,
+  humanHint: string | null = null,
 ): Promise<ModerationDecision> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return { ...FALLBACK_DECISION, reasoning: "ANTHROPIC_API_KEY not set" };
 
   const admin = createAdminClient();
-  const ctx = await buildContext(admin, workspaceId, socialCommentId);
+  const ctx = await buildContext(admin, workspaceId, socialCommentId, humanHint);
   if (!ctx) return { ...FALLBACK_DECISION, reasoning: "social_comments row not found" };
 
   const logUsage = (usage: ClaudeUsage | undefined, tag: string) => {
