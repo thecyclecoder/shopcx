@@ -145,6 +145,19 @@ If `createFullReturn()` itself fails (Shopify return mutation rejected, EasyPost
 | `src/lib/customer-events.ts` | Log return.* events |
 | `src/app/api/webhooks/easypost/route.ts` | EasyPost tracker webhook handler |
 
+## Status / open work
+
+**Shipped:** `createFullReturn()` single entry-point (2026-05-14 rewrite). EasyPost label with USPS preference + carrier fallback. `net_refund_cents` stored at creation. Instant refund on EasyPost `delivered` (no 24h wait, no Shopify dispose). Shopify partial refund OR Braintree direct refund (with email+amount+date fallback). Return confirmation email. Crisis-return auto-handling.
+
+**Known gaps / not yet shipped:** None identified.
+
+**Recent activity:**
+- `2bce67a4` Returns: refund instantly on delivered using stored net_refund_cents
+- `5be66e2b` Returns: advance status to label_created when EasyPost label is bought
+- `c3e03c16` Returns: fix Improve-tab labels delivering to customer instead of warehouse
+
+**Open questions:** None.
+
 ## Related
 
 [[ticket-lifecycle]] · [[ai-multi-turn]] · [[crisis-campaign]] · [[../integrations/easypost]] · [[../integrations/shopify]] · [[../integrations/braintree]] · [[../integrations/resend]] · [[../tables/returns]] · [[../tables/orders]] · [[../tables/store_credit_log]] · [[../inngest/returns]] · [[../inngest/delivery-audit]]

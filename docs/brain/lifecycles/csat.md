@@ -80,6 +80,19 @@ A high reopen rate (>15%) is the leading indicator of premature ticket-close. Lo
 | `src/app/dashboard/csat/page.tsx` | Dashboard view |
 | `src/app/dashboard/sidebar.tsx` | "CSAT" link under Tickets, alongside AI Analysis |
 
+## Status / open work
+
+**Shipped:** Cron-driven send 48h post-close, resolution gate (yes → rate path, no → reopen path), 5-star rating + comment on separate screens, 500-point award on completion, already-submitted guard, dashboard view at `/dashboard/csat` — all shipped today.
+
+**Known gaps / not yet shipped:** None.
+
+**Recent activity:**
+- `a6844aaa` CSAT: resolution-gate survey + cron-driven send + dashboard
+- `75b38ab0` CSAT: split rating/comment into two screens + already-submitted guard
+- `af32d630` Delete stale CSAT [id] routes — superseded by [ticketId]
+
+**Open questions:** None.
+
 ## Related
 
 [[../tables/ticket_csat]] · [[../tables/tickets]] · [[../tables/loyalty_members]] · [[ticket-lifecycle]] · [[../inngest/ticket-csat]]

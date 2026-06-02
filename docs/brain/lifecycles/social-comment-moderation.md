@@ -160,6 +160,20 @@ Admins ban via the comment detail UI. Unbans also via the UI; the row gets soft-
 | `src/app/api/webhooks/meta/route.ts` | Meta webhook handler |
 | `src/app/dashboard/social-comments/page.tsx` | Moderation queue UI |
 
+## Status / open work
+
+**Shipped:** Two-pass orchestration (Haiku classifier + Opus generator). is_published / promotion_status / ad_id cascade for ad classification. Haiku fallback for organic-post product matching. IG `/replies` vs FB `/comments` endpoint dispatch. Resolution-gate-then-rate analogous flow not applicable here, but "Flag as competitor promotion" agent button + workspace competitor deny-list ARE shipped. Customer-name match + agent "Confirm match" persistent link. Brand proof points + objection handling. Regenerate-with-context button.
+
+**Known gaps / not yet shipped:**
+- **JIT ad-creative lookup** — Marketing API doesn't support `EQUAL` filtering on `effective_object_story_id`. Long-term fix is a one-time + daily creative sync to a local table. Today, ad classification falls through is_published / promotion_status. Documented at the end of `commit 22206b13`.
+
+**Recent activity:**
+- `4b7d6eca` Social comments: use IG /replies endpoint when commenting on Instagram
+- `ce9c6498` Social comments: competitor-promotion detection + agent flag button
+- `62ca4972` Social-comment orchestrator: never hide price objections, build value publicly
+
+**Open questions:** None.
+
 ## Related
 
 [[ticket-lifecycle]] · [[ai-multi-turn]] · [[customer-link-confirmation]] · [[../integrations/meta-graph]] · [[../integrations/anthropic]] · [[../tables/social_comments]] · [[../tables/social_comment_replies]] · [[../tables/meta_post_cache]] · [[../tables/meta_sender_customer_links]] · [[../tables/banned_meta_users]] · [[../inngest/social-comment-moderate]] · [[../inngest/meta-historical-comments-sync]]

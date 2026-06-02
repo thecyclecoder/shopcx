@@ -196,6 +196,18 @@ All three produce the same [[../tables/ticket_messages]] rows + the same [[../ta
 | `src/app/api/journey/[token]/complete/route.ts` | Final action execution |
 | `src/app/api/journey/[token]/step/route.ts` | Per-step submission |
 
+## Status / open work
+
+**Shipped:** Cancel journey with Haiku remedy selection, customer-facing mini-site, Appstle subscription mutations, outcome tracking, social-proof reviews, open-ended Sonnet conversation — all functional end-to-end.
+
+**Known gaps / not yet shipped:** None identified.
+
+**Recent activity:**
+- `a6844aaa` CSAT: resolution-gate survey + cron-driven send + dashboard (cross-system)
+- `12f954ff` docs/brain: lifecycles/ — 12 narrative pages tracing key flows end-to-end
+
+**Open questions:** None.
+
 ## Related
 
 [[ticket-lifecycle]] · [[ai-multi-turn]] · [[../integrations/appstle]] · [[../integrations/anthropic]] · [[../integrations/klaviyo]] · [[../tables/journey_definitions]] · [[../tables/journey_sessions]] · [[../tables/remedies]] · [[../tables/remedy_outcomes]] · [[../tables/coupon_mappings]] · [[../tables/product_reviews]] · [[../inngest/portal-auto-resume]] · [[../journeys/cancel]]

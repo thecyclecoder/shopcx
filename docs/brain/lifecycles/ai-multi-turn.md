@@ -180,6 +180,19 @@ The orchestrator's behavior is *not* hardcoded. [[../tables/sonnet_prompts]] hol
 | `src/lib/inngest/ticket-analysis-cron.ts` | Nightly analysis cron |
 | `src/lib/inngest/ai-nightly-analysis.ts` | Daily AI quality review |
 
+## Status / open work
+
+**Shipped:** Sonnet orchestrator with tool-use, multi-turn handling, prompt caching, confidence-gated escalation, Haiku/Sonnet model selection, action execution — fully wired.
+
+**Known gaps / not yet shipped:**
+- AI nightly analysis (`daily_analysis_reports`) was paused 2026-04-28 — see memory `project_ai_analysis_apr28` for what's left.
+
+**Recent activity:**
+- `096c8b3b` Orchestrator: escalate when no-action path lands on an agent-involved ticket
+- `49cfd939` Orchestrator: add bill_now action + auto-fallback in change_next_date
+
+**Open questions:** None.
+
 ## Related
 
 [[ticket-lifecycle]] · [[../integrations/anthropic]] · [[../integrations/openai]] · [[../tables/sonnet_prompts]] · [[../tables/policies]] · [[../tables/ai_token_usage]] · [[../inngest/unified-ticket-handler]]

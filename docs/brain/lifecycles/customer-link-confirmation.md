@@ -146,6 +146,17 @@ See feedback "Main account only for marketing decisions" in [[../journeys/README
 | `src/app/api/journey/[token]/complete/route.ts` | Account-linking step completion |
 | `src/app/dashboard/tickets/[id]/page.tsx` | Sidebar customer-match UI + manual link |
 
+## Status / open work
+
+**Shipped:** Shopify auto-merge webhook handling, message-driven auto-link, inline confirmation journey, Meta sender → customer linking (manual confirm via social-comments sidebar), account-linking journey prepend mode, segment refresh — all functional.
+
+**Known gaps / not yet shipped:** None identified.
+
+**Recent activity:**
+- `12f954ff` docs/brain: lifecycles/ — 12 narrative pages tracing key flows end-to-end
+
+**Open questions:** None.
+
 ## Related
 
 [[ticket-lifecycle]] · [[ai-multi-turn]] · [[social-comment-moderation]] · [[storefront-checkout]] · [[../integrations/meta-graph]] · [[../integrations/shopify]] · [[../tables/customer_links]] · [[../tables/customer_link_rejections]] · [[../tables/meta_sender_customer_links]] · [[../tables/customers]] · [[../inngest/refresh-customer-segments]] · [[../journeys/account-linking]]

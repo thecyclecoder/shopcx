@@ -150,6 +150,17 @@ For one-off ops on a chargeback batch:
 | `src/app/dashboard/chargebacks/page.tsx` | List + slideout UI |
 | `src/app/api/webhooks/shopify/route.ts` | Webhook entry |
 
+## Status / open work
+
+**Shipped:** Shopify disputes webhook ingestion + polling fallback, fraud-reason auto-cancel of subscriptions, evidence reminder, ticket creation, account linking on the dashboard chargeback detail — all functional.
+
+**Known gaps / not yet shipped:** None identified.
+
+**Recent activity:**
+- `12f954ff` docs/brain: lifecycles/ — 12 narrative pages tracing key flows end-to-end
+
+**Open questions:** None.
+
 ## Related
 
 [[fraud-detection]] · [[dunning]] · [[ticket-lifecycle]] · [[../integrations/shopify]] · [[../integrations/appstle]] · [[../integrations/resend]] · [[../tables/chargeback_events]] · [[../tables/chargeback_subscription_actions]] · [[../tables/subscriptions]] · [[../inngest/chargeback-processing]]

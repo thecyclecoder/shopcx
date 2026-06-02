@@ -157,6 +157,21 @@ When a Braintree refund is issued via [[../inngest/returns]] → [[return-pipeli
 | `src/lib/inngest/portal-auto-resume.ts` | Pause auto-resume |
 | `src/lib/billing-forecast.ts` | Forecast event writes (out of band) |
 
+## Status / open work
+
+**Shipped:** Both paths functional. Internal scheduler (hourly cron, line-item resolution, Avalara tax quote, Braintree charge, order create). Legacy Appstle path (webhook-driven, state mirroring, our subscription mutations dispatch on `is_internal`). Pause/resume/skip unified. Dunning integration. Tax void/adjust on refund.
+
+**Known gaps / not yet shipped:**
+- **Appstle → internal migration not activated.** Documented as the long-term plan; requires Braintree vault-import for Card-on-File migration off Shopify Payments. No live migration jobs running.
+- Per `feedback_no_double_billing_framing` memory: customer comms must not frame parallel-sub charges as "double billing." That rule lives in sonnet_prompts, not in this lifecycle — but flag it for anyone touching billing UX.
+
+**Recent activity:**
+- `2bce67a4` Returns: refund instantly on delivered using stored net_refund_cents (touches transactions)
+- `49cfd939` Orchestrator: add bill_now action + auto-fallback in change_next_date
+
+**Open questions:**
+- Trigger for starting the Appstle → internal migration: blocked on Braintree vault import or a policy decision?
+
 ## Related
 
 [[storefront-checkout]] · [[dunning]] · [[return-pipeline]] · [[chargeback-pipeline]] · [[../integrations/appstle]] · [[../integrations/braintree]] · [[../integrations/avalara]] · [[../tables/subscriptions]] · [[../tables/orders]] · [[../tables/transactions]] · [[../tables/dunning_cycles]] · [[../inngest/internal-subscription-renewals]] · [[../inngest/portal-auto-resume]]

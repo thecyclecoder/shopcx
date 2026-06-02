@@ -155,6 +155,19 @@ Configured per workspace in [[../tables/slack_notification_rules]].
 | `src/app/api/webhooks/shopify/route.ts` | Webhook entry point |
 | `src/app/dashboard/settings/dunning/page.tsx` | Settings UI |
 
+## Status / open work
+
+**Shipped:** Silent card rotation (`deduplicatePaymentMethods`), payday-aware retries (`getNextPaydayDates` — 1st/15th/Fridays/last-business-day), Cycle 2 cancel-instead-of-pause + auto-reactivate, customer-driven new-card recovery, terminal-card cancel-without-entering-dunning, replacement-of-Appstle-payment-update-email — all functional.
+
+**Known gaps / not yet shipped:** None identified.
+
+**Recent activity:**
+- `84eefddd` Drop Appstle payment-update email; restyle ours to look human
+- `d3a1ae28` Terminal+single-card billing failure: cancel without entering dunning
+- `39a1232e` Dunning cycle 2: cancel instead of indefinite pause + auto-reactivate
+
+**Open questions:** None.
+
 ## Related
 
 [[ticket-lifecycle]] · [[chargeback-pipeline]] · [[subscription-billing]] · [[../integrations/appstle]] · [[../integrations/shopify]] · [[../integrations/resend]] · [[../tables/dunning_cycles]] · [[../tables/payment_failures]] · [[../tables/customer_payment_methods]] · [[../inngest/dunning]]

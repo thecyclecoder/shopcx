@@ -144,6 +144,19 @@ When `workspaces.sandbox_mode = true`, every outbound message from the AI become
 | `src/lib/inngest/ticket-csat.ts` | CSAT survey 24h post-close |
 | `src/lib/inngest/auto-archive.ts` | Archive old closed tickets |
 
+## Status / open work
+
+**Shipped:** All seven phases — inbound capture (Resend, Twilio, Meta, chat widget), unified pipeline (resolve → fraud short-circuit → playbook/Sonnet → execute), outbound delivery (deliver-pending-send cron), engagement tracking (email_events, SMS callbacks), auto-resolve, CSAT, archive. Sandbox mode + agent-involved escalation gaps both closed.
+
+**Known gaps / not yet shipped:** None identified.
+
+**Recent activity:**
+- `a6844aaa` CSAT: resolution-gate survey + cron-driven send + dashboard
+- `096c8b3b` Orchestrator: escalate when no-action path lands on an agent-involved ticket
+- `af32d630` Delete stale CSAT [id] routes — superseded by [ticketId]
+
+**Open questions:** None.
+
 ## Related
 
 [[ai-multi-turn]] · [[fraud-detection]] · [[customer-link-confirmation]] · [[social-comment-moderation]] · [[../inngest/unified-ticket-handler]] · [[../inngest/deliver-pending-send]] · [[../tables/tickets]] · [[../tables/ticket_messages]]

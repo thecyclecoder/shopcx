@@ -154,6 +154,23 @@ Catches Nancy-style and Sheryl-style drift.
 | `src/app/dashboard/tickets/[id]/ResearchPanel.tsx` | Ticket detail surface |
 | `src/lib/action-executor.ts` | Heal action dispatch |
 
+## Status / open work
+
+**Shipped:** Phase 1 (manual heal) — three recipes (`verify_subscription_changes`, `verify_coupon_promises`, `verify_grandfathered_pricing`). Manual heal endpoint at `/api/workspaces/[id]/tickets/[ticketId]/heal/route.ts`. Ticket-detail UI integration.
+
+**Known gaps / not yet shipped:**
+- **Phase 2 (auto-heal via allowlist) — NOT shipped.** Documentation describes auto-triggered heals against an allowlist, but no auto-execution path is wired. Manual heal only today.
+- **Planned recipes — NOT shipped:** `verify_replacement_promises`, `verify_refund_issued`, `verify_return_label_sent`. Only the three Phase 1 recipes exist in `RECIPE_REGISTRY` (`src/lib/research/index.ts`).
+
+**Recent activity:**
+- `02c6acf2` Research & Heal: verify_grandfathered_pricing recipe (proactive)
+- `4a0c1d3f` Research & Heal: verify_subscription_changes recipe + orchestrator retry
+- `caa4c59a` Research & Heal Phase 1: framework + verify_coupon_promises + ticket UI
+
+**Open questions:**
+- When does Phase 2 ship — and what's the allowlist policy (which recipes auto-execute vs require human approval)?
+- Recipe coverage: which of the planned three should we build next?
+
 ## Related
 
 [[ai-multi-turn]] · [[ticket-lifecycle]] · [[../tables/ticket_research_runs]] · [[../tables/ticket_heal_attempts]] · [[../tables/ticket_analyses]] · [[../inngest/ai-nightly-analysis]] · [[../inngest/ticket-research]] · [[../libraries/research_index]] · [[../libraries/action-executor]]

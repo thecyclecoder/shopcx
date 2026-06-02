@@ -76,6 +76,28 @@ Tax quote happens at this step:
 3. Tax line returns. Quote cached on [[../tables/cart_drafts]].`avalara_quote_*` columns.
 4. Browser displays the tax line. Re-validation happens at submit.
 
+## Phase 4.5 — OTP gate on existing-customer match
+
+When the email field loses focus (debounced), the client POSTs to `/api/checkout/otp/start` with `{cart_token, email, channel: "sms"|"email"}`. The server:
+
+1. Looks up the email in [[../tables/customers]] (workspace-scoped).
+2. **Skips OTP for bare leads** — only triggers when the matched customer has order history OR a subscription. Random email entries don't get challenged.
+3. If gated: creates an [[../tables/auth_otp_sessions]] row with `cart_token` + `customer_id`, calls [[../integrations/twilio]] Verify via `src/lib/twilio-verify.ts` → `startVerification(channel)`. Twilio sends the code; we don't store it.
+4. Phone-spoofing defense: the OTP is sent to the customer's `phone` on file from `customers`, NOT a phone entered at checkout. A fraudster who knows the email can't redirect the code to their own phone.
+5. Client renders an OTP modal. Customer enters the code → `/api/checkout/otp/verify` calls `checkVerification(code)` against Twilio, then on success backfills `cart_drafts.customer_id` + `email` + `phone` so the rest of the checkout flow has the linked identity.
+
+Resend support: `/api/checkout/otp/resend` re-fires `startVerification` (rate-limited by Twilio).
+
+## Phase 4.6 — Subscription choice for verified existing customers
+
+Once OTP succeeds AND the cart has subscribe-mode items AND the customer has at least one active `is_internal=true` subscription, the checkout renders a three-way choice card (`/api/checkout/existing-subs` returns the customer's active subs):
+
+- **Add to existing sub — next renewal only** — line items appended to the existing sub's `items` JSONB; nothing bills today.
+- **Order now + add to sub** *(default)* — one-time Braintree charge today using the vaulted payment method, AND the items get added to the existing sub for future renewals.
+- **Create new subscription** — original behavior; spins up a fresh `subscriptions` row.
+
+The choice rides on the submit payload as `subscription_action: "add_next_renewal" | "order_now_and_add" | "new"`. Checkout's `/api/checkout` route branches accordingly. Customers WITHOUT an existing active internal sub never see this card — they go straight to the standard subscribe flow.
+
 ## Phase 5 — submit
 
 Browser POSTs to `/api/checkout`:
@@ -184,6 +206,19 @@ The identity stitch mechanism — see [[customer-link-confirmation]] for the bro
 | `src/lib/inngest/sinks/klaviyo.ts` | Klaviyo sink |
 | `src/lib/inngest/abandoned-cart.ts` | Sweeps stale cart_drafts |
 
+## Status / open work
+
+**Shipped:** All seven phases — PDP pixel, cart create + server validation, customize, checkout (Braintree Hosted Fields + Avalara tax quote), **OTP gate (Phase 4.5)**, **subscription choice card (Phase 4.6)**, submit (vault + charge + order + commit tax), thank-you, CAPI fan-out. OTP gate is wired at `/api/checkout/otp/{start,verify,resend}` and triggered for matched customers with order history or active subs. Subscription choice card at `/api/checkout/existing-subs` shows three options when authenticated + subscribe items + active internal sub.
+
+**Known gaps / not yet shipped:** None identified.
+
+**Recent activity:**
+- `aeb8b074` Checkout: free-gift image fix, identity stitch, guarantee badge
+- `6b85f4b5` Braintree direct refunds + quantity-reduction positive-close fix
+- `f3d1f969` Customize page: heal stale carts on load
+
+**Open questions:** None.
+
 ## Related
 
-[[subscription-billing]] · [[customer-link-confirmation]] · [[../integrations/braintree]] · [[../integrations/avalara]] · [[../integrations/meta-marketing]] · [[../integrations/klaviyo]] · [[../tables/storefront_events]] · [[../tables/storefront_sessions]] · [[../tables/storefront_leads]] · [[../tables/cart_drafts]] · [[../tables/orders]] · [[../tables/transactions]] · [[../tables/event_sinks]] · [[../tables/event_dispatches]] · [[../tables/pricing_rules]] · [[../inngest/abandoned-cart]]
+[[subscription-billing]] · [[customer-link-confirmation]] · [[../integrations/braintree]] · [[../integrations/avalara]] · [[../integrations/meta-marketing]] · [[../integrations/klaviyo]] · [[../integrations/twilio]] · [[../tables/storefront_events]] · [[../tables/storefront_sessions]] · [[../tables/storefront_leads]] · [[../tables/cart_drafts]] · [[../tables/orders]] · [[../tables/transactions]] · [[../tables/auth_otp_sessions]] · [[../tables/event_sinks]] · [[../tables/event_dispatches]] · [[../tables/pricing_rules]] · [[../libraries/twilio-verify]] · [[../inngest/abandoned-cart]]

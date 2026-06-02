@@ -160,6 +160,17 @@ For one-off ops:
 | `scripts/cancel-and-ban-resellers.ts` | Bulk cancel + ban |
 | `scripts/backfill-1yr-addresses.ts` | Address backfill |
 
+## Status / open work
+
+**Shipped:** All five rule types (shared_address, high_velocity, address_distance, name_mismatch, amazon_reseller). Two-pass amazon_reseller matching (normalized exact + Haiku fuzzy). Order hold via `tagsAdd("suspicious")`. `confirmed_fraud` orchestrator short-circuit in `customer-fraud-status.ts`. Weekly reseller discovery scan. Address fallback chain on order ingest.
+
+**Known gaps / not yet shipped:** None identified.
+
+**Recent activity:**
+- `12f954ff` docs/brain: lifecycles/ — 12 narrative pages tracing key flows end-to-end
+
+**Open questions:** None.
+
 ## Related
 
 [[ticket-lifecycle]] · [[chargeback-pipeline]] · [[ai-multi-turn]] · [[../integrations/shopify]] · [[../integrations/appstle]] · [[../tables/fraud_cases]] · [[../tables/fraud_rules]] · [[../tables/known_resellers]] · [[../tables/amazon_asins]] · [[../tables/fraud_action_log]] · [[../inngest/fraud-detection]] · [[../inngest/reseller-discovery]] · [[../inngest/order-address-fallback]]

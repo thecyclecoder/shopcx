@@ -201,6 +201,17 @@ See [[../lifecycles/ai-multi-turn]] crisis rules.
 | `src/app/api/workspaces/[id]/crisis/[crisisId]/resolve/route.ts` | Mass resolution actions |
 | `src/app/api/workspaces/[id]/crisis/route.ts` | CRUD |
 
+## Status / open work
+
+**Shipped:** Crisis event activation, daily cron eligibility scanning, Tier 1/2/3 journeys with flavor/product swaps, pause/remove logic, auto-resume + auto-readd on resolution — all functional.
+
+**Known gaps / not yet shipped:** None identified.
+
+**Recent activity:**
+- `12f954ff` docs/brain: lifecycles/ — 12 narrative pages tracing key flows end-to-end
+
+**Open questions:** None.
+
 ## Related
 
 [[ticket-lifecycle]] · [[cancel-flow]] · [[ai-multi-turn]] · [[../integrations/appstle]] · [[../integrations/resend]] · [[../tables/crisis_events]] · [[../tables/crisis_customer_actions]] · [[../tables/subscriptions]] · [[../inngest/crisis-campaign]] · [[../inngest/portal-auto-resume]] · [[../journeys]]
