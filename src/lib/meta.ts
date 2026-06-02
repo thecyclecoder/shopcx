@@ -520,16 +520,38 @@ export function buildMetaAuthUrl(params: {
   state: string;
 }): string {
   const scopes = [
+    // User-data permission — granted to the user-token leg so we
+    // get the admin's email at /me?fields=email after auth. Lets
+    // us tie the connected page back to the right ShopCX user.
+    "email",
+    // Page DMs (Messenger) — receive + reply
     "pages_messaging",
+    // Read engagement (own page posts, insights). Required pairing
+    // for several manage-* scopes (Meta returns "(#200) requires
+    // both pages_read_engagement and pages_manage_posts" without it).
     "pages_read_engagement",
+    // Read user-generated content on the page: customer DMs in
+    // /conversations, comments by visitors on posts, ratings.
+    // Core to the CX use case.
+    "pages_read_user_content",
+    // Manage page metadata — subscribe to webhooks, etc.
     "pages_manage_metadata",
-    // pages_manage_engagement = liking/reacting to comments + reactions
-    // on the page's own posts. Without this, POST /{comment-id}/likes
-    // returns "insufficient permissions" on FB.
+    // Like/react to comments + reactions on the page's own posts.
+    // Without this, POST /{comment-id}/likes returns "insufficient
+    // permissions" on FB. Also gates hide-comment + private-reply.
     "pages_manage_engagement",
+    // Create / edit / delete posts on the page. Required for
+    // moderating abusive user posts to the page + scheduled marketing
+    // posts.
+    "pages_manage_posts",
+    // Instagram pairing
     "instagram_basic",
     "instagram_manage_messages",
     "instagram_manage_comments",
+    // Publish to IG Business/Creator account (paired with
+    // instagram_basic). Needed for cross-posting + scheduled IG
+    // content.
+    "instagram_content_publish",
     // ads_read = lets us call /{ad_id} for creative.object_story_spec.link_data.link
     // so ad-comment moderation can match the comment to the destination product.
     "ads_read",

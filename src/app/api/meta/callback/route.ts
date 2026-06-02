@@ -89,6 +89,23 @@ export async function GET(request: Request) {
     const now = new Date().toISOString();
     const firstPage = pageResult.pages[0];
 
+    // Fetch the admin's profile + email (granted via the `email`
+    // scope on the user token). Stored on the workspace so we know
+    // who connected the page + can show them in the Integrations UI.
+    // Best-effort — if /me fails, fall back to empty values.
+    let adminEmail: string | null = null;
+    let adminName: string | null = null;
+    try {
+      const meRes = await fetch(`https://graph.facebook.com/v21.0/me?fields=id,name,email&access_token=${encodeURIComponent(tokenResult.access_token)}`);
+      if (meRes.ok) {
+        const me = await meRes.json() as { id?: string; name?: string; email?: string };
+        adminEmail = me.email || null;
+        adminName = me.name || null;
+      }
+    } catch (err) {
+      console.warn("Meta callback: failed to fetch /me", err);
+    }
+
     // Legacy single-page columns on workspaces stay populated with the
     // FIRST FB page so older code paths (DM ticket creation, the
     // existing settings card) keep working. Once those callers move
@@ -107,6 +124,8 @@ export async function GET(request: Request) {
         meta_instagram_id: firstPage.instagramId || null,
         meta_webhook_verify_token: workspaceVerifyToken,
         meta_user_access_token_encrypted: userTokenEncrypted,
+        meta_connected_admin_email: adminEmail,
+        meta_connected_admin_name: adminName,
       })
       .eq("id", workspaceId);
 
