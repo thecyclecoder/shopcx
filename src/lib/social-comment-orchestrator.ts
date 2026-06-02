@@ -99,7 +99,7 @@ interface CommentContext {
   };
   page: { name: string | null; type: string; platform: string };
   post: { permalink_url: string | null; message: string | null; is_ad: boolean } | null;
-  matchedProduct: { title: string; description: string | null } | null;
+  matchedProduct: { title: string; description: string | null; url: string | null } | null;
   /** Active crisis affecting the matched product — drives "back in
    *  stock by July 9" style replies when commenters ask about it.
    *  Null when there's no crisis touching the matched product. */
@@ -328,6 +328,11 @@ function buildPass2Prompt(ctx: CommentContext, rag: string, policies: string, se
   lines.push("  - Use the macros below as voice/structure templates — match length and warmth, don't copy verbatim.");
   lines.push("  - Use the KB excerpts for factual claims. Don't invent product details.");
   lines.push("");
+  lines.push("HARD RULES — violating these is a failure:");
+  lines.push("  - LINKS: When you link to a product, use the `PRODUCT URL (canonical)` provided above EXACTLY. Never extract URLs from the ad copy, the post caption, or the commenter's text. Never invent shortened domains (e.g. 'superfoodtabs.com'). Never use bit.ly / l.facebook.com / utm-laden tracking links. If no canonical URL is provided, don't include any URL — say 'on our website' and let them find it.");
+  lines.push("  - COUPONS: Coupons NEVER apply automatically. The customer must enter the code on the checkout page. NEVER say things like 'the coupon will apply automatically', 'we'll apply the discount', 'you'll see the discount at checkout', or anything implying it's pre-applied. If you mention a coupon, say the customer needs to enter it at checkout (or just don't mention coupons at all).");
+  lines.push("  - PROMISES: Don't promise anything that requires us to take action — refunds, replacements, account changes, shipping updates, phone support. If a commenter is asking for action, escalate.");
+  lines.push("");
   lines.push(`COMMENT: ${ctx.comment.body.slice(0, 1500)}`);
   lines.push(`COMMENTER: ${ctx.comment.sender_name || "(unknown)"}${ctx.comment.sender_username ? ` (@${ctx.comment.sender_username})` : ""}`);
   lines.push(`PAGE: ${ctx.page.name || "(unnamed)"} (${ctx.page.platform} ${ctx.page.type})`);
@@ -335,6 +340,9 @@ function buildPass2Prompt(ctx: CommentContext, rag: string, policies: string, se
   if (ctx.matchedProduct) {
     const desc = (ctx.matchedProduct.description || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
     lines.push(`POST PRODUCT: ${ctx.matchedProduct.title}${desc ? ` — ${desc}` : ""}`);
+    if (ctx.matchedProduct.url) {
+      lines.push(`PRODUCT URL (canonical): ${ctx.matchedProduct.url}`);
+    }
   }
   // Active crisis touching this product — surface the restock date so
   // stock-question replies cite a real date instead of "check the
@@ -440,13 +448,35 @@ async function buildContext(
     .eq("id", socialCommentId).single();
   if (!comment) return null;
 
-  const [{ data: page }, { data: post }, productRow] = await Promise.all([
+  const [{ data: page }, { data: post }, productRow, { data: ws }] = await Promise.all([
     admin.from("meta_pages").select("meta_page_name, page_type, platform").eq("id", comment.meta_page_id).single(),
     admin.from("meta_post_cache").select("permalink_url, message, is_ad").eq("workspace_id", workspaceId).eq("meta_post_id", comment.meta_post_id).maybeSingle(),
     comment.matched_product_id
-      ? admin.from("products").select("title, description").eq("id", comment.matched_product_id).single()
+      ? admin.from("products").select("title, description, handle").eq("id", comment.matched_product_id).single()
       : Promise.resolve({ data: null }),
+    admin.from("workspaces").select("storefront_domain, shopify_domain, shopify_myshopify_domain, ad_destination_domains").eq("id", workspaceId).single(),
   ]);
+
+  // Construct the canonical PDP URL from the workspace's primary
+  // customer-facing domain + the product handle. Priority:
+  //   1. ad_destination_domains[0] — where ads currently send traffic
+  //      (the brand site customers actually know — `superfoodscompany.com`).
+  //   2. storefront_domain — the in-house storefront (`shop.…`); future-state,
+  //      only used once ad traffic is cut over.
+  //   3. shopify_domain / .myshopify.com — last-resort fallback.
+  // AI ad copy often contains shortlinks (bit.ly), tracking-laden URLs,
+  // or random domain variants; we always override with the catalog URL.
+  function buildProductUrl(handle: string): string | null {
+    const adDomains = (ws?.ad_destination_domains as string[] | null) || [];
+    const rawHost =
+      adDomains[0]
+      || (ws?.storefront_domain as string | undefined)
+      || (ws?.shopify_domain as string | undefined)
+      || (ws?.shopify_myshopify_domain as string | undefined);
+    if (!rawHost) return null;
+    const host = rawHost.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+    return `https://${host}/products/${handle}`;
+  }
 
   // Active crisis touching the matched product? Drives "back in
   // stock by July 9" replies when a commenter asks about stock.
@@ -503,7 +533,11 @@ async function buildContext(
     },
     post: post ? { permalink_url: post.permalink_url, message: post.message, is_ad: !!post.is_ad } : null,
     matchedProduct: productRow.data
-      ? { title: (productRow.data as { title: string }).title, description: (productRow.data as { description: string | null }).description }
+      ? {
+          title: (productRow.data as { title: string }).title,
+          description: (productRow.data as { description: string | null }).description,
+          url: buildProductUrl((productRow.data as { handle: string }).handle),
+        }
       : null,
     crisis,
   };
