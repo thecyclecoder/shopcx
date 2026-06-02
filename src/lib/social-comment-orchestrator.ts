@@ -100,6 +100,14 @@ interface CommentContext {
   page: { name: string | null; type: string; platform: string };
   post: { permalink_url: string | null; message: string | null; is_ad: boolean } | null;
   matchedProduct: { title: string; description: string | null } | null;
+  /** Active crisis affecting the matched product — drives "back in
+   *  stock by July 9" style replies when commenters ask about it.
+   *  Null when there's no crisis touching the matched product. */
+  crisis: {
+    name: string;
+    affected_product_title: string;
+    expected_restock_date: string | null;
+  } | null;
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -328,6 +336,15 @@ function buildPass2Prompt(ctx: CommentContext, rag: string, policies: string, se
     const desc = (ctx.matchedProduct.description || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
     lines.push(`POST PRODUCT: ${ctx.matchedProduct.title}${desc ? ` — ${desc}` : ""}`);
   }
+  // Active crisis touching this product — surface the restock date so
+  // stock-question replies cite a real date instead of "check the
+  // product page". The orchestrator chooses how to use it.
+  if (ctx.crisis) {
+    const restock = ctx.crisis.expected_restock_date
+      ? new Date(ctx.crisis.expected_restock_date).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })
+      : "TBD";
+    lines.push(`CRISIS / STOCK STATUS: "${ctx.crisis.affected_product_title}" is currently out of stock. Expected restock: ${restock}. If the comment asks about availability of that flavor/variant, name the date directly and offer the restock-notification opt-in.`);
+  }
   lines.push("");
   lines.push(rag);
   lines.push("");
@@ -431,6 +448,42 @@ async function buildContext(
       : Promise.resolve({ data: null }),
   ]);
 
+  // Active crisis touching the matched product? Drives "back in
+  // stock by July 9" replies when a commenter asks about stock.
+  // We match by product_id on the crisis row OR by parent product
+  // (any active crisis whose affected_variant_id belongs to this
+  // product). When the matched product covers multiple variants
+  // and only one is in crisis (Mixed Berry tab while other tab
+  // flavors are fine), surfacing the variant + restock date is
+  // still useful — the AI can disambiguate.
+  let crisis: CommentContext["crisis"] = null;
+  if (comment.matched_product_id) {
+    const { data: variantsOfProduct } = await admin
+      .from("product_variants")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("product_id", comment.matched_product_id);
+    const variantIds = (variantsOfProduct || []).map(v => v.id as string);
+    if (variantIds.length) {
+      const { data: crisisRow } = await admin
+        .from("crisis_events")
+        .select("name, affected_product_title, expected_restock_date, status, affected_variant_id")
+        .eq("workspace_id", workspaceId)
+        .eq("status", "active")
+        .in("affected_variant_id", variantIds)
+        .order("expected_restock_date", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (crisisRow) {
+        crisis = {
+          name: crisisRow.name as string,
+          affected_product_title: crisisRow.affected_product_title as string,
+          expected_restock_date: (crisisRow.expected_restock_date as string | null) || null,
+        };
+      }
+    }
+  }
+
   return {
     workspaceId,
     socialCommentId,
@@ -452,6 +505,7 @@ async function buildContext(
     matchedProduct: productRow.data
       ? { title: (productRow.data as { title: string }).title, description: (productRow.data as { description: string | null }).description }
       : null,
+    crisis,
   };
 }
 

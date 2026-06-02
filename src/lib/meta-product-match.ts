@@ -96,7 +96,25 @@ async function tryUrl(
   } catch {
     return null;
   }
-  const host = url.host.toLowerCase().replace(/^www\./, "");
+  let host = url.host.toLowerCase().replace(/^www\./, "");
+
+  // Unwrap Facebook/Instagram link-shim URLs. Post attachments come
+  // back wrapped as l.facebook.com/l.php?u=<encoded destination> (and
+  // l.instagram.com on the IG side). Without unwrapping, the matcher
+  // sees l.facebook.com which isn't a workspace host AND isn't in
+  // SHORTLINK_HOSTS, so it never reaches the real product URL.
+  // Maya Agha's ad post on the Superfoods page (ticket 1d0dc052)
+  // surfaced this — `superfoodscompany.com/products/superfood-tabs`
+  // was hidden behind l.facebook.com and went unmatched.
+  if ((host === "l.facebook.com" || host === "l.instagram.com" || host === "lm.facebook.com") && url.pathname === "/l.php") {
+    const wrapped = url.searchParams.get("u");
+    if (wrapped) {
+      try {
+        url = new URL(wrapped);
+        host = url.host.toLowerCase().replace(/^www\./, "");
+      } catch { /* fall through with original url */ }
+    }
+  }
 
   // Direct match against our storefront / shopify domain, OR same
   // registrable root (matches superfoodscompany.com against a workspace
