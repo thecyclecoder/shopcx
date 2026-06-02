@@ -21,23 +21,11 @@ interface MetaPageRow {
 
 interface AdAccountRow {
   id: string;
-  fb_act_id: string;
-  name: string | null;
-  account_status: number | null;
-  sync_enabled: boolean;
-  last_synced_at: string | null;
+  meta_account_id: string;
+  meta_account_name: string;
+  is_active: boolean;
+  last_sync_at: string | null;
 }
-
-const ACCOUNT_STATUS_LABEL: Record<number, string> = {
-  1: "Active",
-  2: "Disabled",
-  3: "Unsettled",
-  7: "Pending review",
-  101: "Closed",
-  102: "Any active",
-  201: "Pending settlement",
-  202: "Pending RBA review",
-};
 
 export default function MetaPagesSettingsPage() {
   const { id: workspaceId } = useWorkspace();
@@ -53,11 +41,10 @@ export default function MetaPagesSettingsPage() {
   const [adDomainInput, setAdDomainInput] = useState("");
   const [savingDomains, setSavingDomains] = useState(false);
 
-  // Ad accounts — auto-discovered. Toggle per account to enable historical-
-  // comment backfill from ads delivered in the last 30 days.
+  // Ad accounts — managed by the ROAS Meta Ads integration (see
+  // Settings → Integrations → Meta Ads). Read-only here; we just
+  // display + offer "Sync now" to backfill comments off recent ads.
   const [adAccounts, setAdAccounts] = useState<AdAccountRow[]>([]);
-  const [savingActId, setSavingActId] = useState<string | null>(null);
-  const [refreshingAccts, setRefreshingAccts] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
@@ -76,45 +63,6 @@ export default function MetaPagesSettingsPage() {
   useEffect(() => {
     void loadPages();
   }, [loadPages]);
-
-  async function toggleAdAccount(fbActId: string, syncEnabled: boolean) {
-    setSavingActId(fbActId);
-    try {
-      const res = await fetch(`/api/workspaces/${workspaceId}/meta-ad-accounts`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fb_act_id: fbActId, sync_enabled: syncEnabled }),
-      });
-      if (!res.ok) {
-        const d = await res.json();
-        setError(d.error || "Toggle failed");
-        return;
-      }
-      setAdAccounts(prev => prev.map(a => a.fb_act_id === fbActId ? { ...a, sync_enabled: syncEnabled } : a));
-    } finally {
-      setSavingActId(null);
-    }
-  }
-
-  async function refreshAdAccounts() {
-    setRefreshingAccts(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/workspaces/${workspaceId}/meta-ad-accounts`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "refresh" }),
-      });
-      if (!res.ok) {
-        const d = await res.json();
-        setError(d.error || "Refresh failed");
-        return;
-      }
-      await loadPages();
-    } finally {
-      setRefreshingAccts(false);
-    }
-  }
 
   async function syncNow() {
     setSyncing(true);
@@ -323,25 +271,23 @@ export default function MetaPagesSettingsPage() {
             <div>
               <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Ad accounts</h2>
               <p className="mt-1 text-xs text-zinc-500">
-                Toggle which ad accounts to pull historical comments from. On &ldquo;Sync now,&rdquo; we look at ads delivered in the
-                last 30 days and pull every comment on them — runs once, dedupes against existing comments.
+                Connected via the Meta Ads (ROAS) integration. &ldquo;Sync now&rdquo; looks at ads delivered in the last 30 days
+                across all active accounts and pulls every comment on them — dedupes against existing comments.
               </p>
             </div>
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={refreshAdAccounts}
-                disabled={refreshingAccts}
-                className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              <Link
+                href="/dashboard/settings/integrations/meta-ads"
+                className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
               >
-                {refreshingAccts ? "Refreshing…" : "Refresh list"}
-              </button>
+                Manage connection
+              </Link>
               <button
                 type="button"
                 onClick={syncNow}
-                disabled={syncing || !adAccounts.some(a => a.sync_enabled)}
+                disabled={syncing || adAccounts.length === 0}
                 className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                title={!adAccounts.some(a => a.sync_enabled) ? "Enable at least one ad account first" : ""}
+                title={adAccounts.length === 0 ? "Connect ad accounts in the Meta Ads integration first" : ""}
               >
                 {syncing ? "Queueing…" : "Sync now"}
               </button>
@@ -355,39 +301,25 @@ export default function MetaPagesSettingsPage() {
           )}
 
           {adAccounts.length === 0 ? (
-            <p className="mt-4 text-xs text-zinc-500">No ad accounts discovered. Click &ldquo;Refresh list&rdquo; to re-pull from Meta.</p>
+            <p className="mt-4 text-xs text-zinc-500">No ad accounts connected. Set up the Meta Ads integration to enable historical comment backfill.</p>
           ) : (
             <ul className="mt-4 divide-y divide-zinc-100 dark:divide-zinc-800">
-              {adAccounts.map(a => {
-                const statusLabel = a.account_status != null ? ACCOUNT_STATUS_LABEL[a.account_status] || `Status ${a.account_status}` : "—";
-                const isActive = a.account_status === 1;
-                return (
-                  <li key={a.fb_act_id} className="flex items-center justify-between py-2.5">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                        {a.name || a.fb_act_id}
-                      </p>
-                      <p className="mt-0.5 text-[11px] text-zinc-500">
-                        <span className="font-mono">{a.fb_act_id}</span>
-                        <span className={`ml-2 ${isActive ? "text-emerald-600" : "text-zinc-400"}`}>· {statusLabel}</span>
-                        {a.last_synced_at && (
-                          <span className="ml-2">· synced {new Date(a.last_synced_at).toLocaleString()}</span>
-                        )}
-                      </p>
-                    </div>
-                    <label className="flex shrink-0 items-center gap-2 cursor-pointer">
-                      <span className="text-xs text-zinc-500">{a.sync_enabled ? "On" : "Off"}</span>
-                      <input
-                        type="checkbox"
-                        checked={a.sync_enabled}
-                        disabled={savingActId === a.fb_act_id}
-                        onChange={(e) => toggleAdAccount(a.fb_act_id, e.target.checked)}
-                        className="h-4 w-4 cursor-pointer accent-emerald-600"
-                      />
-                    </label>
-                  </li>
-                );
-              })}
+              {adAccounts.map(a => (
+                <li key={a.id} className="flex items-center justify-between py-2.5">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                      {a.meta_account_name}
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-zinc-500">
+                      <span className="font-mono">act_{a.meta_account_id}</span>
+                      <span className={`ml-2 ${a.is_active ? "text-emerald-600" : "text-zinc-400"}`}>· {a.is_active ? "Active" : "Inactive"}</span>
+                      {a.last_sync_at && (
+                        <span className="ml-2">· synced {new Date(a.last_sync_at).toLocaleString()}</span>
+                      )}
+                    </p>
+                  </div>
+                </li>
+              ))}
             </ul>
           )}
         </div>

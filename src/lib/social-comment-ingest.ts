@@ -22,7 +22,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { decrypt } from "@/lib/crypto";
-import { hideComment, getPostMetadata, findAdCreativeForPost } from "@/lib/meta";
+import { hideComment, getPostMetadata } from "@/lib/meta";
 import { resolvePostProductMatch } from "@/lib/meta-product-match";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -270,86 +270,38 @@ async function ensurePostCache(args: EnsurePostCacheArgs): Promise<{
   }
   void adTitle;  // no longer used for lookup — media id is the canonical key
 
-  // ── JIT ad-creative lookup ───────────────────────────────────────
-  // For every uncached post (ad OR organic), search the Marketing
-  // API for a creative whose effective_object_story_id (FB) or
-  // effective_instagram_media_id (IG) equals this post. This is the
-  // definitive "is this an ad?" signal — webhook ad_id is missing on
-  // dark posts whose campaigns have ended, and promotion_status lags
-  // by hours/days. A creative match also gives us the click-through
-  // URL which IG ad posts don't expose anywhere else.
-  //
-  // Cost: one Marketing API call per active ad account on first-comment
-  // ingest. Result is cached on meta_post_cache, so every subsequent
-  // comment on the same post is a local DB read.
-  let adCreativeId: string | null = null;
-  let adDestinationUrl: string | null = null;
-  let jitMatch = false;
-  if (postId) {
-    const { data: ws } = await admin
-      .from("workspaces")
-      .select("meta_user_access_token_encrypted")
-      .eq("id", page.workspace_id)
-      .maybeSingle();
-    if (ws?.meta_user_access_token_encrypted) {
-      const { data: accts } = await admin
-        .from("meta_ad_accounts")
-        .select("fb_act_id")
-        .eq("workspace_id", page.workspace_id)
-        .eq("account_status", 1);  // active only
-      if (accts && accts.length) {
-        try {
-          const userToken = decrypt(ws.meta_user_access_token_encrypted as string);
-          // FB feed comments give us `{page_id}_{post_id}` directly,
-          // which is exactly the `effective_object_story_id` shape.
-          // IG comments give us the media id, matched against
-          // `effective_instagram_media_id`. Pass platform through.
-          const hit = await findAdCreativeForPost(
-            userToken,
-            accts.map(a => ({ id: a.fb_act_id })),
-            postId,
-            platform,
-          );
-          if (hit) {
-            jitMatch = true;
-            adCreativeId = hit.ad_creative_id;
-            adDestinationUrl = hit.destination_url;
-          }
-        } catch (err) {
-          console.warn("findAdCreativeForPost failed:", err);
-        }
-      }
-    }
-  }
-
-  const urls = [...new Set([
-    ...(adDestinationUrl ? [adDestinationUrl] : []),
-    ...messageUrls,
-    ...attachmentUrls,
-  ])];
+  // Note: Marketing API doesn't support `EQUAL` filtering on
+  // effective_object_story_id / effective_instagram_media_id (returns
+  // #100 "filtering field with operation 'equal' is not supported").
+  // So we can't do a JIT creative lookup keyed on the post id. The
+  // long-term fix is a one-time + daily sync of all adcreatives into
+  // a local `meta_ad_creatives` table indexed by post — TODO.
+  // Until then, ad classification relies on the four-signal cascade
+  // below; destination URLs only come from the post body/attachments
+  // (IG ad-only destination URLs will be missing until we ship the
+  // creative sync).
+  const urls = [...new Set([...messageUrls, ...attachmentUrls])];
 
   // Resolve a product match — follows shortlink redirects, matches
   // against products.handle.
   const matchedProductId = await resolvePostProductMatch(admin, page.workspace_id, urls);
 
-  // Mark as ad with a four-signal cascade, most authoritative first:
-  //   1. JIT creative lookup hit → definitive (we found the actual ad)
-  //   2. Webhook ad_id present → ad served via paid placement right now
-  //   3. is_published === false → dark post (page post that only exists
-  //      as an ad creative, never published to timeline)
-  //   4. promotion_status currently active/extendable/not_extendable
-  //      → currently-running ad, may have been served from an older
-  //        campaign whose ad_id wasn't on this particular impression
+  // Mark as ad via a three-signal cascade, most authoritative first:
+  //   1. Webhook ad_id → ad served via paid placement right now
+  //   2. is_published === false → dark post (page post that only
+  //      exists as an ad creative, never published to timeline)
+  //   3. promotion_status active/extendable/not_extendable → currently
+  //      running ad
   // We previously used `is_eligible_for_promotion` which is TRUE for
   // nearly every public organic post on a business page (Maria Gundlach
-  // false-positive on "Where are our Peach Mango fans at?"). And we
-  // missed dark posts that had `promotion_status=inactive` because the
-  // campaign ended (Suzy Doucet false-negative).
+  // false-positive). And we missed dark posts that had
+  // promotion_status=inactive because the campaign ended (Suzy Doucet
+  // false-negative). is_published=false catches the dark-post case.
   const promotionStatus = (meta.promotion_status || "").toLowerCase();
   const isCurrentlyPromoted = promotionStatus === "extendable"
     || promotionStatus === "not_extendable"
     || promotionStatus === "active";
-  const isAd = jitMatch || !!adId || meta.is_published === false || isCurrentlyPromoted;
+  const isAd = !!adId || meta.is_published === false || isCurrentlyPromoted;
 
   await admin.from("meta_post_cache").insert({
     workspace_id: page.workspace_id,
@@ -357,8 +309,6 @@ async function ensurePostCache(args: EnsurePostCacheArgs): Promise<{
     meta_post_id: postId,
     is_ad: isAd,
     ad_id: adId,
-    ad_creative_id: adCreativeId,
-    ad_destination_url: adDestinationUrl,
     permalink_url: meta.permalink_url || null,
     message: meta.message || null,
     image_url: imageUrl,

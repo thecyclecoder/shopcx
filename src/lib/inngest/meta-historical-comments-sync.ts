@@ -53,15 +53,18 @@ export const metaHistoricalCommentsSync = inngest.createFunction(
     };
     const admin = createAdminClient();
 
-    // 1. Workspace user token (required for Marketing API)
+    // 1. User token via the ROAS Meta Ads OAuth connection — that's
+    // the flow that requested ads_read. Marketing API rejects page
+    // tokens; pages-OAuth user token doesn't carry ads_read either.
     const userToken = await step.run("load-user-token", async () => {
-      const { data: ws } = await admin
-        .from("workspaces")
-        .select("meta_user_access_token_encrypted")
-        .eq("id", workspaceId)
-        .single();
-      return ws?.meta_user_access_token_encrypted
-        ? decrypt(ws.meta_user_access_token_encrypted as string)
+      const { data: conn } = await admin
+        .from("meta_connections")
+        .select("access_token_encrypted")
+        .eq("workspace_id", workspaceId)
+        .eq("is_active", true)
+        .maybeSingle();
+      return conn?.access_token_encrypted
+        ? decrypt(conn.access_token_encrypted as string)
         : null;
     });
     if (!userToken) return { error: "no_user_token" };
@@ -83,14 +86,21 @@ export const metaHistoricalCommentsSync = inngest.createFunction(
       (p.platform === "instagram" ? igPagesById : fbPagesById).set(p.meta_page_id as string, p as PageRow);
     }
 
-    // 3. Enabled ad accounts
+    // 3. Active ad accounts (managed via ROAS integration). All
+    // connected accounts are eligible for comment backfill — no
+    // separate per-account opt-in.
     const accounts = await step.run("load-enabled-accounts", async () => {
       const { data } = await admin
         .from("meta_ad_accounts")
-        .select("id, fb_act_id, name")
+        .select("id, meta_account_id, meta_account_name")
         .eq("workspace_id", workspaceId)
-        .eq("sync_enabled", true);
-      return data || [];
+        .eq("is_active", true);
+      return (data || []).map(a => ({
+        id: a.id as string,
+        // Marketing API needs the `act_` prefix
+        fb_act_id: `act_${a.meta_account_id}`,
+        name: a.meta_account_name as string,
+      }));
     });
     if (accounts.length === 0) return { skipped: "no_enabled_accounts" };
 
@@ -224,7 +234,7 @@ export const metaHistoricalCommentsSync = inngest.createFunction(
       await step.run(`stamp-account-${acct.id}`, async () => {
         await admin
           .from("meta_ad_accounts")
-          .update({ last_synced_at: new Date().toISOString() })
+          .update({ last_sync_at: new Date().toISOString() })
           .eq("id", acct.id);
       });
     }

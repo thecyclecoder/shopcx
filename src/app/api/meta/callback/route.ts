@@ -196,32 +196,11 @@ export async function GET(request: Request) {
       console.warn("Meta webhook subscription warnings:", subscribeWarnings.join(" | "));
     }
 
-    // Auto-discover ad accounts so the admin can later toggle which ones
-    // the historical comments backfill pulls from. Idempotent — re-running
-    // OAuth re-syncs the list (new accounts get added, existing ones get
-    // status updates) without resetting the sync_enabled flag.
-    try {
-      const acctsRes = await fetch(`https://graph.facebook.com/v21.0/me/adaccounts?fields=id,name,account_status&limit=200&access_token=${encodeURIComponent(pageResult.userAccessToken)}`);
-      if (acctsRes.ok) {
-        const accts = ((await acctsRes.json()).data || []) as Array<{ id: string; name: string; account_status: number }>;
-        for (const a of accts) {
-          // Upsert preserves sync_enabled — only updates the fields Meta
-          // owns (name, account_status).
-          await admin.from("meta_ad_accounts").upsert(
-            {
-              workspace_id: workspaceId,
-              fb_act_id: a.id,
-              name: a.name,
-              account_status: a.account_status,
-              updated_at: now,
-            },
-            { onConflict: "workspace_id,fb_act_id", ignoreDuplicates: false },
-          );
-        }
-      }
-    } catch (err) {
-      console.warn("Meta ad accounts discovery failed:", err);
-    }
+    // Ad-account discovery: handled separately by the ROAS Meta Ads
+    // integration (meta_connections + meta_ad_accounts populated via
+    // /api/meta-ads-* flows). That's where the user opts in to ads_read
+    // and picks which accounts to sync. This Pages OAuth callback only
+    // covers page-level scopes (comments, DMs, posts).
 
     return NextResponse.redirect(`${siteUrl}/dashboard/settings/integrations?meta=connected&pages=${persisted}`);
   } catch (err) {
