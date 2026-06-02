@@ -9,6 +9,9 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 138 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 50 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 13 |
+| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 12 |
+| [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
+| [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
 
 ## Tables (`tables/`)
 
@@ -315,6 +318,44 @@ External APIs we call. Each page documents auth model, credential location (env 
 - [[integrations/inngest]] — Durable workflow engine. Account-level env keys only.
 - [[integrations/openai]] — Embeddings only (`text-embedding-3-small`, 1536d). Account-level env.
 - [[integrations/anthropic]] — Claude Haiku + Sonnet + Opus. All AI surfaces. Account-level env.
+
+## Lifecycles (`lifecycles/`)
+
+Long-form narrative pages tracing key flows end-to-end. Each wikilinks 5+ reference pages and ends with a `Files touched` section listing every `src/lib/*` involved.
+
+- [[lifecycles/ticket-lifecycle]] — Inbound message → orchestrator → action → close → CSAT. The hottest path in the platform.
+- [[lifecycles/ai-multi-turn]] — Route → assemble context → generate → confidence-gate → send → auto-resolve. Tool-use orchestrator details.
+- [[lifecycles/dunning]] — Payment-failed → card rotation → payday retry → cycle action → recovery / pause.
+- [[lifecycles/return-pipeline]] — `createFullReturn` → EasyPost label → delivered → issue-refund → confirmation email.
+- [[lifecycles/cancel-flow]] — Cancel intent → cancel journey → Haiku remedy → save / cancel → tag.
+- [[lifecycles/crisis-campaign]] — Crisis activation → daily cron → Tier 1/2/3 → resolve auto-resume.
+- [[lifecycles/social-comment-moderation]] — Webhook → ingest → pass-1 classify → pass-2 generate → action.
+- [[lifecycles/fraud-detection]] — Order create → rules → fraud_cases → hold orders → confirmed_fraud → orchestrator gate.
+- [[lifecycles/storefront-checkout]] — PDP → cart → tax-quote → Braintree vault + sale → order create → CAPI fan-out.
+- [[lifecycles/subscription-billing]] — In-house billing-tick cron → renewal quote → tax → Braintree → orders → dunning on failure.
+- [[lifecycles/customer-link-confirmation]] — Meta sender → fuzzy match → agent confirms → `meta_sender_customer_links` → backfill.
+- [[lifecycles/chargeback-pipeline]] — Shopify dispute → `chargeback_events` → fraud classification → auto-cancel subs → `chargeback_subscription_actions`.
+
+## Journeys (`journeys/`)
+
+One page per row in [[tables/journey_definitions]]. See [[journeys/README]] for the architecture, channel rules, and the "live render" principle.
+
+- [[journeys/cancel]] — AI-powered retention with Haiku remedy selection. Highest priority (5).
+- [[journeys/discount-signup]] — Marketing consent capture + coupon delivery.
+- [[journeys/account-linking]] — Prepend-only. Silently inserted as Step 0 of other journeys.
+- [[journeys/crisis-tier1-flavor-swap]] — Crisis Tier 1 — flavor swap.
+- [[journeys/crisis-tier2-product-swap]] — Crisis Tier 2 — product swap + 20% coupon.
+- [[journeys/crisis-tier3-pause-remove]] — Crisis Tier 3 — pause (berry_only) or remove item (berry_plus).
+- [[journeys/shipping-address]] — Sub / order / default address change with EasyPost validation.
+- [[journeys/missing-items]] — Line-item checklist driving replacements.
+- [[journeys/select-subscription]] — Sub picker used by other flows.
+
+## Playbooks (`playbooks/`)
+
+One page per active row in [[tables/playbooks]]. See [[playbooks/README]] for the data model, step types, and the universal communication patterns from PLAYBOOK-PATTERNS.md.
+
+- [[playbooks/refund]] — Sub-renewal dispute → identify → policy → tiered exceptions → return / refund / store credit.
+- [[playbooks/replacement-order]] — Missing / damaged / lost → tracking check → missing-items checklist → fresh draft order at no cost.
 
 ---
 
