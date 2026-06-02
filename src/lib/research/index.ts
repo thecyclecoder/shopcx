@@ -3,7 +3,7 @@
  *
  * Each recipe lives under src/lib/research/recipes/<slug>.ts and gets
  * registered below. Recipes are TypeScript (not config) — see
- * RESEARCH-AND-HEAL.md for the design rationale.
+ * docs/brain/lifecycles/research-and-heal.md for the design rationale.
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";

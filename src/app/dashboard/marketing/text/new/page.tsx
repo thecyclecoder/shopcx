@@ -39,7 +39,7 @@ const TIMEZONE_OPTIONS = [
 // Archetype segments — independent boolean tags. Sorted by predicted
 // conversion (engaged → cold) so the "cascade" pattern (include lower
 // tiers, exclude higher tiers) reads naturally top-down. See
-// TEXT-MARKETING.md § "Predictive segmentation" for definitions.
+// docs/brain/tables/sms_campaigns.md § "Predictive segmentation" for definitions.
 const ARCHETYPE_SEGMENTS = [
   { value: "engaged",      label: "Engaged",       hint: "Orders ≥1 + recent email-click / ATC / checkout (0.44% conv)" },
   { value: "cycle_hitter", label: "Cycle hitter",  hint: "Orders ≥2 + at expected reorder window (0.30% conv)" },

@@ -52,7 +52,7 @@ export async function getLoyaltyAndSubState(workspaceId: string, customerId: str
 }> {
   const admin = createAdminClient();
 
-  // Resolve linked customer ids (DATABASE.md pattern)
+  // Resolve linked customer ids (docs/brain/README.md pattern)
   const linkedIds = await resolveLinkedIds(admin, customerId);
 
   const [{ data: member }, { data: reds }, { data: subs }] = await Promise.all([

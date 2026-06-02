@@ -19,7 +19,7 @@
  * keep payload validation tight: required fields, allowlisted event
  * types, max batch size, body size cap.
  *
- * See STOREFRONT.md for the architecture overview.
+ * See docs/brain/lifecycles/storefront-checkout.md for the architecture overview.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -33,7 +33,7 @@ const TRANSPARENT_GIF = Buffer.from(
 );
 
 // Allowlisted event_type values. Anything else is silently dropped.
-// Keep in sync with STOREFRONT.md § "Defined event types."
+// Keep in sync with docs/brain/lifecycles/storefront-checkout.md § "Defined event types."
 const ALLOWED_EVENT_TYPES = new Set([
   "pdp_view",
   "pdp_engaged",

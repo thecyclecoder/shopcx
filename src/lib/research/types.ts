@@ -1,6 +1,6 @@
 /**
  * Shared types for the Research & Heal system.
- * See RESEARCH-AND-HEAL.md for the design rationale.
+ * See docs/brain/lifecycles/research-and-heal.md for the design rationale.
  */
 
 export type FindingSeverity = "info" | "low" | "medium" | "high";
