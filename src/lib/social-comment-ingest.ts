@@ -304,7 +304,20 @@ async function ensurePostCache(args: EnsurePostCacheArgs): Promise<{
     }
   }
 
-  const isAd = !!adId || !!meta.is_eligible_for_promotion;
+  // Mark as ad ONLY when we have a real signal:
+  //   1. The webhook delivered an ad_id (most direct signal), OR
+  //   2. Meta's promotion_status indicates the post IS currently being
+  //      promoted (extendable / not_extendable / active).
+  // We previously used `is_eligible_for_promotion` which is TRUE for
+  // nearly every public organic post on a business page — that caused
+  // organic posts like "Where are our Peach Mango fans at?" to be
+  // mislabeled as ads (Maria Gundlach's "I love this drink" comment,
+  // social-comment 58edf8de, surfaced the bug).
+  const promotionStatus = (meta.promotion_status || "").toLowerCase();
+  const isCurrentlyPromoted = promotionStatus === "extendable"
+    || promotionStatus === "not_extendable"
+    || promotionStatus === "active";
+  const isAd = !!adId || isCurrentlyPromoted;
 
   await admin.from("meta_post_cache").insert({
     workspace_id: page.workspace_id,

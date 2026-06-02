@@ -264,6 +264,10 @@ export interface MetaPostMetadata {
   message?: string;
   created_time?: string;
   is_eligible_for_promotion?: boolean;
+  /** "extendable" | "not_extendable" | "active" = currently running ad.
+   *  "inactive" | "eligible" | "ineligible" | "pending" | "not_eligible"
+   *  = not currently an ad. */
+  promotion_status?: string;
   attachments?: {
     data: Array<{
       type?: string;
@@ -279,7 +283,14 @@ export async function getPostMetadata(
   pageAccessToken: string,
   postId: string,
 ): Promise<MetaPostMetadata | null> {
-  const fields = "id,permalink_url,message,created_time,is_eligible_for_promotion,attachments{media,target,subattachments,type,url}";
+  // promotion_status distinguishes currently-running ads from organic
+  // posts that happen to be eligible-to-be-promoted. is_eligible_for_promotion
+  // is TRUE for nearly every public organic post on a business page, so
+  // it's useless as an "is this an ad" signal — we use promotion_status
+  // instead. Values: "extendable" / "not_extendable" / "active" = ad
+  // currently running; "inactive" / "eligible" / "ineligible" / "pending" /
+  // "not_eligible" = not currently an ad.
+  const fields = "id,permalink_url,message,created_time,is_eligible_for_promotion,promotion_status,attachments{media,target,subattachments,type,url}";
   const url = `${GRAPH_BASE}/${postId}?fields=${encodeURIComponent(fields)}&access_token=${encodeURIComponent(pageAccessToken)}`;
   const res = await fetch(url);
   if (!res.ok) return null;
