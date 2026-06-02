@@ -89,7 +89,7 @@ const { count } = await admin.from("dunning_cycles")
 
 ## Gotchas
 
-- Status: `active` / `skipped` / `paused` / `recovered` / `exhausted` (**lowercase**).
+- Status: production values (as of probe): `retrying`, `recovered`, `exhausted`, `skipped`, `active` (**lowercase**). Most rows are `retrying` (in-flight) or `recovered` (success). `active` is rare and short-lived. No `paused` state on this row — pausing the SUB is a `payment_failures` event + `subscriptions.status='paused'`.
 - Per-(subscription, billing cycle). Don't conflate with `payment_failures` which is per-attempt within a cycle.
 - Driven by Inngest `dunning/payment-failed`. See Phase 5 in CLAUDE.md.
 - **Internal joins use the UUID.** Join to [[subscriptions]] via `subscription_id` UUID — NOT `shopify_contract_id`. Shopify is being sunset; the contract id will be deprecated. `subscription_id` is column-nullable but always populated in practice for cycles created by our Inngest path; a NULL is a data issue worth surfacing, not a fallback signal.

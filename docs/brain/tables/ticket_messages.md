@@ -86,7 +86,9 @@ const { data } = await admin.from("ticket_messages")
 - `resend_email_id` not `resend_id`. supabase-js will silently insert with unknown columns dropped — always check `error` on insert.
 - `author_type`: `"customer"`, `"agent"`, `"ai"`, `"system"`.
 - `direction`: `"inbound"`, `"outbound"`.
-- `visibility`: `"public"`, `"internal"`. Internal notes never leave our system.
+- `visibility`: **`"external"`** (customer-facing, default) and **`"internal"`** (notes only). NOT `"public"` — earlier docs were wrong. Querying `.eq("visibility", "public")` returns zero rows.
+- `author_id` is usually NULL for `customer`, `ai`, and `system` author types; only `agent` rows reliably have it set (the user UUID of the operator).
+- `transactions.type` is open-ended (only `initial_checkout` in prod so far); `transactions.status` is `"succeeded"` (NOT `"settled"`).
 
 ---
 

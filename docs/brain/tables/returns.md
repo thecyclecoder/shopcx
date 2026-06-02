@@ -90,7 +90,7 @@ const { data } = await admin.from("dashboard_notifications")
 
 ## Gotchas
 
-- `status`: `"open"`, `"label_created"`, `"in_transit"`, `"delivered"`, `"refunded"`, `"restocked"`, `"cancelled"`.
+- `status`: production values (as of probe): `"closed"`, `"label_created"`, `"refunded"`, `"open"`, `"cancelled"`, `"in_transit"`, `"delivered"`. The earlier spec referenced `"restocked"` — not seen in data. Treat `"closed"` as a final state distinct from `"refunded"` (e.g. customer-paid-shipping returns that hit a refund-failure branch and were manually closed).
 - `resolution_type`: `"refund_return"`, `"store_credit_return"`, `"refund_no_return"`, `"store_credit_no_return"`.
 - `source`: `"ai"`, `"agent"`, `"playbook"`, `"portal"`, `"system"`.
 - There is no `name` column — use `order_number`.

@@ -75,7 +75,7 @@ const { count } = await admin.from("fraud_cases")
 ## Gotchas
 
 - `rule_type` matches `fraud_rules.slug`.
-- `status`: `open`, `reviewing`, `confirmed_fraud`, `dismissed`.
+- `status`: schema supports `open`, `reviewing`, `confirmed_fraud`, `dismissed`. Production data only has `dismissed` and `confirmed_fraud` — the open/reviewing states exist for the UI workflow but resolve fast (no long-lived `open` cases in prod).
 - Orchestrator bails (closes + escalates with confirmed-fraud reply) if customer has ANY `status='confirmed_fraud'` OR `rule_type='amazon_reseller'`. See feedback_orchestrator_fraud_gate.
 - Chargebacks don't create fraud cases anymore — only actual rules do.
 

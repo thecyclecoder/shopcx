@@ -159,7 +159,7 @@ const { data } = await admin.from("tickets")
 
 ## Gotchas
 
-- `status`: `"open"`, `"pending"`, `"closed"`, `"archived"` (lowercase).
+- `status`: `"open"`, `"closed"`, `"archived"` (lowercase). **`pending` is NOT used in production data** — older docs claim it but no rows have it. Use `open` for "AI is awaiting customer reply"; `closed` for "resolved"; `archived` for "auto-archived after retention threshold."
 - `channel`: `"email"`, `"chat"`, `"help_center"`, `"social_comments"`, `"meta_dm"`, `"sms"`.
 - `handled_by` is a free-text label — `"AI Agent"`, `"Workflow: order_tracking"`, `"Journey: cancel"`, or a display_name. Filter for the customer-reply-driven AI path with `LIKE 'Journey:%' OR ='AI Agent' OR LIKE 'Workflow:%'`.
 - `escalated_to` set when escalated to a human; `assigned_to` is the human owner.

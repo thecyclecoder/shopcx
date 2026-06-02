@@ -118,12 +118,12 @@ const { data } = await admin.from("orders")
   .gte("created_at", since);
 ```
 
-### Recent paid orders (head count only)
+### Recent paid orders (head count only) — note mixed-case handling
 ```ts
 const { count } = await admin.from("orders")
   .select("id", { count: "exact", head: true })
   .eq("workspace_id", workspaceId)
-  .eq("financial_status", "paid")
+  .in("financial_status", ["PAID", "paid"])   // both cases exist in prod
   .gte("created_at", since);
 ```
 
@@ -134,8 +134,8 @@ const { count } = await admin.from("orders")
 - `shipping_address` and `billing_address` are both JSONB. If only one is populated on the Shopify side, both are mirrored — see feedback_address_mirror_rule.
 - `line_items` is JSONB. Variant ids inside, not a join.
 - `shopify_order_id` is a numeric string. Internal joins should use `id` (UUID), not the Shopify id.
-- `financial_status`: `"paid"`, `"refunded"`, `"partially_refunded"`, `"voided"` (lowercase).
-- `fulfillment_status`: `"fulfilled"`, `"partial"`, `"unfulfilled"`, or `null`.
+- `financial_status`: **mixed-case in production data** — both `"PAID"` (94% of rows, from Shopify webhook ingestion) and `"paid"` (6%, normalized) exist. Same for `"REFUNDED"`/`"refunded"`, `"PARTIALLY_REFUNDED"`/`"partially_refunded"`, `"PENDING"`/`"pending"`. Use `ILIKE` or `.in("financial_status", ["PAID","paid"])`. Don't use `.eq("financial_status", "paid")` — you'll miss 94% of rows.
+- `fulfillment_status`: `"fulfilled"`, `"partial"`, `"unfulfilled"`, or `null`. Probe before assuming lowercase.
 
 ---
 

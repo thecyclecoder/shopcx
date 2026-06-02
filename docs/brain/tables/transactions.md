@@ -80,7 +80,10 @@ const { count } = await admin.from("transactions")
 
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **`type`**: production data has `initial_checkout`. Other types (`subscription_renewal`, `refund`, etc.) are defined in code but not yet present at scale — the storefront checkout + internal-sub scheduler are still ramping. Probe before filtering.
+- **`status`**: `succeeded` is what's stored on success (NOT `settled`). Failures get `failed`. `pending` for in-flight authorization.
+- **Braintree-only**. This table is for our custom-checkout flow. Shopify Payments orders DON'T write transactions rows — they only write [[orders]] + their `payment_details` JSONB.
+- **`attempted_at` is required**, `settled_at` + `refunded_at` track lifecycle. Always write `attempted_at` first.
 
 ---
 
