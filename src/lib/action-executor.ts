@@ -94,6 +94,12 @@ export interface ActionContext {
   customerId: string;
   channel: string;
   sandbox: boolean;
+  // Whether a human agent has touched this ticket OR it's already
+  // assigned to one. When true, the orchestrator is in limited-scope
+  // mode ("agent will be back with you shortly") — any ai_response
+  // on an agent-involved ticket is implicitly a hand-off and must
+  // flip escalation flags so the assigned agent gets a signal.
+  agentInvolved?: boolean;
   // Internal: set by escalateTicket() when this run hands the ticket to
   // an agent. The post-execute auto-close in unified-ticket-handler
   // honors this flag so a ticket that was just escalated doesn't get
@@ -1972,6 +1978,20 @@ export async function executeSonnetDecision(
     case "ai_response":
       if (decision.response_message) {
         await trackedSend(decision.response_message, ctx.sandbox);
+      }
+      // On agent-involved tickets the orchestrator is constrained to
+      // either a positive closure or a "we're reviewing your ticket and
+      // an agent will be back with you shortly" holding response. Both
+      // come through as ai_response. A positive closure sets
+      // _closedThisRun via the close_ticket action; if we got here
+      // WITHOUT that flag, this is a holding promise — flip escalation
+      // state so the assigned agent gets a real signal in the queue
+      // instead of the ticket silently auto-closing under them.
+      // (Suzanne Doucet 2026-05-21: AI said "agent will be back",
+      // then post-execute auto-close closed the ticket and the agent
+      // never knew she was waiting. Lost for a week.)
+      if (ctx.agentInvolved && !ctx._closedThisRun && !ctx._escalatedThisRun) {
+        await escalateTicket(ctx, "ai_holding_promise");
       }
       break;
 

@@ -1634,7 +1634,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         const { data: wsForSandbox } = await admin.from("workspaces").select("sandbox_mode").eq("id", wsId).single();
         const isSandbox = wsForSandbox?.sandbox_mode === true || cfg.sandbox === true;
         const execResult = await executeSonnetDecision(
-          { admin, workspaceId: wsId, ticketId: tid, customerId: st.custId || "", channel: st.ch, sandbox: isSandbox },
+          { admin, workspaceId: wsId, ticketId: tid, customerId: st.custId || "", channel: st.ch, sandbox: isSandbox, agentInvolved: agentAssigned },
           sonnetDecision,
           pers,
           async (m, sb) => sendWithDelay(admin, wsId, tid, st.ch, m, sb),
