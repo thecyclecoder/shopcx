@@ -336,19 +336,32 @@ export async function POST(
           ctx.awaiting_item_selection = false;
           await admin.from("tickets").update({ playbook_context: ctx }).eq("id", session.ticket_id);
         } else {
-          // Items need replacing — write exact quantities
+          // Items need replacing — write exact quantities + per-item reason
           const replacementItems = result.replacementItems.map(i => ({
             title: i.title,
             quantity: i.quantity,
             variantId: i.variantId || "",
             sku: i.sku || "",
-            type: i.type,
+            reason: i.reason,                 // missing | damaged | wrong
+            type: "damaged_or_missing",       // legacy compat for playbook
           }));
+
+          // Combined reason for the replacement record + playbook
+          // executor. When mixed, "damaged_items" wins so the
+          // replacement copy mentions product quality (and the
+          // orchestrator's reply can flag heat etc.).
+          const reasons = Array.from(result.reasonsPresent);
+          const primaryReason: "damaged_items" | "missing_items" | "wrong_item" =
+            reasons.includes("damaged") ? "damaged_items"
+            : reasons.includes("missing") ? "missing_items"
+            : reasons.includes("wrong") ? "wrong_item"
+            : "missing_items";
 
           const { data: ticket } = await admin.from("tickets")
             .select("playbook_context").eq("id", session.ticket_id).single();
           const ctx = (ticket?.playbook_context || {}) as Record<string, unknown>;
           ctx.replacement_items = replacementItems;
+          ctx.replacement_reasons_present = reasons;   // ["damaged","missing"] etc.
           ctx.awaiting_item_selection = false;
           await admin.from("tickets").update({ playbook_context: ctx }).eq("id", session.ticket_id);
 
@@ -357,12 +370,12 @@ export async function POST(
           if (replacementId) {
             await admin.from("replacements").update({
               items: replacementItems,
-              reason: "missing_items",
+              reason: primaryReason,
               updated_at: new Date().toISOString(),
             }).eq("id", replacementId);
           }
 
-          actionLog.push(`Replacement needed: ${result.summary}`);
+          actionLog.push(`Replacement needed (${primaryReason}): ${result.summary}`);
         }
       }
 

@@ -2,11 +2,23 @@
  * Missing Items Journey Builder
  *
  * Two-step flow:
- *   Step 1 (checklist): Select which items had issues (unselected = received fine)
- *   Step 2 (item_accounting): For each selected item, how many were damaged/missing?
+ *   Step 1 (item_accounting): For EACH item, what happened? Per-item radio
+ *     - Received and OK (default — no action)
+ *     - Item is missing
+ *     - Damaged or unusable (melted, discolored, broken seal, stuck together)
+ *     - Wrong item — got something different than ordered
+ *   Step 2 (item_accounting): For items marked missing/damaged/wrong, how many?
  *
- * If customer selects nothing in step 1, all items received = no replacement.
- * Step 2 only shows items from step 1, with simple quantity options.
+ * If every item is "received and OK", we close out as no replacement needed.
+ * Otherwise we produce a replacement plan keyed by reason — the orchestrator's
+ * reply can mention common causes (heat for "damaged", carrier for "missing",
+ * etc.) based on which reasons appear in the result.
+ *
+ * Old shape was a single "select all that had issues" checkbox — Angelyna
+ * Reggiani (ticket 0428c8a9) revealed the gap: she received the box but
+ * the tablets were unusable, so she correctly didn't tick "missing"
+ * boxes, and the journey concluded "all items received OK". The per-item
+ * radio with explicit reason eliminates that mismatch.
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -125,42 +137,47 @@ export async function buildMissingItemsSteps(
 
   const steps: JourneyStep[] = [];
 
-  // Step 1: Checklist — which items had issues?
+  // Step 1: Per-item reason picker. The renderer groups by `item_N:`
+  // prefix and shows a radio per item.
+  const REASONS: { value: "ok" | "missing" | "damaged" | "wrong"; label: string }[] = [
+    { value: "ok",      label: "Received and OK" },
+    { value: "missing", label: "Item is missing from the box" },
+    { value: "damaged", label: "Damaged or unusable (melted, discolored, stuck together, broken seal)" },
+    { value: "wrong",   label: "Wrong item — I got something different than I ordered" },
+  ];
+  const reasonGroups = lineItems.map((item, idx) => ({
+    key: `item_${idx}`,
+    title: `${item.title}${item.quantity > 1 ? ` (x${item.quantity})` : ""}`,
+    quantity: item.quantity,
+    options: REASONS.map((r) => ({ value: `item_${idx}:${r.value}`, label: r.label })),
+  }));
   steps.push({
     key: "select_items",
-    type: "checklist",
-    question: "Which items had an issue?",
-    subtitle: "Select all items that were missing or damaged. Items you don't select will be marked as received.",
-    options: lineItems.map((item, idx) => ({
-      value: String(idx),
-      label: `${item.title}${item.quantity > 1 ? ` (x${item.quantity})` : ""}`,
-    })),
+    type: "item_accounting",
+    question: "What happened with each item?",
+    subtitle: "Pick the option that best matches for each item. If everything arrived fine, leave each one on 'Received and OK'.",
+    options: reasonGroups.flatMap((g) => g.options),
   });
 
-  // Step 2: item_accounting — for selected items, how many?
-  // Options are built per-item: "1 damaged/missing", "2 damaged/missing", etc.
-  const itemGroups = lineItems.map((item, idx) => {
+  // Step 2: Quantity per affected item. Only renders entries whose
+  // step-1 pick wasn't "ok". The frontend already filters by step-1
+  // response so we ship the full option set here.
+  const qtyGroups = lineItems.map((item, idx) => {
     const options: { value: string; label: string }[] = [];
     for (let n = 1; n <= item.quantity; n++) {
       options.push({
         value: `item_${idx}:${n}`,
-        label: n === item.quantity && item.quantity > 1
-          ? `All ${n} damaged/missing`
-          : `${n} damaged/missing`,
+        label: n === item.quantity && item.quantity > 1 ? `All ${n}` : String(n),
       });
     }
     return { key: `item_${idx}`, title: item.title, quantity: item.quantity, options };
   });
-
-  // Flat options for the step (renderer will group by prefix)
-  const allOptions = itemGroups.flatMap(g => g.options);
-
   steps.push({
     key: "item_accounting",
     type: "item_accounting",
-    question: "How many of each item were damaged or missing?",
-    subtitle: "Select the quantity for each affected item.",
-    options: allOptions,
+    question: "How many of each were affected?",
+    subtitle: "Pick the quantity for each item you flagged above.",
+    options: qtyGroups.flatMap((g) => g.options),
   });
 
   return {
@@ -171,58 +188,114 @@ export async function buildMissingItemsSteps(
       orderId: order.id,
       orderNumber: order.order_number,
       lineItems,
-      itemGroups,
+      reasonGroups,
+      qtyGroups,
       replacementId: replacement?.id || null,
     },
   };
 }
 
 /**
- * Parse the two-step journey response into replacement items.
- * Step 1 response: "0,2,4" (selected item indices)
- * Step 2 response: "item_0:1,item_2:2,item_4:1" (quantities)
+ * Parse the two-step journey response into replacement items keyed
+ * by reason.
+ *
+ *   selectResponse format:      "item_0:damaged,item_1:ok,item_2:missing"
+ *   accountingResponse format:  "item_0:2,item_2:1"
+ *
+ * Returns:
+ *   - allReceived: true when every item picked "ok"
+ *   - replacementItems: per-item reason + qty
+ *   - reasonsPresent: set of reasons (drives orchestrator reply context)
+ *   - summary: human-readable rollup for the system log
  */
+type ItemReason = "ok" | "missing" | "damaged" | "wrong";
+
+export interface ParsedReplacementItem {
+  title: string;
+  quantity: number;
+  reason: Exclude<ItemReason, "ok">;
+  sku?: string;
+  variantId?: string;
+}
+
 export function parseItemAccounting(
   selectResponse: string,
   accountingResponse: string,
   lineItems: OrderLineItem[],
 ): {
   allReceived: boolean;
-  replacementItems: { title: string; quantity: number; type: "damaged_or_missing"; sku?: string; variantId?: string }[];
+  replacementItems: ParsedReplacementItem[];
+  reasonsPresent: Set<Exclude<ItemReason, "ok">>;
   summary: string;
 } {
-  const selectedIndices = selectResponse.split(",").map(s => parseInt(s.trim())).filter(n => !isNaN(n));
-
-  if (selectedIndices.length === 0) {
-    return { allReceived: true, replacementItems: [], summary: "All items received OK" };
+  // Parse step 1 — per-item reason
+  const reasonByIdx = new Map<number, Exclude<ItemReason, "ok">>();
+  for (const part of selectResponse.split(",").map(s => s.trim()).filter(Boolean)) {
+    const [key, val] = part.split(":");
+    if (!key || !val) continue;
+    const idx = parseInt(key.replace("item_", ""));
+    if (isNaN(idx)) continue;
+    const r = val.trim() as ItemReason;
+    // BACK-COMPAT: a bare numeric value here (e.g. "0,2,4" — the
+    // legacy checkbox shape) means "this item had an issue" with
+    // no reason. Treat as "damaged" so we don't lose the report.
+    if (r === "ok") continue;
+    if (r === "missing" || r === "damaged" || r === "wrong") {
+      reasonByIdx.set(idx, r);
+    }
+  }
+  // BACK-COMPAT fallback: if selectResponse is just digit indices
+  // ("0,2,4"), treat each as "damaged".
+  if (reasonByIdx.size === 0 && /^[\d,\s]+$/.test(selectResponse) && selectResponse.trim()) {
+    for (const s of selectResponse.split(",").map(x => x.trim())) {
+      const idx = parseInt(s);
+      if (!isNaN(idx)) reasonByIdx.set(idx, "damaged");
+    }
   }
 
-  const replacementItems: { title: string; quantity: number; type: "damaged_or_missing"; sku?: string; variantId?: string }[] = [];
+  if (reasonByIdx.size === 0) {
+    return {
+      allReceived: true,
+      replacementItems: [],
+      reasonsPresent: new Set(),
+      summary: "All items received OK",
+    };
+  }
 
-  // Parse accounting response
-  const parts = accountingResponse.split(",").map(s => s.trim());
-  for (const part of parts) {
+  // Parse step 2 — quantities. Default to 1 if absent (one-item subs
+  // skip the picker in practice).
+  const qtyByIdx = new Map<number, number>();
+  for (const part of accountingResponse.split(",").map(s => s.trim()).filter(Boolean)) {
     const [key, qtyStr] = part.split(":");
-    if (!key || !qtyStr) continue;
-    const idx = parseInt(key.replace("item_", ""));
-    const qty = parseInt(qtyStr);
-    const item = lineItems[idx];
-    if (!item || isNaN(qty) || qty <= 0) continue;
+    const idx = parseInt((key || "").replace("item_", ""));
+    const qty = parseInt(qtyStr || "1");
+    if (!isNaN(idx) && !isNaN(qty) && qty > 0) qtyByIdx.set(idx, qty);
+  }
 
+  const replacementItems: ParsedReplacementItem[] = [];
+  const reasonsPresent = new Set<Exclude<ItemReason, "ok">>();
+  for (const [idx, reason] of reasonByIdx.entries()) {
+    const item = lineItems[idx];
+    if (!item) continue;
+    const qty = qtyByIdx.get(idx) ?? Math.min(item.quantity, 1);
     replacementItems.push({
       title: item.title,
       quantity: qty,
-      type: "damaged_or_missing",
+      reason,
       sku: item.sku,
       variantId: item.variant_id,
     });
+    reasonsPresent.add(reason);
   }
+
+  const summary = replacementItems
+    .map(i => `${i.quantity}x ${i.title} (${i.reason})`)
+    .join(", ");
 
   return {
     allReceived: replacementItems.length === 0,
     replacementItems,
-    summary: replacementItems.length === 0
-      ? "All items received OK"
-      : replacementItems.map(i => `${i.quantity}x ${i.title}`).join(", "),
+    reasonsPresent,
+    summary: replacementItems.length === 0 ? "All items received OK" : summary,
   };
 }

@@ -1244,6 +1244,38 @@ export default function TicketDetailPage() {
                       className={`prose prose-sm max-w-none break-words overflow-hidden [overflow-wrap:anywhere] ${textClass} ${!isInbound && !isInternal ? "prose-invert" : ""}`}
                       dangerouslySetInnerHTML={{ __html: (m.direction === "inbound" && (m as unknown as Record<string, unknown>).body_clean) ? String((m as unknown as Record<string, unknown>).body_clean) : m.body }}
                     />
+                    {/* Inline images from the raw body — body_clean
+                        strips <img> tags for AI processing, so customer-
+                        attached photos disappear from the agent view.
+                        Extract them from the original body and render
+                        as a small gallery below the message text. */}
+                    {m.direction === "inbound" && (() => {
+                      const raw = m.body || "";
+                      const urls: string[] = [];
+                      const re = /<img[^>]+src=["']([^"']+)["']/gi;
+                      let match: RegExpExecArray | null;
+                      while ((match = re.exec(raw)) !== null) {
+                        const src = match[1];
+                        // Skip 1x1 tracking pixels and tiny inline icons
+                        if (src.includes("track") || src.endsWith(".gif?")) continue;
+                        urls.push(src);
+                      }
+                      if (urls.length === 0) return null;
+                      return (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {urls.map((src, i) => (
+                            // eslint-disable-next-line @next/next/no-img-element, jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions
+                            <img
+                              key={i}
+                              src={src}
+                              alt={`Customer attachment ${i + 1}`}
+                              className="h-32 w-32 cursor-pointer rounded-lg border border-zinc-200 object-cover transition hover:opacity-80 dark:border-zinc-700"
+                              onClick={() => window.open(src, "_blank")}
+                            />
+                          ))}
+                        </div>
+                      );
+                    })()}
                     {(m as TicketMessage & { _sandbox_suppressed?: boolean })._sandbox_suppressed && (
                       <div className="mt-1.5 flex items-center gap-1 text-sm text-amber-300">
                         <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
