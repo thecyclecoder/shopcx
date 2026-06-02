@@ -22,6 +22,34 @@ function expectedToken(ticketId: string): string {
   return createHmac("sha256", secret).update(ticketId).digest("hex").slice(0, 32);
 }
 
+/**
+ * GET — read existing CSAT for this ticket (if any).
+ * Returns { existing: null } when nothing has been submitted yet, OR
+ * { existing: { rating, comment, submitted_at, points_awarded } }.
+ *
+ * Used by the mini-site on load so a refresh after submitting doesn't
+ * show the rating form again — instead we show a "thanks, you already
+ * rated this" view with the rating + comment.
+ */
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ ticketId: string }> },
+) {
+  const { ticketId } = await params;
+  const url = new URL(request.url);
+  const token = url.searchParams.get("token") || "";
+  if (!token || token !== expectedToken(ticketId)) {
+    return NextResponse.json({ error: "Invalid token" }, { status: 401 });
+  }
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("ticket_csat")
+    .select("rating, comment, submitted_at, points_awarded")
+    .eq("ticket_id", ticketId)
+    .maybeSingle();
+  return NextResponse.json({ existing: data || null });
+}
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ ticketId: string }> },

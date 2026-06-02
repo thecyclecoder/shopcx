@@ -14,7 +14,7 @@
 import { useEffect, useState, use } from "react";
 import { useSearchParams } from "next/navigation";
 
-type Step = "gate" | "reopen" | "rate" | "thanks-rated" | "thanks-reopened";
+type Step = "loading" | "gate" | "reopen" | "rate" | "comment" | "thanks-rated" | "thanks-reopened" | "already-submitted";
 
 export default function CsatPage({
   params,
@@ -26,18 +26,43 @@ export default function CsatPage({
   const token = searchParams.get("token") || "";
   const preScore = parseInt(searchParams.get("score") || "0", 10);
 
-  const [step, setStep] = useState<Step>("gate");
+  const [step, setStep] = useState<Step>("loading");
   const [rating, setRating] = useState<number>(preScore >= 1 && preScore <= 5 ? preScore : 0);
   const [comment, setComment] = useState("");
   const [reopenReason, setReopenReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pointsAwarded, setPointsAwarded] = useState(0);
+  const [existingRating, setExistingRating] = useState<number>(0);
+  const [existingComment, setExistingComment] = useState<string | null>(null);
+  const [existingSubmittedAt, setExistingSubmittedAt] = useState<string | null>(null);
+  const [existingPoints, setExistingPoints] = useState(0);
 
-  // Deep-link from the email: ?score=N → jump straight to rate step
+  // On load: check if this ticket already has a CSAT submitted. If
+  // yes, jump straight to the already-submitted view (handles
+  // refresh-after-submit on mobile and second-click from the email).
   useEffect(() => {
-    if (preScore >= 1 && preScore <= 5) setStep("rate");
-  }, [preScore]);
+    if (!token) { setStep("gate"); return; }
+    fetch(`/api/csat/${ticketId}?token=${encodeURIComponent(token)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.existing) {
+          setExistingRating(data.existing.rating);
+          setExistingComment(data.existing.comment || null);
+          setExistingSubmittedAt(data.existing.submitted_at || null);
+          setExistingPoints(data.existing.points_awarded || 0);
+          setStep("already-submitted");
+        } else if (preScore >= 1 && preScore <= 5) {
+          // Deep-link from email with pre-selected rating → jump to
+          // the comment step rather than re-showing the gate.
+          setStep("comment");
+        } else {
+          setStep("gate");
+        }
+      })
+      .catch(() => setStep("gate"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticketId, token]);
 
   async function submitReopen() {
     if (!reopenReason.trim()) return;
@@ -79,6 +104,35 @@ export default function CsatPage({
   return (
     <div className="min-h-screen bg-gradient-to-b from-emerald-50 to-white px-4 py-12 dark:from-zinc-950 dark:to-zinc-900">
       <div className="mx-auto max-w-md rounded-2xl bg-white p-8 shadow-sm ring-1 ring-zinc-200 dark:bg-zinc-900 dark:ring-zinc-800">
+        {step === "loading" && (
+          <div className="py-10 text-center text-sm text-zinc-500">Loading…</div>
+        )}
+
+        {step === "already-submitted" && (
+          <div className="text-center">
+            <div className={`mx-auto flex h-14 w-14 items-center justify-center rounded-full text-2xl font-bold ${
+              existingRating >= 4 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400" :
+              existingRating === 3 ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400" :
+              "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400"
+            }`}>{existingRating}</div>
+            <h1 className="mt-4 text-xl font-semibold text-zinc-900 dark:text-zinc-100">Thanks — we got your rating</h1>
+            <p className="mt-2 text-[15px] leading-relaxed text-zinc-600 dark:text-zinc-300">
+              You rated this <strong>{existingRating} / 5</strong>
+              {existingSubmittedAt && <> on <time>{new Date(existingSubmittedAt).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}</time></>}.
+            </p>
+            {existingComment && (
+              <div className="mt-4 rounded-lg bg-zinc-50 p-4 text-left text-[14px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                &ldquo;{existingComment}&rdquo;
+              </div>
+            )}
+            {existingPoints > 0 && (
+              <p className="mt-4 text-[13px] text-emerald-600 dark:text-emerald-400">
+                +{existingPoints} loyalty points added to your account
+              </p>
+            )}
+          </div>
+        )}
+
         {step === "gate" && (
           <>
             <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Quick question</h1>
@@ -142,14 +196,14 @@ export default function CsatPage({
           <>
             <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">How was your experience?</h1>
             <p className="mt-2 text-[15px] leading-relaxed text-zinc-600 dark:text-zinc-300">
-              Two minutes of feedback shapes how we serve you next time. Plus we&apos;ll add <strong>500 loyalty points</strong> to your account as a thank you.
+              Pick a rating to continue.
             </p>
             <div className="mt-6 flex justify-between gap-2">
               {[1, 2, 3, 4, 5].map((n) => (
                 <button
                   key={n}
                   type="button"
-                  onClick={() => setRating(n)}
+                  onClick={() => { setRating(n); setStep("comment"); }}
                   className={`flex-1 rounded-xl border-2 px-3 py-4 text-2xl font-semibold transition ${
                     rating === n
                       ? n <= 2
@@ -165,13 +219,42 @@ export default function CsatPage({
               ))}
             </div>
             <p className="mt-2 text-center text-[11px] text-zinc-400">1 = Poor &nbsp;·&nbsp; 5 = Excellent</p>
+            <button
+              type="button"
+              onClick={() => setStep("gate")}
+              disabled={submitting}
+              className="mt-6 w-full text-center text-sm text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+            >
+              ← Back
+            </button>
+          </>
+        )}
+
+        {step === "comment" && (
+          <>
+            <div className={`mx-auto flex h-14 w-14 items-center justify-center rounded-full text-2xl font-bold ${
+              rating >= 4 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400" :
+              rating === 3 ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400" :
+              "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400"
+            }`}>{rating}</div>
+            <h1 className="mt-4 text-center text-xl font-semibold text-zinc-900 dark:text-zinc-100">
+              {rating >= 4 ? "Thanks for the kind rating!" : rating === 3 ? "Got it — thanks for the rating" : "Sorry we missed the mark"}
+            </h1>
+            <p className="mt-2 text-center text-[15px] leading-relaxed text-zinc-600 dark:text-zinc-300">
+              {rating >= 4
+                ? "Anything specific you want to call out? Your team loves reading the kind words."
+                : rating === 3
+                  ? "What would have made this a 5? Even one sentence helps us improve."
+                  : "What could we have done differently? Tell us — we read every response."}
+            </p>
             <textarea
               value={comment}
               onChange={(e) => setComment(e.target.value)}
-              placeholder="Anything else? (optional)"
-              rows={3}
+              placeholder={rating >= 4 ? "Optional — leave blank to skip" : "Tell us what happened"}
+              rows={5}
               maxLength={2000}
-              className="mt-4 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-[15px] text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+              autoFocus
+              className="mt-5 w-full rounded-lg border border-zinc-300 bg-white px-3 py-3 text-[15px] text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
             />
             {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
             <button
@@ -180,15 +263,15 @@ export default function CsatPage({
               onClick={submitRating}
               className="mt-4 w-full rounded-xl bg-emerald-600 px-4 py-3 text-base font-medium text-white transition hover:bg-emerald-500 disabled:opacity-50"
             >
-              {submitting ? "Submitting…" : "Submit feedback"}
+              {submitting ? "Submitting…" : comment.trim() ? "Submit feedback" : "Submit without comment"}
             </button>
             <button
               type="button"
-              onClick={() => setStep("gate")}
+              onClick={() => setStep("rate")}
               disabled={submitting}
               className="mt-2 w-full text-center text-sm text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
             >
-              ← Back
+              ← Change rating
             </button>
           </>
         )}
