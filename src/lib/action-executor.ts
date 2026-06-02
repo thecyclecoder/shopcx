@@ -448,24 +448,52 @@ export const directActionHandlers: Record<
   },
 
   change_next_date: async (ctx, p) => {
-    const { appstleUpdateNextBillingDate } = await import("@/lib/appstle");
-    // Appstle rejects past timestamps with a 400. If Sonnet passes a date
-    // that is today (Central) or earlier — common when a customer says
-    // "ship it ASAP" and Sonnet picks the current date — bump to tomorrow
-    // before calling. The customer-facing message references {{next_date}}
-    // which substitutes from the final action params.
+    const { appstleUpdateNextBillingDate, appstleGetUpcomingOrders, appstleAttemptBilling } = await import("@/lib/appstle");
+    // Appstle rejects past/today timestamps. If Sonnet passes a date
+    // ≤ today (Central) — which it does when a customer says "ship
+    // it ASAP" or "send right away" — we don't shove next_billing
+    // into the future; we just charge now via bill_now. This matches
+    // customer intent (get product TODAY) and avoids the 400 we used
+    // to bounce on.
     let date = p.date!;
     const centralToday = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }));
     centralToday.setHours(0, 0, 0, 0);
     const requested = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00`) : new Date(date);
     if (!isNaN(requested.getTime()) && requested.getTime() <= centralToday.getTime()) {
+      const upcoming = await appstleGetUpcomingOrders(ctx.workspaceId, p.contract_id!);
+      if (upcoming.success && upcoming.orders?.length) {
+        const billed = await appstleAttemptBilling(ctx.workspaceId, upcoming.orders[0].id);
+        if (billed.success) {
+          return { success: true, summary: "Triggered bill_now (customer asked to ship today)" };
+        }
+        // bill_now failed → fall through to bumping date as a soft fallback
+        console.warn(`[change_next_date] bill_now fallback failed for ${p.contract_id}:`, billed.error);
+      }
       const tomorrow = new Date(centralToday);
       tomorrow.setDate(tomorrow.getDate() + 1);
       date = tomorrow.toISOString().slice(0, 10);
-      p.date = date; // so the action-completed summary reflects the actual date
+      p.date = date;
     }
     const r = await appstleUpdateNextBillingDate(ctx.workspaceId, p.contract_id!, date);
     return { ...r, summary: `Changed next billing date to ${date}` };
+  },
+
+  /**
+   * bill_now — charge the current upcoming order on a sub right
+   * away (Appstle's attemptBilling endpoint). Use this when the
+   * customer says "ship it now", "ASAP", "I'm out of product".
+   * Does NOT change next_billing_date — after the charge, Appstle
+   * advances the schedule by one cycle.
+   */
+  bill_now: async (ctx, p) => {
+    const { appstleGetUpcomingOrders, appstleAttemptBilling } = await import("@/lib/appstle");
+    if (!p.contract_id) return { success: false, error: "bill_now missing contract_id" };
+    const upcoming = await appstleGetUpcomingOrders(ctx.workspaceId, p.contract_id);
+    if (!upcoming.success || !upcoming.orders?.length) {
+      return { success: false, error: `No upcoming order to bill: ${upcoming.error || "(empty)"}` };
+    }
+    const billed = await appstleAttemptBilling(ctx.workspaceId, upcoming.orders[0].id);
+    return { ...billed, summary: "Triggered bill_now" };
   },
 
   add_item: async (ctx, p) => {
