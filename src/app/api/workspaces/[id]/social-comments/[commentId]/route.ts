@@ -157,6 +157,34 @@ export async function POST(
     .single();
   if (!comment) return NextResponse.json({ error: "Comment not found" }, { status: 404 });
 
+  if (action === "flag_competitor") {
+    // Agent-driven escalation: append competitor name(s) to the
+    // workspace deny-list, then delete + ban the current commenter
+    // exactly like Pass-1's competitor_promotion classification.
+    const rawName = typeof body.competitor_name === "string" ? body.competitor_name.trim() : "";
+    if (rawName) {
+      const { data: ws } = await admin.from("workspaces")
+        .select("social_competitor_keywords").eq("id", workspaceId).single();
+      const existing = ((ws?.social_competitor_keywords as string | null) || "").trim();
+      const existingLines = existing ? existing.split("\n").map((l: string) => l.trim().toLowerCase()) : [];
+      // Accept comma- or newline-separated input from the prompt
+      const newLines = rawName.split(/[\n,]+/).map((l: string) => l.trim()).filter(Boolean);
+      const toAdd = newLines.filter((l: string) => !existingLines.includes(l.toLowerCase()));
+      if (toAdd.length) {
+        const merged = [existing, ...toAdd].filter(Boolean).join("\n");
+        await admin.from("workspaces").update({ social_competitor_keywords: merged }).eq("id", workspaceId);
+      }
+    }
+    // Delete + ban (re-using the executeAction path used by Pass-1)
+    const result = await executeAction({
+      admin, comment, action: "delete", replyBody: null,
+      actorUserId: user.id, moderationSource: "agent_manual",
+      banUser: true, banReason: `competitor promotion${rawName ? `: ${rawName}` : ""}`,
+    });
+    if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });
+    return NextResponse.json({ ok: true });
+  }
+
   if (action === "regenerate_ai") {
     const { moderateSocialComment } = await import("@/lib/social-comment-orchestrator");
     const humanHint = typeof body.human_context === "string" && body.human_context.trim()

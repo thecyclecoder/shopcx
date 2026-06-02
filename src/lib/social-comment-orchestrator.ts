@@ -104,6 +104,10 @@ interface CommentContext {
    *  count, science backing, etc.) the AI weaves into public replies
    *  when a commenter raises a price/affordability objection. */
   brandProofPoints: string | null;
+  /** Workspace-curated competitor brand/product names (one per line).
+   *  When Pass-1 detects positive promotion of one of these on our
+   *  paid creative, classify as competitor_promotion → delete + ban. */
+  competitorKeywords: string | null;
   /** Optional hint from an agent triggering a re-moderation, e.g.
    *  "this is actually a glowing review, not spam". Overrides both
    *  passes' default classifications when supplied. */
@@ -122,7 +126,7 @@ interface CommentContext {
 // PASS 1 — Haiku triage
 // ────────────────────────────────────────────────────────────────────────
 
-type Pass1Classification = "clean" | "spam" | "sexual" | "abusive" | "irrelevant";
+type Pass1Classification = "clean" | "spam" | "sexual" | "abusive" | "irrelevant" | "competitor_promotion";
 
 interface Pass1Output {
   classification: Pass1Classification;
@@ -148,15 +152,21 @@ function buildPass1Prompt(ctx: CommentContext): string {
   lines.push("  - spam: link spam, contact-info dumps, fake promo codes, repeated promotional content unrelated to our brand");
   lines.push("  - sexual: sexual harassment, soliciting, lewd content");
   lines.push("  - abusive: slurs, doxxing, targeted hate, threats — AND brand-attack/anti-campaign comments. Anti-campaign means comments whose primary intent is to discourage others from buying or to publicly broadcast a grievance as a warning: 'don't buy from this company', 'this is a scam', 'they ripped me off', 'beware of these people', 'tag everyone you know so they don't get scammed', etc. These are usually people who got a denied refund or had a bad experience and are trying to damage the brand. A single complaint or negative review of the product is CLEAN, not abusive. Anti-campaign requires the intent to recruit OTHER customers against the brand.");
+  lines.push("  - competitor_promotion: comment endorses, recommends, or actively shills a competitor brand/product under OUR paid ad. The intent matters — not the mere mention. POSITIVE PROMOTION ('I drink Ryze daily', 'try AG1 instead, way better', 'Mud\\Wtr changed my life, switch to that') → competitor_promotion. NEUTRAL PRICE COMPARISON ('twice the price of Ryze', 'cheaper than Athletic Greens') is NOT competitor_promotion — that's a price objection mentioning a competitor as context and stays CLEAN so Pass-2 can handle it as an objection. Naming a competitor as part of a complaint about us is also clean. The bar: is the commenter trying to redirect prospects to a competitor? If yes, competitor_promotion. If they're just expressing skepticism or context, clean.");
   lines.push("  - irrelevant: tagging unrelated users with no comment, single emoji with no signal, gibberish");
-  lines.push("  - clean: anything else, INCLUDING negative complaints, criticism, sarcasm, or off-color humor that's not crossing a line. Real customer feedback — even harsh — is clean. Asking for a refund publicly is clean. Saying 'I had a bad experience' is clean. The line is when the comment shifts from sharing experience to actively trying to dissuade others.");
+  lines.push("  - clean: anything else, INCLUDING negative complaints, criticism, sarcasm, or off-color humor that's not crossing a line. Real customer feedback — even harsh — is clean. Asking for a refund publicly is clean. Saying 'I had a bad experience' is clean. Mentioning a competitor in a price comparison or skeptical context is clean. The line is when the comment shifts from sharing experience to actively trying to dissuade others or promote a competitor.");
+  if (ctx.competitorKeywords) {
+    lines.push("");
+    lines.push("KNOWN COMPETITORS for this workspace (mentions to evaluate carefully):");
+    lines.push(ctx.competitorKeywords);
+  }
   lines.push("");
   lines.push("Also assign a sentiment: positive / negative / neutral / spam / abusive.");
   lines.push("Sentiment is independent of classification — a 'clean' comment can be negative; a positive comment is never abusive.");
   lines.push("");
   lines.push("Respond with ONLY valid JSON, no prose:");
   lines.push("{");
-  lines.push('  "classification": "clean" | "spam" | "sexual" | "abusive" | "irrelevant",');
+  lines.push('  "classification": "clean" | "spam" | "sexual" | "abusive" | "competitor_promotion" | "irrelevant",');
   lines.push('  "sentiment": "positive" | "negative" | "neutral" | "spam" | "abusive",');
   lines.push('  "reasoning": "one short sentence"');
   lines.push("}");
@@ -209,6 +219,8 @@ function pass1ToDecision(p1: Pass1Output): ModerationDecision {
       return { ...base, action: "delete", ban_user: true, ban_reason: "sexual content" };
     case "abusive":
       return { ...base, action: "delete", ban_user: true, ban_reason: "abusive content" };
+    case "competitor_promotion":
+      return { ...base, action: "delete", ban_user: true, ban_reason: "competitor promotion" };
     case "irrelevant":
       return { ...base, action: "ignore" };
     case "clean":
@@ -484,7 +496,7 @@ async function buildContext(
     comment.matched_product_id
       ? admin.from("products").select("title, description, handle").eq("id", comment.matched_product_id).single()
       : Promise.resolve({ data: null }),
-    admin.from("workspaces").select("storefront_domain, shopify_domain, shopify_myshopify_domain, ad_destination_domains, social_brand_proof_points").eq("id", workspaceId).single(),
+    admin.from("workspaces").select("storefront_domain, shopify_domain, shopify_myshopify_domain, ad_destination_domains, social_brand_proof_points, social_competitor_keywords").eq("id", workspaceId).single(),
   ]);
 
   // Construct the canonical PDP URL from the workspace's primary
@@ -570,6 +582,7 @@ async function buildContext(
         }
       : null,
     brandProofPoints: ((ws as { social_brand_proof_points: string | null } | null)?.social_brand_proof_points || null),
+    competitorKeywords: ((ws as { social_competitor_keywords: string | null } | null)?.social_competitor_keywords || null),
     humanHint,
     crisis,
   };

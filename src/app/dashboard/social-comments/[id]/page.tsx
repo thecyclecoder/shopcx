@@ -356,6 +356,25 @@ export default function SocialCommentDetailPage({
                   Ignore
                 </ActionButton>
               </div>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={async () => {
+                  const raw = prompt(
+                    "Competitor name(s) they're promoting? (comma-separated)\n\n" +
+                    "Adds to the workspace deny-list, deletes this comment, and bans the user.",
+                  );
+                  if (raw === null) return;
+                  const name = raw.trim();
+                  if (!name) return;
+                  if (!confirm(`Add "${name}" to competitor list + delete comment + ban ${comment.meta_sender_name || "this user"}?`)) return;
+                  const ok = await act("flag_competitor", { competitor_name: name });
+                  if (ok) await load();
+                }}
+                className="mt-2 w-full rounded-md border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:bg-zinc-900 dark:text-red-400 dark:hover:bg-red-950"
+              >
+                Flag as competitor promotion (delete + ban)
+              </button>
             </Card>
 
             {/* Escalation — pick a specific agent or round-robin */}
