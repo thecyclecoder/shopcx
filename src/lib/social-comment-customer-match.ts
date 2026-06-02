@@ -142,21 +142,45 @@ export interface CustomerCandidate {
   has_active_sub: boolean;
   ticket_count: number;
   last_order_at: string | null;
-  /** 0-100: how confident we are this is the same person. */
+  /** 0-100 from fuzzy match; 1000 when the agent has confirmed this link. */
   match_score: number;
+  /** True when this customer was confirmed by an agent (lives in
+   *  meta_sender_customer_links). Skip fuzzy matching entirely. */
+  confirmed: boolean;
 }
 
 /**
- * Find customers that plausibly match a Meta display name.
+ * Find customers that plausibly match a Meta display name. Always
+ * checks the confirmed-link table first — if an agent has previously
+ * confirmed this Meta sender is a specific customer, return ONLY that
+ * customer with confirmed=true and skip fuzzy matching.
  *
- * Always returns the BEST candidate per linked-account group; we
- * don't surface 4 versions of the same person.
+ * Pass metaSenderId to enable the confirmed-link lookup; without it
+ * we fall straight to name matching.
  */
 export async function findCustomerCandidatesByMetaName(
   admin: Admin,
   workspaceId: string,
   metaSenderName: string | null,
+  metaSenderId?: string | null,
 ): Promise<CustomerCandidate[]> {
+  // Confirmed link short-circuit: if an agent has linked this Meta
+  // sender to a customer before, that's the answer — no fuzzy match.
+  if (metaSenderId) {
+    const { data: link } = await admin
+      .from("meta_sender_customer_links")
+      .select("customer_id")
+      .eq("workspace_id", workspaceId)
+      .eq("meta_sender_id", metaSenderId)
+      .maybeSingle();
+    if (link?.customer_id) {
+      const enriched = await enrichCandidate(admin, workspaceId, link.customer_id as string);
+      return enriched
+        ? [{ ...enriched, match_score: 1000, confirmed: true }]
+        : [];
+    }
+  }
+
   const parts = (metaSenderName || "").trim().split(/\s+/).filter(Boolean);
   if (parts.length < 2) return [];
   const firstName = parts[0];
@@ -247,5 +271,40 @@ export async function findCustomerCandidatesByMetaName(
       Number(b.has_active_sub) - Number(a.has_active_sub) ||
       b.ticket_count - a.ticket_count ||
       (b.ltv_cents || 0) - (a.ltv_cents || 0))
-    .slice(0, 5);
+    .slice(0, 5)
+    .map(c => ({ ...c, confirmed: false }));
+}
+
+/**
+ * Load + enrich a single customer for the confirmed-link short-circuit.
+ * Returns null if the customer was deleted or never existed.
+ */
+async function enrichCandidate(
+  admin: Admin,
+  workspaceId: string,
+  customerId: string,
+): Promise<Omit<CustomerCandidate, "match_score" | "confirmed"> | null> {
+  const { data: c } = await admin
+    .from("customers")
+    .select("id, email, first_name, last_name, shopify_customer_id, ltv_cents, subscription_status")
+    .eq("workspace_id", workspaceId)
+    .eq("id", customerId)
+    .maybeSingle();
+  if (!c) return null;
+  const [{ count: ticket_count }, { data: order }] = await Promise.all([
+    admin.from("tickets").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("customer_id", customerId),
+    admin.from("orders").select("created_at").eq("workspace_id", workspaceId).eq("customer_id", customerId).order("created_at", { ascending: false }).limit(1).maybeSingle(),
+  ]);
+  return {
+    id: c.id as string,
+    email: c.email as string | null,
+    first_name: c.first_name as string | null,
+    last_name: c.last_name as string | null,
+    shopify_customer_id: c.shopify_customer_id as string | null,
+    ltv_cents: c.ltv_cents as number | null,
+    subscription_status: c.subscription_status as string | null,
+    has_active_sub: c.subscription_status === "active",
+    ticket_count: ticket_count || 0,
+    last_order_at: (order?.created_at as string | null) || null,
+  };
 }

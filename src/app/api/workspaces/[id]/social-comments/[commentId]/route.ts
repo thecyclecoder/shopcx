@@ -82,6 +82,7 @@ export async function GET(
     admin,
     workspaceId,
     (comment as { meta_sender_name: string | null }).meta_sender_name,
+    (comment as { meta_sender_id: string | null }).meta_sender_id,
   );
   let recentTicketsByCustomer: Record<string, Array<{ id: string; subject: string | null; status: string; created_at: string; channel: string }>> = {};
   if (candidates.length) {
@@ -155,6 +156,83 @@ export async function POST(
     .eq("id", commentId)
     .single();
   if (!comment) return NextResponse.json({ error: "Comment not found" }, { status: 404 });
+
+  if (action === "set_status") {
+    const next = String(body.status || "").toLowerCase();
+    const ALLOWED = new Set(["open", "closed", "ignored"]);
+    if (!ALLOWED.has(next)) {
+      return NextResponse.json({ error: `status must be one of ${[...ALLOWED].join(", ")}` }, { status: 400 });
+    }
+    // Don't trample a row that's already been deleted/hidden on Meta —
+    // those are end states tied to a Graph API action, not just UI bookkeeping.
+    const { data: current } = await admin
+      .from("social_comments").select("status").eq("id", commentId).single();
+    if (current && ["hidden", "deleted"].includes(current.status as string)) {
+      return NextResponse.json({ error: `Comment is ${current.status} — undo that first via Meta` }, { status: 400 });
+    }
+    await admin.from("social_comments")
+      .update({ status: next, updated_at: new Date().toISOString() })
+      .eq("id", commentId);
+    return NextResponse.json({ ok: true });
+  }
+
+  if (action === "link_customer") {
+    const customerId = (body.customer_id as string) || null;
+    if (!customerId) return NextResponse.json({ error: "customer_id required" }, { status: 400 });
+    const { data: cust } = await admin.from("customers")
+      .select("id").eq("workspace_id", workspaceId).eq("id", customerId).maybeSingle();
+    if (!cust) return NextResponse.json({ error: "Customer not in this workspace" }, { status: 400 });
+
+    // Persistent link — future comments from this Meta sender are
+    // auto-stamped with this customer_id at ingest time.
+    await admin.from("meta_sender_customer_links").upsert({
+      workspace_id: workspaceId,
+      meta_sender_id: comment.meta_sender_id,
+      meta_sender_name: comment.meta_sender_name || null,
+      customer_id: customerId,
+      confirmed_by: user.id,
+      confirmed_at: new Date().toISOString(),
+    }, { onConflict: "workspace_id,meta_sender_id" });
+
+    // Stamp every existing comment from the same sender so historical
+    // rows pick up the link without a re-ingest.
+    await admin.from("social_comments")
+      .update({ customer_id: customerId, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
+      .eq("meta_sender_id", comment.meta_sender_id);
+    return NextResponse.json({ ok: true });
+  }
+
+  if (action === "unlink_customer") {
+    await admin.from("meta_sender_customer_links")
+      .delete()
+      .eq("workspace_id", workspaceId)
+      .eq("meta_sender_id", comment.meta_sender_id);
+    await admin.from("social_comments")
+      .update({ customer_id: null, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
+      .eq("meta_sender_id", comment.meta_sender_id);
+    return NextResponse.json({ ok: true });
+  }
+
+  if (action === "assign") {
+    const assigneeId = (body.assignee_id as string) || null;
+    if (assigneeId) {
+      // Confirm the assignee is a member of this workspace.
+      const { data: m } = await admin.from("workspace_members")
+        .select("user_id").eq("workspace_id", workspaceId).eq("user_id", assigneeId).maybeSingle();
+      if (!m) return NextResponse.json({ error: "Assignee not a member of this workspace" }, { status: 400 });
+    }
+    await admin.from("social_comments")
+      .update({
+        status: assigneeId ? "escalated" : "open",
+        assigned_to: assigneeId,
+        moderation_source: "agent_manual",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", commentId);
+    return NextResponse.json({ ok: true });
+  }
 
   if (action === "create_ticket") {
     const customerId = (body.customer_id as string) || null;

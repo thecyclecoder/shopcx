@@ -24,6 +24,7 @@ interface CommentDetail {
   ai_reply_body: string | null;
   ai_reasoning: string | null;
   ai_ran_at: string | null;
+  assigned_to: string | null;
   liked_at: string | null;
   hidden_at: string | null;
   deleted_at: string | null;
@@ -72,6 +73,13 @@ interface CustomerCandidate {
   ticket_count: number;
   last_order_at: string | null;
   match_score: number;
+  confirmed: boolean;
+}
+
+interface WorkspaceMember {
+  user_id: string;
+  display_name: string | null;
+  role: string;
 }
 
 interface RecentTicket {
@@ -97,6 +105,8 @@ export default function SocialCommentDetailPage({
   const [senderBanned, setSenderBanned] = useState(false);
   const [candidates, setCandidates] = useState<CustomerCandidate[]>([]);
   const [recentTicketsByCustomer, setRecentTicketsByCustomer] = useState<Record<string, RecentTicket[]>>({});
+  const [members, setMembers] = useState<WorkspaceMember[]>([]);
+  const [assigneePick, setAssigneePick] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [replyBody, setReplyBody] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -143,6 +153,15 @@ export default function SocialCommentDetailPage({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Workspace members for the escalation assignee picker — load once.
+  useEffect(() => {
+    if (!workspaceId) return;
+    fetch(`/api/workspaces/${workspaceId}/members`)
+      .then(r => r.ok ? r.json() : [])
+      .then((data: WorkspaceMember[]) => setMembers(Array.isArray(data) ? data.filter(m => ["owner", "admin", "agent", "social"].includes(m.role)) : []))
+      .catch(() => setMembers([]));
+  }, [workspaceId]);
 
   async function act(action: string, payload?: Record<string, unknown>) {
     setSubmitting(true);
@@ -280,7 +299,38 @@ export default function SocialCommentDetailPage({
         {/* Right sidebar — moderation context */}
         <aside className="w-80 shrink-0 border-l border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-950 overflow-auto">
           <div className="space-y-4">
-            {/* Moderation actions — pinned at top for fast triage */}
+            {/* Status row — independent of the Meta-side actions (hide/delete).
+                Lets agents close a comment without taking a public action. */}
+            <Card title={`Status: ${comment.status}`}>
+              {(["hidden", "deleted"].includes(comment.status)) ? (
+                <p className="text-xs text-zinc-500">
+                  Status is locked because this comment is {comment.status} on Meta.
+                  Reopen it from Meta first if you need to change status here.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {(["open", "closed", "ignored"] as const).map(s => (
+                    <button
+                      key={s}
+                      type="button"
+                      disabled={submitting || comment.status === s}
+                      onClick={async () => {
+                        if (await act("set_status", { status: s })) await load();
+                      }}
+                      className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+                        comment.status === s
+                          ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
+                          : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                      }`}
+                    >
+                      {s[0].toUpperCase() + s.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </Card>
+
+            {/* Moderation actions — Meta-side actions */}
             <Card title="Moderation actions" accent="purple">
               <div className="grid grid-cols-2 gap-2">
                 <ActionButton onClick={() => act("like").then(load)} disabled={submitting}>
@@ -303,13 +353,58 @@ export default function SocialCommentDetailPage({
                 <ActionButton onClick={() => act("ignore").then(load)} disabled={submitting}>
                   Ignore
                 </ActionButton>
-                <ActionButton
-                  onClick={() => act("escalate").then(load)}
-                  disabled={submitting}
-                >
-                  Escalate
-                </ActionButton>
               </div>
+            </Card>
+
+            {/* Escalation — pick a specific agent or round-robin */}
+            <Card title="Escalate">
+              {comment.status === "escalated" ? (
+                <div className="space-y-1.5">
+                  <p className="text-xs text-zinc-500">
+                    Currently escalated{comment.assigned_to ? ` to ${members.find(m => m.user_id === comment.assigned_to)?.display_name || "an agent"}` : ""}.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={async () => {
+                      if (await act("assign", { assignee_id: null })) await load();
+                    }}
+                    className="w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  >
+                    Unassign
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <select
+                    value={assigneePick}
+                    onChange={(e) => setAssigneePick(e.target.value)}
+                    className="w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-xs text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                  >
+                    <option value="">Round-robin (next available)</option>
+                    {members.map(m => (
+                      <option key={m.user_id} value={m.user_id}>
+                        {m.display_name || m.user_id.slice(0, 8)} ({m.role})
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={async () => {
+                      const ok = assigneePick
+                        ? await act("assign", { assignee_id: assigneePick })
+                        : await act("escalate");
+                      if (ok) await load();
+                    }}
+                    className="w-full rounded-md bg-amber-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-amber-500 disabled:opacity-50"
+                  >
+                    {assigneePick
+                      ? `Assign to ${members.find(m => m.user_id === assigneePick)?.display_name || "agent"}`
+                      : "Escalate (round-robin)"}
+                  </button>
+                </div>
+              )}
             </Card>
 
             {/* Commenter — pinned near top alongside actions */}
@@ -350,13 +445,21 @@ export default function SocialCommentDetailPage({
               )}
             </Card>
 
-            {/* Possible customer matches by name */}
+            {/* Customer match — confirmed link OR fuzzy candidates */}
             {candidates.length > 0 && (
-              <Card title={candidates.length === 1 ? "Customer match" : `${candidates.length} possible matches`} accent="emerald">
+              <Card
+                title={
+                  candidates[0]?.confirmed ? "Linked customer" :
+                  candidates.length === 1 ? "Customer match" :
+                  `${candidates.length} possible matches`
+                }
+                accent="emerald"
+              >
                 <ul className="space-y-3">
                   {candidates.map(c => {
                     const tix = recentTicketsByCustomer[c.id] || [];
                     const confidence =
+                      c.confirmed ? "linked" :
                       c.match_score >= 100 ? "exact" :
                       c.match_score >= 85 ? "likely" :
                       "possible";
@@ -376,6 +479,7 @@ export default function SocialCommentDetailPage({
                             )}
                           </div>
                           <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                            confidence === "linked" ? "bg-emerald-600 text-white dark:bg-emerald-500" :
                             confidence === "exact" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400" :
                             confidence === "likely" ? "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-400" :
                             "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
@@ -410,14 +514,42 @@ export default function SocialCommentDetailPage({
                             ))}
                           </ul>
                         )}
-                        <button
-                          type="button"
-                          disabled={creatingTicketFor === c.id}
-                          onClick={() => createTicketFor(c.id)}
-                          className="mt-1 w-full rounded-md border border-blue-300 px-2 py-1 text-[11px] font-medium text-blue-700 transition-colors hover:bg-blue-50 disabled:opacity-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-950"
-                        >
-                          {creatingTicketFor === c.id ? "Creating…" : "Create ticket from this comment"}
-                        </button>
+                        <div className="mt-1 flex gap-1.5">
+                          {!c.confirmed && (
+                            <button
+                              type="button"
+                              disabled={submitting}
+                              onClick={async () => {
+                                if (await act("link_customer", { customer_id: c.id })) await load();
+                              }}
+                              className="flex-1 rounded-md border border-emerald-300 px-2 py-1 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-800 dark:text-emerald-400 dark:hover:bg-emerald-950"
+                              title={`Permanently link this FB/IG user to ${fullName} so every comment from them is auto-attributed.`}
+                            >
+                              ✓ Confirm match
+                            </button>
+                          )}
+                          {c.confirmed && (
+                            <button
+                              type="button"
+                              disabled={submitting}
+                              onClick={async () => {
+                                if (!confirm("Unlink this FB/IG user from this customer?")) return;
+                                if (await act("unlink_customer")) await load();
+                              }}
+                              className="flex-1 rounded-md border border-zinc-300 px-2 py-1 text-[11px] font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                            >
+                              Unlink
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={creatingTicketFor === c.id}
+                            onClick={() => createTicketFor(c.id)}
+                            className="flex-1 rounded-md border border-blue-300 px-2 py-1 text-[11px] font-medium text-blue-700 transition-colors hover:bg-blue-50 disabled:opacity-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-950"
+                          >
+                            {creatingTicketFor === c.id ? "Creating…" : "Create ticket"}
+                          </button>
+                        </div>
                       </li>
                     );
                   })}

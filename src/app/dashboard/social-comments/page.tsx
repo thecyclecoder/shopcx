@@ -32,12 +32,13 @@ interface MetaPageOption {
   platform: string;
 }
 
-const STATUS_OPTIONS = ["all", "open", "escalated", "replied", "hidden", "deleted", "ignored"] as const;
+const STATUS_OPTIONS = ["all", "open", "escalated", "replied", "closed", "ignored", "hidden", "deleted"] as const;
 const SENTIMENT_OPTIONS = ["all", "positive", "negative", "neutral", "spam", "abusive"] as const;
 
 const STATUS_COLORS: Record<string, string> = {
   open: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
   replied: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+  closed: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
   hidden: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
   deleted: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
   escalated: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",

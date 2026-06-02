@@ -139,6 +139,17 @@ export async function ingestSocialComment(args: IngestArgs): Promise<void> {
 
   const isAd = cachedIsAd || !!adId;
 
+  // Confirmed sender→customer link, if an agent has previously matched
+  // this Meta account. Stamped on the row so every UI surface knows
+  // who the customer is without any fuzzy matching.
+  const { data: senderLink } = await admin
+    .from("meta_sender_customer_links")
+    .select("customer_id")
+    .eq("workspace_id", page.workspace_id)
+    .eq("meta_sender_id", senderId)
+    .maybeSingle();
+  const linkedCustomerId = (senderLink?.customer_id as string | undefined) || null;
+
   // ── Insert the moderation row ────────────────────────────────────
   const { data: inserted, error: insertErr } = await admin
     .from("social_comments")
@@ -156,6 +167,7 @@ export async function ingestSocialComment(args: IngestArgs): Promise<void> {
       page_type: page.page_type,
       ad_id: adId,
       matched_product_id: matchedProductId,
+      customer_id: linkedCustomerId,
       status: "open",
     })
     .select("id")
