@@ -1,6 +1,18 @@
-# brain — table reference
+# brain — reference
 
-One page per table in the `public` schema (138 total). Each page has:
+System-level reference covering everything an agent needs to navigate the codebase: every database table, every background job, every external integration. Designed to be grep-able and `[[wikilinked]]`.
+
+## What's here
+
+| Folder | Contents | Count |
+|---|---|---|
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 138 |
+| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 50 |
+| [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 13 |
+
+## Tables (`tables/`)
+
+Each page has:
 
 - **Summary** — one line, what the table is for.
 - **Columns** — name, type, nullable, FK target, encryption + default flags.
@@ -230,6 +242,79 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/import_jobs]] — Background import jobs (Shopify/Gorgias/Klaviyo) with progress + status. UI shows a progress bar.
 - [[tables/slack_notification_rules]] — Per-workspace Slack notification routing rules (which events go to which channel).
 - [[tables/sync_jobs]] — Background sync job state (Shopify bulk ops, Appstle pulls) — progress, status, error.
+
+## Inngest functions (`inngest/`)
+
+Every background job, webhook fan-out, and cron lives here. Each page lists trigger event/cron, retries + concurrency, downstream events sent, and tables read/written (wikilinked).
+
+- [[inngest/abandoned-cart]] — Sweeps `cart_drafts` past `expires_at` → flips to `abandoned`. Hourly.
+- [[inngest/ai-nightly-analysis]] — Nightly review of recent AI-handled tickets. Writes `daily_analysis_reports`. Paused 2026-04-28.
+- [[inngest/amazon-sync]] — Pulls Amazon SP-API order + ASIN data.
+- [[inngest/amplifier-webhooks]] — Amplifier (3PL) `order_received` / `order_shipped` → updates `orders.amplifier_*`.
+- [[inngest/auto-archive]] — Archives closed tickets older than threshold.
+- [[inngest/chargeback-processing]] — Shopify dispute pipeline: classify → auto-cancel sub OR review → won/lost.
+- [[inngest/client]] — SDK client init (not a function).
+- [[inngest/crisis-campaign]] — Daily crisis-campaign cron. Tier advancement + auto-swap.
+- [[inngest/customer-demographics]] — Census + Versium demographic enrichment.
+- [[inngest/daily-analysis-report-cron]] — Schedules `ai-nightly-analysis`.
+- [[inngest/daily-order-snapshot]] — Daily rollup → `daily_order_snapshots`.
+- [[inngest/deliver-pending-send]] — Sends queued outbound messages from `ticket_messages.pending_send_at`.
+- [[inngest/delivery-audit]] — Surfaces stuck `in_transit` orders to `dashboard_notifications`.
+- [[inngest/dunning]] — Payment-failed orchestrator: card rotation → payday retries → cycle action. + new-card recovery + billing-success cleanup.
+- [[inngest/fraud-detection]] — Per-order + per-customer + nightly fraud scans. Tags Shopify orders `suspicious`.
+- [[inngest/import-subscriptions]] — Initial Appstle subscription import.
+- [[inngest/internal-subscription-renewals]] — Post-Appstle internal scheduler stub.
+- [[inngest/journey-outcomes]] — Tags tickets with `jo:positive` / `jo:negative` / `jo:neutral`.
+- [[inngest/kb-embed]] — Embeds new/updated KB articles into `kb_chunks`.
+- [[inngest/klaviyo-attribution-compute]] — Recomputes `klaviyo_sms_campaign_history.initial_revenue_cents`.
+- [[inngest/klaviyo-engagement-backfill]] — 180d historical engagement backfill (unreliable; prefer local script).
+- [[inngest/klaviyo-engagement-sync]] — Daily 4am CST incremental delta → `profile_events`.
+- [[inngest/klaviyo-events-import]] — Placed Order events + UTM attribution.
+- [[inngest/klaviyo-sms-import]] — Historical Klaviyo SMS campaigns.
+- [[inngest/macro-audit]] — Audits macro acceptance rates.
+- [[inngest/marketing-coupon-cron]] — Auto-disables expired SMS-campaign coupons.
+- [[inngest/marketing-text]] — SMS campaign send pipeline (schedule + 5-min send tick).
+- [[inngest/meta-historical-comments-sync]] — Backfills `social_comments` from historical posts/ads.
+- [[inngest/meta-sync]] — Per-workspace Meta Page + Instagram sync.
+- [[inngest/monthly-revenue-snapshot]] — Month-end revenue rollup.
+- [[inngest/order-address-fallback]] — Backfills missing ship/bill via `Customer.defaultAddress`.
+- [[inngest/portal-auto-resume]] — Resumes paused subs at `pause_resume_at`.
+- [[inngest/product-intelligence]] — AI product positioning + competitor analysis.
+- [[inngest/refresh-customer-segments]] — Recomputes `customers.segments` for archetype targeting.
+- [[inngest/reseller-discovery]] — Weekly Mon 6am CT — pulls Amazon competitor offers + upserts `known_resellers`.
+- [[inngest/returns]] — Returns refund pipeline: process-delivery → issue-refund.
+- [[inngest/review-tagging]] — Tags `product_reviews` via Haiku.
+- [[inngest/scrape-help-center]] — Crawls help-center sites into `knowledge_base`.
+- [[inngest/seo-keyword-research]] — Generates `product_seo_keywords`.
+- [[inngest/sms-wave-promote]] — Promotes `sms_send_candidates` → `sms_campaign_recipients`.
+- [[inngest/social-comment-moderate]] — Per-comment orchestrator + reply + hide/delete.
+- [[inngest/sync-inventory]] — Shopify inventory sync.
+- [[inngest/sync-reviews]] — Nightly + on-demand Klaviyo review sync with AI summaries.
+- [[inngest/sync-shopify]] — Main Shopify bulk sync (customers, orders, products).
+- [[inngest/ticket-analysis-cron]] — Nightly cron over recent tickets → `ticket_analyses`.
+- [[inngest/ticket-csat]] — Sends CSAT 24h after ticket closes.
+- [[inngest/ticket-research]] — Research-and-heal pipeline: investigate → recipe → propose → auto-execute allowlisted.
+- [[inngest/ticket-snooze]] — Wakes snoozed tickets.
+- [[inngest/today-sync]] — Today-only incremental Shopify sync.
+- [[inngest/unified-ticket-handler]] — **THE main pipeline.** Every inbound message → resolve → playbook → Sonnet → execute.
+
+## Integrations (`integrations/`)
+
+External APIs we call. Each page documents auth model, credential location (env var or `workspaces.X_encrypted` column), key endpoints, rate limits + retry pattern, and known gotchas.
+
+- [[integrations/shopify]] — Admin GraphQL + REST + Bulk Operations + Storefront API + App Proxy + Multipass. Per-workspace OAuth.
+- [[integrations/appstle]] — Subscription contracts. Per-workspace API key + shop domain.
+- [[integrations/klaviyo]] — Reviews + Placed Order events + engagement events + historical SMS campaigns. Per-workspace API key.
+- [[integrations/resend]] — Transactional email send + inbound parse. Per-workspace API key + webhook secret. Self-hosted open/click tracking.
+- [[integrations/twilio]] — SMS send/receive + Lookup v2 phone validation + Verify v2 OTP. Account-level env + per-workspace sender numbers.
+- [[integrations/easypost]] — Return label purchase + reverse-shipment tracking. Per-workspace live + test API keys.
+- [[integrations/braintree]] — Payment gateway for the custom storefront + recurring billing (replaces Shopify Payments + Appstle). Per-workspace merchant + keys.
+- [[integrations/avalara]] — Sales tax calculation + commit. Per-workspace account + license key.
+- [[integrations/meta-graph]] — Organic Pages/IG/Messenger — comments, DMs, replies. Per-workspace Page Access Token.
+- [[integrations/meta-marketing]] — Paid ads insights + Conversions API (CAPI) fan-out. Same OAuth as meta-graph + system user token.
+- [[integrations/inngest]] — Durable workflow engine. Account-level env keys only.
+- [[integrations/openai]] — Embeddings only (`text-embedding-3-small`, 1536d). Account-level env.
+- [[integrations/anthropic]] — Claude Haiku + Sonnet + Opus. All AI surfaces. Account-level env.
 
 ---
 
