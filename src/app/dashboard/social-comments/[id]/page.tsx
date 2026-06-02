@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, use } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface CommentDetail {
@@ -59,6 +60,28 @@ interface SenderHistoryRow {
   created_at: string;
 }
 
+interface CustomerCandidate {
+  id: string;
+  email: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  shopify_customer_id: string | null;
+  ltv_cents: number | null;
+  subscription_status: string | null;
+  has_active_sub: boolean;
+  ticket_count: number;
+  last_order_at: string | null;
+  match_score: number;
+}
+
+interface RecentTicket {
+  id: string;
+  subject: string | null;
+  status: string;
+  created_at: string;
+  channel: string;
+}
+
 export default function SocialCommentDetailPage({
   params,
 }: {
@@ -66,15 +89,19 @@ export default function SocialCommentDetailPage({
 }) {
   const { id } = use(params);
   const { id: workspaceId } = useWorkspace();
+  const router = useRouter();
 
   const [comment, setComment] = useState<CommentDetail | null>(null);
   const [replies, setReplies] = useState<ReplyRow[]>([]);
   const [senderHistory, setSenderHistory] = useState<SenderHistoryRow[]>([]);
   const [senderBanned, setSenderBanned] = useState(false);
+  const [candidates, setCandidates] = useState<CustomerCandidate[]>([]);
+  const [recentTicketsByCustomer, setRecentTicketsByCustomer] = useState<Record<string, RecentTicket[]>>({});
   const [loading, setLoading] = useState(true);
   const [replyBody, setReplyBody] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [creatingTicketFor, setCreatingTicketFor] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -88,8 +115,30 @@ export default function SocialCommentDetailPage({
     setReplies(data.replies || []);
     setSenderHistory(data.sender_history || []);
     setSenderBanned(!!data.sender_banned);
+    setCandidates(data.customer_candidates || []);
+    setRecentTicketsByCustomer(data.recent_tickets_by_customer || {});
     setLoading(false);
   }, [id, workspaceId]);
+
+  async function createTicketFor(customerId: string) {
+    setCreatingTicketFor(customerId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workspaces/${workspaceId}/social-comments/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "create_ticket", customer_id: customerId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Failed to create ticket");
+        return;
+      }
+      router.push(`/dashboard/tickets/${data.ticket_id}`);
+    } finally {
+      setCreatingTicketFor(null);
+    }
+  }
 
   useEffect(() => {
     void load();
@@ -301,6 +350,81 @@ export default function SocialCommentDetailPage({
               )}
             </Card>
 
+            {/* Possible customer matches by name */}
+            {candidates.length > 0 && (
+              <Card title={candidates.length === 1 ? "Customer match" : `${candidates.length} possible matches`} accent="emerald">
+                <ul className="space-y-3">
+                  {candidates.map(c => {
+                    const tix = recentTicketsByCustomer[c.id] || [];
+                    const confidence =
+                      c.match_score >= 100 ? "exact" :
+                      c.match_score >= 85 ? "likely" :
+                      "possible";
+                    const fullName = [c.first_name, c.last_name].filter(Boolean).join(" ");
+                    return (
+                      <li key={c.id} className="space-y-1.5 rounded-md bg-white p-2.5 dark:bg-zinc-900">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <Link
+                              href={`/dashboard/customers/${c.id}`}
+                              className="block truncate text-sm font-medium text-zinc-900 hover:text-blue-600 dark:text-zinc-100 dark:hover:text-blue-400"
+                            >
+                              {fullName || c.email || "(no name)"}
+                            </Link>
+                            {c.email && (
+                              <p className="truncate text-[11px] text-zinc-500">{c.email}</p>
+                            )}
+                          </div>
+                          <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                            confidence === "exact" ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400" :
+                            confidence === "likely" ? "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-400" :
+                            "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
+                          }`}>
+                            {confidence}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-zinc-500">
+                          {c.has_active_sub && <span className="text-emerald-600 dark:text-emerald-400">Active sub</span>}
+                          {typeof c.ltv_cents === "number" && c.ltv_cents > 0 && (
+                            <span>${(c.ltv_cents / 100).toFixed(0)} LTV</span>
+                          )}
+                          <span>{c.ticket_count} ticket{c.ticket_count === 1 ? "" : "s"}</span>
+                        </div>
+                        {tix.length > 0 && (
+                          <ul className="mt-1 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-800">
+                            {tix.map(t => (
+                              <li key={t.id}>
+                                <Link
+                                  href={`/dashboard/tickets/${t.id}`}
+                                  className="block truncate text-[11px] text-zinc-600 hover:text-blue-600 dark:text-zinc-400 dark:hover:text-blue-400"
+                                  title={t.subject || ""}
+                                >
+                                  <span className={`mr-1 inline-block h-1.5 w-1.5 rounded-full align-middle ${
+                                    t.status === "open" ? "bg-emerald-500" :
+                                    t.status === "pending" ? "bg-amber-500" :
+                                    "bg-zinc-400"
+                                  }`} />
+                                  {t.subject || "(no subject)"}
+                                </Link>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        <button
+                          type="button"
+                          disabled={creatingTicketFor === c.id}
+                          onClick={() => createTicketFor(c.id)}
+                          className="mt-1 w-full rounded-md border border-blue-300 px-2 py-1 text-[11px] font-medium text-blue-700 transition-colors hover:bg-blue-50 disabled:opacity-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-950"
+                        >
+                          {creatingTicketFor === c.id ? "Creating…" : "Create ticket from this comment"}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </Card>
+            )}
+
             {/* AI suggestion */}
             {comment.ai_action && (
               <Card title="AI suggestion" accent="purple">
@@ -406,11 +530,12 @@ function Card({
 }: {
   title: string;
   children: React.ReactNode;
-  accent?: "purple";
+  accent?: "purple" | "emerald";
 }) {
-  const accentClass = accent === "purple"
-    ? "border-purple-200 dark:border-purple-900"
-    : "border-zinc-200 dark:border-zinc-800";
+  const accentClass =
+    accent === "purple" ? "border-purple-200 dark:border-purple-900" :
+    accent === "emerald" ? "border-emerald-200 dark:border-emerald-900" :
+    "border-zinc-200 dark:border-zinc-800";
   return (
     <div className={`rounded-lg border bg-white p-3 dark:bg-zinc-900 ${accentClass}`}>
       <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">{title}</h3>

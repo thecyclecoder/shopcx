@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { executeAction, banUser, unbanUser } from "@/lib/social-comment-actions";
+import { findCustomerCandidatesByMetaName } from "@/lib/social-comment-customer-match";
 
 /**
  * GET — full comment detail for the dashboard detail view.
@@ -74,11 +75,47 @@ export async function GET(
       .maybeSingle(),
   ]);
 
+  // Find customer candidates by name (e.g. "Suzy Doucet" → "Suzanne
+  // Doucet"). Then pull their recent tickets so the sidebar can show
+  // clickable history per candidate.
+  const candidates = await findCustomerCandidatesByMetaName(
+    admin,
+    workspaceId,
+    (comment as { meta_sender_name: string | null }).meta_sender_name,
+  );
+  let recentTicketsByCustomer: Record<string, Array<{ id: string; subject: string | null; status: string; created_at: string; channel: string }>> = {};
+  if (candidates.length) {
+    const { data: tix } = await admin
+      .from("tickets")
+      .select("id, customer_id, subject, status, created_at, channel")
+      .eq("workspace_id", workspaceId)
+      .in("customer_id", candidates.map(c => c.id))
+      .order("created_at", { ascending: false })
+      .limit(50);
+    recentTicketsByCustomer = (tix || []).reduce((acc, t) => {
+      const k = t.customer_id as string;
+      (acc[k] ||= []).push({
+        id: t.id as string,
+        subject: (t.subject as string | null) || null,
+        status: t.status as string,
+        created_at: t.created_at as string,
+        channel: t.channel as string,
+      });
+      return acc;
+    }, {} as typeof recentTicketsByCustomer);
+    // Cap at 5 per candidate
+    for (const k of Object.keys(recentTicketsByCustomer)) {
+      recentTicketsByCustomer[k] = recentTicketsByCustomer[k].slice(0, 5);
+    }
+  }
+
   return NextResponse.json({
     comment,
     replies: replies || [],
     sender_history: senderHistory || [],
     sender_banned: !!ban,
+    customer_candidates: candidates,
+    recent_tickets_by_customer: recentTicketsByCustomer,
   });
 }
 
@@ -113,11 +150,64 @@ export async function POST(
 
   const { data: comment } = await admin
     .from("social_comments")
-    .select("id, workspace_id, meta_page_id, meta_comment_id, meta_sender_id, meta_sender_name, meta_sender_username")
+    .select("id, workspace_id, meta_page_id, meta_comment_id, meta_sender_id, meta_sender_name, meta_sender_username, body, created_at, meta_post_id")
     .eq("workspace_id", workspaceId)
     .eq("id", commentId)
     .single();
   if (!comment) return NextResponse.json({ error: "Comment not found" }, { status: 404 });
+
+  if (action === "create_ticket") {
+    const customerId = (body.customer_id as string) || null;
+    if (!customerId) return NextResponse.json({ error: "customer_id required" }, { status: 400 });
+
+    // Confirm the customer belongs to this workspace before we wire it
+    // to a ticket — keep workspace scoping airtight.
+    const { data: cust } = await admin
+      .from("customers")
+      .select("id, email, first_name, last_name")
+      .eq("workspace_id", workspaceId)
+      .eq("id", customerId)
+      .maybeSingle();
+    if (!cust) return NextResponse.json({ error: "Customer not in this workspace" }, { status: 400 });
+
+    // Derive a short subject from the comment body. Fall back to a
+    // generic title when the body is empty (rare but possible).
+    const rawBody = (comment as { body: string | null }).body || "";
+    const firstLine = rawBody.split(/\n/)[0].trim();
+    const subject = firstLine
+      ? firstLine.length > 80 ? firstLine.slice(0, 77) + "…" : firstLine
+      : `Public comment from ${comment.meta_sender_name || "customer"}`;
+
+    const { data: ticket, error: terr } = await admin
+      .from("tickets")
+      .insert({
+        workspace_id: workspaceId,
+        customer_id: customerId,
+        channel: "social_comments",
+        status: "open",
+        subject,
+        meta_post_id: (comment as { meta_post_id: string | null }).meta_post_id,
+        meta_comment_id: comment.meta_comment_id,
+        meta_sender_id: comment.meta_sender_id,
+        last_customer_reply_at: (comment as { created_at: string }).created_at,
+      })
+      .select("id")
+      .single();
+    if (terr || !ticket) return NextResponse.json({ error: terr?.message || "Ticket create failed" }, { status: 500 });
+
+    // Copy the comment body over as the inbound first message so the
+    // ticket reads as a real conversation start, not an empty thread.
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticket.id,
+      direction: "inbound",
+      visibility: "external",
+      author_type: "customer",
+      body: rawBody || `<no message body>`,
+      created_at: (comment as { created_at: string }).created_at,
+    });
+
+    return NextResponse.json({ ok: true, ticket_id: ticket.id });
+  }
 
   if (action === "ban") {
     await banUser({
