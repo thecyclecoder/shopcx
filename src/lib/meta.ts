@@ -37,6 +37,44 @@ export function verifyMetaWebhookSignature(
 }
 
 /**
+ * Fetch a Messenger user's public profile fields by PSID. The Meta
+ * webhook payload only carries the PSID — no name, no email — so we
+ * call `GET /{psid}?fields=first_name,last_name,profile_pic` against
+ * the page access token to enrich the inbound DM ticket.
+ *
+ * Email is NEVER returned by this endpoint (Meta doesn't expose
+ * customer emails via the Messenger API). Name + profile pic are
+ * the only useful pieces. Returns null on any error so the caller
+ * falls back to the bare PSID as before.
+ */
+export async function fetchMessengerUserProfile(
+  pageAccessToken: string,
+  psid: string,
+): Promise<{ first_name?: string; last_name?: string; profile_pic?: string } | null> {
+  const url = `${GRAPH_BASE}/${encodeURIComponent(psid)}?fields=first_name,last_name,profile_pic&access_token=${encodeURIComponent(pageAccessToken)}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.warn(`[meta] fetchMessengerUserProfile ${psid} → HTTP ${res.status}`);
+      return null;
+    }
+    const data = (await res.json()) as { first_name?: string; last_name?: string; profile_pic?: string; error?: { message?: string } };
+    if (data?.error) {
+      console.warn(`[meta] fetchMessengerUserProfile ${psid} → ${data.error.message}`);
+      return null;
+    }
+    return {
+      first_name: data.first_name,
+      last_name: data.last_name,
+      profile_pic: data.profile_pic,
+    };
+  } catch (err) {
+    console.warn(`[meta] fetchMessengerUserProfile ${psid} threw:`, err);
+    return null;
+  }
+}
+
+/**
  * Send a DM reply via Meta Messenger / Instagram
  */
 export async function sendMetaDM(

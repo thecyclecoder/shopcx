@@ -213,12 +213,60 @@ export async function POST(request: Request) {
             },
           });
         } else {
+          // Meta DMs arrive with just a PSID — no name, no email. Call
+          // the Graph API to fetch first/last name so the ticket subject
+          // reads "DM from Jane Doe" instead of "DM from 3470392026374637".
+          // Email is NEVER returned by Meta's Messenger API, so the best
+          // we can do beyond name is a fuzzy match against existing
+          // customers — the agent then has a starting point.
+          let senderFirstName: string | null = null;
+          let senderLastName: string | null = null;
+          let matchedCustomerId: string | null = null;
+          try {
+            const { data: wsRow } = await admin
+              .from("workspaces")
+              .select("meta_page_access_token_encrypted")
+              .eq("id", workspaceId).single();
+            const enc = wsRow?.meta_page_access_token_encrypted as string | null;
+            if (enc) {
+              const { decrypt } = await import("@/lib/crypto");
+              const { fetchMessengerUserProfile } = await import("@/lib/meta");
+              const profile = await fetchMessengerUserProfile(decrypt(enc), senderId);
+              if (profile) {
+                senderFirstName = profile.first_name || null;
+                senderLastName = profile.last_name || null;
+                // Best-effort customer match by name. Single hit only —
+                // we never auto-link on ambiguous matches. If multiple
+                // customers share the name, the agent will need to
+                // resolve.
+                if (senderFirstName && senderLastName) {
+                  // Only auto-match when we have BOTH names — first
+                  // name alone is too ambiguous to be safe.
+                  const { data: matches } = await admin
+                    .from("customers")
+                    .select("id")
+                    .eq("workspace_id", workspaceId)
+                    .ilike("first_name", senderFirstName)
+                    .ilike("last_name", senderLastName)
+                    .limit(2);
+                  if (matches && matches.length === 1) matchedCustomerId = matches[0].id;
+                }
+              }
+            }
+          } catch (err) {
+            console.warn(`[meta-dm] sender enrichment failed for ${senderId}:`, err);
+          }
+
+          const fullName = [senderFirstName, senderLastName].filter(Boolean).join(" ").trim();
+          const subject = fullName ? `DM from ${fullName}` : `DM from ${senderId}`;
+
           const { data: ticket } = await admin.from("tickets").insert({
             workspace_id: workspaceId,
             channel: "meta_dm",
             status: "open",
-            subject: `DM from ${senderId}`,
+            subject,
             meta_sender_id: senderId,
+            customer_id: matchedCustomerId,
             last_customer_reply_at: new Date().toISOString(),
           }).select("id").single();
 
