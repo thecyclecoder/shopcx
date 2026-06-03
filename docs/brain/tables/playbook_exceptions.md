@@ -17,8 +17,8 @@ Per-(playbook, customer/ticket) one-off exception grants (e.g. tenured customer 
 | `conditions` | `jsonb` | — | default: `'{}'` |
 | `resolution_type` | `text` | — |  |
 | `instructions` | `text` | ✓ |  |
-| `auto_grant` | `bool` | — | default: `false` |
-| `auto_grant_trigger` | `text` | ✓ |  |
+| `auto_grant` | `bool` | — | default: `false` · **Feature removed 2026-06-03** — column retained for backward compatibility but unused. The executor still filters `!auto_grant` defensively so any legacy `true` rows stay out of customer-facing tier offers. New rows are forced to `false` on every save. |
+| `auto_grant_trigger` | `text` | ✓ | **Feature removed 2026-06-03.** Historical values: `duplicate_charge` / `cancelled_but_charged` / `never_delivered`. Never read at runtime now. |
 | `sort_order` | `int4` | — | default: `0` |
 | `created_at` | `timestamptz` | — | default: `now()` |
 | `skip_stand_firm` | `bool` | — | default: `false` |

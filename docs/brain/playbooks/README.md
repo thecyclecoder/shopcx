@@ -142,7 +142,7 @@ After the first mention, never repeat order details, subscription info, or timel
 
 Return / API failures leave the ticket OPEN, escalated to agent. Don't close. See feedback_return_failure_escalation.
 
-## Disqualifiers + auto-grants
+## Disqualifiers
 
 `playbooks.exception_disqualifiers` (JSONB array) — conditions that block exceptions:
 
@@ -154,11 +154,11 @@ Return / API failures leave the ticket OPEN, escalated to agent. Don't close. Se
 - `silent` — playbook proceeds without offering the blocked path; never mentions disqualification.
 - `block_exceptions` — explicit "we can't offer an exception this time" wording.
 
-`playbook_exceptions.auto_grant` + `auto_grant_trigger` — automatically grant the exception without asking the customer when certain triggers fire (e.g. detected system error → refund without return). See project_autogrant_detection.
+> **Auto-grant removed 2026-06-03.** The `playbook_exceptions.auto_grant` + `auto_grant_trigger` columns are retained for backward compatibility but no longer drive any behavior. The original triggers (`duplicate_charge` / `cancelled_but_charged` / `never_delivered`) were stubbed for months; in practice the orchestrator (Sonnet) escalates these scenarios directly, and `never_delivered` is handled by the replacement flow. Removing the feature simplifies the executor.
 
 ## Skip stand-firm
 
-`playbook_exceptions.skip_stand_firm` — when true, accepting this exception skips the stand-firm tier-up loop. Used for auto-grants and edge cases where standing firm would be customer-hostile.
+`playbook_exceptions.skip_stand_firm` — when true, accepting this exception skips the stand-firm tier-up loop. Used for edge cases where standing firm would be customer-hostile.
 
 ## Files
 

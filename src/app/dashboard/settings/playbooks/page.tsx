@@ -127,12 +127,6 @@ const RESOLUTION_TYPES = [
   { value: "refund_no_return", label: "Refund (no return)" },
 ];
 
-const AUTO_GRANT_TRIGGERS = [
-  { value: "duplicate_charge", label: "Duplicate charge" },
-  { value: "cancelled_but_charged", label: "Cancelled but charged" },
-  { value: "never_delivered", label: "Never delivered" },
-];
-
 const DATA_ACCESS_OPTIONS = [
   "recent_orders", "subscriptions", "customer_events", "fulfillments", "payment_methods",
 ];
@@ -1088,14 +1082,10 @@ export default function PlaybooksSettingsPage() {
                                 <button onClick={() => addException(pol.id)} className="text-[10px] text-indigo-500 hover:text-indigo-700">+ Add</button>
                               </div>
                               {polExceptions.map(ex => (
-                                <div key={ex.id} className={`rounded-md border p-2 ${ex.auto_grant ? "border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950" : "border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800"}`}>
+                                <div key={ex.id} className="rounded-md border p-2 border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800">
                                   <div className="flex items-center justify-between">
                                     <div className="flex items-center gap-2">
-                                      {ex.auto_grant ? (
-                                        <span className="rounded bg-emerald-200 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-800 dark:text-emerald-300">AUTO: {ex.auto_grant_trigger}</span>
-                                      ) : (
-                                        <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">Tier {ex.tier}</span>
-                                      )}
+                                      <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">Tier {ex.tier}</span>
                                       <span className="text-xs font-medium text-zinc-900 dark:text-zinc-100">{ex.name}</span>
                                       <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300">
                                         {RESOLUTION_TYPES.find(r => r.value === ex.resolution_type)?.label || ex.resolution_type}
@@ -1199,43 +1189,19 @@ export default function PlaybooksSettingsPage() {
                           </div>
                         </div>
                         <div>
-                          <label className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400 mb-2">
-                            <input
-                              type="checkbox"
-                              checked={editingException.auto_grant}
-                              onChange={(e) => setEditingException({ ...editingException, auto_grant: e.target.checked, auto_grant_trigger: e.target.checked ? "duplicate_charge" : null })}
-                              className="rounded border-zinc-300"
-                            />
-                            Auto-grant (system error — no eligibility check)
-                          </label>
-                          {editingException.auto_grant && (
-                            <select
-                              value={editingException.auto_grant_trigger || ""}
-                              onChange={(e) => setEditingException({ ...editingException, auto_grant_trigger: e.target.value || null })}
-                              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                            >
-                              {AUTO_GRANT_TRIGGERS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                            </select>
-                          )}
+                          <label className="block text-xs font-medium text-zinc-500 mb-1">Tier</label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={editingException.tier}
+                            onChange={(e) => setEditingException({ ...editingException, tier: parseInt(e.target.value) || 1 })}
+                            className="w-24 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                          />
                         </div>
-                        {!editingException.auto_grant && (
-                          <>
-                            <div>
-                              <label className="block text-xs font-medium text-zinc-500 mb-1">Tier</label>
-                              <input
-                                type="number"
-                                min={1}
-                                value={editingException.tier}
-                                onChange={(e) => setEditingException({ ...editingException, tier: parseInt(e.target.value) || 1 })}
-                                className="w-24 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-xs font-medium text-zinc-500 mb-1">Conditions (JSON)</label>
-                              <ConditionEditor value={editingException.conditions} onChange={(c) => setEditingException({ ...editingException, conditions: c })} />
-                            </div>
-                          </>
-                        )}
+                        <div>
+                          <label className="block text-xs font-medium text-zinc-500 mb-1">Conditions (JSON)</label>
+                          <ConditionEditor value={editingException.conditions} onChange={(c) => setEditingException({ ...editingException, conditions: c })} />
+                        </div>
                         <div>
                           <label className="block text-xs font-medium text-zinc-500 mb-1">AI instructions</label>
                           <textarea
@@ -1312,24 +1278,18 @@ export default function PlaybooksSettingsPage() {
                     <div>
                       <h4 className="text-xs font-medium text-zinc-400 uppercase tracking-wider mb-2">Exceptions</h4>
                       {pb.exceptions.map(ex => (
-                        <div key={ex.id} className={`rounded-md border p-3 mb-2 ${ex.auto_grant ? "border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950" : "border-zinc-100 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-800/50"}`}>
+                        <div key={ex.id} className="rounded-md border p-3 mb-2 border-zinc-100 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-800/50">
                           <div className="flex items-center gap-2">
-                            {ex.auto_grant ? (
-                              <span className="rounded bg-emerald-200 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-800 dark:text-emerald-300">AUTO</span>
-                            ) : (
-                              <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">Tier {ex.tier}</span>
-                            )}
+                            <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">Tier {ex.tier}</span>
                             <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{ex.name}</span>
                             <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300">
                               {RESOLUTION_TYPES.find(r => r.value === ex.resolution_type)?.label || ex.resolution_type}
                             </span>
                           </div>
                           {ex.instructions && <p className="text-xs text-zinc-500 mt-1">{ex.instructions}</p>}
-                          {!ex.auto_grant && (
-                            <div className="mt-1 text-[10px] text-zinc-400 font-mono">
-                              Conditions: {JSON.stringify(ex.conditions)}
-                            </div>
-                          )}
+                          <div className="mt-1 text-[10px] text-zinc-400 font-mono">
+                            Conditions: {JSON.stringify(ex.conditions)}
+                          </div>
                         </div>
                       ))}
                     </div>

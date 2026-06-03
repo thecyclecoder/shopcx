@@ -1469,18 +1469,6 @@ async function handleOfferException(
     };
   }
 
-  // Check auto-grant exceptions first
-  for (const ex of exceptions.filter(e => e.auto_grant)) {
-    const autoGranted = checkAutoGrant(ex.auto_grant_trigger, orders, ctx);
-    if (autoGranted) {
-      return {
-        action: "advance", newStep: step.step_order + 1,
-        context: { exception_granted: ex.name, exception_tier: 0, resolution_type: ex.resolution_type, auto_granted: true, offer_accepted: true },
-        systemNote: `[Playbook] Auto-granted exception: ${ex.name} (${ex.auto_grant_trigger}).`,
-      };
-    }
-  }
-
   // ── Check disqualifiers (silent or explicit) ──
   // Disqualifiers have a "blocks" field:
   //   "exceptions_only" — blocks exception tiers but allows in-policy returns
@@ -1630,6 +1618,9 @@ async function handleOfferException(
   ctx.exception_stand_firm_count = 0;
 
   // ── Find next eligible tier ──
+  // The `!e.auto_grant` filter is a defensive backstop — the auto-grant
+  // feature was removed; any lingering DB rows with auto_grant=true stay
+  // excluded from customer-facing tier offers.
   const tieredExceptions = exceptions.filter(e => !e.auto_grant && e.tier > currentTier);
 
   if (tieredExceptions.length === 0 || exceptionsUsed >= playbook.exception_limit) {
@@ -2096,16 +2087,6 @@ function evaluateCustomerConditions(conditions: Record<string, unknown>, custome
     }
   }
   return true;
-}
-
-function checkAutoGrant(trigger: string | null, orders: OrderData[], ctx: Record<string, unknown>): boolean {
-  if (!trigger) return false;
-  // Auto-grant triggers are checked against order/system data
-  // These would be detected earlier in the pipeline, but check here as safety
-  if (trigger === "duplicate_charge") return false; // Needs separate detection
-  if (trigger === "cancelled_but_charged") return false; // Needs sub cancellation date vs order date check
-  if (trigger === "never_delivered") return false; // Needs fulfillment/tracking check
-  return false;
 }
 
 // ── Summary builder ──

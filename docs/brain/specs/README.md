@@ -25,12 +25,6 @@ Single source of truth for what's being built next, what's parked, and what just
 Concrete, scoped, high-ROI work. Pick any one and promote to a full spec.
 
 
-### Auto-grant exception detection (3 stubs)
-**Status:** ⏳ Still false-returning in `src/lib/playbook-executor.ts:2105-2107`.
-- `cancelled_but_charged`: sub cancelled BEFORE order charged → auto-grant refund without return.
-- `duplicate_charge`: detect from order/billing data (multiple charges same period).
-- `never_delivered`: check fulfillment/tracking status.
-- Without these, customers who got charged after cancelling go through the tiered exception flow instead of getting an immediate refund.
 
 ---
 
@@ -150,6 +144,7 @@ These have no work attached — they're operational notes. Kept here because the
 - ✅ **Stuck-sub cleanup** (2026-06-03) — `next_billing_date` cleanup across 83 subs: 75 advanced (Appstle truth synced into our DB), 6 marked cancelled, 2 re-fired into dunning via `appstleAttemptBilling`. Was a one-time data-staleness backlog, not an active bug (the sync-lag root cause was already patched earlier). Script: `scripts/cleanup-stuck-subs-2026-06-03.ts`.
 - ✅ **Cancel-event dedup** (2026-06-03) — forward fix in the Appstle webhook handler. When a customer cancels via the portal, both a `portal.subscription.cancelled` (source=portal) AND a `subscription.cancelled` (source=appstle) fire within seconds. Now the Appstle webhook checks for a portal cancel for the same `shopify_contract_id` within the last 5 min and suppresses the duplicate insert. **Historical 272 duplicates left in place** — backfill script (`scripts/backfill-cancel-event-dedup.ts`) exists but was not applied; analytics consumers can still dedupe at query time if needed.
 - ✅ **Stacked-sale-coupon check** (2026-06-03) — re-scoped per Dylan to "subs with **2+** sale coupons (excluding loyalty / free-shipping / Buy-N bundle)." Live count: **0**. The 333 subs that carry one CODE_DISCOUNT each are allowed to combine with automatic-discount + subscribe-and-save. Item resolved without cleanup.
+- ✅ **Auto-grant detection removed** (2026-06-03) — three stubbed triggers (`cancelled_but_charged` / `duplicate_charge` / `never_delivered`) were never wired up. Per Dylan: `never_delivered` is handled by the replacement flow; the other two should not happen and Sonnet escalates them directly when they do. Stripped the `checkAutoGrant` function, the auto-grant for-loop in the playbook executor, the auto-grant editor in `/dashboard/settings/playbooks`, the simulate-route auto-grant block, and the AUTO label in the playbook-fix logger. Schema columns + 1 dormant DB row retained (executor filter `!e.auto_grant` is a defensive backstop).
 
 ---
 

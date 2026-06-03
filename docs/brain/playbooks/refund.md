@@ -55,13 +55,7 @@ Current policy contract:
 - **resolution_type**: `refund_return` (full refund to original card).
 - Reserved for customers we don't want to lose, where store credit alone would push them out.
 
-### Auto-grant — System Error → Refund Without Return
-
-- **conditions**: empty `{}` (always-eligible).
-- **resolution_type**: `refund_no_return` (full refund, customer keeps the product).
-- **auto_grant**: true (no customer agreement needed).
-- Fires when a system error is detected — duplicate charge from a Shopify glitch, double-billing during dunning recovery, etc.
-- Detection is partly stubbed (see project_autogrant_detection) — need cancelled_but_charged / duplicate / never_delivered triggers.
+> **Auto-grant feature removed 2026-06-03.** A previous tier-0 "System Error → Refund Without Return" exception with `auto_grant=true` existed; the detection logic was stubbed and never shipped. Sonnet escalates these scenarios directly when they come up, and `never_delivered` is handled by the replacement flow. The legacy DB row is preserved but dormant — the executor filters `!auto_grant` defensively.
 
 ## Disqualifiers (`disqualifier_behavior='silent'`)
 

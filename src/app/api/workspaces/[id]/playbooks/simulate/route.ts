@@ -251,7 +251,7 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
       // Pre-calculate eligible tiers for progress bar
       const policyStepCfg = steps.find((s: { type: string }) => s.type === "offer_exception")?.config;
       const polExAll = policyStepCfg?.policy_id
-        ? (exceptions || []).filter((e: { policy_id: string; auto_grant: boolean }) => e.policy_id === (policyStepCfg as { policy_id: string }).policy_id && !e.auto_grant)
+        ? (exceptions || []).filter((e: { policy_id: string; auto_grant: boolean }) => e.policy_id === (policyStepCfg as { policy_id: string }).policy_id && !e.auto_grant) // auto_grant filter is a defensive backstop (feature removed)
         : [];
       const eligibleTierCount = polExAll.filter((e: { conditions: Record<string, unknown> }) => evalCustomerConditions(e.conditions, customer).pass).length;
 
@@ -340,11 +340,9 @@ Return JSON only: { "intent": "...", "confidence": 0-100, "reasoning": "one sent
               ctx.net_refund_cents = orderTotal - mockLabelCost;
             }
 
-            const autoGrants = polExceptions.filter((e: { auto_grant: boolean }) => e.auto_grant);
-            if (autoGrants.length) {
-              dataFound += `Auto-grant exceptions: ${autoGrants.map((e: { name: string; auto_grant_trigger: string | null }) => `${e.name} (${e.auto_grant_trigger})`).join(", ")}\nNote: Auto-grant detection not yet fully implemented.\n`;
-            }
-
+            // Auto-grant feature removed; the !auto_grant filter is a
+            // defensive backstop so any legacy auto_grant=true rows stay
+            // out of the tier list.
             const tiered = polExceptions.filter((e: { auto_grant: boolean }) => !e.auto_grant).sort((a: { tier: number }, b: { tier: number }) => a.tier - b.tier);
             const eligibleTiers = tiered.filter((ex: { conditions: Record<string, unknown> }) => evalCustomerConditions(ex.conditions, customer).pass);
             const ineligibleTiers = tiered.filter((ex: { conditions: Record<string, unknown> }) => !evalCustomerConditions(ex.conditions, customer).pass);

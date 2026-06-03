@@ -224,7 +224,7 @@ function buildConfigSummary(
 
   lines.push(`\n### Exceptions (${exceptions.length}):`);
   exceptions.forEach((e, i) => {
-    lines.push(`[${i}] "${e.name}" — Tier ${e.tier} — ${e.resolution_type}${e.auto_grant ? " (AUTO-GRANT: " + e.auto_grant_trigger + ")" : ""}`);
+    lines.push(`[${i}] "${e.name}" — Tier ${e.tier} — ${e.resolution_type}`);
     lines.push(`    Conditions: ${JSON.stringify(e.conditions)}`);
     lines.push(`    Instructions: ${e.instructions || "(none)"}`);
   });

@@ -170,8 +170,11 @@ export async function PATCH(
           conditions: e.conditions || {},
           resolution_type: e.resolution_type,
           instructions: e.instructions || null,
-          auto_grant: e.auto_grant || false,
-          auto_grant_trigger: e.auto_grant_trigger || null,
+          // Auto-grant feature removed; force off on every save so any
+          // legacy rows with auto_grant=true become dormant the next
+          // time they're touched.
+          auto_grant: false,
+          auto_grant_trigger: null,
           sort_order: i,
         };
         if (e.id && !e.id.startsWith("new_")) {
