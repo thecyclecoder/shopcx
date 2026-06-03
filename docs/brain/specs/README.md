@@ -28,48 +28,24 @@ Concrete, scoped, high-ROI work. Pick any one and promote to a full spec.
 
 ---
 
-## Ready to spec — analytics
+## Ready to spec — storefront
 
-### Storefront — own the checkout (#1 priority per memory)
-**Status:** ⏳ Active work track (spans many sub-tasks).
-- Replace Shopify checkout. Saves 3% txn fees, enables AOV boosters, custom sub conversion logic, full UX control.
-- [[../lifecycles/storefront-checkout]] is the in-progress brain page.
-- Promote sub-pieces into individual specs as they're picked up.
-- Originally in `project_storefront_priority.md`.
+### Storefront — own the checkout (active umbrella project, needs more spec'ing)
+**Status:** 🚧 In flight as one ongoing project. Many sub-phases already shipped; next phases need to be spec'd out.
 
-### ROAS analytics — more cards / breakouts
-**Status:** 🚧 Partly shipped (Amazon SP-API + Meta + ROAS dashboard live; CAC card just added).
-- Remaining: LTV prediction column, channel-level CAC breakdown, payback-period curve.
-- Originally in `project_roas_analytics.md`.
+**Sub-phases shipped (per [[../lifecycles/storefront-checkout]]):**
+- PDP pixel, cart create + server-validated pricing
+- Braintree Hosted Fields checkout
+- Avalara tax quote at checkout (recent)
+- OTP gate (`/api/checkout/otp/{start,verify,resend}`)
+- Subscription choice card (`/api/checkout/existing-subs`) — three options when authenticated + cart contains subscribe items + active internal sub
+- CAPI fan-out
 
-### Billing forecast — event-driven MRR
-**Status:** ⏳ Roadmap.
-- One pending forecast per subscription; webhook-driven updates; static forecast + change events.
-- Originally in `project_billing_forecast.md`.
+**Active sub-work (parallel project — needs spec'ing here):**
+- Add-to-existing-subscription at checkout — one-time purchase now, then promote into an existing sub. Replaces the "modal: do you want to add to your existing sub?" idea with an explicit OTP-gated dual flow.
+- Whatever else the storefront-v2 push is taking on next.
 
-### Amazon pricing UI
-**Status:** ⏳ Roadmap.
-- Surface for managing Amazon-channel prices alongside Shopify pricing.
-- Originally in `project_amazon_pricing.md`.
-
-### Automation analytics dashboard
-**Status:** ⏳ Roadmap.
-- Surface that scores automation coverage per ticket type / customer-journey segment.
-- Originally in `project_automation_analytics.md`.
-
-### Anomaly-aware data tools
-**Status:** ⏳ Reframe.
-- Tickets are anomaly reports. Restructure orchestrator data tools to surface contradictions (sub cancelled but charged; subs cancelled with active orders; etc.) instead of just current state.
-- Originally in `project_anomaly_aware_data_tools.md`.
-
----
-
-## Ready to spec — integrations
-
-### Cross-app integration (ShopCX / ShopGrowth / Shoptics shared API keys)
-**Status:** ⏳ Roadmap.
-- Shared API key + workspace mapping so the three apps can call each other without re-auth.
-- Originally in `project_cross_app_integration.md`.
+**How to use this:** when ready to expand, promote each next sub-phase into its own `docs/brain/specs/{slug}.md` file (e.g. `specs/checkout-add-to-sub.md`) instead of speccing into this index entry.
 
 ---
 
@@ -96,6 +72,7 @@ These have no work attached — they're operational notes. Kept here because the
 - ✅ **Meta ad-comment attribution** — shipped. Matches `creative.effective_object_story_id` (FB) / `effective_instagram_media_id` (IG) on adcreatives against the webhook's `post.id` / `media.id` so the bimodal ad-vs-organic webhook shape no longer breaks attribution.
 - ✅ **Klaviyo 180d engagement backfill** — shipped via local script. Engagement events from Klaviyo's history backfilled into our DB; verify current state via [[../integrations/klaviyo]] before extending.
 - ✅ **UX/product bucket cleared** (all 6 items shipped or superseded): (1) parallel-sub alert at checkout — superseded by OTP-then-add-to-sub work in a separate project; (2) SMS phone preview component — shipped (`src/components/sms-phone-preview.tsx`); (3) SMS buyer archetypes + replenishment ratio — shipped; (4) predicted-purchase segments — shipped; (5) return-request auto-playbook — shipped via the refund playbook; (6) shipping-issues Opus chat — shipped.
+- ✅ **Analytics + integrations bucket cleared** (all shipped, not-needed, or folded into the storefront umbrella): ROAS analytics — shipped; billing forecast — shipped; Amazon pricing UI — shipped; automation analytics dashboard — not needed; anomaly-aware data tools — shipped via the ticket timeline anomaly-detection feature; cross-app shared API keys (ShopCX / ShopGrowth / Shoptics) — not needed.
 
 ---
 
