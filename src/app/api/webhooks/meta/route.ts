@@ -248,12 +248,28 @@ export async function POST(request: Request) {
           //    confirmed link; still call the API for the name so the
           //    subject reads correctly (and to refresh the link row's
           //    meta_sender_name if needed). API failure is non-fatal.
+          //
+          //    PSIDs are PAGE-SCOPED — only the page that received the
+          //    DM can resolve them. The workspaces.meta_page_access_token_encrypted
+          //    column is stale/wrong for multi-page workspaces; always
+          //    pull the recipient page's token from meta_pages.
           try {
-            const { data: wsRow } = await admin
-              .from("workspaces")
-              .select("meta_page_access_token_encrypted")
-              .eq("id", workspaceId).single();
-            const enc = wsRow?.meta_page_access_token_encrypted as string | null;
+            const { data: pageRow } = await admin
+              .from("meta_pages")
+              .select("access_token_encrypted")
+              .eq("workspace_id", workspaceId)
+              .eq("meta_page_id", platformPageId)
+              .maybeSingle();
+            let enc: string | null = (pageRow?.access_token_encrypted as string | null) || null;
+            // Legacy fallback: workspaces.meta_page_access_token_encrypted
+            // for single-page setups that never migrated to meta_pages.
+            if (!enc) {
+              const { data: wsRow } = await admin
+                .from("workspaces")
+                .select("meta_page_access_token_encrypted")
+                .eq("id", workspaceId).single();
+              enc = (wsRow?.meta_page_access_token_encrypted as string | null) || null;
+            }
             if (enc) {
               const { decrypt } = await import("@/lib/crypto");
               const { fetchMessengerUserProfile } = await import("@/lib/meta");
