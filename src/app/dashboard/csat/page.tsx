@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface CsatResponse {
@@ -28,11 +29,29 @@ interface CsatStats {
 const WINDOWS = [7, 30, 90, 365] as const;
 
 export default function CsatPage() {
+  const router = useRouter();
   const { id: workspaceId } = useWorkspace();
   const [days, setDays] = useState<number>(30);
   const [stats, setStats] = useState<CsatStats | null>(null);
   const [responses, setResponses] = useState<CsatResponse[]>([]);
   const [loading, setLoading] = useState(true);
+  const [creatingTicketFor, setCreatingTicketFor] = useState<string | null>(null);
+
+  async function createTicketFromCsat(csatId: string) {
+    setCreatingTicketFor(csatId);
+    try {
+      const res = await fetch(`/api/workspaces/${workspaceId}/csat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "create_ticket", csat_id: csatId }),
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(data.error || "Failed to create ticket"); return; }
+      router.push(`/dashboard/tickets/${data.ticket_id}`);
+    } finally {
+      setCreatingTicketFor(null);
+    }
+  }
 
   const load = useCallback(async () => {
     if (!workspaceId) return;
@@ -136,7 +155,18 @@ export default function CsatPage() {
                         {r.points_awarded > 0 && <span className="ml-2">· +{r.points_awarded} pts</span>}
                       </p>
                       {r.comment && (
-                        <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{r.comment}</p>
+                        <>
+                          <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{r.comment}</p>
+                          <button
+                            type="button"
+                            disabled={creatingTicketFor === r.id}
+                            onClick={() => createTicketFromCsat(r.id)}
+                            className="mt-2 rounded-md border border-blue-300 px-2 py-1 text-[11px] font-medium text-blue-700 transition hover:bg-blue-50 disabled:opacity-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-950"
+                            title="Use the comment as the first inbound message of a new ticket"
+                          >
+                            {creatingTicketFor === r.id ? "Creating…" : "Create ticket from this comment"}
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>

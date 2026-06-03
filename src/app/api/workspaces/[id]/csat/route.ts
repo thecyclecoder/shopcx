@@ -91,3 +91,111 @@ export async function GET(
     })),
   });
 }
+
+/**
+ * POST /api/workspaces/[id]/csat
+ * Body: { action: "create_ticket", csat_id }
+ *
+ * Creates a new ticket from a CSAT comment when the customer used
+ * the comment field to slip in a new request (e.g. "5 stars but I
+ * actually need to cancel my subscription"). The comment goes in
+ * as the first inbound message on the new ticket. Returns the
+ * new ticket_id for client-side redirect.
+ */
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const { id: workspaceId } = await params;
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const admin = createAdminClient();
+  const { data: member } = await admin
+    .from("workspace_members").select("role")
+    .eq("workspace_id", workspaceId).eq("user_id", user.id).single();
+  if (!member || !["owner", "admin", "agent"].includes(member.role)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const body = await request.json().catch(() => ({}));
+  if (body.action !== "create_ticket") {
+    return NextResponse.json({ error: "Unknown action" }, { status: 400 });
+  }
+  const csatId = String(body.csat_id || "");
+  if (!csatId) return NextResponse.json({ error: "csat_id required" }, { status: 400 });
+
+  const { data: csat } = await admin
+    .from("ticket_csat")
+    .select("id, rating, comment, customer_id, ticket_id, submitted_at")
+    .eq("workspace_id", workspaceId)
+    .eq("id", csatId)
+    .maybeSingle();
+  if (!csat) return NextResponse.json({ error: "CSAT not found" }, { status: 404 });
+  if (!csat.comment?.trim()) return NextResponse.json({ error: "CSAT has no comment to use as ticket body" }, { status: 400 });
+  if (!csat.customer_id) return NextResponse.json({ error: "CSAT has no customer_id" }, { status: 400 });
+
+  const commentText = csat.comment.trim();
+  const firstLine = commentText.split(/\n/)[0].trim();
+  const subject = firstLine.length > 80
+    ? firstLine.slice(0, 77) + "…"
+    : firstLine || `CSAT follow-up — ${csat.rating}★`;
+
+  // Pull the original ticket's channel + subject so the system note
+  // can link back for agent context.
+  const { data: srcTicket } = await admin
+    .from("tickets").select("channel, subject")
+    .eq("id", csat.ticket_id).maybeSingle();
+
+  const now = new Date().toISOString();
+  const { data: ticket, error: terr } = await admin.from("tickets").insert({
+    workspace_id: workspaceId,
+    customer_id: csat.customer_id,
+    channel: srcTicket?.channel || "email",
+    status: "open",
+    subject,
+    last_customer_reply_at: csat.submitted_at,
+  }).select("id").single();
+  if (terr || !ticket) return NextResponse.json({ error: terr?.message || "Ticket insert failed" }, { status: 500 });
+
+  // First inbound message — the CSAT comment.
+  await admin.from("ticket_messages").insert({
+    ticket_id: ticket.id,
+    direction: "inbound",
+    visibility: "external",
+    author_type: "customer",
+    body: `<p>${commentText.replace(/</g, "&lt;").replace(/\n/g, "<br>")}</p>`,
+    created_at: csat.submitted_at,
+  });
+
+  // System note tying back to the CSAT + the original ticket.
+  await admin.from("ticket_messages").insert({
+    ticket_id: ticket.id,
+    direction: "outbound",
+    visibility: "internal",
+    author_type: "system",
+    body: `[System] Created from CSAT (${csat.rating}★) on ticket <a href="/dashboard/tickets/${csat.ticket_id}">${srcTicket?.subject || csat.ticket_id.slice(0, 8)}</a>. The customer's CSAT comment is the first inbound message above.`,
+  });
+
+  const { addTicketTag } = await import("@/lib/ticket-tags");
+  await addTicketTag(ticket.id, "from_csat");
+
+  // Fire the unified ticket handler so the orchestrator processes
+  // this as a real new inbound — pattern-matching, journey trigger,
+  // Sonnet decision, action execution. Same event widget chat /
+  // email webhook / journey completion all use.
+  const { inngest } = await import("@/lib/inngest/client");
+  await inngest.send({
+    name: "ticket/inbound-message",
+    data: {
+      workspace_id: workspaceId,
+      ticket_id: ticket.id,
+      message_body: commentText,
+      channel: srcTicket?.channel || "email",
+      is_new_ticket: true,
+    },
+  });
+
+  return NextResponse.json({ ok: true, ticket_id: ticket.id });
+}
