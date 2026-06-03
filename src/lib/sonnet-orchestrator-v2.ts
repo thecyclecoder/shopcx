@@ -1396,6 +1396,41 @@ export async function callSonnetOrchestratorV2(
           }
           console.warn(`Orchestrator (${modelKey}): empty-content retry failed (status ${retry.status})`);
         }
+        // Parse the response. If the model returned prose without a JSON
+        // block (Christine 5a279c92, 2026-06-03 — Opus reasoned through
+        // the situation in plain English but never emitted JSON), retry
+        // once with no tools + an explicit "JSON only" reminder. Same
+        // shape as the max-tool-rounds force-decision retry below.
+        const firstAttempt = tryParseSonnetDecision(text);
+        if (firstAttempt) return firstAttempt;
+        console.warn(`Orchestrator (${modelKey}): no JSON in text, retrying with JSON-only reminder. Got: ${text.slice(0, 500).replace(/\s+/g, " ")}`);
+        try {
+          const jsonRetry = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: modelId,
+              max_tokens: 2000,
+              messages: [
+                ...messages,
+                { role: "assistant", content: text },
+                { role: "user", content: "Your previous response was prose, not JSON. Re-emit your decision as a single JSON object with at minimum the keys `reasoning` and `action_type`. Output ONLY the JSON object, nothing else." },
+              ],
+            }),
+          });
+          if (jsonRetry.ok) {
+            const jsonRetryData = await jsonRetry.json();
+            logUsage(jsonRetryData.usage, `round${round}-retry-json`);
+            const retryText = (jsonRetryData.content || []).filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => b.text).join("");
+            const second = tryParseSonnetDecision(retryText);
+            if (second) return second;
+            console.warn(`Orchestrator (${modelKey}): JSON-only retry still no JSON. Got: ${retryText.slice(0, 500).replace(/\s+/g, " ")}`);
+          } else {
+            console.warn(`Orchestrator (${modelKey}): JSON-only retry HTTP ${jsonRetry.status}`);
+          }
+        } catch (e) {
+          console.warn(`Orchestrator (${modelKey}): JSON-only retry threw:`, e);
+        }
         return parseSonnetDecision(text, message);
       }
 
@@ -1466,6 +1501,23 @@ export async function callSonnetOrchestratorV2(
 }
 
 // ── JSON Parser ──
+
+/**
+ * Try to parse a decision from `text`. Returns null (not a fallback)
+ * on any parse failure so the caller can decide whether to retry the
+ * API call before escalating.
+ */
+function tryParseSonnetDecision(text: string): SonnetDecision | null {
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (!parsed.reasoning || !parsed.action_type) return null;
+    return parsed as SonnetDecision;
+  } catch {
+    return null;
+  }
+}
 
 function parseSonnetDecision(text: string, inboundMessage: string = ""): SonnetDecision {
   // Each failure mode tags the reasoning so when a ticket lands in
