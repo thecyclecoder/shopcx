@@ -112,6 +112,20 @@ When linking accounts (Shopify auto-merge, Meta sender → customer, etc.):
 - **Only the main customer's marketing consent counts** for journey marketing decisions. Linked accounts' marketing status doesn't merge.
 - **Once linked via "Confirm match," the link is permanent.** Future comments / DMs / orders from that Meta account auto-attribute. No re-asking.
 
+## Exchanges
+
+**We do not offer exchanges on shipped orders.** No refund-and-reship, no swap-the-package-out path. The only thing that resembles an exchange that we *can* do is a **subscription line-item swap that applies to the NEXT renewal**.
+
+Handling:
+
+1. If the customer has an active subscription containing the same product type, **swap the variant on their sub** to whatever they want. Use the [[orchestrator-tools#subscription-mutations|swap_variant]] direct action. Frame the message as "your next shipment will be X" — never "we'll exchange your last order."
+2. If the customer has no active subscription, **decline cleanly** with the published policy line. Don't apologize at length, don't invent an "exchange credit" path, don't promise to refund and reship.
+3. **Don't bait a negative outcome.** Never write "if you don't like it, reply to pause" — that primes the customer toward returning before they've tried it. Assume the best.
+
+Source of truth:
+- Published customer-facing copy → [[tables/policies]] where `slug='no_exchanges'`.
+- Runtime AI enforcement → [[tables/sonnet_prompts]] where `title='rule_no_exchanges'`.
+
 ## Crisis comms
 
 - **Crisis returns are fully automated by the Sonnet orchestrator.** Don't escalate them to a human unless the orchestrator explicitly hits a knowledge gap.
