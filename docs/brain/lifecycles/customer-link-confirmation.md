@@ -56,6 +56,19 @@ When a customer sends a message and is unmatched, `src/lib/auto-link-customer-fr
 
 For each proposal, the orchestrator may auto-confirm (if the order number was unambiguous + the message strongly implies "this is me") or ask for inline confirmation.
 
+### Meta DM specifics (channel = meta_dm)
+
+Meta delivers only a **page-scoped sender ID (PSID)** in the webhook — no email, no name, no order number. Customer resolution on inbound DMs follows a strict policy:
+
+1. **[[../tables/meta_sender_customer_links]] lookup** — if a confirmed binding exists for the PSID, use that `customer_id`. This is the only auto-link path for DMs.
+2. **Graph API name fetch** — using the recipient page's token from [[../tables/meta_pages]] (PSIDs are page-scoped; only the page that received the DM can resolve them). The returned first/last name is used for the ticket subject and the first-turn greeting; **it is NOT used to match a customer record**. Fuzzy name matching is unsafe for DMs because common names collide (multiple "Susan Smiths" in the customers table; picking one wrong is worse than admitting we don't know).
+3. **If no link** → the orchestrator asks for **email or order number** on the first reply. Account-related answers ("do I have a sub?", "where's my order?", LTV, loyalty, cancel) are gated until the customer provides one. General questions (product info, return policy, ingredients) can still be answered without a match. See sonnet_prompts rule `0d75ac46-4338-47f2-aba6-8235910f98e2` for the exact greeting template.
+4. **Customer's next message with email/order#** flows through Phase 2 above: `auto-link-customer-from-message.ts` extracts the identifier, looks up the customer record, proposes the link, and the orchestrator then runs with the matched `customer_id`.
+
+Why: telling someone "you don't have a subscription" when they actually have a $3K LTV sub is a worse failure than a one-turn delay to verify identity. Verify-then-act is the right UX whenever the platform doesn't hand us a verified email.
+
+App-permission context: the Meta app is in review for upgraded webhook permissions that may eventually expose customer email. Even if approved, the email/order# verification rule stays — Meta delivery of email is best-effort and won't be reliable for all senders. The DM verification flow is the permanent identification path; upgraded permissions would only reduce its frequency.
+
 ## Phase 3 — inline confirmation
 
 When auto-confirm isn't safe, the unified handler inserts a clarifying step into the conversation:
