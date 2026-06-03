@@ -1,6 +1,8 @@
 # policies
 
-Canonical published policies (refund window, restocking, exchange rules, etc). Consumed by orchestrator, storefront, and (TODO) playbook executor.
+Canonical published policies (refund window, restocking, exchange rules, cancellation terms, etc.). Consumed by orchestrator, storefront, and (TODO) playbook executor.
+
+**Role in customer messaging:** this table answers the *"what can we do?"* layer of customer communication. The orchestrator references it to determine eligibility (e.g. "is this refund within the 14-day window?"). The voice layer ([[../customer-voice]]) governs how the answer is delivered; the scenario-rule layer ([[sonnet_prompts]]) governs when to invoke which policy. Three-layer model fully described in [[../customer-voice]] § Three layers of customer communication.
 
 **Primary key:** `id`
 

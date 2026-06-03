@@ -2,6 +2,8 @@
 
 DB-driven prompt rules for the Sonnet orchestrator. category: rule/approach/knowledge/tool_hint. Editable in Settings → AI → Prompts.
 
+**Role in customer messaging:** this table answers the *"when X, do Y"* scenario layer. The orchestrator concatenates approved + enabled rows into its system prompt at runtime. Sits next to [[policies]] (the "what can we do?" layer) and [[../customer-voice]] (the "how does it sound?" voice layer). Three-layer model in [[../customer-voice]] § Three layers of customer communication.
+
 **Primary key:** `id`
 
 ## Columns
