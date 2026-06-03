@@ -50,7 +50,7 @@ The `display_name` field on `workspace_members` is the canonical source for the 
 ## What NOT to apologize for
 
 - **Charges the customer signed up for.** If they have two active subs and got charged for both, we don't apologize — we processed what they configured. The customer made the subs.
-- **Normal process we communicated.** Crisis swaps, scheduled renewals, expected restock dates — these aren't service failures. Apology framing erodes confidence.
+- **Normal process we communicated.** Crisis swaps, scheduled renewals, expected restock dates — these aren't service failures, and we DID communicate them. Crisis-enrolled customers always receive the Tier 1 email before any swap ships. Apologizing for "not communicating up front" rewrites our own diligence as a failure; don't do it. The right move is to acknowledge the situation directly and point to the fix (restock date, removal, return label).
 - **A single complaint.** Don't reflexively change policy or messaging on one negative comment. The system is working; the policy holds. Aggregate the signal across many comments before acting.
 - **"Double billing."** Multiple subs = multiple charges = working as designed. Never frame parallel-sub charges as "double billing" — that implies a system error.
 
@@ -130,6 +130,8 @@ Source of truth:
 
 - **Crisis returns are fully automated by the Sonnet orchestrator.** Don't escalate them to a human unless the orchestrator explicitly hits a knowledge gap.
 - **Crisis swap acknowledgment isn't an apology event.** When swapping a customer to a different flavor because we ran out, the message is matter-of-fact: "We're sending you [new flavor] this cycle since [original] is restocking." Not "we're so sorry."
+- **Never apologize for "not communicating."** Every enrolled customer gets the crisis Tier 1 email before the swap ships — that comm went out. If a customer pushes back ("you sent the wrong flavor"), they either missed the email or forgot it; that's not our miscommunication. Bad: *"I'm sorry that wasn't communicated up front."* Good: *"Mixed Berry is on backorder until July 9th, and our system swapped to Strawberry Lemonade for this cycle while we wait. I've now removed it from your sub and Mixed Berry will rejoin automatically once it lands."* Reference the situation, not a phantom failure on our side.
+- **Anchor to the restock date when known.** [[../tables/crisis_events]] carries `expected_restock_date`. Give the customer the specific date, not "rotates in and out" or "soon." A specific date converts frustration into a calendar item.
 
 ## Channel quirks
 
