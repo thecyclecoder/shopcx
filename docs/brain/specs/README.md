@@ -25,14 +25,6 @@ Single source of truth for what's being built next, what's parked, and what just
 Concrete, scoped, high-ROI work. Pick any one and promote to a full spec.
 
 
-### Stacked sale coupons on subscriptions
-**Status:** ⏳ Reduced scope from original analysis but still real.
-- 333 active subs have at least one CODE_DISCOUNT applied (was: "136 grandfathered with coupons" in Apr).
-- Of those, ~60% are allowed (LOYALTY-*, free shipping like `VIPFreeShip` / `pedrofreeship`, Buy-N bundle deals).
-- The remaining ~70-100 carry real promotional codes (`CX20`, `RTX25`, `FROMTHEFOUNDER`, `BIGMDW26`, `SUMMERFIT`, `WELLNESS`, `MGS10SC`, `MDAY55`, `LUCKY`, `FLOWERS`, `STNICK`) that probably shouldn't be stacking on subscription pricing.
-- **Fix:** script reads `applied_discounts[]` for active subs, filters to CODE_DISCOUNT NOT IN (loyalty patterns + free-shipping codes + bundle "Buy N" codes), removes via Appstle `subscription-contracts-remove-discount`.
-- Pre-flight: verify a manual sample of 10 codes that they're not customer-promised lifetime discounts before bulk-removing.
-
 ### Auto-grant exception detection (3 stubs)
 **Status:** ⏳ Still false-returning in `src/lib/playbook-executor.ts:2105-2107`.
 - `cancelled_but_charged`: sub cancelled BEFORE order charged → auto-grant refund without return.
@@ -157,6 +149,7 @@ These have no work attached — they're operational notes. Kept here because the
 - ✅ **Email tracking spec** — mostly shipped; verify current state in [[../inngest/deliver-pending-send]] / Resend integration page if anyone touches it again.
 - ✅ **Stuck-sub cleanup** (2026-06-03) — `next_billing_date` cleanup across 83 subs: 75 advanced (Appstle truth synced into our DB), 6 marked cancelled, 2 re-fired into dunning via `appstleAttemptBilling`. Was a one-time data-staleness backlog, not an active bug (the sync-lag root cause was already patched earlier). Script: `scripts/cleanup-stuck-subs-2026-06-03.ts`.
 - ✅ **Cancel-event dedup** (2026-06-03) — forward fix in the Appstle webhook handler. When a customer cancels via the portal, both a `portal.subscription.cancelled` (source=portal) AND a `subscription.cancelled` (source=appstle) fire within seconds. Now the Appstle webhook checks for a portal cancel for the same `shopify_contract_id` within the last 5 min and suppresses the duplicate insert. **Historical 272 duplicates left in place** — backfill script (`scripts/backfill-cancel-event-dedup.ts`) exists but was not applied; analytics consumers can still dedupe at query time if needed.
+- ✅ **Stacked-sale-coupon check** (2026-06-03) — re-scoped per Dylan to "subs with **2+** sale coupons (excluding loyalty / free-shipping / Buy-N bundle)." Live count: **0**. The 333 subs that carry one CODE_DISCOUNT each are allowed to combine with automatic-discount + subscribe-and-save. Item resolved without cleanup.
 
 ---
 
