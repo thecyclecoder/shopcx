@@ -24,55 +24,39 @@ Single source of truth for what's being built next, what's parked, and what just
 
 Concrete, scoped, high-ROI work. Pick any one and promote to a full spec.
 
-### 469 stuck subs — dunning skipped but `next_billing_date` never advanced
-**Status:** ⏳ Diagnosed, fix not yet written.
-- 462 of 469 are in dunning with `status='skipped'`; the next_billing_date stays stuck on the failed date forever.
-- 7 are pre-dunning ghosts (Oct 2025).
-- ~$35K+ MRR impact (~$75 avg × 469 subs).
-- **Fix scope:** dunning skip handler must advance `next_billing_date` to the next cycle. Backfill script for the 469 stuck ones.
+### Stuck subs — dunning skipped but `next_billing_date` never advanced
+**Status:** ⏳ Shrunk substantially (469 → 83 as of 2026-06-03) but still real.
+- 83 active subs with `next_billing_date` in the past. Bucket: 1 @ 60+d, 31 @ 30-60d, 44 @ 14-30d, 7 @ 1-14d.
+- ~$6-7K MRR impact at current scale (~$75 avg × 83).
+- **Fix scope:** dunning skip handler must advance `next_billing_date` to the next cycle. Backfill script for the 83 stuck ones.
 - May also need `sendPaymentUpdateEmail` for expired cards.
-- Originally in `project_billing_investigation.md`.
 
-### 52 grandfathered subs below the 50% MSRP floor
-**Status:** ⏳ Stats captured, cleanup script not written.
-- 52 sub-line-items pricing < 50% of `product_standard_price` (the configured `coupon_price_floor_pct`).
-- Likely from old promos or migration errors.
-- **Fix:** script that picks them via `price_cents / 0.75 < standard * 0.50`, calls `subUpdateLineItemPrice` to raise to floor, logs audit.
-- Originally in `project_grandfathered_price_cleanup.md`.
+### Cancel event deduplication — **worse than the original analysis suggested**
+**Status:** 🚧 Still very real; not resolved. Reverify cited.
+- Last 7d: **52 of 90 cancelled subs (58%)** double-logged with both `portal` AND `appstle` source events.
+- Last 30d: **227 overlap of 473 total** (48%).
+- The "Appstle-only" tail is still ~35/week (~5/day, matching the original Apr baseline) — the email disable in Apr didn't fix it because the double-log comes from the Appstle webhook firing on every portal cancel, not from customers using Appstle's portal.
+- **Fix:** when an Appstle cancel webhook fires AND a portal event already exists for the same `shopify_contract_id` in the last N minutes, suppress / mark the Appstle row as duplicate.
+- Affects every aggregate cancel query (analytics, retention rate, journey trigger counts).
 
-### 136 grandfathered subs with stacked sale coupons
-**Status:** ⏳ Stats captured, cleanup script not written.
-- Sub has grandfathered pricing AND a code coupon — double-dipping.
-- LOYALTY-* and smile-* are allowed; PRIMESALE / LUCKY / FLOWERS / VIPFreeShip / etc. must come off.
-- **Fix:** script reads `applied_discounts[]` for active grandfathered subs, filters to non-loyalty CODE_DISCOUNT, removes via Appstle `subscription-contracts-remove-discount`.
-- Originally in `project_grandfathered_coupon_cleanup.md`.
+### Stacked sale coupons on subscriptions
+**Status:** ⏳ Reduced scope from original analysis but still real.
+- 333 active subs have at least one CODE_DISCOUNT applied (was: "136 grandfathered with coupons" in Apr).
+- Of those, ~60% are allowed (LOYALTY-*, free shipping like `VIPFreeShip` / `pedrofreeship`, Buy-N bundle deals).
+- The remaining ~70-100 carry real promotional codes (`CX20`, `RTX25`, `FROMTHEFOUNDER`, `BIGMDW26`, `SUMMERFIT`, `WELLNESS`, `MGS10SC`, `MDAY55`, `LUCKY`, `FLOWERS`, `STNICK`) that probably shouldn't be stacking on subscription pricing.
+- **Fix:** script reads `applied_discounts[]` for active subs, filters to CODE_DISCOUNT NOT IN (loyalty patterns + free-shipping codes + bundle "Buy N" codes), removes via Appstle `subscription-contracts-remove-discount`.
+- Pre-flight: verify a manual sample of 10 codes that they're not customer-promised lifetime discounts before bulk-removing.
 
 ### Auto-grant exception detection (3 stubs)
-**Status:** ⏳ Stubs returning false in `src/lib/playbook-executor.ts:760`.
+**Status:** ⏳ Still false-returning in `src/lib/playbook-executor.ts:2105-2107`.
 - `cancelled_but_charged`: sub cancelled BEFORE order charged → auto-grant refund without return.
 - `duplicate_charge`: detect from order/billing data (multiple charges same period).
 - `never_delivered`: check fulfillment/tracking status.
 - Without these, customers who got charged after cancelling go through the tiered exception flow instead of getting an immediate refund.
-- Originally in `project_autogrant_detection.md`.
-
-### Cancel event deduplication
-**Status:** ⏳ Mostly diagnosed; Appstle email disable already shipped, dedup logic not written.
-- Portal cancels double-log: `portal.subscription.cancelled` (source: portal) + `subscription.cancelled` (source: appstle). Apr 21 baseline: 8 portal / 14 appstle / 7 overlap.
-- The ~5/day appstle-only mystery cancels were caused by Appstle's post-order emails linking to their merchant portal — Dylan disabled those 2026-04-22. Monitor to confirm.
-- **Fix:** when an Appstle cancel webhook fires AND a portal event already exists for the sub in the last N minutes, suppress / mark the Appstle row as duplicate.
-- Originally in `project_cancel_event_dedup.md`.
 
 ---
 
 ## Ready to spec — backfills + enrichment
-
-### Klaviyo profile enrichment → customers.timezone + address
-**Status:** ⏳ Sketched in memory.
-- Many subscribers signed up via Klaviyo forms but never ordered, so we have no shipping address or timezone for them.
-- Klaviyo Profile API has the data; we don't pull it.
-- Drives the SMS timezone priority chain (`customers.timezone → zip → area_code → workspace fallback`) — Klaviyo-only subscribers all fall through to the workspace fallback today.
-- **Fix:** Klaviyo Profile API client + matcher by email/phone + write `customers.timezone`, `customers.default_address` JSONB.
-- Originally in `project_klaviyo_profile_enrichment.md`.
 
 ### Meta ad-comment attribution via effective_object_story_id
 **Status:** ⏳ Architecturally designed in memory, not implemented.
