@@ -63,7 +63,6 @@ Synced from Shopify Online Store channel. `variants` JSONB is legacy — real so
 - [[product_how_it_works]].`product_id`
 - [[product_ingredient_research]].`product_id`
 - [[product_ingredients]].`product_id`
-- [[product_intelligence]].`product_id`
 - [[product_link_members]].`product_id`
 - [[product_media]].`product_id`
 - [[product_page_content]].`product_id`

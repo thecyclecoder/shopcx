@@ -1,6 +1,6 @@
 # inngest/product-intelligence
 
-Generates `product_intelligence` rows — competitor analysis, positioning, recommended angles.
+The four Sonnet workers that drive the Product Intelligence Engine pipeline. End-to-end flow in [[../lifecycles/product-intelligence]].
 
 **File:** `src/lib/inngest/product-intelligence.ts`
 

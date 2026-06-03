@@ -211,7 +211,6 @@ _None._
 - [[loyalty_redemptions]].`workspace_id`
 - [[loyalty_settings]].`workspace_id`
 - [[loyalty_transactions]].`workspace_id`
-- [[macro_audit_jobs]].`workspace_id`
 - [[macro_usage_log]].`workspace_id`
 - [[macros]].`workspace_id`
 - [[marketing_shortlinks]].`workspace_id`
@@ -236,7 +235,6 @@ _None._
 - [[product_how_it_works]].`workspace_id`
 - [[product_ingredient_research]].`workspace_id`
 - [[product_ingredients]].`workspace_id`
-- [[product_intelligence]].`workspace_id`
 - [[product_link_groups]].`workspace_id`
 - [[product_media]].`workspace_id`
 - [[product_page_content]].`workspace_id`

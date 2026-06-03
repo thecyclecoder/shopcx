@@ -10,7 +10,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 51 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 13 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 174 |
-| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 19 |
+| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 20 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
 | [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 23 + README |
@@ -111,7 +111,6 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/kb_chunks]] — RAG retrieval chunks for knowledge base articles. pgvector embedding (1536).
 - [[tables/knowledge_base]] — Help center articles — slug, content_html, view_count, helpful_yes/no. Public-facing.
 - [[tables/knowledge_gaps]] — AI-detected knowledge gaps — moments the AI had nothing to say. Surfaced for admin review.
-- [[tables/macro_audit_jobs]] — Jobs that re-audit macro acceptance rates and flag low-performers for review.
 - [[tables/macro_usage_log]] — Per-use tracking of every macro send — source (ai/agent), outcome (accepted/rejected/personalized).
 - [[tables/macros]] — Canned response templates with embeddings + AI-suggestion counters. Discoverable by Sonnet.
 - [[tables/pattern_feedback]] — Smart-pattern agent feedback queue (agent removed an auto-applied smart: tag → review).
@@ -201,7 +200,6 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/product_how_it_works]] — PDP 'How it works' section content per product.
 - [[tables/product_ingredient_research]] — Research/citations for each ingredient — used by the ingredient deep-dive PDP section.
 - [[tables/product_ingredients]] — Per-product ingredient list with name, dose, function.
-- [[tables/product_intelligence]] — AI-generated product intelligence (positioning, competitor analysis, recommended angles).
 - [[tables/product_link_groups]] — Cross-product link groups — bundles, related products, upsell groups.
 - [[tables/product_link_members]] — Members of a `product_link_groups` row.
 - [[tables/product_media]] — Per-product media (images, videos) with dimensions and roles (hero, gallery, before/after).
@@ -282,7 +280,6 @@ Every background job, webhook fan-out, and cron lives here. Each page lists trig
 - [[inngest/klaviyo-engagement-sync]] — Daily 4am CST incremental delta → `profile_events`.
 - [[inngest/klaviyo-events-import]] — Placed Order events + UTM attribution.
 - [[inngest/klaviyo-sms-import]] — Historical Klaviyo SMS campaigns.
-- [[inngest/macro-audit]] — Audits macro acceptance rates.
 - [[inngest/marketing-coupon-cron]] — Auto-disables expired SMS-campaign coupons.
 - [[inngest/marketing-text]] — SMS campaign send pipeline (schedule + 5-min send tick).
 - [[inngest/meta-historical-comments-sync]] — Backfills `social_comments` from historical posts/ads.
@@ -345,6 +342,7 @@ Long-form narrative pages tracing key flows end-to-end. Each wikilinks 5+ refere
 - [[lifecycles/customer-link-confirmation]] — Meta sender → fuzzy match → agent confirms → `meta_sender_customer_links` → backfill.
 - [[lifecycles/chargeback-pipeline]] — Shopify dispute → `chargeback_events` → fraud classification → auto-cancel subs → `chargeback_subscription_actions`.
 - [[lifecycles/demographic-enrichment]] — New customer → name→Haiku, ZIP→Census, orders→buyer_type → `customer_demographics` → snapshots → dashboard.
+- [[lifecycles/product-intelligence]] — Product → ingredients → research → review analysis → benefit selections → page content → publish. The Product Intelligence Engine.
 
 ## Journeys (`journeys/`)
 

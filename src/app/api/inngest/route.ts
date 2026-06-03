@@ -52,7 +52,6 @@ import {
   internalSubscriptionRenewalAttempt,
 } from "@/lib/inngest/internal-subscription-renewals";
 import { returnsProcessDelivery, returnsIssueRefund } from "@/lib/inngest/returns";
-import { macroAuditFunction } from "@/lib/inngest/macro-audit";
 import { deliveryNightlyAudit } from "@/lib/inngest/delivery-audit";
 import { deliverPendingSends } from "@/lib/inngest/deliver-pending-send";
 import { crisisDailyCampaign, crisisAdvanceTier } from "@/lib/inngest/crisis-campaign";
@@ -141,7 +140,6 @@ export const { GET, POST, PUT } = serve({
     unifiedTicketHandler,
     returnsProcessDelivery,
     returnsIssueRefund,
-    macroAuditFunction,
     deliveryNightlyAudit,
     deliverPendingSends,
     crisisDailyCampaign,

@@ -6,11 +6,9 @@ Business outcome: cut per-ad creative cost from ~$200 (freelancer) to ~$2 (Higgs
 
 ## Data-source contract (hard rule)
 
-The ad tool consumes the **ShopCX Product Intelligence Engine's structured fields** as its single source of truth for what to say about a product. It does NOT consume:
+The ad tool consumes the **ShopCX Product Intelligence Engine's structured fields** as its single source of truth for what to say about a product.
 
-- `product_intelligence.content` — the legacy ShopGrowth-LLM markdown brief. **Deprecated for the ad tool.** Will be removed from the engine in separate work; the ad tool design assumes it's gone.
-- `product_intelligence.source = 'shopgrowth'` derived fields.
-- `product_intelligence.title` — redundant with `products.title`.
+(Historical note: a legacy free-form `product_intelligence.content` markdown blob existed for this purpose. The table and all surrounding UI / API / Inngest code were removed 2026-06-03 — the ad tool design always assumed it was absent.)
 
 The ad tool reads (in Phase 0.5 angle generator priority order):
 
@@ -248,7 +246,7 @@ The dimensions matter because Soul + most diffusion models default to "drink-can
 
 ### Storefront UI changes
 
-Existing `/dashboard/products/[id]` gets:
+Existing `/dashboard/storefront/products/[id]` gets:
 
 1. **Per-product "Physical dimensions" card** — four numeric inputs (length / width / height / weight) + a shape dropdown. Save button POSTs to `/api/products/{id}/dimensions`.
 2. **Per-variant "Isolated image" upload** — a separate image upload widget under each variant row, with a thumbnail preview. Replaces existing isolated image if any. Stored in Supabase Storage at `products/{workspace_id}/{product_id}/variants/{variant_id}/isolated.png`. POSTs to `/api/products/{id}/variants/{variant_id}/isolated-image`.
@@ -260,14 +258,14 @@ Both upload UIs accept PNG / JPG / WEBP, max 10 MB. Server-side: validate the im
 
 - Migration adds `isolated_image_url` + `isolated_image_uploaded_at` + `isolated_image_uploaded_by` to `product_variants`.
 - Migration adds `physical_dimensions jsonb` to both `products` and `product_variants`.
-- Upload card on `/dashboard/products/[id]` works for both surfaces.
+- Upload card on `/dashboard/storefront/products/[id]` works for both surfaces.
 - For at least one Superfoods product (manual test): upload the variant's isolated image + the product's dimensions, then verify the values land in the DB.
 
 This phase ships BEFORE Phase 1 so the avatar/character pipeline has clean product references to consume from day one.
 
 ## Phase 0.5 — product intelligence → ad angles (LF8 mapping + DR validator) ⏳
 
-The ShopCX Product Intelligence Engine has the PDP-tested structured data we need (leading benefits, science-backed benefits, ingredient research, certifications, awards, customer phrases). This phase consumes those structured fields — never the deprecated `product_intelligence.content` markdown blob — and produces direct-response angles anchored to the PROVEN leading benefits.
+The ShopCX Product Intelligence Engine has the PDP-tested structured data we need (leading benefits, science-backed benefits, ingredient research, certifications, awards, customer phrases). This phase consumes those structured fields exclusively and produces direct-response angles anchored to the PROVEN leading benefits. (Historical note: a legacy `product_intelligence.content` markdown blob existed for this purpose; it was removed 2026-06-03 along with all UI/API/Inngest code that touched it.)
 
 ### Data source hierarchy (the source-of-truth contract)
 
@@ -280,15 +278,6 @@ The angle generator consumes data in this **strict priority order**. Higher tier
 | **3** | [[../tables/product_ingredient_research]] WHERE `ai_confidence >= 0.6` | Mechanism + clinically_studied_benefits + citations. The science substrate behind every claim. |
 | **4** | [[../tables/product_reviews]] WHERE `rating >= 4`, top 10 by featured/recency | **Quotable proof only.** Reviews CITE benefits already established in tiers 1-2. They cannot BE the angle. |
 | **5** | Always-on credibility (composed live): `products.certifications[]`, `products.allergen_free[]`, `products.awards[]`, count + avg(`product_reviews`), count(`product_ingredient_research where ai_confidence >= 0.6`), [[../tables/workspaces]]`.social_brand_proof_points`, `product_page_content.guarantee_copy` | The badge row + CTA stack at the bottom of every ad. |
-
-### Deprecated — do not consume
-
-The ad tool **never reads**:
-- `product_intelligence.content` (the legacy ShopGrowth-LLM markdown brief)
-- `product_intelligence.source = 'shopgrowth'` derived fields
-- `product_intelligence.title` (redundant with `products.title`)
-
-If a future migration removes these columns from `product_intelligence`, the ad tool keeps working unchanged.
 
 ### Angle generator input contract
 
@@ -415,7 +404,7 @@ The script generator (Phase 3) calls this internally and retries up to 3 times b
 - Every angle has `lead_benefit_anchor` populated with a verbatim string from `product_page_content.benefit_bar` OR `product_benefit_selections.name`.
 - Every angle has `meta_headline ≤ 40`, `meta_primary_text ≤ 125`, `meta_description ≤ 30`. No overflow.
 - The angles trace cleanly: no claim in any angle's `hook_one_liner` / `desired_outcome` is unanchored when checked against the Tier 1-2 source list.
-- The generator NEVER queries `product_intelligence.content` (grep-verifiable absence in the implementation).
+- The generator reads only from the Engine's structured tables (no free-form markdown ingestion of any kind).
 - Validator rejects a deliberately "safe" script in `scripts/test-ad-validator.ts`.
 - Validator rejects a script whose central claim cites only a review (no tier-1 / tier-2 anchor) in the same test file.
 - Settings page works.
@@ -770,13 +759,12 @@ Per [[../project-management]]:
 - New: `lifecycles/ad-render.md` — end-to-end trace of the pipeline above with "Status / open work" block.
 - New: `tables/ad_avatars.md`, `tables/ad_avatar_proposals.md`, `tables/ad_campaigns.md`, `tables/ad_videos.md`, `tables/ad_jobs.md`, `tables/product_ad_angles.md`.
 - New: `libraries/ad-angles.md`, `libraries/ad-validator.md`.
-- Update: `tables/products.md` — call out that `target_customer`, `certifications`, `allergen_free`, `awards` are the canonical structured proof source (replaces the deprecated `product_intelligence.content` markdown approach). Note new `physical_dimensions` column added by Phase 0.
+- Update: `tables/products.md` — call out that `target_customer`, `certifications`, `allergen_free`, `awards` are the canonical structured proof source. Note new `physical_dimensions` column added by Phase 0.
 - Update: `tables/product_variants.md` (new `isolated_image_url` + `physical_dimensions` columns).
 - Update: `tables/product_page_content.md` — flag as Tier-1 source for ad angles (hero_headline + benefit_bar + guarantee_copy + expectation_timeline).
 - Update: `tables/product_benefit_selections.md` — flag as Tier-2 source for ad angles.
 - Update: `tables/product_ingredient_research.md` — flag as Tier-3 source.
 - Update: `tables/product_reviews.md` — flag as Tier-4 proof-only source.
-- Update: `tables/product_intelligence.md` — mark the `content` column as **deprecated for ad-tool purposes**; ad tool reads only the structured `products.*` columns going forward.
 - Update: `dashboard/products.md` (new dimensions + isolated-image upload surfaces).
 - New: `inngest/ad-tool.md`.
 - New: `integrations/higgsfield.md` — auth model, key endpoints, rate limits, gotchas.
@@ -813,7 +801,7 @@ Once all six prior phases land:
 ## Completion criteria
 
 - ⏳ Phase 0: `product_variants.isolated_image_url` upload UI works; `products.physical_dimensions` + variant-override input UI works; at least one Superfoods product has both populated end-to-end.
-- ⏳ Phase 0.5: `product_ad_angles` populated for Amazing Coffee with at least 12 angles; every angle has `lead_benefit_anchor` set to a verbatim string from `product_page_content.benefit_bar` OR `product_benefit_selections.name`; every angle has `meta_headline ≤ 40`, `meta_primary_text ≤ 125`, `meta_description ≤ 30`; the generator code never references `product_intelligence.content` (grep-verifiable); DR validator + claim-anchor validator tests pass; banned-words list editable in settings.
+- ⏳ Phase 0.5: `product_ad_angles` populated for Amazing Coffee with at least 12 angles; every angle has `lead_benefit_anchor` set to a verbatim string from `product_page_content.benefit_bar` OR `product_benefit_selections.name`; every angle has `meta_headline ≤ 40`, `meta_primary_text ≤ 125`, `meta_description ≤ 30`; the generator reads only from Engine structured tables (no free-form markdown ingestion); DR validator + claim-anchor validator tests pass; banned-words list editable in settings.
 - ⏳ Phase 2: archetype proposals derived from the four-field demographic tuple (gender, age range, life stage, income bracket — see [[../lifecycles/demographic-enrichment]]) surface on `/dashboard/marketing/ads/avatars` BEFORE any photo upload happens; at least 2 proposals exist for Amazing Coffee; one proposal is confirmed into a real `ad_avatars` row; the `demographic_basis` JSONB does NOT contain `health_priorities` or `buyer_type` fields.
 - ⏳ Schema applied via supabase migration + apply script.
 - ⏳ Higgsfield integration card on Settings → Integrations connects + saves credentials.

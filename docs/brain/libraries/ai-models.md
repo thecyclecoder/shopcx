@@ -63,7 +63,6 @@ const MODELS
 - `src/lib/inngest/ai-nightly-analysis.ts`
 - `src/lib/inngest/customer-demographics.ts`
 - `src/lib/inngest/fraud-detection.ts`
-- `src/lib/inngest/macro-audit.ts`
 - `src/lib/inngest/product-intelligence.ts`
 - … and 11 more
 
