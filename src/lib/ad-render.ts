@@ -266,6 +266,131 @@ export function buildCompositionProps(args: BuildPropsArgs): AdCompositionProps 
   };
 }
 
+// ── VO-spine captions (the proven Veo pipeline) ─────────────────────────────
+// The talking segments' own audio IS the voiceover. Captions are built from each
+// segment's Whisper words, PROOFREAD against the script that generated the clip
+// (Veo adds hallucinated filler), with numbers + "%" preserved. One caption on
+// screen at a time. Mirrors what shipped in the approved Amazing Coffee ad.
+
+const NUMWORDS: Record<string, string> = {
+  zero: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9",
+  ten: "10", eleven: "11", twelve: "12", thirteen: "13", fourteen: "14", fifteen: "15", sixteen: "16", seventeen: "17",
+  eighteen: "18", nineteen: "19", twenty: "20", thirty: "30", forty: "40", fifty: "50", sixty: "60", seventy: "70",
+  eighty: "80", ninety: "90", hundred: "100",
+};
+const normWord = (s: string): string => {
+  let n = (s || "").toLowerCase().replace(/[^a-z0-9%]/g, "");
+  if (NUMWORDS[n] !== undefined) n = NUMWORDS[n];
+  return n;
+};
+
+/**
+ * Align Whisper words to the intended script: keep only words that match the
+ * script sequence (drop Veo's filler), and when the script says a number then
+ * "percent", render "N%" on the number's beat even if Whisper emitted an empty
+ * word for "percent". Returns the kept words (with their original timings).
+ */
+export function proofreadWords(scriptText: string, words: TranscriptWord[]): TranscriptWord[] {
+  const tokens = (scriptText || "").split(/\s+/).map(normWord).filter(Boolean);
+  if (!tokens.length) return words;
+  const out: TranscriptWord[] = [];
+  let ti = 0;
+  const attachPercent = (pushed: TranscriptWord) => {
+    if (ti < tokens.length && (tokens[ti] === "percent" || tokens[ti] === "%")) {
+      const digits = (pushed.word.match(/\d+/) || [])[0];
+      if (digits) { pushed.word = digits + "%"; ti++; }
+    }
+  };
+  for (const w of words) {
+    const nw = normWord(w.word);
+    if (!nw) continue;
+    if (ti >= tokens.length) break;
+    if (nw === tokens[ti] || tokens[ti].includes(nw) || nw.includes(tokens[ti])) {
+      const p = { ...w }; ti++; attachPercent(p); out.push(p); continue;
+    }
+    let found = -1;
+    for (let k = ti + 1; k < Math.min(ti + 3, tokens.length); k++) if (nw === tokens[k]) { found = k; break; }
+    if (found >= 0) { const p = { ...w }; ti = found + 1; attachPercent(p); out.push(p); }
+  }
+  return out;
+}
+
+const VO_EMPHASIS = /pound|aging|wrong|free|shipping|superfood|energy|crash|forty|40|percent|%|limited|craving|shed|website|\d/i;
+
+/** Group proofread words into 1-2 word Hormozi beats, one on screen at a time. */
+export function groupVoCaptions(words: TranscriptWord[]): CaptionGroup[] {
+  const groups: CaptionGroup[] = [];
+  let i = 0, gi = 0;
+  while (i < words.length) {
+    const clean = (words[i].word || "").replace(/[^a-z0-9%]/gi, "");
+    let take = clean.length <= 4 ? 1 : 2;
+    const next = words[i + 1]?.word?.trim()?.toLowerCase();
+    if (["up", "off", "in", "on"].includes(next || "")) take = 2;
+    take = Math.min(take, words.length - i);
+    const slice = words.slice(i, i + take);
+    const text = slice.map((s) => s.word.trim()).join(" ").replace(/[",.]/g, "").trim();
+    const emphasis = slice.some((s) => VO_EMPHASIS.test(s.word));
+    const baseColor: "yellow" | "white" = Math.floor(gi / 3) % 2 === 1 ? "white" : "yellow";
+    groups.push({ text, start: slice[0].start, end: slice[slice.length - 1].end, color: emphasis ? "yellow" : baseColor, emphasis });
+    i += take; gi++;
+  }
+  // Non-overlap: each caption shows until the next one starts.
+  for (let g = 0; g < groups.length - 1; g++) groups[g].end = groups[g + 1].start;
+  if (groups.length) groups[groups.length - 1].end += 0.4;
+  return groups;
+}
+
+/**
+ * Build the global caption track for an ad from its talking segments. Each
+ * segment contributes its proofread words, offset to its position on the
+ * timeline (startSec). Pass the segment's own script + Whisper words.
+ */
+export function buildVoCaptions(
+  segments: { scriptText: string | null; words: TranscriptWord[]; startSec: number }[],
+): CaptionGroup[] {
+  const all: TranscriptWord[] = [];
+  for (const s of segments) {
+    const clean = proofreadWords(s.scriptText || "", s.words);
+    for (const w of clean) all.push({ ...w, start: w.start + s.startSec, end: w.end + s.startSec });
+  }
+  return groupVoCaptions(all);
+}
+
+// ── VO-spine video render (the proven composition) ──────────────────────────
+
+export interface VoSpineProps {
+  width: number;
+  height: number;
+  fps: number;
+  durationSec: number;
+  segments: { src: string; startSec: number; trimSec: number }[];
+  broll: { src: string; fromSec: number; durSec: number; volume: number }[];
+  music: { src: string; volume: number } | null;
+  captions: CaptionGroup[];
+}
+
+/**
+ * Render the VO-spine video (base talking segments = audio, muted/ASMR b-roll
+ * overlays, low music bed, one-at-a-time Hormozi captions) via the canonical
+ * ExampleAd Remotion composition. `src` values are remote signed URLs.
+ */
+export async function renderVoSpineVideo(props: VoSpineProps, outPath: string): Promise<{ outputPath: string }> {
+  let bundler: any, renderer: any;
+  try {
+    bundler = await import(/* webpackIgnore: true */ "@remotion/bundler" as any);
+    renderer = await import(/* webpackIgnore: true */ "@remotion/renderer" as any);
+  } catch {
+    throw new Error("remotion_not_installed: run `npm i remotion @remotion/bundler @remotion/renderer @remotion/cli`");
+  }
+  const path = await import("path");
+  const entry = path.resolve(process.cwd(), "remotion/index.ts");
+  const publicDir = path.resolve(process.cwd(), "remotion/public");
+  const serveUrl = await bundler.bundle({ entryPoint: entry, publicDir });
+  const composition = await renderer.selectComposition({ serveUrl, id: "ExampleAd", inputProps: props });
+  await renderer.renderMedia({ composition, serveUrl, codec: "h264", outputLocation: outPath, inputProps: props });
+  return { outputPath: outPath };
+}
+
 // ── Render invocation (dynamic — needs Remotion installed) ──────────────────
 
 export interface RenderOutput {

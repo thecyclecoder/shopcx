@@ -20,7 +20,8 @@ The ad-tool's **holding-product** + **talking-head/b-roll** engine. Per-workspac
 |---|---|---|
 | `generateNanoBananaProCombine({workspaceId, prompt, imageUrls[], model?})` | `→ { buffer, mimeType }` | **Synchronous** multi-image fusion (`:generateContent`, `responseModalities:["IMAGE"]`). Image returns inline (~10-30s), no polling. Caller uploads the buffer. Used for the holding-product hero: `imageUrls = [face, product isolated]`, referenced in the prompt as "the first/second image". |
 | `generateVeoVideo({workspaceId, prompt, imageUrl?, aspectRatio?, resolution?, model?, intervalMs?, timeoutMs?})` | `→ { buffer, mimeType }` | **Long-running.** `:predictLongRunning` → poll `GET /v1beta/{opName}` until `done` → download MP4 (signed URI needs the same `x-goog-api-key`). `imageUrl` set = image-to-video (first frame), else text-to-video. ~8s clips, native baked-in audio. Defaults: `9:16`, `720p`, 8s poll, 300s timeout. |
-| `probeGeminiAuth(workspaceId)` | `→ { ok, status }` | Cheap `GET /models` for the settings "Verify" button. |
+| `generateLyriaMusic({workspaceId, prompt, model?})` | `→ { buffer, mimeType }` | **Synchronous** (`:generateContent`, inline audio like Nano Banana Pro). The ONE low music bed under the ad (b-roll stays muted/ASMR; VO = talking segments' audio). ~25-30s. |
+| `probeGeminiAuth(workspaceId)` | `→ { ok, status }` | Cheap `GET /models` for the settings "Verify" button (Settings → Ad tool → Google AI Studio card). |
 
 ## Constants
 
@@ -30,6 +31,7 @@ The ad-tool's **holding-product** + **talking-head/b-roll** engine. Per-workspac
 | `NANO_BANANA_MODEL` | `gemini-2.5-flash-image` (cheaper fallback) |
 | `VEO_MODEL` | `veo-3.1-generate-preview` (10/day on Tier 1) |
 | `VEO_FAST_MODEL` | `veo-3.1-fast-generate-preview` (**use this** — separate quota, proven "perfect") |
+| `LYRIA_MODEL` | `lyria-3-clip-preview` (music bed) |
 
 ## Errors
 
@@ -37,7 +39,8 @@ The ad-tool's **holding-product** + **talking-head/b-roll** engine. Per-workspac
 
 ## Callers
 
-- `src/lib/inngest/ad-tool.ts` — hero step (`generateNanoBananaProCombine` from face + product isolated image → `uploadBuffer`). **Talking-head Veo wiring is still open** — see [[../lifecycles/ad-render]] § Open.
+- `src/lib/inngest/ad-tool.ts` — hero step (`generateNanoBananaProCombine`), talking-head (`generateVeoVideo` Veo 3.1 Fast, multi-segment), render `assemble` (`generateLyriaMusic`), segment-regenerate (`generateVeoVideo`). All wired.
+- `src/app/api/workspaces/[id]/gemini/route.ts` — `probeGeminiAuth` for the settings Verify button.
 
 ## Related
 

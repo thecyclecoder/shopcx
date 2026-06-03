@@ -155,11 +155,17 @@ This is the locked-in creative pipeline, confirmed by building a real Amazing Co
 - **B-roll** — Gemini Veo Fast or Higgsfield **DoP** image-to-video; prompt for ASMR (cracks/pours/splashes).
 - **Hormozi captions** — Whisper word-timing, one-at-a-time (each caption's `end` = next caption's `start`, no stacking), Anton font, emoji stickers. `proofread()` drops Veo filler words; `NUMWORDS` keeps numbers (twelve↔12); **"40% off" renders correctly even when Whisper emits an empty word for "percent"** (% attached to the number's beat from the script). Reference composition: `remotion/ExampleAd.tsx` + `_render-example.ts` (local dev driver, not committed).
 
-**⏳ Open (to run the proven stack from the app, not one-off scripts):**
-- **Gemini settings card** — add a Google AI Studio key card (Settings → Integrations) writing `workspaces.gemini_api_key_encrypted` (migration `20260604170000` adds the column; `getGeminiCredentials` already falls back to `env GEMINI_API_KEY`). Use `probeGeminiAuth` for the Verify button.
-- **Wire Veo into the production Inngest talking-head** — `src/lib/inngest/ad-tool.ts` talking-head step still calls Higgsfield Speak; swap to `generateVeoVideo` (Veo 3.1 Fast) + multi-segment stitch + Whisper trim.
-- **Generalize the render** — production uses `remotion/AdComposition.tsx`; fold `ExampleAd`'s VO-spine + muted-broll + proofread/% caption logic into it (or replace) so the wizard renders the proven layout.
-- **No workspace has `ad_tool_enabled=true`** yet — flip per-workspace via SQL after Dylan reviews the first ad on `/dashboard/marketing/ads`.
+**✅ Proven stack wired into production (2026-06-03):**
+- **Gemini settings card** — Settings → Ad tool → "Google AI Studio (Gemini)" card writes `workspaces.gemini_api_key_encrypted` + `gemini_project_id`, Verify via `probeGeminiAuth`. `getGeminiCredentials` falls back to `env GEMINI_API_KEY`. (Superfoods workspace already seeded.)
+- **Veo talking-head** — `adToolTalkingHeadRequested` splits the script into ~8s beats (`splitScriptIntoSegments`), generates each as a Veo 3.1 Fast clip from the holding-product hero, Whisper sets the trim, persists each as an [[../tables/ad_segments]] row (with its script). Replaced Higgsfield Speak/TTS.
+- **Creative library** — every piece persists: talking beats, b-roll, music ([[../tables/ad_segments]]) + the stitch recipe (`ad_campaigns.composition`, [[../libraries/ad-segments]]). Render's `assemble` step loads active segments → `buildComposition` → `saveComposition` → resolves signed URLs + proofread VO captions → renders the canonical `remotion/ExampleAd.tsx` (VO spine + muted/ASMR b-roll + Lyria bed). Music (Lyria) is generated in `assemble` if missing.
+- **Re-launch refresh** — regenerate ONE talking beat + re-stitch (`adToolSegmentRegenerate`, `regenerateTalkingSegment`). See [[../recipes/ad-relaunch-refresh]]. UI: the campaign page's **Creative library** section ("Refresh this hook").
+- **Example ad backfilled** — the approved Amazing Coffee 22s ad is a live campaign in the library (face → avatar → hero → 3 talking + 2 b-roll + 1 music segments → composition → final MP4). `scripts/backfill-example-ad.ts`. `ad_tool_enabled=true` flipped for Superfoods.
+
+**⏳ Open:**
+- **Live end-to-end Veo render not yet run from the app** — the pipeline is code-complete + typechecks, but a full wizard→Veo→render pass hasn't run against live quota (Veo 3.1 Fast daily cap). The proven artifacts were produced via one-off scripts and backfilled.
+- **Static path** still renders the hero+headline `AdStatic` (unchanged); only the video path uses the VO-spine composition.
+- **B-roll/music refresh** — only talking beats are refreshable via the UI; b-roll + music are reused as-is.
 
 Verification scripts: `scripts/test-ad-validator.ts`, `scripts/generate-amazing-coffee-angles.ts`, `scripts/generate-amazing-coffee-proposals.ts`, `scripts/test-higgsfield-auth.ts`.
 

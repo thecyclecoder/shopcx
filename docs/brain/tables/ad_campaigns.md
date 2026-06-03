@@ -20,8 +20,9 @@ A single ad concept: product × variant × [[product_ad_angles|angle]] × [[ad_a
 | `voice_id` | `text` | ✓ |  |
 | `caption_style` | `text` | — | default: `'hormozi_yellow'` |
 | `vibe_tags` | `text[]` | ✓ |  |
-| `hero_image_url` | `text` | ✓ |  |
-| `audio_url` | `text` | ✓ |  |
+| `hero_image_url` | `text` | ✓ | holding-product shot (Nano Banana Pro) |
+| `audio_url` | `text` | ✓ | legacy TTS (vestigial in the Veo stack) |
+| `composition` | `jsonb` | ✓ | the **stitch recipe**: ordered [[ad_segments]] refs + b-roll overlays + music mix. Render reads it; re-launch refresh swaps one segment + re-renders. See [[../libraries/ad-segments]], [[../lifecycles/ad-render]]. |
 | `status` | `text` | — | default: `'draft'` · `draft` \| `rendering` \| `ready` \| `failed` |
 | `created_by` | `uuid` | ✓ |  |
 | `created_at` | `timestamptz` | — | default: `now()` |

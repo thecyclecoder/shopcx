@@ -14,6 +14,10 @@ import { loadFont } from "@remotion/google-fonts/Anton";
 
 const { fontFamily } = loadFont();
 
+// Segment/b-roll/music sources are either bundled static files (the local
+// example) or remote signed URLs (production renders from the creative library).
+const resolveSrc = (s: string): string => (/^https?:\/\//.test(s) ? s : staticFile(s));
+
 export interface CaptionGroup {
   text: string;
   start: number; // global seconds
@@ -38,9 +42,10 @@ export interface ExampleAdProps {
 }
 
 /**
- * One-off example-ad composition that mirrors the production model:
+ * Canonical VO-spine ad composition (production + the local example use it):
  *   base talking segments (VO) + muted/ducked b-roll overlays + low music bed
- *   + word-synced Hormozi captions. 9:16.
+ *   + word-synced Hormozi captions. 9:16; other formats reframe via objectFit
+ *   cover. Driven by ad-render.ts (renderVoSpineVideo) from the creative library.
  */
 export const ExampleAd: React.FC<ExampleAdProps> = (p) => {
   const { fps } = useVideoConfig();
@@ -50,7 +55,7 @@ export const ExampleAd: React.FC<ExampleAdProps> = (p) => {
           is cut at its trim point so there's no dead air between them. */}
       {p.segments.map((s, i) => (
         <Sequence key={`seg${i}`} from={Math.round(s.startSec * fps)} durationInFrames={Math.round(s.trimSec * fps)}>
-          <OffthreadVideo src={staticFile(s.src)} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          <OffthreadVideo src={resolveSrc(s.src)} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         </Sequence>
       ))}
 
@@ -58,12 +63,12 @@ export const ExampleAd: React.FC<ExampleAdProps> = (p) => {
           (the talking-head VO underneath keeps playing). */}
       {p.broll.map((b, i) => (
         <Sequence key={`broll${i}`} from={Math.round(b.fromSec * fps)} durationInFrames={Math.round(b.durSec * fps)}>
-          <OffthreadVideo src={staticFile(b.src)} volume={b.volume} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          <OffthreadVideo src={resolveSrc(b.src)} volume={b.volume} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         </Sequence>
       ))}
 
       {/* Music bed — one track, low, under everything. */}
-      {p.music && <Audio src={staticFile(p.music.src)} volume={p.music.volume} />}
+      {p.music && <Audio src={resolveSrc(p.music.src)} volume={p.music.volume} />}
 
       {/* Hormozi captions on top of everything. */}
       <Captions captions={p.captions} />

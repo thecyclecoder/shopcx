@@ -18,17 +18,33 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import {
   generateSoulPortrait,
   generateTtsAudio,
-  generateSpeakVideo,
   generateDopVideo,
   pollJobUntilDone,
   creditsToCents,
 } from "@/lib/higgsfield";
-import { generateNanoBananaProCombine } from "@/lib/gemini";
+import { generateNanoBananaProCombine, generateVeoVideo, generateLyriaMusic, VEO_FAST_MODEL, LYRIA_MODEL } from "@/lib/gemini";
 import { uploadFromUrl, uploadBuffer, signedUrl } from "@/lib/ad-storage";
-import { buildAvatarPortraitPrompt, eligibleMotions, slugify, resolveAdToolSettings, VIDEO_FORMATS, STATIC_FORMATS, type AdFormat, type VibeTag, type AvatarFaceAttributes } from "@/lib/ad-tool-config";
+import {
+  splitScriptIntoSegments,
+  createSegment,
+  completeSegment,
+  failSegment,
+  loadActiveSegments,
+  buildComposition,
+  saveComposition,
+  regenerateTalkingSegment,
+} from "@/lib/ad-segments";
+import { buildAvatarPortraitPrompt, eligibleMotions, slugify, resolveAdToolSettings, VIDEO_FORMATS, STATIC_FORMATS, FORMAT_SPECS, type AdFormat, type VibeTag, type AvatarFaceAttributes } from "@/lib/ad-tool-config";
 import { loadAngleInputs } from "@/lib/ad-angles";
 import { transcribeWords } from "@/lib/ad-transcribe";
-import { composeCredibility, buildCompositionProps, renderAdFormat } from "@/lib/ad-render";
+import { composeCredibility, buildCompositionProps, renderAdFormat, buildVoCaptions, renderVoSpineVideo } from "@/lib/ad-render";
+
+// Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
+// hallucinated filler (we still proofread captions, but tighter input = cleaner).
+function buildTalkingHeadPrompt(productTitle: string, script: string): string {
+  return `A person holding the ${productTitle} speaks directly to camera with warm, casual, confident UGC energy. They say ONLY these exact words and NOTHING else — no extra words, no filler, no improvisation, no repetition: "${script}" Authentic handheld selfie video, natural daylight, subtle real movement, relaxed unhurried pace. NO background music. Do NOT add any on-screen text, captions, subtitles, or words burned into the footage.`;
+}
+const LYRIA_PROMPT = "Upbeat optimistic uplifting instrumental background music bed, light acoustic guitar and soft claps, warm and energetic but gentle, no vocals, loopable, 25 seconds.";
 
 const CONCURRENCY: [{ limit: number; key: string }] = [{ limit: 3, key: "event.data.workspace_id" }];
 
@@ -189,44 +205,52 @@ export const adToolAudioRequested = inngest.createFunction(
   },
 );
 
-// ── 3. Talking head (Speak) ─────────────────────────────────────────────────
+// ── 3. Talking head (Veo 3.1 Fast, multi-segment, persisted) ─────────────────
+// The proven stack: split the script into ~8s beats, generate each as a Veo clip
+// from the holding-product hero (Veo's native audio = the VO spine). Each clip is
+// a durable ad_segments row carrying the exact script that made it + its Whisper
+// timing + trim point — so one beat can be refreshed and re-stitched later.
 export const adToolTalkingHeadRequested = inngest.createFunction(
-  { id: "ad-tool-talking-head-requested", retries: 2, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/talking-head-requested" }] },
+  { id: "ad-tool-talking-head-requested", retries: 1, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/talking-head-requested" }] },
   async ({ event, step }) => {
     const { workspace_id, campaign_id } = event.data as EventData;
     const admin = createAdminClient();
     const campaign = await step.run("load", async () => {
-      const { data } = await admin.from("ad_campaigns").select("hero_image_url, audio_url, script_text, length_sec").eq("id", campaign_id).single();
+      const { data } = await admin.from("ad_campaigns").select("hero_image_url, script_text, length_sec, products(title)").eq("id", campaign_id).single();
       return data;
     });
-    if (!campaign?.hero_image_url || !campaign?.audio_url) return { ok: false, reason: "missing_hero_or_audio" };
+    if (!campaign?.hero_image_url) return { ok: false, reason: "missing_hero" };
+    const productTitle = (campaign as any)?.products?.title || "the product";
+    const scripts = splitScriptIntoSegments(campaign.script_text || "", campaign.length_sec || 15);
+    if (!scripts.length) return { ok: false, reason: "no_script" };
 
-    // 15s ad: single 15s gen. 30s ad: two 15s gens (Speak max = 15s/gen).
-    const segments = campaign.length_sec >= 30 ? 2 : 1;
-    const urls = await step.run("speak-generate-poll", async () => {
-      const out: string[] = [];
-      for (let s = 0; s < segments; s++) {
-        const { jobSetId } = await generateSpeakVideo({
-          workspaceId: workspace_id,
-          imageUrl: campaign.hero_image_url,
-          audioUrl: campaign.audio_url,
-          prompt: campaign.script_text || "",
-          duration: 15,
-          quality: "1080p",
-          campaignId: campaign_id,
-        });
-        if (!jobSetId) throw new Error("no_job_set");
-        const res = await pollJobUntilDone(workspace_id, jobSetId, { timeoutMs: 240000 });
-        if (res.status !== "completed" || !res.outputUrls[0]) throw new Error(`speak_${res.status}`);
-        const path = `talking-head/${workspace_id}/${campaign_id}_${s}.mp4`;
-        await uploadFromUrl(path, res.outputUrls[0], "video/mp4");
-        out.push(await signedUrl(path));
+    // One Veo clip per beat, generated sequentially (Veo Fast has a daily cap;
+    // bursting risks 429). Each persists as its own ad_segments row.
+    const segs = await step.run("veo-generate-persist", async () => {
+      const out: Array<{ segId: string; ok: boolean; error?: string }> = [];
+      for (let i = 0; i < scripts.length; i++) {
+        const prompt = buildTalkingHeadPrompt(productTitle, scripts[i]);
+        const segId = await createSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "talking_head", seq: i, scriptText: scripts[i], prompt, model: VEO_FAST_MODEL });
+        try {
+          const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: campaign.hero_image_url!, aspectRatio: "9:16", model: VEO_FAST_MODEL, timeoutMs: 360000 });
+          const path = `talking-head/${workspace_id}/${segId}.mp4`;
+          await uploadBuffer(path, buffer, "video/mp4");
+          // Whisper for the per-segment trim point (kill Veo's end-of-clip dead air).
+          let words: any[] = [];
+          try { words = (await transcribeWords(await signedUrl(path))).words; } catch { /* trim falls back to clip length */ }
+          const last = words[words.length - 1];
+          await completeSegment(segId, { storagePath: path, durationSec: last ? last.end : undefined, trimSec: last ? last.end + 0.15 : undefined, transcript: { words } });
+          out.push({ segId, ok: true });
+        } catch (err: any) {
+          await failSegment(segId, String(err?.message || err));
+          out.push({ segId, ok: false, error: String(err?.message || err) });
+        }
       }
       return out;
     });
 
     await step.sendEvent("th-completed", { name: "ad-tool/talking-head-completed", data: { workspace_id, campaign_id } });
-    return { ok: true, segments: urls };
+    return { ok: segs.some((s) => s.ok), segments: segs };
   },
 );
 
@@ -252,19 +276,27 @@ export const adToolBrollRequested = inngest.createFunction(
     if (sources.length < 1) return { ok: false, reason: "no_broll_sources" };
     const motions = eligibleMotions(ctx.vibe);
 
-    const clips = await step.run("dop-generate-poll", async () => {
-      const out: Array<{ image_url: string; video_url: string; motion_id: string }> = [];
+    const clips = await step.run("dop-generate-persist", async () => {
+      const out: Array<{ segId: string; motion_id: string }> = [];
       for (let i = 0; i < sources.length; i++) {
         const src = sources[i];
         const imageUrl = src.webp_1080_url || src.url;
         const motionId = motions[i % motions.length];
-        const { jobSetId } = await generateDopVideo({ workspaceId: workspace_id, imageUrl, motionId, campaignId: campaign_id });
-        if (!jobSetId) continue;
-        const res = await pollJobUntilDone(workspace_id, jobSetId, { timeoutMs: 180000 });
-        if (res.status === "completed" && res.outputUrls[0]) {
-          const path = `broll/${workspace_id}/${campaign_id}_${i}.mp4`;
-          await uploadFromUrl(path, res.outputUrls[0], "video/mp4");
-          out.push({ image_url: imageUrl, video_url: await signedUrl(path), motion_id: motionId });
+        const segId = await createSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "broll", seq: i, model: `dop:${motionId}`, prompt: `DoP motion ${motionId} from product media (muted/ASMR cutaway)` });
+        try {
+          const { jobSetId } = await generateDopVideo({ workspaceId: workspace_id, imageUrl, motionId, campaignId: campaign_id });
+          if (!jobSetId) { await failSegment(segId, "no_job_set"); continue; }
+          const res = await pollJobUntilDone(workspace_id, jobSetId, { timeoutMs: 180000 });
+          if (res.status === "completed" && res.outputUrls[0]) {
+            const path = `broll/${workspace_id}/${segId}.mp4`;
+            await uploadFromUrl(path, res.outputUrls[0], "video/mp4");
+            await completeSegment(segId, { storagePath: path });
+            out.push({ segId, motion_id: motionId });
+          } else {
+            await failSegment(segId, `dop_${res.status}`);
+          }
+        } catch (err: any) {
+          await failSegment(segId, String(err?.message || err));
         }
       }
       return out;
@@ -313,17 +345,6 @@ export const adToolRenderRequested = inngest.createFunction(
 
     await admin.from("ad_campaigns").update({ status: "rendering" }).eq("id", campaign_id);
 
-    // Transcribe once; reused across formats.
-    const transcript = await step.run("transcribe", async () => {
-      if (!ctx.campaign?.audio_url) return [];
-      try {
-        const t = await transcribeWords(ctx.campaign.audio_url);
-        return t.words;
-      } catch {
-        return [];
-      }
-    });
-
     const credibility = composeCredibility({
       certifications: ctx.inputs.credibility.certifications,
       allergen_free: ctx.inputs.credibility.allergen_free,
@@ -335,13 +356,62 @@ export const adToolRenderRequested = inngest.createFunction(
       pinned_badges: ctx.settings.pinned_badges,
     });
 
-    // Gather generated media for this campaign's latest video rows.
-    const media = await step.run("gather-media", async () => {
-      const { data: vids } = await admin.from("ad_videos").select("talking_head_url, talking_head_segments_url, b_roll_urls").eq("campaign_id", campaign_id).limit(1).maybeSingle();
-      const th: string[] = vids?.talking_head_segments_url?.length ? vids.talking_head_segments_url : vids?.talking_head_url ? [vids.talking_head_url] : [];
-      const broll = Array.isArray(vids?.b_roll_urls) ? (vids!.b_roll_urls as Array<{ video_url: string; motion_id: string }>) : [];
-      return { th, broll };
+    // Assemble from the creative library: active talking/broll/music segments →
+    // composition recipe (saved) → resolved signed URLs + proofread VO captions.
+    // Music is generated here (Lyria) if the campaign doesn't have one yet.
+    const assembled = await step.run("assemble", async () => {
+      const { talking, broll, music } = await loadActiveSegments(campaign_id);
+      if (!talking.length) return null;
+
+      let musicId: string | null = music?.id || null;
+      let musicPath: string | null = music?.storage_path || null;
+      if (!musicId) {
+        const segId = await createSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "music", seq: 0, model: LYRIA_MODEL, prompt: LYRIA_PROMPT });
+        try {
+          const { buffer, mimeType } = await generateLyriaMusic({ workspaceId: workspace_id, prompt: LYRIA_PROMPT });
+          const ext = mimeType.includes("wav") ? "wav" : "mp3";
+          const path = `audio/${workspace_id}/${segId}.${ext}`;
+          await uploadBuffer(path, buffer, mimeType);
+          await completeSegment(segId, { storagePath: path });
+          musicId = segId; musicPath = path;
+        } catch (err: any) {
+          await failSegment(segId, String(err?.message || err)); // music is optional
+        }
+      }
+
+      const composition = buildComposition(talking, broll, musicId ? { id: musicId } : null, 30);
+      await saveComposition(campaign_id, composition);
+
+      // Resolve each recipe entry to a signed URL.
+      const thById = new Map(talking.map((s) => [s.id, s]));
+      const brById = new Map(broll.map((s) => [s.id, s]));
+      const segments: Array<{ src: string; startSec: number; trimSec: number }> = [];
+      for (const s of composition.segments) {
+        const seg = thById.get(s.segment_id);
+        if (seg?.storage_path) segments.push({ src: await signedUrl(seg.storage_path), startSec: s.startSec, trimSec: s.trimSec });
+      }
+      const brollSrc: Array<{ src: string; fromSec: number; durSec: number; volume: number }> = [];
+      for (const b of composition.broll) {
+        const seg = brById.get(b.segment_id);
+        if (seg?.storage_path) brollSrc.push({ src: await signedUrl(seg.storage_path), fromSec: b.fromSec, durSec: b.durSec, volume: b.volume });
+      }
+      const musicSrc = musicPath ? { src: await signedUrl(musicPath), volume: composition.music?.volume ?? 0.12 } : null;
+
+      // VO captions: each talking segment's Whisper words proofread vs its script.
+      const captions = buildVoCaptions(
+        composition.segments.map((s) => {
+          const seg = thById.get(s.segment_id);
+          return { scriptText: seg?.script_text || null, words: seg?.transcript_json?.words || [], startSec: s.startSec };
+        }),
+      );
+      const transcriptWords = captions.flatMap((c) => [{ word: c.text, start: c.start, end: c.end }]);
+      return { durationSec: composition.durationSec, fps: composition.fps, segments, broll: brollSrc, music: musicSrc, captions, transcriptWords };
     });
+
+    if (!assembled) {
+      await admin.from("ad_campaigns").update({ status: "failed" }).eq("id", campaign_id);
+      return { ok: false, reason: "no_talking_segments" };
+    }
 
     const lengthSec = (ctx.campaign?.length_sec === 30 ? 30 : 15) as 15 | 30;
     const style = (ctx.campaign?.caption_style as any) || "hormozi_yellow";
@@ -357,22 +427,6 @@ export const adToolRenderRequested = inngest.createFunction(
       const out: any[] = [];
       let canonicalId: string | null = null;
       for (const p of plan) {
-        const props = buildCompositionProps({
-          format: p.format,
-          mediaKind: p.kind,
-          lengthSec,
-          style,
-          vibeTags,
-          transcript,
-          talkingHeadSegments: media.th,
-          brollClips: media.broll,
-          credibility,
-          ingredientImages: ctx.ingredientImages,
-          heroImageUrl: (ctx.campaign as any)?.hero_image_url || undefined,
-          staticHeadline: ctx.staticHeadline || undefined,
-          staticTemplate: p.kind === "static" ? "shipping_label_brutalist" : undefined,
-        });
-
         const ext = p.kind === "video" ? "mp4" : "jpg";
         const row: any = {
           workspace_id,
@@ -381,25 +435,47 @@ export const adToolRenderRequested = inngest.createFunction(
           media_kind: p.kind,
           format_variant_of_id: canonicalId,
           caption_style: style,
-          duration_sec: lengthSec,
+          duration_sec: Math.round(assembled!.durationSec),
           status: "rendering",
-          transcript_json: { words: transcript },
+          transcript_json: { words: assembled!.transcriptWords },
         };
         const { data: vrow } = await admin.from("ad_videos").insert(row).select("id").single();
         if (!canonicalId) canonicalId = vrow!.id;
 
         try {
           const tmp = `/tmp/ad_${campaign_id}_${p.format}_${p.kind}.${ext}`;
-          const rendered = await renderAdFormat(props, tmp);
+          if (p.kind === "video") {
+            const spec = FORMAT_SPECS[p.format];
+            await renderVoSpineVideo(
+              { width: spec.width, height: spec.height, fps: assembled.fps, durationSec: assembled.durationSec, segments: assembled.segments, broll: assembled.broll, music: assembled.music, captions: assembled.captions },
+              tmp,
+            );
+          } else {
+            const props = buildCompositionProps({
+              format: p.format,
+              mediaKind: p.kind,
+              lengthSec,
+              style,
+              vibeTags,
+              transcript: assembled.transcriptWords,
+              talkingHeadSegments: [],
+              brollClips: [],
+              credibility,
+              ingredientImages: ctx.ingredientImages,
+              heroImageUrl: (ctx.campaign as any)?.hero_image_url || undefined,
+              staticHeadline: ctx.staticHeadline || undefined,
+              staticTemplate: "shipping_label_brutalist",
+            });
+            await renderAdFormat(props, tmp);
+          }
           const fs = await import("fs/promises");
-          const buf = await fs.readFile(rendered.outputPath);
+          const buf = await fs.readFile(tmp);
           const storagePath = `finals/${workspace_id}/${vrow!.id}.${ext}`;
-          const { uploadBuffer, signedUrl: sign } = await import("@/lib/ad-storage");
           await uploadBuffer(storagePath, buf, p.kind === "video" ? "video/mp4" : "image/jpeg");
-          const url = await sign(storagePath);
+          const url = await signedUrl(storagePath);
           await admin
             .from("ad_videos")
-            .update(p.kind === "video" ? { final_mp4_url: url, status: "ready" } : { static_jpg_url: url, status: "ready" })
+            .update(p.kind === "video" ? { final_mp4_url: url, status: "ready", meta: { storage_path: storagePath } } : { static_jpg_url: url, status: "ready", meta: { storage_path: storagePath } })
             .eq("id", vrow!.id);
           out.push({ format: p.format, kind: p.kind, id: vrow!.id, ok: true, url });
         } catch (err: any) {
@@ -416,6 +492,54 @@ export const adToolRenderRequested = inngest.createFunction(
   },
 );
 
+// ── 6. Segment regenerate (the re-launch refresh) ───────────────────────────
+// "This ad is fatiguing — refresh the hook." Regenerate ONE talking beat with a
+// new script (version+1, old deactivated), then re-render. Every other piece is
+// reused from the creative library; nothing else is re-burned.
+interface RegenEventData {
+  workspace_id: string;
+  campaign_id: string;
+  seq: number;
+  new_script: string;
+}
+
+export const adToolSegmentRegenerate = inngest.createFunction(
+  { id: "ad-tool-segment-regenerate", retries: 1, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/segment-regenerate" }] },
+  async ({ event, step }) => {
+    const { workspace_id, campaign_id, seq, new_script } = event.data as RegenEventData;
+    const admin = createAdminClient();
+
+    const campaign = await step.run("load", async () => {
+      const { data } = await admin.from("ad_campaigns").select("hero_image_url, products(title)").eq("id", campaign_id).single();
+      return data;
+    });
+    if (!campaign?.hero_image_url) return { ok: false, reason: "missing_hero" };
+    const productTitle = (campaign as any)?.products?.title || "the product";
+
+    const segId = await step.run("regen-veo", async () => {
+      const prompt = buildTalkingHeadPrompt(productTitle, new_script);
+      const id = await regenerateTalkingSegment({ workspaceId: workspace_id, campaignId: campaign_id, seq, newScript: new_script, prompt, model: VEO_FAST_MODEL });
+      try {
+        const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: campaign.hero_image_url!, aspectRatio: "9:16", model: VEO_FAST_MODEL, timeoutMs: 360000 });
+        const path = `talking-head/${workspace_id}/${id}.mp4`;
+        await uploadBuffer(path, buffer, "video/mp4");
+        let words: any[] = [];
+        try { words = (await transcribeWords(await signedUrl(path))).words; } catch { /* trim falls back */ }
+        const last = words[words.length - 1];
+        await completeSegment(id, { storagePath: path, durationSec: last ? last.end : undefined, trimSec: last ? last.end + 0.15 : undefined, transcript: { words } });
+        return id;
+      } catch (err: any) {
+        await failSegment(id, String(err?.message || err));
+        throw err;
+      }
+    });
+
+    // Re-stitch: re-render from the (now-updated) creative library.
+    await step.sendEvent("re-render", { name: "ad-tool/render-requested", data: { workspace_id, campaign_id } });
+    return { ok: true, segId };
+  },
+);
+
 export const adToolFunctions = [
   adToolFaceRequested,
   adToolHeroRequested,
@@ -423,6 +547,7 @@ export const adToolFunctions = [
   adToolTalkingHeadRequested,
   adToolBrollRequested,
   adToolRenderRequested,
+  adToolSegmentRegenerate,
 ];
 
 // keep imports used even if tree-shaken in some builds

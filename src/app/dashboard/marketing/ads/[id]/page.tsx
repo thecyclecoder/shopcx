@@ -27,6 +27,18 @@ interface Video {
   status: string;
 }
 
+interface Segment {
+  id: string;
+  kind: "talking_head" | "broll" | "music";
+  seq: number;
+  version: number;
+  script_text: string | null;
+  model: string | null;
+  trim_sec: number | null;
+  status: string;
+  preview_url: string | null;
+}
+
 export default function AdDetailPage() {
   const workspace = useWorkspace();
   const params = useParams<{ id: string }>();
@@ -34,6 +46,7 @@ export default function AdDetailPage() {
 
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [videos, setVideos] = useState<Video[]>([]);
+  const [segments, setSegments] = useState<Segment[]>([]);
   const [loading, setLoading] = useState(true);
   const [rendering, setRendering] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -44,9 +57,20 @@ export default function AdDetailPage() {
       const d = await res.json();
       setCampaign(d.campaign);
       setVideos(d.videos || []);
+      setSegments(d.segments || []);
     }
     setLoading(false);
   }, [id, workspace.id]);
+
+  async function regenerate(seq: number, newScript: string) {
+    const res = await fetch(`/api/ads/campaigns/${id}/segments/regenerate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: workspace.id, seq, new_script: newScript }),
+    });
+    setMessage(res.ok ? "Refreshing that beat and re-stitching. Check back shortly." : "Failed to queue refresh.");
+    if (res.ok) load();
+  }
 
   useEffect(() => {
     load();
@@ -160,6 +184,22 @@ export default function AdDetailPage() {
         </div>
       </div>
 
+      {/* Creative library — the pieces that make up this ad. Refresh one beat
+          (e.g. a fatigued hook) and re-stitch without rebuilding everything. */}
+      <div className="mt-8 flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Creative library</h2>
+        <span className="text-xs text-zinc-400">Refresh one beat → re-stitch (reuses every other piece)</span>
+      </div>
+      {segments.length === 0 ? (
+        <p className="mt-2 text-sm text-zinc-500">No segments yet. Generate the talking head, b-roll, and render.</p>
+      ) : (
+        <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {segments.map((s) => (
+            <SegmentCard key={s.id} s={s} onRegenerate={regenerate} />
+          ))}
+        </div>
+      )}
+
       {/* Video outputs */}
       <h2 className="mt-8 mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Video formats</h2>
       {videoOutputs.length === 0 ? (
@@ -181,6 +221,60 @@ export default function AdDetailPage() {
           {staticOutputs.map((v) => (
             <StaticCard key={v.id} v={v} />
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SegmentCard({ s, onRegenerate }: { s: Segment; onRegenerate: (seq: number, script: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(s.script_text || "");
+  const [busy, setBusy] = useState(false);
+  const kindLabel = s.kind === "talking_head" ? `Hook beat #${s.seq + 1}` : s.kind === "broll" ? `B-roll #${s.seq + 1}` : "Music bed";
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">{kindLabel}</span>
+        {s.version > 1 && <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">v{s.version}</span>}
+        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800">{s.status}</span>
+        {s.trim_sec ? <span className="text-[10px] text-zinc-400">{s.trim_sec.toFixed(1)}s</span> : null}
+      </div>
+      {s.preview_url ? (
+        s.kind === "music" ? (
+          <audio controls src={s.preview_url} className="w-full" />
+        ) : (
+          <video controls src={s.preview_url} className="w-full rounded-md" />
+        )
+      ) : (
+        <p className="text-xs text-zinc-400">{s.status === "generating" ? "Generating…" : "No preview."}</p>
+      )}
+      {s.kind === "talking_head" && (
+        <div className="mt-2">
+          {s.script_text && <p className="mb-1 text-xs italic text-zinc-500">“{s.script_text}”</p>}
+          {editing ? (
+            <div>
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                rows={3}
+                className="w-full rounded-md border border-zinc-300 bg-white p-2 text-xs dark:border-zinc-700 dark:bg-zinc-950"
+                placeholder="New words for this beat…"
+              />
+              <div className="mt-1 flex gap-2">
+                <button
+                  disabled={busy || !draft.trim()}
+                  onClick={async () => { setBusy(true); await onRegenerate(s.seq, draft.trim()); setBusy(false); setEditing(false); }}
+                  className="rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  {busy ? "Queuing…" : "Regenerate & re-stitch"}
+                </button>
+                <button onClick={() => setEditing(false)} className="text-xs text-zinc-500 hover:underline">Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={() => setEditing(true)} className="text-xs text-indigo-600 hover:underline">Refresh this hook</button>
+          )}
         </div>
       )}
     </div>

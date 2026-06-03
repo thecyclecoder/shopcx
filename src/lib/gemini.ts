@@ -136,6 +136,32 @@ export async function generateVeoVideo(args: VeoVideoArgs): Promise<{ buffer: Bu
   }
 }
 
+// ── Lyria music bed ──────────────────────────────────────────────────────────
+export const LYRIA_MODEL = "lyria-3-clip-preview";
+
+/**
+ * Generate a short instrumental music bed via Lyria. Synchronous — audio comes
+ * back inline (`generateContent`), like Nano Banana Pro. Used for the ONE low
+ * music bed under the ad (b-roll stays muted/ASMR; the VO spine is the talking
+ * segments' own audio). Returns raw bytes (caller uploads). ~25-30s clips.
+ */
+export async function generateLyriaMusic(args: { workspaceId: string; prompt: string; model?: string }): Promise<{ buffer: Buffer; mimeType: string }> {
+  const creds = await getGeminiCredentials(args.workspaceId);
+  if (!creds) throw new Error("gemini_not_connected");
+  const res = await fetch(`${GEMINI_BASE}/models/${args.model || LYRIA_MODEL}:generateContent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": creds.apiKey },
+    body: JSON.stringify({ contents: [{ parts: [{ text: args.prompt }] }] }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`lyria_${res.status}:${(json?.error?.message || "").slice(0, 100)}`);
+  const parts = json?.candidates?.[0]?.content?.parts || [];
+  const part = parts.find((p: any) => p.inline_data || p.inlineData);
+  if (!part) throw new Error("lyria_no_audio");
+  const inline = part.inline_data || part.inlineData;
+  return { buffer: Buffer.from(inline.data, "base64"), mimeType: inline.mime_type || inline.mimeType || "audio/wav" };
+}
+
 /** Cheap auth probe for the settings "Verify" button (list models). */
 export async function probeGeminiAuth(workspaceId: string): Promise<{ ok: boolean; status: number }> {
   const creds = await getGeminiCredentials(workspaceId);

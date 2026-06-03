@@ -218,6 +218,7 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/ad_avatar_proposals]] — AI-proposed spokesperson archetypes grounded in a demographic snapshot. Written by `src/lib/ad-avatar-proposals.ts`.
 - [[tables/ad_campaigns]] — A single ad concept: product × variant × angle × avatar, plus script + render settings. Fans out into 4 `ad_videos`.
 - [[tables/ad_videos]] — Rendered media outputs. One ad = 4 sibling rows (Reels MP4 + Feed-4:5 MP4 + Stories JPG + Feed-4:5 JPG) via `format_variant_of_id`.
+- [[tables/ad_segments]] — The creative library: every generated piece (talking-head Veo clip + its script, b-roll, music) + version history. Plus the stitch recipe on `ad_campaigns.composition`. Enables the [[recipes/ad-relaunch-refresh]] (refresh one beat, re-stitch).
 - [[tables/ad_jobs]] — Audit/replay log of every Higgsfield API call. Written by `loggedHiggsfieldFetch()` in `src/lib/higgsfield.ts`.
 
 ### Marketing & SMS
