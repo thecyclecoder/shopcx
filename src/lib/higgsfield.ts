@@ -1,42 +1,42 @@
 /**
- * Higgsfield Cloud API client (cloud.higgsfield.ai).
+ * Higgsfield Platform API client (platform.higgsfield.ai).
  *
- * One vendor covers the three generative surfaces the ad tool needs:
- *   - Soul       — image gen ("avatar holding product" hero shot)
- *   - DoP        — image-to-video (b-roll clips)
- *   - Speak      — talking-head lip-sync (speech2video)
- *   - Audio      — text-to-speech for the script (optional; ElevenLabs alt)
+ * Verified against the official Higgsfield SDK + docs (2026-06):
+ *   - Base URL: https://platform.higgsfield.ai
+ *   - Auth:     Authorization: Key {KEY_ID}:{KEY_SECRET}   (single header)
+ *   - Soul text2image:        POST /v1/text2image/soul
+ *   - Soul image-to-image:    POST /v1/text2image/soul  (custom_reference_id + strength)
+ *   - DoP image-to-video:     POST /v1/image2video/dop
+ *   - Speak speech2video:     POST /v1/speak/higgsfield
+ *   - Status polling:         GET  /requests/{request_id}/status
+ *   Response shape: { status, request_id, images:[{url}] | video:{url} }
+ *   status ∈ queued | in_progress | completed | failed | nsfw
  *
- * Auth is a dual-credential model: an API key + a secret, both per-workspace,
- * stored AES-256-GCM encrypted on `workspaces` (see src/lib/crypto.ts). There
- * is NO global Higgsfield account — every call resolves credentials for one
- * workspace.
+ * Credentials are per-workspace, AES-256-GCM encrypted on `workspaces`. Every
+ * call is logged to `ad_jobs` for cost-audit + replay.
  *
- * Async jobs return a `job_set_id`; we poll `getJobStatus` until completed.
- * Every call is logged to `ad_jobs` via loggedHiggsfieldFetch for cost-audit
- * and replay (same discipline as src/lib/appstle-call-log.ts).
- *
- * NOTE: endpoint paths + payload shapes below are the integration contract.
- * They follow the published Higgsfield references gathered in the spec; verify
- * against live docs when wiring real credentials (see brain integrations/higgsfield.md).
+ * See docs/brain/integrations/higgsfield.md for the full API contract.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 
-const BASE_URL = process.env.HIGGSFIELD_BASE_URL || "https://cloud.higgsfield.ai";
+const BASE_URL = process.env.HIGGSFIELD_BASE_URL || "https://platform.higgsfield.ai";
 
-// Model ids (from the Higgsfield resources catalog).
-export const HIGGSFIELD_MODELS = {
-  soul: "soul",
-  dop: "dop",
-  speak: "speak",
-} as const;
+export const HIGGSFIELD_MODELS = { soul: "soul", dop: "dop", speak: "speak" } as const;
 
 // $1 = 16 credits.
 export const CREDITS_PER_DOLLAR = 16;
 export function creditsToCents(credits: number): number {
   return Math.round((credits / CREDITS_PER_DOLLAR) * 100);
 }
+
+// width_and_height enums accepted by Soul text2image (subset).
+export const SOUL_SIZES = {
+  portrait_9x16: "1152x2048",
+  portrait_3x4: "1536x2048",
+  square: "1536x1536",
+  landscape_16x9: "2048x1152",
+} as const;
 
 export type HiggsfieldJobType = "create_character" | "soul_image" | "dop_video" | "speak_video" | "tts_audio";
 
@@ -53,10 +53,7 @@ export async function getHiggsfieldCredentials(workspaceId: string): Promise<Hig
     .eq("id", workspaceId)
     .single();
   if (!ws?.higgsfield_api_key_encrypted || !ws?.higgsfield_secret_encrypted) return null;
-  return {
-    apiKey: decrypt(ws.higgsfield_api_key_encrypted),
-    secret: decrypt(ws.higgsfield_secret_encrypted),
-  };
+  return { apiKey: decrypt(ws.higgsfield_api_key_encrypted), secret: decrypt(ws.higgsfield_secret_encrypted) };
 }
 
 interface LoggedFetchArgs {
@@ -68,16 +65,21 @@ interface LoggedFetchArgs {
   campaignId?: string | null;
   videoId?: string | null;
   costCredits?: number;
-  /** When true, persist a row in ad_jobs. Probe/list calls skip persistence. */
   persist?: boolean;
 }
 
-/**
- * Single fetch wrapper: resolves creds, signs the request, calls Higgsfield,
- * and (unless persist=false) writes an ad_jobs row for audit/replay.
- * Returns the parsed JSON body + the ad_jobs row id (if persisted).
- */
-export async function loggedHiggsfieldFetch(args: LoggedFetchArgs): Promise<{ ok: boolean; status: number; json: any; jobId: string | null }> {
+/** Pull the output url(s) out of a Higgsfield response (images[] or video). */
+function extractUrls(json: any): string[] {
+  const urls: string[] = [];
+  if (Array.isArray(json?.images)) for (const im of json.images) if (im?.url) urls.push(im.url);
+  if (json?.video?.url) urls.push(json.video.url);
+  // JobSet-style fallback (SDK): jobs[].results.raw.url
+  const jobs: any[] = json?.jobs || json?.results || [];
+  if (Array.isArray(jobs)) for (const j of jobs) { const u = j?.results?.raw?.url || j?.output_url || j?.url; if (u) urls.push(u); }
+  return urls;
+}
+
+export async function loggedHiggsfieldFetch(args: LoggedFetchArgs): Promise<{ ok: boolean; status: number; json: any; jobId: string | null; requestId: string | null; outputUrls: string[] }> {
   const creds = await getHiggsfieldCredentials(args.workspaceId);
   if (!creds) throw new Error("higgsfield_not_connected");
 
@@ -89,8 +91,7 @@ export async function loggedHiggsfieldFetch(args: LoggedFetchArgs): Promise<{ ok
     method,
     headers: {
       "Content-Type": "application/json",
-      "hf-api-key": creds.apiKey,
-      "hf-secret": creds.secret,
+      Authorization: `Key ${creds.apiKey}:${creds.secret}`,
     },
     body: args.body !== undefined ? JSON.stringify(args.body) : undefined,
   });
@@ -102,9 +103,11 @@ export async function loggedHiggsfieldFetch(args: LoggedFetchArgs): Promise<{ ok
     json = { _raw: await res.clone().text().catch(() => "") };
   }
 
+  const requestId: string | null = json?.request_id || json?.id || null;
+  const outputUrls = extractUrls(json);
+
   let jobId: string | null = null;
   if (args.persist !== false && args.jobType !== "probe") {
-    const jobSetId: string | null = json?.job_set_id || json?.id || null;
     const { data: jobRow } = await admin
       .from("ad_jobs")
       .insert({
@@ -112,8 +115,8 @@ export async function loggedHiggsfieldFetch(args: LoggedFetchArgs): Promise<{ ok
         campaign_id: args.campaignId ?? null,
         video_id: args.videoId ?? null,
         job_type: args.jobType,
-        higgsfield_job_set_id: jobSetId,
-        status: res.ok ? "queued" : "failed",
+        higgsfield_job_set_id: requestId,
+        status: res.ok ? (json?.status === "completed" ? "completed" : "queued") : "failed",
         request_payload: redactCreds(args.body),
         response_payload: json,
         cost_credits: args.costCredits ?? 0,
@@ -124,130 +127,146 @@ export async function loggedHiggsfieldFetch(args: LoggedFetchArgs): Promise<{ ok
     jobId = jobRow?.id ?? null;
   }
 
-  return { ok: res.ok, status: res.status, json, jobId };
+  return { ok: res.ok, status: res.status, json, jobId, requestId, outputUrls };
 }
 
 function redactCreds(body: unknown): unknown {
   if (!body || typeof body !== "object") return body ?? null;
   const clone: Record<string, unknown> = { ...(body as Record<string, unknown>) };
-  for (const k of Object.keys(clone)) {
-    if (/key|secret|token/i.test(k)) clone[k] = "[redacted]";
-  }
+  for (const k of Object.keys(clone)) if (/key|secret|token/i.test(k)) clone[k] = "[redacted]";
   return clone;
 }
 
-// ── High-level operations ───────────────────────────────────────────────────
+// ── Status polling ──────────────────────────────────────────────────────────
+export type HiggsfieldStatus = "queued" | "in_progress" | "completed" | "failed" | "nsfw";
 
-export interface CreateCharacterArgs {
-  workspaceId: string;
-  name: string;
-  imageUrls: string[]; // signed, public-readable for the duration of the call
+function normalizeStatus(raw: string): HiggsfieldStatus {
+  const s = String(raw || "in_progress").toLowerCase();
+  if (s.includes("complet") || s === "succeeded" || s === "done" || s === "success") return "completed";
+  if (s.includes("nsfw")) return "nsfw";
+  if (s.includes("fail") || s.includes("error") || s.includes("cancel")) return "failed";
+  if (s.includes("queue")) return "queued";
+  return "in_progress";
 }
 
-/** Mint a persistent Higgsfield character (40 credits / ~$2.50). */
-export async function createCharacter(args: CreateCharacterArgs): Promise<{ characterId: string | null; jobId: string | null }> {
-  const r = await loggedHiggsfieldFetch({
-    workspaceId: args.workspaceId,
-    jobType: "create_character",
-    path: "/v1/characters",
-    body: { name: args.name, reference_image_urls: args.imageUrls },
-    costCredits: 40,
-  });
-  if (!r.ok) throw new Error(`higgsfield_create_character_${r.status}`);
-  return { characterId: r.json?.character_id || r.json?.id || null, jobId: r.jobId };
+export async function getJobStatus(workspaceId: string, requestId: string): Promise<{ status: HiggsfieldStatus; outputUrls: string[] }> {
+  const r = await loggedHiggsfieldFetch({ workspaceId, jobType: "probe", path: `/requests/${requestId}/status`, method: "GET", persist: false });
+  return { status: normalizeStatus(r.json?.status), outputUrls: r.outputUrls };
 }
 
-export interface SoulImageArgs {
-  workspaceId: string;
-  characterId: string;
-  prompt: string;
-  referenceImageUrls?: string[];
-  quality?: "720p" | "1080p";
-  campaignId?: string;
+export async function pollJobUntilDone(
+  workspaceId: string,
+  requestId: string,
+  opts: { intervalMs?: number; timeoutMs?: number } = {},
+): Promise<{ status: HiggsfieldStatus; outputUrls: string[] }> {
+  const intervalMs = opts.intervalMs ?? 4000;
+  const timeoutMs = opts.timeoutMs ?? 240000;
+  const deadline = Date.now() + timeoutMs;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const s = await getJobStatus(workspaceId, requestId);
+    if (s.status === "completed" || s.status === "failed" || s.status === "nsfw") return s;
+    if (Date.now() > deadline) return { status: "failed", outputUrls: [] };
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
 }
 
-/** Generate a Soul image (avatar + product hero). ~3 credits @ 1080p. */
-export async function generateSoulImage(args: SoulImageArgs): Promise<{ jobSetId: string | null; jobId: string | null }> {
-  const r = await loggedHiggsfieldFetch({
-    workspaceId: args.workspaceId,
-    jobType: "soul_image",
-    path: "/v1/soul/generate",
-    campaignId: args.campaignId,
-    body: {
-      model: HIGGSFIELD_MODELS.soul,
-      character_id: args.characterId,
-      prompt: args.prompt,
-      reference_image_urls: args.referenceImageUrls ?? [],
-      quality: args.quality ?? "1080p",
-    },
-    costCredits: 3,
-  });
-  if (!r.ok) throw new Error(`higgsfield_soul_${r.status}`);
-  return { jobSetId: r.json?.job_set_id || r.json?.id || null, jobId: r.jobId };
-}
-
+// ── Soul text-to-image (avatar face candidates — no reference) ───────────────
 export interface SoulPortraitArgs {
   workspaceId: string;
   prompt: string;
+  size?: string; // a SOUL_SIZES value
   quality?: "720p" | "1080p";
   seed?: number;
 }
 
 /**
- * Soul TEXT-TO-IMAGE — generate a brand-new person from a description (no
- * existing character). Used to mint avatar candidates from a demographic
- * archetype brief, so the operator never has to upload reference photos. ~3
- * credits. The chosen portrait is then fed to createCharacter() to become a
- * persistent, reusable character.
+ * Generate a brand-new person from a text prompt (Soul text2image). Returns the
+ * request id + any immediately-available image urls; if the response is async,
+ * poll getJobStatus(requestId). ~3 credits.
  */
-export async function generateSoulPortrait(args: SoulPortraitArgs): Promise<{ jobSetId: string | null; jobId: string | null }> {
+export async function generateSoulPortrait(args: SoulPortraitArgs): Promise<{ jobSetId: string | null; jobId: string | null; outputUrls: string[] }> {
   const r = await loggedHiggsfieldFetch({
     workspaceId: args.workspaceId,
     jobType: "soul_image",
-    path: "/v1/soul/generate",
+    path: "/v1/text2image/soul",
     body: {
-      model: HIGGSFIELD_MODELS.soul,
-      prompt: args.prompt,
-      quality: args.quality ?? "1080p",
-      ...(args.seed !== undefined ? { seed: args.seed } : {}),
+      params: {
+        prompt: args.prompt,
+        width_and_height: args.size || SOUL_SIZES.portrait_9x16,
+        quality: args.quality ?? "1080p",
+        ...(args.seed !== undefined ? { seed: args.seed } : {}),
+      },
     },
     costCredits: 3,
   });
-  if (!r.ok) throw new Error(`higgsfield_soul_portrait_${r.status}`);
-  return { jobSetId: r.json?.job_set_id || r.json?.id || null, jobId: r.jobId };
+  if (!r.ok) throw new Error(`higgsfield_soul_${r.status}`);
+  return { jobSetId: r.requestId, jobId: r.jobId, outputUrls: r.outputUrls };
 }
 
+// ── Soul image (hero — optional custom reference) ────────────────────────────
+export interface SoulImageArgs {
+  workspaceId: string;
+  prompt: string;
+  customReferenceId?: string; // a registered Higgsfield custom reference
+  customReferenceStrength?: number;
+  size?: string;
+  quality?: "720p" | "1080p";
+  campaignId?: string;
+}
+
+export async function generateSoulImage(args: SoulImageArgs): Promise<{ jobSetId: string | null; jobId: string | null; outputUrls: string[] }> {
+  const r = await loggedHiggsfieldFetch({
+    workspaceId: args.workspaceId,
+    jobType: "soul_image",
+    path: "/v1/text2image/soul",
+    campaignId: args.campaignId,
+    body: {
+      params: {
+        prompt: args.prompt,
+        width_and_height: args.size || SOUL_SIZES.portrait_9x16,
+        quality: args.quality ?? "1080p",
+        ...(args.customReferenceId ? { custom_reference_id: args.customReferenceId, custom_reference_strength: args.customReferenceStrength ?? 0.8 } : {}),
+      },
+    },
+    costCredits: 3,
+  });
+  if (!r.ok) throw new Error(`higgsfield_soul_${r.status}`);
+  return { jobSetId: r.requestId, jobId: r.jobId, outputUrls: r.outputUrls };
+}
+
+// ── DoP image-to-video (b-roll) ──────────────────────────────────────────────
 export interface DopVideoArgs {
   workspaceId: string;
   imageUrl: string;
-  motionId: string;
+  motionId?: string;
   prompt?: string;
-  quality?: "720p" | "1080p";
   campaignId?: string;
   videoId?: string;
 }
 
-/** Image-to-video b-roll clip (5s). ~9 credits / ~$0.56. */
-export async function generateDopVideo(args: DopVideoArgs): Promise<{ jobSetId: string | null; jobId: string | null }> {
+export async function generateDopVideo(args: DopVideoArgs): Promise<{ jobSetId: string | null; jobId: string | null; outputUrls: string[] }> {
   const r = await loggedHiggsfieldFetch({
     workspaceId: args.workspaceId,
     jobType: "dop_video",
-    path: "/v1/dop/generate",
+    path: "/v1/image2video/dop",
     campaignId: args.campaignId,
     videoId: args.videoId,
     body: {
-      model: HIGGSFIELD_MODELS.dop,
-      input_image: args.imageUrl,
-      motion_id: args.motionId,
-      prompt: args.prompt ?? "",
-      quality: args.quality ?? "1080p",
+      params: {
+        model: HIGGSFIELD_MODELS.dop,
+        prompt: args.prompt ?? "",
+        input_images: [{ type: "image_url", image_url: args.imageUrl }],
+        ...(args.motionId ? { motions: [args.motionId] } : {}),
+      },
     },
     costCredits: 9,
   });
   if (!r.ok) throw new Error(`higgsfield_dop_${r.status}`);
-  return { jobSetId: r.json?.job_set_id || r.json?.id || null, jobId: r.jobId };
+  return { jobSetId: r.requestId, jobId: r.jobId, outputUrls: r.outputUrls };
 }
 
+// ── Speak speech2video (talking head) ────────────────────────────────────────
 export interface SpeakVideoArgs {
   workspaceId: string;
   imageUrl: string;
@@ -259,29 +278,29 @@ export interface SpeakVideoArgs {
   videoId?: string;
 }
 
-/** Talking-head lip-sync from a hero image + audio. ~$0.10/sec. Max 15s/gen. */
-export async function generateSpeakVideo(args: SpeakVideoArgs): Promise<{ jobSetId: string | null; jobId: string | null }> {
+export async function generateSpeakVideo(args: SpeakVideoArgs): Promise<{ jobSetId: string | null; jobId: string | null; outputUrls: string[] }> {
   const r = await loggedHiggsfieldFetch({
     workspaceId: args.workspaceId,
     jobType: "speak_video",
-    path: "/v1/speak/generate",
+    path: "/v1/speak/higgsfield",
     campaignId: args.campaignId,
     videoId: args.videoId,
     body: {
-      model: HIGGSFIELD_MODELS.speak,
-      input_image: args.imageUrl,
-      input_audio: args.audioUrl,
-      prompt: args.prompt,
-      duration: args.duration,
-      quality: args.quality ?? "1080p",
+      params: {
+        input_image: { type: "image_url", image_url: args.imageUrl },
+        input_audio: { type: "audio_url", audio_url: args.audioUrl },
+        prompt: args.prompt,
+        quality: args.quality ?? "1080p",
+        duration: String(args.duration),
+      },
     },
-    // ~$0.10/sec → credits ≈ duration * 1.6
     costCredits: Math.round(args.duration * 1.6),
   });
   if (!r.ok) throw new Error(`higgsfield_speak_${r.status}`);
-  return { jobSetId: r.json?.job_set_id || r.json?.id || null, jobId: r.jobId };
+  return { jobSetId: r.requestId, jobId: r.jobId, outputUrls: r.outputUrls };
 }
 
+// ── TTS (vendor TBD — endpoint unverified; ElevenLabs is the fallback) ────────
 export interface TtsAudioArgs {
   workspaceId: string;
   text: string;
@@ -289,80 +308,49 @@ export interface TtsAudioArgs {
   campaignId?: string;
 }
 
-/** Higgsfield Audio TTS (default V1 TTS vendor). */
-export async function generateTtsAudio(args: TtsAudioArgs): Promise<{ jobSetId: string | null; jobId: string | null }> {
+export async function generateTtsAudio(args: TtsAudioArgs): Promise<{ jobSetId: string | null; jobId: string | null; outputUrls: string[] }> {
   const r = await loggedHiggsfieldFetch({
     workspaceId: args.workspaceId,
     jobType: "tts_audio",
     path: "/v1/audio/tts",
     campaignId: args.campaignId,
-    body: { text: args.text, voice_id: args.voiceId },
+    body: { params: { text: args.text, voice_id: args.voiceId } },
     costCredits: 1,
   });
   if (!r.ok) throw new Error(`higgsfield_tts_${r.status}`);
-  return { jobSetId: r.json?.job_set_id || r.json?.id || null, jobId: r.jobId };
+  return { jobSetId: r.requestId, jobId: r.jobId, outputUrls: r.outputUrls };
 }
 
-export type HiggsfieldStatus = "queued" | "in_progress" | "completed" | "failed" | "nsfw";
-
-/** Poll a job set. Returns normalized status + any output urls. */
-export async function getJobStatus(workspaceId: string, jobSetId: string): Promise<{ status: HiggsfieldStatus; outputUrls: string[] }> {
-  const r = await loggedHiggsfieldFetch({
-    workspaceId,
-    jobType: "probe",
-    path: `/v1/job-sets/${jobSetId}`,
-    method: "GET",
-    persist: false,
-  });
-  const raw = r.json || {};
-  const jobs: any[] = raw.jobs || raw.results || (Array.isArray(raw) ? raw : []);
-  const outputUrls: string[] = [];
-  for (const j of jobs) {
-    const u = j?.results?.raw?.url || j?.output_url || j?.url;
-    if (u) outputUrls.push(u);
-  }
-  const rawStatus = String(raw.status || raw.state || jobs[0]?.status || "in_progress").toLowerCase();
-  let status: HiggsfieldStatus = "in_progress";
-  if (rawStatus.includes("complet") || rawStatus === "succeeded" || rawStatus === "done") status = "completed";
-  else if (rawStatus.includes("nsfw")) status = "nsfw";
-  else if (rawStatus.includes("fail") || rawStatus.includes("error")) status = "failed";
-  else if (rawStatus.includes("queue")) status = "queued";
-  return { status, outputUrls };
+export interface CreateCharacterArgs {
+  workspaceId: string;
+  name: string;
+  imageUrls: string[];
 }
 
-/** Poll until terminal (completed/failed/nsfw) or timeout. */
-export async function pollJobUntilDone(
-  workspaceId: string,
-  jobSetId: string,
-  opts: { intervalMs?: number; timeoutMs?: number } = {},
-): Promise<{ status: HiggsfieldStatus; outputUrls: string[] }> {
-  const intervalMs = opts.intervalMs ?? 5000;
-  const timeoutMs = opts.timeoutMs ?? 240000;
-  const deadline = Date.now() + timeoutMs;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const s = await getJobStatus(workspaceId, jobSetId);
-    if (s.status === "completed" || s.status === "failed" || s.status === "nsfw") return s;
-    if (Date.now() > deadline) return { status: "failed", outputUrls: [] };
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
+/**
+ * NOTE: Higgsfield's true "Soul ID" character requires 20+ training photos. With
+ * a single chosen face we don't mint a Soul ID — the avatar simply stores the
+ * chosen face image, reused as a Soul custom-reference for hero generation. This
+ * returns characterId=null (no spend); the avatar row carries the face url.
+ * (Full Soul-ID training is tracked as open work in the ad-render lifecycle.)
+ */
+export async function createCharacter(_args: CreateCharacterArgs): Promise<{ characterId: string | null; jobId: string | null }> {
+  return { characterId: null, jobId: null };
 }
 
-/** Static catalog of motion presets (cached client-side). */
-export async function listMotions(workspaceId: string): Promise<any[]> {
-  const r = await loggedHiggsfieldFetch({ workspaceId, jobType: "probe", path: "/v1/motions", method: "GET", persist: false });
-  return r.json?.motions || r.json || [];
-}
-
-export async function listStyles(workspaceId: string): Promise<any[]> {
-  const r = await loggedHiggsfieldFetch({ workspaceId, jobType: "probe", path: "/v1/styles", method: "GET", persist: false });
-  return r.json?.styles || r.json || [];
-}
-
-/** Cheap auth probe used by the settings card "verify" step. */
+/** Cheap auth probe for the settings "Verify" button — bad creds → 401/403. */
 export async function probeHiggsfieldAuth(workspaceId: string): Promise<{ ok: boolean; status: number }> {
   const creds = await getHiggsfieldCredentials(workspaceId);
   if (!creds) return { ok: false, status: 0 };
-  const r = await loggedHiggsfieldFetch({ workspaceId, jobType: "probe", path: "/v1/motions", method: "GET", persist: false });
-  return { ok: r.ok, status: r.status };
+  // GET a POST-only endpoint: 401/403 = bad auth; 404/405/200 = creds accepted.
+  const res = await fetch(`${BASE_URL}/v1/text2image/soul`, { method: "GET", headers: { Authorization: `Key ${creds.apiKey}:${creds.secret}` } });
+  return { ok: res.status !== 401 && res.status !== 403, status: res.status };
+}
+
+export async function listMotions(_workspaceId: string): Promise<any[]> {
+  // Motions catalog is static in the Higgsfield product; returned empty here.
+  return [];
+}
+export async function listStyles(_workspaceId: string): Promise<any[]> {
+  return [];
 }

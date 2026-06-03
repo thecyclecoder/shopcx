@@ -31,11 +31,12 @@ Constants: `CREDITS_PER_DOLLAR = 16`, `HIGGSFIELD_MODELS = { soul, dop, speak }`
 
 ## Gotchas
 
-- **Dual credential.** Both `hf-api-key` AND `hf-secret` headers are required. There is NO global Higgsfield account — every call resolves one workspace's creds; missing creds throw `higgsfield_not_connected`.
+- **Single credential header.** `Authorization: Key {KEY_ID}:{KEY_SECRET}` (KEY_ID = `higgsfield_api_key_encrypted`, KEY_SECRET = `higgsfield_secret_encrypted`). No global account — every call resolves one workspace's creds; missing creds throw `higgsfield_not_connected`.
+- **Every POST body must be wrapped in `{ params: {...} }`** — a flat body 422s. See [[../integrations/higgsfield]] for the full contract (verified live 2026-06-03).
+- **`createCharacter` is a no-op** (returns `characterId=null`): a real Soul ID needs 20+ training photos, so a single generated face can't mint one. The avatar stores the chosen face image instead; Soul-ID/reference-locking is open work.
 - **NSFW jobs STILL bill.** `status='nsfw'` is terminal and the credits (~$0.50) are eaten — surface it clearly, don't silently retry.
-- **Every billable call writes `ad_jobs`** (`loggedHiggsfieldFetch`, `persist` defaults on). Probe/list calls pass `persist:false` and skip persistence. Request payloads are credential-redacted before storage.
-- Endpoint paths + payload shapes are the **integration contract** gathered from published references — verify against live Higgsfield docs when wiring real credentials.
-- Async only: mutating calls return a `job_set_id`; you must poll. `getJobStatus` normalizes Higgsfield's varied status/output shapes.
+- **Every billable call writes `ad_jobs`** (`loggedHiggsfieldFetch`, `persist` defaults on). Probe/status calls pass `persist:false`. Request payloads are credential-redacted before storage.
+- Async: POSTs return a `request_id`; poll `GET /requests/{id}/status`. `pollJobUntilDone` handles it; `getJobStatus` normalizes status + `images[].url`/`video.url`.
 
 ---
 

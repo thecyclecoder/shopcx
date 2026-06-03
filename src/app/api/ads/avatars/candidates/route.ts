@@ -118,19 +118,24 @@ export async function POST(req: Request) {
     Array.from({ length: count }, (_, i) =>
       (async () => {
         try {
-          const { jobSetId } = await generateSoulPortrait({
+          const gen = await generateSoulPortrait({
             workspaceId,
             prompt: buildAvatarPortraitPrompt(attrs, context, i),
             quality: "1080p",
             seed: 1000 + i,
           });
-          if (!jobSetId) return { ok: false as const, error: "no_job_set" };
-          const res = await pollJobUntilDone(workspaceId, jobSetId, { timeoutMs: 180000 });
-          if (res.status === "nsfw") return { ok: false as const, error: "nsfw" };
-          if (res.status !== "completed" || !res.outputUrls[0]) return { ok: false as const, error: res.status };
+          // Use immediate urls if the call was synchronous; otherwise poll.
+          let urls = gen.outputUrls;
+          if (!urls[0]) {
+            if (!gen.jobSetId) return { ok: false as const, error: "no_job_set" };
+            const res = await pollJobUntilDone(workspaceId, gen.jobSetId, { timeoutMs: 180000 });
+            if (res.status === "nsfw") return { ok: false as const, error: "nsfw" };
+            if (res.status !== "completed" || !res.outputUrls[0]) return { ok: false as const, error: res.status };
+            urls = res.outputUrls;
+          }
           // Unique path per face so library entries never collide.
           const path = `avatars/${workspaceId}/library/${stamp}_${Date.now()}_${i}.png`;
-          await uploadFromUrl(path, res.outputUrls[0], "image/png");
+          await uploadFromUrl(path, urls[0], "image/png");
           const { data: row } = await admin
             .from("ad_avatar_candidates")
             .insert({

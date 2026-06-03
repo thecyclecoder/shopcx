@@ -83,28 +83,23 @@ export const adToolHeroRequested = inngest.createFunction(
     const prompt = buildSoulPrompt(ctx.avatar.name, productTitle, ctx.dims, (ctx.campaign?.vibe_tags as string[]) || []);
 
     const heroUrl = await step.run("soul-generate-poll", async () => {
-      // Sign the isolated image so Higgsfield can read it (private bucket).
-      let refUrls: string[] = [];
-      if (ctx.isoUrl) {
-        try {
-          refUrls = [ctx.isoUrl.includes("/storage/") ? await signedFromPublicish(ctx.isoUrl) : ctx.isoUrl];
-        } catch {
-          refUrls = [ctx.isoUrl];
-        }
-      }
-      const { jobSetId } = await generateSoulImage({
+      // Soul text2image from the dimension-aware prompt. (Product/avatar lock via
+      // a registered Soul custom-reference is tracked as open work — see brain.)
+      const { jobSetId, outputUrls } = await generateSoulImage({
         workspaceId: workspace_id,
-        characterId: ctx.avatar!.higgsfield_character_id!,
         prompt,
-        referenceImageUrls: refUrls,
         quality: "1080p",
         campaignId: campaign_id,
       });
-      if (!jobSetId) throw new Error("no_job_set");
-      const res = await pollJobUntilDone(workspace_id, jobSetId, { timeoutMs: 180000 });
-      if (res.status !== "completed" || !res.outputUrls[0]) throw new Error(`soul_${res.status}`);
+      let urls = outputUrls;
+      if (!urls[0]) {
+        if (!jobSetId) throw new Error("no_job_set");
+        const res = await pollJobUntilDone(workspace_id, jobSetId, { timeoutMs: 180000 });
+        if (res.status !== "completed" || !res.outputUrls[0]) throw new Error(`soul_${res.status}`);
+        urls = res.outputUrls;
+      }
       const path = `avatars/${workspace_id}/heroes/${campaign_id}.png`;
-      await uploadFromUrl(path, res.outputUrls[0], "image/png");
+      await uploadFromUrl(path, urls[0], "image/png");
       return signedUrl(path);
     });
 
@@ -221,7 +216,7 @@ export const adToolBrollRequested = inngest.createFunction(
         const src = sources[i];
         const imageUrl = src.webp_1080_url || src.url;
         const motionId = motions[i % motions.length];
-        const { jobSetId } = await generateDopVideo({ workspaceId: workspace_id, imageUrl, motionId, quality: "1080p", campaignId: campaign_id });
+        const { jobSetId } = await generateDopVideo({ workspaceId: workspace_id, imageUrl, motionId, campaignId: campaign_id });
         if (!jobSetId) continue;
         const res = await pollJobUntilDone(workspace_id, jobSetId, { timeoutMs: 180000 });
         if (res.status === "completed" && res.outputUrls[0]) {
