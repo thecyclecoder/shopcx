@@ -162,6 +162,24 @@ The faster this loop runs, the faster the AI converges on workspace-specific voi
 | `src/lib/ai-models.ts` (constants) · `src/lib/ai-usage.ts` (cost accounting) | Existing helpers used by the review logic |
 | `src/lib/daily-analysis-report.ts` · `src/lib/inngest/daily-analysis-report-cron.ts` · `src/lib/inngest/ticket-analysis-cron.ts` | Upstream proposal pipeline (unchanged) |
 
+## Status / open work
+
+**Shipped:** End-to-end loop is wired. Per-ticket grading (every 30 min) → daily synthesis (11 UTC) → Claude Opus auto-review with full safety guards (11 UTC) → audit-logged decisions → orchestrator picks up approved rules on the next turn. Dashboard tabs + override buttons functional. Safety test verifies all four invariants (no-delete, confidence floor, daily cap, audit-first).
+
+**Known gaps / not yet shipped:**
+- No workspace has `sonnet_auto_review_enabled=true` yet. Manual flip per-workspace once Dylan reviews the first batch on /dashboard/ai-analysis.
+- Similar-prompt retrieval uses keyword-overlap not pgvector. `sonnet_prompts.embedding` column doesn't exist yet — see `src/lib/sonnet-prompt-auto-review.ts:loadReviewInputs` for the stub.
+- `grader_prompts` get proposed by the same daily report but are NOT yet auto-reviewed — separate spec needed if we want symmetry there.
+- The `delete → supersede` rewrite is a hard-coded guard; the model can't know about it from its prompt. If we ever want the model to recommend `supersede` directly, the system prompt should be updated.
+- Override surface in /dashboard/ai-analysis is functional but lacks bulk actions (accept-all / reject-all-low-confidence). Add if the queue grows beyond ~50 pending.
+
+**Recent activity:**
+- `91fea5a3` Prompt learning — auto-review of proposed sonnet_prompts (spec shipped)
+
+**Open questions:**
+- What's the right per-workspace daily cap for a workspace with ~1000 tickets/day? 10 may be too low or too high — tune after first month of live decisions.
+- Should `revise` decisions auto-create a NEW proposal with the suggested revisions applied, or leave that to a human? Currently stays as `status='proposed'` with the suggestion on the audit row.
+
 ## Related
 
 [[ai-multi-turn]] · [[ticket-lifecycle]] · [[research-and-heal]] · [[../tables/sonnet_prompts]] · [[../tables/sonnet_prompt_decisions]] · [[../tables/ticket_analyses]] · [[../tables/daily_analysis_reports]] · [[../tables/policies]] · [[../inngest/ticket-analysis-cron]] · [[../inngest/daily-analysis-report-cron]] · [[../inngest/sonnet-prompt-auto-review]] · [[../customer-voice]] · [[../operational-rules]]

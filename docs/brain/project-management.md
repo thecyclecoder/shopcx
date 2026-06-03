@@ -118,4 +118,4 @@ That triplet answers "what's done, what's next, what's blocked" without Dylan ha
 
 ## Related
 
-[[README]] · [[customer-voice]] · [[operational-rules]] · [[specs/prompt-learning]]
+[[README]] · [[customer-voice]] · [[operational-rules]] · [[lifecycles/ai-learning]] (example of a shipped + folded spec)

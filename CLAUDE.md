@@ -21,6 +21,8 @@ The retention operating system for Superfoods Company. Replaces Gorgias + Siena 
 
 **Hard rule:** every new feature / table / Inngest function / integration / library file must land in `docs/brain/` in the same PR. Code without a brain page is incomplete.
 
+**Planning + tracking work also lives in the brain.** Specs for in-flight features go in `docs/brain/specs/{slug}.md` with phase emojis (⏳ planned · 🚧 in progress · ✅ shipped). Start a build session with `/goal do everything in docs/brain/specs/{slug}.md`. When a spec is fully shipped, its content folds into the relevant lifecycle/table/library/inngest/integration/dashboard/recipe pages, and the spec file is deleted. Lifecycle pages carry a "Status / open work" block at the bottom showing shipped state. Full workflow: [docs/brain/project-management.md](docs/brain/project-management.md).
+
 ## Local conventions
 
 These can't live in a wiki page — they're project-wide invariants:
