@@ -24,13 +24,6 @@ Single source of truth for what's being built next, what's parked, and what just
 
 Concrete, scoped, high-ROI work. Pick any one and promote to a full spec.
 
-### Stuck subs — dunning skipped but `next_billing_date` never advanced
-**Status:** ⏳ Shrunk substantially (469 → 83 as of 2026-06-03) but still real.
-- 83 active subs with `next_billing_date` in the past. Bucket: 1 @ 60+d, 31 @ 30-60d, 44 @ 14-30d, 7 @ 1-14d.
-- ~$6-7K MRR impact at current scale (~$75 avg × 83).
-- **Fix scope:** dunning skip handler must advance `next_billing_date` to the next cycle. Backfill script for the 83 stuck ones.
-- May also need `sendPaymentUpdateEmail` for expired cards.
-
 ### Cancel event deduplication — **worse than the original analysis suggested**
 **Status:** 🚧 Still very real; not resolved. Reverify cited.
 - Last 7d: **52 of 90 cancelled subs (58%)** double-logged with both `portal` AND `appstle` source events.
@@ -169,6 +162,7 @@ These have no work attached — they're operational notes. Kept here because the
 - ✅ **CSAT** (2026-06) — now in [[../lifecycles/csat]].
 - ✅ **Customer voice / operational rules / UI conventions** brain pages (2026-06).
 - ✅ **Email tracking spec** — mostly shipped; verify current state in [[../inngest/deliver-pending-send]] / Resend integration page if anyone touches it again.
+- ✅ **Stuck-sub cleanup** (2026-06-03) — `next_billing_date` cleanup across 83 subs: 75 advanced (Appstle truth synced into our DB), 6 marked cancelled, 2 re-fired into dunning via `appstleAttemptBilling`. Was a one-time data-staleness backlog, not an active bug (the sync-lag root cause was already patched earlier). Script: `scripts/cleanup-stuck-subs-2026-06-03.ts`.
 
 ---
 
