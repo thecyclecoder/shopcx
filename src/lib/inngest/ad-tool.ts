@@ -16,15 +16,16 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
-  generateSoulImage,
+  generateSoulPortrait,
   generateTtsAudio,
   generateSpeakVideo,
   generateDopVideo,
   pollJobUntilDone,
   creditsToCents,
 } from "@/lib/higgsfield";
-import { uploadFromUrl, signedUrl } from "@/lib/ad-storage";
-import { eligibleMotions, slugify, resolveAdToolSettings, VIDEO_FORMATS, STATIC_FORMATS, type AdFormat, type VibeTag } from "@/lib/ad-tool-config";
+import { generateNanoBananaProCombine } from "@/lib/gemini";
+import { uploadFromUrl, uploadBuffer, signedUrl } from "@/lib/ad-storage";
+import { buildAvatarPortraitPrompt, eligibleMotions, slugify, resolveAdToolSettings, VIDEO_FORMATS, STATIC_FORMATS, type AdFormat, type VibeTag, type AvatarFaceAttributes } from "@/lib/ad-tool-config";
 import { loadAngleInputs } from "@/lib/ad-angles";
 import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, renderAdFormat } from "@/lib/ad-render";
@@ -33,20 +34,65 @@ const CONCURRENCY: [{ limit: number; key: string }] = [{ limit: 3, key: "event.d
 
 type EventData = { workspace_id: string; campaign_id: string; video_id?: string };
 
-// ── Soul prompt builder ──────────────────────────────────────────────────────
-function buildSoulPrompt(avatarName: string, productTitle: string, dims: any, vibeTags: string[]): string {
-  const shape = dims?.shape || "product";
-  const l = dims?.length_in ?? 6;
-  const w = dims?.width_in ?? 3;
-  const h = dims?.height_in ?? 8;
-  let prompt = `${avatarName} holding a ${l}-inch by ${h}-inch ${shape} of ${productTitle}, studio lighting, clean background, mid-shot, looking at camera, smiling, photorealistic. The ${shape} measures approximately ${l}" × ${w}" × ${h}", so size it proportionally in the avatar's hand — not as a small handheld item, but realistically scaled.`;
-  if (vibeTags.includes("ugly")) prompt += " Asymmetric framing, oversaturated color grading, slight motion blur, phone-camera look.";
-  if (vibeTags.includes("clinical")) prompt += " Harsh fluorescent lighting, lab-counter background.";
-  if (vibeTags.includes("phone_recorded")) prompt += " Handheld phone photo, slightly off-center.";
+// ── 0. Face candidate (Soul text2image) — async, one per face ────────────────
+// Image gen exceeds the Vercel function budget, so the candidates API inserts a
+// 'generating' row + fires this event; we generate, poll, upload, and flip the
+// row to 'available'. The UI polls the row until it's ready.
+interface FaceEventData {
+  workspace_id: string;
+  candidate_id: string;
+  gender: string;
+  age_range: string;
+  health_level: string;
+  ethnicity: string;
+  context?: string;
+  variant?: number;
+}
+
+export const adToolFaceRequested = inngest.createFunction(
+  { id: "ad-tool-face-requested", retries: 2, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/face-requested" }] },
+  async ({ event }) => {
+    const d = event.data as FaceEventData;
+    const admin = createAdminClient();
+    try {
+      const attrs: AvatarFaceAttributes = {
+        gender: d.gender as AvatarFaceAttributes["gender"],
+        ageRange: d.age_range,
+        healthLevel: d.health_level as AvatarFaceAttributes["healthLevel"],
+        ethnicity: d.ethnicity as AvatarFaceAttributes["ethnicity"],
+      };
+      const variant = d.variant ?? 0;
+      const prompt = buildAvatarPortraitPrompt(attrs, d.context || "", variant);
+      const gen = await generateSoulPortrait({ workspaceId: d.workspace_id, prompt, quality: "1080p", seed: 1000 + variant });
+      let urls = gen.outputUrls;
+      if (!urls[0]) {
+        if (!gen.jobSetId) throw new Error("no_job_set");
+        const res = await pollJobUntilDone(d.workspace_id, gen.jobSetId, { timeoutMs: 180000 });
+        if (res.status === "nsfw") throw new Error("nsfw");
+        if (res.status !== "completed" || !res.outputUrls[0]) throw new Error(`soul_${res.status}`);
+        urls = res.outputUrls;
+      }
+      const path = `avatars/${d.workspace_id}/library/${d.candidate_id}.png`;
+      await uploadFromUrl(path, urls[0], "image/png");
+      await admin.from("ad_avatar_candidates").update({ storage_path: path, status: "available" }).eq("id", d.candidate_id);
+      return { ok: true };
+    } catch (err: any) {
+      await admin.from("ad_avatar_candidates").update({ status: "failed", error: String(err?.message || err) }).eq("id", d.candidate_id);
+      return { ok: false, error: String(err?.message || err) };
+    }
+  },
+);
+
+// ── Holding-product prompt (Nano Banana Pro combine: face + product) ─────────
+function buildHoldingProductPrompt(productTitle: string, dims: any, vibeTags: string[]): string {
+  const shape = dims?.shape || "package";
+  let prompt = `Create a photorealistic vertical 9:16 UGC selfie-style photo: the person from the FIRST image holding the ${shape} of ${productTitle} from the SECOND image in their hands at chest height, facing the camera with a warm authentic smile, natural daylight outdoors. Keep their face and identity IDENTICAL to the first image. Reproduce the product packaging artwork and ALL text exactly and sharply from the second image. Realistic hands with exactly five fingers.`;
+  if (vibeTags.includes("ugly")) prompt += " Slightly off-center phone-camera framing, oversaturated color grading.";
+  if (vibeTags.includes("clinical")) prompt += " Bright clean clinical lighting, lab-counter setting.";
   return prompt;
 }
 
-// ── 1. Hero (Soul) ────────────────────────────────────────────────────────────
+// ── 1. Hero (Seedream combine: avatar face + product isolated image) ─────────
 export const adToolHeroRequested = inngest.createFunction(
   { id: "ad-tool-hero-requested", retries: 2, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/hero-requested" }] },
   async ({ event, step }) => {
@@ -59,7 +105,7 @@ export const adToolHeroRequested = inngest.createFunction(
         .select("id, product_id, variant_id, avatar_id, vibe_tags, products(title)")
         .eq("id", campaign_id)
         .single();
-      const { data: avatar } = await admin.from("ad_avatars").select("name, higgsfield_character_id").eq("id", c?.avatar_id).single();
+      const { data: avatar } = await admin.from("ad_avatars").select("name, reference_image_urls").eq("id", c?.avatar_id).single();
       let isoUrl: string | null = null;
       let dims: any = null;
       if (c?.variant_id) {
@@ -67,39 +113,40 @@ export const adToolHeroRequested = inngest.createFunction(
         isoUrl = v?.isolated_image_url || null;
         dims = v?.physical_dimensions || null;
       }
+      if (!isoUrl) {
+        const { data: pv } = await admin.from("product_variants").select("isolated_image_url").eq("product_id", c?.product_id).not("isolated_image_url", "is", null).limit(1).maybeSingle();
+        isoUrl = pv?.isolated_image_url || null;
+      }
       if (!dims) {
         const { data: p } = await admin.from("products").select("physical_dimensions").eq("id", c?.product_id).single();
         dims = p?.physical_dimensions || null;
       }
-      return { campaign: c, avatar, isoUrl, dims };
+      return { campaign: c, faceUrl: (avatar?.reference_image_urls as string[] | null)?.[0] || null, isoUrl, dims };
     });
 
-    if (!ctx.avatar?.higgsfield_character_id) {
+    if (!ctx.faceUrl) {
       await admin.from("ad_campaigns").update({ status: "failed" }).eq("id", campaign_id);
-      return { ok: false, reason: "no_character" };
+      return { ok: false, reason: "no_avatar_face" };
+    }
+    if (!ctx.isoUrl) {
+      await admin.from("ad_campaigns").update({ status: "failed" }).eq("id", campaign_id);
+      return { ok: false, reason: "no_isolated_image" };
     }
 
     const productTitle = (ctx.campaign as any)?.products?.title || "the product";
-    const prompt = buildSoulPrompt(ctx.avatar.name, productTitle, ctx.dims, (ctx.campaign?.vibe_tags as string[]) || []);
+    const prompt = buildHoldingProductPrompt(productTitle, ctx.dims, (ctx.campaign?.vibe_tags as string[]) || []);
 
-    const heroUrl = await step.run("soul-generate-poll", async () => {
-      // Soul text2image from the dimension-aware prompt. (Product/avatar lock via
-      // a registered Soul custom-reference is tracked as open work — see brain.)
-      const { jobSetId, outputUrls } = await generateSoulImage({
+    const heroUrl = await step.run("nano-banana-pro-combine", async () => {
+      // Nano Banana Pro (Gemini) composes [face, product] → "holding product".
+      // Synchronous — image returns inline (~10-30s), no polling. Identity-locked
+      // + sharp packaging text + correct anatomy.
+      const { buffer, mimeType } = await generateNanoBananaProCombine({
         workspaceId: workspace_id,
         prompt,
-        quality: "1080p",
-        campaignId: campaign_id,
+        imageUrls: [ctx.faceUrl!, ctx.isoUrl!],
       });
-      let urls = outputUrls;
-      if (!urls[0]) {
-        if (!jobSetId) throw new Error("no_job_set");
-        const res = await pollJobUntilDone(workspace_id, jobSetId, { timeoutMs: 180000 });
-        if (res.status !== "completed" || !res.outputUrls[0]) throw new Error(`soul_${res.status}`);
-        urls = res.outputUrls;
-      }
       const path = `avatars/${workspace_id}/heroes/${campaign_id}.png`;
-      await uploadFromUrl(path, urls[0], "image/png");
+      await uploadBuffer(path, buffer, mimeType);
       return signedUrl(path);
     });
 
@@ -108,11 +155,6 @@ export const adToolHeroRequested = inngest.createFunction(
     return { ok: true, heroUrl };
   },
 );
-
-// Helper: a stored "public-ish" URL we still want to re-sign (best effort).
-async function signedFromPublicish(url: string): Promise<string> {
-  return url; // isolated images are stored in product-media (already accessible); pass through.
-}
 
 // ── 2. Audio (TTS) ────────────────────────────────────────────────────────────
 export const adToolAudioRequested = inngest.createFunction(
@@ -375,6 +417,7 @@ export const adToolRenderRequested = inngest.createFunction(
 );
 
 export const adToolFunctions = [
+  adToolFaceRequested,
   adToolHeroRequested,
   adToolAudioRequested,
   adToolTalkingHeadRequested,

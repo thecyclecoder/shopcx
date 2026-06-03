@@ -46,3 +46,6 @@ yarn-error.log*
 next-env.d.ts
 twilio-recovery.txt
 .claude/worktrees/
+
+# ad-tool example render assets (binary, regenerated locally)
+remotion/public/adbuild/

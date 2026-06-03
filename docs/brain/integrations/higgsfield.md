@@ -4,10 +4,32 @@ Higgsfield Platform API (`platform.higgsfield.ai`). The single generative-media 
 
 | Surface | Endpoint | Used for |
 |---|---|---|
-| **Soul** (text2image) | `/v1/text2image/soul` | avatar face candidates + hero shot |
+| **Soul** (text2image) | `/v1/text2image/soul` | avatar **face** candidates |
+| **Seedream** (text2image combine) | `/v1/text2image/seedream` | **"holding product"** hero (face + product isolated image) |
 | **DoP** (image2video) | `/v1/image2video/dop` | b-roll clips |
 | **Speak** (speech2video) | `/v1/speak/higgsfield` | talking-head lip-sync |
 | **Audio** (TTS) | `/v1/audio/tts` (unverified) | script voiceover (ElevenLabs is the alt) |
+
+### Model availability (probed live 2026-06-03 on Superfoods' key)
+
+Models live under `/v1/{task}/{model}`; a wrong slug 404s `"Model not found"`. Only these image models exist for our key:
+
+| Model | Path | Status |
+|---|---|---|
+| `soul` | `/v1/text2image/soul` | ✅ text→image faces (params: `prompt`, `width_and_height`, `quality`) |
+| `seedream` | `/v1/text2image/seedream` | ✅ **multi-image combine** (params: `prompt`, `input_images[]`, `aspect_ratio`, `quality`) — composes face + product. **This is the holding-product engine.** |
+| `nano-banana` | `/v1/text2image/nano-banana` | ⚠️ exists + validates, but the handler returns `404 {"detail":"Not Found"}` at submission → **not API-enabled for our key** (UI access ≠ API access). Use Seedream instead. |
+
+Everything else (`flux*`, `seededit`, `gpt-image`, `midjourney`, `ideogram`, `image2image/*`, …) → `"Model not found"`.
+
+**Seedream enums:** `aspect_ratio` ∈ `1:1, 4:3, 16:9, 3:2, 21:9, 3:4, 9:16, 2:3` (no `4:5` — use `9:16` for Reels, `3:4` for portrait; renderer crops to exact safe zones). `quality` ∈ `basic, high` (use `high` — sharper packaging text). Diffusion combine *re-synthesizes* the product, so fine label text garbles; b-roll carries the crisp product close-up.
+
+### Input images must be Higgsfield-hosted (upload flow)
+
+Combine models 404 on arbitrary external URLs. Upload each input first (`uploadImageToHiggsfield`):
+1. `POST /files/generate-upload-url` `{ content_type }` → `{ upload_url, public_url }`
+2. `PUT upload_url` with the image bytes (`Content-Type` header)
+3. use `public_url` in `input_images`
 
 **Verified working against the live API 2026-06-03** (avatar face generation). Earlier placeholder paths (`cloud.higgsfield.ai`, `/v1/soul/generate`, `hf-api-key` headers) were wrong and 404'd — the table below is the real contract.
 

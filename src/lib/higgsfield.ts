@@ -235,6 +235,102 @@ export async function generateSoulImage(args: SoulImageArgs): Promise<{ jobSetId
   return { jobSetId: r.requestId, jobId: r.jobId, outputUrls: r.outputUrls };
 }
 
+// ── Nano Banana edit (face + product → "holding product") ───────────────────
+export interface NanoBananaEditArgs {
+  workspaceId: string;
+  prompt: string;
+  imageUrls: string[]; // [face, product, …] — first is the primary reference
+  aspectRatio?: "auto" | "1:1" | "3:2" | "2:3" | "4:3" | "3:4" | "4:5" | "5:4" | "9:16" | "16:9" | "21:9";
+  campaignId?: string;
+}
+
+/**
+ * Higgsfield Nano Banana (Gemini image) multi-image edit. Composes the picked
+ * avatar face + the product's isolated image into a "person holding the product"
+ * shot — Dylan's manual UI workflow, server-side. No Soul-ID training needed.
+ *   POST /v1/text2image/nano-banana
+ *   params: { prompt, input_images:[{type:"image_url",image_url}], aspect_ratio }
+ */
+export async function generateNanoBananaEdit(args: NanoBananaEditArgs): Promise<{ jobSetId: string | null; jobId: string | null; outputUrls: string[] }> {
+  const r = await loggedHiggsfieldFetch({
+    workspaceId: args.workspaceId,
+    jobType: "soul_image",
+    path: "/v1/text2image/nano-banana",
+    campaignId: args.campaignId,
+    body: {
+      params: {
+        prompt: args.prompt,
+        input_images: args.imageUrls.filter(Boolean).map((u) => ({ type: "image_url", image_url: u })),
+        aspect_ratio: args.aspectRatio || "4:5",
+      },
+    },
+    costCredits: 4,
+  });
+  if (!r.ok) throw new Error(`higgsfield_nanobanana_${r.status}`);
+  return { jobSetId: r.requestId, jobId: r.jobId, outputUrls: r.outputUrls };
+}
+
+// ── Higgsfield file upload (input images must be Higgsfield-hosted) ──────────
+/**
+ * Upload an image (by source URL) to Higgsfield's CDN and return its public URL.
+ * Combine models (Seedream) 404 on arbitrary external URLs — input images must
+ * be Higgsfield-hosted. Flow: POST /files/generate-upload-url → PUT bytes.
+ */
+export async function uploadImageToHiggsfield(workspaceId: string, srcUrl: string, contentType = "image/png"): Promise<string> {
+  const r = await loggedHiggsfieldFetch({ workspaceId, jobType: "probe", path: "/files/generate-upload-url", body: { content_type: contentType }, persist: false });
+  const uploadUrl = r.json?.upload_url;
+  const publicUrl = r.json?.public_url;
+  if (!uploadUrl || !publicUrl) throw new Error("higgsfield_upload_url_failed");
+  const bytes = Buffer.from(await (await fetch(srcUrl)).arrayBuffer());
+  const put = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": contentType }, body: bytes });
+  if (!put.ok) throw new Error(`higgsfield_upload_put_${put.status}`);
+  return publicUrl;
+}
+
+// ── Seedream combine (face + product → "holding product") ───────────────────
+// Seedream aspect_ratio enum (no 4:5 — 3:4 is the closest portrait; the renderer
+// crops to exact 4:5 safe zones downstream).
+export type SeedreamAspect = "1:1" | "4:3" | "16:9" | "3:2" | "21:9" | "3:4" | "9:16" | "2:3";
+
+export interface SeedreamCombineArgs {
+  workspaceId: string;
+  prompt: string;
+  imageUrls: string[]; // [face, product, …] — first is the primary identity reference
+  aspectRatio?: SeedreamAspect; // default 9:16 (Reels)
+  quality?: "basic" | "high"; // default high (sharper labels)
+  campaignId?: string;
+  /** when false, imageUrls are already Higgsfield-hosted (skip upload) */
+  uploadFirst?: boolean;
+}
+
+/**
+ * Seedream multi-image combine — Dylan's "holding product" step. Composes the
+ * picked avatar face + the product's isolated image into one shot. This is the
+ * API-enabled combine model (Nano Banana validates but 404s for our key).
+ *   POST /v1/text2image/seedream  params: { prompt, input_images:[{type,image_url}] }
+ */
+export async function generateSeedreamCombine(args: SeedreamCombineArgs): Promise<{ jobSetId: string | null; jobId: string | null; outputUrls: string[] }> {
+  const sources = args.imageUrls.filter(Boolean);
+  const hosted = args.uploadFirst === false ? sources : await Promise.all(sources.map((u) => uploadImageToHiggsfield(args.workspaceId, u)));
+  const r = await loggedHiggsfieldFetch({
+    workspaceId: args.workspaceId,
+    jobType: "soul_image",
+    path: "/v1/text2image/seedream",
+    campaignId: args.campaignId,
+    body: {
+      params: {
+        prompt: args.prompt,
+        input_images: hosted.map((u) => ({ type: "image_url", image_url: u })),
+        aspect_ratio: args.aspectRatio || "9:16",
+        quality: args.quality || "high",
+      },
+    },
+    costCredits: 4,
+  });
+  if (!r.ok) throw new Error(`higgsfield_seedream_${r.status}`);
+  return { jobSetId: r.requestId, jobId: r.jobId, outputUrls: r.outputUrls };
+}
+
 // ── DoP image-to-video (b-roll) ──────────────────────────────────────────────
 export interface DopVideoArgs {
   workspaceId: string;

@@ -41,8 +41,9 @@ Every claim in every ad must trace back to a structured row in the Product Intel
   │
   ├─2 pick/confirm AVATAR   (gated on product; pick from library OR generate from THIS product's buyers)
   │     getProductArchetypes(productId) pre-fills gender/age from the product's dominant buyer archetype
-  │     → set gender/age/health/ethnicity → generate 3 faces (Soul text-to-image, ~3cr each)
-  │     → saved face library (ad_avatar_candidates) → pick one → createCharacter (40cr / $2.50)
+  │     → set gender/age/health/ethnicity → generate 3 faces (Soul text2image, ~3cr each, ASYNC via
+  │       Inngest ad-tool/face-requested — rows start status=generating, UI polls until available)
+  │     → saved face library (ad_avatar_candidates) → pick one → avatar stores the face image
   │     [photo upload + Opus archetype proposals are optional alternatives]
   │
   ├─0.5 pick ANGLE   (product_ad_angles, anchored to a tier-1/2 verbatim benefit)
@@ -51,7 +52,8 @@ Every claim in every ad must trace back to a structured row in the Product Intel
   │
   ├─3 SCRIPT   generateScript + DR validator (≤3 retries on fatal violations)
   │
-  ├─3 HERO     Soul(character_id + isolated_image as reference + dims baked into prompt + vibe tags)   ~3cr
+  ├─3 HERO     Seedream COMBINE(avatar face + product isolated_image → "holding product"), 9:16, quality=high   ~4cr
+  │              (both images uploaded to Higgsfield first; Nano Banana would do this too but isn't API-enabled)
   │
   ├─3 AUDIO    Higgsfield TTS                                                                          ~1cr
   │

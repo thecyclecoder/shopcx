@@ -24,6 +24,8 @@ const MIGRATIONS = [
   "20260604130000_ad_tool_phase2_avatar_proposals.sql",
   "20260604140000_ad_tool_archetype_cache.sql",
   "20260604150000_ad_avatar_candidates.sql",
+  "20260604160000_ad_avatar_candidates_async.sql",
+  "20260604170000_gemini_integration.sql",
 ];
 
 async function main() {

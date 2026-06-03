@@ -12,6 +12,7 @@
     "@easypost/api": "^8.8.0",
     "@remotion/bundler": "^4.0.471",
     "@remotion/cli": "^4.0.471",
+    "@remotion/google-fonts": "^4.0.471",
     "@remotion/renderer": "^4.0.471",
     "@supabase/ssr": "^0.9.0",
     "@supabase/supabase-js": "^2.100.0",

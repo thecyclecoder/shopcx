@@ -28,7 +28,7 @@ interface Proposal {
 
 interface LibraryFace {
   id: string;
-  url: string;
+  url: string | null;
   status?: string;
   gender?: string;
   age_range?: string;
@@ -119,6 +119,14 @@ export default function NewAvatarPage() {
     loadArchetypes();
   }, [loadProposal, loadLibrary, loadArchetypes]);
 
+  // Poll while any face is still generating in the background (Inngest worker).
+  const anyGenerating = library.some((f) => f.status === "generating");
+  useEffect(() => {
+    if (!anyGenerating) return;
+    const t = setInterval(loadLibrary, 4000);
+    return () => clearInterval(t);
+  }, [anyGenerating, loadLibrary]);
+
   async function generateFaces() {
     setGenerating(true);
     setError(null);
@@ -147,10 +155,9 @@ export default function NewAvatarPage() {
         );
         return;
       }
-      // New faces are saved to the library; refresh + auto-select the first.
-      const fresh: { id: string }[] = json.candidates || [];
+      // Faces generate async in the background; refresh to show the placeholders
+      // (the polling effect below fills them in as they complete).
       await loadLibrary();
-      if (fresh[0]) setSelectedId(fresh[0].id);
     } catch {
       setError("Face generation failed.");
     } finally {
@@ -191,7 +198,7 @@ export default function NewAvatarPage() {
   async function createAvatar() {
     const usingUpload = showUpload && uploadUrls.length > 0;
     const selectedFace = library.find((f) => f.id === selectedId);
-    const imageUrls = usingUpload ? uploadUrls : selectedFace ? [selectedFace.url] : [];
+    const imageUrls = usingUpload ? uploadUrls : selectedFace?.url ? [selectedFace.url] : [];
     if (!name.trim()) {
       setError("Please enter a name.");
       return;
@@ -345,32 +352,46 @@ export default function NewAvatarPage() {
           </p>
         ) : (
           <div className="mt-3 grid grid-cols-3 gap-3 sm:grid-cols-4">
-            {library.map((face) => (
-              <div key={face.id} className="group relative">
-                <button
-                  onClick={() => setSelectedId(face.id)}
-                  className={`block w-full overflow-hidden rounded-lg border-2 transition-colors ${
-                    selectedId === face.id ? "border-indigo-500 ring-2 ring-indigo-500/40" : "border-transparent hover:border-zinc-300"
-                  }`}
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={face.url} alt="" className="aspect-[3/4] w-full object-cover" />
-                  {selectedId === face.id && (
-                    <span className="absolute left-1 top-1 rounded-full bg-indigo-600 px-1.5 text-xs text-white">✓</span>
+            {library.map((face) => {
+              const generating = face.status === "generating" || !face.url;
+              return (
+                <div key={face.id} className="group relative">
+                  <button
+                    onClick={() => !generating && setSelectedId(face.id)}
+                    disabled={generating}
+                    className={`block w-full overflow-hidden rounded-lg border-2 transition-colors ${
+                      selectedId === face.id ? "border-indigo-500 ring-2 ring-indigo-500/40" : "border-transparent hover:border-zinc-300"
+                    } ${generating ? "cursor-default" : ""}`}
+                  >
+                    {generating ? (
+                      <div className="flex aspect-[3/4] w-full items-center justify-center bg-zinc-100 dark:bg-zinc-800">
+                        <span className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-500" />
+                      </div>
+                    ) : (
+                      <>
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={face.url!} alt="" className="aspect-[3/4] w-full object-cover" />
+                        {selectedId === face.id && (
+                          <span className="absolute left-1 top-1 rounded-full bg-indigo-600 px-1.5 text-xs text-white">✓</span>
+                        )}
+                        {face.status === "used" && (
+                          <span className="absolute bottom-1 left-1 rounded bg-black/60 px-1 text-[10px] text-white">used</span>
+                        )}
+                      </>
+                    )}
+                  </button>
+                  {!generating && (
+                    <button
+                      onClick={() => deleteFace(face.id)}
+                      title="Delete this face"
+                      className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-900 text-xs text-white opacity-0 transition-opacity group-hover:opacity-100"
+                    >
+                      ×
+                    </button>
                   )}
-                  {face.status === "used" && (
-                    <span className="absolute bottom-1 left-1 rounded bg-black/60 px-1 text-[10px] text-white">used</span>
-                  )}
-                </button>
-                <button
-                  onClick={() => deleteFace(face.id)}
-                  title="Delete this face"
-                  className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-900 text-xs text-white opacity-0 transition-opacity group-hover:opacity-100"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

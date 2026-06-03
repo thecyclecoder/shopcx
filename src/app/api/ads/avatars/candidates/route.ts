@@ -1,17 +1,9 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { generateSoulPortrait, pollJobUntilDone } from "@/lib/higgsfield";
-import { uploadFromUrl, signedUrl, removeObjects } from "@/lib/ad-storage";
-import {
-  buildAvatarPortraitPrompt,
-  AVATAR_GENDERS,
-  AVATAR_HEALTH_LEVELS,
-  AVATAR_ETHNICITIES,
-  type AvatarFaceAttributes,
-} from "@/lib/ad-tool-config";
-
-export const maxDuration = 300;
+import { inngest } from "@/lib/inngest/client";
+import { signedUrl, removeObjects } from "@/lib/ad-storage";
+import { AVATAR_GENDERS, AVATAR_HEALTH_LEVELS, AVATAR_ETHNICITIES } from "@/lib/ad-tool-config";
 
 async function authorize(workspaceId: string | null, userId: string) {
   if (!workspaceId) return null;
@@ -55,7 +47,8 @@ export async function GET(req: Request) {
   const candidates = await Promise.all(
     (rows || []).map(async (r) => ({
       id: r.id,
-      url: await signedUrl(r.storage_path).catch(() => ""),
+      // generating rows have no storage_path yet — null url, UI shows a spinner.
+      url: r.storage_path ? await signedUrl(r.storage_path).catch(() => null) : null,
       gender: r.gender,
       age_range: r.age_range,
       health_level: r.health_level,
@@ -63,13 +56,17 @@ export async function GET(req: Request) {
       status: r.status,
     })),
   );
-  return NextResponse.json({ candidates: candidates.filter((c) => c.url) });
+  // Drop only completed-but-unsignable rows; keep generating (no url) so the UI
+  // can show in-progress placeholders and poll until they're ready.
+  return NextResponse.json({ candidates: candidates.filter((c) => c.url || c.status === "generating") });
 }
 
 /**
- * POST — generate N avatar FACE candidates from four attributes (gender, age,
- * health level, ethnicity) via Higgsfield Soul text-to-image, persist each into
- * the library, and return them. No reference-photo upload. ~3 credits per face.
+ * POST — kick off N avatar FACE generations (async). Image gen exceeds the
+ * Vercel function budget, so this inserts N rows in status='generating' and
+ * fires an `ad-tool/face-requested` Inngest event per face, then returns
+ * immediately. The Inngest worker generates + uploads + flips each row to
+ * 'available'; the UI polls GET until none are 'generating'. ~3 credits per face.
  */
 export async function POST(req: Request) {
   const supabase = await createClient();
@@ -89,7 +86,6 @@ export async function POST(req: Request) {
   const ageRange = typeof body.ageRange === "string" && body.ageRange ? body.ageRange : "35-44";
   const healthLevel = AVATAR_HEALTH_LEVELS.some((h) => h.value === body.healthLevel) ? body.healthLevel : "fit";
   const ethnicity = AVATAR_ETHNICITIES.some((e) => e.value === body.ethnicity) ? body.ethnicity : "auto";
-  const attrs: AvatarFaceAttributes = { gender, ageRange, healthLevel, ethnicity };
 
   let context = "";
   let proposalId: string | null = null;
@@ -107,65 +103,36 @@ export async function POST(req: Request) {
       productId = proposal.product_id;
     }
   }
-  // Direct product scoping (builder path, no proposal): confirm ownership.
   if (productId && !proposalId) {
     const { data: prod } = await admin.from("products").select("workspace_id").eq("id", productId).single();
     if (!prod || prod.workspace_id !== workspaceId) productId = null;
   }
 
-  const stamp = `${gender}_${ageRange}_${healthLevel}_${ethnicity}`;
-  const results = await Promise.all(
-    Array.from({ length: count }, (_, i) =>
-      (async () => {
-        try {
-          const gen = await generateSoulPortrait({
-            workspaceId,
-            prompt: buildAvatarPortraitPrompt(attrs, context, i),
-            quality: "1080p",
-            seed: 1000 + i,
-          });
-          // Use immediate urls if the call was synchronous; otherwise poll.
-          let urls = gen.outputUrls;
-          if (!urls[0]) {
-            if (!gen.jobSetId) return { ok: false as const, error: "no_job_set" };
-            const res = await pollJobUntilDone(workspaceId, gen.jobSetId, { timeoutMs: 180000 });
-            if (res.status === "nsfw") return { ok: false as const, error: "nsfw" };
-            if (res.status !== "completed" || !res.outputUrls[0]) return { ok: false as const, error: res.status };
-            urls = res.outputUrls;
-          }
-          // Unique path per face so library entries never collide.
-          const path = `avatars/${workspaceId}/library/${stamp}_${Date.now()}_${i}.png`;
-          await uploadFromUrl(path, urls[0], "image/png");
-          const { data: row } = await admin
-            .from("ad_avatar_candidates")
-            .insert({
-              workspace_id: workspaceId,
-              proposal_id: proposalId,
-              product_id: productId,
-              gender,
-              age_range: ageRange,
-              health_level: healthLevel,
-              ethnicity,
-              storage_path: path,
-              status: "available",
-              created_by: user.id,
-            })
-            .select("id")
-            .single();
-          return { ok: true as const, id: row?.id, url: await signedUrl(path) };
-        } catch (err: any) {
-          return { ok: false as const, error: String(err?.message || err) };
-        }
-      })(),
+  // Insert N 'generating' rows (no image yet), then fire one event per face.
+  const rowsToInsert = Array.from({ length: count }, () => ({
+    workspace_id: workspaceId,
+    proposal_id: proposalId,
+    product_id: productId,
+    gender,
+    age_range: ageRange,
+    health_level: healthLevel,
+    ethnicity,
+    status: "generating",
+    created_by: user.id,
+  }));
+  const { data: rows, error } = await admin.from("ad_avatar_candidates").insert(rowsToInsert).select("id");
+  if (error || !rows) return NextResponse.json({ error: error?.message || "insert_failed" }, { status: 500 });
+
+  await Promise.all(
+    rows.map((r, i) =>
+      inngest.send({
+        name: "ad-tool/face-requested",
+        data: { workspace_id: workspaceId, candidate_id: r.id, gender, age_range: ageRange, health_level: healthLevel, ethnicity, context, variant: i },
+      }),
     ),
   );
 
-  const candidates = results.filter((r) => r.ok).map((r) => ({ id: (r as any).id, url: (r as any).url }));
-  if (candidates.length === 0) {
-    const reason = (results.find((r) => !r.ok) as any)?.error || "generation_failed";
-    return NextResponse.json({ error: "no_candidates", reason }, { status: 502 });
-  }
-  return NextResponse.json({ candidates });
+  return NextResponse.json({ candidates: rows.map((r) => ({ id: r.id, status: "generating" })) });
 }
 
 /** DELETE — permanently remove a saved face from the library (row + storage object). */

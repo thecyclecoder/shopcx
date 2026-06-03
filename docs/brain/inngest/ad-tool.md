@@ -6,11 +6,15 @@ Ad tool — async generation pipeline (Higgsfield + Whisper + Remotion). One fun
 
 ## Functions
 
-All five share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a single workspace can't monopolize Higgsfield rate limits.
+All share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a single workspace can't monopolize Higgsfield rate limits.
+
+### `ad-tool-face-requested`
+- **Trigger:** event `ad-tool/face-requested` (`{ workspace_id, candidate_id, gender, age_range, health_level, ethnicity, context?, variant? }`) · **Retries:** 2
+- Generates ONE avatar face: `buildAvatarPortraitPrompt` → `generateSoulPortrait` + poll → uploads to the library path → flips `ad_avatar_candidates` from `generating` → `available` (or `failed` + `error`). **This is why face gen is async** — image gen exceeds the Vercel function budget, so `POST /api/ads/avatars/candidates` inserts `generating` rows + fires N of these events and returns instantly; the UI polls the rows.
 
 ### `ad-tool-hero-requested`
 - **Trigger:** event `ad-tool/hero-requested` · **Retries:** 2
-- Loads campaign + avatar + isolated image/dims → builds a Soul prompt (avatar holding product, dimension-scaled, vibe-adjusted) → `generateSoulImage` + `pollJobUntilDone` → uploads hero → writes `ad_campaigns.hero_image_url` → emits `ad-tool/hero-completed`. Fails the campaign if the avatar has no `higgsfield_character_id`.
+- Loads campaign + avatar **face** (`reference_image_urls[0]`) + product isolated image → `generateSeedreamCombine([face, product])` (9:16, quality=high, both uploaded to Higgsfield first) + `pollJobUntilDone` → uploads hero → writes `ad_campaigns.hero_image_url` → emits `ad-tool/hero-completed`. Fails the campaign if the avatar has no face or the product has no isolated image.
 
 ### `ad-tool-audio-requested`
 - **Trigger:** event `ad-tool/audio-requested` · **Retries:** 2
