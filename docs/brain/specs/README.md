@@ -1,59 +1,84 @@
-# Backlog — in-flight + planned + roadmap
+# Backlog — active projects + recently shipped
 
-Single source of truth for what's being built next, what's parked, and what just shipped. Replaces the loose `project_*.md` files that lived in agent memory.
+Single source of truth for what's being built next, what's parked, and what just shipped. Replaces the loose `project_*.md` files that used to live in agent memory.
 
 ## How to use this
 
 - **Status emojis** (per the convention in [[../project-management]]): ⏳ planned · 🚧 in progress · ✅ shipped (then folded + removed).
-- **Items in the "Ready" section** are concrete enough to fire `/goal do everything in docs/brain/specs/{slug}.md` against, once promoted to their own spec file.
-- **Roadmap items** are tracked here but don't get individual spec files until promoted to "Ready."
-- **Move things between sections** as priorities shift. The order within a section is rough priority.
-- When an item ships, fold its content into the relevant lifecycle/table/library pages and delete the row here (the spec file too, if it had one).
+- Three active project tracks today. Each has shipped sub-phases (documented in the linked lifecycle) and open sub-work that should be promoted into individual `docs/brain/specs/{slug}.md` files as soon as it's concrete enough to fire `/goal` at.
+- When a sub-phase ships, fold its content into the relevant lifecycle/table/library pages and delete the spec file (per [[../project-management]] § Folding a shipped spec into the brain).
 
 ---
 
-## Active specs (in flight)
+## Active project 1 — Storefront 🚧
 
-| Status | Spec | Summary |
-|---|---|---|
-| ⏳🚧 | [ad-tool](ad-tool.md) | Avatar + LF8 ad-angle generator + Higgsfield render pipeline. Phase 0/0.5 in progress. |
+**Lifecycle:** [[../lifecycles/storefront-checkout]]
 
----
+**Why this matters:** owning the checkout removes the 3% Shopify txn fee, unlocks AOV boosters + custom sub-conversion logic, and prevents the hidden-parallel-sub pattern that bites us repeatedly.
 
-## Ready to spec — data integrity / cleanup
-
-Concrete, scoped, high-ROI work. Pick any one and promote to a full spec.
-
-
-
----
-
-## Ready to spec — storefront
-
-### Storefront — own the checkout (active umbrella project, needs more spec'ing)
-**Status:** 🚧 In flight as one ongoing project. Many sub-phases already shipped; next phases need to be spec'd out.
-
-**Sub-phases shipped (per [[../lifecycles/storefront-checkout]]):**
+**Sub-phases shipped:**
 - PDP pixel, cart create + server-validated pricing
 - Braintree Hosted Fields checkout
 - Avalara tax quote at checkout (recent)
 - OTP gate (`/api/checkout/otp/{start,verify,resend}`)
-- Subscription choice card (`/api/checkout/existing-subs`) — three options when authenticated + cart contains subscribe items + active internal sub
+- Subscription choice card (`/api/checkout/existing-subs`)
 - CAPI fan-out
 
-**Active sub-work (parallel project — needs spec'ing here):**
-- Add-to-existing-subscription at checkout — one-time purchase now, then promote into an existing sub. Replaces the "modal: do you want to add to your existing sub?" idea with an explicit OTP-gated dual flow.
-- Whatever else the storefront-v2 push is taking on next.
+**Open sub-work:**
+- 🚧 **OTP testing** — flow built, awaiting Dylan to test end-to-end on the live storefront.
+- 🚧 **New-sub vs add-to-existing-sub UI** — at checkout, when a customer with an active subscription buys a subscribe item, present the choice: create a new parallel sub, add the line to the existing sub, or just one-time-purchase. Prevents the "Jennifer Santiago = 2 parallel Superfood Tabs subs for 7 months" pattern. Promote to its own spec when ready: `specs/checkout-add-to-sub.md`.
 
-**How to use this:** when ready to expand, promote each next sub-phase into its own `docs/brain/specs/{slug}.md` file (e.g. `specs/checkout-add-to-sub.md`) instead of speccing into this index entry.
+---
+
+## Active project 2 — Customer portal 🚧
+
+**Lifecycle:** [[../lifecycles/customer-portal]]
+
+**Why this matters:** the in-house portal is replacing the Shopify-extension surface. Once it owns full sub-management it can do things the Shopify ext can't — better cancel-save UX, in-portal storefront flows, loyalty redemption, payment update without leaving the page.
+
+**Sub-phases shipped (per lifecycle page):**
+- Both surfaces (Shopify extension + in-house mini-site) wired
+- Cancel-via-journey, loyalty redeem + apply, coupon validation
+- Address + frequency + line-item mutations
+- Payment-method update with Appstle → internal migration on card change
+- Identity linking, event log + internal ticket notes
+
+**Open sub-work:**
+- 🚧 **New customer portal** (v2) — net-new surface being built. Scope to be spec'd: which capabilities move from the Shopify ext to the in-house surface, what the design system looks like, how it co-exists with the existing in-house mini-site under `/portal`. Promote to its own spec when concrete: `specs/customer-portal-v2.md`.
+
+---
+
+## Active project 3 — Ad builder tool 🚧
+
+**Lifecycle:** [[../lifecycles/ad-render]]
+
+**Why this matters:** cut per-ad creative cost from ~$200 (freelancer) to ~$2 (Higgsfield + Whisper + Anthropic), and cut turnaround from days to ~5 minutes per ad. Enables ROAS-driven creative iteration at the cadence the Meta dashboard needs.
+
+**Sub-phases shipped (per lifecycle page):**
+- Schema: [[../tables/ad_avatars]], [[../tables/ad_avatar_proposals]], [[../tables/ad_campaigns]], [[../tables/ad_videos]], [[../tables/ad_jobs]], [[../tables/product_ad_angles]]
+- Product-asset prep: `product_variants.isolated_image_url` + `physical_dimensions` columns + UI uploads on `/dashboard/storefront/products/[id]`
+- Libraries: ad-angles, ad-script, ad-validator, ad-render, ad-tool-config, ad-avatar-proposals, ad-transcribe, ad-storage, higgsfield
+- API surface: `/api/ads/*` (campaigns, avatars, angles, proposals, validate, hero/audio/talking-head/render) + `/api/workspaces/{id}/ad-tool-settings`
+- Dashboard: `/dashboard/marketing/ads/*`
+
+**Open sub-work (per lifecycle page):**
+- ⏳ Migration `20260604140000_ad_tool_archetype_cache.sql` not yet applied — re-run `npx tsx scripts/apply-ad-tool-migration.ts` (idempotent).
+- ⏳ Live **Higgsfield + OpenAI** credentials need to be wired per-workspace via Settings → Integrations.
+- ⏳ Run `npm i remotion @remotion/bundler @remotion/renderer @remotion/cli` before any video render — `renderAdFormat` throws `remotion_not_installed` until then.
+- ⏳ Flip `workspaces.ad_tool_enabled=true` per-workspace after Dylan reviews the first ad on `/dashboard/marketing/ads`.
+- ⏳ TTS vendor (Higgsfield Audio vs ElevenLabs) + Remotion runtime (Inngest serverless vs AWS Lambda) decisions pending under load.
 
 ---
 
 ## Reference / runbooks (not work items)
 
-These have no work attached — they're operational notes. Kept here because they were in memory; fold into recipes/ on next pass.
+- **DB lockup diagnosis runbook** — past root cause was missing index on `sms_campaign_recipients.message_sid` during MDW SMS sends. Use `scripts/pg-stat-statements.ts` + `scripts/pg-live-snapshot.ts` against the pooler. Should move to `docs/brain/recipes/db-lockup-diagnosis.md` next pass.
 
-- **DB lockup diagnosis runbook** (`project_db_lockup_diagnosis.md`) — past root cause was missing index on `sms_campaign_recipients.message_sid` during MDW SMS sends. Use `scripts/pg-stat-statements.ts` + `scripts/pg-live-snapshot.ts` against the pooler. Should move to `docs/brain/recipes/db-lockup-diagnosis.md`.
+---
+
+## Past incident (kept for pattern-matching)
+
+- **Apr 13 ticket glitch** — false-positive close + return response + 529 errors. Originally in `project_ticket_glitch_apr13.md`. If it recurs, check that file before re-investigating from scratch.
 
 ---
 
@@ -65,20 +90,14 @@ These have no work attached — they're operational notes. Kept here because the
 - ✅ **CSAT** (2026-06) — now in [[../lifecycles/csat]].
 - ✅ **Customer voice / operational rules / UI conventions** brain pages (2026-06).
 - ✅ **Email tracking spec** — mostly shipped; verify current state in [[../inngest/deliver-pending-send]] / Resend integration page if anyone touches it again.
-- ✅ **Stuck-sub cleanup** (2026-06-03) — `next_billing_date` cleanup across 83 subs: 75 advanced (Appstle truth synced into our DB), 6 marked cancelled, 2 re-fired into dunning via `appstleAttemptBilling`. Was a one-time data-staleness backlog, not an active bug (the sync-lag root cause was already patched earlier). Script: `scripts/cleanup-stuck-subs-2026-06-03.ts`.
-- ✅ **Cancel-event dedup** (2026-06-03) — forward fix in the Appstle webhook handler. When a customer cancels via the portal, both a `portal.subscription.cancelled` (source=portal) AND a `subscription.cancelled` (source=appstle) fire within seconds. Now the Appstle webhook checks for a portal cancel for the same `shopify_contract_id` within the last 5 min and suppresses the duplicate insert. **Historical 272 duplicates left in place** — backfill script (`scripts/backfill-cancel-event-dedup.ts`) exists but was not applied; analytics consumers can still dedupe at query time if needed.
-- ✅ **Stacked-sale-coupon check** (2026-06-03) — re-scoped per Dylan to "subs with **2+** sale coupons (excluding loyalty / free-shipping / Buy-N bundle)." Live count: **0**. The 333 subs that carry one CODE_DISCOUNT each are allowed to combine with automatic-discount + subscribe-and-save. Item resolved without cleanup.
-- ✅ **Auto-grant detection removed** (2026-06-03) — three stubbed triggers (`cancelled_but_charged` / `duplicate_charge` / `never_delivered`) were never wired up. Per Dylan: `never_delivered` is handled by the replacement flow; the other two should not happen and Sonnet escalates them directly when they do. Stripped the `checkAutoGrant` function, the auto-grant for-loop in the playbook executor, the auto-grant editor in `/dashboard/settings/playbooks`, the simulate-route auto-grant block, and the AUTO label in the playbook-fix logger. Schema columns + 1 dormant DB row retained (executor filter `!e.auto_grant` is a defensive backstop).
-- ✅ **Meta ad-comment attribution** — shipped. Matches `creative.effective_object_story_id` (FB) / `effective_instagram_media_id` (IG) on adcreatives against the webhook's `post.id` / `media.id` so the bimodal ad-vs-organic webhook shape no longer breaks attribution.
-- ✅ **Klaviyo 180d engagement backfill** — shipped via local script. Engagement events from Klaviyo's history backfilled into our DB; verify current state via [[../integrations/klaviyo]] before extending.
-- ✅ **UX/product bucket cleared** (all 6 items shipped or superseded): (1) parallel-sub alert at checkout — superseded by OTP-then-add-to-sub work in a separate project; (2) SMS phone preview component — shipped (`src/components/sms-phone-preview.tsx`); (3) SMS buyer archetypes + replenishment ratio — shipped; (4) predicted-purchase segments — shipped; (5) return-request auto-playbook — shipped via the refund playbook; (6) shipping-issues Opus chat — shipped.
-- ✅ **Analytics + integrations bucket cleared** (all shipped, not-needed, or folded into the storefront umbrella): ROAS analytics — shipped; billing forecast — shipped; Amazon pricing UI — shipped; automation analytics dashboard — not needed; anomaly-aware data tools — shipped via the ticket timeline anomaly-detection feature; cross-app shared API keys (ShopCX / ShopGrowth / Shoptics) — not needed.
-
----
-
-## Past incident (kept for pattern-matching)
-
-- **Apr 13 ticket glitch** — false-positive close + return response + 529 errors. Originally in `project_ticket_glitch_apr13.md`. If it recurs, check that file before re-investigating from scratch.
+- ✅ **Stuck-sub cleanup** (2026-06-03) — `next_billing_date` cleanup across 83 subs: 75 advanced (Appstle truth synced into our DB), 6 marked cancelled, 2 re-fired into dunning via `appstleAttemptBilling`. Was a one-time data-staleness backlog, not an active bug. Script: `scripts/cleanup-stuck-subs-2026-06-03.ts`.
+- ✅ **Cancel-event dedup** (2026-06-03) — forward fix in the Appstle webhook handler. When a customer cancels via the portal, the Appstle webhook checks for a portal cancel for the same `shopify_contract_id` within the last 5 min and suppresses the duplicate insert. Historical 272 duplicates left in place; analytics consumers can dedupe at query time if needed.
+- ✅ **Stacked-sale-coupon check** (2026-06-03) — re-scoped to "subs with 2+ sale coupons (excluding loyalty / free-shipping / Buy-N bundle)." Live count: 0.
+- ✅ **Auto-grant detection removed** (2026-06-03) — three stubbed triggers (`cancelled_but_charged` / `duplicate_charge` / `never_delivered`) never wired up. Sonnet escalates these directly when they occur; `never_delivered` is handled by the replacement flow. Stripped the executor code path + UI editor + simulate route.
+- ✅ **Meta ad-comment attribution** — shipped via `effective_object_story_id` / `effective_instagram_media_id` match against the webhook's `post.id` / `media.id`.
+- ✅ **Klaviyo 180d engagement backfill** — shipped via local script.
+- ✅ **UX/product bucket** — parallel-sub alert (superseded by add-to-existing-sub UI in the storefront project), SMS phone preview, SMS buyer archetypes + replenishment ratio, predicted-purchase segments, return-request auto-playbook (via refund playbook), shipping-issues Opus chat.
+- ✅ **Analytics + integrations bucket** — ROAS analytics, billing forecast, Amazon pricing UI, anomaly-aware data tools (via ticket timeline anomaly-detection); automation analytics dashboard + cross-app shared keys marked not needed.
 
 ---
 
