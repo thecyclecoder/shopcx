@@ -15,6 +15,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
 | [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 23 + README |
 | [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 40 + 37 settings |
+| [specs/](specs/) | Roadmap specs for in-flight or planned features. When a spec ships, content folds into the relevant lifecycle/table/library pages and the spec is removed. | 1 |
 | (root) | Cross-cutting reference: [customer-voice.md](customer-voice.md), [operational-rules.md](operational-rules.md), [ui-conventions.md](ui-conventions.md), [orchestrator-tools.md](orchestrator-tools.md) | 4 |
 
 ## Tables (`tables/`)
