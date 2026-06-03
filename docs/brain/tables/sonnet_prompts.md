@@ -19,11 +19,19 @@ DB-driven prompt rules for the Sonnet orchestrator. category: rule/approach/know
 | `sort_order` | `int4` | — | default: `0` |
 | `created_at` | `timestamptz` | — | default: `now()` |
 | `updated_at` | `timestamptz` | — | default: `now()` |
-| `status` | `text` | — | default: `'approved'` |
+| `status` | `text` | — | default: `'approved'` · enum: `proposed/approved/rejected/archived` |
 | `derived_from_ticket_id` | `uuid` | ✓ | → [[tickets]].id |
 | `proposed_at` | `timestamptz` | ✓ |  |
 | `reviewed_at` | `timestamptz` | ✓ |  |
 | `reviewed_by` | `uuid` | ✓ |  |
+| `auto_decision` | `text` | ✓ | enum: `accept/reject/merge/supersede/human_review/revise`. NULL = not yet auto-reviewed. |
+| `auto_decision_at` | `timestamptz` | ✓ | When the auto-review or override fired |
+| `auto_decision_reason` | `text` | ✓ | Brief reasoning (full per-decision history lives in [[sonnet_prompt_decisions]]) |
+| `auto_decision_model` | `text` | ✓ | Model id, or `manual_override` |
+| `auto_decision_confidence` | `real` | ✓ | 0..1 — the model's raw confidence (NOT floor-adjusted) |
+| `superseded_by_id` | `uuid` | ✓ | → [[sonnet_prompts]].id — set on the old row when a new prompt supersedes it. Old row stays with `enabled=false`, `status='archived'`. Reversible. |
+| `merged_into_id` | `uuid` | ✓ | → [[sonnet_prompts]].id — set when this proposal was merged into another canonical rule |
+| `source_pattern_id` | `uuid` | ✓ | → [[daily_analysis_reports]].id — the report that surfaced this proposal |
 
 ## Foreign keys
 
@@ -31,10 +39,46 @@ DB-driven prompt rules for the Sonnet orchestrator. category: rule/approach/know
 
 - `derived_from_ticket_id` → [[tickets]].`id`
 - `workspace_id` → [[workspaces]].`id`
+- `superseded_by_id` → [[sonnet_prompts]].`id`
+- `merged_into_id` → [[sonnet_prompts]].`id`
+- `source_pattern_id` → [[daily_analysis_reports]].`id`
 
 **In (others → this):**
 
-_None._
+- [[sonnet_prompts]].`superseded_by_id` (self-FK)
+- [[sonnet_prompts]].`merged_into_id` (self-FK)
+- [[sonnet_prompt_decisions]].`sonnet_prompt_id`
+- [[sonnet_prompt_decisions]].`merge_target_id`
+- [[sonnet_prompt_decisions]].`supersede_target_id`
+
+## Auto-decision lifecycle
+
+```
+status='proposed', auto_decision=NULL
+   │
+   │  sonnet-prompt-auto-review cron @ 11 UTC
+   ▼
+┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐
+│   accept     │   reject     │    merge     │  supersede   │ human_review │
+│              │              │              │              │   / revise   │
+├──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤
+│ status=      │ status=      │ status=      │ status=      │ status=      │
+│ approved     │ rejected     │ rejected     │ approved     │ proposed     │
+│ enabled=true │ enabled=false│ merged_into  │ + old row    │ auto_decision│
+│              │              │ set          │ archived +   │ ='human_     │
+│              │              │              │ superseded_  │  review' or  │
+│              │              │              │ by_id set    │ 'revise'     │
+└──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
+                                                                    │
+                                                                    ▼
+                                                       /dashboard/ai-analysis
+                                                       Pending review tab
+                                                       Accept / Reject overrides
+                                                       (writes manual_override
+                                                        row to sonnet_prompt_decisions)
+```
+
+Every transition writes an append-only row to [[sonnet_prompt_decisions]] BEFORE mutating this row. See [[../lifecycles/ai-learning]] for the full self-improvement loop.
 
 ## Common queries
 

@@ -17,6 +17,7 @@ import { scrapeHelpCenter } from "@/lib/inngest/scrape-help-center";
 import { aiNightlyAnalysis } from "@/lib/inngest/ai-nightly-analysis";
 import { ticketAnalysisCron } from "@/lib/inngest/ticket-analysis-cron";
 import { dailyAnalysisReportCron } from "@/lib/inngest/daily-analysis-report-cron";
+import { sonnetPromptAutoReviewCron } from "@/lib/inngest/sonnet-prompt-auto-review";
 import {
   fraudNightlyScan,
   fraudGenerateSummary,
@@ -106,6 +107,7 @@ export const { GET, POST, PUT } = serve({
     aiNightlyAnalysis,
     ticketAnalysisCron,
     dailyAnalysisReportCron,
+    sonnetPromptAutoReviewCron,
     fraudNightlyScan,
     fraudGenerateSummary,
     fraudCheckOrder,

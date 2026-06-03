@@ -6,16 +6,16 @@ System-level reference covering everything an agent needs to navigate the codeba
 
 | Folder | Contents | Count |
 |---|---|---|
-| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 138 |
-| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 50 |
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 139 |
+| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 51 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 13 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 174 |
-| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 17 |
+| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 18 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
 | [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 23 + README |
 | [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 40 + 37 settings |
-| [specs/](specs/) | Roadmap specs for in-flight or planned features. When a spec ships, content folds into the relevant lifecycle/table/library pages and the spec is removed. | 1 |
+| [specs/](specs/) | Roadmap specs for in-flight or planned features. When a spec ships, content folds into the relevant lifecycle/table/library pages and the spec is removed. | 0 |
 | (root) | Cross-cutting reference: [customer-voice.md](customer-voice.md), [operational-rules.md](operational-rules.md), [ui-conventions.md](ui-conventions.md), [orchestrator-tools.md](orchestrator-tools.md) | 4 |
 
 ## Tables (`tables/`)
@@ -116,7 +116,8 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/policies]] — Canonical published policies (refund window, restocking, exchange rules, etc). Consumed by orchestrator, storefront, and (TODO) playbook executor.
 - [[tables/rules]] — Compound AND/OR rules engine — ordered actions, 8 action types. Evaluated on inbound events.
 - [[tables/smart_patterns]] — Global + workspace-scoped patterns. 3-layer classifier (keywords → embeddings → Haiku fallback).
-- [[tables/sonnet_prompts]] — DB-driven prompt rules for the Sonnet orchestrator. category: rule/approach/knowledge/tool_hint. Editable in Settings → AI → Prompts.
+- [[tables/sonnet_prompts]] — DB-driven prompt rules for the Sonnet orchestrator. category: rule/approach/knowledge/tool_hint. Editable in Settings → AI → Prompts. Auto-review lifecycle in [[lifecycles/ai-learning]].
+- [[tables/sonnet_prompt_decisions]] — Append-only audit log of auto-review decisions (cron + manual override) on sonnet_prompts. One row per Opus call.
 - [[tables/workflows]] — Template-based deterministic workflows (order_tracking, cancel_request, subscription_inquiry, account_login, end_chat).
 - [[tables/workspace_pattern_overrides]] — Per-workspace overrides on global smart_patterns (disable a global pattern, raise/lower its threshold).
 
@@ -330,6 +331,7 @@ Long-form narrative pages tracing key flows end-to-end. Each wikilinks 5+ refere
 
 - [[lifecycles/ticket-lifecycle]] — Inbound message → orchestrator → action → close → CSAT. The hottest path in the platform.
 - [[lifecycles/ai-multi-turn]] — Route → assemble context → generate → confidence-gate → send → auto-resolve. Tool-use orchestrator details.
+- [[lifecycles/ai-learning]] — Self-improvement loop: tickets → grader → daily report → proposed rules → auto-review (accept/reject/merge/supersede/human_review/revise) → applied rules → orchestrator → tickets. Closes.
 - [[lifecycles/dunning]] — Payment-failed → card rotation → payday retry → cycle action → recovery / pause.
 - [[lifecycles/return-pipeline]] — `createFullReturn` → EasyPost label → delivered → issue-refund → confirmation email.
 - [[lifecycles/cancel-flow]] — Cancel intent → cancel journey → Haiku remedy → save / cancel → tag.
