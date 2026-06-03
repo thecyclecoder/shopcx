@@ -50,8 +50,12 @@ export default function NewAvatarPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const proposalId = searchParams.get("proposalId");
+  const productId = searchParams.get("productId");
 
   const [proposal, setProposal] = useState<Proposal | null>(null);
+  // The SELECTED product's buyer archetypes (gender/age/share) — pre-fills the
+  // dropdowns with that product's actual buyers, not overall demographics.
+  const [archetypes, setArchetypes] = useState<{ gender: string; age_range: string; share: number }[]>([]);
   const [name, setName] = useState("");
 
   // The four face-generation controls.
@@ -95,10 +99,25 @@ export default function NewAvatarPage() {
     }
   }, [proposalId, workspace.id]);
 
+  const loadArchetypes = useCallback(async () => {
+    if (!productId) return;
+    const res = await fetch(`/api/ads/avatars/archetypes?workspaceId=${workspace.id}&productId=${productId}`);
+    if (!res.ok) return;
+    const json = await res.json();
+    const list: { gender: string; age_range: string; share: number }[] = json.archetypes || [];
+    setArchetypes(list);
+    // Pre-fill from this product's dominant buyer archetype.
+    if (list[0]) {
+      if ((AVATAR_GENDERS as readonly string[]).includes(list[0].gender)) setGender(list[0].gender);
+      if ((AVATAR_AGE_RANGES as readonly string[]).includes(list[0].age_range)) setAgeRange(list[0].age_range);
+    }
+  }, [productId, workspace.id]);
+
   useEffect(() => {
     loadProposal();
     loadLibrary();
-  }, [loadProposal, loadLibrary]);
+    loadArchetypes();
+  }, [loadProposal, loadLibrary, loadArchetypes]);
 
   async function generateFaces() {
     setGenerating(true);
@@ -110,6 +129,7 @@ export default function NewAvatarPage() {
         body: JSON.stringify({
           workspaceId: workspace.id,
           proposalId: proposalId ?? undefined,
+          productId: productId ?? undefined,
           gender,
           ageRange,
           healthLevel,
@@ -235,6 +255,37 @@ export default function NewAvatarPage() {
 
       {/* Four controls + generate */}
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        {archetypes.length > 0 && (
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200">
+              This product&apos;s buyers
+            </label>
+            <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+              Tap an archetype to match gender + age to your actual buyers.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {archetypes.map((a, i) => {
+                const matches = a.gender === gender && a.age_range === ageRange;
+                return (
+                  <button
+                    key={i}
+                    onClick={() => {
+                      if ((AVATAR_GENDERS as readonly string[]).includes(a.gender)) setGender(a.gender);
+                      if ((AVATAR_AGE_RANGES as readonly string[]).includes(a.age_range)) setAgeRange(a.age_range);
+                    }}
+                    className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                      matches
+                        ? "border-indigo-500 bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"
+                        : "border-zinc-300 text-zinc-600 hover:border-zinc-400 dark:border-zinc-700 dark:text-zinc-300"
+                    }`}
+                  >
+                    {a.gender === "female" ? "Female" : "Male"} · {AGE_LABELS[a.age_range] || a.age_range} · {Math.round(a.share * 100)}%
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200">Gender</label>

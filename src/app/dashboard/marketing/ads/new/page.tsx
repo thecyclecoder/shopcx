@@ -243,66 +243,8 @@ export default function NewAdPage() {
 
       {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
 
-      {/* 1. Avatar — pick from library OR generate from demographics */}
-      <Step n={1} title="Pick an avatar">
-        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-          <span className="text-zinc-500">Choose from your library, or</span>
-          <Link
-            href="/dashboard/marketing/ads/avatars/proposals/new"
-            className="font-medium text-indigo-600 hover:underline dark:text-indigo-400"
-          >
-            generate a new avatar from your buyer demographics →
-          </Link>
-        </div>
-        {avatars === null ? (
-          <p className="text-sm text-zinc-500">Loading avatars…</p>
-        ) : avatars.length === 0 ? (
-          <p className="text-sm text-zinc-500">
-            No avatars in your library yet —{" "}
-            <Link href="/dashboard/marketing/ads/avatars/proposals/new" className="text-indigo-600 hover:underline">
-              generate one from your buyer demographics
-            </Link>{" "}
-            or{" "}
-            <Link href="/dashboard/marketing/ads/avatars/new" className="text-indigo-600 hover:underline">
-              build one manually
-            </Link>
-            .
-          </p>
-        ) : (
-          <div className="grid gap-3 sm:grid-cols-3">
-            {avatars.map((a) => (
-              <label
-                key={a.id}
-                className={`cursor-pointer rounded-lg border p-3 ${
-                  avatarId === a.id
-                    ? "border-indigo-500 ring-1 ring-indigo-500"
-                    : "border-zinc-200 dark:border-zinc-800"
-                } bg-white dark:bg-zinc-900`}
-              >
-                <input
-                  type="radio"
-                  name="avatar"
-                  className="sr-only"
-                  checked={avatarId === a.id}
-                  onChange={() => setAvatarId(a.id)}
-                />
-                {a.reference_image_urls?.[0] && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={a.reference_image_urls[0]}
-                    alt={a.name}
-                    className="mb-2 aspect-square w-full rounded object-cover"
-                  />
-                )}
-                <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{a.name}</p>
-              </label>
-            ))}
-          </div>
-        )}
-      </Step>
-
-      {/* 2. Product */}
-      <Step n={2} title="Pick a product">
+      {/* 1. Product (first — the avatar is built from THIS product's buyers) */}
+      <Step n={1} title="Pick a product">
         {products.length === 0 ? (
           <p className="text-sm text-zinc-500">No products found.</p>
         ) : (
@@ -335,6 +277,66 @@ export default function NewAdPage() {
               </label>
             ))}
           </div>
+        )}
+      </Step>
+
+      {/* 2. Avatar — pick from library OR generate from THIS product's buyers */}
+      <Step n={2} title="Pick an avatar">
+        {!productId ? (
+          <p className="text-sm text-zinc-500">Pick a product first — the avatar is generated from that product&apos;s buyers.</p>
+        ) : (
+          <>
+            <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+              <span className="text-zinc-500">Choose from your library, or</span>
+              <Link
+                href={`/dashboard/marketing/ads/avatars/new?productId=${productId}`}
+                className="font-medium text-indigo-600 hover:underline dark:text-indigo-400"
+              >
+                generate a new avatar from this product&apos;s buyers →
+              </Link>
+            </div>
+            {avatars === null ? (
+              <p className="text-sm text-zinc-500">Loading avatars…</p>
+            ) : avatars.length === 0 ? (
+              <p className="text-sm text-zinc-500">
+                No avatars in your library yet —{" "}
+                <Link href={`/dashboard/marketing/ads/avatars/new?productId=${productId}`} className="text-indigo-600 hover:underline">
+                  generate one from this product&apos;s buyers
+                </Link>
+                .
+              </p>
+            ) : (
+              <div className="grid gap-3 sm:grid-cols-3">
+                {avatars.map((a) => (
+                  <label
+                    key={a.id}
+                    className={`cursor-pointer rounded-lg border p-3 ${
+                      avatarId === a.id
+                        ? "border-indigo-500 ring-1 ring-indigo-500"
+                        : "border-zinc-200 dark:border-zinc-800"
+                    } bg-white dark:bg-zinc-900`}
+                  >
+                    <input
+                      type="radio"
+                      name="avatar"
+                      className="sr-only"
+                      checked={avatarId === a.id}
+                      onChange={() => setAvatarId(a.id)}
+                    />
+                    {a.reference_image_urls?.[0] && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={a.reference_image_urls[0]}
+                        alt={a.name}
+                        className="mb-2 aspect-square w-full rounded object-cover"
+                      />
+                    )}
+                    <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{a.name}</p>
+                  </label>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </Step>
 

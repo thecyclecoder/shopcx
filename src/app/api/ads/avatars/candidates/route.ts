@@ -93,7 +93,7 @@ export async function POST(req: Request) {
 
   let context = "";
   let proposalId: string | null = null;
-  let productId: string | null = null;
+  let productId: string | null = typeof body.productId === "string" ? body.productId : null;
   if (body.proposalId) {
     const { data: proposal } = await admin
       .from("ad_avatar_proposals")
@@ -106,6 +106,11 @@ export async function POST(req: Request) {
       proposalId = body.proposalId;
       productId = proposal.product_id;
     }
+  }
+  // Direct product scoping (builder path, no proposal): confirm ownership.
+  if (productId && !proposalId) {
+    const { data: prod } = await admin.from("products").select("workspace_id").eq("id", productId).single();
+    if (!prod || prod.workspace_id !== workspaceId) productId = null;
   }
 
   const stamp = `${gender}_${ageRange}_${healthLevel}_${ethnicity}`;

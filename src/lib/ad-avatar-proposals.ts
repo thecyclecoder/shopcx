@@ -323,3 +323,24 @@ export async function generateAvatarProposals(productId: string, maxArchetypes =
   }
   return { ok: true, proposals };
 }
+
+/**
+ * Cheap (Opus-free) lookup of a product's joint demographic archetypes — used to
+ * pre-fill the avatar face dropdowns with the SELECTED product's actual buyers
+ * (gender + age), not overall demographics. Reads the write-through cache; only
+ * recomputes from raw demographics on a miss. Returns flattened gender/age/share.
+ */
+export async function getProductArchetypes(
+  productId: string,
+  maxArchetypes = 5,
+): Promise<{ archetypes: Array<{ gender: string; age_range: string; share: number }>; used_fallback: boolean } | null> {
+  const admin = createAdminClient();
+  const { data: product } = await admin.from("products").select("id, workspace_id, title").eq("id", productId).single();
+  if (!product) return null;
+  const resolved = await resolveArchetypes(admin, product.workspace_id, productId, product.title, maxArchetypes, false);
+  if (!resolved) return null;
+  return {
+    archetypes: resolved.archetypes.map((a) => ({ gender: a.tuple.gender, age_range: a.tuple.age_range, share: a.share })),
+    used_fallback: resolved.basis.used_fallback_snapshot,
+  };
+}

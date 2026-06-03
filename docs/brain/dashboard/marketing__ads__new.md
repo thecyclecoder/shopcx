@@ -1,6 +1,6 @@
 # Dashboard · marketing/ads/new
 
-The ad builder wizard. Walks the operator through avatar → product → angle → length → script → voice → hero/audio, then kicks off the async generation pipeline. See the full trace in [[../lifecycles/ad-render]].
+The ad builder wizard. Walks the operator through **product → avatar** → angle → length → script → voice → hero/audio, then kicks off the async generation pipeline. **Product is picked first** because the avatar is generated from THAT product's buyer demographics, not overall demographics. See the full trace in [[../lifecycles/ad-render]].
 
 **Route:** `/dashboard/marketing/ads/new`
 
@@ -9,8 +9,8 @@ The ad builder wizard. Walks the operator through avatar → product → angle �
 **Page title:** New ad
 
 **Wizard steps:**
-1. **Avatar picker** — offers BOTH paths: (a) pick an existing avatar (radio cards from [[../tables/ad_avatars]]), or (b) **"generate a new avatar from your buyer demographics"** — a link to `/dashboard/marketing/ads/avatars/proposals/new` to spin up demographic proposals → faces → a new character.
-2. **Product + variant picker** — search [[../tables/products]]; pick a variant.
+1. **Product + variant picker** — search [[../tables/products]]; pick a variant. **First step** — the avatar is built from this product's buyers.
+2. **Avatar picker** — gated on a product being selected. Offers BOTH paths: (a) pick an existing avatar (radio cards from [[../tables/ad_avatars]]), or (b) **"generate a new avatar from this product's buyers"** — links to `/dashboard/marketing/ads/avatars/new?productId={selected}`, which pre-fills the gender/age dropdowns from that product's dominant demographic archetype (via `GET /api/ads/avatars/archetypes`). Product-specific, not overall demographics.
 3. **Angle picker** — cards from [[../tables/product_ad_angles]] (hook slug, LF8 badge, `hook_one_liner`, `proof_anchor`, vibe chips). "Generate fresh angles" calls the Phase 0.5 generator.
 4. **Length** — 15s / 30s (optionally also produce the 15s cut).
 5. **Script editor** — auto-populated from the angle; live-validated against the DR validator ([[../libraries/ad-validator]]); "Regenerate" re-runs with a new seed.

@@ -37,12 +37,13 @@ Every claim in every ad must trace back to a structured row in the Product Intel
   │
   ├─0 (prereq) variant.isolated_image_url + product/variant.physical_dimensions   [Phase 0, /dashboard/storefront/products/[id]]
   │
-  ├─2 pick/confirm AVATAR
-  │     demographic proposals (generateAvatarProposals, 5) → set gender/age/health/ethnicity
-  │     → generate 3 faces (Soul text-to-image, ~3cr each) → saved face library (ad_avatar_candidates)
-  │     → pick one → createCharacter (40cr / $2.50)   [photo upload is an optional fallback]
+  ├─1 pick PRODUCT + variant   (FIRST — the avatar is built from this product's buyers; variant must have an isolated image or the hero hard-blocks)
   │
-  ├─  pick PRODUCT + variant   (variant must have an isolated image; hero hard-blocks otherwise)
+  ├─2 pick/confirm AVATAR   (gated on product; pick from library OR generate from THIS product's buyers)
+  │     getProductArchetypes(productId) pre-fills gender/age from the product's dominant buyer archetype
+  │     → set gender/age/health/ethnicity → generate 3 faces (Soul text-to-image, ~3cr each)
+  │     → saved face library (ad_avatar_candidates) → pick one → createCharacter (40cr / $2.50)
+  │     [photo upload + Opus archetype proposals are optional alternatives]
   │
   ├─0.5 pick ANGLE   (product_ad_angles, anchored to a tier-1/2 verbatim benefit)
   │

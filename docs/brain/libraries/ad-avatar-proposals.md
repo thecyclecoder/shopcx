@@ -6,6 +6,15 @@ Ad tool — Phase 2 demographic-driven avatar proposals. Reads **who actually bu
 
 ## Exports
 
+### `getProductArchetypes` — function
+
+```ts
+function getProductArchetypes(productId, maxArchetypes = 5):
+  Promise<{ archetypes: Array<{ gender, age_range, share }>, used_fallback } | null>
+```
+
+**Opus-free** lookup of a product's joint demographic archetypes (gender + age + share), used to pre-fill the avatar face dropdowns with the SELECTED product's actual buyers — not overall demographics. Reads the `demographics_snapshots.archetype_tuples` write-through cache (recomputes from raw demographics only on a miss); no Opus briefs. Backs `GET /api/ads/avatars/archetypes` and the builder's product-scoped avatar generation.
+
 ### `generateAvatarProposals` — function
 
 ```ts
