@@ -222,6 +222,32 @@ export async function POST(request: Request) {
           let senderFirstName: string | null = null;
           let senderLastName: string | null = null;
           let matchedCustomerId: string | null = null;
+
+          // 1. PREFERRED: confirmed link from a prior session. An agent
+          //    (or the customer-link-confirmation flow) may have already
+          //    bound this meta_sender_id → customer_id. That binding is
+          //    explicit and stronger than any fuzzy name match — always
+          //    check it first.
+          const { data: confirmedLink } = await admin
+            .from("meta_sender_customer_links")
+            .select("customer_id, meta_sender_name")
+            .eq("workspace_id", workspaceId)
+            .eq("meta_sender_id", senderId)
+            .maybeSingle();
+          if (confirmedLink?.customer_id) {
+            matchedCustomerId = confirmedLink.customer_id;
+            // Pull the name from the link so the subject still reads
+            // "DM from {Name}" even if Graph enrichment below fails.
+            const linkName = (confirmedLink.meta_sender_name || "").trim().split(/\s+/);
+            if (linkName.length >= 1) senderFirstName = linkName[0] || null;
+            if (linkName.length >= 2) senderLastName = linkName.slice(1).join(" ") || null;
+          }
+
+          // 2. FALLBACK: Graph API enrichment + fuzzy name match.
+          //    Skip the customer-match part if we already have a
+          //    confirmed link; still call the API for the name so the
+          //    subject reads correctly (and to refresh the link row's
+          //    meta_sender_name if needed). API failure is non-fatal.
           try {
             const { data: wsRow } = await admin
               .from("workspaces")
@@ -233,15 +259,13 @@ export async function POST(request: Request) {
               const { fetchMessengerUserProfile } = await import("@/lib/meta");
               const profile = await fetchMessengerUserProfile(decrypt(enc), senderId);
               if (profile) {
-                senderFirstName = profile.first_name || null;
-                senderLastName = profile.last_name || null;
-                // Best-effort customer match by name. Single hit only —
-                // we never auto-link on ambiguous matches. If multiple
-                // customers share the name, the agent will need to
-                // resolve.
-                if (senderFirstName && senderLastName) {
-                  // Only auto-match when we have BOTH names — first
-                  // name alone is too ambiguous to be safe.
+                senderFirstName = profile.first_name || senderFirstName;
+                senderLastName = profile.last_name || senderLastName;
+                // Only fuzzy-match if no confirmed link already resolved it.
+                if (!matchedCustomerId && senderFirstName && senderLastName) {
+                  // Single hit only — we never auto-link on ambiguous
+                  // matches. If multiple customers share the name, the
+                  // agent will need to resolve.
                   const { data: matches } = await admin
                     .from("customers")
                     .select("id")
