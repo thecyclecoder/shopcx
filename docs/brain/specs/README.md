@@ -28,22 +28,6 @@ Concrete, scoped, high-ROI work. Pick any one and promote to a full spec.
 
 ---
 
-## Ready to spec — backfills + enrichment
-
-### Meta ad-comment attribution via effective_object_story_id
-**Status:** ⏳ Architecturally designed in memory, not implemented.
-- Same FB/IG post is "ad" or "organic" depending on entry path; the webhook shape is bimodal and `ad_id` alone is unreliable.
-- Canonical truth: match `creative.effective_object_story_id` (FB) / `effective_instagram_media_id` (IG) on adcreatives against the webhook's `post.id`/`media.id`. If a creative matches, the post is ad-backed and the creative's destination URL drives product attribution.
-- Originally in `project_meta_comments_ad_detection.md`.
-
-### Klaviyo 180-day engagement backfill (local script)
-**Status:** ⏳ Local script approach decided.
-- Backfill engagement events from Klaviyo's history for the last 180 days.
-- Local because hitting Klaviyo from Vercel risks rate-limit / timeout.
-- Originally in `project_klaviyo_engagement_backfill_local.md`.
-
----
-
 ## Ready to spec — UX / product
 
 ### Custom checkout — alert on existing active subscription
@@ -145,6 +129,8 @@ These have no work attached — they're operational notes. Kept here because the
 - ✅ **Cancel-event dedup** (2026-06-03) — forward fix in the Appstle webhook handler. When a customer cancels via the portal, both a `portal.subscription.cancelled` (source=portal) AND a `subscription.cancelled` (source=appstle) fire within seconds. Now the Appstle webhook checks for a portal cancel for the same `shopify_contract_id` within the last 5 min and suppresses the duplicate insert. **Historical 272 duplicates left in place** — backfill script (`scripts/backfill-cancel-event-dedup.ts`) exists but was not applied; analytics consumers can still dedupe at query time if needed.
 - ✅ **Stacked-sale-coupon check** (2026-06-03) — re-scoped per Dylan to "subs with **2+** sale coupons (excluding loyalty / free-shipping / Buy-N bundle)." Live count: **0**. The 333 subs that carry one CODE_DISCOUNT each are allowed to combine with automatic-discount + subscribe-and-save. Item resolved without cleanup.
 - ✅ **Auto-grant detection removed** (2026-06-03) — three stubbed triggers (`cancelled_but_charged` / `duplicate_charge` / `never_delivered`) were never wired up. Per Dylan: `never_delivered` is handled by the replacement flow; the other two should not happen and Sonnet escalates them directly when they do. Stripped the `checkAutoGrant` function, the auto-grant for-loop in the playbook executor, the auto-grant editor in `/dashboard/settings/playbooks`, the simulate-route auto-grant block, and the AUTO label in the playbook-fix logger. Schema columns + 1 dormant DB row retained (executor filter `!e.auto_grant` is a defensive backstop).
+- ✅ **Meta ad-comment attribution** — shipped. Matches `creative.effective_object_story_id` (FB) / `effective_instagram_media_id` (IG) on adcreatives against the webhook's `post.id` / `media.id` so the bimodal ad-vs-organic webhook shape no longer breaks attribution.
+- ✅ **Klaviyo 180d engagement backfill** — shipped via local script. Engagement events from Klaviyo's history backfilled into our DB; verify current state via [[../integrations/klaviyo]] before extending.
 
 ---
 
