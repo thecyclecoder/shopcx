@@ -217,3 +217,69 @@ export function resolveAdToolSettings(stored: unknown): AdToolSettings {
 export function slugify(name: string): string {
   return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
+
+// ── Avatar generation attributes (text-to-image, no reference photos) ────────
+// The four controls that drive Soul face generation. Gender + age pre-fill from
+// the buyer demographic cohort; health level + ethnicity are operator choices.
+export const AVATAR_GENDERS = ["female", "male"] as const;
+export type AvatarGender = (typeof AVATAR_GENDERS)[number];
+
+// Mirrors customer_demographics.inferred_age_range bands.
+export const AVATAR_AGE_RANGES = ["under_25", "25-34", "35-44", "45-54", "55-64", "65+"] as const;
+export type AvatarAgeRange = (typeof AVATAR_AGE_RANGES)[number];
+
+export const AVATAR_HEALTH_LEVELS = [
+  { value: "athletic", label: "Super healthy / athletic", prompt: "lean and athletic, visibly very fit, glowing healthy skin, toned" },
+  { value: "fit", label: "Fit / healthy", prompt: "fit and healthy-looking, energetic, clear skin" },
+  { value: "average", label: "Average", prompt: "average everyday build, normal healthy appearance" },
+  { value: "relatable", label: "Everyday / relatable", prompt: "ordinary relatable build, soft, approachable everyday person" },
+] as const;
+export type AvatarHealthLevel = (typeof AVATAR_HEALTH_LEVELS)[number]["value"];
+
+// "auto" lets the image model choose; the rest are explicit. Operator-picked
+// (we have no ethnicity data to infer from).
+export const AVATAR_ETHNICITIES = [
+  { value: "auto", label: "Auto / no preference", prompt: "" },
+  { value: "white", label: "White", prompt: "White / Caucasian" },
+  { value: "black", label: "Black / African American", prompt: "Black / African American" },
+  { value: "hispanic", label: "Hispanic / Latino", prompt: "Hispanic / Latino" },
+  { value: "east_asian", label: "East Asian", prompt: "East Asian" },
+  { value: "south_asian", label: "South Asian", prompt: "South Asian" },
+  { value: "southeast_asian", label: "Southeast Asian", prompt: "Southeast Asian" },
+  { value: "middle_eastern", label: "Middle Eastern / North African", prompt: "Middle Eastern / North African" },
+  { value: "native_american", label: "Native American", prompt: "Native American / Indigenous" },
+  { value: "pacific_islander", label: "Pacific Islander", prompt: "Pacific Islander" },
+  { value: "mixed", label: "Mixed / Multiracial", prompt: "mixed / multiracial" },
+] as const;
+export type AvatarEthnicity = (typeof AVATAR_ETHNICITIES)[number]["value"];
+
+const AGE_TO_APPARENT: Record<string, string> = {
+  under_25: "early 20s",
+  "25-34": "late 20s to early 30s",
+  "35-44": "late 30s to early 40s",
+  "45-54": "late 40s to early 50s",
+  "55-64": "late 50s to early 60s",
+  "65+": "mid-to-late 60s",
+};
+
+export interface AvatarFaceAttributes {
+  gender: AvatarGender;
+  ageRange: string;
+  healthLevel: AvatarHealthLevel;
+  ethnicity: AvatarEthnicity;
+}
+
+/** Build a Soul text-to-image portrait prompt from the four attributes (+ optional context). */
+export function buildAvatarPortraitPrompt(attrs: AvatarFaceAttributes, context: string, angleVariant: number): string {
+  const health = AVATAR_HEALTH_LEVELS.find((h) => h.value === attrs.healthLevel)?.prompt || "healthy-looking";
+  const eth = AVATAR_ETHNICITIES.find((e) => e.value === attrs.ethnicity)?.prompt || "";
+  const apparentAge = AGE_TO_APPARENT[attrs.ageRange] || attrs.ageRange;
+  const ethClause = eth ? `${eth} ` : "";
+  const angles = [
+    "upper-body shot, looking directly at the camera",
+    "slightly off-center selfie angle, mid-sentence candid expression",
+    "three-quarter angle, warm natural smile",
+  ];
+  const ctx = context ? ` ${context}.` : "";
+  return `Photorealistic UGC-style portrait photo of a real ${ethClause}${attrs.gender}, apparent age ${apparentAge}, ${health}.${ctx} ${angles[angleVariant % angles.length]}, natural daylight, authentic non-stock expression, shot on a phone. No text, no watermark, no product in frame.`;
+}

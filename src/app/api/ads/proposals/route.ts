@@ -66,6 +66,6 @@ export async function POST(req: Request) {
 
   // forceRefresh recomputes the joint archetypes from raw demographics; default
   // reuses the cached archetypes on demographics_snapshots (cheap).
-  const result = await generateAvatarProposals(productId, 4, body.forceRefresh === true);
+  const result = await generateAvatarProposals(productId, 5, body.forceRefresh === true);
   return NextResponse.json({ ok: result.ok, count: result.proposals.length, reason: result.reason });
 }

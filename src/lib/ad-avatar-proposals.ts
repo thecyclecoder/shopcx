@@ -39,6 +39,9 @@ export interface ArchetypeBrief {
   setting: string;
   hook_delivery_style: string;
   photoshoot_brief: string;
+  // The archetype's own demographic tuple — pre-fills the avatar face dropdowns.
+  gender?: string;
+  age_range?: string;
 }
 
 export interface DemographicBasis {
@@ -278,7 +281,7 @@ async function resolveArchetypes(
  * Archetypes come from the write-through cache on demographics_snapshots unless
  * `forceRefresh` is set (or the cache is stale).
  */
-export async function generateAvatarProposals(productId: string, maxArchetypes = 4, forceRefresh = false): Promise<GenerateProposalsResult> {
+export async function generateAvatarProposals(productId: string, maxArchetypes = 5, forceRefresh = false): Promise<GenerateProposalsResult> {
   const admin = createAdminClient();
   const { data: product } = await admin.from("products").select("id, workspace_id, title").eq("id", productId).single();
   if (!product) return { ok: false, proposals: [], reason: "product_not_found" };
@@ -300,6 +303,9 @@ export async function generateAvatarProposals(productId: string, maxArchetypes =
   const rows: any[] = [];
   for (const arch of archetypes) {
     const brief = await briefFromOpus(workspaceId, product.title, arch.tuple, arch.share, angles);
+    // Carry the archetype's own tuple so the avatar face dropdowns pre-fill.
+    brief.gender = arch.tuple.gender;
+    brief.age_range = arch.tuple.age_range;
     const draft: ProposalDraft = { archetype_brief: brief, demographic_basis: { ...basis, cohort_size: basis.cohort_size } };
     proposals.push(draft);
     rows.push({

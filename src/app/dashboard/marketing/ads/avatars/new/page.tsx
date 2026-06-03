@@ -3,6 +3,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
+import {
+  AVATAR_GENDERS,
+  AVATAR_AGE_RANGES,
+  AVATAR_HEALTH_LEVELS,
+  AVATAR_ETHNICITIES,
+} from "@/lib/ad-tool-config";
 
 interface ArchetypeBrief {
   name?: string;
@@ -10,6 +16,8 @@ interface ArchetypeBrief {
   setting?: string;
   hook_delivery_style?: string;
   photoshoot_brief?: string;
+  gender?: string;
+  age_range?: string;
 }
 
 interface Proposal {
@@ -17,6 +25,15 @@ interface Proposal {
   archetype_brief: ArchetypeBrief | null;
   products?: { title?: string } | null;
 }
+
+const AGE_LABELS: Record<string, string> = {
+  under_25: "Under 25",
+  "25-34": "25–34",
+  "35-44": "35–44",
+  "45-54": "45–54",
+  "55-64": "55–64",
+  "65+": "65+",
+};
 
 export default function NewAvatarPage() {
   const workspace = useWorkspace();
@@ -26,8 +43,23 @@ export default function NewAvatarPage() {
 
   const [proposal, setProposal] = useState<Proposal | null>(null);
   const [name, setName] = useState("");
-  const [imageUrls, setImageUrls] = useState<string[]>([]);
+
+  // The four face-generation controls.
+  const [gender, setGender] = useState<string>("female");
+  const [ageRange, setAgeRange] = useState<string>("35-44");
+  const [healthLevel, setHealthLevel] = useState<string>("fit");
+  const [ethnicity, setEthnicity] = useState<string>("auto");
+
+  // Generated candidates + selection.
+  const [candidates, setCandidates] = useState<string[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+
+  // Manual-upload fallback.
+  const [showUpload, setShowUpload] = useState(false);
+  const [uploadUrls, setUploadUrls] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
+
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,7 +71,10 @@ export default function NewAvatarPage() {
     const found = list.find((p) => p.id === proposalId);
     if (found) {
       setProposal(found);
-      if (found.archetype_brief?.name) setName(found.archetype_brief.name);
+      const b = found.archetype_brief;
+      if (b?.name) setName(b.name);
+      if (b?.gender && (AVATAR_GENDERS as readonly string[]).includes(b.gender)) setGender(b.gender);
+      if (b?.age_range && (AVATAR_AGE_RANGES as readonly string[]).includes(b.age_range)) setAgeRange(b.age_range);
     }
   }, [proposalId, workspace.id]);
 
@@ -47,14 +82,46 @@ export default function NewAvatarPage() {
     loadProposal();
   }, [loadProposal]);
 
+  async function generateFaces() {
+    setGenerating(true);
+    setError(null);
+    setCandidates([]);
+    setSelected(null);
+    try {
+      const res = await fetch("/api/ads/avatars/candidates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: workspace.id,
+          proposalId: proposalId ?? undefined,
+          gender,
+          ageRange,
+          healthLevel,
+          ethnicity,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setError(
+          json.reason === "nsfw"
+            ? "A generation was flagged — try different attributes."
+            : json.error === "higgsfield_not_connected" || json.reason === "higgsfield_not_connected"
+              ? "Connect Higgsfield first (Settings → Integrations)."
+              : json.error || "Face generation failed.",
+        );
+        return;
+      }
+      setCandidates((json.candidates || []).map((c: { url: string }) => c.url));
+    } catch {
+      setError("Face generation failed.");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
   async function handleFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
-    const remaining = 5 - imageUrls.length;
-    const chosen = Array.from(files).slice(0, remaining);
-    if (chosen.length === 0) {
-      setError("Maximum 5 reference photos.");
-      return;
-    }
+    const chosen = Array.from(files).slice(0, 5 - uploadUrls.length);
     setUploading(true);
     setError(null);
     const uploaded: string[] = [];
@@ -71,21 +138,19 @@ export default function NewAvatarPage() {
       }
       uploaded.push(json.url);
     }
-    setImageUrls((prev) => [...prev, ...uploaded]);
+    setUploadUrls((prev) => [...prev, ...uploaded]);
+    setSelected(null);
     setUploading(false);
   }
 
-  function removeImage(idx: number) {
-    setImageUrls((prev) => prev.filter((_, i) => i !== idx));
-  }
-
   async function createAvatar() {
+    const imageUrls = showUpload && uploadUrls.length ? uploadUrls : selected ? [selected] : [];
     if (!name.trim()) {
       setError("Please enter a name.");
       return;
     }
     if (imageUrls.length === 0) {
-      setError("Upload at least one reference photo.");
+      setError("Generate and select a face (or upload a photo) first.");
       return;
     }
     setCreating(true);
@@ -114,50 +179,104 @@ export default function NewAvatarPage() {
   }
 
   const brief = proposal?.archetype_brief;
+  const canCreate = !!name.trim() && ((showUpload && uploadUrls.length > 0) || (!showUpload && !!selected));
+
+  const selectClass =
+    "mt-1 w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100";
 
   return (
     <div className="mx-auto max-w-2xl space-y-6 p-6">
       <div>
         <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">New avatar</h1>
         <p className="text-sm text-zinc-500 dark:text-zinc-400">
-          Upload 1–5 reference photos to create a recurring character.
+          Set the look, generate 3 faces, and pick one — no photos needed. Gender and age are pre-filled
+          from your buyer demographics.
         </p>
       </div>
 
       {brief && (
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
           <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-            Archetype brief{proposal?.products?.title ? ` · ${proposal.products.title}` : ""}
+            {brief.name || "Archetype"}{proposal?.products?.title ? ` · ${proposal.products.title}` : ""}
           </h2>
-          <dl className="mt-2 space-y-1 text-sm text-zinc-600 dark:text-zinc-300">
-            {brief.wardrobe && (
-              <p>
-                <span className="font-medium text-zinc-500 dark:text-zinc-400">Wardrobe:</span>{" "}
-                {brief.wardrobe}
-              </p>
-            )}
-            {brief.setting && (
-              <p>
-                <span className="font-medium text-zinc-500 dark:text-zinc-400">Setting:</span>{" "}
-                {brief.setting}
-              </p>
-            )}
-            {brief.hook_delivery_style && (
-              <p>
-                <span className="font-medium text-zinc-500 dark:text-zinc-400">Delivery:</span>{" "}
-                {brief.hook_delivery_style}
-              </p>
-            )}
-            {brief.photoshoot_brief && (
-              <p>
-                <span className="font-medium text-zinc-500 dark:text-zinc-400">Photoshoot:</span>{" "}
-                {brief.photoshoot_brief}
-              </p>
-            )}
-          </dl>
+          {brief.photoshoot_brief && (
+            <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{brief.photoshoot_brief}</p>
+          )}
         </div>
       )}
 
+      {/* Four controls */}
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200">Gender</label>
+            <select value={gender} onChange={(e) => setGender(e.target.value)} className={selectClass}>
+              {AVATAR_GENDERS.map((g) => (
+                <option key={g} value={g}>{g === "female" ? "Female" : "Male"}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200">Age</label>
+            <select value={ageRange} onChange={(e) => setAgeRange(e.target.value)} className={selectClass}>
+              {AVATAR_AGE_RANGES.map((a) => (
+                <option key={a} value={a}>{AGE_LABELS[a] || a}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200">Health level</label>
+            <select value={healthLevel} onChange={(e) => setHealthLevel(e.target.value)} className={selectClass}>
+              {AVATAR_HEALTH_LEVELS.map((h) => (
+                <option key={h.value} value={h.value}>{h.label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200">Ethnicity</label>
+            <select value={ethnicity} onChange={(e) => setEthnicity(e.target.value)} className={selectClass}>
+              {AVATAR_ETHNICITIES.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <button
+          onClick={generateFaces}
+          disabled={generating}
+          className="mt-4 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+        >
+          {generating ? "Generating faces…" : candidates.length ? "Regenerate 3 faces" : "Generate 3 faces"}
+        </button>
+        <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">≈ 9 Higgsfield credits ($0.56) for 3 faces.</p>
+      </div>
+
+      {/* Candidates */}
+      {candidates.length > 0 && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+          <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200">Pick a face</label>
+          <div className="mt-3 grid grid-cols-3 gap-3">
+            {candidates.map((url) => (
+              <button
+                key={url}
+                onClick={() => setSelected(url)}
+                className={`relative overflow-hidden rounded-lg border-2 transition-colors ${
+                  selected === url ? "border-indigo-500 ring-2 ring-indigo-500/40" : "border-transparent hover:border-zinc-300"
+                }`}
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={url} alt="" className="aspect-[3/4] w-full object-cover" />
+                {selected === url && (
+                  <span className="absolute right-1 top-1 rounded-full bg-indigo-600 px-1.5 text-xs text-white">✓</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Name + create */}
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
         <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200">Name</label>
         <input
@@ -166,43 +285,41 @@ export default function NewAvatarPage() {
           placeholder="e.g. Morning-routine Mia"
           className="mt-1 w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
         />
+      </div>
 
-        <label className="mt-4 block text-sm font-medium text-zinc-700 dark:text-zinc-200">
-          Reference photos ({imageUrls.length}/5)
-        </label>
-        <input
-          type="file"
-          accept="image/png,image/jpeg,image/webp"
-          multiple
-          disabled={uploading || imageUrls.length >= 5}
-          onChange={(e) => handleFiles(e.target.files)}
-          className="mt-1 block w-full text-sm text-zinc-600 file:mr-3 file:rounded-md file:border-0 file:bg-zinc-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-zinc-700 dark:text-zinc-300 dark:file:bg-zinc-800 dark:file:text-zinc-200"
-        />
-        {uploading && (
-          <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Uploading…</p>
-        )}
-
-        {imageUrls.length > 0 && (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {imageUrls.map((url, idx) => (
-              <div key={url} className="relative">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={url} alt="" className="h-16 w-16 rounded-md object-cover" />
-                <button
-                  onClick={() => removeImage(idx)}
-                  className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-900 text-xs text-white"
-                  aria-label="Remove"
-                >
-                  ×
-                </button>
+      {/* Optional manual upload fallback */}
+      <div className="text-sm">
+        <button
+          onClick={() => setShowUpload((v) => !v)}
+          className="text-zinc-500 underline hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+        >
+          {showUpload ? "Hide" : "Advanced: upload your own photos instead"}
+        </button>
+        {showUpload && (
+          <div className="mt-2 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              multiple
+              disabled={uploading || uploadUrls.length >= 5}
+              onChange={(e) => handleFiles(e.target.files)}
+              className="block w-full text-sm text-zinc-600 file:mr-3 file:rounded-md file:border-0 file:bg-zinc-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-zinc-700 dark:text-zinc-300 dark:file:bg-zinc-800 dark:file:text-zinc-200"
+            />
+            {uploadUrls.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {uploadUrls.map((url) => (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img key={url} src={url} alt="" className="h-16 w-16 rounded-md object-cover" />
+                ))}
               </div>
-            ))}
+            )}
+            <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Uploaded photos take priority over generated faces.</p>
           </div>
         )}
       </div>
 
       <p className="text-xs text-zinc-500 dark:text-zinc-400">
-        Creating an avatar costs 40 Higgsfield credits (≈ $2.50).
+        Creating the avatar costs 40 Higgsfield credits (≈ $2.50) — charged once when you click Create.
       </p>
 
       {error && (
@@ -214,7 +331,7 @@ export default function NewAvatarPage() {
       <div className="flex items-center gap-3">
         <button
           onClick={createAvatar}
-          disabled={creating || uploading}
+          disabled={creating || !canCreate}
           className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
         >
           {creating ? "Creating…" : "Create avatar"}

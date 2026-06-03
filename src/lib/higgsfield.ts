@@ -186,6 +186,37 @@ export async function generateSoulImage(args: SoulImageArgs): Promise<{ jobSetId
   return { jobSetId: r.json?.job_set_id || r.json?.id || null, jobId: r.jobId };
 }
 
+export interface SoulPortraitArgs {
+  workspaceId: string;
+  prompt: string;
+  quality?: "720p" | "1080p";
+  seed?: number;
+}
+
+/**
+ * Soul TEXT-TO-IMAGE — generate a brand-new person from a description (no
+ * existing character). Used to mint avatar candidates from a demographic
+ * archetype brief, so the operator never has to upload reference photos. ~3
+ * credits. The chosen portrait is then fed to createCharacter() to become a
+ * persistent, reusable character.
+ */
+export async function generateSoulPortrait(args: SoulPortraitArgs): Promise<{ jobSetId: string | null; jobId: string | null }> {
+  const r = await loggedHiggsfieldFetch({
+    workspaceId: args.workspaceId,
+    jobType: "soul_image",
+    path: "/v1/soul/generate",
+    body: {
+      model: HIGGSFIELD_MODELS.soul,
+      prompt: args.prompt,
+      quality: args.quality ?? "1080p",
+      ...(args.seed !== undefined ? { seed: args.seed } : {}),
+    },
+    costCredits: 3,
+  });
+  if (!r.ok) throw new Error(`higgsfield_soul_portrait_${r.status}`);
+  return { jobSetId: r.json?.job_set_id || r.json?.id || null, jobId: r.jobId };
+}
+
 export interface DopVideoArgs {
   workspaceId: string;
   imageUrl: string;
