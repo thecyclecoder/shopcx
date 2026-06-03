@@ -530,19 +530,23 @@ async function buildContext(
   // still useful — the AI can disambiguate.
   let crisis: CommentContext["crisis"] = null;
   if (comment.matched_product_id) {
+    // crisis_events.affected_variant_id is a Shopify variant ID (text),
+    // not our internal UUID. Join via product_variants.shopify_variant_id.
     const { data: variantsOfProduct } = await admin
       .from("product_variants")
-      .select("id")
+      .select("shopify_variant_id")
       .eq("workspace_id", workspaceId)
       .eq("product_id", comment.matched_product_id);
-    const variantIds = (variantsOfProduct || []).map(v => v.id as string);
-    if (variantIds.length) {
+    const shopifyVariantIds = (variantsOfProduct || [])
+      .map(v => v.shopify_variant_id as string | null)
+      .filter((v): v is string => !!v);
+    if (shopifyVariantIds.length) {
       const { data: crisisRow } = await admin
         .from("crisis_events")
         .select("name, affected_product_title, expected_restock_date, status, affected_variant_id")
         .eq("workspace_id", workspaceId)
         .eq("status", "active")
-        .in("affected_variant_id", variantIds)
+        .in("affected_variant_id", shopifyVariantIds)
         .order("expected_restock_date", { ascending: true })
         .limit(1)
         .maybeSingle();
