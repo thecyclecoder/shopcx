@@ -1,6 +1,6 @@
 # libraries/customer-demographics
 
-Census + Versium demographic enrichment. Writes [[../tables/customer_demographics]].
+Census + Versium demographic enrichment. Writes [[../tables/customer_demographics]]. End-to-end pipeline in [[../lifecycles/demographic-enrichment]].
 
 **File:** `src/lib/customer-demographics.ts`
 

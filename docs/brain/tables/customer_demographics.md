@@ -1,6 +1,6 @@
 # customer_demographics
 
-Per-customer demographic enrichment (age band, household income band, etc.) from Census/Versium.
+Per-customer demographic enrichment (age band, household income band, etc.) from Census/Versium. End-to-end pipeline in [[../lifecycles/demographic-enrichment]].
 
 **Primary key:** `id`
 

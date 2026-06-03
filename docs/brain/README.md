@@ -10,7 +10,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 51 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 13 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 174 |
-| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 18 |
+| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 19 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
 | [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 23 + README |
@@ -333,7 +333,7 @@ Long-form narrative pages tracing key flows end-to-end. Each wikilinks 5+ refere
 
 - [[lifecycles/ticket-lifecycle]] — Inbound message → orchestrator → action → close → CSAT. The hottest path in the platform.
 - [[lifecycles/ai-multi-turn]] — Route → assemble context → generate → confidence-gate → send → auto-resolve. Tool-use orchestrator details.
-- [[lifecycles/ai-learning]] — Self-improvement loop: tickets → grader → daily report → proposed rules → auto-review (accept/reject/merge/supersede/human_review/revise) → applied rules → orchestrator → tickets. Closes.
+- [[lifecycles/ai-learning]] — Self-improvement loop: tickets → grader → daily report → proposed rules → auto-review (accept/reject/merge/supersede/revise; no human queue) → applied rules → orchestrator → tickets. Closes.
 - [[lifecycles/dunning]] — Payment-failed → card rotation → payday retry → cycle action → recovery / pause.
 - [[lifecycles/return-pipeline]] — `createFullReturn` → EasyPost label → delivered → issue-refund → confirmation email.
 - [[lifecycles/cancel-flow]] — Cancel intent → cancel journey → Haiku remedy → save / cancel → tag.
@@ -344,6 +344,7 @@ Long-form narrative pages tracing key flows end-to-end. Each wikilinks 5+ refere
 - [[lifecycles/subscription-billing]] — In-house billing-tick cron → renewal quote → tax → Braintree → orders → dunning on failure.
 - [[lifecycles/customer-link-confirmation]] — Meta sender → fuzzy match → agent confirms → `meta_sender_customer_links` → backfill.
 - [[lifecycles/chargeback-pipeline]] — Shopify dispute → `chargeback_events` → fraud classification → auto-cancel subs → `chargeback_subscription_actions`.
+- [[lifecycles/demographic-enrichment]] — New customer → name→Haiku, ZIP→Census, orders→buyer_type → `customer_demographics` → snapshots → dashboard.
 
 ## Journeys (`journeys/`)
 

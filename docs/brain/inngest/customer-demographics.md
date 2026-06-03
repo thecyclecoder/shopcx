@@ -1,6 +1,6 @@
 # inngest/customer-demographics
 
-Enriches `customer_demographics` from Census + Versium for new customers.
+Enriches `customer_demographics` from Census + Versium for new customers. End-to-end pipeline in [[../lifecycles/demographic-enrichment]].
 
 **File:** `src/lib/inngest/customer-demographics.ts`
 

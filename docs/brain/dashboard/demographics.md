@@ -1,6 +1,6 @@
 # Dashboard · demographics
 
-Customer demographics dashboard. Age band, household income, geo. Cohort snapshots.
+Customer demographics dashboard. Age band, household income, geo. Cohort snapshots. End-to-end pipeline in [[../lifecycles/demographic-enrichment]].
 
 **Route:** `/dashboard/demographics`
 
