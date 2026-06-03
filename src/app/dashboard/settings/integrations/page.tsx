@@ -145,6 +145,14 @@ export default function IntegrationsPage() {
             connected: !!data.versium_connected,
           },
           {
+            slug: "higgsfield",
+            name: "Higgsfield",
+            description: "AI avatar video + image generation for the Ad Tool",
+            icon: "M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z",
+            iconBg: "bg-purple-600/10",
+            connected: !!data.higgsfield_connected,
+          },
+          {
             slug: "slack",
             name: "Slack",
             description: "Team notifications, ticket sharing",

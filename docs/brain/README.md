@@ -6,15 +6,15 @@ System-level reference covering everything an agent needs to navigate the codeba
 
 | Folder | Contents | Count |
 |---|---|---|
-| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 139 |
-| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 51 |
-| [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 13 |
-| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 174 |
-| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 20 |
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 145 |
+| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 52 |
+| [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 14 |
+| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 183 |
+| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 21 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
-| [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 23 + README |
-| [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 40 + 37 settings |
+| [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 25 + README |
+| [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 43 + 39 settings |
 | [specs/](specs/) | Roadmap specs for in-flight or planned features. When a spec ships, content folds into the relevant lifecycle/table/library pages and the spec file is deleted. | 0 |
 | (root) | Cross-cutting reference: [customer-voice.md](customer-voice.md), [operational-rules.md](operational-rules.md), [ui-conventions.md](ui-conventions.md), [orchestrator-tools.md](orchestrator-tools.md), [project-management.md](project-management.md) | 5 |
 
@@ -209,6 +209,15 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/product_seo_keywords]] — Per-product SEO keyword targets for ad/landing-page copy.
 - [[tables/product_variants]] — First-class variant rows (UUID PK). Source of truth for variants; `products.variants` JSONB is a legacy mirror.
 - [[tables/products]] — Synced from Shopify Online Store channel. `variants` JSONB is legacy — real source is `product_variants`.
+
+### Ad tool
+
+- [[tables/product_ad_angles]] — Generated ad angles per product (hook × Life Force 8 slot, anchored to a verbatim lead benefit). Written by `src/lib/ad-angles.ts`.
+- [[tables/ad_avatars]] — Confirmed AI spokesperson characters (Higgsfield). Max 10 per workspace; promoted from `ad_avatar_proposals`.
+- [[tables/ad_avatar_proposals]] — AI-proposed spokesperson archetypes grounded in a demographic snapshot. Written by `src/lib/ad-avatar-proposals.ts`.
+- [[tables/ad_campaigns]] — A single ad concept: product × variant × angle × avatar, plus script + render settings. Fans out into 4 `ad_videos`.
+- [[tables/ad_videos]] — Rendered media outputs. One ad = 4 sibling rows (Reels MP4 + Feed-4:5 MP4 + Stories JPG + Feed-4:5 JPG) via `format_variant_of_id`.
+- [[tables/ad_jobs]] — Audit/replay log of every Higgsfield API call. Written by `loggedHiggsfieldFetch()` in `src/lib/higgsfield.ts`.
 
 ### Marketing & SMS
 

@@ -56,6 +56,11 @@ const { count } = await admin.from("product_benefit_selections")
 
 _None documented. Probe before assuming — see [[../README]] § Probing technique._
 
+## Ad tool
+
+- **Tier-2 ad-angle source** for [[product_ad_angles]]. Qualifying rows: `role='lead' AND science_confirmed=true` → contribute `benefit_name` + `customer_phrases[]` + `ingredient_research_ids[]`.
+- `benefit_name` is one of the two allowed verbatim sources for [[product_ad_angles]].`lead_benefit_anchor` (the other is [[product_page_content]].`benefit_bar[].text`).
+
 ---
 
 [[../README]] · [[../../CLAUDE]] · [[../../DATABASE]]

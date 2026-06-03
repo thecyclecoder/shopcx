@@ -78,6 +78,12 @@ const { count } = await admin.from("product_page_content")
 
 _None documented. Probe before assuming — see [[../README]] § Probing technique._
 
+## Ad tool
+
+- **Tier-1 ad-angle source** for [[product_ad_angles]] — the highest-priority, already-approved claim copy. Fields used: `hero_headline`, `hero_subheadline`, `benefit_bar`, `guarantee_copy`, `expectation_timeline`.
+- `benefit_bar[].text` is one of the two allowed verbatim sources for [[product_ad_angles]].`lead_benefit_anchor` (the other is [[product_benefit_selections]].`benefit_name`).
+- Always pull the **latest published** version: `WHERE status='published' ORDER BY version DESC LIMIT 1`.
+
 ---
 
 [[../README]] · [[../../CLAUDE]] · [[../../DATABASE]]

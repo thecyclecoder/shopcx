@@ -75,6 +75,7 @@ export default function SettingsPage() {
 
         <SettingsSection title="Marketing">
           <SettingsCard href="/dashboard/settings/text-marketing" title="Text Marketing" desc="Sender phone, shortlink domain (sprfd.co), default campaign settings" />
+          <SettingsCard href="/dashboard/settings/ad-tool" title="Ad Tool" desc="Banned words, Life Force 8 toggles, ugly-mode intensity, credibility badges, cost cap" />
         </SettingsSection>
 
         <SettingsSection title="Orders & Fulfillment">

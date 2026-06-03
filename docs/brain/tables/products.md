@@ -43,6 +43,7 @@ Synced from Shopify Online Store channel. `variants` JSONB is legacy — real so
 | `shopify_category` | `text` | ✓ |  |
 | `shopify_category_id` | `text` | ✓ |  |
 | `taxable` | `bool` | ✓ | default: `true` |
+| `physical_dimensions` | `jsonb` | ✓ | ad tool · `{length_in, width_in, height_in, weight_oz?, shape: bag\|box\|bottle\|jar\|pouch\|other}` |
 
 ## Foreign keys
 
@@ -58,6 +59,9 @@ Synced from Shopify Online Store channel. `variants` JSONB is legacy — real so
 - [[knowledge_base]].`product_id`
 - [[macros]].`product_id`
 - [[meta_post_cache]].`matched_product_id`
+- [[ad_avatar_proposals]].`product_id`
+- [[ad_campaigns]].`product_id`
+- [[product_ad_angles]].`product_id`
 - [[product_benefit_angles]].`product_id`
 - [[product_benefit_selections]].`product_id`
 - [[product_how_it_works]].`product_id`
@@ -106,6 +110,11 @@ const { count } = await admin.from("products")
 - `variants` JSONB is a **legacy mirror** — source of truth is `product_variants`. Each JSONB element gets `internal_id` stamped on it so legacy readers can resolve the UUID.
 - Internal joins on variants should reference `product_variants.id` (UUID).
 - "Default Title" variant is a Shopify placeholder for no-variant products. Never display it — show just the product title. See feedback_default_title_variant.
+
+## Ad tool
+
+- `physical_dimensions` (jsonb) drives package/B-roll framing in the ad tool. `product_variants` may carry a per-variant override.
+- `target_customer`, `certifications`, `allergen_free`, and `awards` are the **canonical Tier-5 structured proof source** for [[product_ad_angles]] (proof points like "USDA Organic", "no soy", awards). Tiers 1-4 of ad-angle sourcing live in [[product_page_content]] (Tier-1), [[product_benefit_selections]] (Tier-2), [[product_ingredient_research]] (Tier-3), and [[product_reviews]] (Tier-4).
 
 ---
 

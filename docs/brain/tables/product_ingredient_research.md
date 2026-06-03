@@ -56,6 +56,10 @@ const { count } = await admin.from("product_ingredient_research")
 
 _None documented. Probe before assuming — see [[../README]] § Probing technique._
 
+## Ad tool
+
+- **Tier-3 ad-angle source** for [[product_ad_angles]]. Qualifying rows: `ai_confidence>=0.6` → contribute `benefit_headline` + `clinically_studied_benefits` + `citations` as the science proof anchor (`proof_anchor.type='science'`).
+
 ---
 
 [[../README]] · [[../../CLAUDE]] · [[../../DATABASE]]

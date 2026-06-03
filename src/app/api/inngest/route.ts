@@ -84,12 +84,14 @@ import { klaviyoEngagementSync } from "@/lib/inngest/klaviyo-engagement-sync";
 import { socialCommentModerate } from "@/lib/inngest/social-comment-moderate";
 import { metaHistoricalCommentsSync } from "@/lib/inngest/meta-historical-comments-sync";
 import { ticketResearchRequested, ticketHealRequested } from "@/lib/inngest/ticket-research";
+import { adToolFunctions } from "@/lib/inngest/ad-tool";
 
 export const maxDuration = 300;
 
 export const { GET, POST, PUT } = serve({
   client: inngest,
   functions: [
+    ...adToolFunctions,
     syncCustomers,
     syncOrders,
     ticketCsatCron,

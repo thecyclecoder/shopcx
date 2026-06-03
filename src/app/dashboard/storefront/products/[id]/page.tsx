@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useParams } from "next/navigation";
 import Link from "next/link";
@@ -14,6 +14,17 @@ interface Variant {
   [key: string]: unknown;
 }
 
+const SHAPES = ["bag", "box", "bottle", "jar", "pouch", "other"] as const;
+type Shape = (typeof SHAPES)[number];
+
+interface PhysicalDimensions {
+  length_in: number;
+  width_in: number;
+  height_in: number;
+  weight_oz?: number;
+  shape: Shape;
+}
+
 interface TableVariant {
   id: string;                        // internal UUID
   shopify_variant_id: string | null;
@@ -25,6 +36,10 @@ interface TableVariant {
   position: number;
   inventory_quantity: number | null;
   available: boolean;
+  // Loaded via a separate ad-tool fetch (the variants list API doesn't
+  // select these columns and is not editable here).
+  isolated_image_url?: string | null;
+  physical_dimensions?: PhysicalDimensions | null;
 }
 
 interface Product {
@@ -54,6 +69,7 @@ interface Product {
   upsell_product_id: string | null;
   upsell_complementarity: { headline?: string; intro?: string; bullets?: string[] } | null;
   bundle_name: string | null;
+  physical_dimensions: PhysicalDimensions | null;
   created_at: string;
   updated_at: string;
 }
@@ -89,7 +105,44 @@ export default function StorefrontProductDetailPage() {
     }
     if (vRes.ok) {
       const data = await vRes.json();
-      setTableVariants((data.variants || []) as TableVariant[]);
+      const rows = (data.variants || []) as TableVariant[];
+      setTableVariants(rows);
+      // The variants list API doesn't return the ad-tool columns
+      // (isolated_image_url, physical_dimensions). Hydrate them per
+      // variant from the isolated-image GET, then merge in.
+      Promise.all(
+        rows.map(async (v) => {
+          try {
+            const r = await fetch(
+              `/api/workspaces/${workspace.id}/products/${productId}/variants/${v.id}/isolated-image`,
+            );
+            if (!r.ok) return null;
+            const j = (await r.json()) as {
+              isolated_image_url: string | null;
+              physical_dimensions: PhysicalDimensions | null;
+            };
+            return { id: v.id, ...j };
+          } catch {
+            return null;
+          }
+        }),
+      ).then((results) => {
+        const byId = new Map(
+          results.filter((x): x is NonNullable<typeof x> => !!x).map((x) => [x.id, x]),
+        );
+        setTableVariants((prev) =>
+          prev.map((row) => {
+            const extra = byId.get(row.id);
+            return extra
+              ? {
+                  ...row,
+                  isolated_image_url: extra.isolated_image_url,
+                  physical_dimensions: extra.physical_dimensions,
+                }
+              : row;
+          }),
+        );
+      });
     }
     setLoading(false);
   }, [workspace.id, productId]);
@@ -174,6 +227,8 @@ export default function StorefrontProductDetailPage() {
 
       <FeaturedArticlesCard product={product} workspaceId={workspace.id} onUpdate={(p) => setProduct(p)} />
 
+      <PhysicalDimensionsCard product={product} workspaceId={workspace.id} onUpdate={(p) => setProduct(p)} />
+
       <div className="grid gap-4 lg:grid-cols-3">
         <Card title="Identifiers">
           <KV label="Internal ID" value={product.id} mono />
@@ -245,36 +300,71 @@ export default function StorefrontProductDetailPage() {
                   <th className="py-2 pr-2">Title</th>
                   <th className="py-2 pr-2">SKU</th>
                   <th className="py-2 pr-2">Price</th>
+                  <th className="py-2 pr-2">Isolated</th>
                   <th className="py-2 pr-2">Internal UUID</th>
                   <th className="py-2 pr-2">Shopify ID</th>
                 </tr>
               </thead>
               <tbody>
                 {tableVariants.map((v) => (
-                  <tr key={v.id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                    <td className="py-2 pr-2">
-                      <div className="flex items-center gap-2">
-                        <VariantImageUploader
+                  <Fragment key={v.id}>
+                    <tr className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                      <td className="py-2 pr-2">
+                        <div className="flex items-center gap-2">
+                          <VariantImageUploader
+                            workspaceId={workspace.id}
+                            productId={product.id}
+                            variantId={v.id}
+                            currentUrl={v.image_url}
+                            onChange={(url) => {
+                              setTableVariants((prev) =>
+                                prev.map((row) =>
+                                  row.id === v.id ? { ...row, image_url: url } : row,
+                                ),
+                              );
+                            }}
+                          />
+                          <span className="text-sm text-zinc-900 dark:text-zinc-100">{v.title || "Default"}</span>
+                        </div>
+                      </td>
+                      <td className="py-2 pr-2 font-mono text-xs text-zinc-600 dark:text-zinc-400">{v.sku || "—"}</td>
+                      <td className="py-2 pr-2 text-xs text-zinc-600 dark:text-zinc-400">{formatPrice(v.price_cents)}</td>
+                      <td className="py-2 pr-2">
+                        <IsolatedImageUploader
                           workspaceId={workspace.id}
                           productId={product.id}
                           variantId={v.id}
-                          currentUrl={v.image_url}
+                          currentUrl={v.isolated_image_url ?? null}
                           onChange={(url) => {
                             setTableVariants((prev) =>
                               prev.map((row) =>
-                                row.id === v.id ? { ...row, image_url: url } : row,
+                                row.id === v.id ? { ...row, isolated_image_url: url } : row,
                               ),
                             );
                           }}
                         />
-                        <span className="text-sm text-zinc-900 dark:text-zinc-100">{v.title || "Default"}</span>
-                      </div>
-                    </td>
-                    <td className="py-2 pr-2 font-mono text-xs text-zinc-600 dark:text-zinc-400">{v.sku || "—"}</td>
-                    <td className="py-2 pr-2 text-xs text-zinc-600 dark:text-zinc-400">{formatPrice(v.price_cents)}</td>
-                    <td className="py-2 pr-2 font-mono text-[10px] text-zinc-500" title={v.id}>{v.id.slice(0, 8)}…</td>
-                    <td className="py-2 pr-2 font-mono text-[10px] text-zinc-400">{v.shopify_variant_id || "—"}</td>
-                  </tr>
+                      </td>
+                      <td className="py-2 pr-2 font-mono text-[10px] text-zinc-500" title={v.id}>{v.id.slice(0, 8)}…</td>
+                      <td className="py-2 pr-2 font-mono text-[10px] text-zinc-400">{v.shopify_variant_id || "—"}</td>
+                    </tr>
+                    <tr className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                      <td colSpan={6} className="pb-3 pl-12 pr-2">
+                        <VariantDimensionsOverride
+                          workspaceId={workspace.id}
+                          productId={product.id}
+                          variantId={v.id}
+                          current={v.physical_dimensions ?? null}
+                          onSaved={(dims) => {
+                            setTableVariants((prev) =>
+                              prev.map((row) =>
+                                row.id === v.id ? { ...row, physical_dimensions: dims } : row,
+                              ),
+                            );
+                          }}
+                        />
+                      </td>
+                    </tr>
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -409,6 +499,350 @@ function VariantImageUploader({
         )}
       </button>
     </div>
+  );
+}
+
+// =============================================================================
+// Physical dimensions + isolated image (ad-tool, Phase 0)
+// =============================================================================
+
+const SHAPE_LABELS: Record<Shape, string> = {
+  bag: "Bag",
+  box: "Box",
+  bottle: "Bottle",
+  jar: "Jar",
+  pouch: "Pouch",
+  other: "Other",
+};
+
+type DimsForm = {
+  length_in: string;
+  width_in: string;
+  height_in: string;
+  weight_oz: string;
+  shape: Shape;
+};
+
+function dimsToForm(d: PhysicalDimensions | null): DimsForm {
+  return {
+    length_in: d?.length_in != null ? String(d.length_in) : "",
+    width_in: d?.width_in != null ? String(d.width_in) : "",
+    height_in: d?.height_in != null ? String(d.height_in) : "",
+    weight_oz: d?.weight_oz != null ? String(d.weight_oz) : "",
+    shape: d?.shape ?? "other",
+  };
+}
+
+function formToDims(f: DimsForm): PhysicalDimensions | null {
+  const length_in = parseFloat(f.length_in);
+  const width_in = parseFloat(f.width_in);
+  const height_in = parseFloat(f.height_in);
+  if (!Number.isFinite(length_in) || !Number.isFinite(width_in) || !Number.isFinite(height_in)) {
+    return null;
+  }
+  const weight = parseFloat(f.weight_oz);
+  const dims: PhysicalDimensions = { length_in, width_in, height_in, shape: f.shape };
+  if (Number.isFinite(weight)) dims.weight_oz = weight;
+  return dims;
+}
+
+/**
+ * Shared 4-input + shape-select row used by both the product-level
+ * dimensions card and the per-variant override form. Sizes are inches,
+ * weight is ounces; shape clamps to the enum.
+ */
+function DimensionsFields({
+  form,
+  onChange,
+}: {
+  form: DimsForm;
+  onChange: (next: DimsForm) => void;
+}) {
+  const set = (k: keyof DimsForm, value: string) =>
+    onChange({ ...form, [k]: value } as DimsForm);
+  const numField = (label: string, key: keyof DimsForm, placeholder: string) => (
+    <label className="flex flex-col gap-1">
+      <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">{label}</span>
+      <input
+        type="number"
+        min="0"
+        step="0.01"
+        value={form[key]}
+        onChange={(e) => set(key, e.target.value)}
+        placeholder={placeholder}
+        className="rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+      />
+    </label>
+  );
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+      {numField("Length (in)", "length_in", "0.0")}
+      {numField("Width (in)", "width_in", "0.0")}
+      {numField("Height (in)", "height_in", "0.0")}
+      {numField("Weight (oz)", "weight_oz", "optional")}
+      <label className="flex flex-col gap-1">
+        <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Shape</span>
+        <select
+          value={form.shape}
+          onChange={(e) => set("shape", e.target.value)}
+          className="h-[34px] rounded border border-zinc-300 bg-white px-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+        >
+          {SHAPES.map((s) => (
+            <option key={s} value={s}>{SHAPE_LABELS[s]}</option>
+          ))}
+        </select>
+      </label>
+    </div>
+  );
+}
+
+function PhysicalDimensionsCard({
+  product,
+  workspaceId,
+  onUpdate,
+}: {
+  product: Product;
+  workspaceId: string;
+  onUpdate: (p: Product) => void;
+}) {
+  const [form, setForm] = useState<DimsForm>(() => dimsToForm(product.physical_dimensions));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedFlash, setSavedFlash] = useState(false);
+
+  async function save() {
+    const dims = formToDims(form);
+    if (!dims) {
+      setError("Length, width, and height are required numbers.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`/api/workspaces/${workspaceId}/products/${product.id}/dimensions`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(dims),
+    });
+    setBusy(false);
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      setError(j.error || "Could not save.");
+      return;
+    }
+    const data = await res.json();
+    onUpdate({ ...product, physical_dimensions: data.physical_dimensions as PhysicalDimensions });
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 2000);
+  }
+
+  return (
+    <div className="mb-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3">
+        <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Physical Dimensions</span>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          Real-world size + shape of this product&apos;s packaging. Used by the ad tool to render the pack at a believable scale. Variants can override these below.
+        </p>
+      </div>
+
+      <DimensionsFields form={form} onChange={setForm} />
+
+      <div className="mt-3 flex items-center gap-3">
+        <button
+          type="button"
+          onClick={save}
+          disabled={busy}
+          className="rounded-md bg-emerald-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-60"
+        >
+          {busy ? "Saving..." : "Save dimensions"}
+        </button>
+        {savedFlash && <span className="text-xs text-emerald-600">Saved.</span>}
+        {error && <span className="text-xs text-red-500">{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Per-variant isolated (background-free) image uploader. Mirrors
+ * VariantImageUploader but targets the isolated-image endpoint and the
+ * isolated_image_url column. Shift-click removes.
+ */
+function IsolatedImageUploader({
+  workspaceId,
+  productId,
+  variantId,
+  currentUrl,
+  onChange,
+}: {
+  workspaceId: string;
+  productId: string;
+  variantId: string;
+  currentUrl: string | null;
+  onChange: (url: string | null) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+
+  const upload = async (file: File) => {
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/products/${productId}/variants/${variantId}/isolated-image`,
+        { method: "POST", body: fd },
+      );
+      if (!res.ok) throw new Error(await res.text());
+      const json = (await res.json()) as { isolated_image_url: string };
+      onChange(json.isolated_image_url);
+    } catch (err) {
+      console.error("isolated image upload failed", err);
+      alert("Upload failed — use a PNG, JPEG, WebP, or AVIF under 10MB.");
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  const remove = async () => {
+    if (!currentUrl) return;
+    if (!confirm("Remove this isolated image?")) return;
+    setBusy(true);
+    try {
+      await fetch(
+        `/api/workspaces/${workspaceId}/products/${productId}/variants/${variantId}/isolated-image`,
+        { method: "DELETE" },
+      );
+      onChange(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="relative">
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/avif"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) upload(f);
+        }}
+      />
+      <button
+        type="button"
+        onClick={(e) => {
+          if (e.shiftKey && currentUrl) {
+            remove();
+            return;
+          }
+          inputRef.current?.click();
+        }}
+        disabled={busy}
+        title={currentUrl ? "Click to replace · Shift-click to remove" : "Click to upload isolated (bg-free) image"}
+        className={`flex h-10 w-10 items-center justify-center rounded-md border border-dashed transition-colors ${
+          currentUrl
+            ? "border-transparent bg-zinc-100 dark:bg-zinc-800"
+            : "border-zinc-300 bg-white hover:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
+        } ${busy ? "opacity-60" : ""}`}
+      >
+        {currentUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={currentUrl} alt="" className="h-9 w-9 rounded object-contain" />
+        ) : (
+          <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+            {busy ? "…" : "Add"}
+          </span>
+        )}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Collapsible per-variant dimensions override. Defaults to "inherit
+ * from product"; expanding + saving writes the variant's own
+ * physical_dimensions via the dimensions route (variantId in body).
+ */
+function VariantDimensionsOverride({
+  workspaceId,
+  productId,
+  variantId,
+  current,
+  onSaved,
+}: {
+  workspaceId: string;
+  productId: string;
+  variantId: string;
+  current: PhysicalDimensions | null;
+  onSaved: (dims: PhysicalDimensions | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState<DimsForm>(() => dimsToForm(current));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedFlash, setSavedFlash] = useState(false);
+
+  // Re-sync the form when the loaded value arrives (hydration is async).
+  useEffect(() => {
+    setForm(dimsToForm(current));
+  }, [current]);
+
+  async function save() {
+    const dims = formToDims(form);
+    if (!dims) {
+      setError("Length, width, and height are required numbers.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`/api/workspaces/${workspaceId}/products/${productId}/dimensions`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...dims, variantId }),
+    });
+    setBusy(false);
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      setError(j.error || "Could not save.");
+      return;
+    }
+    const data = await res.json();
+    onSaved(data.physical_dimensions as PhysicalDimensions);
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 2000);
+  }
+
+  return (
+    <details
+      open={open}
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+      className="rounded-md border border-zinc-200 dark:border-zinc-800"
+    >
+      <summary className="cursor-pointer select-none px-3 py-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
+        Override dimensions{" "}
+        <span className="text-zinc-400">
+          {current ? "(custom)" : "(inherits from product)"}
+        </span>
+      </summary>
+      <div className="px-3 pb-3 pt-1">
+        <DimensionsFields form={form} onChange={setForm} />
+        <div className="mt-2 flex items-center gap-3">
+          <button
+            type="button"
+            onClick={save}
+            disabled={busy}
+            className="rounded-md bg-emerald-500 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-60"
+          >
+            {busy ? "Saving..." : "Save override"}
+          </button>
+          {savedFlash && <span className="text-[11px] text-emerald-600">Saved.</span>}
+          {error && <span className="text-[11px] text-red-500">{error}</span>}
+        </div>
+      </div>
+    </details>
   );
 }
 

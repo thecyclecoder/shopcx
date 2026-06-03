@@ -19,6 +19,7 @@ const NAMES: Record<string, string> = {
   census: "US Census Bureau",
   "google-seo": "Google SEO Tools",
   versium: "Versium REACH",
+  higgsfield: "Higgsfield",
 };
 
 export default function IntegrationDetailPage() {

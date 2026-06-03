@@ -28,7 +28,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, transactional_from_name, transactional_reply_to_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted, storefront_domain, storefront_slug, shortlink_domain, twilio_phone_number, google_ads_developer_token_encrypted, google_ads_client_id, google_ads_client_secret_encrypted, google_ads_refresh_token_encrypted, google_ads_customer_id, google_search_console_credentials_encrypted, google_search_console_site_url, braintree_merchant_id, braintree_public_key, braintree_private_key_encrypted, braintree_environment, avalara_account_id, avalara_license_key_encrypted, avalara_company_code, avalara_environment, avalara_origin_address, avalara_default_tax_code, avalara_enabled, twilio_verify_service_sid"
+      "resend_api_key_encrypted, resend_domain, support_email, transactional_from_name, transactional_reply_to_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted, storefront_domain, storefront_slug, shortlink_domain, twilio_phone_number, google_ads_developer_token_encrypted, google_ads_client_id, google_ads_client_secret_encrypted, google_ads_refresh_token_encrypted, google_ads_customer_id, google_search_console_credentials_encrypted, google_search_console_site_url, braintree_merchant_id, braintree_public_key, braintree_private_key_encrypted, braintree_environment, avalara_account_id, avalara_license_key_encrypted, avalara_company_code, avalara_environment, avalara_origin_address, avalara_default_tax_code, avalara_enabled, twilio_verify_service_sid, higgsfield_api_key_encrypted, higgsfield_secret_encrypted"
     )
     .eq("id", workspaceId)
     .single();
@@ -174,6 +174,12 @@ export async function GET(
     versium_connected: !!workspace.versium_api_key_encrypted,
     versium_api_key_hint: workspace.versium_api_key_encrypted
       ? `...${decrypt(workspace.versium_api_key_encrypted).slice(-4)}`
+      : null,
+
+    // Higgsfield (Ad Tool — AI avatar video + image gen)
+    higgsfield_connected: !!workspace.higgsfield_api_key_encrypted,
+    higgsfield_api_key_hint: workspace.higgsfield_api_key_encrypted
+      ? `...${decrypt(workspace.higgsfield_api_key_encrypted).slice(-4)}`
       : null,
 
     // Meta Ads
@@ -391,6 +397,18 @@ export async function PATCH(
       } else {
         updates.versium_api_key_encrypted = null;
       }
+    }
+
+    // Higgsfield (Ad Tool) — dual credential: API key + secret
+    if ("higgsfield_api_key" in body) {
+      updates.higgsfield_api_key_encrypted = body.higgsfield_api_key
+        ? encrypt(body.higgsfield_api_key)
+        : null;
+    }
+    if ("higgsfield_secret" in body) {
+      updates.higgsfield_secret_encrypted = body.higgsfield_secret
+        ? encrypt(body.higgsfield_secret)
+        : null;
     }
 
     // Census
@@ -670,4 +688,42 @@ export async function PATCH(
   }
 
   return NextResponse.json({ success: true });
+}
+
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: workspaceId } = await params;
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const admin = createAdminClient();
+
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user.id)
+    .single();
+
+  if (!member || !["owner", "admin"].includes(member.role)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  if (body?.action === "verify_higgsfield") {
+    const { probeHiggsfieldAuth } = await import("@/lib/higgsfield");
+    const { ok } = await probeHiggsfieldAuth(workspaceId);
+    return NextResponse.json({ ok });
+  }
+
+  return NextResponse.json({ error: "Unknown action" }, { status: 400 });
 }

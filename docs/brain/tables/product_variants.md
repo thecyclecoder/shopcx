@@ -32,6 +32,10 @@ First-class variant rows (UUID PK). Source of truth for variants; `products.vari
 | `supplement_facts` | `jsonb` | ✓ |  |
 | `taxable` | `bool` | ✓ | default: `true` |
 | `shopify_tax_code` | `text` | ✓ |  |
+| `isolated_image_url` | `text` | ✓ | ad tool · cut-out product shot; feeds Higgsfield Soul as `reference_image_urls[]` |
+| `isolated_image_uploaded_at` | `timestamptz` | ✓ | ad tool |
+| `isolated_image_uploaded_by` | `uuid` | ✓ | ad tool |
+| `physical_dimensions` | `jsonb` | ✓ | ad tool · per-variant override of [[products]].`physical_dimensions` |
 
 ## Foreign keys
 
@@ -42,7 +46,7 @@ First-class variant rows (UUID PK). Source of truth for variants; `products.vari
 
 **In (others → this):**
 
-_None._
+- [[ad_campaigns]].`variant_id`
 
 ## Common queries
 
@@ -66,6 +70,11 @@ const { count } = await admin.from("product_variants")
 - UUID PK is canonical. Use it for internal joins.
 - `shopify_variant_id` is nullable (allows internal-only variants for future).
 - Read via `src/lib/product-variants.ts` helpers (`getProductVariants`, `findVariant`).
+
+## Ad tool
+
+- `isolated_image_url` is the cut-out (background-removed) product shot the ad tool feeds to **Higgsfield Soul** as `reference_image_urls[]` for image generation.
+- `physical_dimensions` here **overrides** [[products]].`physical_dimensions` for this variant when present.
 
 ---
 

@@ -89,6 +89,14 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
   const [klaviyoReviewCount, setKlaviyoReviewCount] = useState<number | null>(null);
   const [klaviyoSyncing, setKlaviyoSyncing] = useState(false);
 
+  // Higgsfield (Ad Tool)
+  const [higgsfieldApiKey, setHiggsfieldApiKey] = useState("");
+  const [higgsfieldSecret, setHiggsfieldSecret] = useState("");
+  const [higgsfieldConnected, setHiggsfieldConnected] = useState(false);
+  const [higgsfieldApiKeyHint, setHiggsfieldApiKeyHint] = useState<string | null>(null);
+  const [higgsfieldVerifying, setHiggsfieldVerifying] = useState(false);
+  const [higgsfieldVerifyResult, setHiggsfieldVerifyResult] = useState<{ ok: boolean; msg: string } | null>(null);
+
   // Census
   const [censusApiKey, setCensusApiKey] = useState("");
   const [censusConnected, setCensusConnected] = useState(false);
@@ -210,6 +218,8 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
         setKlaviyoPublicKey(data.klaviyo_public_key || "");
         setKlaviyoLastSync(data.klaviyo_last_sync_at);
         setKlaviyoReviewCount(data.klaviyo_review_count);
+        setHiggsfieldConnected(!!data.higgsfield_connected);
+        setHiggsfieldApiKeyHint(data.higgsfield_api_key_hint);
         setCensusConnected(!!data.census_connected);
         setCensusApiKeyHint(data.census_api_key_hint || null);
         setVersiumConnected(!!data.versium_connected);
@@ -435,6 +445,54 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
       setMessage("Review sync failed");
     }
     setKlaviyoSyncing(false);
+  };
+
+  // Higgsfield handlers (Ad Tool — dual credential: API key + secret)
+  const handleSaveHiggsfield = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const body: Record<string, string> = {};
+    if (higgsfieldApiKey) body.higgsfield_api_key = higgsfieldApiKey;
+    if (higgsfieldSecret) body.higgsfield_secret = higgsfieldSecret;
+    if (await patchIntegrations(body)) {
+      setMessage("Higgsfield configuration saved");
+      setHiggsfieldConnected(true);
+      setHiggsfieldApiKeyHint(higgsfieldApiKey ? `...${higgsfieldApiKey.slice(-4)}` : higgsfieldApiKeyHint);
+      setHiggsfieldApiKey("");
+      setHiggsfieldSecret("");
+      setHiggsfieldVerifyResult(null);
+    }
+  };
+
+  const handleDisconnectHiggsfield = async () => {
+    if (await patchIntegrations({ higgsfield_api_key: null, higgsfield_secret: null })) {
+      setHiggsfieldConnected(false);
+      setHiggsfieldApiKeyHint(null);
+      setHiggsfieldApiKey("");
+      setHiggsfieldSecret("");
+      setHiggsfieldVerifyResult(null);
+      setMessage("Higgsfield disconnected");
+    }
+  };
+
+  const handleVerifyHiggsfield = async () => {
+    setHiggsfieldVerifying(true);
+    setHiggsfieldVerifyResult(null);
+    try {
+      const res = await fetch(`/api/workspaces/${workspace.id}/integrations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "verify_higgsfield" }),
+      });
+      const data = await res.json();
+      setHiggsfieldVerifyResult(
+        data.ok
+          ? { ok: true, msg: "Connection verified" }
+          : { ok: false, msg: "Verification failed — check credentials" },
+      );
+    } catch {
+      setHiggsfieldVerifyResult({ ok: false, msg: "Verification failed" });
+    }
+    setHiggsfieldVerifying(false);
   };
 
   // Census handlers
@@ -1526,6 +1584,122 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
                 <button
                   type="submit"
                   disabled={saving || !klaviyoApiKey}
+                  className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  Update
+                </button>
+              </form>
+            </div>
+          )}
+        </div>
+        )}
+
+        {/* ── Higgsfield (Ad Tool) ── */}
+        {show("higgsfield") && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-purple-600/10">
+                <svg className="h-5 w-5 text-purple-600 dark:text-purple-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Higgsfield</h2>
+                <p className="text-sm text-zinc-500">AI avatar video + image generation for the Ad Tool</p>
+              </div>
+            </div>
+            {higgsfieldConnected && (
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                Connected
+              </span>
+            )}
+          </div>
+
+          {canEdit && !higgsfieldConnected && (
+            <form onSubmit={handleSaveHiggsfield} className="mt-5 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">API Key</label>
+                <input
+                  type="password"
+                  value={higgsfieldApiKey}
+                  onChange={(e) => setHiggsfieldApiKey(e.target.value)}
+                  placeholder="hf-api-key..."
+                  required
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-500">Secret</label>
+                <input
+                  type="password"
+                  value={higgsfieldSecret}
+                  onChange={(e) => setHiggsfieldSecret(e.target.value)}
+                  placeholder="hf-secret..."
+                  required
+                  className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={saving || !higgsfieldApiKey || !higgsfieldSecret}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {saving ? "Saving..." : "Save & Connect"}
+              </button>
+            </form>
+          )}
+
+          {canEdit && higgsfieldConnected && (
+            <div className="mt-5 space-y-3">
+              <div className="rounded-md bg-zinc-50 p-3 dark:bg-zinc-800">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-zinc-500">API Key</span>
+                  <span className="font-mono text-sm text-zinc-400">{higgsfieldApiKeyHint}</span>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleVerifyHiggsfield}
+                  disabled={higgsfieldVerifying}
+                  className="rounded-md border border-indigo-300 px-4 py-2 text-sm font-medium text-indigo-600 transition-colors hover:bg-indigo-50 disabled:opacity-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
+                >
+                  {higgsfieldVerifying ? "Verifying..." : "Verify connection"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDisconnectHiggsfield}
+                  disabled={saving}
+                  className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                >
+                  Disconnect
+                </button>
+              </div>
+              {higgsfieldVerifyResult && (
+                <p className={`text-sm ${higgsfieldVerifyResult.ok ? "text-emerald-600" : "text-red-600"}`}>
+                  {higgsfieldVerifyResult.msg}
+                </p>
+              )}
+              {/* Update credentials */}
+              <form onSubmit={handleSaveHiggsfield} className="space-y-2">
+                <input
+                  type="password"
+                  value={higgsfieldApiKey}
+                  onChange={(e) => setHiggsfieldApiKey(e.target.value)}
+                  placeholder="New API key (leave blank to keep current)"
+                  className="block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+                <input
+                  type="password"
+                  value={higgsfieldSecret}
+                  onChange={(e) => setHiggsfieldSecret(e.target.value)}
+                  placeholder="New secret (leave blank to keep current)"
+                  className="block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500"
+                />
+                <button
+                  type="submit"
+                  disabled={saving || (!higgsfieldApiKey && !higgsfieldSecret)}
                   className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
                 >
                   Update

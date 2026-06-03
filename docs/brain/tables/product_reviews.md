@@ -85,6 +85,10 @@ const { count } = await admin.from("product_reviews")
 - Synced from Klaviyo. AI-summarized (Haiku, max 15 words) for cancel-journey social proof.
 - Featured reviews (`smart_featured` from Klaviyo) prioritized, then highest-rated.
 
+## Ad tool
+
+- **Tier-4 PROOF-ONLY ad source** for [[product_ad_angles]]. Qualifying rows: `rating>=4`. Reviews can be **cited** as a proof anchor (`proof_anchor.type='review'`) but must **never lead** an angle — the lead is always a Tier-1/Tier-2 verbatim benefit.
+
 ---
 
 [[../README]] · [[../../CLAUDE]] · [[../../DATABASE]]
