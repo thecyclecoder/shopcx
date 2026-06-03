@@ -155,19 +155,21 @@ export default function CsatPage() {
                         {r.points_awarded > 0 && <span className="ml-2">· +{r.points_awarded} pts</span>}
                       </p>
                       {r.comment && (
-                        <>
-                          <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{r.comment}</p>
-                          <button
-                            type="button"
-                            disabled={creatingTicketFor === r.id}
-                            onClick={() => createTicketFromCsat(r.id)}
-                            className="mt-2 rounded-md border border-blue-300 px-2 py-1 text-[11px] font-medium text-blue-700 transition hover:bg-blue-50 disabled:opacity-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-950"
-                            title="Use the comment as the first inbound message of a new ticket"
-                          >
-                            {creatingTicketFor === r.id ? "Creating…" : "Create ticket from this comment"}
-                          </button>
-                        </>
+                        <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{r.comment}</p>
                       )}
+                      <button
+                        type="button"
+                        disabled={creatingTicketFor === r.id}
+                        onClick={() => createTicketFromCsat(r.id)}
+                        className="mt-2 rounded-md border border-blue-300 px-2 py-1 text-[11px] font-medium text-blue-700 transition hover:bg-blue-50 disabled:opacity-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-950"
+                        title={r.comment ? "Use the CSAT comment as the first inbound message" : "Start a fresh ticket on this customer — empty, agent opens the conversation"}
+                      >
+                        {creatingTicketFor === r.id
+                          ? "Creating…"
+                          : r.comment
+                            ? "Create ticket from this comment"
+                            : "Create ticket for this customer"}
+                      </button>
                     </div>
                   </div>
                 </li>

@@ -133,14 +133,10 @@ export async function POST(
     .eq("id", csatId)
     .maybeSingle();
   if (!csat) return NextResponse.json({ error: "CSAT not found" }, { status: 404 });
-  if (!csat.comment?.trim()) return NextResponse.json({ error: "CSAT has no comment to use as ticket body" }, { status: 400 });
   if (!csat.customer_id) return NextResponse.json({ error: "CSAT has no customer_id" }, { status: 400 });
 
-  const commentText = csat.comment.trim();
-  const firstLine = commentText.split(/\n/)[0].trim();
-  const subject = firstLine.length > 80
-    ? firstLine.slice(0, 77) + "…"
-    : firstLine || `CSAT follow-up — ${csat.rating}★`;
+  const commentText = csat.comment?.trim() || "";
+  const hasComment = commentText.length > 0;
 
   // Pull the original ticket's channel + subject so the system note
   // can link back for agent context.
@@ -148,54 +144,77 @@ export async function POST(
     .from("tickets").select("channel, subject")
     .eq("id", csat.ticket_id).maybeSingle();
 
-  const now = new Date().toISOString();
+  // Subject derivation:
+  //   - With a comment: first line of comment (capped 80).
+  //   - Without a comment: "Follow-up from {original subject}" so the
+  //     agent has context for what the CSAT was rating. No automatic
+  //     orchestrator run in this path — there's no customer message
+  //     to chew on, and the agent is starting the conversation.
+  let subject: string;
+  if (hasComment) {
+    const firstLine = commentText.split(/\n/)[0].trim();
+    subject = firstLine.length > 80 ? firstLine.slice(0, 77) + "…" : firstLine;
+  } else {
+    const origTitle = srcTicket?.subject?.replace(/^Re:\s*/i, "").trim() || "previous ticket";
+    const trimmed = origTitle.length > 60 ? origTitle.slice(0, 57) + "…" : origTitle;
+    subject = `Follow-up from "${trimmed}"`;
+  }
+
   const { data: ticket, error: terr } = await admin.from("tickets").insert({
     workspace_id: workspaceId,
     customer_id: csat.customer_id,
     channel: srcTicket?.channel || "email",
     status: "open",
     subject,
-    last_customer_reply_at: csat.submitted_at,
+    last_customer_reply_at: hasComment ? csat.submitted_at : null,
   }).select("id").single();
   if (terr || !ticket) return NextResponse.json({ error: terr?.message || "Ticket insert failed" }, { status: 500 });
 
-  // First inbound message — the CSAT comment.
-  await admin.from("ticket_messages").insert({
-    ticket_id: ticket.id,
-    direction: "inbound",
-    visibility: "external",
-    author_type: "customer",
-    body: `<p>${commentText.replace(/</g, "&lt;").replace(/\n/g, "<br>")}</p>`,
-    created_at: csat.submitted_at,
-  });
+  // First inbound message — only if the CSAT had a comment. Without
+  // one, the new ticket starts empty for the agent to open the
+  // conversation with the customer.
+  if (hasComment) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticket.id,
+      direction: "inbound",
+      visibility: "external",
+      author_type: "customer",
+      body: `<p>${commentText.replace(/</g, "&lt;").replace(/\n/g, "<br>")}</p>`,
+      created_at: csat.submitted_at,
+    });
+  }
 
   // System note tying back to the CSAT + the original ticket.
+  const noteBody = hasComment
+    ? `[System] Created from CSAT (${csat.rating}★) on ticket <a href="/dashboard/tickets/${csat.ticket_id}">${srcTicket?.subject || csat.ticket_id.slice(0, 8)}</a>. The customer's CSAT comment is the first inbound message above.`
+    : `[System] Created from CSAT (${csat.rating}★, no comment) on ticket <a href="/dashboard/tickets/${csat.ticket_id}">${srcTicket?.subject || csat.ticket_id.slice(0, 8)}</a>. No inbound message — agent should open the conversation.`;
   await admin.from("ticket_messages").insert({
     ticket_id: ticket.id,
     direction: "outbound",
     visibility: "internal",
     author_type: "system",
-    body: `[System] Created from CSAT (${csat.rating}★) on ticket <a href="/dashboard/tickets/${csat.ticket_id}">${srcTicket?.subject || csat.ticket_id.slice(0, 8)}</a>. The customer's CSAT comment is the first inbound message above.`,
+    body: noteBody,
   });
 
   const { addTicketTag } = await import("@/lib/ticket-tags");
   await addTicketTag(ticket.id, "from_csat");
 
-  // Fire the unified ticket handler so the orchestrator processes
-  // this as a real new inbound — pattern-matching, journey trigger,
-  // Sonnet decision, action execution. Same event widget chat /
-  // email webhook / journey completion all use.
-  const { inngest } = await import("@/lib/inngest/client");
-  await inngest.send({
-    name: "ticket/inbound-message",
-    data: {
-      workspace_id: workspaceId,
-      ticket_id: ticket.id,
-      message_body: commentText,
-      channel: srcTicket?.channel || "email",
-      is_new_ticket: true,
-    },
-  });
+  // Fire the unified ticket handler ONLY when we have a real customer
+  // message for the orchestrator to chew on. No-comment tickets are
+  // agent-initiated; the orchestrator has nothing to route.
+  if (hasComment) {
+    const { inngest } = await import("@/lib/inngest/client");
+    await inngest.send({
+      name: "ticket/inbound-message",
+      data: {
+        workspace_id: workspaceId,
+        ticket_id: ticket.id,
+        message_body: commentText,
+        channel: srcTicket?.channel || "email",
+        is_new_ticket: true,
+      },
+    });
+  }
 
   return NextResponse.json({ ok: true, ticket_id: ticket.id });
 }

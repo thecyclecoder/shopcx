@@ -67,7 +67,11 @@ Surface at `/dashboard/csat`:
 - Reopen rate (csat:reopened tag count / sent)
 - Rating histogram 1-5
 - Recent responses with comments inline
-- **"Create ticket from this comment" button** on every CSAT response with a non-empty comment. Mirrors the social-comments pattern — opens a new ticket on the same customer with the CSAT comment as the first inbound message, system-note linking back to the original ticket, tagged `from_csat`. **Fires the `ticket/inbound-message` Inngest event** so the unified ticket handler processes it like a real new inbound — pattern matching, journey triggering, Sonnet decision, action execution. Used when a customer slips a new request into the CSAT comment (e.g. 5★ + "I actually need to cancel my subscription") — the AI will route it to the cancel journey automatically.
+- **"Create ticket" button** on every CSAT row (label changes based on whether a comment exists). Two modes:
+  - **With comment** ("Create ticket from this comment"): comment becomes the first inbound external message; subject = first line of comment (capped 80 chars); fires the `ticket/inbound-message` Inngest event so the orchestrator routes it like a real new inbound (pattern matching, journey triggering, Sonnet decision). Used when the customer hid a new request inside the CSAT comment (e.g. 5★ + "I actually need to cancel my subscription").
+  - **Without comment** ("Create ticket for this customer"): empty new ticket on the customer; subject = `Follow-up from "{original ticket subject}"`; system note records the CSAT origin; orchestrator is NOT fired (no customer message for it to chew on). The agent opens the conversation themselves. Used when the rating alone is signal enough to follow up but there's no comment body to parse.
+
+Both modes tag the new ticket `from_csat` and add a system note linking back to the source ticket + CSAT row.
 
 A high reopen rate (>15%) is the leading indicator of premature ticket-close. Lower is better.
 
