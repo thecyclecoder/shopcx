@@ -34,11 +34,13 @@
     "@types/braintree": "^3.4.4",
     "@types/html-to-text": "^9.0.4",
     "@types/node": "^20",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/zipcodes": "^8.0.5",
     "eslint": "^9",
     "eslint-config-next": "16.2.1",
+    "pg": "^8.21.0",
     "sharp": "^0.34.5",
     "tailwindcss": "^4",
     "typescript": "^5"

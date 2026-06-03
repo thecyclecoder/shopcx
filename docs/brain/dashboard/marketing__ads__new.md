@@ -9,7 +9,7 @@ The ad builder wizard. Walks the operator through avatar → product → angle �
 **Page title:** New ad
 
 **Wizard steps:**
-1. **Avatar picker** — radio cards from [[../tables/ad_avatars]].
+1. **Avatar picker** — offers BOTH paths: (a) pick an existing avatar (radio cards from [[../tables/ad_avatars]]), or (b) **"generate a new avatar from your buyer demographics"** — a link to `/dashboard/marketing/ads/avatars/proposals/new` to spin up demographic proposals → faces → a new character.
 2. **Product + variant picker** — search [[../tables/products]]; pick a variant.
 3. **Angle picker** — cards from [[../tables/product_ad_angles]] (hook slug, LF8 badge, `hook_one_liner`, `proof_anchor`, vibe chips). "Generate fresh angles" calls the Phase 0.5 generator.
 4. **Length** — 15s / 30s (optionally also produce the 15s cut).

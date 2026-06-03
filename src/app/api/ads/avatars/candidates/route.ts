@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { generateSoulPortrait, pollJobUntilDone } from "@/lib/higgsfield";
-import { uploadFromUrl, signedUrl } from "@/lib/ad-storage";
+import { uploadFromUrl, signedUrl, removeObjects } from "@/lib/ad-storage";
 import {
   buildAvatarPortraitPrompt,
   AVATAR_GENDERS,
@@ -13,13 +13,63 @@ import {
 
 export const maxDuration = 300;
 
+async function authorize(workspaceId: string | null, userId: string) {
+  if (!workspaceId) return null;
+  const admin = createAdminClient();
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", userId)
+    .single();
+  if (!member || !["owner", "admin"].includes(member.role as string)) return null;
+  return admin;
+}
+
 /**
- * Generate 3 avatar FACE candidates from four attributes — gender, age, health
- * level, ethnicity — via Higgsfield Soul text-to-image. No reference-photo
- * upload. The operator picks one; POST /api/ads/avatars then mints it into a
- * recurring character. ~3 credits per candidate (~$0.56 for the set).
- *
- * Optional wardrobe/setting context comes from the chosen archetype proposal.
+ * GET — the saved avatar-face library. Every generated face is persisted in
+ * ad_avatar_candidates; this re-signs each storage_path and returns them newest
+ * first so the operator reuses existing faces instead of regenerating (which
+ * burns Soul credits). Excludes discarded faces.
+ */
+export async function GET(req: Request) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const url = new URL(req.url);
+  const workspaceId = url.searchParams.get("workspaceId");
+  const admin = await authorize(workspaceId, user.id);
+  if (!admin) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+  const { data: rows } = await admin
+    .from("ad_avatar_candidates")
+    .select("id, gender, age_range, health_level, ethnicity, storage_path, status, created_at")
+    .eq("workspace_id", workspaceId as string)
+    .neq("status", "discarded")
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  const candidates = await Promise.all(
+    (rows || []).map(async (r) => ({
+      id: r.id,
+      url: await signedUrl(r.storage_path).catch(() => ""),
+      gender: r.gender,
+      age_range: r.age_range,
+      health_level: r.health_level,
+      ethnicity: r.ethnicity,
+      status: r.status,
+    })),
+  );
+  return NextResponse.json({ candidates: candidates.filter((c) => c.url) });
+}
+
+/**
+ * POST — generate N avatar FACE candidates from four attributes (gender, age,
+ * health level, ethnicity) via Higgsfield Soul text-to-image, persist each into
+ * the library, and return them. No reference-photo upload. ~3 credits per face.
  */
 export async function POST(req: Request) {
   const supabase = await createClient();
@@ -32,42 +82,33 @@ export async function POST(req: Request) {
   const workspaceId: string | undefined = body.workspaceId;
   const count: number = Math.min(Math.max(Number(body.count) || 3, 1), 4);
   if (!workspaceId) return NextResponse.json({ error: "workspaceId required" }, { status: 400 });
+  const admin = await authorize(workspaceId, user.id);
+  if (!admin) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-  const admin = createAdminClient();
-  const { data: member } = await admin
-    .from("workspace_members")
-    .select("role")
-    .eq("workspace_id", workspaceId)
-    .eq("user_id", user.id)
-    .single();
-  if (!member || !["owner", "admin"].includes(member.role as string))
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-
-  // Validate the four attributes.
   const gender = (AVATAR_GENDERS as readonly string[]).includes(body.gender) ? body.gender : "female";
   const ageRange = typeof body.ageRange === "string" && body.ageRange ? body.ageRange : "35-44";
   const healthLevel = AVATAR_HEALTH_LEVELS.some((h) => h.value === body.healthLevel) ? body.healthLevel : "fit";
   const ethnicity = AVATAR_ETHNICITIES.some((e) => e.value === body.ethnicity) ? body.ethnicity : "auto";
   const attrs: AvatarFaceAttributes = { gender, ageRange, healthLevel, ethnicity };
 
-  // Optional wardrobe/setting context from a proposal (face is shot waist-up, but
-  // wardrobe still informs the look).
   let context = "";
-  let tag = "adhoc";
+  let proposalId: string | null = null;
+  let productId: string | null = null;
   if (body.proposalId) {
     const { data: proposal } = await admin
       .from("ad_avatar_proposals")
-      .select("archetype_brief, workspace_id")
+      .select("archetype_brief, workspace_id, product_id")
       .eq("id", body.proposalId)
       .single();
     if (proposal && proposal.workspace_id === workspaceId) {
       const b = proposal.archetype_brief as { wardrobe?: string; setting?: string } | null;
       context = [b?.wardrobe, b?.setting].filter(Boolean).join(", ");
-      tag = body.proposalId;
+      proposalId = body.proposalId;
+      productId = proposal.product_id;
     }
   }
 
-  // Generate candidates in parallel; tolerate per-candidate failures (NSFW etc).
+  const stamp = `${gender}_${ageRange}_${healthLevel}_${ethnicity}`;
   const results = await Promise.all(
     Array.from({ length: count }, (_, i) =>
       (async () => {
@@ -78,24 +119,68 @@ export async function POST(req: Request) {
             quality: "1080p",
             seed: 1000 + i,
           });
-          if (!jobSetId) return { ok: false, error: "no_job_set" };
+          if (!jobSetId) return { ok: false as const, error: "no_job_set" };
           const res = await pollJobUntilDone(workspaceId, jobSetId, { timeoutMs: 180000 });
-          if (res.status === "nsfw") return { ok: false, error: "nsfw" };
-          if (res.status !== "completed" || !res.outputUrls[0]) return { ok: false, error: res.status };
-          const path = `avatars/${workspaceId}/candidates/${tag}/${i}_${gender}_${healthLevel}_${ethnicity}.png`;
+          if (res.status === "nsfw") return { ok: false as const, error: "nsfw" };
+          if (res.status !== "completed" || !res.outputUrls[0]) return { ok: false as const, error: res.status };
+          // Unique path per face so library entries never collide.
+          const path = `avatars/${workspaceId}/library/${stamp}_${Date.now()}_${i}.png`;
           await uploadFromUrl(path, res.outputUrls[0], "image/png");
-          return { ok: true, url: await signedUrl(path) };
+          const { data: row } = await admin
+            .from("ad_avatar_candidates")
+            .insert({
+              workspace_id: workspaceId,
+              proposal_id: proposalId,
+              product_id: productId,
+              gender,
+              age_range: ageRange,
+              health_level: healthLevel,
+              ethnicity,
+              storage_path: path,
+              status: "available",
+              created_by: user.id,
+            })
+            .select("id")
+            .single();
+          return { ok: true as const, id: row?.id, url: await signedUrl(path) };
         } catch (err: any) {
-          return { ok: false, error: String(err?.message || err) };
+          return { ok: false as const, error: String(err?.message || err) };
         }
       })(),
     ),
   );
 
-  const candidates = results.filter((r) => r.ok).map((r) => ({ url: (r as any).url }));
+  const candidates = results.filter((r) => r.ok).map((r) => ({ id: (r as any).id, url: (r as any).url }));
   if (candidates.length === 0) {
     const reason = (results.find((r) => !r.ok) as any)?.error || "generation_failed";
     return NextResponse.json({ error: "no_candidates", reason }, { status: 502 });
   }
   return NextResponse.json({ candidates });
+}
+
+/** DELETE — permanently remove a saved face from the library (row + storage object). */
+export async function DELETE(req: Request) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const url = new URL(req.url);
+  const workspaceId = url.searchParams.get("workspaceId");
+  const id = url.searchParams.get("id");
+  const admin = await authorize(workspaceId, user.id);
+  if (!admin) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
+
+  const { data: row } = await admin
+    .from("ad_avatar_candidates")
+    .select("storage_path, workspace_id")
+    .eq("id", id)
+    .single();
+  if (!row || row.workspace_id !== workspaceId) return NextResponse.json({ error: "not_found" }, { status: 404 });
+
+  await removeObjects([row.storage_path]).catch(() => {});
+  await admin.from("ad_avatar_candidates").delete().eq("id", id);
+  return NextResponse.json({ ok: true });
 }

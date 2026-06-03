@@ -52,6 +52,7 @@ export async function POST(req: Request) {
   const name: string = (body.name || "").trim();
   const imageUrls: string[] = Array.isArray(body.imageUrls) ? body.imageUrls : [];
   const proposalId: string | null = body.proposalId ?? null;
+  const candidateId: string | null = body.candidateId ?? null;
 
   if (!name) return NextResponse.json({ error: "name required" }, { status: 400 });
   if (imageUrls.length === 0)
@@ -108,6 +109,15 @@ export async function POST(req: Request) {
       .from("ad_avatar_proposals")
       .update({ status: "confirmed", confirmed_avatar_id: avatar.id })
       .eq("id", proposalId)
+      .eq("workspace_id", workspaceId as string);
+  }
+
+  // Tag the chosen library face as used (it stays in the library, badged).
+  if (candidateId) {
+    await auth.admin
+      .from("ad_avatar_candidates")
+      .update({ status: "used", used_avatar_id: avatar.id })
+      .eq("id", candidateId)
       .eq("workspace_id", workspaceId as string);
   }
 

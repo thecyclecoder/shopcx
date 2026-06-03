@@ -29,6 +29,13 @@ export async function uploadBuffer(path: string, buffer: Buffer, contentType: st
   return path;
 }
 
+/** Permanently remove stored objects (e.g. a discarded avatar face). */
+export async function removeObjects(paths: string[]): Promise<void> {
+  if (!paths.length) return;
+  const admin = createAdminClient();
+  await admin.storage.from(AD_BUCKET).remove(paths);
+}
+
 /** Short-lived signed URL for a stored object (for Higgsfield inputs + UI previews). */
 export async function signedUrl(path: string, ttlSec = SIGNED_TTL_SEC): Promise<string> {
   const admin = createAdminClient();

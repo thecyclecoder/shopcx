@@ -23,6 +23,17 @@ Ad tool — **single source of truth** for the direct-response frameworks the ge
 | `AdToolSettings` + `DEFAULT_AD_TOOL_SETTINGS` + `resolveAdToolSettings(stored)` | per-workspace settings shape (`workspaces.ad_tool_settings`), merged over defaults |
 | `slugify(name)` | name → snake_case slug (used for `ingredient_*` media slots) |
 
+### Avatar face generation (text-to-image)
+
+| Export | What |
+|---|---|
+| `AVATAR_GENDERS` | `["female", "male"]` (+ `AvatarGender` type) — pre-filled from the buyer cohort |
+| `AVATAR_AGE_RANGES` | `["under_25", "25-34", "35-44", "45-54", "55-64", "65+"]` (+ `AvatarAgeRange` type) — **mirrors `customer_demographics.inferred_age_range` bands**; pre-filled from the cohort |
+| `AVATAR_HEALTH_LEVELS` | `athletic` \| `fit` \| `average` \| `relatable`, each `{ value, label, prompt }` where `prompt` is the body/appearance fragment baked into the portrait prompt |
+| `AVATAR_ETHNICITIES` | `auto` (model chooses) + all major ethnicities, each `{ value, label, prompt }`. **Operator-picked — NO race lookup** (we have no ethnicity data to infer from) |
+| `AvatarFaceAttributes` | `{ gender, ageRange, healthLevel, ethnicity }` — the four controls |
+| `buildAvatarPortraitPrompt(attrs, context, angleVariant)` | builds a photorealistic UGC-style Soul text-to-image prompt from the four attributes (+ optional cohort `context`); `angleVariant` rotates the camera angle so the 3 generated faces differ. No text/watermark/product in frame. |
+
 ## Gotchas
 
 - **LF8 #4 (sexual companionship) is OFF by default** in `DEFAULT_AD_TOOL_SETTINGS.lf8_allowed` — a brand must opt in.

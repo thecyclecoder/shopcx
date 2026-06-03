@@ -20,6 +20,7 @@ Per-workspace cohort demographic snapshots (frozen view of a segment at a point 
 | `buyer_type_distribution` | `jsonb` | — | default: `'{}'` |
 | `top_health_priorities` | `jsonb` | — | default: `'[]'` |
 | `suggested_target_customer` | `text` | ✓ |  |
+| `archetype_tuples` | `jsonb` | ✓ | write-through cache of the **JOINT** four-field demographic archetypes (gender × age × life_stage × income) + cohort basis — basis for the ad-tool avatar proposal generator. Added by `supabase/migrations/20260604140000_ad_tool_archetype_cache.sql`. |
 | `computed_at` | `timestamptz` | — | default: `now()` |
 
 ## Foreign keys
@@ -45,7 +46,8 @@ const { data } = await admin.from("demographics_snapshots")
 
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- Every distribution column (`gender_distribution`, `age_distribution`, …) stores **MARGINAL** distributions only — each field independently. The **JOINT** four-field archetype tuples (e.g. "female · 55-64 · family · 80-100k") live ONLY in `archetype_tuples`, populated by the ad-tool avatar proposal generator ([[../libraries/ad-avatar-proposals]]) as a write-through cache (recomputes when absent / stale >7 days / forced). `archetype_tuples` is the four-field tuple only — never `health_priorities`/`buyer_type`/geo.
+- Probe before assuming — see [[../README]] § Probing technique.
 
 ---
 

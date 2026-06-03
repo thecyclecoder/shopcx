@@ -243,15 +243,28 @@ export default function NewAdPage() {
 
       {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
 
-      {/* 1. Avatar */}
+      {/* 1. Avatar — pick from library OR generate from demographics */}
       <Step n={1} title="Pick an avatar">
+        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+          <span className="text-zinc-500">Choose from your library, or</span>
+          <Link
+            href="/dashboard/marketing/ads/avatars/proposals/new"
+            className="font-medium text-indigo-600 hover:underline dark:text-indigo-400"
+          >
+            generate a new avatar from your buyer demographics →
+          </Link>
+        </div>
         {avatars === null ? (
           <p className="text-sm text-zinc-500">Loading avatars…</p>
         ) : avatars.length === 0 ? (
           <p className="text-sm text-zinc-500">
-            No avatars —{" "}
+            No avatars in your library yet —{" "}
+            <Link href="/dashboard/marketing/ads/avatars/proposals/new" className="text-indigo-600 hover:underline">
+              generate one from your buyer demographics
+            </Link>{" "}
+            or{" "}
             <Link href="/dashboard/marketing/ads/avatars/new" className="text-indigo-600 hover:underline">
-              create one
+              build one manually
             </Link>
             .
           </p>

@@ -38,7 +38,9 @@ Every claim in every ad must trace back to a structured row in the Product Intel
   ├─0 (prereq) variant.isolated_image_url + product/variant.physical_dimensions   [Phase 0, /dashboard/storefront/products/[id]]
   │
   ├─2 pick/confirm AVATAR
-  │     demographic proposals (generateAvatarProposals) → confirm → photo upload → createCharacter (40cr / $2.50)
+  │     demographic proposals (generateAvatarProposals, 5) → set gender/age/health/ethnicity
+  │     → generate 3 faces (Soul text-to-image, ~3cr each) → saved face library (ad_avatar_candidates)
+  │     → pick one → createCharacter (40cr / $2.50)   [photo upload is an optional fallback]
   │
   ├─  pick PRODUCT + variant   (variant must have an isolated image; hero hard-blocks otherwise)
   │
@@ -83,7 +85,9 @@ The hero is only as good as the product reference. Two operator-confirmed inputs
 
 The avatar is a deliberate match for the *actual buyer*, read from the demographic-enrichment pipeline. [[../libraries/ad-avatar-proposals]] `generateAvatarProposals(productId)` is a **read-only** consumer of [[demographic-enrichment]] — it uses only four fields: `inferred_gender`, `inferred_age_range`, `inferred_life_stage`, `zip_income_bracket`. Explicitly NOT `health_priorities`, `buyer_type`, or geo fields (the angle owns the script; the avatar just owns the face).
 
-Flow: resolve the product's buyer cohort (link-group deduped) → top archetypes by share → Opus brief per archetype → insert [[../tables/ad_avatar_proposals]] rows (`status='proposed'`, **no Higgsfield spend**). Cohort < 30 falls back to the workspace-wide [[../tables/demographics_snapshots]]. Operator confirms a proposal → uploads 1-5 reference photos → `createCharacter` mints a Higgsfield character (40cr / $2.50) → [[../tables/ad_avatars]] row, lineage via `proposed_from_id`. Cap: **10 avatars/workspace**.
+Flow: resolve the product's buyer cohort (link-group deduped) → top **5** archetypes by share → Opus brief per archetype → insert [[../tables/ad_avatar_proposals]] rows (`status='proposed'`, **no Higgsfield spend**). Cohort < 30 falls back to the workspace-wide [[../tables/demographics_snapshots]]; the JOINT archetype tuples are write-through cached on `demographics_snapshots.archetype_tuples` (recompute only when absent / stale >7 days / forced).
+
+**No photo upload required.** Operator picks a proposal → sets the four controls **gender, age, health level, ethnicity** (gender + age pre-filled from the archetype tuple) → **"Generate 3 faces"** via `generateSoulPortrait` (Soul text-to-image, ~3cr each). Every generated face is persisted to the reusable [[../tables/ad_avatar_candidates]] library (private `ad-tool` bucket, re-signed on read, deletable) so the operator never re-spends Soul credits on the same look. They pick one face + name it → `createCharacter` mints a Higgsfield character (40cr / $2.50) → [[../tables/ad_avatars]] row, lineage via `proposed_from_id`, chosen candidate tagged `used`. Uploading 1-5 reference photos remains an **optional fallback**. Cap: **10 avatars/workspace**.
 
 ### Phase 3 — script + hero + audio
 
@@ -121,7 +125,8 @@ Flow: resolve the product's buyer cohort (link-group deduped) → top archetypes
 ## Status / open work
 
 **✅ Shipped (built + typechecks):**
-- Schema: [[../tables/ad_avatars]], [[../tables/ad_avatar_proposals]], [[../tables/ad_campaigns]], [[../tables/ad_videos]], [[../tables/ad_jobs]], [[../tables/product_ad_angles]] + new columns (`product_variants.isolated_image_url`/`physical_dimensions`, `products.physical_dimensions`, `workspaces.higgsfield_*_encrypted`/`ad_tool_enabled`/`ad_tool_settings`).
+- Schema: [[../tables/ad_avatars]], [[../tables/ad_avatar_proposals]], [[../tables/ad_avatar_candidates]], [[../tables/ad_campaigns]], [[../tables/ad_videos]], [[../tables/ad_jobs]], [[../tables/product_ad_angles]] + new columns (`product_variants.isolated_image_url`/`physical_dimensions`, `products.physical_dimensions`, `demographics_snapshots.archetype_tuples`, `workspaces.higgsfield_*_encrypted`/`ad_tool_enabled`/`ad_tool_settings`).
+- **Photo-free avatar creation:** demographic proposals (5) → four-attribute (gender/age/health/ethnicity) Soul text-to-image face generation → **saved face library** ([[../tables/ad_avatar_candidates]]) persisting every generation for reuse → pick → mint character. Upload is an optional fallback. APIs: `POST/GET/DELETE /api/ads/avatars/candidates`; `POST /api/ads/avatars` accepts `candidateId`. The builder's avatar step offers both pick-from-library and "generate from buyer demographics".
 - Libraries: `ad-angles`, `ad-script`, `ad-validator`, `ad-render`, `ad-tool-config`, `ad-avatar-proposals`, `ad-transcribe`, `ad-storage`, `higgsfield`.
 - APIs: `/api/ads/*` (campaigns, avatars, angles, proposals, validate, hero/audio/talking-head/render) + `/api/workspaces/{id}/ad-tool-settings` + product dimensions / variant isolated-image.
 - UI: builder wizard + avatars + proposals + angle library + library + settings + storefront-product asset cards + Higgsfield integration card.
@@ -134,8 +139,10 @@ Flow: resolve the product's buyer cohort (link-group deduped) → top archetypes
 - Phase 2: 4 archetype proposals from the joint four-field tuple; `demographic_basis` clean — no `health_priorities`/`buyer_type`/geo (`scripts/generate-amazing-coffee-proposals.ts`).
 - Validator gate tests pass (`scripts/test-ad-validator.ts`): rejects "safe" + review-only scripts, accepts anchored DR scripts.
 
+- **Migration 5** `20260604140000_ad_tool_archetype_cache.sql` (per-product joint-archetype write-through cache on `demographics_snapshots.archetype_tuples`) + **Migration 6** `20260604150000_ad_avatar_candidates.sql` (saved face library) shipped. `ad-avatar-proposals.ts` degrades gracefully without the cache (always live-computes, cache write is best-effort).
+- The saved-face library persists every Soul text-to-image generation in [[../tables/ad_avatar_candidates]] for reuse — the two unpicked faces (and any faces from abandoned sessions) stay available instead of orphaning + re-burning credits.
+
 **⏳ Open:**
-- **Migration 5** `20260604140000_ad_tool_archetype_cache.sql` (per-product joint-archetype write-through cache on `demographics_snapshots.archetype_tuples`) is written + in the apply script but **not yet applied** — re-run `npx tsx scripts/apply-ad-tool-migration.ts` (idempotent). `ad-avatar-proposals.ts` degrades gracefully without it (always live-computes, cache write is best-effort).
 - Needs live **Higgsfield + OpenAI** credentials to run end-to-end (no creds wired yet; Higgsfield endpoint shapes follow published docs — verify against live API). Higgsfield is per-workspace via Settings → Integrations.
 - Run `npm i remotion @remotion/bundler @remotion/renderer @remotion/cli` before any video render — `renderAdFormat` throws `remotion_not_installed` until then.
 - **No workspace has `ad_tool_enabled=true`** yet — flip per-workspace via SQL after Dylan reviews the first ad on `/dashboard/marketing/ads`.
@@ -152,7 +159,8 @@ Verification scripts: `scripts/test-ad-validator.ts`, `scripts/generate-amazing-
 | `src/lib/ad-angles.ts` | Tier hydration + Opus angle generation + validation |
 | `src/lib/ad-script.ts` | HOOK/BODY/CTA script generator + 3× retry |
 | `src/lib/ad-validator.ts` | Direct-response refuse-to-ship gate (angle + script) |
-| `src/lib/ad-avatar-proposals.ts` | Demographic archetype proposals (read-only) |
+| `src/lib/ad-avatar-proposals.ts` | Demographic archetype proposals (read-only) + write-through archetype cache (5 default) |
+| `src/app/api/ads/avatars/candidates/route.ts` | Generate/list/delete saved avatar faces (Soul text-to-image → [[../tables/ad_avatar_candidates]]) |
 | `src/lib/ad-render.ts` | Caption grouping, credibility, cut plan, safe-zone, Remotion invocation |
 | `src/lib/ad-transcribe.ts` | Whisper word-level transcription |
 | `src/lib/ad-storage.ts` | Private `ad-tool` bucket upload + signed URLs |
@@ -167,4 +175,4 @@ Verification scripts: `scripts/test-ad-validator.ts`, `scripts/generate-amazing-
 
 ## Related
 
-[[demographic-enrichment]] · [[product-intelligence]] · [[../tables/product_ad_angles]] · [[../tables/ad_campaigns]] · [[../tables/ad_videos]] · [[../tables/ad_jobs]] · [[../tables/ad_avatars]] · [[../tables/ad_avatar_proposals]] · [[../integrations/higgsfield]] · [[../integrations/openai]] · [[../libraries/ad-angles]] · [[../libraries/ad-validator]] · [[../libraries/ad-render]] · [[../inngest/ad-tool]] · [[../dashboard/marketing__ads]] · [[../dashboard/marketing__ads__new]] · [[../dashboard/marketing__ads__avatars]] · [[../dashboard/settings__ad-tool]]
+[[demographic-enrichment]] · [[product-intelligence]] · [[../tables/product_ad_angles]] · [[../tables/ad_campaigns]] · [[../tables/ad_videos]] · [[../tables/ad_jobs]] · [[../tables/ad_avatars]] · [[../tables/ad_avatar_proposals]] · [[../tables/ad_avatar_candidates]] · [[../integrations/higgsfield]] · [[../integrations/openai]] · [[../libraries/ad-angles]] · [[../libraries/ad-validator]] · [[../libraries/ad-render]] · [[../inngest/ad-tool]] · [[../dashboard/marketing__ads]] · [[../dashboard/marketing__ads__new]] · [[../dashboard/marketing__ads__avatars]] · [[../dashboard/settings__ad-tool]]

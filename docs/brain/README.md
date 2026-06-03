@@ -6,7 +6,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 
 | Folder | Contents | Count |
 |---|---|---|
-| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 145 |
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 146 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 52 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 14 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 183 |
@@ -213,6 +213,7 @@ Five seconds of probing beats an hour of "why is my filter empty."
 ### Ad tool
 
 - [[tables/product_ad_angles]] — Generated ad angles per product (hook × Life Force 8 slot, anchored to a verbatim lead benefit). Written by `src/lib/ad-angles.ts`.
+- [[tables/ad_avatar_candidates]] — Saved avatar-FACE library: every Soul text-to-image face generated from the four attributes (gender/age/health/ethnicity), persisted + reusable so the operator never re-spends Soul credits. Written by `src/app/api/ads/avatars/candidates/route.ts`.
 - [[tables/ad_avatars]] — Confirmed AI spokesperson characters (Higgsfield). Max 10 per workspace; promoted from `ad_avatar_proposals`.
 - [[tables/ad_avatar_proposals]] — AI-proposed spokesperson archetypes grounded in a demographic snapshot. Written by `src/lib/ad-avatar-proposals.ts`.
 - [[tables/ad_campaigns]] — A single ad concept: product × variant × angle × avatar, plus script + render settings. Fans out into 4 `ad_videos`.

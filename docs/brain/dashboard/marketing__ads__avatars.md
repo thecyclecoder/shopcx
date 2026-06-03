@@ -16,15 +16,18 @@ The avatar manager. Split layout: **Proposals** (top — demographic-driven arch
 
 ## Sub-routes
 
-- `new/` → avatar create: upload 1-5 reference photos + name → `createCharacter` (40cr / $2.50). Reachable from a confirmed proposal (prefilled) or from scratch.
-- `proposals/new/` → operator-initiated "Suggest avatars for product X" form → `generateAvatarProposals` (Opus-only, no Higgsfield spend).
+- `new/` → avatar create. **Photo-free by default:** pick a confirmed proposal → set the four controls (**gender, age, health level, ethnicity** — gender + age pre-filled from the archetype tuple) → **"Generate 3 faces"** (Soul text-to-image, ~3cr each) → every generated face is saved to the reusable library ([[../tables/ad_avatar_candidates]]) → pick one + name → **Create** mints the 40cr / $2.50 character. The screen lists the existing face library first (deletable) so the operator reuses a look instead of regenerating. Uploading 1-5 reference photos is now an **optional fallback**. Reachable from a confirmed proposal (prefilled) or from scratch.
+- `proposals/new/` → operator-initiated "Suggest avatars for product X" form → `generateAvatarProposals` (Opus-only, no Higgsfield spend; default **5** archetypes).
 
 ## API endpoints called
 
 - `GET /api/ads/avatars` — active avatar list
-- `POST /api/ads/avatars` — create avatar (calls `createCharacter`; sets the proposal's `confirmed_avatar_id` when `proposalId` given)
+- `POST /api/ads/avatars` — create avatar (calls `createCharacter`; accepts `candidateId` to tag the chosen face `used` + link `used_avatar_id`; sets the proposal's `confirmed_avatar_id` when `proposalId` given). **40-credit character minted only here, on Create.**
 - `PATCH /api/ads/avatars/{id}` — archive / rename
-- `POST /api/ads/avatars/upload` — upload reference photos to the private bucket
+- `POST /api/ads/avatars/candidates` — generate N faces from the four attributes via Soul text-to-image + save each to the library
+- `GET /api/ads/avatars/candidates` — list the saved face library (re-signed URLs, excludes `discarded`)
+- `DELETE /api/ads/avatars/candidates?id=…` — delete a saved face (row + storage object)
+- `POST /api/ads/avatars/upload` — upload reference photos to the private bucket (optional fallback path)
 - `GET /api/ads/proposals` — proposal list
 - `POST /api/ads/proposals` — generate proposals for a product (`generateAvatarProposals`)
 - `PATCH /api/ads/proposals/{id}` — confirm / reject a proposal
@@ -41,7 +44,7 @@ Owner / admin can create / archive. Other roles can view the list.
 
 ## Related
 
-[[../lifecycles/ad-render]] · [[../lifecycles/demographic-enrichment]] · [[../tables/ad_avatars]] · [[../tables/ad_avatar_proposals]] · [[../integrations/higgsfield]] · [[../recipes/create-avatar]]
+[[../lifecycles/ad-render]] · [[../lifecycles/demographic-enrichment]] · [[../tables/ad_avatars]] · [[../tables/ad_avatar_proposals]] · [[../tables/ad_avatar_candidates]] · [[../integrations/higgsfield]] · [[../recipes/create-avatar]]
 
 ---
 

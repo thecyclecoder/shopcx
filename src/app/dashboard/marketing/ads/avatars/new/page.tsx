@@ -26,6 +26,16 @@ interface Proposal {
   products?: { title?: string } | null;
 }
 
+interface LibraryFace {
+  id: string;
+  url: string;
+  status?: string;
+  gender?: string;
+  age_range?: string;
+  health_level?: string;
+  ethnicity?: string;
+}
+
 const AGE_LABELS: Record<string, string> = {
   under_25: "Under 25",
   "25-34": "25–34",
@@ -50,9 +60,9 @@ export default function NewAvatarPage() {
   const [healthLevel, setHealthLevel] = useState<string>("fit");
   const [ethnicity, setEthnicity] = useState<string>("auto");
 
-  // Generated candidates + selection.
-  const [candidates, setCandidates] = useState<string[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
+  // The persistent face library + selection.
+  const [library, setLibrary] = useState<LibraryFace[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
 
   // Manual-upload fallback.
@@ -62,6 +72,13 @@ export default function NewAvatarPage() {
 
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const loadLibrary = useCallback(async () => {
+    const res = await fetch(`/api/ads/avatars/candidates?workspaceId=${workspace.id}`);
+    if (!res.ok) return;
+    const json = await res.json();
+    setLibrary(json.candidates || []);
+  }, [workspace.id]);
 
   const loadProposal = useCallback(async () => {
     if (!proposalId) return;
@@ -80,13 +97,12 @@ export default function NewAvatarPage() {
 
   useEffect(() => {
     loadProposal();
-  }, [loadProposal]);
+    loadLibrary();
+  }, [loadProposal, loadLibrary]);
 
   async function generateFaces() {
     setGenerating(true);
     setError(null);
-    setCandidates([]);
-    setSelected(null);
     try {
       const res = await fetch("/api/ads/avatars/candidates", {
         method: "POST",
@@ -111,12 +127,21 @@ export default function NewAvatarPage() {
         );
         return;
       }
-      setCandidates((json.candidates || []).map((c: { url: string }) => c.url));
+      // New faces are saved to the library; refresh + auto-select the first.
+      const fresh: { id: string }[] = json.candidates || [];
+      await loadLibrary();
+      if (fresh[0]) setSelectedId(fresh[0].id);
     } catch {
       setError("Face generation failed.");
     } finally {
       setGenerating(false);
     }
+  }
+
+  async function deleteFace(id: string) {
+    setLibrary((prev) => prev.filter((f) => f.id !== id));
+    if (selectedId === id) setSelectedId(null);
+    await fetch(`/api/ads/avatars/candidates?workspaceId=${workspace.id}&id=${id}`, { method: "DELETE" });
   }
 
   async function handleFiles(files: FileList | null) {
@@ -139,18 +164,20 @@ export default function NewAvatarPage() {
       uploaded.push(json.url);
     }
     setUploadUrls((prev) => [...prev, ...uploaded]);
-    setSelected(null);
+    setSelectedId(null);
     setUploading(false);
   }
 
   async function createAvatar() {
-    const imageUrls = showUpload && uploadUrls.length ? uploadUrls : selected ? [selected] : [];
+    const usingUpload = showUpload && uploadUrls.length > 0;
+    const selectedFace = library.find((f) => f.id === selectedId);
+    const imageUrls = usingUpload ? uploadUrls : selectedFace ? [selectedFace.url] : [];
     if (!name.trim()) {
       setError("Please enter a name.");
       return;
     }
     if (imageUrls.length === 0) {
-      setError("Generate and select a face (or upload a photo) first.");
+      setError("Pick a face from your library (or upload a photo) first.");
       return;
     }
     setCreating(true);
@@ -163,6 +190,7 @@ export default function NewAvatarPage() {
         name: name.trim(),
         imageUrls,
         proposalId: proposalId ?? undefined,
+        candidateId: usingUpload ? undefined : selectedId ?? undefined,
       }),
     });
     const json = await res.json();
@@ -179,7 +207,7 @@ export default function NewAvatarPage() {
   }
 
   const brief = proposal?.archetype_brief;
-  const canCreate = !!name.trim() && ((showUpload && uploadUrls.length > 0) || (!showUpload && !!selected));
+  const canCreate = !!name.trim() && ((showUpload && uploadUrls.length > 0) || (!showUpload && !!selectedId));
 
   const selectClass =
     "mt-1 w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100";
@@ -189,8 +217,8 @@ export default function NewAvatarPage() {
       <div>
         <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">New avatar</h1>
         <p className="text-sm text-zinc-500 dark:text-zinc-400">
-          Set the look, generate 3 faces, and pick one — no photos needed. Gender and age are pre-filled
-          from your buyer demographics.
+          Generate faces from your buyer demographics, pick one from your library, and name it — no
+          photos needed. Every face you generate is saved to your library.
         </p>
       </div>
 
@@ -205,7 +233,7 @@ export default function NewAvatarPage() {
         </div>
       )}
 
-      {/* Four controls */}
+      {/* Four controls + generate */}
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="grid grid-cols-2 gap-4">
           <div>
@@ -247,36 +275,56 @@ export default function NewAvatarPage() {
           disabled={generating}
           className="mt-4 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
         >
-          {generating ? "Generating faces…" : candidates.length ? "Regenerate 3 faces" : "Generate 3 faces"}
+          {generating ? "Generating faces…" : "Generate 3 faces"}
         </button>
-        <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">≈ 9 Higgsfield credits ($0.56) for 3 faces.</p>
+        <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">≈ 9 Higgsfield credits ($0.56) for 3 faces — saved to your library below.</p>
       </div>
 
-      {/* Candidates */}
-      {candidates.length > 0 && (
-        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200">Pick a face</label>
-          <div className="mt-3 grid grid-cols-3 gap-3">
-            {candidates.map((url) => (
-              <button
-                key={url}
-                onClick={() => setSelected(url)}
-                className={`relative overflow-hidden rounded-lg border-2 transition-colors ${
-                  selected === url ? "border-indigo-500 ring-2 ring-indigo-500/40" : "border-transparent hover:border-zinc-300"
-                }`}
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={url} alt="" className="aspect-[3/4] w-full object-cover" />
-                {selected === url && (
-                  <span className="absolute right-1 top-1 rounded-full bg-indigo-600 px-1.5 text-xs text-white">✓</span>
-                )}
-              </button>
+      {/* Library */}
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex items-center justify-between">
+          <label className="text-sm font-medium text-zinc-700 dark:text-zinc-200">
+            Your avatar library {library.length > 0 && <span className="text-zinc-400">({library.length})</span>}
+          </label>
+        </div>
+        {library.length === 0 ? (
+          <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+            No saved faces yet — generate some above. They&apos;ll be saved here so you never have to
+            regenerate (or burn credits) for a look you already made.
+          </p>
+        ) : (
+          <div className="mt-3 grid grid-cols-3 gap-3 sm:grid-cols-4">
+            {library.map((face) => (
+              <div key={face.id} className="group relative">
+                <button
+                  onClick={() => setSelectedId(face.id)}
+                  className={`block w-full overflow-hidden rounded-lg border-2 transition-colors ${
+                    selectedId === face.id ? "border-indigo-500 ring-2 ring-indigo-500/40" : "border-transparent hover:border-zinc-300"
+                  }`}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={face.url} alt="" className="aspect-[3/4] w-full object-cover" />
+                  {selectedId === face.id && (
+                    <span className="absolute left-1 top-1 rounded-full bg-indigo-600 px-1.5 text-xs text-white">✓</span>
+                  )}
+                  {face.status === "used" && (
+                    <span className="absolute bottom-1 left-1 rounded bg-black/60 px-1 text-[10px] text-white">used</span>
+                  )}
+                </button>
+                <button
+                  onClick={() => deleteFace(face.id)}
+                  title="Delete this face"
+                  className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-900 text-xs text-white opacity-0 transition-opacity group-hover:opacity-100"
+                >
+                  ×
+                </button>
+              </div>
             ))}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {/* Name + create */}
+      {/* Name */}
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
         <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-200">Name</label>
         <input
@@ -313,7 +361,7 @@ export default function NewAvatarPage() {
                 ))}
               </div>
             )}
-            <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Uploaded photos take priority over generated faces.</p>
+            <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Uploaded photos take priority over a selected library face.</p>
           </div>
         )}
       </div>
