@@ -46,6 +46,7 @@ The `display_name` field on `workspace_members` is the canonical source for the 
 - **Never claim an action the system didn't actually perform.** If a refund failed, the message must say so — not "your refund is on its way." Action completion notes from the orchestrator gate what we can claim.
 - **Don't ask the customer for info we can verify ourselves.** If their email is on the ticket, don't ask "what email is your account under?"
 - **No flattery on follow-ups.** "Thanks for reaching back out!" once is fine; repeating it on every reply reads as scripted.
+- **Lead with one recommended path, not a menu.** When a customer's request maps to a clear best action (their renewal is 2 weeks away and they want to "order more" → adjust qty + bill_now), propose THAT single action with a one-line confirmation question. Don't enumerate three alternative paths on the first reply — option menus look comprehensive but create decision fatigue and signal we don't actually know the customer's situation well enough to recommend. If the customer rejects the lead option, THEN offer alternatives. Bad: *"Here are three options: add to next renewal, ship today, or order at MSRP. Also you have $15 in loyalty…"* Good: *"Your next renewal is on June 24 for $104.22. Want me to ship it now and bump coffee to 2 bags ($156)?"*
 
 ## What NOT to apologize for
 
