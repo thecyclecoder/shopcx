@@ -145,11 +145,21 @@ Flow: resolve the product's buyer cohort (link-group deduped) → top **5** arch
 - **Migration 5** `20260604140000_ad_tool_archetype_cache.sql` (per-product joint-archetype write-through cache on `demographics_snapshots.archetype_tuples`) + **Migration 6** `20260604150000_ad_avatar_candidates.sql` (saved face library) shipped. `ad-avatar-proposals.ts` degrades gracefully without the cache (always live-computes, cache write is best-effort).
 - The saved-face library persists every Soul text-to-image generation in [[../tables/ad_avatar_candidates]] for reuse — the two unpicked faces (and any faces from abandoned sessions) stay available instead of orphaning + re-burning credits.
 
-**⏳ Open:**
-- Needs live **Higgsfield + OpenAI** credentials to run end-to-end (no creds wired yet; Higgsfield endpoint shapes follow published docs — verify against live API). Higgsfield is per-workspace via Settings → Integrations.
-- Run `npm i remotion @remotion/bundler @remotion/renderer @remotion/cli` before any video render — `renderAdFormat` throws `remotion_not_installed` until then.
+**✅ Proven model stack (end-to-end, 2026-06-03 — Dylan-approved "perfect" 21.5s ad):**
+This is the locked-in creative pipeline, confirmed by building a real Amazing Coffee ad:
+- **Face** — Higgsfield **Soul** text-to-image (`generateSoulPortrait`), four-attribute, photo-free.
+- **Holding-product shot** — Gemini **Nano Banana Pro** (`gemini-3-pro-image`, `generateNanoBananaProCombine` in [[../libraries/gemini]]): face + product isolated image → identity-locked composite, sharp packaging text, correct anatomy. Replaced Higgsfield Seedream (six fingers / blurry text) and Soul-combine.
+- **Talking head** — Gemini **Veo 3.1 Fast** (`veo-3.1-fast-generate-preview`, `generateVeoVideo`). Veo's native audio (real ambience/voice) beats polished TTS. **Veo 3.1 (non-fast) is Tier-1 capped at 10 req/day** — Fast has separate quota and was the unblock. Prompt each ~8s segment with "say ONLY these exact words" to suppress hallucinated filler.
+- **Audio architecture** — ONE continuous VO spine = the talking segments' own audio. B-roll laid over the visual is **muted or ASMR-ducked low** (never its own music). One low Gemini **Lyria** music bed under everything.
+- **Stitch + trim** — multiple ~8s Veo segments (different script each) cut at the last-word timing (Whisper) to kill Veo's end-of-clip dead air.
+- **B-roll** — Gemini Veo Fast or Higgsfield **DoP** image-to-video; prompt for ASMR (cracks/pours/splashes).
+- **Hormozi captions** — Whisper word-timing, one-at-a-time (each caption's `end` = next caption's `start`, no stacking), Anton font, emoji stickers. `proofread()` drops Veo filler words; `NUMWORDS` keeps numbers (twelve↔12); **"40% off" renders correctly even when Whisper emits an empty word for "percent"** (% attached to the number's beat from the script). Reference composition: `remotion/ExampleAd.tsx` + `_render-example.ts` (local dev driver, not committed).
+
+**⏳ Open (to run the proven stack from the app, not one-off scripts):**
+- **Gemini settings card** — add a Google AI Studio key card (Settings → Integrations) writing `workspaces.gemini_api_key_encrypted` (migration `20260604170000` adds the column; `getGeminiCredentials` already falls back to `env GEMINI_API_KEY`). Use `probeGeminiAuth` for the Verify button.
+- **Wire Veo into the production Inngest talking-head** — `src/lib/inngest/ad-tool.ts` talking-head step still calls Higgsfield Speak; swap to `generateVeoVideo` (Veo 3.1 Fast) + multi-segment stitch + Whisper trim.
+- **Generalize the render** — production uses `remotion/AdComposition.tsx`; fold `ExampleAd`'s VO-spine + muted-broll + proofread/% caption logic into it (or replace) so the wizard renders the proven layout.
 - **No workspace has `ad_tool_enabled=true`** yet — flip per-workspace via SQL after Dylan reviews the first ad on `/dashboard/marketing/ads`.
-- TTS vendor (Higgsfield Audio vs ElevenLabs) + Remotion runtime (Inngest serverless vs AWS Lambda) still to be settled under load.
 
 Verification scripts: `scripts/test-ad-validator.ts`, `scripts/generate-amazing-coffee-angles.ts`, `scripts/generate-amazing-coffee-proposals.ts`, `scripts/test-higgsfield-auth.ts`.
 
