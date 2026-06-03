@@ -28,42 +28,6 @@ Concrete, scoped, high-ROI work. Pick any one and promote to a full spec.
 
 ---
 
-## Ready to spec — UX / product
-
-### Custom checkout — alert on existing active subscription
-**Status:** ⏳ Roadmap, blocked on custom storefront landing.
-- Hidden-parallel-sub pattern: same customer, same product, multiple parallel subs (Jennifer Santiago = 2 Superfood Tabs subs for 7 months; Roxana Magana = 3 parallel Amazing Coffee subs).
-- At checkout submit: lookup active subs containing the cart variant; if any, modal: *"You already have an active subscription with this — add to it, or create a new one?"* Default to add.
-- Track choice so we can measure how often a real second-parallel-sub is intentional.
-- Originally in `project_checkout_dedup_subs.md`. Depends on the custom storefront work.
-
-### SMS phone preview component
-**Status:** ⏳ UI component, scope clear.
-- iPhone-style preview pane on the SMS campaign builder showing how the message renders.
-- Originally in `project_sms_phone_preview.md`.
-
-### 5 SMS buyer archetypes + replenishment-ratio framework
-**Status:** ⏳ Framework drafted.
-- Five archetypes (committed / new / cautious / value / lapsed) × per-product replenishment ratios drive campaign targeting.
-- Originally in `project_segment_archetypes.md`.
-
-### Predicted-purchase segments (Klaviyo event history)
-**Status:** ⏳ Drafted.
-- Use Klaviyo event history (placed-order frequency + product affinity) → "likely to repurchase X in the next 30d" segments.
-- Originally in `project_predicted_purchase_segments.md`.
-
-### Return-request auto-playbook
-**Status:** ⏳ Roadmap.
-- Auto-play return requests through the playbook executor (vs the current handler).
-- Originally in `project_return_request_playbook.md`.
-
-### Shipping-issues Opus chat
-**Status:** ⏳ Deferred (low priority).
-- Opus chat for the "shipping issues" cancel reason path — give customers a real conversation instead of a static remedy.
-- Originally in `project_shipping_issues_ai_chat.md`.
-
----
-
 ## Ready to spec — analytics
 
 ### Storefront — own the checkout (#1 priority per memory)
@@ -131,6 +95,7 @@ These have no work attached — they're operational notes. Kept here because the
 - ✅ **Auto-grant detection removed** (2026-06-03) — three stubbed triggers (`cancelled_but_charged` / `duplicate_charge` / `never_delivered`) were never wired up. Per Dylan: `never_delivered` is handled by the replacement flow; the other two should not happen and Sonnet escalates them directly when they do. Stripped the `checkAutoGrant` function, the auto-grant for-loop in the playbook executor, the auto-grant editor in `/dashboard/settings/playbooks`, the simulate-route auto-grant block, and the AUTO label in the playbook-fix logger. Schema columns + 1 dormant DB row retained (executor filter `!e.auto_grant` is a defensive backstop).
 - ✅ **Meta ad-comment attribution** — shipped. Matches `creative.effective_object_story_id` (FB) / `effective_instagram_media_id` (IG) on adcreatives against the webhook's `post.id` / `media.id` so the bimodal ad-vs-organic webhook shape no longer breaks attribution.
 - ✅ **Klaviyo 180d engagement backfill** — shipped via local script. Engagement events from Klaviyo's history backfilled into our DB; verify current state via [[../integrations/klaviyo]] before extending.
+- ✅ **UX/product bucket cleared** (all 6 items shipped or superseded): (1) parallel-sub alert at checkout — superseded by OTP-then-add-to-sub work in a separate project; (2) SMS phone preview component — shipped (`src/components/sms-phone-preview.tsx`); (3) SMS buyer archetypes + replenishment ratio — shipped; (4) predicted-purchase segments — shipped; (5) return-request auto-playbook — shipped via the refund playbook; (6) shipping-issues Opus chat — shipped.
 
 ---
 
