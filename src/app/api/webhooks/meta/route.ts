@@ -213,21 +213,26 @@ export async function POST(request: Request) {
             },
           });
         } else {
-          // Meta DMs arrive with just a PSID — no name, no email. Call
-          // the Graph API to fetch first/last name so the ticket subject
-          // reads "DM from Jane Doe" instead of "DM from 3470392026374637".
-          // Email is NEVER returned by Meta's Messenger API, so the best
-          // we can do beyond name is a fuzzy match against existing
-          // customers — the agent then has a starting point.
+          // Meta DMs arrive with just a PSID — no name, no email.
+          //
+          // Customer resolution policy for meta_dm:
+          //   1. Confirmed binding in meta_sender_customer_links → use it.
+          //   2. Otherwise leave customer_id = NULL. The orchestrator
+          //      asks for email or order number when the intent is
+          //      account-related, and auto-link-customer-from-message
+          //      proposes the link on the next inbound.
+          //
+          // DO NOT fuzzy-match by first+last name here. Common names
+          // (6 Susan Smiths in the customers table) make name-only
+          // matching unsafe for a direct conversation — name fuzzy
+          // matching is a social-comments heuristic, not a DM one.
+          //
+          // We still call Graph for the name so the ticket subject reads
+          // "DM from Jane Doe" instead of "DM from 3470392026374637".
           let senderFirstName: string | null = null;
           let senderLastName: string | null = null;
           let matchedCustomerId: string | null = null;
 
-          // 1. PREFERRED: confirmed link from a prior session. An agent
-          //    (or the customer-link-confirmation flow) may have already
-          //    bound this meta_sender_id → customer_id. That binding is
-          //    explicit and stronger than any fuzzy name match — always
-          //    check it first.
           const { data: confirmedLink } = await admin
             .from("meta_sender_customer_links")
             .select("customer_id, meta_sender_name")
@@ -236,23 +241,16 @@ export async function POST(request: Request) {
             .maybeSingle();
           if (confirmedLink?.customer_id) {
             matchedCustomerId = confirmedLink.customer_id;
-            // Pull the name from the link so the subject still reads
-            // "DM from {Name}" even if Graph enrichment below fails.
             const linkName = (confirmedLink.meta_sender_name || "").trim().split(/\s+/);
             if (linkName.length >= 1) senderFirstName = linkName[0] || null;
             if (linkName.length >= 2) senderLastName = linkName.slice(1).join(" ") || null;
           }
 
-          // 2. FALLBACK: Graph API enrichment + fuzzy name match.
-          //    Skip the customer-match part if we already have a
-          //    confirmed link; still call the API for the name so the
-          //    subject reads correctly (and to refresh the link row's
-          //    meta_sender_name if needed). API failure is non-fatal.
-          //
-          //    PSIDs are PAGE-SCOPED — only the page that received the
-          //    DM can resolve them. The workspaces.meta_page_access_token_encrypted
-          //    column is stale/wrong for multi-page workspaces; always
-          //    pull the recipient page's token from meta_pages.
+          // Graph API name fetch (for subject). PSIDs are PAGE-SCOPED —
+          // only the recipient page's token can resolve them. Pull from
+          // meta_pages keyed by platformPageId (the page the DM was sent
+          // to). Legacy single-page workspaces fall back to the
+          // workspace-level token.
           try {
             const { data: pageRow } = await admin
               .from("meta_pages")
@@ -261,8 +259,6 @@ export async function POST(request: Request) {
               .eq("meta_page_id", platformPageId)
               .maybeSingle();
             let enc: string | null = (pageRow?.access_token_encrypted as string | null) || null;
-            // Legacy fallback: workspaces.meta_page_access_token_encrypted
-            // for single-page setups that never migrated to meta_pages.
             if (!enc) {
               const { data: wsRow } = await admin
                 .from("workspaces")
@@ -277,20 +273,6 @@ export async function POST(request: Request) {
               if (profile) {
                 senderFirstName = profile.first_name || senderFirstName;
                 senderLastName = profile.last_name || senderLastName;
-                // Only fuzzy-match if no confirmed link already resolved it.
-                if (!matchedCustomerId && senderFirstName && senderLastName) {
-                  // Single hit only — we never auto-link on ambiguous
-                  // matches. If multiple customers share the name, the
-                  // agent will need to resolve.
-                  const { data: matches } = await admin
-                    .from("customers")
-                    .select("id")
-                    .eq("workspace_id", workspaceId)
-                    .ilike("first_name", senderFirstName)
-                    .ilike("last_name", senderLastName)
-                    .limit(2);
-                  if (matches && matches.length === 1) matchedCustomerId = matches[0].id;
-                }
               }
             }
           } catch (err) {
