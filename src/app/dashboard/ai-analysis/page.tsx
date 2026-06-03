@@ -44,18 +44,6 @@ interface DecisionRow {
   } | null;
 }
 
-interface PendingRow {
-  id: string;
-  title: string;
-  content: string;
-  category: string;
-  proposed_at: string;
-  auto_decision: string;
-  auto_decision_at: string;
-  auto_decision_reason: string;
-  auto_decision_confidence: number;
-  status: string;
-}
 
 function scoreColor(score: number): string {
   if (score >= 8) return "text-emerald-600 dark:text-emerald-400";
@@ -78,7 +66,7 @@ const DECISION_COLORS: Record<string, string> = {
   revise: "bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200",
 };
 
-type Tab = "daily" | "auto" | "pending";
+type Tab = "daily" | "auto";
 
 export default function AIAnalysisPage() {
   const workspace = useWorkspace();
@@ -87,7 +75,6 @@ export default function AIAnalysisPage() {
   const [today, setToday] = useState<TodayData | null>(null);
   const [rollups, setRollups] = useState<DailyRollup[]>([]);
   const [decisions, setDecisions] = useState<DecisionRow[]>([]);
-  const [pending, setPending] = useState<PendingRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -107,11 +94,6 @@ export default function AIAnalysisPage() {
         .then(r => r.ok ? r.json() : null)
         .then(d => { setDecisions(d?.decisions || []); setLoading(false); })
         .catch(() => setLoading(false));
-    } else if (tab === "pending") {
-      fetch(`/api/workspaces/${workspace.id}/sonnet-prompt-decisions?view=pending`)
-        .then(r => r.ok ? r.json() : null)
-        .then(d => { setPending(d?.pending || []); setLoading(false); })
-        .catch(() => setLoading(false));
     }
   }, [workspace.id, tab]);
 
@@ -126,14 +108,9 @@ export default function AIAnalysisPage() {
       if (!r.ok) {
         const j = await r.json().catch(() => ({}));
         alert(`Override failed: ${j.error || r.statusText}`);
-      } else {
-        if (tab === "auto") {
-          const d = await fetch(`/api/workspaces/${workspace.id}/sonnet-prompt-decisions?view=recent`).then(r => r.json());
-          setDecisions(d?.decisions || []);
-        } else if (tab === "pending") {
-          const d = await fetch(`/api/workspaces/${workspace.id}/sonnet-prompt-decisions?view=pending`).then(r => r.json());
-          setPending(d?.pending || []);
-        }
+      } else if (tab === "auto") {
+        const d = await fetch(`/api/workspaces/${workspace.id}/sonnet-prompt-decisions?view=recent`).then(r => r.json());
+        setDecisions(d?.decisions || []);
       }
     } finally {
       setBusyId(null);
@@ -154,7 +131,6 @@ export default function AIAnalysisPage() {
           {[
             { k: "daily", label: "Daily" },
             { k: "auto", label: "Auto-decisions" },
-            { k: "pending", label: "Pending review" },
           ].map(t => (
             <button
               key={t.k}
@@ -321,41 +297,6 @@ export default function AIAnalysisPage() {
         </div>
       )}
 
-      {!loading && tab === "pending" && (
-        <div className="space-y-3">
-          <p className="mb-3 text-xs text-zinc-500">Queue sorted by confidence ascending — least-certain first.</p>
-          {pending.length === 0 ? (
-            <p className="text-sm text-zinc-400">No proposals awaiting human review.</p>
-          ) : pending.map(p => (
-            <div key={p.id} className="rounded-lg border border-amber-200 bg-amber-50/40 p-4 dark:border-amber-900/40 dark:bg-amber-900/10">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${DECISION_COLORS.human_review}`}>human_review</span>
-                <span className="text-xs text-zinc-400">confidence</span>
-                <span className="text-xs text-zinc-600 dark:text-zinc-300">{Math.round((p.auto_decision_confidence || 0) * 100)}%</span>
-                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">{p.category}</span>
-                <span className="ml-auto text-[11px] text-zinc-400">{p.proposed_at ? new Date(p.proposed_at).toLocaleString() : ""}</span>
-              </div>
-              <div className="mt-2 text-sm font-medium text-zinc-900 dark:text-zinc-100">{p.title}</div>
-              <div className="mt-1 text-xs text-zinc-500">{p.content}</div>
-              {p.auto_decision_reason && (
-                <div className="mt-2 text-xs italic text-amber-700 dark:text-amber-400">{p.auto_decision_reason}</div>
-              )}
-              <div className="mt-3 flex gap-2 border-t border-amber-100 pt-3 dark:border-amber-900/40">
-                <button
-                  disabled={busyId === p.id}
-                  onClick={() => override(p.id, "accept")}
-                  className="rounded bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-200 disabled:opacity-40 dark:bg-emerald-900/40 dark:text-emerald-300"
-                >Accept</button>
-                <button
-                  disabled={busyId === p.id}
-                  onClick={() => override(p.id, "reject")}
-                  className="rounded bg-red-100 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-200 disabled:opacity-40 dark:bg-red-900/40 dark:text-red-300"
-                >Reject</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

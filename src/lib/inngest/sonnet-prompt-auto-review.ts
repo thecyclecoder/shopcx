@@ -18,7 +18,15 @@ export const sonnetPromptAutoReviewCron = inngest.createFunction(
     id: "sonnet-prompt-auto-review",
     retries: 1,
     concurrency: [{ limit: 1 }],
-    triggers: [{ cron: "0 11 * * *" }],
+    triggers: [
+      { cron: "0 11 * * *" },
+      // Manual trigger — fire `prompt-learning/auto-review.run` to invoke
+      // out of band (Inngest dashboard "Invoke", or `inngest.send` from
+      // anywhere in the codebase). Used for one-off runs after the
+      // human-review backlog gets cleared so we don't have to wait
+      // for the next 11 UTC tick.
+      { event: "prompt-learning/auto-review.run" },
+    ],
   },
   async ({ step }) => {
     const admin = createAdminClient();

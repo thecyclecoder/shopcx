@@ -24,7 +24,7 @@ DB-driven prompt rules for the Sonnet orchestrator. category: rule/approach/know
 | `proposed_at` | `timestamptz` | ✓ |  |
 | `reviewed_at` | `timestamptz` | ✓ |  |
 | `reviewed_by` | `uuid` | ✓ |  |
-| `auto_decision` | `text` | ✓ | enum: `accept/reject/merge/supersede/human_review/revise`. NULL = not yet auto-reviewed. |
+| `auto_decision` | `text` | ✓ | enum: `accept/reject/merge/supersede/revise`. NULL = not yet auto-reviewed. `human_review` is in the historical enum but the cron never emits it (downgraded to `reject` since 2026-06-03). |
 | `auto_decision_at` | `timestamptz` | ✓ | When the auto-review or override fired |
 | `auto_decision_reason` | `text` | ✓ | Brief reasoning (full per-decision history lives in [[sonnet_prompt_decisions]]) |
 | `auto_decision_model` | `text` | ✓ | Model id, or `manual_override` |
@@ -59,24 +59,24 @@ status='proposed', auto_decision=NULL
    │  sonnet-prompt-auto-review cron @ 11 UTC
    ▼
 ┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐
-│   accept     │   reject     │    merge     │  supersede   │ human_review │
-│              │              │              │              │   / revise   │
+│   accept     │   reject     │    merge     │  supersede   │    revise    │
 ├──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤
 │ status=      │ status=      │ status=      │ status=      │ status=      │
 │ approved     │ rejected     │ rejected     │ approved     │ proposed     │
-│ enabled=true │ enabled=false│ merged_into  │ + old row    │ auto_decision│
-│              │              │ set          │ archived +   │ ='human_     │
-│              │              │              │ superseded_  │  review' or  │
-│              │              │              │ by_id set    │ 'revise'     │
+│ enabled=true │ enabled=false│ merged_into  │ + old row    │ suggested_   │
+│              │              │ set          │ archived +   │ revisions on │
+│              │              │              │ superseded_  │ audit row    │
+│              │              │              │ by_id set    │              │
 └──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
-                                                                    │
-                                                                    ▼
-                                                       /dashboard/ai-analysis
-                                                       Pending review tab
-                                                       Accept / Reject overrides
-                                                       (writes manual_override
-                                                        row to sonnet_prompt_decisions)
+                                      │
+                                      ▼
+                          /dashboard/ai-analysis
+                          Auto-decisions tab
+                          (override → writes manual_override
+                           row to sonnet_prompt_decisions)
 ```
+
+The cron is decisive: no `human_review` outcome. Low confidence (< 0.55) → `reject` and the pattern resurfaces if real. Tentative accept (0.55 ≤ conf < 0.70) → also `reject`. See [[../inngest/sonnet-prompt-auto-review]] for the floors.
 
 Every transition writes an append-only row to [[sonnet_prompt_decisions]] BEFORE mutating this row. See [[../lifecycles/ai-learning]] for the full self-improvement loop.
 

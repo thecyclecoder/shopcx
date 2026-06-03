@@ -4,6 +4,8 @@ How the AI agent gets better at customer service without Dylan approving every r
 
 This page traces the full pipeline end-to-end. Single source of truth for "how does the AI learn from past mistakes?"
 
+> **Update 2026-06-03 — no human queue.** The auto-review is decisive. There is no "pending review" outcome — proposals are accepted, rejected, merged, superseded, or kept-as-proposed-for-revision. Low confidence is rejected (the pattern resurfaces if real); the model is instructed to decide rather than defer.
+
 ## Why this exists
 
 For ~6 months, every proposed sonnet_prompt sat in a `status='proposed'` queue waiting for Dylan to review. The queue grew faster than it cleared. Two outcomes:
@@ -11,7 +13,7 @@ For ~6 months, every proposed sonnet_prompt sat in a `status='proposed'` queue w
 1. **Real wins didn't ship.** A clear rule the AI needed sat for a week before anyone applied it.
 2. **Noise piled up.** Single-ticket one-shot proposals never got pruned and made the queue feel hopeless.
 
-The auto-review introduces a deterministic + audited filter so the queue stays consumable. Phase 3 safety guards (confidence floor, supersede-not-delete, daily cap, per-workspace flag) keep the system reversible.
+The auto-review introduces a deterministic + audited filter so the queue stays consumable. Phase 3 safety guards (REJECT_FLOOR, ACCEPT_FLOOR, supersede-not-delete, daily cap, per-workspace flag) keep the system reversible without ever queuing to a human.
 
 See `docs/brain/specs/prompt-learning.md` for the original spec.
 
@@ -72,20 +74,22 @@ That's the upstream. Until this commit, the queue stopped here.
 | `reject` | Bad idea (violates voice rule, duplicates existing, single-shot) | `status='rejected'`, `enabled=false` |
 | `merge` | Same intent as an existing rule | `merged_into_id` set, `status='rejected'` |
 | `supersede` | Replaces an existing rule (better/clearer/scoped right) | New: `status='approved'`. Old: `enabled=false`, `status='archived'`, `superseded_by_id` → new |
-| `human_review` | Model unsure or forced by safety guards | `status='proposed'`, surface in /dashboard/ai-analysis Pending review |
+| ~~`human_review`~~ | **Removed 2026-06-03.** No human queue. | The model can still emit it, but the safety layer downgrades to `reject`. See "No human queue" below. |
 | `revise` | Direction is right, wording isn't | `status='proposed'`, `suggested_revisions` written to the audit row |
 
 ## Phase 3.5 — safety guards (non-negotiable)
 
 In `applyDecision()` (`src/lib/sonnet-prompt-auto-review.ts`):
 
-- **Confidence floor 0.75.** Any `confidence < 0.75` is forced to `human_review` regardless of decision. `[SAFETY] confidence_floor (...)` is prepended to reasoning.
-- **Daily auto-approval cap.** Default 10 `accept` decisions per workspace per day. Excess go to `human_review`. Configurable via `workspaces.sonnet_auto_review_daily_cap`.
+- **REJECT_FLOOR = 0.55.** Any `confidence < 0.55` is downgraded to `reject` (dropped). The pattern will resurface with more evidence if it's real.
+- **ACCEPT_FLOOR = 0.70.** An `accept` with confidence in [0.55, 0.70) gets downgraded to `reject`. Tentative accepts are not accepts — they're rejects we're being honest about.
+- **No human queue.** If the model emits `human_review`, we override it to `reject`. The system is designed to be decisive; a backlog of "Dylan please look at this" is not a feature. The reasoning is preserved in the audit row so the model's hesitation is still visible.
+- **Daily auto-approval cap.** Default 10 `accept` decisions per workspace per day. Excess get rejected, not queued.
 - **`delete` is rewritten to `supersede`.** The model can't delete an approved prompt — supersede is the only allowed replacement path. Old row stays in place (`enabled=false`, `status='archived`).
 - **Audit BEFORE apply.** [[../tables/sonnet_prompt_decisions]] insert happens first; only on success do we mutate [[../tables/sonnet_prompts]]. If the audit insert fails, the prompt is untouched.
-- **Per-workspace enable flag.** `workspaces.sonnet_auto_review_enabled` (default `false`). Cron skips workspaces with it off. **No workspace has this on at this commit** — flipped per-workspace when ready to go live.
+- **Per-workspace enable flag.** `workspaces.sonnet_auto_review_enabled` (default `false`). Cron skips workspaces with it off.
 
-A safety test (`scripts/test-prompt-auto-review-safety.ts`) verifies all four invariants against the live DB before each push.
+A safety test (`scripts/test-prompt-auto-review-safety.ts`) verifies the never-delete + audit-first invariants against the live DB.
 
 ## Phase 4 — orchestrator picks up the rule
 
@@ -93,10 +97,11 @@ The orchestrator ([[../lifecycles/ai-multi-turn]]) loads `status='approved' AND 
 
 ## Phase 5 — human override
 
-`/dashboard/ai-analysis` has two new tabs:
+`/dashboard/ai-analysis` has one tab:
 
 - **Auto-decisions** — last 50 decisions, color-coded badges, confidence bar, model reasoning, references with hover-why, override buttons (Accept manually / Reject manually / Revert to proposed).
-- **Pending review** — proposals where the AI returned `human_review`, sorted by confidence ascending. Accept / Reject inline.
+
+There is no "Pending review" tab — the cron never queues to a human. If Dylan disagrees with a rejection, he reverts it from the Auto-decisions row.
 
 Every override writes a NEW row in [[../tables/sonnet_prompt_decisions]] with `source='manual_override'`, `performed_by=user.id`, `confidence=1.0`. Append-only: the prior auto-decision history stays intact.
 
@@ -127,8 +132,8 @@ Every override writes a NEW row in [[../tables/sonnet_prompt_decisions]] with `s
                     ┌──────────────────────────────────────┐
                     │  sonnet-prompt-auto-review           │
                     │  → accept / reject / merge /          │
-                    │    supersede / human_review /        │
-                    │    revise (Phase 3 guards)           │
+                    │    supersede / revise                │
+                    │    (Phase 3 guards; no human queue)  │
                     └─────────────────┬────────────────────┘
                                       │
                                       ▼
@@ -175,10 +180,12 @@ The faster this loop runs, the faster the AI converges on workspace-specific voi
 
 **Recent activity:**
 - `91fea5a3` Prompt learning — auto-review of proposed sonnet_prompts (spec shipped)
+- 2026-06-03 — Removed `human_review` as a cron outcome. Replaced single `CONFIDENCE_FLOOR=0.75` with two-tier `REJECT_FLOOR=0.55` + `ACCEPT_FLOOR=0.70`. Updated Opus system prompt to demand decisiveness. First live run: 20 accept / 10 reject / 4 merge / 1 supersede / 0 human_review.
 
 **Open questions:**
 - What's the right per-workspace daily cap for a workspace with ~1000 tickets/day? 10 may be too low or too high — tune after first month of live decisions.
 - Should `revise` decisions auto-create a NEW proposal with the suggested revisions applied, or leave that to a human? Currently stays as `status='proposed'` with the suggestion on the audit row.
+- Should we tighten REJECT_FLOOR / ACCEPT_FLOOR after we see a few weeks of decisions? Reject rate too high → loosen; accept rate too aggressive → raise ACCEPT_FLOOR.
 
 ## Related
 

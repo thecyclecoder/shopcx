@@ -21,7 +21,17 @@ import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
 // ── Constants ──────────────────────────────────────────────────────
-export const CONFIDENCE_FLOOR = 0.75;
+// Below this confidence, we DROP (reject) the proposal — not bother
+// Dylan with it. The agent has a strong opinion that low-confidence
+// proposals shouldn't accumulate in a human queue; they should just
+// die. If the underlying pattern is real, it'll resurface with more
+// evidence next time and clear the bar.
+export const REJECT_FLOOR = 0.55;
+// Above this confidence, an accept lands as approved. Below this
+// (but above REJECT_FLOOR), the model's recommendation is trusted
+// EXCEPT accepts get downgraded to reject — we want decisive
+// rejects, never tentative accepts.
+export const ACCEPT_FLOOR = 0.70;
 export const DEFAULT_DAILY_CAP = 10;
 export const REVIEW_MODEL = OPUS_MODEL;
 const TOP_K_SIMILAR_PROMPTS = 8;
@@ -180,20 +190,21 @@ export async function loadReviewInputs(
 
 // ── Build the system + user prompts ────────────────────────────────
 export function buildSystemPrompt(): string {
-  return `You are reviewing a proposed sonnet_prompt rule for a customer-service AI agent. Your job: decide whether the proposal should be accepted, rejected, merged with an existing rule, supersede an existing rule, sent to human_review, or returned with suggested revisions.
+  return `You are reviewing a proposed sonnet_prompt rule for a customer-service AI agent. Your job: decide whether the proposal should be accepted, rejected, merged with an existing rule, supersede an existing rule, or returned with suggested revisions. **You must decide.** There is no human-review queue — if you're not confident, REJECT. The pattern will resurface with more evidence next time if it's real.
 
-You must honor four hard rules:
+Hard rules:
 
 1. **Never recommend deleting an approved prompt.** If the proposal contradicts or replaces an existing approved rule, the correct decision is "supersede" with the supersede_target_id set, NOT delete. The old rule will be disabled but kept.
-2. **Decisions are LIVE on enabled workspaces.** Only confidence ≥ 0.75 will auto-apply; below that, the system forces human_review regardless of your recommendation. Be honest about uncertainty — when in doubt, lower the confidence.
-3. **Voice rules from docs/brain/customer-voice.md govern tone.** If the proposal violates a voice rule (e.g. suggests re-greeting on follow-ups, suggests apologizing for charges customers signed up for, suggests revealing the AI persona), reject it with a reference to the relevant voice rule.
-4. **Source tickets are evidence, not law.** A pattern across 3+ tickets is enough to justify a rule. A single ticket is not — recommend human_review for one-shot proposals.
+2. **No human queue.** Don't punt. The four real decisions are: accept (≥0.70 confidence), reject (drop it), merge (combine into an existing rule), supersede (replace an existing rule). If the proposal has merit but isn't ready, REJECT — the upstream pipeline will resurface it with more evidence later.
+3. **Voice rules from docs/brain/customer-voice.md govern tone.** If the proposal violates a voice rule (e.g. suggests re-greeting on follow-ups, apologizing for charges customers signed up for, revealing the AI persona), reject it with a reference to the relevant voice rule.
+4. **Source tickets are evidence, but absence isn't disqualifying.** A pattern across 3+ tickets strongly supports a rule. A proposal with zero source tickets attached is still a fair candidate IF the rule articulates a clear principle aligned with existing voice/operational rules and doesn't conflict with anything. Don't reject solely on "single ticket" or "no tickets" — reject if the rule itself is weak, redundant, or wrong.
+5. **Be decisive.** Tentative accepts get auto-downgraded to reject. If you want this to land, your confidence should be ≥0.70. If it's lower than that, you're really saying "reject" — just say it.
 
 Output JSON exactly matching this schema:
 
 \`\`\`json
 {
-  "decision": "accept" | "reject" | "merge" | "supersede" | "human_review" | "revise",
+  "decision": "accept" | "reject" | "merge" | "supersede" | "revise",
   "confidence": 0.0..1.0,
   "reasoning": "one paragraph explaining the decision",
   "references": [
@@ -234,7 +245,7 @@ export function buildUserPrompt(inputs: ReviewInputs): string {
       ? sourceTickets
           .map((t: any) => `- ${t.ticket_id} · score=${t.score}\n  summary: ${t.summary}`)
           .join("\n\n")
-      : "_None — single-ticket or no source data; lean toward human_review._",
+      : "_None — no source pattern attached. That's not by itself disqualifying; judge the rule on its merits against the voice + operational rules below._",
     "",
     "## Voice rules (excerpt from docs/brain/customer-voice.md)",
     voiceDocs.customer_voice.slice(0, 6000),
@@ -356,32 +367,68 @@ export async function applyDecision(
   finalDecision: DecisionType;
   reason?: string;
 }> {
-  // Phase 3 safety gates BEFORE we touch sonnet_prompts.
+  // Phase 3 safety gates BEFORE we touch sonnet_prompts. We DO NOT
+  // route to human_review from the cron — Dylan explicitly doesn't
+  // want a queue accumulating for him to process. If the model isn't
+  // confident, we drop (reject); the pattern will resurface with
+  // more evidence next time if it's real.
   let finalDecision = rawDecision.decision;
-  let forcedToHumanReview = false;
+  let forcedDowngrade = false;
   let reason: string | undefined;
 
-  if (rawDecision.confidence < CONFIDENCE_FLOOR) {
-    finalDecision = "human_review";
-    forcedToHumanReview = true;
-    reason = `confidence_floor (${rawDecision.confidence.toFixed(2)} < ${CONFIDENCE_FLOOR})`;
+  // 1. Hard floor — anything below REJECT_FLOOR gets dropped.
+  if (rawDecision.confidence < REJECT_FLOOR) {
+    finalDecision = "reject";
+    forcedDowngrade = true;
+    reason = `confidence_below_reject_floor (${rawDecision.confidence.toFixed(2)} < ${REJECT_FLOOR}) — dropping rather than queuing for human review`;
+  }
+  // 2. Accept floor — accepts below ACCEPT_FLOOR get downgraded to reject.
+  //    Never auto-apply a tentative accept; reject and let it resurface
+  //    with stronger evidence next time.
+  else if (finalDecision === "accept" && rawDecision.confidence < ACCEPT_FLOOR) {
+    finalDecision = "reject";
+    forcedDowngrade = true;
+    reason = `accept_below_floor (${rawDecision.confidence.toFixed(2)} < ${ACCEPT_FLOOR}) — downgraded to reject; resurface with more evidence`;
+  }
+  // 3. Model returned human_review — we override that. Trust the
+  //    reasoning content; treat as reject. (The model still expresses
+  //    its hesitation in the audit reasoning.)
+  else if ((finalDecision as string) === "human_review") {
+    finalDecision = "reject";
+    forcedDowngrade = true;
+    reason = `model_recommended_human_review_overridden_to_reject — auto-review never queues to humans`;
   }
 
-  // Daily cap (only for accept; supersede/merge etc. don't count).
+  // Daily cap on accepts — past the cap, reject instead of queueing.
   if (finalDecision === "accept" && modelMeta.source === "cron") {
     const acceptedToday = opts.alreadyAcceptedToday ?? 0;
     if (acceptedToday >= opts.dailyCap) {
-      finalDecision = "human_review";
-      forcedToHumanReview = true;
-      reason = `daily_cap (${acceptedToday}/${opts.dailyCap})`;
+      finalDecision = "reject";
+      forcedDowngrade = true;
+      reason = `daily_cap_reached (${acceptedToday}/${opts.dailyCap}) — dropping; rerun tomorrow`;
     }
   }
 
   // Hard safety: NEVER allow a delete-style decision. Map to supersede.
   if ((finalDecision as string) === "delete") {
     finalDecision = "supersede";
-    forcedToHumanReview = true;
+    forcedDowngrade = true;
     reason = "delete_rewritten_to_supersede";
+  }
+
+  // Missing-target safety: merge needs merge_target_id, supersede needs
+  // supersede_target_id. If the model returned the decision without a
+  // target, we can't apply it — downgrade to reject (same philosophy as
+  // the confidence floors: never queue to a human, drop and resurface).
+  if (finalDecision === "merge" && !rawDecision.merge_target_id) {
+    finalDecision = "reject";
+    forcedDowngrade = true;
+    reason = "merge_without_target_downgraded_to_reject";
+  }
+  if (finalDecision === "supersede" && !rawDecision.supersede_target_id) {
+    finalDecision = "reject";
+    forcedDowngrade = true;
+    reason = "supersede_without_target_downgraded_to_reject";
   }
 
   // Compute cost for accounting.
@@ -415,7 +462,7 @@ export async function applyDecision(
     model: modelMeta.model,
     input_tokens: u.input_tokens || null,
     output_tokens: u.output_tokens || null,
-    cost_usd_cents: cost,
+    cost_usd_cents: Math.round(cost),
     latency_ms: modelMeta.latencyMs || null,
     source: modelMeta.source || "cron",
     performed_by: modelMeta.performedBy || null,
@@ -428,7 +475,7 @@ export async function applyDecision(
   if (auditErr || !audit?.id) {
     return {
       applied: false,
-      forcedToHumanReview,
+      forcedToHumanReview: forcedDowngrade,
       decisionRowId: "",
       finalDecision,
       reason: `audit_insert_failed: ${auditErr?.message || "no id"}`,
@@ -455,44 +502,30 @@ export async function applyDecision(
       promptUpdates.enabled = false;
       break;
     case "merge":
-      if (rawDecision.merge_target_id) {
-        promptUpdates.merged_into_id = rawDecision.merge_target_id;
-        promptUpdates.status = "rejected";
-        promptUpdates.enabled = false;
-      } else {
-        // Missing target — degrade.
-        promptUpdates.auto_decision = "human_review";
-        promptUpdates.status = "proposed";
-      }
+      // Missing-target case already downgraded to reject in the safety
+      // section above — by this point merge_target_id is guaranteed.
+      promptUpdates.merged_into_id = rawDecision.merge_target_id;
+      promptUpdates.status = "rejected";
+      promptUpdates.enabled = false;
       break;
     case "supersede":
-      if (rawDecision.supersede_target_id) {
-        promptUpdates.status = "approved";
-        promptUpdates.reviewed_at = new Date().toISOString();
-        // The new proposal supersedes the old one. Disable the old.
-        await admin
-          .from("sonnet_prompts")
-          .update({
-            superseded_by_id: proposal.id,
-            enabled: false,
-            status: "archived",
-          })
-          .eq("id", rawDecision.supersede_target_id)
-          .eq("workspace_id", workspaceId);
-      } else {
-        promptUpdates.auto_decision = "human_review";
-        promptUpdates.status = "proposed";
-      }
+      // Missing-target case already downgraded to reject above.
+      promptUpdates.status = "approved";
+      promptUpdates.reviewed_at = new Date().toISOString();
+      // The new proposal supersedes the old one. Disable the old.
+      await admin
+        .from("sonnet_prompts")
+        .update({
+          superseded_by_id: proposal.id,
+          enabled: false,
+          status: "archived",
+        })
+        .eq("id", rawDecision.supersede_target_id)
+        .eq("workspace_id", workspaceId);
       break;
     case "revise":
       // Stays as proposed; the suggested_revisions live on the audit row.
       promptUpdates.status = "proposed";
-      break;
-    case "human_review":
-      promptUpdates.status = "proposed";
-      // Stamp a tag-style flag via the existing `tags`-shaped path:
-      // simplest is to leave status=proposed and let the dashboard sort
-      // by auto_decision='human_review'.
       break;
   }
 
@@ -504,7 +537,7 @@ export async function applyDecision(
   if (updErr) {
     return {
       applied: false,
-      forcedToHumanReview,
+      forcedToHumanReview: forcedDowngrade,
       decisionRowId: audit.id,
       finalDecision,
       reason: `prompt_update_failed: ${updErr.message}`,
@@ -525,8 +558,8 @@ export async function applyDecision(
   }
 
   return {
-    applied: finalDecision !== "human_review",
-    forcedToHumanReview,
+    applied: true,
+    forcedToHumanReview: forcedDowngrade,
     decisionRowId: audit.id,
     finalDecision,
     reason,
@@ -564,7 +597,7 @@ export async function reviewSingleProposal(
       { dailyCap: options.dailyCap, alreadyAcceptedToday: options.alreadyAcceptedToday },
     );
     return {
-      ok: applied.applied || applied.finalDecision === "human_review",
+      ok: applied.applied,
       decision: opus.decision,
       applied: applied.applied,
       decisionRowId: applied.decisionRowId,
@@ -623,7 +656,10 @@ export async function reviewWorkspace(
         accepted++;
         acceptedToday++;
       }
-      if (r.forcedToHumanReview || r.decision.decision === "human_review") humanReview++;
+      // `humanReview` counter is retained as a telemetry field for
+      // backward compat; semantically it now counts safety downgrades
+      // (the cron no longer routes anything to a human queue).
+      if (r.forcedToHumanReview) humanReview++;
     } else {
       errors.push(`${p.id}: ${r.reason}`);
     }

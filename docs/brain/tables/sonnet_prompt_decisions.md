@@ -1,6 +1,8 @@
 # sonnet_prompt_decisions
 
-Append-only audit log of auto-review decisions on [[sonnet_prompts]]. One row per Claude Opus decision (cron), per human override, or per safety test. Every state change to `sonnet_prompts.auto_decision` writes a row here first — this is the per-decision history of how a proposal moved through accept / reject / merge / supersede / human_review / revise.
+Append-only audit log of auto-review decisions on [[sonnet_prompts]]. One row per Claude Opus decision (cron), per human override, or per safety test. Every state change to `sonnet_prompts.auto_decision` writes a row here first — this is the per-decision history of how a proposal moved through accept / reject / merge / supersede / revise.
+
+> The cron never emits `human_review` since 2026-06-03 — if the model recommends it, the safety layer downgrades to `reject` (reasoning preserved). Historical rows from before the change still carry `decision='human_review'`.
 
 **Role in the loop:** the audit-first invariant. Phase 3 of the spec says: write THIS row before mutating the prompt, so we always have a record of what the model saw + what it decided, regardless of whether the subsequent prompt-row write succeeded. Replays + investigations key off this table.
 
@@ -13,9 +15,9 @@ Append-only audit log of auto-review decisions on [[sonnet_prompts]]. One row pe
 | `id` | `uuid` | — | PK · default: `gen_random_uuid()` |
 | `workspace_id` | `uuid` | — | → [[workspaces]].id |
 | `sonnet_prompt_id` | `uuid` | — | → [[sonnet_prompts]].id |
-| `decision` | `text` | — | `accept` / `reject` / `merge` / `supersede` / `human_review` / `revise` |
+| `decision` | `text` | — | `accept` / `reject` / `merge` / `supersede` / `revise`. Historical rows may carry `human_review`. |
 | `confidence` | `real` | — | 0..1 — what the model returned (NOT the floor-adjusted final state) |
-| `reasoning` | `text` | — | One-paragraph model reasoning; safety overrides append `[SAFETY] ...` |
+| `reasoning` | `text` | — | One-paragraph model reasoning; safety overrides prepend `[SAFETY] ...` explaining the downgrade (e.g. `confidence_below_reject_floor`, `accept_below_floor`, `model_recommended_human_review_overridden_to_reject`) |
 | `references_json` | `jsonb` | — | `[{type, id, why}]` — what the model cited (prompt/policy/ticket/voice_rule) |
 | `suggested_revisions` | `text` | ✓ | Populated only when `decision='revise'` |
 | `merge_target_id` | `uuid` | ✓ | → [[sonnet_prompts]].id — only when `decision='merge'` |
@@ -74,14 +76,19 @@ const { data } = await admin.from("sonnet_prompt_decisions")
   .order("created_at", { ascending: true });
 ```
 
-### Decisions forced to human_review by the confidence floor
+### Decisions downgraded by the safety floors
 ```ts
+// Anything the safety layer touched leaves "[SAFETY]" in the reasoning.
 const { data } = await admin.from("sonnet_prompt_decisions")
-  .select("sonnet_prompt_id, confidence, reasoning")
+  .select("sonnet_prompt_id, decision, confidence, reasoning")
   .eq("workspace_id", workspaceId)
-  .eq("decision", "human_review")
-  .ilike("reasoning", "%[SAFETY] confidence_floor%")
+  .ilike("reasoning", "%[SAFETY]%")
   .order("created_at", { ascending: false }).limit(50);
+
+// Three reasons safety fires:
+//   confidence_below_reject_floor   — conf < REJECT_FLOOR (0.55) → dropped
+//   accept_below_floor              — accept with conf in [0.55, 0.70) → reject
+//   model_recommended_human_review_overridden_to_reject — model hesitated, we decided
 ```
 
 ### Human overrides since X
@@ -95,11 +102,13 @@ const { data } = await admin.from("sonnet_prompt_decisions")
 
 ## Gotchas
 
-- **`decision`** is what the system finally APPLIED, not necessarily what the model recommended. When the safety guards force `human_review` (confidence floor, daily cap, missing target), `reasoning` is prepended with `[SAFETY] ...` to explain why.
-- **`confidence` is the model's raw value.** Even when forced to `human_review`, this stays untouched — so you can analyze how often the safety guards intervened.
+- **`decision`** is what the system finally APPLIED, not necessarily what the model recommended. When the safety guards downgrade an outcome (below REJECT_FLOOR, accept below ACCEPT_FLOOR, model recommended human_review, daily cap, missing target), `reasoning` is prepended with `[SAFETY] ...` to explain why. The model's raw recommendation is recoverable via `input_proposal` + the safety prefix on `reasoning`.
+- **`confidence` is the model's raw value.** Safety downgrades don't rewrite it — so you can analyze how often the floors intervened.
+- **`cost_usd_cents` is INT, not numeric.** The application code uses `Math.round(usageCostCents(...))` before inserting. Passing a float will error.
 - **Append-only.** Never UPDATE / DELETE rows. A human override on a previously-auto-decided prompt creates a NEW row with `source='manual_override'`.
 - **`input_voice_doc_hashes`** lets a replay confirm the voice docs haven't drifted since the decision. If they have, the previous decision should probably be re-evaluated by the cron next run.
 - **Cost accounting also goes through [[ai_token_usage]]** (separate row per call) — this table holds the per-decision audit; ai_token_usage holds the per-call meter.
+- **Old `human_review` rows exist.** Decisions logged before 2026-06-03 may carry `decision='human_review'`. The current cron will not produce new ones. Filtering analytics queries to "cron decisions since 2026-06-03" is the cleanest way to characterize current behavior.
 
 ## Related
 
