@@ -24,13 +24,6 @@ Single source of truth for what's being built next, what's parked, and what just
 
 Concrete, scoped, high-ROI work. Pick any one and promote to a full spec.
 
-### Cancel event deduplication — **worse than the original analysis suggested**
-**Status:** 🚧 Still very real; not resolved. Reverify cited.
-- Last 7d: **52 of 90 cancelled subs (58%)** double-logged with both `portal` AND `appstle` source events.
-- Last 30d: **227 overlap of 473 total** (48%).
-- The "Appstle-only" tail is still ~35/week (~5/day, matching the original Apr baseline) — the email disable in Apr didn't fix it because the double-log comes from the Appstle webhook firing on every portal cancel, not from customers using Appstle's portal.
-- **Fix:** when an Appstle cancel webhook fires AND a portal event already exists for the same `shopify_contract_id` in the last N minutes, suppress / mark the Appstle row as duplicate.
-- Affects every aggregate cancel query (analytics, retention rate, journey trigger counts).
 
 ### Stacked sale coupons on subscriptions
 **Status:** ⏳ Reduced scope from original analysis but still real.
@@ -163,6 +156,7 @@ These have no work attached — they're operational notes. Kept here because the
 - ✅ **Customer voice / operational rules / UI conventions** brain pages (2026-06).
 - ✅ **Email tracking spec** — mostly shipped; verify current state in [[../inngest/deliver-pending-send]] / Resend integration page if anyone touches it again.
 - ✅ **Stuck-sub cleanup** (2026-06-03) — `next_billing_date` cleanup across 83 subs: 75 advanced (Appstle truth synced into our DB), 6 marked cancelled, 2 re-fired into dunning via `appstleAttemptBilling`. Was a one-time data-staleness backlog, not an active bug (the sync-lag root cause was already patched earlier). Script: `scripts/cleanup-stuck-subs-2026-06-03.ts`.
+- ✅ **Cancel-event dedup** (2026-06-03) — forward fix in the Appstle webhook handler. When a customer cancels via the portal, both a `portal.subscription.cancelled` (source=portal) AND a `subscription.cancelled` (source=appstle) fire within seconds. Now the Appstle webhook checks for a portal cancel for the same `shopify_contract_id` within the last 5 min and suppresses the duplicate insert. **Historical 272 duplicates left in place** — backfill script (`scripts/backfill-cancel-event-dedup.ts`) exists but was not applied; analytics consumers can still dedupe at query time if needed.
 
 ---
 

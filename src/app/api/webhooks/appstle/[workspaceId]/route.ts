@@ -297,31 +297,55 @@ async function handleSubscriptionEvent(
     "subscription.upcoming-order-notification": `Upcoming order notification`,
   };
 
-  await logCustomerEvent({
-    workspaceId,
-    customerId: dbCustomer.id,
-    eventType,
-    source: "appstle",
-    summary: summaryMap[eventType] || eventType,
-    properties: {
-      shopify_contract_id: contractId,
-      status,
-      next_billing_date: data.nextBillingDate,
-      // Rich item shape — variant_id, sku, variant_title, qty, price.
-      // Downstream timeline/anomaly detectors need this to describe what
-      // changed without joining back to the subscriptions table.
-      items: items.map(i => ({
-        variant_id: i.variant_id || null,
-        sku: i.sku || null,
-        title: i.title || null,
-        variant_title: i.variant_title || null,
-        quantity: i.quantity || 1,
-        price_cents: i.price_cents || 0,
-      })),
-      billing_interval: billingPolicy?.interval?.toLowerCase() || null,
-      billing_interval_count: billingPolicy?.intervalCount || null,
-    },
-  });
+  // Dedup: when a customer cancels via the portal, BOTH a portal event
+  // (`portal.subscription.cancelled`, source=portal) AND this Appstle
+  // webhook fire within seconds of each other. The portal event is the
+  // richer one (carries the cancel reason + journey context). Skip the
+  // Appstle insert if a portal cancel exists for the same contract in
+  // the last 5 minutes — it's the same act, not a separate event.
+  let shouldLogEvent = true;
+  if (eventType === "subscription.cancelled" && contractId) {
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const { data: portalCancel } = await admin.from("customer_events")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", dbCustomer.id)
+      .eq("source", "portal")
+      .eq("event_type", "portal.subscription.cancelled")
+      .eq("properties->>shopify_contract_id", contractId)
+      .gte("created_at", fiveMinAgo)
+      .limit(1)
+      .maybeSingle();
+    if (portalCancel) shouldLogEvent = false;
+  }
+
+  if (shouldLogEvent) {
+    await logCustomerEvent({
+      workspaceId,
+      customerId: dbCustomer.id,
+      eventType,
+      source: "appstle",
+      summary: summaryMap[eventType] || eventType,
+      properties: {
+        shopify_contract_id: contractId,
+        status,
+        next_billing_date: data.nextBillingDate,
+        // Rich item shape — variant_id, sku, variant_title, qty, price.
+        // Downstream timeline/anomaly detectors need this to describe what
+        // changed without joining back to the subscriptions table.
+        items: items.map(i => ({
+          variant_id: i.variant_id || null,
+          sku: i.sku || null,
+          title: i.title || null,
+          variant_title: i.variant_title || null,
+          quantity: i.quantity || 1,
+          price_cents: i.price_cents || 0,
+        })),
+        billing_interval: billingPolicy?.interval?.toLowerCase() || null,
+        billing_interval_count: billingPolicy?.intervalCount || null,
+      },
+    });
+  }
 
   // Mark crisis record as cancelled if applicable
   if (eventType === "subscription.cancelled" && contractId) {
