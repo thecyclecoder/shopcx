@@ -1,8 +1,29 @@
 # Agent To-Do system
 
-Replace synchronous ticket-by-ticket handling with an async approval queue. A 30-minute routine reasons about escalated tickets (and eventually other surfaces) using the brain + DB, proposes concrete actions (replies, sub mutations, refunds, return labels, new Sonnet rules, brain edits, code changes), and writes them as todos to an approval queue. Dylan + Zach review the queue on `/dashboard/tickets/todos`. Approval triggers execution; rejection routes the ticket to a Claude-chat session for manual handling.
+Replace synchronous ticket-by-ticket handling with an async approval queue. A **Claude Code Routine** (Anthropic's cloud-hosted scheduled-agent product, not an Inngest cron) reasons about escalated tickets using the brain + DB every hour, proposes concrete actions (replies, sub mutations, refunds, return labels, new Sonnet rules, brain edits, code changes), and writes them as todos to an approval queue. Dylan + Zach review the queue on `/dashboard/tickets/todos`. Approval triggers execution; rejection routes the ticket to a Claude-chat session for manual handling.
 
 **Business outcome:** today Dylan spends 2-3 hours/day handling escalated tickets and the structural fixes those tickets surface. The system reduces that to ~30 minutes/day of approval clicks while preserving Dylan-level judgment on every customer touch and every system change. The routine never executes customer-facing actions or system changes without explicit human approval.
+
+## Runtime — where this lives
+
+Two cooperating runtimes, by design:
+
+| Runtime | Role | Where | Cadence |
+|---|---|---|---|
+| **Claude Code Routine** (`/dashboard/code/routines` in the Claude desktop app, configured at `claude.ai/code/routines`) | Reasoning + system-level execution: scans escalated tickets, proposes todos, executes approved system actions (sonnet_prompt inserts, brain edits via PR, code changes via PR), runs CI gate before PR open | Anthropic-managed cloud (clones the repo at run start, has git access, has Read/Edit/Write/Bash tools) | **Hourly** (Claude Code Routines have a 1-hour minimum schedule interval — confirmed 2026-06-04 via docs) + API-trigger endpoint for on-demand fires |
+| **Inngest event worker** (`agent-todo-execute`) | Customer-facing immediate execution: fires on approve API for `customer_reply`, `customer_action`, `ticket_close`. Drift-check + dispatch to `sendTicketReply`/`subRemoveItem`/`createFullReturn`/etc. | Vercel serverless (same as `sonnet-prompt-auto-review` etc.) | Event-triggered; no schedule |
+
+**Why the split:**
+- Customer replies can't wait an hour after approval. Inngest event worker fires within seconds.
+- Code + brain changes need actual git access (commit, push, PR open). Only the Claude Code Routine has that — the Inngest function runs in a serverless container without the repo checked out.
+- Sonnet prompt changes are DB inserts — could go through either path; routine handles them so all "system" changes ship through one runtime.
+
+**Routine setup requirements** (one-time, per workspace):
+- Repo configured on the routine (shopcx). Default-branch clone at run start.
+- Environment variables mirrored from `.env.local`: `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_PASSWORD`, `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `APPSTLE_*`, `EASYPOST_API_KEY`, `META_*`, etc. Set via the Routine's environment configuration in `claude.ai/code/routines`.
+- Branch push policy: default `claude/`-prefixed branches OK; "Allow unrestricted branch pushes" stays OFF (no direct-to-main from the routine).
+- Model: Opus (matches the existing orchestrator quality bar for ticket reasoning).
+- Triggers: schedule (hourly) + API endpoint (for on-demand wake from approval API on system-level todos).
 
 ## Phase 0 — Schema + migration ⏳
 
@@ -48,9 +69,9 @@ Replace synchronous ticket-by-ticket handling with an async approval queue. A 30
 - ⏳ Index on `(workspace_id, status, created_at desc)` for list-view paging.
 - ⏳ Index on `(source_ticket_id)` for the linked-todos block on detail page.
 
-## Phase 1 — The 30-min routine ⏳
+## Phase 1 — The hourly Claude Code Routine ⏳
 
-Inngest function `agent-todo-routine`, cron `*/30 * * * *`, concurrency limit 1.
+Routine name: `agent-todo-routine`. Schedule: hourly. Trigger surface includes API endpoint (for wake-on-approval of system-level todos).
 
 ### Escalation routing change (prereq)
 
@@ -76,15 +97,23 @@ Today the unified-ticket-handler sets `tickets.escalated_to` to a human user UUI
      - **Escalation false-positive pattern** → when ≥2 tickets in this run are flagged as false-positive escalations triggered by the same auto-flag rule (e.g. three tickets escalated for "threat language" when no threat exists), propose an `escalation_rule_fix` todo describing the tightening (specific regex / keyword removal / prompt change).
    - Write `context_what_happened` (1 short paragraph) and `context_what_we_propose` (one paragraph or short bulleted list) so Zach can act without reading the conversation.
    - Capture `pre_exec_context` (latest_inbound_message_id, sub state hash, etc.) for drift detection.
-2. **Execution pass** — for each `approved` todo where execution is owed (immediate for customer-facing; queued for system-level):
-   - Re-verify drift: latest customer reply timestamp vs `pre_exec_context.latest_inbound_at`. If a new inbound message has landed since approval, mark `status='superseded'` with reason, don't execute. (A new proposal will be created on the next reasoning pass.)
-   - Execute via the right helper (`sendTicketReply`, `subRemoveItem`, `createFullReturn`, supabase insert into `sonnet_prompts`, file write + commit + push, etc.).
-   - Record `execution_result` jsonb (label_url, message_id, commit_sha, etc.).
-   - On failure → `status='failed'` with the error; do NOT auto-retry.
+2. **System-level execution pass** — the routine executes approved system-level todos. (Customer-facing approvals don't wait — they're handled by the Inngest event worker described in Phase 4.)
+   - For each `approved` todo where `action_type IN ('sonnet_prompt_new','sonnet_prompt_edit','ticket_analysis_rescore','grader_prompt_edit','escalation_rule_fix','brain_doc_edit','code_change')`:
+     - **sonnet_prompt / ticket_analysis_rescore / grader_prompt_edit**: DB insert/update via Supabase service-role client. Record the new row id in `execution_result`.
+     - **brain_doc_edit**: edit the markdown file in the cloned repo → run `npx tsc --noEmit` (no-op for docs but good safety habit) → commit on `claude/agent-todo-{timestamp}-{slug}` branch → push → open PR via `gh pr create` or GitHub API. Record `pr_url` in `execution_result`. Optional `auto_merge=true` flag on the todo: after CI passes, auto-merge.
+     - **code_change**: same flow but **never auto-merge**. The diff is in the todo payload; apply it, run `npx tsc --noEmit`, run any unit tests we wire in, only push if all green. If CI fails → mark todo `failed` with the error output in `execution_result`, do NOT push a broken branch.
+     - **escalation_rule_fix**: typically code-adjacent (the threat-detector prompt or the auto-flag thresholds live in code) → goes through the code_change PR path.
+   - Skip drift check on system-level execution (system actions don't depend on the customer's latest message).
+   - On failure → `status='failed'` with error; do NOT auto-retry.
 3. **Auto-closure pass** — for each `source_ticket_id` where all customer-facing todos (`customer_reply` + `customer_action`) in the group are `executed`:
    - Update `tickets`: `status='closed'`, `escalated_at=null`, `assigned_to=null`, `closed_at=now()`.
    - Insert system note in ticket_messages: *"[System] Resolved via To-Do system. Approved by {role} {name} at {time}."*
-   - System-level todos (`sonnet_prompt_*`, `brain_doc_edit`, `code_change`) do NOT block ticket closure. They can be approved + executed later without touching the customer.
+   - System-level todos (`sonnet_prompt_*`, `brain_doc_edit`, `code_change`, etc.) do NOT block ticket closure. They can be approved + executed later without touching the customer.
+
+4. **Merged-PR cleanup pass** — for each `brain_doc_edit` / `code_change` todo with status='executed' and `pr_url` populated:
+   - Query GitHub API for merge status of the PR.
+   - If merged → todo gets a final tag in `execution_result.merged_at`. (Nothing else changes; the ticket was already closed at the customer-facing layer.)
+   - If closed-without-merge → todo gets `status='rejected'` with reason `pr_closed_without_merge`. (Treated as a rejection so it doesn't sit in "executed" forever as a phantom completion.)
 
 **Safety invariants — non-negotiable:**
 - The routine NEVER executes a customer-facing or system-level action without a `status='approved'` row.
@@ -119,8 +148,11 @@ Route: `/dashboard/tickets/todos/[id]`.
 - ⏳ `POST /api/todos/[id]/approve`
   - Auth: `workspace_members.role` of the caller must allow the `action_type`.
   - Set `status='approved'`, stamp `approved_by/at/role`.
-  - **For customer-facing actions** (`customer_reply`, `customer_action`, `ticket_close`) → fire `inngest.send('agent-todo/execute', { todo_id })` for immediate execution. Drift-check runs inside the worker.
-  - **For system-level actions** (`sonnet_prompt_*`, `brain_doc_edit`, `code_change`) → leave status='approved'; the next 30-min routine tick picks it up. (Reason: code/brain changes can wait minutes; customer can't.)
+  - **For customer-facing actions** (`customer_reply`, `customer_action`, `ticket_close`) → fire `inngest.send('agent-todo/execute', { todo_id })` for immediate Inngest event-worker execution. Drift-check runs inside the worker.
+  - **For system-level actions** (sonnet_prompts / brain / code / analysis / escalation_rule / grader) → either:
+    - (a) Wait for the next hourly Claude Code Routine tick to pick it up (acceptable for most), OR
+    - (b) **POST to the routine's API-trigger endpoint** with `{ todo_id }` to wake the routine on-demand (use when the approval is urgent — e.g. a tightening of the threat-detector that's actively producing false-positive escalations).
+    - First cut: always wake the routine on system-level approvals. Cost is minor; latency win is real. Can downgrade to "wait for hourly tick" if cost grows.
   - Return the updated todo for optimistic UI refresh.
 - ⏳ `POST /api/todos/[id]/reject`
   - Auth: same role gate as approve.
@@ -128,9 +160,10 @@ Route: `/dashboard/tickets/todos/[id]`.
   - **Ticket is NOT auto-closed on reject.** It stays in its current escalated state so Dylan can pick it up in a Claude-chat session.
   - If all todos in the group are rejected, add a tag to the source ticket: `todo:rejected` so Dylan can filter the rejected pile from the regular ticket inbox.
 - ⏳ Inngest worker `agent-todo-execute` (event `agent-todo/execute`):
+  - **Handles only customer-facing action types** (`customer_reply`, `customer_action`, `ticket_close`). System-level actions are routine territory.
   - Load todo.
-  - Drift check via `pre_exec_context`.
-  - Dispatch by `action_type` to the right helper.
+  - Drift check via `pre_exec_context`. If a new inbound message landed on the source ticket between approval and execution, mark `status='superseded'` and stop.
+  - Dispatch by `action_type` to the right helper (`sendTicketReply`, `subRemoveItem`, `createFullReturn`, etc.).
   - Update `status` + `execution_result` based on outcome.
   - If this was the last unexecuted customer-facing todo in the group → run auto-closure step from Phase 1.
 
@@ -158,10 +191,29 @@ The existing `/dashboard/tickets/escalated` view filters by `escalated_to = curr
   - This is intentionally different from the To-Do bubble (which is "items in your approval queue"). Together: To-Do bubble = "approve these"; Escalated bubble = "think about these."
 - ⏳ **Default chip:** `Awaiting approval` if it has rows, otherwise `All`. Optimizes for the most actionable view.
 
+## Phase 4.7 — Branches surface ⏳
 
+The routine creates PRs on `claude/`-prefixed branches whenever a `brain_doc_edit` or `code_change` (or `escalation_rule_fix` / `grader_prompt_edit` that lands as code) executes. Dylan needs a single surface to see all open PRs the routine has created.
 
-- ⏳ One-shot script: for each currently-escalated ticket (the 7 in the queue right now), run the routine's reasoning pass once and write its todos. Confirms the pipeline end-to-end on real data before going live.
-- ⏳ After backfill validates, enable the cron trigger.
+- ⏳ **Inline on the To-Do detail page** — when execution result includes `pr_url`, render a card: PR title, file count, CI status (pulled from GitHub), age, **Open in GitHub** button. This is the "PR for this todo I just approved" view.
+- ⏳ **New `/dashboard/branches` page** — list all open `claude/*` PRs on the shopcx repo via GitHub API. Columns:
+  - Title
+  - Source todo (link back to the todo that created it — match via `pr_url`)
+  - Age
+  - CI status (passing / failing / pending)
+  - Mergeability
+  - **Open in GitHub** button
+- ⏳ **Sidebar item "Branches"** under top-level dashboard, with bubble count = number of open `claude/*` PRs.
+- ⏳ **Auto-merge flag per category** (workspace setting):
+  - `auto_merge_brain_docs`: default false. When true, brain doc PRs auto-merge once CI passes. Low-risk; reverts via git if needed.
+  - `auto_merge_code_changes`: ALWAYS false. Hard-coded. Code never auto-merges.
+- ⏳ **CI gate** — the routine runs `npx tsc --noEmit` (and any tests wired in) BEFORE pushing. If it fails, no PR opens; the todo gets `status='failed'` with the compile error in `execution_result.error`. No broken PRs make it to the Branches surface.
+
+## Phase 5 — Backfill + first run ⏳
+
+- ⏳ One-shot reasoning pass: for each currently-escalated ticket (the 7 in the queue right now), run the routine's reasoning pass once and write its todos. Confirms the pipeline end-to-end on real data before going live.
+- ⏳ Verify Millie's return label proposal lands in the queue (her ticket is in the backfill set).
+- ⏳ After backfill validates, enable the hourly schedule on the routine in `claude.ai/code/routines`.
 
 ## Phase 6 — Brain index updates ⏳
 
@@ -169,6 +221,7 @@ The existing `/dashboard/tickets/escalated` view filters by `escalated_to = curr
 - ⏳ New brain page: `docs/brain/dashboard/tickets__todos.md` (list view).
 - ⏳ New brain page: `docs/brain/dashboard/tickets__todos__id.md` (detail view).
 - ⏳ Update brain page: `docs/brain/dashboard/tickets__escalated.md` — document the rebuilt observability view with the 6 chips + new bubble semantics.
+- ⏳ New brain page: `docs/brain/dashboard/branches.md` — the Branches surface listing open `claude/*` PRs.
 - ⏳ New brain page: `docs/brain/tables/agent_todos.md`.
 - ⏳ New brain page: `docs/brain/inngest/agent-todo-routine.md`.
 - ⏳ New brain page: `docs/brain/lifecycles/agent-todo-system.md` (the end-to-end trace). After this spec ships, fold the spec content here and delete the spec per project-management convention.
@@ -187,7 +240,10 @@ The existing `/dashboard/tickets/escalated` view filters by `escalated_to = curr
 - **Visibility ≠ approval.** Both roles see all todos. Approval buttons are gated; non-approvers see a *"Needs owner access to approve"* indicator.
 - **Drift detection.** Every execution worker re-fetches the latest ticket state and compares against `pre_exec_context`. If the customer replied between approval and execution, supersede silently and re-propose next pass.
 - **One active group per ticket.** Reasoning pass skips tickets that already have a pending or approved group of todos.
-- **Customer-facing immediate, system-level deferred.** Approving a `customer_reply` fires it within seconds via the event-triggered worker. Approving a `sonnet_prompt_edit` waits for the next 30-min routine tick. This keeps reply latency low while keeping system changes batched.
+- **Customer-facing immediate (Inngest), system-level via Routine.** Approving a `customer_reply` fires within seconds via the Inngest event worker. Approving a `sonnet_prompt_edit` or `code_change` either waits for the next hourly Routine tick or is woken on-demand by POSTing to the Routine's API endpoint. Keeps customer reply latency low while preserving the Routine's git access for system changes.
+- **No direct-to-main pushes from the Routine.** Branch push policy restricts the Routine to `claude/`-prefixed branches. Code merges to main are always human-driven (you reviewing the PR in GitHub).
+- **CI gate before PR.** Code-change todos run `npx tsc --noEmit` and tests inside the Routine BEFORE pushing. If CI fails, todo is `failed` with the error captured; no PR opens. No broken branches accumulate.
+- **Routine is stateless between runs.** Each tick is a fresh cloud session with a clean filesystem. State lives in `agent_todos` (Supabase). The Routine queries the table at run start to know what's been processed.
 - **No silent retries on failure.** A `failed` todo stays failed and surfaces in the queue with the error; humans decide next step.
 - **Rejection is the Claude-chat escape hatch.** Rejected todos do NOT auto-close the ticket. Dylan picks them up in conversation here.
 - **Escalations route to the routine, never to humans by default.** Orchestrator escalation sets `escalated_to = NULL`. Humans only see escalated tickets after they reject a todo, at which point `escalated_to` is set to the rejecter's user_id and the ticket appears in their "escalated to me" inbox.
@@ -195,12 +251,15 @@ The existing `/dashboard/tickets/escalated` view filters by `escalated_to = curr
 ## Completion criteria
 
 - ⏳ Schema migration applied; `agent_todos` table exists with all columns + indexes.
-- ⏳ Inngest function `agent-todo-routine` registered, cron + concurrency configured.
+- ⏳ Claude Code Routine `agent-todo-routine` created at `claude.ai/code/routines` with hourly schedule + API trigger + env vars + repo configured.
+- ⏳ Inngest event worker `agent-todo-execute` registered for customer-facing immediate execution.
 - ⏳ The 7 currently-escalated tickets each have a populated todo group after backfill.
 - ⏳ `/dashboard/tickets/todos` list view renders, role-scoped bubble count works.
 - ⏳ `/dashboard/tickets/todos/[id]` detail view renders all blocks (what happened, what we propose, linked todos, action preview, collapsed conversation).
-- ⏳ Approve fires immediate execution for `customer_reply`; the customer sees the message within ~30s of click.
-- ⏳ Approve queues `sonnet_prompt_new` for next routine tick; executed on tick.
+- ⏳ Approve fires immediate execution for `customer_reply` via Inngest worker; the customer sees the message within ~30s of click.
+- ⏳ Approve on `sonnet_prompt_new` either waits for hourly Routine tick or wakes the Routine via API trigger; executed.
+- ⏳ Approve on `brain_doc_edit` or `code_change` results in a `claude/`-prefixed PR opening with the diff; PR URL stored in `execution_result.pr_url`; To-Do detail page shows the PR card; `/dashboard/branches` lists it.
+- ⏳ CI gate works: a deliberately broken code_change todo fails `npx tsc --noEmit` and no PR opens.
 - ⏳ Reject marks todo + ticket; doesn't auto-close ticket.
 - ⏳ Customer-facing group execute → ticket auto-closes + unescalates + unassigns + system note added.
 - ⏳ `/dashboard/tickets/escalated` shows ALL escalated tickets (no `escalated_to=me` filter), with chip filters and a "Routed to" badge per row. Sidebar bubble counts the "Rejected → me" pile, not the routine-bound pile.
@@ -211,6 +270,8 @@ The existing `/dashboard/tickets/escalated` view filters by `escalated_to = curr
 - **Bubble-count refresh cadence.** Real-time via supabase realtime, or poll every N seconds? Lean realtime if it's cheap.
 - **Failed-todo replay.** Right now manually inspect + decide. If the failure rate stays high we may want a "retry" button on the detail view. Start without and revisit after first month of data.
 - **Multi-routine coordination.** This spec assumes one routine. Future: CSAT-driven todos, sub-health-driven todos, etc. Should be additive — the routine name + reasoning logic differ, but the table + dashboard surface stays one.
+- **Sub-hourly cadence.** Claude Code Routines minimum schedule is 1 hour. If we ever need faster reasoning passes, the option is: cron job (Inngest, every 30 min) POSTs to the Routine's API endpoint to wake it. Costs more but bypasses the schedule floor. Skip for first cut.
+- **GitHub App permissions.** The Routine commits + pushes via your GitHub identity (Claude GitHub App). Verify the Claude app is installed on `thecyclecoder/shopcx` with `claude/`-prefixed-branch push permission and PR-open permission.
 
 ## Related
 
