@@ -484,18 +484,22 @@ async function escalate(admin: Admin, wsId: string, tid: string, ch: string, int
     title: `AI escalated: ${intent || "unknown"}`, body: `"${msg.slice(0, 100)}..."`,
     metadata: { ticket_id: tid, intent, confidence: conf, assigned_to: assignedName },
   });
+  // Agent To-Do system: escalations route to the hourly Claude Code Routine,
+  // not to a human. escalated_to/assigned_to stay null; the routine picks up
+  // everything where escalated_at IS NOT NULL and no active todo group exists.
+  // A human only gets escalated_to set when they reject a todo (see
+  // /api/todos/[id]/reject). docs/brain/specs/agent-todo-system.md § Phase 1.
+  void assignedTo; void assignedName;
   await admin.from("tickets").update({
     status: "open",
     ai_clarification_turn: 0,
-    assigned_to: assignedTo,
-    escalated_to: assignedTo,
+    assigned_to: null,
+    escalated_to: null,
     escalated_at: new Date().toISOString(),
     escalation_reason: intent || "unknown",
   }).eq("id", tid);
 
-  if (assignedName) {
-    await sysNote(admin, tid, `[System] Escalated to ${assignedName}.`);
-  }
+  await sysNote(admin, tid, `[System] Escalated to the To-Do routine for review.`);
 
   // Always send a customer-facing message on escalation.
   // Must contain "send you an email" to trigger chatEnded in the widget —
@@ -1250,15 +1254,12 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         if (pbResult.action === "escalate_api_failure") {
           await step.run("pb-api-fail", async () => {
             const reason = pbResult.error || pbResult.systemNote || "playbook step could not progress";
-            await sysNote(admin, tid, `[System] Playbook API failure: ${reason}. Escalating to agent.`);
-            // Find an agent to assign so the ticket lands in their queue
-            const { data: agents } = await admin.from("workspace_members")
-              .select("user_id").eq("workspace_id", wsId)
-              .in("role", ["admin", "agent", "owner"]).order("user_id");
-            const assignee = agents?.[0]?.user_id || null;
+            await sysNote(admin, tid, `[System] Playbook API failure: ${reason}. Escalating to the To-Do routine.`);
+            // Agent To-Do system: route to the routine, not a human. escalated_to
+            // stays null until a human rejects a todo. docs/brain/specs/agent-todo-system.md.
             await admin.from("tickets").update({
               status: "open",
-              assigned_to: assignee, escalated_to: assignee,
+              assigned_to: null, escalated_to: null,
               escalated_at: new Date().toISOString(),
               escalation_reason: reason,
             }).eq("id", tid);
@@ -1664,17 +1665,16 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           // when the ticket is agent-involved; otherwise just keep it
           // open for organic review.
           if (agentAssigned) {
-            const { data: agents } = await admin.from("workspace_members")
-              .select("user_id").eq("workspace_id", wsId).in("role", ["owner", "admin", "agent"]).order("user_id");
-            const assignee = st.assignedTo || agents?.[0]?.user_id || null;
+            // Agent To-Do system: route to the routine, not a human. escalated_to
+            // stays null until a human rejects a todo. docs/brain/specs/agent-todo-system.md.
             await admin.from("tickets").update({
               status: "open",
-              assigned_to: assignee,
-              escalated_to: assignee,
+              assigned_to: null,
+              escalated_to: null,
               escalated_at: new Date().toISOString(),
               escalation_reason: "no_action_on_agent_ticket",
             }).eq("id", tid);
-            await sysNote(admin, tid, "[System] Customer replied on agent-involved ticket; orchestrator took no action — escalated to assigned agent for review.");
+            await sysNote(admin, tid, "[System] Customer replied on agent-involved ticket; orchestrator took no action — escalated to the To-Do routine for review.");
           } else {
             await admin.from("tickets").update({ status: "open" }).eq("id", tid);
             await sysNote(admin, tid, "[System] No customer message sent — ticket kept open for agent review.");

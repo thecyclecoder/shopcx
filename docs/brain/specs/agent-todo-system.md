@@ -4,6 +4,8 @@ Replace synchronous ticket-by-ticket handling with an async approval queue. A **
 
 **Business outcome:** today Dylan spends 2-3 hours/day handling escalated tickets and the structural fixes those tickets surface. The system reduces that to ~30 minutes/day of approval clicks while preserving Dylan-level judgment on every customer touch and every system change. The routine never executes customer-facing actions or system changes without explicit human approval.
 
+> **Status (2026-06-04):** all code shipped and `npx tsc --noEmit` clean — schema, escalation routing change, reasoning lib + routine/backfill scripts, Inngest worker + approval APIs, To-Do/escalated/branches dashboards, sidebar, and brain pages. The canonical home is now [[../lifecycles/agent-todo-system]]; brain pages: [[../tables/agent_todos]], [[../inngest/agent-todo-routine]], [[../dashboard/tickets__todos]], [[../dashboard/tickets__todos__id]], [[../dashboard/tickets__escalated]], [[../dashboard/branches]]. **Remaining = operational only** (apply migration, create the routine at `claude.ai/code/routines`, run the backfill, enable the schedule). This spec is kept until the routine is live, then deleted per project-management convention.
+
 ## Runtime — where this lives
 
 Two cooperating runtimes, by design:

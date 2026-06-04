@@ -48,6 +48,7 @@ Critical for the `amazon_reseller` fraud rule which compares ship vs bill — ne
 
 - **Don't fire-and-forget in Vercel serverless.** A pending HTTP response gets the function killed mid-flight when Vercel reaps it. Either `await` the work inline, or fire an Inngest event and let the durable runtime handle it.
 - **Don't push to Vercel during active Inngest syncs** — Vercel's deploy reaps in-flight functions. Wait for syncs to drain.
+- **Dylan reviews on the live deployment, not localhost.** When he "can't see" a change, it's almost always undeployed — not missing code. To show a change, commit + push to `main` (Vercel auto-deploys production); don't spin up a local dev server to demo. Scope each commit to its own feature; leave his unrelated in-progress edits uncommitted.
 
 ## Shopify extension deploy
 

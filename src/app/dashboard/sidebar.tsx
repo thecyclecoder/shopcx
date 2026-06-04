@@ -121,6 +121,7 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "#", label: "Email", icon: ICONS.marketing, comingSoon: true },
     ],
   },
+  { href: "/dashboard/branches", label: "Branches", icon: "M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m6-15a3 3 0 11-3 3m3-3v6a6 6 0 01-6 6m0 0v3", ownerOnly: true },
   { href: "/dashboard/settings", label: "Settings", icon: ICONS.settings },
 ];
 
@@ -146,6 +147,9 @@ export default function Sidebar({
   const [escalationCounts, setEscalationCounts] = useState<{ open: number; pending: number; closed: number }>({ open: 0, pending: 0, closed: 0 });
   const [fraudCount, setFraudCount] = useState<{ count: number; maxSeverity: string }>({ count: 0, maxSeverity: "low" });
   const [pendingReviewCount, setPendingReviewCount] = useState(0);
+  const [todoCount, setTodoCount] = useState(0); // items the current viewer can approve
+  const [rejectedCount, setRejectedCount] = useState(0); // "Rejected → me" pile
+  const [branchesCount, setBranchesCount] = useState(0); // open claude/* PRs
 
   // Close sidebar on route change (mobile), auto-expand tickets when on tickets page
   useEffect(() => {
@@ -198,6 +202,22 @@ export default function Sidebar({
         .then(r => r.ok ? r.json() : null)
         .then(d => { if (d?.stats?.pending != null) setPendingReviewCount(d.stats.pending); })
         .catch(() => {});
+
+      // Agent To-Do system: approvable-queue bubble + "Rejected → me" pile.
+      fetch(`/api/todos?status=pending&limit=1`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d?.approvable_count != null) setTodoCount(d.approvable_count); })
+        .catch(() => {});
+      fetch(`/api/escalated`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d?.chips?.rejected_me != null) setRejectedCount(d.chips.rejected_me); })
+        .catch(() => {});
+      if (["owner", "admin"].includes(workspace.role)) {
+        fetch(`/api/branches`)
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d?.total != null) setBranchesCount(d.total); })
+          .catch(() => {});
+      }
     };
     fetchCounts();
     const interval = setInterval(fetchCounts, 10000);
@@ -347,6 +367,10 @@ export default function Sidebar({
           const isSettings = item.href === "/dashboard/settings";
           if (isSettings && !["owner", "admin"].includes(workspace.role)) return null;
 
+          // Branches surface — owner only (routine PRs).
+          const isBranches = item.href === "/dashboard/branches";
+          if (isBranches && workspace.role !== "owner") return null;
+
           return (
             <div key={item.href}>
               {isTickets ? (
@@ -378,9 +402,50 @@ export default function Sidebar({
                     <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
                   </svg>
                   <span className="flex-1">{item.label}</span>
+                  {isBranches && branchesCount > 0 && (
+                    <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                      {branchesCount > 99 ? "99+" : branchesCount}
+                    </span>
+                  )}
                 </Link>
               )}
-              {/* Escalations submenu */}
+              {/* Agent To-Do system: To Do queue + Escalated observability */}
+              {isTickets && ticketsExpanded && (
+                <div className="ml-6 mt-1 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-700">
+                  <Link
+                    href="/dashboard/tickets/todos"
+                    className={`flex items-center justify-between rounded px-2 py-1 text-sm ${
+                      pathname.startsWith("/dashboard/tickets/todos")
+                        ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
+                        : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                    }`}
+                  >
+                    <span>To Do</span>
+                    {todoCount > 0 && (
+                      <span className="rounded-full bg-teal-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-teal-600 dark:bg-teal-900/30 dark:text-teal-400">
+                        {todoCount > 99 ? "99+" : todoCount}
+                      </span>
+                    )}
+                  </Link>
+                  <Link
+                    href="/dashboard/tickets/escalated"
+                    className={`flex items-center justify-between rounded px-2 py-1 text-sm ${
+                      pathname === "/dashboard/tickets/escalated"
+                        ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400"
+                        : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                    }`}
+                  >
+                    <span>Escalated</span>
+                    {rejectedCount > 0 && (
+                      <span className="rounded-full bg-rose-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-rose-600 dark:bg-rose-900/30 dark:text-rose-400">
+                        {rejectedCount > 99 ? "99+" : rejectedCount}
+                      </span>
+                    )}
+                  </Link>
+                </div>
+              )}
+
+              {/* Escalations submenu (legacy escalation_mine views) */}
               {isTickets && ticketsExpanded && (() => {
                 const totalEsc = escalationCounts.open + escalationCounts.pending + escalationCounts.closed;
                 if (totalEsc === 0) return null;

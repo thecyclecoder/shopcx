@@ -85,6 +85,7 @@ import { socialCommentModerate } from "@/lib/inngest/social-comment-moderate";
 import { metaHistoricalCommentsSync } from "@/lib/inngest/meta-historical-comments-sync";
 import { ticketResearchRequested, ticketHealRequested } from "@/lib/inngest/ticket-research";
 import { adToolFunctions } from "@/lib/inngest/ad-tool";
+import { agentTodoExecute } from "@/lib/inngest/agent-todo-execute";
 
 export const maxDuration = 300;
 
@@ -175,5 +176,6 @@ export const { GET, POST, PUT } = serve({
     metaHistoricalCommentsSync,
     ticketResearchRequested,
     ticketHealRequested,
+    agentTodoExecute,
   ],
 });
