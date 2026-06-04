@@ -52,7 +52,17 @@ Replace synchronous ticket-by-ticket handling with an async approval queue. A 30
 
 Inngest function `agent-todo-routine`, cron `*/30 * * * *`, concurrency limit 1.
 
-Per run:
+### Escalation routing change (prereq)
+
+Today the unified-ticket-handler sets `tickets.escalated_to` to a human user UUID at three sites (`src/lib/inngest/unified-ticket-handler.ts:491, 1261, 1673`). With the To-Do system, escalations route to the routine, not to a human.
+
+- ⏳ Change those three sites: set `escalated_to = null` (and `assigned_to = null`) when the orchestrator escalates. The routine picks up everything where `escalated_at IS NOT NULL` AND no active todo group exists.
+- ⏳ Dashboard "escalated to me" filter unchanged in behavior — it still filters by `escalated_to = current_user.id`, which means by default it shows nothing (everything escalates to routine first).
+- ⏳ On `POST /api/todos/[id]/reject` — if all todos in the group are rejected, update the source ticket: `escalated_to = current_user.id` AND add tag `todo:rejected`. The ticket reappears in the rejecter's inbox, which is the cue to bring it to Claude chat.
+
+### Per run
+
+
 
 1. **Reasoning pass** — for each open or recently-closed ticket where `escalated_at IS NOT NULL` AND no `agent_todos` row with status in `('pending','approved','executed')` exists for that ticket:
    - Load full ticket context: messages, customer record, subs, recent orders, AI analysis, active crisis enrollment if any.
@@ -155,6 +165,7 @@ Route: `/dashboard/tickets/todos/[id]`.
 - **Customer-facing immediate, system-level deferred.** Approving a `customer_reply` fires it within seconds via the event-triggered worker. Approving a `sonnet_prompt_edit` waits for the next 30-min routine tick. This keeps reply latency low while keeping system changes batched.
 - **No silent retries on failure.** A `failed` todo stays failed and surfaces in the queue with the error; humans decide next step.
 - **Rejection is the Claude-chat escape hatch.** Rejected todos do NOT auto-close the ticket. Dylan picks them up in conversation here.
+- **Escalations route to the routine, never to humans by default.** Orchestrator escalation sets `escalated_to = NULL`. Humans only see escalated tickets after they reject a todo, at which point `escalated_to` is set to the rejecter's user_id and the ticket appears in their "escalated to me" inbox.
 
 ## Completion criteria
 
