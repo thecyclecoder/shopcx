@@ -20,7 +20,11 @@ Two cooperating runtimes, by design:
 
 **Routine setup requirements** (one-time, per workspace):
 - Repo configured on the routine (shopcx). Default-branch clone at run start.
-- Environment variables mirrored from `.env.local`: `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_PASSWORD`, `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `APPSTLE_*`, `EASYPOST_API_KEY`, `META_*`, etc. Set via the Routine's environment configuration in `claude.ai/code/routines`.
+- **Environment variables**: Anthropic does NOT expose an API/CLI to set Routine env vars programmatically (verified 2026-06-04). The only mechanism is the textarea at `claude.ai/code/routines` → Edit → Select environment → Environment variables (KEY=value, newline-separated). To minimize the manual step:
+  - Build a `scripts/print-routine-env.ts` helper that reads `.env.local`, filters to the keys the Routine actually needs (`NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_PASSWORD`, `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `APPSTLE_*`, `EASYPOST_API_KEY`, `META_*`, `BRAINTREE_*`, `KLAVIYO_*`, `SHOPIFY_*`), and emits them in the exact textarea format.
+  - Usage: `npx tsx scripts/print-routine-env.ts | pbcopy` → paste into the textarea → done.
+  - Rerun the script + paste whenever env vars rotate. Workaround until Anthropic ships an env API.
+- **Shared environment**: create one named environment ("shopcx-production") in `claude.ai/code/routines` and reuse it across every future Routine in the workspace. The copy-paste happens exactly once per rotation, not per routine.
 - Branch push policy: default `claude/`-prefixed branches OK; "Allow unrestricted branch pushes" stays OFF (no direct-to-main from the routine).
 - Model: Opus (matches the existing orchestrator quality bar for ticket reasoning).
 - Triggers: schedule (hourly) + API endpoint (for on-demand wake from approval API on system-level todos).
@@ -68,6 +72,7 @@ Two cooperating runtimes, by design:
   - `code_change`
 - ⏳ Index on `(workspace_id, status, created_at desc)` for list-view paging.
 - ⏳ Index on `(source_ticket_id)` for the linked-todos block on detail page.
+- ⏳ `scripts/print-routine-env.ts` — reads `.env.local`, filters to the Routine's needed keys (Supabase / Anthropic / Resend / Appstle / EasyPost / Meta / Braintree / Klaviyo / Shopify), prints `KEY=value\n` block to stdout. Pipe to `pbcopy`; paste into the Routine's environment-vars textarea once. Avoids 25-row copy-paste; rerun when secrets rotate.
 
 ## Phase 1 — The hourly Claude Code Routine ⏳
 
@@ -79,7 +84,7 @@ Today the unified-ticket-handler sets `tickets.escalated_to` to a human user UUI
 
 - ⏳ Change those three sites: set `escalated_to = null` (and `assigned_to = null`) when the orchestrator escalates. The routine picks up everything where `escalated_at IS NOT NULL` AND no active todo group exists.
 - ⏳ Dashboard "escalated to me" filter unchanged in behavior — it still filters by `escalated_to = current_user.id`, which means by default it shows nothing (everything escalates to routine first).
-- ⏳ On `POST /api/todos/[id]/reject` — if all todos in the group are rejected, update the source ticket: `escalated_to = current_user.id` AND add tag `todo:rejected`. The ticket reappears in the rejecter's inbox, which is the cue to bring it to Claude chat.
+- ⏳ On `POST /api/todos/[id]/reject` — if all todos in the group are rejected, update the source ticket: `escalated_to = workspace_owner.user_id` AND add tag `todo:rejected`. **Always escalates to owner**, regardless of who clicked reject. Zach can reject a customer message, but the resulting "needs manual handling" ticket lands in Dylan's inbox — Dylan handles all manual ticket work going forward.
 
 ### Per run
 
@@ -245,12 +250,13 @@ The routine creates PRs on `claude/`-prefixed branches whenever a `brain_doc_edi
 - **CI gate before PR.** Code-change todos run `npx tsc --noEmit` and tests inside the Routine BEFORE pushing. If CI fails, todo is `failed` with the error captured; no PR opens. No broken branches accumulate.
 - **Routine is stateless between runs.** Each tick is a fresh cloud session with a clean filesystem. State lives in `agent_todos` (Supabase). The Routine queries the table at run start to know what's been processed.
 - **No silent retries on failure.** A `failed` todo stays failed and surfaces in the queue with the error; humans decide next step.
-- **Rejection is the Claude-chat escape hatch.** Rejected todos do NOT auto-close the ticket. Dylan picks them up in conversation here.
+- **Rejection always escalates to owner, not rejecter.** When ALL todos in a group are rejected, the source ticket's `escalated_to` is set to the workspace owner's user_id — never the rejecter's. Dylan handles all manual ticket work via Claude chat regardless of which role clicked reject.
 - **Escalations route to the routine, never to humans by default.** Orchestrator escalation sets `escalated_to = NULL`. Humans only see escalated tickets after they reject a todo, at which point `escalated_to` is set to the rejecter's user_id and the ticket appears in their "escalated to me" inbox.
 
 ## Completion criteria
 
 - ⏳ Schema migration applied; `agent_todos` table exists with all columns + indexes.
+- ⏳ `scripts/print-routine-env.ts` works: `npx tsx scripts/print-routine-env.ts` outputs the filtered KEY=value block ready to paste into the Routine's environment textarea.
 - ⏳ Claude Code Routine `agent-todo-routine` created at `claude.ai/code/routines` with hourly schedule + API trigger + env vars + repo configured.
 - ⏳ Inngest event worker `agent-todo-execute` registered for customer-facing immediate execution.
 - ⏳ The 7 currently-escalated tickets each have a populated todo group after backfill.
