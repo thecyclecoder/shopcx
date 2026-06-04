@@ -10,7 +10,13 @@ Single source of truth for what's being built next, what's parked, and what just
 
 ---
 
-## Active project 1 — Storefront 🚧
+## Active project 1 — Agent To-Do system ⏳
+
+**Spec:** [agent-todo-system.md](agent-todo-system.md)
+
+**Why this matters:** replaces 2-3 hours/day of synchronous ticket handling with a 30-min routine that proposes fixes (customer replies + actions + Sonnet rules + brain edits + code patches + AI-analysis corrections) into an approval queue on `/dashboard/tickets/todos`. Owner + admin approve in batch; execution is gated, role-scoped, and drift-checked. Customer-facing approval auto-closes the ticket. Reject = bring to Claude chat. This becomes the primary surface for handling escalations going forward.
+
+## Active project 2 — Storefront 🚧
 
 **Lifecycle:** [[../lifecycles/storefront-checkout]]
 
@@ -30,7 +36,7 @@ Single source of truth for what's being built next, what's parked, and what just
 
 ---
 
-## Active project 2 — Customer portal 🚧
+## Active project 3 — Customer portal 🚧
 
 **Lifecycle:** [[../lifecycles/customer-portal]]
 
@@ -48,7 +54,7 @@ Single source of truth for what's being built next, what's parked, and what just
 
 ---
 
-## Active project 3 — Ad builder tool 🚧
+## Active project 4 — Ad builder tool 🚧
 
 **Lifecycle:** [[../lifecycles/ad-render]]
 
