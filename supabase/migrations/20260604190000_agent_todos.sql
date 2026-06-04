@@ -71,6 +71,7 @@ create index if not exists agent_todos_group_idx
 
 alter table public.agent_todos enable row level security;
 
+drop policy if exists "agent_todos_select" on public.agent_todos;
 create policy "agent_todos_select" on public.agent_todos
   for select using (
     workspace_id in (
@@ -78,6 +79,7 @@ create policy "agent_todos_select" on public.agent_todos
     )
   );
 
+drop policy if exists "agent_todos_service" on public.agent_todos;
 create policy "agent_todos_service" on public.agent_todos
   for all using (auth.role() = 'service_role')
   with check (auth.role() = 'service_role');
