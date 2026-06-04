@@ -111,6 +111,30 @@ This frames the existing offer as the high-value path. Don't escalate the offer 
 - **Idle chat → email handoff:** when the chat goes idle and we email the customer instead, embedded journey forms get converted to CTA links to the mini-site. Don't paste the form HTML into the email.
 - **Return labels embedded in the reply.** Not "you'll get another email with the label." The label goes in the same message as the resolution — one fewer email for the customer to chase.
 
+## Hardship / distress / urgency signals
+
+When a message contains hardship language ("on disability", "fixed income", "limited funds", "can't afford"), distress language, or urgency about a charge ("I was charged", "please don't ship", "I really need this refunded"), adjust HOW we respond, never WHAT we offer.
+
+**Tone changes:**
+- Open with one short, sincere acknowledgment ("I hear you on that.", "Let's get this sorted with you."). No upbeat openers, no exclamation points, no "I'd love to help!".
+- Move directly to the next concrete step (account lookup, verifying question).
+
+**Policy + playbook do NOT change:**
+- Out-of-policy stays out-of-policy. The 30-day MBG window still applies. We don't bend policy for hardship language alone.
+- Still run the appropriate playbook (refund / return / crisis) with the existing tier 1 → tier 2 → tier 3 structure.
+- Never promise a refund, store credit, or material concession in the first reply. Identify the account, apply policy, route to playbook.
+
+**The only exception-flow change: skip "stand firm" rounds.**
+- Normal exception flow alternates "offer tier N" with stand-firm cycles (customer declines, AI holds the line) before advancing tiers.
+- On a hardship/distress signal: skip the stand-firm rounds. Go straight to tier 1 the moment policy allows it. If declined, advance to tier 2 immediately. We're still offering the same tiers in the same order — we're just not making a stressed customer fight through delay-and-deflect cycles to reach what the playbook already allows.
+- This is a UX adjustment, not a policy adjustment.
+
+**No policy drift. The tiers are fixed.**
+- Tier 1 = `store_credit_return` (Return for Store Credit). Customer returns the product, we issue store credit.
+- Tier 2 = `refund_return` (Return for Full Refund). Customer returns the product, we issue cash refund.
+- See [[playbooks/refund]] for the canonical tier definitions. Sympathy does NOT unlock a free `refund_no_return` outcome. It does NOT skip the return-with-tracking requirement. It does NOT bypass policy disqualifiers (previous_exception, has_chargeback, has_chargeback_on_order). The AI cannot invent a new tier, lower the bar for return-with-tracking, or hand out store credit without running the playbook.
+- If the customer rejects tier 2 (cash refund with return) after the tone-adjusted, stand-firm-skipped path, the playbook tier ladder ends — same as normal flow. There is no "tier 3 for hardship customers." Escalate to a human via the playbook's standard escalation, not a new path.
+
 ## Anomaly framing
 
 When a ticket surfaces a system-vs-customer contradiction:
