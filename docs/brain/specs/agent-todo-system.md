@@ -134,7 +134,31 @@ Route: `/dashboard/tickets/todos/[id]`.
   - Update `status` + `execution_result` based on outcome.
   - If this was the last unexecuted customer-facing todo in the group → run auto-closure step from Phase 1.
 
-## Phase 5 — Backfill + first run ⏳
+## Phase 4.5 — Escalated dashboard view rebuild ⏳
+
+The existing `/dashboard/tickets/escalated` view filters by `escalated_to = current_user.id` — under the new model that filter is wrong (most escalations are routine-bound with `escalated_to = NULL`). Rebuild it as the **observability surface** for the whole escalation pipeline. The To-Do queue stays the primary action surface; this is the at-a-glance pipeline health view.
+
+- ⏳ **Drop the `escalated_to = current_user.id` filter.** Show every ticket where `escalated_at IS NOT NULL`, sorted by `escalated_at desc`.
+- ⏳ **Add a "Routed to" column** with a status badge per row:
+  - `routine` (gray) — no todos created yet; awaiting the next routine pass
+  - `todo:pending` (amber) — group has pending todos
+  - `todo:approved` (blue) — todos approved, awaiting execution
+  - `rejected → {first_name}` (red) — at least one todo rejected, escalated_to set to that user
+  - `assigned → {first_name}` (zinc, legacy) — assigned to a human under the pre-routine model
+- ⏳ **Filter chips at the top** (counts in parens):
+  - `All`
+  - `Routine pending` — escalated, no todo group exists yet
+  - `Awaiting approval` — at least one `pending` todo in the group
+  - `Approved, pending execute` — all approved but not all executed
+  - `Rejected → me` — at least one rejected todo, `escalated_to = current_user.id`
+  - `Assigned to human (legacy)` — `escalated_to` is some other user, no todos in flight
+- ⏳ **Sidebar bubble change.** The "Escalated" sidebar item's count badge changes meaning:
+  - Old: count of tickets with `escalated_to = current_user.id`
+  - New: count of tickets in the **"Rejected → me"** chip — the pile that needs human thinking, not algorithmic processing
+  - This is intentionally different from the To-Do bubble (which is "items in your approval queue"). Together: To-Do bubble = "approve these"; Escalated bubble = "think about these."
+- ⏳ **Default chip:** `Awaiting approval` if it has rows, otherwise `All`. Optimizes for the most actionable view.
+
+
 
 - ⏳ One-shot script: for each currently-escalated ticket (the 7 in the queue right now), run the routine's reasoning pass once and write its todos. Confirms the pipeline end-to-end on real data before going live.
 - ⏳ After backfill validates, enable the cron trigger.
@@ -144,6 +168,7 @@ Route: `/dashboard/tickets/todos/[id]`.
 - ⏳ Update `docs/brain/specs/README.md` Active Project 1-3 to mention the To-Do system as their common feedback surface (since it'll route fixes back into each project).
 - ⏳ New brain page: `docs/brain/dashboard/tickets__todos.md` (list view).
 - ⏳ New brain page: `docs/brain/dashboard/tickets__todos__id.md` (detail view).
+- ⏳ Update brain page: `docs/brain/dashboard/tickets__escalated.md` — document the rebuilt observability view with the 6 chips + new bubble semantics.
 - ⏳ New brain page: `docs/brain/tables/agent_todos.md`.
 - ⏳ New brain page: `docs/brain/inngest/agent-todo-routine.md`.
 - ⏳ New brain page: `docs/brain/lifecycles/agent-todo-system.md` (the end-to-end trace). After this spec ships, fold the spec content here and delete the spec per project-management convention.
@@ -178,6 +203,7 @@ Route: `/dashboard/tickets/todos/[id]`.
 - ⏳ Approve queues `sonnet_prompt_new` for next routine tick; executed on tick.
 - ⏳ Reject marks todo + ticket; doesn't auto-close ticket.
 - ⏳ Customer-facing group execute → ticket auto-closes + unescalates + unassigns + system note added.
+- ⏳ `/dashboard/tickets/escalated` shows ALL escalated tickets (no `escalated_to=me` filter), with chip filters and a "Routed to" badge per row. Sidebar bubble counts the "Rejected → me" pile, not the routine-bound pile.
 - ⏳ Brain pages written; spec content folded into `lifecycles/agent-todo-system.md`; this spec file deleted.
 
 ## Open questions
