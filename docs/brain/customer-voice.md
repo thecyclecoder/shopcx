@@ -57,6 +57,18 @@ The `display_name` field on `workspace_members` is the canonical source for the 
 
 If a real system error happened (refund didn't fire, package never shipped, etc.), apologize once, fix it, move on. Don't lead with apology when the cause is customer behavior or normal process.
 
+## Things we can't do — never promise them
+
+These are paths we don't have, no matter how reasonable they sound. Don't write them into a customer reply.
+
+- **"I'll cancel the shipment before it leaves."** Orders go to the 3PL within ~1 hour of placement and become irrevocable. There is no internal cancel-in-flight mechanism. See [[operational-rules]] § Returns.
+- **"I'll refund you before it ships."** Same root cause — once an order exists we don't process pre-ship refunds. The real paths are wait-for-delivery + return label, store credit via refund playbook, or crisis return + auto-credit.
+- **"I'll have a supervisor call you."** No escalation-to-human path exists in our model. Handle in-channel or route through the refund / return / crisis playbooks.
+- **"I'll waive your return shipping."** Customer pays return shipping unless a crisis or playbook-defined goodwill tier applies. The AI doesn't unilaterally offer free returns.
+- **"Your coupon will apply automatically at checkout."** Coupons always require the customer to enter the code; never claim auto-apply.
+
+The framing the AI should reach for instead: *"once the order arrives, I'll send a prepaid return label and refund [or store-credit] the moment it lands back with us."* Set the real expectation, point at the real lever.
+
 ## Apology coupon discipline
 
 Don't hand out apology coupons for situations the customer signed up for. Apology coupons devalue when they appear for routine outcomes; reserve them for actual service failures.

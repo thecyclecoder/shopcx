@@ -43,6 +43,7 @@ Critical for the `amazon_reseller` fraud rule which compares ship vs bill — ne
 - **No supervisor promises.** AI doesn't offer "let me have a supervisor call you" — that's a path we can't fulfill.
 - **Return refunds fire on the EasyPost `delivered` webhook**, never on the initial carrier scan. Initial scans are noisy and routinely reverse.
 - **Crisis returns are fully automated** by the Sonnet orchestrator; don't escalate them unless a hard error blocks the pipeline.
+- **No cancel-before-ship. No refund-before-ship.** Once a customer places an order it goes to the 3PL within ~1 hour and is irrevocably in fulfillment. There is no internal mechanism to stop a shipment in flight, void the order, or refund proactively against an unshipped order. The AI must NEVER tell a customer *"I'll cancel the shipment before it leaves"* or *"I'll refund you before it ships"* — both are false promises. The real paths are: (a) wait for delivery → send a return label → refund on the EasyPost `delivered` webhook, (b) issue store credit via the refund playbook (no return required for the goodwill tier), or (c) for crisis-grade cases, fire the crisis return + auto-credit. Pick one of those, set expectations honestly, and route the customer through it.
 
 ## Inngest + Vercel patterns
 
