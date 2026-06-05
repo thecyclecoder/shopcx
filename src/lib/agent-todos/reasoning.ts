@@ -34,6 +34,8 @@ export interface ReasoningOptions {
   brainBrief?: string;
   /** Tag the proposed rows with the routine pass id. */
   routineRunId?: string;
+  /** Repo root for the Agent SDK to use as cwd (for Read/Grep/Bash tool access). Defaults to process.cwd(). */
+  repoDir?: string;
 }
 
 interface ProposedTodo {
@@ -251,31 +253,80 @@ async function gatherContext(admin: Admin, workspaceId: string, ticketId: string
   return lines.join("\n");
 }
 
-async function callOpus(systemPrompt: string, userContent: string): Promise<ReasoningOutput | null> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
+/**
+ * Reason via the Claude Agent SDK so Opus has Read/Glob/Grep/Bash tool
+ * access to the actual cloned repo during reasoning. Without this, the
+ * model hallucinates file paths (we hit "escalation/rules/threat_language.py"
+ * — a Python file in our TypeScript project — on 2026-06-04).
+ *
+ * Auth: the Agent SDK respects whatever the host environment provides.
+ * Inside a Claude Code Routine it uses the routine's session credentials
+ * (billed against the Max subscription's Agent SDK credit bucket as of
+ * 2026-06-15). When run locally / outside a routine, falls back to
+ * ANTHROPIC_API_KEY.
+ *
+ * Cwd: the spawned Claude session inherits `cwd` here, which the
+ * routine-run script sets to the repo root. So `Read("src/lib/...")` etc
+ * resolve against the real files.
+ */
+async function callOpus(systemPrompt: string, userContent: string, repoDir: string): Promise<ReasoningOutput | null> {
+  const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
+  const sdkSystemPrompt = `${systemPrompt}
+
+Output protocol: you have Read, Glob, Grep, and Bash tools to explore the repo at ${repoDir}. Use them to ground EVERY file_path you propose. If you cannot verify a file exists, do not propose code_change-style todos against it — emit a sonnet_prompt with category="knowledge" instead.
+
+When you are ready to propose, emit your final answer as a single JSON code block wrapped in \`\`\`json ... \`\`\`. The JSON MUST match this shape exactly:
+
+{
+  "decision": "no_action" | "customer_fix" | "system_gap" | "analysis_gap" | "escalation_false_positive",
+  "context_what_happened": "one short paragraph",
+  "context_what_we_propose": "one paragraph or short bullets",
+  "urgency": "urgent" | "normal" | "low",
+  "todos": [
+    { "action_type": "...", "summary": "...", "payload": { ... }, "confidence": 0.0-1.0 }
+  ]
+}
+
+Emit the JSON block as the LAST thing in your final response. After the JSON block, do not emit anything else.`;
+
+  let finalText = "";
+  const iter = query({
+    prompt: userContent,
+    options: {
+      systemPrompt: sdkSystemPrompt,
+      cwd: repoDir,
       model: OPUS_MODEL,
-      max_tokens: 4000,
-      system: systemPrompt,
-      tools: [TOOL],
-      tool_choice: { type: "tool", name: "propose_todos" },
-      messages: [{ role: "user", content: userContent }],
-    }),
+      allowedTools: ["Read", "Glob", "Grep", "Bash"],
+      maxTurns: 30,
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+    },
   });
-  if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  const block = (data.content || []).find((b: { type: string }) => b.type === "tool_use");
-  if (!block) return null;
-  return block.input as ReasoningOutput;
+
+  for await (const msg of iter) {
+    // Capture every assistant text block; the JSON we want is in the last one.
+    if (msg.type === "assistant" && (msg as { message?: { content?: Array<{ type: string; text?: string }> } }).message?.content) {
+      const content = (msg as { message: { content: Array<{ type: string; text?: string }> } }).message.content;
+      for (const block of content) {
+        if (block.type === "text" && block.text) finalText = block.text;
+      }
+    }
+  }
+
+  if (!finalText) return null;
+
+  // Extract JSON block from the final text.
+  const fenced = finalText.match(/```json\s*\n([\s\S]*?)\n```/);
+  const raw = fenced ? fenced[1] : (finalText.match(/\{[\s\S]*\}/)?.[0] ?? null);
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw) as ReasoningOutput;
+  } catch (err) {
+    console.warn(`[reasoning] JSON parse failed: ${err instanceof Error ? err.message : err}. Raw: ${raw.slice(0, 300)}`);
+    return null;
+  }
 }
 
 /** Reason about a single ticket and (unless dryRun) write its todo group. */
@@ -293,7 +344,7 @@ export async function reasonAboutTicket(
       context,
     ].join("\n");
 
-    const output = await callOpus(SYSTEM_PROMPT, userContent);
+    const output = await callOpus(SYSTEM_PROMPT, userContent, opts.repoDir || process.cwd());
     if (!output || !output.todos?.length) {
       return { ticketId, proposed: [], skipped: "model proposed nothing" };
     }

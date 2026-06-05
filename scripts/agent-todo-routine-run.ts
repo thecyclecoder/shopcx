@@ -46,7 +46,7 @@ const REPO_DIR = process.cwd();
 
 async function reasoningPass(runId: string) {
   console.log("[routine] reasoning pass…");
-  const results = await runReasoningPass({ workspaceId: WORKSPACE_ID, routineRunId: runId });
+  const results = await runReasoningPass({ workspaceId: WORKSPACE_ID, routineRunId: runId, repoDir: REPO_DIR });
   const groups = results.filter((r) => r.groupId).length;
   const todos = results.reduce((n, r) => n + (r.groupId ? r.proposed.length : 0), 0);
   console.log(`[routine] reasoning: ${results.length} tickets · ${groups} new groups · ${todos} todos`);
