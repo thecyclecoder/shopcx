@@ -93,6 +93,23 @@ const CUSTOMER_ESCALATION_KEYWORDS = [
   "report you", "fraud", "scam",
 ];
 
+// Benign phrases that contain a threat keyword but indicate the customer
+// is cooperating (e.g. reporting a bank-side fraud alert). When a phrase
+// in this denylist appears in the body, the matching keyword is excluded
+// from the threat check. Seen on ticket a613e06e: "they Fraud Alert me"
+// from a customer cooperating with us substring-matched "fraud" and
+// force-escalated despite a positive close.
+const ESCALATION_KEYWORD_DENYLIST: Record<string, string[]> = {
+  fraud: ["fraud alert", "fraud team", "flagged for fraud", "bank fraud", "fraud department", "fraud protection"],
+};
+
+function matchesEscalationKeyword(loweredText: string, keyword: string): boolean {
+  if (!loweredText.includes(keyword)) return false;
+  const denylist = ESCALATION_KEYWORD_DENYLIST[keyword];
+  if (denylist?.some(phrase => loweredText.includes(phrase))) return false;
+  return true;
+}
+
 interface AnalysisResult {
   score: number;
   issues: Array<{ type: string; description: string }>;
@@ -663,7 +680,7 @@ async function applySeverityActions(
   const customerThreat = msgs.some(m => {
     if (m.direction !== "inbound") return false;
     const txt = (m.body || "").toLowerCase();
-    return CUSTOMER_ESCALATION_KEYWORDS.some(k => txt.includes(k));
+    return CUSTOMER_ESCALATION_KEYWORDS.some(k => matchesEscalationKeyword(txt, k));
   });
 
   const forceEscalate = hasSevereIssue || customerThreat;
