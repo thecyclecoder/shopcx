@@ -127,9 +127,47 @@ async function prCleanupPass() {
   }
 }
 
+/**
+ * Preflight: report exactly which expected env vars this run received.
+ * The cloud routine once reported a clean "0 tickets / 0 todos" because
+ * createAdminClient() got an undefined Supabase URL/key — every query then
+ * returns empty with no thrown error, so a misconfigured run looks like a
+ * healthy no-op. Fail loudly instead: log present-vs-missing for each var,
+ * and abort when the ones we can't run without are absent.
+ */
+function checkEnv() {
+  const has = (k: string) => !!(process.env[k] && process.env[k] !== "");
+  // Without these every Supabase query silently returns empty → abort.
+  const REQUIRED = ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"];
+  // Missing these degrades a pass but doesn't make the run a silent lie.
+  const RECOMMENDED = [
+    "ENCRYPTION_KEY", // decrypt per-workspace integration creds during execution
+    "ANTHROPIC_API_KEY", // reasoning pass (skippable if authed via Claude OAuth/Max)
+    "OPENAI_API_KEY", // embeddings for brain/context lookups
+    "GITHUB_TOKEN", // PR-cleanup pass (or AGENT_TODO_GITHUB_TOKEN)
+    "RESEND_API_KEY",
+  ];
+
+  console.log("[routine] env preflight:");
+  for (const k of REQUIRED) console.log(`  ${has(k) ? "✓" : "✗ MISSING"}  ${k}  (required)`);
+  for (const k of RECOMMENDED) {
+    const present = k === "GITHUB_TOKEN" ? has("GITHUB_TOKEN") || has("AGENT_TODO_GITHUB_TOKEN") : has(k);
+    console.log(`  ${present ? "✓" : "·  "}  ${k}${present ? "" : "  (missing — that pass will be degraded/skipped)"}`);
+  }
+
+  const missing = REQUIRED.filter((k) => !has(k));
+  if (missing.length) {
+    console.error(`\n[routine] ABORT — missing required env var(s): ${missing.join(", ")}.`);
+    console.error("[routine] Without Supabase creds every query returns empty and the run would silently do nothing.");
+    console.error("[routine] Populate the routine environment (npx tsx scripts/print-routine-env.ts) and re-trigger.");
+    process.exit(1);
+  }
+}
+
 async function main() {
   const runId = randomUUID();
   console.log(`[routine] agent-todo-routine run ${runId} · workspace ${WORKSPACE_ID} · repo ${REPO_DIR}`);
+  checkEnv();
   await reasoningPass(runId);
   await systemExecutionPass();
   await prCleanupPass();
