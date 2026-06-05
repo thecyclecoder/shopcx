@@ -34,7 +34,8 @@ async function analyzeTicket(ticketId: string, trigger: "auto_close" | "manual_c
 
 ## Gotchas
 
-_None documented._
+- **`CUSTOMER_ESCALATION_KEYWORDS` substring-matches `"fraud"` against the entire inbound body**, which false-positives on benign bank phrasing — e.g. "my bank put a Fraud Alert on my card", "the fraud team called", "flagged for fraud". The customer is cooperating, not threatening, but `customerThreat` flips true and the ticket force-escalates silently regardless of score. Seen on ticket `a613e06e` (Elizabeth Fraser, 2026-06-05). **Mitigated** by `ESCALATION_KEYWORD_DENYLIST` + `matchesEscalationKeyword()` — a benign-phrase denylist that excludes the matching keyword when a cooperating-context phrase is present (added via the agent-todo `code_change`, PR #2). The same substring risk still applies to other keywords (`"scam"`, `"report you"`) that aren't yet denylisted.
+- **No idempotency check on repeat mutations within a ticket.** The orchestrator can fire `bill_now` (or any mutation) twice in consecutive turns without verifying the first attempt's outcome — the analyzer only surfaces it after the fact as `missed_opportunity`, but the prevention belongs in orchestrator rules, not grading. Seen on the same ticket: `bill_now` fired in turn 2 and again in turn 3 without checking turn 2's result, with real duplicate-charge risk. Addressed by a sonnet_prompt rule (todo `943de409`) instructing the orchestrator to check the prior action result before re-firing a mutation.
 
 ---
 
