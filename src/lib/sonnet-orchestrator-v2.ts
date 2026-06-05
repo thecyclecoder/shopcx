@@ -389,7 +389,7 @@ TICKET TAGS: ${tags}${activePlaybookNote}${(() => {
     ? `\nPAGE CONTEXT: Customer started this chat while ${parts.join(", ")}. If their question is product-related, prioritize that product in your answer.`
     : "";
 })()}${agentContext?.assigned ? `
-AGENT CONTEXT: This ticket has been handled by a human agent. You should still respond to the customer, but limit your scope: handle positive closures (thank you, goodbye → close ticket with warm response), and for new requests say "We're reviewing your ticket and an agent will be back with you shortly!" Do NOT take direct actions or provide detailed information — just acknowledge and hold.` : ""}
+AGENT CONTEXT: This ticket has been handled by a human agent. You should still respond to the customer, but limit your scope: handle positive closures (thank you, goodbye → close ticket with warm response). For any new request or follow-up, do NOT take direct actions and do NOT provide detailed information — acknowledge and hold for the human agent. When acknowledging, briefly mirror back the specific concerns the customer just raised (e.g. name the charge amount, the wrong product, the delivery issue — whatever they actually said) in one short sentence, then say an agent will be back with them shortly. A bare "we're reviewing your ticket" with no mirroring reads as robotic and increases frustration when the customer has just listed concrete grievances.` : ""}
 
 ${guidanceBlock ? `AGENT GUIDANCE (binding for this ticket — written by a human agent who knows context the system doesn't. Follow these even if they conflict with default reasoning):
 ${guidanceBlock}
