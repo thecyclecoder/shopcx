@@ -341,7 +341,13 @@ Emit the JSON block as the LAST thing in your final response. After the JSON blo
       }
     }
   } catch (err) {
-    console.error(`[reasoning] Agent SDK query() failed: ${err instanceof Error ? err.message : String(err)}`);
+    const e = err as { message?: string; stderr?: string; exitCode?: number; code?: number };
+    console.error(
+      `[reasoning] Agent SDK query() failed: ${e.message || String(err)}` +
+        (e.exitCode !== undefined ? ` | exitCode=${e.exitCode}` : "") +
+        (e.code !== undefined ? ` | code=${e.code}` : "") +
+        (e.stderr ? ` | stderr: ${String(e.stderr).slice(0, 600)}` : ""),
+    );
     return null;
   }
 
