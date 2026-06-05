@@ -61,6 +61,10 @@ After editing files under `shopify-extension/portal-src/`:
 
 Skip either step and the customer-facing portal will be out of sync with what's in source.
 
+## Remotion site deploy
+
+After editing anything under `remotion/` (compositions, `ExampleAd`/`AdStatic`, fonts) **re-run `npx tsx scripts/deploy-remotion-lambda.ts`** to re-upload the bundle to the Lambda site. Production ad renders run on Remotion Lambda (Vercel serverless can't run Remotion) and use the *deployed* site — skip this and Lambda renders a stale composition. See [[integrations/remotion-lambda]]. Local dev (`REMOTION_RENDER_MODE` unset) renders in-process and doesn't need a redeploy.
+
 ## Gorgias
 
 - **Keep Gorgias code out of production.** The migration is complete; Gorgias is read-only / archive-only. Any Gorgias API calls live in standalone `scripts/` files for historical lookups, never in `src/`.

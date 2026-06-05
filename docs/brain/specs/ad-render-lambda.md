@@ -1,6 +1,8 @@
 # Spec: production ad rendering via Remotion Lambda
 
-**Status:** ⏳ planned · **Owner:** Dylan · **Run with:** `/goal do everything in docs/brain/specs/ad-render-lambda.md`
+**Status:** 🚧 code shipped, awaiting AWS creds for live deploy + verify · **Owner:** Dylan
+
+> **Progress (2026-06):** Phases 1–5 implemented + typechecked: `@remotion/lambda` dep, `scripts/deploy-remotion-lambda.ts` (deployFunction + getOrCreateBucket + deploySite), Lambda render dispatch in `ad-render.ts` (`renderVoSpineVideoTo`/`renderStaticTo` behind `REMOTION_RENDER_MODE`), Whisper backfill in the render assemble step, URL re-signing in the campaign GET, brain docs ([[../integrations/remotion-lambda]]). **Remaining (creds-gated):** create the IAM user, run `scripts/deploy-remotion-lambda.ts`, set the env vars in Vercel, flip `REMOTION_RENDER_MODE=lambda`, render an ad end-to-end from the app, then fold + delete this spec.
 
 ## Why
 

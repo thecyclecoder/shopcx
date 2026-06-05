@@ -167,8 +167,13 @@ This is the locked-in creative pipeline, confirmed by building a real Amazing Co
 - **Hero comment-regenerate** — the Hero card takes a free-text correction ("hands look wrong") → `POST /hero {feedback}` → appended to the Nano Banana Pro prompt.
 - **TTS audio removed** — no `audio` stage/route/function; VO = Veo native audio, only added track is the Lyria bed.
 
+**🚧 Render runtime → Remotion Lambda (code shipped, awaiting AWS creds):**
+- Remotion can't run on Vercel serverless (`remotion_not_installed`). The render path now dispatches on `REMOTION_RENDER_MODE`: **lambda** (`renderMediaOnLambda`/`renderStillOnLambda` + poll + S3 download) for prod, **local** in-process for dev. See [[../integrations/remotion-lambda]]. Code + `scripts/deploy-remotion-lambda.ts` are in; needs an AWS IAM user + `deployFunction`/`deploySite` run to go live.
+- **Captions never empty**: the render `assemble` step now backfills Whisper transcripts for any talking clip missing them (was silently empty in prod). Needs `OPENAI_API_KEY` in Vercel.
+- **URL durability**: `ad_videos.meta.storage_path` stored; campaign GET re-signs `final_mp4_url`/`static_jpg_url` from it (no more 90-day-expiry links).
+- Interim: renders are produced via a local `tsx` script until the Lambda deploy runs.
+
 **⏳ Open:**
-- **Live end-to-end Veo render not yet run from the app** — the pipeline is code-complete + typechecks, but a full UI→Veo→render pass hasn't run against live quota (Veo 3.1 Fast daily cap). The proven artifacts were produced via one-off scripts and backfilled.
 - **Static path** still renders the hero+headline `AdStatic` (unchanged); only the video path uses the VO-spine composition.
 - **B-roll/music refresh** — only talking beats are refreshable via the UI; b-roll + music are reused as-is. Regenerating the hero does NOT auto-refresh existing talking clips (regenerate those to pick up the new hero).
 

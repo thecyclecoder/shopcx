@@ -37,7 +37,7 @@ import {
 import { buildAvatarPortraitPrompt, slugify, resolveAdToolSettings, VIDEO_FORMATS, STATIC_FORMATS, FORMAT_SPECS, type AdFormat, type VibeTag, type AvatarFaceAttributes } from "@/lib/ad-tool-config";
 import { loadAngleInputs } from "@/lib/ad-angles";
 import { transcribeWords } from "@/lib/ad-transcribe";
-import { composeCredibility, buildCompositionProps, renderAdFormat, buildVoCaptions, renderVoSpineVideo } from "@/lib/ad-render";
+import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo } from "@/lib/ad-render";
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
 // hallucinated filler (we still proofread captions, but tighter input = cleaner).
@@ -403,6 +403,25 @@ export const adToolRenderRequested = inngest.createFunction(
       const { talking, broll, music } = await loadActiveSegments(campaign_id);
       if (!talking.length) return null;
 
+      // Captions come from each talking clip's Whisper transcript. If a clip was
+      // generated without one (transcription can fail at gen time), backfill it
+      // here so captions + tight trims always populate — never silently empty.
+      for (const s of talking) {
+        if (!(s.transcript_json?.words?.length) && s.storage_path) {
+          try {
+            const { words } = await transcribeWords(await signedUrl(s.storage_path));
+            const last = words[words.length - 1];
+            const trimSec = last ? last.end + 0.15 : null;
+            await admin.from("ad_segments").update({ transcript_json: { words }, duration_sec: last?.end ?? null, trim_sec: trimSec }).eq("id", s.id);
+            (s as any).transcript_json = { words };
+            (s as any).trim_sec = trimSec ?? s.trim_sec;
+            (s as any).duration_sec = last?.end ?? s.duration_sec;
+          } catch (err: any) {
+            await admin.from("ad_segments").update({ error: `whisper: ${String(err?.message || err).slice(0, 200)}` }).eq("id", s.id);
+          }
+        }
+      }
+
       let musicId: string | null = music?.id || null;
       let musicPath: string | null = music?.storage_path || null;
       if (!musicId) {
@@ -488,7 +507,7 @@ export const adToolRenderRequested = inngest.createFunction(
           const tmp = `/tmp/ad_${campaign_id}_${p.format}_${p.kind}.${ext}`;
           if (p.kind === "video") {
             const spec = FORMAT_SPECS[p.format];
-            await renderVoSpineVideo(
+            await renderVoSpineVideoTo(
               { width: spec.width, height: spec.height, fps: assembled.fps, durationSec: assembled.durationSec, segments: assembled.segments, broll: assembled.broll, music: assembled.music, captions: assembled.captions },
               tmp,
             );
@@ -508,7 +527,7 @@ export const adToolRenderRequested = inngest.createFunction(
               staticHeadline: ctx.staticHeadline || undefined,
               staticTemplate: "shipping_label_brutalist",
             });
-            await renderAdFormat(props, tmp);
+            await renderStaticTo(props, tmp);
           }
           const fs = await import("fs/promises");
           const buf = await fs.readFile(tmp);

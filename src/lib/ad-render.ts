@@ -425,3 +425,77 @@ export async function renderAdFormat(props: AdCompositionProps, outPath: string)
   }
   return { format: props.format, mediaKind: props.mediaKind, outputPath: outPath };
 }
+
+// ── Render dispatch: Remotion Lambda (prod) vs in-process (local dev) ────────
+// REMOTION_RENDER_MODE=lambda runs the render on AWS Lambda (Vercel serverless
+// can't run Remotion). Anything else uses the in-process renderer above.
+// See docs/brain/integrations/remotion-lambda.md.
+
+const RENDER_MODE = process.env.REMOTION_RENDER_MODE || "local";
+
+function lambdaConfig() {
+  const region = process.env.REMOTION_AWS_REGION || "us-east-1";
+  const functionName = process.env.REMOTION_LAMBDA_FUNCTION_NAME;
+  const serveUrl = process.env.REMOTION_LAMBDA_SERVE_URL;
+  if (!functionName || !serveUrl) throw new Error("remotion_lambda_not_configured: set REMOTION_LAMBDA_FUNCTION_NAME + REMOTION_LAMBDA_SERVE_URL (run scripts/deploy-remotion-lambda.ts)");
+  return { region, functionName, serveUrl };
+}
+
+async function downloadTo(url: string, outPath: string): Promise<void> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`render_output_fetch_${res.status}`);
+  const fs = await import("fs/promises");
+  await fs.writeFile(outPath, Buffer.from(await res.arrayBuffer()));
+}
+
+/** Render the VO-spine video on Lambda (ExampleAd) → write to outPath. */
+async function renderVoSpineVideoOnLambda(props: VoSpineProps, outPath: string): Promise<void> {
+  const { region, functionName, serveUrl } = lambdaConfig();
+  const lambda: any = await import(/* webpackIgnore: true */ "@remotion/lambda/client" as any);
+  const { renderId, bucketName } = await lambda.renderMediaOnLambda({
+    region, functionName, serveUrl,
+    composition: "ExampleAd",
+    inputProps: props,
+    codec: "h264",
+    maxRetries: 1,
+    privacy: "public",
+  });
+  // Poll until done. Veo-length clips render in ~1-3 min.
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 5000));
+    const p = await lambda.getRenderProgress({ renderId, bucketName, functionName, region });
+    if (p.fatalErrorEncountered) throw new Error(`lambda_render_failed: ${(p.errors?.[0]?.message || "fatal").slice(0, 160)}`);
+    if (p.done) {
+      if (!p.outputFile) throw new Error("lambda_render_no_output");
+      await downloadTo(p.outputFile, outPath);
+      return;
+    }
+  }
+}
+
+/** Render a still on Lambda (AdStatic) → write to outPath. */
+async function renderStaticOnLambda(props: AdCompositionProps, outPath: string): Promise<void> {
+  const { region, functionName, serveUrl } = lambdaConfig();
+  const lambda: any = await import(/* webpackIgnore: true */ "@remotion/lambda/client" as any);
+  const out = await lambda.renderStillOnLambda({
+    region, functionName, serveUrl,
+    composition: "AdStatic",
+    inputProps: props,
+    imageFormat: "jpeg",
+    frame: 0,
+    privacy: "public",
+  });
+  await downloadTo(out.url, outPath);
+}
+
+/** Render the VO-spine video (Lambda in prod, in-process locally) → outPath. */
+export async function renderVoSpineVideoTo(props: VoSpineProps, outPath: string): Promise<void> {
+  if (RENDER_MODE === "lambda") return renderVoSpineVideoOnLambda(props, outPath);
+  await renderVoSpineVideo(props, outPath);
+}
+
+/** Render a static ad (Lambda in prod, in-process locally) → outPath. */
+export async function renderStaticTo(props: AdCompositionProps, outPath: string): Promise<void> {
+  if (RENDER_MODE === "lambda") return renderStaticOnLambda(props, outPath);
+  await renderAdFormat(props, outPath);
+}

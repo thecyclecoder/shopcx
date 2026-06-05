@@ -40,7 +40,8 @@ All share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a sin
 
 ### `ad-tool-render-requested`
 - **Trigger:** event `ad-tool/render-requested` · **Retries:** 1
-- Sets campaign `status='rendering'`. **`assemble` step:** `loadActiveSegments` (talking/broll/music) → generates a Lyria music bed if missing (persists `kind=music`) → `buildComposition` + `saveComposition` (`ad_campaigns.composition`) → resolves signed URLs → `buildVoCaptions` (per-segment Whisper proofread vs script, numbers + `%` preserved). Then renders **all 4 formats**: video via `renderVoSpineVideo` (canonical `ExampleAd` composition — VO spine + muted/ASMR b-roll + Lyria bed + captions), static via `renderAdFormat` (`AdStatic`). One `ad_videos` row per format (siblings via `format_variant_of_id`).
+- Sets campaign `status='rendering'`. **`assemble` step:** `loadActiveSegments` (talking/broll/music) → **backfills Whisper transcripts** for any talking clip missing them (so captions never come back empty + trims stay tight) → generates a Lyria music bed if missing (persists `kind=music`) → `buildComposition` + `saveComposition` (`ad_campaigns.composition`) → resolves signed URLs → `buildVoCaptions` (per-segment proofread vs script, numbers + `%` preserved). Then renders **all 4 formats**: video via `renderVoSpineVideoTo` (`ExampleAd`), static via `renderStaticTo` (`AdStatic`). One `ad_videos` row per format (siblings via `format_variant_of_id`); `meta.storage_path` stored for re-signing.
+- **Render runs on Remotion Lambda in prod** (`REMOTION_RENDER_MODE=lambda`) — Remotion can't run on Vercel serverless. See [[../integrations/remotion-lambda]]. Local dev renders in-process.
 
 ### `ad-tool-segment-regenerate` (refresh a beat / upgrade to HQ Veo 3)
 - **Trigger:** event `ad-tool/segment-regenerate` (`{ workspace_id, campaign_id, seq, kind?, new_script?, model? }`) · **Retries:** 1

@@ -38,12 +38,24 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   if (error || !campaign)
     return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-  const { data: videos } = await auth.admin
+  const { data: videoRows } = await auth.admin
     .from("ad_videos")
     .select("*")
     .eq("campaign_id", id)
     .eq("workspace_id", workspaceId as string)
     .order("created_at", { ascending: false });
+  const { signedUrl: signFinal } = await import("@/lib/ad-storage");
+  // Re-sign final URLs from the stored path so links never expire (the stored
+  // final_mp4_url/static_jpg_url is itself a time-limited signed URL).
+  const videos = await Promise.all(
+    (videoRows || []).map(async (v) => {
+      const sp = (v.meta as any)?.storage_path as string | undefined;
+      if (!sp) return v;
+      const fresh = await signFinal(sp).catch(() => null);
+      if (!fresh) return v;
+      return v.media_kind === "static" ? { ...v, static_jpg_url: fresh } : { ...v, final_mp4_url: fresh };
+    }),
+  );
 
   // Creative library: the active pieces that make up this ad, with signed
   // preview URLs so the operator can inspect (and refresh) each one.
