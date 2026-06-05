@@ -51,9 +51,10 @@ Current policy contract:
 
 ### Tier 2 — Return for Full Refund
 
-- **conditions**: customer LTV ≥ $300 OR total orders ≥ 6 (very tenured).
+- **conditions**: customer LTV ≥ $2,000 OR total orders ≥ 5 (very tenured). _Threshold tightened 2026-06-05 from $300 / 3 orders — only true high-LTV customers escalate to a cash refund._
 - **resolution_type**: `refund_return` (full refund to original card).
 - Reserved for customers we don't want to lose, where store credit alone would push them out.
+- **Standalone offer is firm.** When the executor advances from Tier 1 to Tier 2 it does NOT re-offer Tier 1 first — Tier 1 has already been rejected. The reply restates the Tier 2 offer with the same exact math and a clear CTA.
 
 > **Auto-grant feature removed 2026-06-03.** A previous tier-0 "System Error → Refund Without Return" exception with `auto_grant=true` existed; the detection logic was stubbed and never shipped. Sonnet escalates these scenarios directly when they come up, and `never_delivered` is handled by the replacement flow. The legacy DB row is preserved but dormant — the executor filters `!auto_grant` defensively.
 
@@ -70,7 +71,7 @@ Current policy contract:
 `stand_firm_before_exceptions=2` + `stand_firm_between_tiers=2` + `stand_firm_max=3`:
 
 - After explaining the policy (step 3), if customer pushes back, stand firm up to 2 times before tiering up to an exception offer.
-- Between exception tiers, stand firm up to 2 times.
+- Between exception tiers (Tier 1 → Tier 2), stand firm up to 2 times **then advance** — the executor resets `exception_stand_firm_count`, finds the next eligible tier via `evaluateCustomerConditions`, and offers it. The model must NOT keep re-quoting Tier 1 forever; once the counter exhausts, the next turn is Tier 2 (or final stand-firm if customer doesn't qualify).
 - Total stand-firm reps capped at 3 before AI declares the conversation closed.
 
 Final stand firm format: one sentence + "reply if you change your mind." See [[../playbooks/README]].
@@ -80,6 +81,9 @@ Final stand firm format: one sentence + "reply if you change your mind." See [[.
 - **Never apologize for the charge** the customer signed up for — duplicate-sub charges aren't billing errors. See feedback_no_apology_for_customer_action.
 - **Never frame multiple subs as "double billing"** — customer made the subs, we processed them as configured. See feedback_no_double_billing_framing.
 - **Cancel detection is global** — if the customer mentions cancel mid-flow, pause + launch [[../journeys/cancel]] + don't mention the refund again until they bring it back up.
+- **Never end an exception offer with "does that work for you?"** (or "is that acceptable", "would that be okay", etc.) — that phrasing implies we have a better offer waiting if the customer says no. We don't. Present the exception as our best offer and end with a direct CTA to proceed ("Want me to send the return label?"). See feedback_no_conditional_exception_phrasing.
+- **Never quote a number from the customer's own message as the active offer.** Customers cite reward-point balances, prior credit, or guesses ($X they mention) — those are NOT the active offer ($Y you just quoted). The active offer comes from the prior AI turn or `playbook_context.net_refund_cents`. If the customer's number differs, address it as a separate balance ("your reward points are separate from this offer") — never silently overwrite the active number with theirs.
+- **Always acknowledge a return-label question.** If the customer asks "how do I get my return label" / "send me a label" / similar, the next turn must address it directly — either by sending the label (offer accepted) or by explaining the next step before they get one. Ignoring the question reads as dismissive and is one of the top causes of escalation.
 
 ## Customer-facing formatting
 
@@ -91,7 +95,7 @@ From [[../playbooks/README]] universal patterns:
   <p><b>March 25</b><br>You subscribed and your first order shipped.</p>
   <p><b>April 4</b><br>Your renewal order processed.</p>
   ```
-- Exception offer is one paragraph with exact math: "I can offer you $5.87 in store credit if you ship the product back to us at no cost — does that work for you?"
+- Exception offer is one paragraph with exact math + direct CTA to proceed. Example: "I was able to get a one-time return exception approved in your situation: ship the product back and you'll get $5.87 in store credit ($6.49 order total minus the $0.62 return label). Want me to send the label?" — note the CTA is asking permission to set it up, NOT asking whether the offer is acceptable. See § Communication rules above.
 
 ## Files
 

@@ -1729,7 +1729,7 @@ Tell the customer the EXACT breakdown with these numbers. Say "approximately" si
     `Customer data:\n${dataCtx}\n\nException: "${ex.name}" (${resLabel})\n${ex.instructions || ""}\n\n${isEscalation
       ? `FRAMING: Say "I was able to get this upgraded" — present as an escalated offer. Do NOT mention any other options exist.`
       : `FRAMING: Say "I was able to get a one-time return exception approved" for their specific situation. Do NOT hint that better alternatives exist.`
-    }\n\nFORMAT: Write ONE paragraph only. Include these key phrases: "in your situation", "one-time", "exception". ${mathBreakdown ? `Include the exact breakdown: ${mathBreakdown}.` : ""} End with a direct yes/no question: "Would you like me to get that setup for you now?"${rateQuoteInfo}`,
+    }\n\nFORMAT: Write ONE paragraph only. Include these key phrases: "in your situation", "one-time", "exception". ${mathBreakdown ? `Include the exact breakdown: ${mathBreakdown}.` : ""} End with a direct CTA to proceed: "Want me to send the return label?" — never phrase it as "does that work for you" or "is that acceptable" or similar, since those imply we have a better offer waiting. This IS our best offer; the CTA is only asking permission to set it up.${rateQuoteInfo}`,
   );
 
   await admin.from("tickets").update({ playbook_exceptions_used: exceptionsUsed + 1 }).eq("id", tid);
