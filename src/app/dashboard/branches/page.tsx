@@ -13,6 +13,7 @@ interface Branch {
   ci: string;
   mergeable_state: string;
   changed_files: number | null;
+  safe_to_merge: boolean;
   todo_id: string | null;
   todo_summary: string | null;
   action_type: string | null;
@@ -38,6 +39,8 @@ export default function BranchesPage() {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [configured, setConfigured] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [merging, setMerging] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -50,12 +53,35 @@ export default function BranchesPage() {
       .finally(() => setLoading(false));
   }, [workspace.id]);
 
+  async function squashMerge(number: number) {
+    if (!window.confirm("Squash & merge this PR into main? This can't be undone from here.")) return;
+    setMerging(number);
+    setError(null);
+    try {
+      const res = await fetch(`/api/branches/${number}/merge`, { method: "POST" });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || "Merge failed");
+      setBranches((bs) => bs.filter((b) => b.number !== number));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Merge failed");
+    } finally {
+      setMerging(null);
+    }
+  }
+
   return (
     <div className="p-6">
       <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Branches</h1>
       <p className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
-        Open <code>claude/*</code> PRs the To-Do routine has opened. Review and merge in GitHub — code never auto-merges.
+        Open <code>claude/*</code> PRs the To-Do routine has opened. Owners can squash &amp; merge here when a PR is
+        conflict-free; otherwise review in GitHub. Code never auto-merges.
       </p>
+
+      {error && (
+        <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-900/40 dark:bg-rose-900/20 dark:text-rose-300">
+          {error}
+        </div>
+      )}
 
       {!configured ? (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300">
@@ -107,7 +133,16 @@ export default function BranchesPage() {
                     </span>
                   </td>
                   <td className="px-3 py-2 text-xs capitalize text-zinc-500">{b.mergeable_state}</td>
-                  <td className="px-3 py-2">
+                  <td className="px-3 py-2 whitespace-nowrap text-right">
+                    {workspace.role === "owner" && b.safe_to_merge && (
+                      <button
+                        onClick={() => squashMerge(b.number)}
+                        disabled={merging === b.number}
+                        className="mr-3 rounded-md bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                      >
+                        {merging === b.number ? "Merging…" : "Squash & merge"}
+                      </button>
+                    )}
                     <a href={b.url} target="_blank" rel="noopener noreferrer" className="text-xs text-teal-600 hover:underline">
                       Open in GitHub ↗
                     </a>

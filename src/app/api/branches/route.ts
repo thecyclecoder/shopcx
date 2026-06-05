@@ -88,6 +88,28 @@ export async function GET() {
       } catch {
         ci = "unknown";
       }
+      // The /pulls LIST endpoint doesn't populate mergeable / mergeable_state /
+      // changed_files — only the single-PR GET does (and it nudges GitHub to
+      // compute mergeability). Fetch it so the merge button can gate on safety.
+      let mergeable: boolean | null = null;
+      let mergeable_state = "unknown";
+      let changed_files: number | null = null;
+      try {
+        const det = (await gh(`/repos/${REPO}/pulls/${p.number}`)) as {
+          mergeable?: boolean | null;
+          mergeable_state?: string;
+          changed_files?: number;
+        };
+        mergeable = det.mergeable ?? null;
+        mergeable_state = det.mergeable_state || "unknown";
+        changed_files = det.changed_files ?? null;
+      } catch {
+        // leave defaults — button just won't show for this row
+      }
+      // Safe = GitHub says mergeable, no conflicts/behind/blocked (clean), and
+      // CI isn't red. (No required checks → "clean" with ci "unknown" is fine.)
+      const safe_to_merge = mergeable === true && mergeable_state === "clean" && ci !== "failure";
+
       const todo = todoByUrl.get(p.html_url);
       return {
         number: p.number,
@@ -96,8 +118,9 @@ export async function GET() {
         branch: p.head.ref,
         created_at: p.created_at,
         ci,
-        mergeable_state: p.mergeable_state || "unknown",
-        changed_files: p.changed_files ?? null,
+        mergeable_state,
+        changed_files,
+        safe_to_merge,
         todo_id: todo?.id || null,
         todo_summary: todo?.summary || null,
         action_type: todo?.action_type || null,
