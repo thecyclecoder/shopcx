@@ -281,14 +281,31 @@ export async function earnPoints(
     order_id: orderId,
   });
 
+  // Re-fetch the current balance — the in-memory `member` argument may
+  // be stale (the caller might be looping earnPoints across many orders
+  // with the same member object, and arithmetic on `member.points_balance`
+  // would just keep overwriting with the original snapshot). Reading the
+  // current row each time keeps multi-call backfills accurate.
+  const { data: current } = await admin
+    .from("loyalty_members")
+    .select("points_balance, points_earned")
+    .eq("id", member.id)
+    .single();
+  const curBal = current?.points_balance ?? member.points_balance;
+  const curEarned = current?.points_earned ?? member.points_earned;
+
   await admin
     .from("loyalty_members")
     .update({
-      points_balance: member.points_balance + points,
-      points_earned: member.points_earned + points,
+      points_balance: curBal + points,
+      points_earned: curEarned + points,
       updated_at: new Date().toISOString(),
     })
     .eq("id", member.id);
+  // Keep the passed-in member object reasonably current for any
+  // immediate follow-up logic in the caller.
+  member.points_balance = curBal + points;
+  member.points_earned = curEarned + points;
 }
 
 export async function spendPoints(
@@ -309,14 +326,24 @@ export async function spendPoints(
     shopify_discount_id: shopifyDiscountId,
   });
 
+  const { data: current } = await admin
+    .from("loyalty_members")
+    .select("points_balance, points_spent")
+    .eq("id", member.id)
+    .single();
+  const curBal = current?.points_balance ?? member.points_balance;
+  const curSpent = current?.points_spent ?? member.points_spent;
+
   await admin
     .from("loyalty_members")
     .update({
-      points_balance: Math.max(0, member.points_balance - points),
-      points_spent: member.points_spent + points,
+      points_balance: Math.max(0, curBal - points),
+      points_spent: curSpent + points,
       updated_at: new Date().toISOString(),
     })
     .eq("id", member.id);
+  member.points_balance = Math.max(0, curBal - points);
+  member.points_spent = curSpent + points;
 }
 
 export async function deductPoints(
@@ -327,11 +354,20 @@ export async function deductPoints(
   description: string,
 ): Promise<void> {
   if (points <= 0) return;
-  // Don't let balance go below 0
-  const actualDeduction = Math.min(points, member.points_balance);
-  if (actualDeduction <= 0) return;
 
   const admin = createAdminClient();
+
+  // Read live balance so multi-call deductions don't keep clamping
+  // against a stale snapshot.
+  const { data: current } = await admin
+    .from("loyalty_members")
+    .select("points_balance")
+    .eq("id", member.id)
+    .single();
+  const curBal = current?.points_balance ?? member.points_balance;
+
+  const actualDeduction = Math.min(points, curBal);
+  if (actualDeduction <= 0) return;
 
   await admin.from("loyalty_transactions").insert({
     workspace_id: member.workspace_id,
@@ -345,8 +381,9 @@ export async function deductPoints(
   await admin
     .from("loyalty_members")
     .update({
-      points_balance: member.points_balance - actualDeduction,
+      points_balance: curBal - actualDeduction,
       updated_at: new Date().toISOString(),
     })
     .eq("id", member.id);
+  member.points_balance = curBal - actualDeduction;
 }

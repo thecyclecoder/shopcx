@@ -17,6 +17,7 @@ Per-(workspace, customer) loyalty enrollment + tier + points balance.
 | `points_earned` | `int4` | — | default: `0` |
 | `points_spent` | `int4` | — | default: `0` |
 | `source` | `text` | — | default: `'native'` |
+| `needs_points_backfill` | `bool` | — | default: `false` · set by the points audit when a member is owed earn-points for pre-pipeline orders; cleared by the backfill script after crediting. Partial index `idx_loyalty_members_needs_backfill` on `(workspace_id) where needs_points_backfill = true`. |
 | `created_at` | `timestamptz` | ✓ | default: `now()` |
 | `updated_at` | `timestamptz` | ✓ | default: `now()` |
 

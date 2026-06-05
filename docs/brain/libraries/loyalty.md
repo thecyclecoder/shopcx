@@ -62,6 +62,8 @@ function pointsToDollarValue(points: number, settings: LoyaltySettings) : number
 function calculateEarningPoints(lineItemsTotal: number, deductions: OrderDeductions, settings: LoyaltySettings,) : number
 ```
 
+> **Balance mutators re-read the live row.** `earnPoints` / `spendPoints` / `deductPoints` each re-fetch the member's current `points_balance` (and `points_earned`/`points_spent`) from the DB before updating, rather than trusting the passed-in `member` snapshot — then they write the new values back onto the `member` object. This makes it safe to loop any of them over the same `member` object (e.g. crediting many orders in a backfill) without lost updates.
+
 ### `earnPoints` — function
 
 ```ts
