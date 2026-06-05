@@ -1242,7 +1242,24 @@ export default function TicketDetailPage() {
                     </div>
                     <div
                       className={`prose prose-sm max-w-none break-words overflow-hidden [overflow-wrap:anywhere] ${textClass} ${!isInbound && !isInternal ? "prose-invert" : ""}`}
-                      dangerouslySetInnerHTML={{ __html: (m.direction === "inbound" && (m as unknown as Record<string, unknown>).body_clean) ? String((m as unknown as Record<string, unknown>).body_clean) : m.body }}
+                      dangerouslySetInnerHTML={{
+                        __html: (() => {
+                          const raw = (m.direction === "inbound" && (m as unknown as Record<string, unknown>).body_clean)
+                            ? String((m as unknown as Record<string, unknown>).body_clean)
+                            : m.body;
+                          // System notes get UUIDs auto-linked to the
+                          // corresponding ticket — most useful on the merge
+                          // breadcrumb ("merged into <uuid>") but harmless
+                          // for any other system note that happens to drop
+                          // a ticket id into the body.
+                          if (m.author_type !== "system") return raw;
+                          return raw.replace(
+                            /\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi,
+                            (uuid) =>
+                              `<a href="/dashboard/tickets/${uuid}" class="text-indigo-600 underline decoration-dotted underline-offset-2 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300">${uuid.slice(0, 8)}</a>`,
+                          );
+                        })(),
+                      }}
                     />
                     {/* Inline images from the raw body — body_clean
                         strips <img> tags for AI processing, so customer-

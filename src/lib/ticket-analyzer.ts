@@ -336,9 +336,16 @@ export async function analyzeTicket(
   const admin = createAdminClient();
 
   const { data: ticket } = await admin.from("tickets")
-    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply")
+    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply, merged_into")
     .eq("id", ticketId).maybeSingle();
   if (!ticket) return { ok: false, reason: "ticket_not_found" };
+
+  // Skip merged-source stubs — the conversation lives on the target
+  // ticket now. Grading the stub would either repeat work or judge an
+  // empty shell. The target gets analyzed on its own close cycle.
+  if (ticket.merged_into) {
+    return { ok: false, reason: "merged_into_other" };
+  }
 
   // do_not_reply tickets don't get analyzed — the AI intentionally
   // didn't reply (wrong company, spam, etc), so grading the absent

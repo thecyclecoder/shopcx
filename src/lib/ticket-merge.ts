@@ -1,10 +1,19 @@
 /**
  * Ticket merge — single function used by bulk action (agent UI) and Sonnet (auto-merge).
  * Always merges old tickets INTO the newest ticket.
- * Old tickets are archived with `merged_into` reference.
+ *
+ * Option B semantics (2026-06-05): the target is the single home for the
+ * conversation. Messages MOVE (not copy) from source to target. FK references
+ * (returns, agent_todos, ticket_analyses, etc.) repoint to the target.
+ * Escalation flags carry forward to the target so the work stays visible.
+ * The source row remains as an archived stub keyed by `merged_into` — kept
+ * so that inbound email threads on the source's original `email_message_id`
+ * still resolve, and the audit link is preserved.
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+
+type Admin = ReturnType<typeof createAdminClient>;
 
 export interface MergeResult {
   success: boolean;
@@ -12,6 +21,85 @@ export interface MergeResult {
   mergedCount: number;
   messagesMoved: number;
   error?: string;
+}
+
+/**
+ * Tables whose `ticket_id` (or `source_ticket_id`) FK should follow the
+ * conversation when it's merged into a new target. Each entry is
+ * `[tableName, columnName]`. Keep this list explicit — schema introspection
+ * would pick up some columns we don't actually want to repoint (e.g.
+ * `derived_from_ticket_id` on ticket_analyses / sonnet_prompts, which is a
+ * historical-provenance link, not a "belongs to" link).
+ */
+const TICKET_FK_TABLES: Array<[string, string]> = [
+  ["returns", "ticket_id"],
+  ["agent_todos", "source_ticket_id"],
+  ["ticket_analyses", "ticket_id"],
+  ["ticket_csat", "ticket_id"],
+  ["store_credit_log", "ticket_id"],
+  ["replacements", "ticket_id"],
+  ["appstle_api_calls", "ticket_id"],
+  ["journey_sessions", "ticket_id"],
+  ["email_log", "ticket_id"],
+  ["pattern_feedback", "ticket_id"],
+  ["chargeback_subscription_actions", "ticket_id"],
+  ["chargeback_monitor", "ticket_id"],
+  ["macro_usage_log", "ticket_id"],
+  ["ai_token_usage", "ticket_id"],
+  ["crisis_customer_actions", "ticket_id"],
+];
+
+/**
+ * Repoint all known ticket-FK rows from source to target. Used by both new
+ * merges and the backfill. Best-effort: an unknown / missing table is
+ * tolerated (logged + skipped) so adding new ticket-referencing tables in
+ * the future doesn't require this list to be exhaustive on day one.
+ */
+export async function repointTicketRefs(
+  admin: Admin, sourceId: string, targetId: string,
+): Promise<{ table: string; updated: number; error?: string }[]> {
+  const results: { table: string; updated: number; error?: string }[] = [];
+  for (const [table, col] of TICKET_FK_TABLES) {
+    try {
+      const { error, count } = await admin
+        .from(table)
+        .update({ [col]: targetId }, { count: "exact" })
+        .eq(col, sourceId);
+      if (error) {
+        // Missing tables come back as PGRST205 (or table-not-found) — fine.
+        if ((error.code || "").startsWith("PGRST") || /does not exist/i.test(error.message)) {
+          continue;
+        }
+        results.push({ table, updated: 0, error: error.message });
+        continue;
+      }
+      if ((count || 0) > 0) results.push({ table, updated: count || 0 });
+    } catch (err) {
+      results.push({ table, updated: 0, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return results;
+}
+
+/**
+ * Follow a chain of `merged_into` references to the terminal target.
+ * Returns the input id if it has no merged_into (already terminal).
+ * Caps at 10 hops as a paranoia guard against cycles.
+ */
+export async function resolveMergedTarget(
+  admin: Admin, ticketId: string,
+): Promise<string> {
+  let current = ticketId;
+  for (let i = 0; i < 10; i++) {
+    const { data } = await admin
+      .from("tickets")
+      .select("merged_into")
+      .eq("id", current)
+      .maybeSingle();
+    if (!data?.merged_into || data.merged_into === current) return current;
+    current = data.merged_into as string;
+  }
+  return current;
 }
 
 /**
@@ -31,12 +119,22 @@ export async function mergeTickets(
 
   const admin = createAdminClient();
 
-  // Fetch all tickets
-  const { data: allTickets } = await admin.from("tickets")
-    .select("id, customer_id, status, subject, tags, created_at, active_playbook_id, playbook_step, playbook_context, playbook_queue, playbook_exceptions_used, journey_id, journey_step, journey_data, merged_into, agent_intervened, assigned_to, do_not_reply, do_not_reply_at")
+  // Fetch all tickets — order by where the customer is actively engaged.
+  // last_customer_reply_at is the signal we want: for chat especially, we
+  // can't merge replies into a stale session the customer no longer has
+  // open, so target = the ticket where the customer most recently spoke.
+  // Tie-break by created_at desc so we still prefer the newer ticket when
+  // last_customer_reply_at is null/equal.
+  const { data: rawTickets } = await admin.from("tickets")
+    .select("id, customer_id, status, subject, tags, created_at, active_playbook_id, playbook_step, playbook_context, playbook_queue, playbook_exceptions_used, journey_id, journey_step, journey_data, merged_into, agent_intervened, assigned_to, do_not_reply, do_not_reply_at, escalated_at, escalated_to, escalation_reason, last_customer_reply_at, channel")
     .eq("workspace_id", workspaceId)
-    .in("id", ticketIds)
-    .order("created_at", { ascending: false }); // Newest first
+    .in("id", ticketIds);
+  const allTickets = (rawTickets || []).slice().sort((a, b) => {
+    const aReply = a.last_customer_reply_at ? new Date(a.last_customer_reply_at as string).getTime() : 0;
+    const bReply = b.last_customer_reply_at ? new Date(b.last_customer_reply_at as string).getTime() : 0;
+    if (bReply !== aReply) return bReply - aReply;
+    return new Date(b.created_at as string).getTime() - new Date(a.created_at as string).getTime();
+  });
 
   if (!allTickets || allTickets.length < 2) {
     return { success: false, targetTicketId: "", mergedCount: 0, messagesMoved: 0, error: "Need at least 2 valid tickets" };
@@ -68,19 +166,17 @@ export async function mergeTickets(
   const sources = allTickets.slice(1);
 
   let totalMoved = 0;
+  const nowIso = () => new Date().toISOString();
 
   for (const source of sources) {
-    // Copy messages from source to target (keep originals on source for reference)
-    const { data: messages } = await admin.from("ticket_messages")
-      .select("direction, visibility, author_type, author_id, body, email_message_id, ai_draft, created_at, macro_id, ai_personalized, meta_message_id, body_clean, pending_send_at, sent_at, send_cancelled, resend_email_id, email_status")
-      .eq("ticket_id", source.id)
-      .order("created_at", { ascending: true });
-
-    if (messages?.length) {
-      const copies = messages.map(m => ({ ...m, ticket_id: target.id }));
-      await admin.from("ticket_messages").insert(copies);
-      totalMoved += messages.length;
-    }
+    // MOVE messages from source to target. Reassign ticket_id rather than
+    // copy-and-delete so we keep email_message_id linkage intact and don't
+    // need to manage two rows for the same message.
+    const { count: movedCount } = await admin
+      .from("ticket_messages")
+      .update({ ticket_id: target.id }, { count: "exact" })
+      .eq("ticket_id", source.id);
+    totalMoved += movedCount || 0;
 
     // Carry forward tags (deduplicate)
     const sourceTags = Array.isArray(source.tags) ? source.tags as string[] : [];
@@ -88,7 +184,7 @@ export async function mergeTickets(
       const targetTags = Array.isArray(target.tags) ? target.tags as string[] : [];
       const merged = [...new Set([...targetTags, ...sourceTags])];
       await admin.from("tickets").update({ tags: merged }).eq("id", target.id);
-      target.tags = merged; // Update in-memory for subsequent iterations
+      target.tags = merged;
     }
 
     // Carry forward playbook/journey state if target doesn't have one
@@ -109,59 +205,64 @@ export async function mergeTickets(
       }).eq("id", target.id);
     }
 
-    // Carry forward agent intervention. If a human has touched any source
-    // ticket in the merge, the new combined ticket inherits that state —
-    // otherwise Sonnet keeps acting on a brand-new ticket as if no agent
-    // had ever weighed in.
-    const targetAgentState = (target as { agent_intervened?: boolean; assigned_to?: string | null; do_not_reply?: boolean; do_not_reply_at?: string | null });
-    const sourceAgentState = (source as { agent_intervened?: boolean; assigned_to?: string | null; do_not_reply?: boolean; do_not_reply_at?: string | null });
+    // Carry forward agent intervention + do_not_reply (see prior comments)
+    const t = target as { agent_intervened?: boolean; assigned_to?: string | null; do_not_reply?: boolean; do_not_reply_at?: string | null };
+    const s = source as { agent_intervened?: boolean; assigned_to?: string | null; do_not_reply?: boolean; do_not_reply_at?: string | null };
     const updates: Record<string, unknown> = {};
-    if (!targetAgentState.agent_intervened && sourceAgentState.agent_intervened) {
-      updates.agent_intervened = true;
-      targetAgentState.agent_intervened = true;
+    if (!t.agent_intervened && s.agent_intervened) {
+      updates.agent_intervened = true; t.agent_intervened = true;
     }
-    if (!targetAgentState.assigned_to && sourceAgentState.assigned_to) {
-      updates.assigned_to = sourceAgentState.assigned_to;
-      targetAgentState.assigned_to = sourceAgentState.assigned_to;
+    if (!t.assigned_to && s.assigned_to) {
+      updates.assigned_to = s.assigned_to; t.assigned_to = s.assigned_to;
     }
-    // Carry forward do_not_reply. If any source ticket has been
-    // deactivated (fraud gate, wrong_company, etc.), the merged target
-    // inherits that state — otherwise a reseller's follow-up email
-    // would fire a fresh fraud gate + canonical refusal each time
-    // instead of silent-closing.
-    if (!targetAgentState.do_not_reply && sourceAgentState.do_not_reply) {
+    if (!t.do_not_reply && s.do_not_reply) {
       updates.do_not_reply = true;
-      updates.do_not_reply_at = sourceAgentState.do_not_reply_at || new Date().toISOString();
-      targetAgentState.do_not_reply = true;
+      updates.do_not_reply_at = s.do_not_reply_at || nowIso();
+      t.do_not_reply = true;
+    }
+
+    // CARRY ESCALATION FORWARD. If the source was escalated and the target
+    // isn't, the target inherits the escalation — otherwise the work
+    // disappears once we archive the source. If both are escalated, target's
+    // existing escalation wins (it's the more recent one).
+    const te = target as { escalated_to?: string | null; escalated_at?: string | null; escalation_reason?: string | null };
+    const se = source as { escalated_to?: string | null; escalated_at?: string | null; escalation_reason?: string | null };
+    if (!te.escalated_at && (se.escalated_at || se.escalated_to)) {
+      updates.escalated_to = se.escalated_to ?? null;
+      updates.escalated_at = se.escalated_at ?? nowIso();
+      updates.escalation_reason = se.escalation_reason ?? null;
+      te.escalated_at = se.escalated_at ?? nowIso();
+      te.escalated_to = se.escalated_to ?? null;
     }
     if (Object.keys(updates).length > 0) {
       await admin.from("tickets").update(updates).eq("id", target.id);
     }
 
-    // Add system note on target
+    // Repoint FK refs (returns, agent_todos, ticket_analyses, etc.)
+    await repointTicketRefs(admin, source.id, target.id);
+
+    // System note on target — clickable UUID handled by the renderer
     await admin.from("ticket_messages").insert({
       ticket_id: target.id,
       direction: "outbound",
       visibility: "internal",
       author_type: "system",
-      body: `[System] ${mergedBy} merged ticket "${source.subject || source.id.substring(0, 8)}" into this ticket (${messages?.length || 0} messages).`,
+      body: `[System] ${mergedBy} merged ticket "${source.subject || source.id.substring(0, 8)}" (${source.id}) into this ticket (${movedCount || 0} messages).`,
     });
 
-    // Add system note on source (for reference when viewing archived ticket)
-    await admin.from("ticket_messages").insert({
-      ticket_id: source.id,
-      direction: "outbound",
-      visibility: "internal",
-      author_type: "system",
-      body: `[System] This ticket was merged into ticket ${target.id}.`,
-    });
-
-    // Archive source with merged_into reference
+    // Archive source with merged_into reference. The source is a stub —
+    // messages have moved, FKs have moved, escalation has moved. It exists
+    // only to keep email_message_id thread resolution working and to
+    // preserve the audit link.
     await admin.from("tickets").update({
       status: "archived",
-      archived_at: new Date().toISOString(),
+      archived_at: nowIso(),
       merged_into: target.id,
-      updated_at: new Date().toISOString(),
+      // Clear escalation on source — it now lives on the target.
+      escalated_to: null,
+      escalated_at: null,
+      escalation_reason: null,
+      updated_at: nowIso(),
     }).eq("id", source.id);
   }
 
@@ -172,7 +273,7 @@ export async function mergeTickets(
   if (targetFinal.status === "closed" && !targetFinal.do_not_reply) {
     await admin.from("tickets").update({
       status: "open",
-      updated_at: new Date().toISOString(),
+      updated_at: nowIso(),
     }).eq("id", target.id);
   }
 
@@ -188,19 +289,17 @@ export async function mergeTickets(
  * Check if all customer IDs belong to the same linked group.
  */
 async function areCustomersLinked(
-  admin: ReturnType<typeof createAdminClient>,
+  admin: Admin,
   customerIds: string[],
 ): Promise<boolean> {
   if (customerIds.length <= 1) return true;
 
-  // Get group_ids for all customers
   const { data: links } = await admin.from("customer_links")
     .select("customer_id, group_id")
     .in("customer_id", customerIds);
 
   if (!links || links.length === 0) return false;
 
-  // Check if all customers share at least one group
   const groupIds = new Set(links.map(l => l.group_id));
   for (const gid of groupIds) {
     const inGroup = links.filter(l => l.group_id === gid).map(l => l.customer_id);

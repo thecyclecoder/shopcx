@@ -183,15 +183,26 @@ export async function POST(request: Request) {
     }
   }
 
-  // If matched ticket is archived, create a new ticket instead of threading
+  // If the matched ticket has been merged into another, follow the chain
+  // to the terminal target. Merge stubs are kept around precisely so that
+  // inbound thread replies on the source's original Message-ID still
+  // resolve — they redirect the message to the live target ticket.
+  if (ticketId) {
+    const { resolveMergedTarget } = await import("@/lib/ticket-merge");
+    ticketId = await resolveMergedTarget(admin, ticketId);
+  }
+
+  // If matched ticket is archived AND not a merge stub (i.e. resolveMergedTarget
+  // didn't already point us at a live ticket), create a new ticket instead of
+  // threading onto a stale archived one.
   if (ticketId) {
     const { data: matchedTicket } = await admin
       .from("tickets")
-      .select("status")
+      .select("status, merged_into")
       .eq("id", ticketId)
       .single();
 
-    if (matchedTicket?.status === "archived") {
+    if (matchedTicket?.status === "archived" && !matchedTicket?.merged_into) {
       ticketId = null;
     }
   }
