@@ -17,6 +17,9 @@
  * without a separate human approval. See docs/brain/specs/agent-todo-system.md.
  */
 import { randomUUID } from "node:crypto";
+import { execSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { buildPreExecContext } from "./execute";
@@ -256,36 +259,121 @@ async function gatherContext(admin: Admin, workspaceId: string, ticketId: string
 }
 
 /**
- * Reason via the Claude Agent SDK so Opus has Read/Glob/Grep/Bash tool
- * access to the actual cloned repo during reasoning. Without this, the
- * model hallucinates file paths (we hit "escalation/rules/threat_language.py"
- * — a Python file in our TypeScript project — on 2026-06-04).
+ * Reason via the Anthropic Messages API with a small file-grounding tool loop
+ * (read_file / grep / glob over the cloned repo). We deliberately do NOT use the
+ * Claude Agent SDK here: it spawns the `claude` CLI as a subprocess, which exits
+ * code 1 inside the Claude Code Routine (nested-session guard / sandbox) and
+ * can't be run reliably there. A direct API call + local file reads behaves
+ * identically locally and in the routine, needs only ANTHROPIC_API_KEY + network
+ * (both present in the routine env), and is fully testable offline.
  *
- * Auth: uses ANTHROPIC_API_KEY. Per Anthropic's ToS (Feb 2026) the Agent SDK
- * requires API-key auth — OAuth/subscription tokens are restricted to Claude
- * Code and Claude.ai. We do NOT delete the key to "force" subscription billing:
- * that path has no valid credential in the routine env and silently returns
- * nothing (which is why 2026-06-05 runs proposed 0 todos). The subscription
- * Agent-SDK credit (live 2026-06-15) is billed via the Claude Code session
- * itself, not reachable by tampering with the key in this nested SDK call.
- *
- * Cwd: the spawned Claude session inherits `cwd` here, which the
- * routine-run script sets to the repo root. So `Read("src/lib/...")` etc
- * resolve against the real files.
+ * The tools let Opus ground every file_path it proposes (so code_change todos
+ * carry real unified_diffs) — without them it hallucinated paths like
+ * "escalation/rules/threat_language.py" (a Python file in our TS project).
  */
-async function callOpus(systemPrompt: string, userContent: string, repoDir: string): Promise<ReasoningOutput | null> {
-  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 
-  // The Agent SDK authenticates with ANTHROPIC_API_KEY. Fail loudly if it's
-  // missing rather than letting query() silently return nothing.
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.error("[reasoning] ANTHROPIC_API_KEY is not set — the Agent SDK cannot authenticate; proposing nothing for this ticket.");
+const REASONING_TOOLS = [
+  {
+    name: "read_file",
+    description: "Read a UTF-8 text file from the repo to ground file paths and build accurate diffs. Returns contents with 1-based line numbers.",
+    input_schema: {
+      type: "object",
+      properties: { path: { type: "string", description: "Repo-relative path, e.g. src/lib/ticket-analyzer.ts" } },
+      required: ["path"],
+    },
+  },
+  {
+    name: "grep",
+    description: "Search the repo for an extended-regex pattern (.ts/.tsx/.md). Returns up to 100 matches as path:line:text.",
+    input_schema: {
+      type: "object",
+      properties: {
+        pattern: { type: "string" },
+        path: { type: "string", description: "Optional repo-relative dir/file to scope the search." },
+      },
+      required: ["pattern"],
+    },
+  },
+  {
+    name: "glob",
+    description: "List repo files (from git) whose path matches a glob like src/lib/**/*.ts. Returns up to 200 paths.",
+    input_schema: {
+      type: "object",
+      properties: { pattern: { type: "string" } },
+      required: ["pattern"],
+    },
+  },
+];
+
+function reasoningSafeAbs(repoDir: string, p: string): string | null {
+  const abs = resolve(repoDir, p);
+  return abs === repoDir || abs.startsWith(repoDir + "/") ? abs : null;
+}
+
+function reasoningGlobToRegExp(glob: string): RegExp {
+  let re = "^";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") { re += ".*"; i++; if (glob[i + 1] === "/") i++; }
+      else re += "[^/]*";
+    } else if (c === "?") {
+      re += "[^/]";
+    } else {
+      re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(re + "$");
+}
+
+/** Execute a file-grounding tool against the cloned repo. Read-only, repo-scoped. */
+function runReasoningTool(name: string, input: Record<string, unknown>, repoDir: string): string {
+  try {
+    if (name === "read_file") {
+      const abs = reasoningSafeAbs(repoDir, String(input.path || ""));
+      if (!abs) return "error: path outside repo";
+      if (!existsSync(abs)) return `error: not found: ${input.path}`;
+      const body = readFileSync(abs, "utf8").split("\n").map((l, i) => `${i + 1}\t${l}`).join("\n");
+      return body.length > 12000 ? body.slice(0, 12000) + "\n…[truncated]" : body;
+    }
+    if (name === "grep") {
+      const pattern = String(input.pattern || "");
+      const rel = input.path ? String(input.path) : ".";
+      if (!reasoningSafeAbs(repoDir, rel)) return "error: path outside repo";
+      try {
+        const out = execSync(
+          `grep -rnI --include='*.ts' --include='*.tsx' --include='*.md' -E -e ${JSON.stringify(pattern)} -- ${JSON.stringify(rel)} | head -100`,
+          { cwd: repoDir, encoding: "utf8", timeout: 15000, maxBuffer: 4_000_000 },
+        );
+        return out.trim() ? out.slice(0, 8000) : "no matches";
+      } catch (e) {
+        const out = (e as { stdout?: string }).stdout;
+        return out && out.trim() ? out.slice(0, 8000) : "no matches";
+      }
+    }
+    if (name === "glob") {
+      const files = execSync("git ls-files", { cwd: repoDir, encoding: "utf8", maxBuffer: 8_000_000 }).split("\n");
+      const re = reasoningGlobToRegExp(String(input.pattern || ""));
+      const hits = files.filter((f) => f && re.test(f)).slice(0, 200);
+      return hits.length ? hits.join("\n") : "no matches";
+    }
+    return `error: unknown tool ${name}`;
+  } catch (e) {
+    return `error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+async function callOpus(systemPrompt: string, userContent: string, repoDir: string): Promise<ReasoningOutput | null> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.error("[reasoning] ANTHROPIC_API_KEY is not set — cannot reason; proposing nothing for this ticket.");
     return null;
   }
 
-  const sdkSystemPrompt = `${systemPrompt}
+  const system = `${systemPrompt}
 
-Output protocol: you have Read, Glob, Grep, and Bash tools to explore the repo at ${repoDir}. Use them to ground EVERY file_path you propose. When the right fix lives in TypeScript code, open the file with Read, confirm the exact lines, and propose a code_change with a real unified_diff against that file. Do NOT escape-hatch code fixes into sonnet_prompts — the routine will open a CI-gated PR for code_change todos, which is the correct path. Only refuse to propose (emit no todo, or a different action_type) if you have explored and the change genuinely cannot be expressed in code.
+Output protocol: you have read_file, grep, and glob tools to explore the repo at ${repoDir}. Use them to ground EVERY file_path you propose. When the right fix lives in TypeScript code, read the file, confirm the exact lines, and propose a code_change with a real unified_diff against that file. Do NOT escape-hatch code fixes into sonnet_prompts — the routine opens a CI-gated PR for code_change todos, which is the correct path.
 
 When you are ready to propose, emit your final answer as a single JSON code block wrapped in \`\`\`json ... \`\`\`. The JSON MUST match this shape exactly:
 
@@ -301,58 +389,50 @@ When you are ready to propose, emit your final answer as a single JSON code bloc
 
 Emit the JSON block as the LAST thing in your final response. After the JSON block, do not emit anything else.`;
 
-  // The Claude Code Routine runs with CLAUDECODE=1 in its env. The Agent SDK
-  // spawns the `claude` CLI as a subprocess, which inherits that var, trips the
-  // nested-session guard ("can't launch Claude Code inside Claude Code"), and
-  // exits code 1 — so reasoning silently produced 0 todos in the routine while
-  // working fine locally (no CLAUDECODE there). Strip the nested-session markers
-  // from the subprocess env (keeping PATH, ANTHROPIC_API_KEY, etc. intact) so
-  // the CLI launches. See anthropics/claude-agent-sdk-python#573.
-  const sdkEnv: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined) sdkEnv[k] = v;
-  }
-  delete sdkEnv.CLAUDECODE;
-  delete sdkEnv.CLAUDE_CODE_ENTRYPOINT;
+  const messages: Array<{ role: "user" | "assistant"; content: unknown }> = [
+    { role: "user", content: userContent },
+  ];
 
   let finalText = "";
-  try {
-    const iter = query({
-      prompt: userContent,
-      options: {
-        systemPrompt: sdkSystemPrompt,
-        cwd: repoDir,
-        model: OPUS_MODEL,
-        allowedTools: ["Read", "Glob", "Grep", "Bash"],
-        maxTurns: 30,
-        permissionMode: "bypassPermissions",
-        allowDangerouslySkipPermissions: true,
-        env: sdkEnv,
-      },
-    });
-
-    for await (const msg of iter) {
-      // Capture every assistant text block; the JSON we want is in the last one.
-      if (msg.type === "assistant" && (msg as { message?: { content?: Array<{ type: string; text?: string }> } }).message?.content) {
-        const content = (msg as { message: { content: Array<{ type: string; text?: string }> } }).message.content;
-        for (const block of content) {
-          if (block.type === "text" && block.text) finalText = block.text;
-        }
+  for (let turn = 0; turn < 20; turn++) {
+    let data: { content?: Array<Record<string, unknown>>; stop_reason?: string };
+    try {
+      const res = await fetch(ANTHROPIC_API_URL, {
+        method: "POST",
+        headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+        body: JSON.stringify({ model: OPUS_MODEL, max_tokens: 4000, system, tools: REASONING_TOOLS, messages }),
+      });
+      if (!res.ok) {
+        console.error(`[reasoning] Anthropic API ${res.status}: ${(await res.text()).slice(0, 400)}`);
+        return null;
       }
+      data = (await res.json()) as { content?: Array<Record<string, unknown>>; stop_reason?: string };
+    } catch (err) {
+      console.error(`[reasoning] Anthropic request failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
     }
-  } catch (err) {
-    const e = err as { message?: string; stderr?: string; exitCode?: number; code?: number };
-    console.error(
-      `[reasoning] Agent SDK query() failed: ${e.message || String(err)}` +
-        (e.exitCode !== undefined ? ` | exitCode=${e.exitCode}` : "") +
-        (e.code !== undefined ? ` | code=${e.code}` : "") +
-        (e.stderr ? ` | stderr: ${String(e.stderr).slice(0, 600)}` : ""),
-    );
-    return null;
+
+    const content = data.content || [];
+    for (const b of content) {
+      const t = (b as { text?: unknown }).text;
+      if (b.type === "text" && typeof t === "string") finalText = t;
+    }
+    const toolUses = content.filter((b) => b.type === "tool_use");
+    if (data.stop_reason !== "tool_use" || toolUses.length === 0) break;
+
+    messages.push({ role: "assistant", content });
+    messages.push({
+      role: "user",
+      content: toolUses.map((tu) => ({
+        type: "tool_result",
+        tool_use_id: tu.id as string,
+        content: runReasoningTool(tu.name as string, (tu.input as Record<string, unknown>) || {}, repoDir),
+      })),
+    });
   }
 
   if (!finalText) {
-    console.warn("[reasoning] Agent SDK produced no output (empty result) — proposing nothing for this ticket. Verify ANTHROPIC_API_KEY is valid and the model returned a response.");
+    console.warn("[reasoning] model returned no final text — proposing nothing for this ticket.");
     return null;
   }
 

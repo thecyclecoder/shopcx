@@ -51,6 +51,10 @@ All share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a sin
   - `model`: `fast` (Veo 3.1 Fast, default) or `full` (Veo 3.1 — slower, higher quality) so a weak clip can be upgraded.
 - See [[../recipes/ad-relaunch-refresh]]. Triggered by `POST /api/ads/campaigns/{id}/segments/regenerate` (`{ seq, kind, model, new_script? }`). UI: per-clip "Refresh this hook" / "Regenerate" + "Regenerate in HQ (Veo 3)".
 
+### `ad-tool-static-requested` (static ads — separate process)
+- **Trigger:** event `ad-tool/static-requested` (`{ workspace_id, campaign_id, archetype, copy? }`) · **Retries:** 1
+- A **distinct** pipeline from video (no talking head/b-roll/music/timeline). `loadStaticInputs` (reviews, endorsement, benefits, product image) → PURE `build{Review,Offer,BenefitAuthority}Props` → renders the matching designed still (`StaticReview`/`StaticOffer`/`StaticBenefitAuthority`) via `renderStillCompositionTo` across **3 formats** (`feed_1x1`/`feed_4x5`/`stories_9x16`) → `ad_videos` rows (`media_kind='static'`, `meta.archetype`). Route: `POST /api/ads/campaigns/[id]/static`. See [[../lifecycles/ad-static]].
+
 ## Staging / UI control
 
 Stages are **manual + staged** (no auto-orchestrator), each fired by its own route from the campaign page's **Production** panel (`/dashboard/marketing/ads/[id]`): `POST /hero`, `/talking-head`, `/broll`, `/music`, `/render` (+ `/segments/regenerate`). The panel shows each stage's state (done/running/ready/blocked) from the DB and lights up the next. Generate in order: hero → talking head → b-roll (optional) → render. An ad rendered before a talking head exists is left in `draft` (recoverable), not `failed`, so it can be resumed and finished.

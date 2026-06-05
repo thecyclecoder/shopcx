@@ -31,10 +31,16 @@ Static ads are single, design-led, scroll-stopping **stills** — not frozen vid
 
 Runs on **Remotion Lambda** (`renderStillCompositionTo` → `renderStillOnLambda`) — see [[../integrations/remotion-lambda]]. Local dev renders in-process. **Re-run `scripts/deploy-remotion-lambda.ts` after editing `remotion/StaticAds.tsx`** so the Lambda site has the latest templates ([[../operational-rules]] § Remotion site deploy).
 
-## Status / verified (2026-06-05)
+## Status / open work (2026-06-05)
 
-- All three archetypes render on Lambda (~1-3s each), and the in-app flow (Inngest → Lambda → `ad_videos`) is verified. Uploads retry transient storage 502s ([[../libraries/ad-storage]]).
-- Open: NBP backdrop auto-generation (toggle), editable-copy UI before render, native/UGC archetype.
+**Shipped + verified:** all three archetypes render on Lambda (~1-3s each); the in-app flow (Inngest → Lambda → `ad_videos`) is verified (9/9 outputs across review/offer/benefit × 1:1/4:5/9:16). Uploads retry transient storage 502s ([[../libraries/ad-storage]]).
+
+**⏳ TODO (Dylan) — design tweaks on the static archetypes.** The pipeline + data are done; the *visual design* is a first pass and needs Dylan's eye. Iterate purely in `remotion/StaticAds.tsx` (each archetype is one component) + the `DEFAULT_BRAND` palette in `src/lib/ad-static.ts` — no pipeline changes needed.
+- Review the samples on Dylan's Desktop (`static-LAMBDA-StaticReview/Offer/BenefitAuthority.jpg`, `static-offer-WITH-backdrop.jpg`).
+- Likely tweaks: brand palette/fonts, type scale + spacing, star/badge styling, product-image placement, the offer card's hierarchy, review-card avatar (initial vs real photo).
+- Preview loop: edit `remotion/StaticAds.tsx` → render samples (the `loadStaticInputs` + `renderStill` pattern) → after approving, **re-run `scripts/deploy-remotion-lambda.ts`** so Lambda has the new look ([[../operational-rules]] § Remotion site deploy).
+
+**⏳ Other open:** NBP backdrop auto-generation (plumbing in; toggle not wired), editable-copy UI before render, native/UGC AI-image archetype.
 
 ## Related
 
