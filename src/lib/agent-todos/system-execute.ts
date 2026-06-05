@@ -1,8 +1,10 @@
 /**
  * Agent To-Do system — execution of SYSTEM-level todos.
  *
- * Runs ONLY inside the Claude Code Routine (it shells out to git/gh and needs
- * the repo checked out). Never imported by Vercel serverless code.
+ * Runs ONLY inside the Claude Code Routine (it shells out to git and calls the
+ * GitHub REST API, and needs the repo checked out). Never imported by Vercel
+ * serverless code. NOTE: `gh` CLI is not available in the Routine env — PRs are
+ * opened via the REST API (ghApi), not `gh`.
  *
  * DB-only actions (sonnet_prompt_*, ticket_analysis_rescore) write straight to
  * Supabase. PR actions (brain_doc_edit, code_change, grader_prompt_edit,
@@ -38,6 +40,32 @@ function sh(cmd: string, cwd: string): string {
 
 function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+}
+
+function ghToken(): string {
+  const t = process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
+  if (!t) throw new Error("missing GITHUB_TOKEN / AGENT_TODO_GITHUB_TOKEN — cannot call the GitHub API");
+  return t;
+}
+
+// The `gh` CLI is NOT installed in the Routine's cloud environment (only git
+// is), so PR creation/merge goes through the GitHub REST API with GITHUB_TOKEN
+// instead of shelling out to `gh`. Same auth the push already uses; same
+// pattern as the PR-cleanup pass and the /api/branches route.
+async function ghApi(method: string, path: string, body?: unknown): Promise<unknown> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${ghToken()}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`GitHub ${method} ${path} → ${res.status}: ${text.slice(0, 300)}`);
+  return text ? JSON.parse(text) : {};
 }
 
 // ── DB-only actions ─────────────────────────────────────────────────────────
@@ -183,21 +211,27 @@ async function execPrAction(todo: AgentTodo, opts: SystemExecOptions): Promise<E
   }
 
   let prUrl: string;
+  let prNumber: number | undefined;
   try {
-    prUrl = sh(
-      `gh pr create --repo "${repo}" --head "${branch}" --title ${JSON.stringify(title)} --body ${JSON.stringify(body)}`,
-      repoDir,
-    ).trim().split("\n").pop() || "";
+    const base = process.env.AGENT_TODO_BASE_BRANCH || "main";
+    const pr = (await ghApi("POST", `/repos/${repo}/pulls`, { title, head: branch, base, body })) as {
+      html_url?: string;
+      number?: number;
+    };
+    prUrl = pr.html_url || "";
+    prNumber = pr.number;
   } catch (err) {
-    return { ok: false, error: `gh pr create failed: ${err instanceof Error ? err.message : String(err)}`, branch };
+    // Branch is already pushed; only PR creation failed. Surface the branch so
+    // it can be recovered (open a PR for it) without re-running the diff.
+    return { ok: false, error: `open PR failed: ${err instanceof Error ? err.message : String(err)}`, branch };
   }
 
   // Auto-merge policy: code NEVER auto-merges; brain docs only when flagged.
   const p = todo.payload as { auto_merge?: boolean };
   const mayAutoMerge = todo.action_type === "brain_doc_edit" && p.auto_merge === true;
-  if (mayAutoMerge) {
+  if (mayAutoMerge && prNumber) {
     try {
-      sh(`gh pr merge "${prUrl}" --repo "${repo}" --squash --auto`, repoDir);
+      await ghApi("PUT", `/repos/${repo}/pulls/${prNumber}/merge`, { merge_method: "squash" });
     } catch {
       // Non-fatal: leave it open for manual merge.
     }
