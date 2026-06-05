@@ -27,6 +27,7 @@ const MIGRATIONS = [
   "20260604160000_ad_avatar_candidates_async.sql",
   "20260604170000_gemini_integration.sql",
   "20260604180000_ad_creative_library.sql",
+  "20260605120000_ad_segment_source.sql",
 ];
 
 async function main() {

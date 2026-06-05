@@ -36,6 +36,7 @@ interface Segment {
   model: string | null;
   trim_sec: number | null;
   status: string;
+  error: string | null;
   preview_url: string | null;
 }
 
@@ -92,13 +93,17 @@ export default function AdDetailPage() {
     setTimeout(load, 1500);
   }
 
-  async function regenerate(seq: number, newScript: string) {
+  async function regenerate(
+    seq: number,
+    opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string },
+  ) {
     const res = await fetch(`/api/ads/campaigns/${id}/segments/regenerate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: workspace.id, seq, new_script: newScript }),
+      body: JSON.stringify({ workspaceId: workspace.id, seq, kind: opts.kind, model: opts.model, new_script: opts.newScript }),
     });
-    setMessage(res.ok ? "Refreshing that beat and re-stitching. Check back shortly." : "Failed to queue refresh.");
+    const hq = opts.model === "full";
+    setMessage(res.ok ? `Regenerating that clip${hq ? " in HQ Veo 3" : ""} and re-stitching. Check back shortly.` : "Failed to queue regenerate.");
     if (res.ok) setTimeout(load, 1500);
   }
 
@@ -339,16 +344,25 @@ function StageRow({ stage, isNext, busy }: { stage: Stage; isNext: boolean; busy
   );
 }
 
-function SegmentCard({ s, onRegenerate }: { s: Segment; onRegenerate: (seq: number, script: string) => void }) {
+function SegmentCard({ s, onRegenerate }: { s: Segment; onRegenerate: (seq: number, opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string }) => Promise<void> }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(s.script_text || "");
   const [busy, setBusy] = useState(false);
   const kindLabel = s.kind === "talking_head" ? `Hook beat #${s.seq + 1}` : s.kind === "broll" ? `B-roll #${s.seq + 1}` : "Music bed";
+  const isVeo = s.kind === "talking_head" || s.kind === "broll";
+  const fast = (s.model || "").includes("fast");
+  async function run(opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string }) {
+    setBusy(true);
+    await onRegenerate(s.seq, opts);
+    setBusy(false);
+    setEditing(false);
+  }
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">{kindLabel}</span>
         {s.version > 1 && <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">v{s.version}</span>}
+        {isVeo && <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800">{fast ? "Veo Fast" : "Veo 3 HQ"}</span>}
         <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800">{s.status}</span>
         {s.trim_sec ? <span className="text-[10px] text-zinc-400">{s.trim_sec.toFixed(1)}s</span> : null}
       </div>
@@ -359,7 +373,7 @@ function SegmentCard({ s, onRegenerate }: { s: Segment; onRegenerate: (seq: numb
           <video controls src={s.preview_url} className="w-full rounded-md" />
         )
       ) : (
-        <p className="text-xs text-zinc-400">{s.status === "generating" ? "Generating…" : "No preview."}</p>
+        <p className="text-xs text-zinc-400">{s.status === "generating" ? "Generating…" : s.status === "failed" ? `Failed${s.error ? `: ${s.error}` : ""}` : "No preview."}</p>
       )}
       {s.kind === "talking_head" && (
         <div className="mt-2">
@@ -376,7 +390,7 @@ function SegmentCard({ s, onRegenerate }: { s: Segment; onRegenerate: (seq: numb
               <div className="mt-1 flex gap-2">
                 <button
                   disabled={busy || !draft.trim()}
-                  onClick={async () => { setBusy(true); await onRegenerate(s.seq, draft.trim()); setBusy(false); setEditing(false); }}
+                  onClick={() => run({ kind: "talking_head", model: "fast", newScript: draft.trim() })}
                   className="rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
                 >
                   {busy ? "Queuing…" : "Regenerate & re-stitch"}
@@ -385,8 +399,21 @@ function SegmentCard({ s, onRegenerate }: { s: Segment; onRegenerate: (seq: numb
               </div>
             </div>
           ) : (
-            <button onClick={() => setEditing(true)} className="text-xs text-indigo-600 hover:underline">Refresh this hook</button>
+            <div className="flex flex-wrap items-center gap-3">
+              <button onClick={() => setEditing(true)} disabled={busy} className="text-xs text-indigo-600 hover:underline disabled:opacity-50">Refresh this hook</button>
+              <button onClick={() => run({ kind: "talking_head", model: "full" })} disabled={busy} className="text-xs text-indigo-600 hover:underline disabled:opacity-50">
+                {busy ? "Queuing…" : "Regenerate in HQ (Veo 3)"}
+              </button>
+            </div>
           )}
+        </div>
+      )}
+      {s.kind === "broll" && (
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <button onClick={() => run({ kind: "broll", model: "fast" })} disabled={busy} className="text-xs text-indigo-600 hover:underline disabled:opacity-50">Regenerate</button>
+          <button onClick={() => run({ kind: "broll", model: "full" })} disabled={busy} className="text-xs text-indigo-600 hover:underline disabled:opacity-50">
+            {busy ? "Queuing…" : "Regenerate in HQ (Veo 3)"}
+          </button>
         </div>
       )}
     </div>

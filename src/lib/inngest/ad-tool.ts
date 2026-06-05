@@ -17,11 +17,10 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   generateSoulPortrait,
-  generateDopVideo,
   pollJobUntilDone,
   creditsToCents,
 } from "@/lib/higgsfield";
-import { generateNanoBananaProCombine, generateVeoVideo, generateLyriaMusic, VEO_FAST_MODEL, LYRIA_MODEL } from "@/lib/gemini";
+import { generateNanoBananaProCombine, generateVeoVideo, generateLyriaMusic, VEO_FAST_MODEL, VEO_MODEL, LYRIA_MODEL } from "@/lib/gemini";
 import { uploadFromUrl, uploadBuffer, signedUrl } from "@/lib/ad-storage";
 import {
   splitScriptIntoSegments,
@@ -31,9 +30,9 @@ import {
   loadActiveSegments,
   buildComposition,
   saveComposition,
-  regenerateTalkingSegment,
+  regenerateSegment,
 } from "@/lib/ad-segments";
-import { buildAvatarPortraitPrompt, eligibleMotions, slugify, resolveAdToolSettings, VIDEO_FORMATS, STATIC_FORMATS, FORMAT_SPECS, type AdFormat, type VibeTag, type AvatarFaceAttributes } from "@/lib/ad-tool-config";
+import { buildAvatarPortraitPrompt, slugify, resolveAdToolSettings, VIDEO_FORMATS, STATIC_FORMATS, FORMAT_SPECS, type AdFormat, type VibeTag, type AvatarFaceAttributes } from "@/lib/ad-tool-config";
 import { loadAngleInputs } from "@/lib/ad-angles";
 import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, renderAdFormat, buildVoCaptions, renderVoSpineVideo } from "@/lib/ad-render";
@@ -44,6 +43,12 @@ function buildTalkingHeadPrompt(productTitle: string, script: string): string {
   return `A person holding the ${productTitle} speaks directly to camera with warm, casual, confident UGC energy. They say ONLY these exact words and NOTHING else — no extra words, no filler, no improvisation, no repetition: "${script}" Authentic handheld selfie video, natural daylight, subtle real movement, relaxed unhurried pace. NO background music. Do NOT add any on-screen text, captions, subtitles, or words burned into the footage.`;
 }
 const LYRIA_PROMPT = "Upbeat optimistic uplifting instrumental background music bed, light acoustic guitar and soft claps, warm and energetic but gentle, no vocals, loopable, 25 seconds.";
+
+// Veo b-roll: animate a product still into a muted/ASMR cutaway. No voices, no
+// music (the VO spine + Lyria bed are added in the stitch).
+function buildBrollPrompt(productTitle: string): string {
+  return `Cinematic ASMR b-roll for ${productTitle}: bring this still to life with subtle, natural motion and a shallow depth of field. Satisfying tactile ambient sounds only — a gentle pour, soft clinks, a light crackle or sizzle. NO voices, NO talking, NO background music, NO on-screen text or captions.`;
+}
 
 const CONCURRENCY: [{ limit: number; key: string }] = [{ limit: 3, key: "event.data.workspace_id" }];
 
@@ -197,6 +202,8 @@ export const adToolTalkingHeadRequested = inngest.createFunction(
     // One Veo clip per beat, generated sequentially (Veo Fast has a daily cap;
     // bursting risks 429). Each persists as its own ad_segments row.
     const segs = await step.run("veo-generate-persist", async () => {
+      // Fresh generation replaces any prior talking-head clips (incl. failed ones).
+      await admin.from("ad_segments").update({ is_active: false }).eq("campaign_id", campaign_id).eq("kind", "talking_head");
       const out: Array<{ segId: string; ok: boolean; error?: string }> = [];
       for (let i = 0; i < scripts.length; i++) {
         const prompt = buildTalkingHeadPrompt(productTitle, scripts[i]);
@@ -224,14 +231,17 @@ export const adToolTalkingHeadRequested = inngest.createFunction(
   },
 );
 
-// ── 4. B-roll (DoP) ──────────────────────────────────────────────────────────
+// ── 4. B-roll (Veo 3.1 Fast, image-to-video, persisted) ──────────────────────
+// Animate product-media stills into muted/ASMR cutaways with Veo (Higgsfield DoP
+// was 422-ing on this account). Each clip persists as an ad_segments row with the
+// source still it animated — so it can be regenerated in HQ Veo 3 later.
 export const adToolBrollRequested = inngest.createFunction(
-  { id: "ad-tool-broll-requested", retries: 2, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/broll-requested" }] },
+  { id: "ad-tool-broll-requested", retries: 1, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/broll-requested" }] },
   async ({ event, step }) => {
     const { workspace_id, campaign_id } = event.data as EventData;
     const admin = createAdminClient();
     const ctx = await step.run("load", async () => {
-      const { data: c } = await admin.from("ad_campaigns").select("product_id, vibe_tags").eq("id", campaign_id).single();
+      const { data: c } = await admin.from("ad_campaigns").select("product_id, products(title)").eq("id", campaign_id).single();
       // Lifestyle shots first, packshots second.
       const { data: media } = await admin
         .from("product_media")
@@ -239,45 +249,40 @@ export const adToolBrollRequested = inngest.createFunction(
         .eq("product_id", c?.product_id)
         .order("display_order", { ascending: true })
         .limit(8);
-      return { vibe: (c?.vibe_tags as string[]) || [], media: media || [] };
+      return { productTitle: (c as any)?.products?.title || "the product", media: media || [] };
     });
 
-    const sources = ctx.media.filter((m) => m.slot !== "hero").slice(0, 3);
-    // B-roll is optional — an ad renders fine with talking head + music alone.
+    // Prefer lifestyle/ingredient/before-after stills over packshots; skip hero.
+    const sources = ctx.media.filter((m) => m.slot !== "hero" && (m.webp_1080_url || m.url)).slice(0, 3);
     if (sources.length < 1) {
       await step.sendEvent("broll-completed", { name: "ad-tool/broll-completed", data: { workspace_id, campaign_id } });
       return { ok: true, clips: [], reason: "no_broll_sources" };
     }
-    const motions = eligibleMotions(ctx.vibe);
+    const prompt = buildBrollPrompt(ctx.productTitle);
 
-    const clips = await step.run("dop-generate-persist", async () => {
-      const out: Array<{ segId: string; motion_id: string }> = [];
+    const clips = await step.run("veo-generate-persist", async () => {
+      // Fresh generation replaces any prior b-roll clips (incl. failed DoP ones).
+      await admin.from("ad_segments").update({ is_active: false }).eq("campaign_id", campaign_id).eq("kind", "broll");
+      const out: Array<{ segId: string; ok: boolean; error?: string }> = [];
       for (let i = 0; i < sources.length; i++) {
-        const src = sources[i];
-        const imageUrl = src.webp_1080_url || src.url;
-        const motionId = motions[i % motions.length];
-        const segId = await createSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "broll", seq: i, model: `dop:${motionId}`, prompt: `DoP motion ${motionId} from product media (muted/ASMR cutaway)` });
+        const imageUrl = (sources[i].webp_1080_url || sources[i].url) as string;
+        const segId = await createSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "broll", seq: i, model: VEO_FAST_MODEL, prompt, sourceUrl: imageUrl });
         try {
-          const { jobSetId } = await generateDopVideo({ workspaceId: workspace_id, imageUrl, motionId, campaignId: campaign_id });
-          if (!jobSetId) { await failSegment(segId, "no_job_set"); continue; }
-          const res = await pollJobUntilDone(workspace_id, jobSetId, { timeoutMs: 180000 });
-          if (res.status === "completed" && res.outputUrls[0]) {
-            const path = `broll/${workspace_id}/${segId}.mp4`;
-            await uploadFromUrl(path, res.outputUrls[0], "video/mp4");
-            await completeSegment(segId, { storagePath: path });
-            out.push({ segId, motion_id: motionId });
-          } else {
-            await failSegment(segId, `dop_${res.status}`);
-          }
+          const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl, aspectRatio: "9:16", model: VEO_FAST_MODEL, timeoutMs: 360000 });
+          const path = `broll/${workspace_id}/${segId}.mp4`;
+          await uploadBuffer(path, buffer, "video/mp4");
+          await completeSegment(segId, { storagePath: path });
+          out.push({ segId, ok: true });
         } catch (err: any) {
           await failSegment(segId, String(err?.message || err));
+          out.push({ segId, ok: false, error: String(err?.message || err) });
         }
       }
       return out;
     });
 
     await step.sendEvent("broll-completed", { name: "ad-tool/broll-completed", data: { workspace_id, campaign_id } });
-    return { ok: true, clips };
+    return { ok: clips.some((c) => c.ok), clips };
   },
 );
 
@@ -502,35 +507,71 @@ export const adToolRenderRequested = inngest.createFunction(
   },
 );
 
-// ── 6. Segment regenerate (the re-launch refresh) ───────────────────────────
-// "This ad is fatiguing — refresh the hook." Regenerate ONE talking beat with a
-// new script (version+1, old deactivated), then re-render. Every other piece is
-// reused from the creative library; nothing else is re-burned.
+// ── 6. Segment regenerate (refresh a beat / upgrade to HQ Veo 3) ─────────────
+// Regenerate ONE clip (talking_head or broll) at version+1, then re-render.
+//  - talking_head: optionally with a NEW script (the re-launch "refresh the hook")
+//    or the same script; image = the campaign hero.
+//  - broll: re-animate its stored source still.
+//  - model: "fast" (Veo 3.1 Fast, default) or "full" (Veo 3.1 — slower, higher
+//    quality) so the operator can upgrade a clip that came out weak.
+// Every other piece is reused from the creative library; nothing else re-burned.
 interface RegenEventData {
   workspace_id: string;
   campaign_id: string;
   seq: number;
-  new_script: string;
+  kind?: "talking_head" | "broll";
+  new_script?: string;
+  model?: "fast" | "full";
 }
 
 export const adToolSegmentRegenerate = inngest.createFunction(
   { id: "ad-tool-segment-regenerate", retries: 1, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/segment-regenerate" }] },
   async ({ event, step }) => {
     const { workspace_id, campaign_id, seq, new_script } = event.data as RegenEventData;
+    const kind = (event.data as RegenEventData).kind || "talking_head";
+    const veoModel = (event.data as RegenEventData).model === "full" ? VEO_MODEL : VEO_FAST_MODEL;
     const admin = createAdminClient();
 
-    const campaign = await step.run("load", async () => {
-      const { data } = await admin.from("ad_campaigns").select("hero_image_url, products(title)").eq("id", campaign_id).single();
-      return data;
+    const ctx = await step.run("load", async () => {
+      const { data: c } = await admin.from("ad_campaigns").select("hero_image_url, products(title)").eq("id", campaign_id).single();
+      const { data: existing } = await admin
+        .from("ad_segments")
+        .select("script_text, prompt, source_url")
+        .eq("campaign_id", campaign_id)
+        .eq("kind", kind)
+        .eq("seq", seq)
+        .eq("is_active", true)
+        .order("version", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      return { hero: c?.hero_image_url || null, productTitle: (c as any)?.products?.title || "the product", existing };
     });
-    if (!campaign?.hero_image_url) return { ok: false, reason: "missing_hero" };
-    const productTitle = (campaign as any)?.products?.title || "the product";
 
     const segId = await step.run("regen-veo", async () => {
-      const prompt = buildTalkingHeadPrompt(productTitle, new_script);
-      const id = await regenerateTalkingSegment({ workspaceId: workspace_id, campaignId: campaign_id, seq, newScript: new_script, prompt, model: VEO_FAST_MODEL });
+      if (kind === "broll") {
+        const sourceUrl = ctx.existing?.source_url;
+        if (!sourceUrl) throw new Error("broll_no_source");
+        const prompt = ctx.existing?.prompt || buildBrollPrompt(ctx.productTitle);
+        const id = await regenerateSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "broll", seq, prompt, model: veoModel, sourceUrl });
+        try {
+          const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: sourceUrl, aspectRatio: "9:16", model: veoModel, timeoutMs: 360000 });
+          const path = `broll/${workspace_id}/${id}.mp4`;
+          await uploadBuffer(path, buffer, "video/mp4");
+          await completeSegment(id, { storagePath: path });
+          return id;
+        } catch (err: any) {
+          await failSegment(id, String(err?.message || err));
+          throw err;
+        }
+      }
+      // talking_head
+      if (!ctx.hero) throw new Error("missing_hero");
+      const script = (new_script || ctx.existing?.script_text || "").trim();
+      if (!script) throw new Error("no_script");
+      const prompt = buildTalkingHeadPrompt(ctx.productTitle, script);
+      const id = await regenerateSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "talking_head", seq, scriptText: script, prompt, model: veoModel });
       try {
-        const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: campaign.hero_image_url!, aspectRatio: "9:16", model: VEO_FAST_MODEL, timeoutMs: 360000 });
+        const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: ctx.hero, aspectRatio: "9:16", model: veoModel, timeoutMs: 360000 });
         const path = `talking-head/${workspace_id}/${id}.mp4`;
         await uploadBuffer(path, buffer, "video/mp4");
         let words: any[] = [];

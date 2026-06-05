@@ -28,6 +28,7 @@ export interface AdSegment {
   prompt: string | null;
   model: string | null;
   storage_path: string | null;
+  source_url: string | null; // input image for image-to-video (b-roll still)
   duration_sec: number | null;
   trim_sec: number | null;
   transcript_json: { words: TranscriptWord[] } | null;
@@ -142,6 +143,7 @@ export interface NewSegment {
   scriptText?: string | null;
   prompt?: string | null;
   model?: string | null;
+  sourceUrl?: string | null;
 }
 
 /** Insert a 'generating' segment row; returns its id. */
@@ -157,6 +159,7 @@ export async function createSegment(s: NewSegment): Promise<string> {
       script_text: s.scriptText ?? null,
       prompt: s.prompt ?? null,
       model: s.model ?? null,
+      source_url: s.sourceUrl ?? null,
       status: "generating",
     })
     .select("id")
@@ -215,24 +218,28 @@ export async function loadActiveSegments(campaignId: string): Promise<{
 }
 
 /**
- * Begin regenerating ONE talking segment: deactivate the current active row at
- * (campaign, seq) and insert a fresh 'generating' row at version+1 with the new
- * script. Returns the new row id. Re-render after it completes to re-stitch.
+ * Begin regenerating ONE segment (talking_head or broll): deactivate the current
+ * active row at (campaign, kind, seq) and insert a fresh 'generating' row at
+ * version+1. Carries over script/prompt/source unless overridden, so the same
+ * content can be re-rendered with a different model (e.g. HQ Veo 3). Returns the
+ * new row id. Re-render after it completes to re-stitch.
  */
-export async function regenerateTalkingSegment(args: {
+export async function regenerateSegment(args: {
   workspaceId: string;
   campaignId: string;
+  kind: SegmentKind;
   seq: number;
-  newScript: string;
-  prompt?: string;
-  model?: string;
+  scriptText?: string | null;
+  prompt?: string | null;
+  model?: string | null;
+  sourceUrl?: string | null;
 }): Promise<string> {
   const admin = createAdminClient();
   const { data: existing } = await admin
     .from("ad_segments")
     .select("version")
     .eq("campaign_id", args.campaignId)
-    .eq("kind", "talking_head")
+    .eq("kind", args.kind)
     .eq("seq", args.seq)
     .eq("is_active", true)
     .order("version", { ascending: false })
@@ -243,20 +250,21 @@ export async function regenerateTalkingSegment(args: {
     .from("ad_segments")
     .update({ is_active: false })
     .eq("campaign_id", args.campaignId)
-    .eq("kind", "talking_head")
+    .eq("kind", args.kind)
     .eq("seq", args.seq);
   const { data, error } = await admin
     .from("ad_segments")
     .insert({
       workspace_id: args.workspaceId,
       campaign_id: args.campaignId,
-      kind: "talking_head",
+      kind: args.kind,
       seq: args.seq,
       version: nextVersion,
       is_active: true,
-      script_text: args.newScript,
+      script_text: args.scriptText ?? null,
       prompt: args.prompt ?? null,
       model: args.model ?? null,
+      source_url: args.sourceUrl ?? null,
       status: "generating",
     })
     .select("id")

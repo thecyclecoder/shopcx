@@ -17,8 +17,9 @@ Migration: `20260604180000_ad_creative_library.sql`. Written by [[../inngest/ad-
 | `is_active` | bool | the version currently in the cut; regen flips the old row false |
 | `script_text` | text | **talking_head**: the exact words spoken in this clip (the re-stitch unit) |
 | `prompt` | text | full generation prompt sent to the model |
-| `model` | text | `veo-3.1-fast-generate-preview` \| `dop:<motion>` \| `lyria-3-clip-preview` … |
+| `model` | text | `veo-3.1-fast-generate-preview` (default) \| `veo-3.1-generate-preview` (HQ) \| `lyria-3-clip-preview` … |
 | `storage_path` | text | private `ad-tool` bucket path (no signed URL stored) |
+| `source_url` | text | input image for image-to-video — **broll**: the product-media still it animates (stable CDN URL), reused for HQ regenerate. Migration `20260605120000`. |
 | `duration_sec` | numeric | raw clip length as generated |
 | `trim_sec` | numeric | trimmed length used in the stitch (last Whisper word + 0.15s pad) |
 | `transcript_json` | jsonb | talking_head: per-segment Whisper words `{ words: [{word,start,end}] }` |

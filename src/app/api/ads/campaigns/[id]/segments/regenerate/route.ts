@@ -33,9 +33,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (auth.error) return auth.error;
 
   const seq = Number(body.seq);
+  const kind = body.kind === "broll" ? "broll" : "talking_head";
+  const model = body.model === "full" ? "full" : "fast";
   const newScript = typeof body.new_script === "string" ? body.new_script.trim() : "";
   if (!Number.isInteger(seq) || seq < 0) return NextResponse.json({ error: "seq required" }, { status: 400 });
-  if (!newScript) return NextResponse.json({ error: "new_script required" }, { status: 400 });
+  // talking_head with no new_script = regenerate same content (e.g. HQ upgrade).
+  // broll never needs a script.
 
   // Confirm the campaign belongs to the workspace.
   const { data: campaign } = await auth.admin
@@ -48,8 +51,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   await inngest.send({
     name: "ad-tool/segment-regenerate",
-    data: { workspace_id: workspaceId as string, campaign_id: id, seq, new_script: newScript },
+    data: { workspace_id: workspaceId as string, campaign_id: id, seq, kind, model, new_script: newScript || undefined },
   });
 
-  return NextResponse.json({ ok: true, seq });
+  return NextResponse.json({ ok: true, seq, kind, model });
 }

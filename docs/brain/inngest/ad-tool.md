@@ -28,17 +28,21 @@ All share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a sin
 - **Trigger:** event `ad-tool/talking-head-requested` · **Retries:** 1
 - Requires `hero_image_url`. `splitScriptIntoSegments` → ~8s beats; for each: `generateVeoVideo` (Veo 3.1 Fast, image-to-video from the hero, native audio = VO spine), Whisper sets the trim, persists an [[../tables/ad_segments]] row (`kind=talking_head`, its `script_text` + `transcript_json` + `trim_sec`). Sequential (Veo Fast daily cap). Emits `ad-tool/talking-head-completed`.
 
-### `ad-tool-broll-requested`
-- **Trigger:** event `ad-tool/broll-requested` · **Retries:** 2
-- Pulls up to 3 `product_media` sources (lifestyle-first; `slot != 'hero'`), picks vibe-eligible motions, `generateDopVideo` each → persists an [[../tables/ad_segments]] row (`kind=broll`). Emits `ad-tool/broll-completed`.
+### `ad-tool-broll-requested` (Veo 3.1 Fast image-to-video)
+- **Trigger:** event `ad-tool/broll-requested` · **Retries:** 1
+- Pulls up to 3 `product_media` stills (lifestyle/ingredient first; `slot != 'hero'`), `generateVeoVideo` each (image-to-video, ASMR prompt, muted) → persists an [[../tables/ad_segments]] row (`kind=broll`, with `source_url` = the still). Retires prior b-roll first. Emits `ad-tool/broll-completed`. **Switched from Higgsfield DoP → Veo** (DoP was returning HTTP 422 on this account).
 
 ### `ad-tool-render-requested`
 - **Trigger:** event `ad-tool/render-requested` · **Retries:** 1
 - Sets campaign `status='rendering'`. **`assemble` step:** `loadActiveSegments` (talking/broll/music) → generates a Lyria music bed if missing (persists `kind=music`) → `buildComposition` + `saveComposition` (`ad_campaigns.composition`) → resolves signed URLs → `buildVoCaptions` (per-segment Whisper proofread vs script, numbers + `%` preserved). Then renders **all 4 formats**: video via `renderVoSpineVideo` (canonical `ExampleAd` composition — VO spine + muted/ASMR b-roll + Lyria bed + captions), static via `renderAdFormat` (`AdStatic`). One `ad_videos` row per format (siblings via `format_variant_of_id`).
 
-### `ad-tool-segment-regenerate` (the re-launch refresh)
-- **Trigger:** event `ad-tool/segment-regenerate` (`{ workspace_id, campaign_id, seq, new_script }`) · **Retries:** 1
-- `regenerateTalkingSegment` (deactivate the active beat at `seq`, insert `version+1` with the new script) → `generateVeoVideo` from the hero → Whisper trim → `completeSegment` → fires `ad-tool/render-requested` to re-stitch. See [[../recipes/ad-relaunch-refresh]]. Triggered by `POST /api/ads/campaigns/{id}/segments/regenerate`.
+### `ad-tool-segment-regenerate` (refresh a beat / upgrade to HQ Veo 3)
+- **Trigger:** event `ad-tool/segment-regenerate` (`{ workspace_id, campaign_id, seq, kind?, new_script?, model? }`) · **Retries:** 1
+- Regenerates ONE clip at `version+1` (`regenerateSegment`), then fires `ad-tool/render-requested` to re-stitch:
+  - `kind=talking_head` (default): with a NEW `new_script` (the re-launch "refresh the hook") or the same script; image = hero; Whisper trim.
+  - `kind=broll`: re-animates its stored `source_url`.
+  - `model`: `fast` (Veo 3.1 Fast, default) or `full` (Veo 3.1 — slower, higher quality) so a weak clip can be upgraded.
+- See [[../recipes/ad-relaunch-refresh]]. Triggered by `POST /api/ads/campaigns/{id}/segments/regenerate` (`{ seq, kind, model, new_script? }`). UI: per-clip "Refresh this hook" / "Regenerate" + "Regenerate in HQ (Veo 3)".
 
 ## Staging / UI control
 
