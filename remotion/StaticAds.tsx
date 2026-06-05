@@ -4,7 +4,7 @@ import { loadFont as loadAnton } from "@remotion/google-fonts/Anton";
 import { loadFont as loadInter } from "@remotion/google-fonts/Inter";
 
 const anton = loadAnton().fontFamily;
-const inter = loadInter({ weights: ["600", "700", "800"], subsets: ["latin"], ignoreTooManyRequestsWarning: true }).fontFamily;
+const inter = loadInter("normal", { weights: ["600", "700", "800"], subsets: ["latin"], ignoreTooManyRequestsWarning: true }).fontFamily;
 
 // ── shared ───────────────────────────────────────────────────────────────────
 export interface Brand { bg: string; fg: string; accent: string; accentFg: string; muted: string; }
