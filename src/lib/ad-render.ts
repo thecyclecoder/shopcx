@@ -499,3 +499,32 @@ export async function renderStaticTo(props: AdCompositionProps, outPath: string)
   if (RENDER_MODE === "lambda") return renderStaticOnLambda(props, outPath);
   await renderAdFormat(props, outPath);
 }
+
+// ── Generic still render (any composition id) — used by the static-ad process ─
+
+async function renderStillCompositionOnLambda(compositionId: string, inputProps: Record<string, unknown>, outPath: string): Promise<void> {
+  const { region, functionName, serveUrl } = lambdaConfig();
+  const lambda: any = await import("@remotion/lambda/client" as any);
+  const out = await lambda.renderStillOnLambda({ region, functionName, serveUrl, composition: compositionId, inputProps, imageFormat: "jpeg", frame: 0, privacy: "public" });
+  await downloadTo(out.url, outPath);
+}
+
+async function renderStillCompositionLocal(compositionId: string, inputProps: Record<string, unknown>, outPath: string): Promise<void> {
+  let bundler: any, renderer: any;
+  try {
+    bundler = await import(/* webpackIgnore: true */ "@remotion/bundler" as any);
+    renderer = await import(/* webpackIgnore: true */ "@remotion/renderer" as any);
+  } catch {
+    throw new Error("remotion_not_installed");
+  }
+  const path = await import("path");
+  const serveUrl = await bundler.bundle({ entryPoint: path.resolve(process.cwd(), "remotion/index.ts"), publicDir: path.resolve(process.cwd(), "remotion/public") });
+  const composition = await renderer.selectComposition({ serveUrl, id: compositionId, inputProps });
+  await renderer.renderStill({ composition, serveUrl, output: outPath, inputProps, imageFormat: "jpeg", jpegQuality: 92, frame: 0 });
+}
+
+/** Render any registered still composition by id (Lambda in prod, local in dev). */
+export async function renderStillCompositionTo(compositionId: string, inputProps: Record<string, unknown>, outPath: string): Promise<void> {
+  if (RENDER_MODE === "lambda") return renderStillCompositionOnLambda(compositionId, inputProps, outPath);
+  await renderStillCompositionLocal(compositionId, inputProps, outPath);
+}

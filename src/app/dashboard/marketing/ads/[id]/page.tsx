@@ -25,6 +25,7 @@ interface Video {
   talking_head_url: string | null;
   duration_sec: number | null;
   status: string;
+  meta?: { archetype?: string; error?: string } | null;
 }
 
 interface Segment {
@@ -102,6 +103,18 @@ export default function AdDetailPage() {
     setMessage(res.ok ? "Added from library." : "Failed to add from library.");
     if (res.ok) load();
   }
+  // Generate a static ad (separate process) — one archetype, 3 formats.
+  async function generateStatic(archetype: string) {
+    setMessage(null);
+    const res = await fetch(`/api/ads/campaigns/${id}/static`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: workspace.id, archetype }),
+    });
+    setMessage(res.ok ? "Generating static ad — appears below when ready." : "Failed to queue static ad.");
+    if (res.ok) setTimeout(load, 1500);
+  }
+
   // Discard a clip from this ad's cut (stays in the library).
   async function discardSegment(segId: string) {
     const res = await fetch(`/api/ads/campaigns/${id}/segments/delete`, {
@@ -347,16 +360,44 @@ export default function AdDetailPage() {
         </div>
       )}
 
-      {/* Static outputs */}
-      <h2 className="mt-8 mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Static formats</h2>
+      {/* Static ads — a separate, design-led process (not video frames). */}
+      <div className="mt-8 flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Static ads</h2>
+        <span className="text-xs text-zinc-400">Designed stills from your product data — 1:1 / 4:5 / 9:16</span>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {[
+          { k: "review", label: "Review screenshot" },
+          { k: "offer", label: "Offer card" },
+          { k: "benefit_authority", label: "Benefit / authority" },
+        ].map((a) => (
+          <button
+            key={a.k}
+            onClick={() => generateStatic(a.k)}
+            className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            + {a.label}
+          </button>
+        ))}
+      </div>
       {staticOutputs.length === 0 ? (
-        <p className="text-sm text-zinc-500">No static outputs yet.</p>
+        <p className="mt-3 text-sm text-zinc-500">No static ads yet. Generate one above — each makes 3 formats.</p>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {staticOutputs.map((v) => (
-            <StaticCard key={v.id} v={v} />
-          ))}
-        </div>
+        ["review", "offer", "benefit_authority"].map((arch) => {
+          const rows = staticOutputs.filter((v) => v.meta?.archetype === arch);
+          if (!rows.length) return null;
+          const label = arch === "review" ? "Review screenshot" : arch === "offer" ? "Offer card" : "Benefit / authority";
+          return (
+            <div key={arch} className="mt-4">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">{label}</p>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {rows.map((v) => (
+                  <StaticCard key={v.id} v={v} />
+                ))}
+              </div>
+            </div>
+          );
+        })
       )}
     </div>
   );

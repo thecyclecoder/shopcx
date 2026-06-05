@@ -37,7 +37,8 @@ import {
 import { buildAvatarPortraitPrompt, slugify, resolveAdToolSettings, VIDEO_FORMATS, STATIC_FORMATS, FORMAT_SPECS, type AdFormat, type VibeTag, type AvatarFaceAttributes } from "@/lib/ad-tool-config";
 import { loadAngleInputs } from "@/lib/ad-angles";
 import { transcribeWords } from "@/lib/ad-transcribe";
-import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo } from "@/lib/ad-render";
+import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo, renderStillCompositionTo } from "@/lib/ad-render";
+import { loadStaticInputs, buildReviewProps, buildOfferProps, buildBenefitAuthorityProps, DEFAULT_BRAND, type StaticArchetype } from "@/lib/ad-static";
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
 // hallucinated filler (we still proofread captions, but tighter input = cleaner).
@@ -644,6 +645,75 @@ export const adToolSegmentRegenerate = inngest.createFunction(
   },
 );
 
+// ── 7. Static ads (a separate, design-led process) ──────────────────────────
+// One archetype → designed Remotion still → 3 formats (1:1 / 4:5 / 9:16). No
+// talking head / b-roll / timeline. Populated from product intelligence.
+const STATIC_DIMS: Array<{ format: string; w: number; h: number }> = [
+  { format: "feed_1x1", w: 1080, h: 1080 },
+  { format: "feed_4x5", w: 1080, h: 1350 },
+  { format: "stories_9x16", w: 1080, h: 1920 },
+];
+const STATIC_COMPOSITION: Record<StaticArchetype, string> = {
+  review: "StaticReview",
+  offer: "StaticOffer",
+  benefit_authority: "StaticBenefitAuthority",
+};
+
+interface StaticEventData {
+  workspace_id: string;
+  campaign_id: string;
+  archetype: StaticArchetype;
+  copy?: Record<string, string>;
+}
+
+export const adToolStaticRequested = inngest.createFunction(
+  { id: "ad-tool-static-requested", retries: 1, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/static-requested" }] },
+  async ({ event, step }) => {
+    const d = event.data as StaticEventData;
+    const { workspace_id, campaign_id, archetype } = d;
+    const admin = createAdminClient();
+
+    const base = await step.run("resolve", async () => {
+      const { data: c } = await admin.from("ad_campaigns").select("product_id").eq("id", campaign_id).single();
+      if (!c?.product_id) throw new Error("no_product");
+      const inp = await loadStaticInputs(c.product_id);
+      // Resolve the archetype's content (PURE), with any operator copy overrides.
+      const props =
+        archetype === "review" ? buildReviewProps(inp, DEFAULT_BRAND)
+        : archetype === "offer" ? buildOfferProps(inp, DEFAULT_BRAND, d.copy)
+        : buildBenefitAuthorityProps(inp, DEFAULT_BRAND);
+      return { props: props as unknown as Record<string, unknown> };
+    });
+
+    const results = await step.run("render-formats", async () => {
+      const out: any[] = [];
+      let canonicalId: string | null = null;
+      for (const dim of STATIC_DIMS) {
+        const row: any = { workspace_id, campaign_id, format: dim.format, media_kind: "static", format_variant_of_id: canonicalId, status: "rendering", meta: { archetype } };
+        const { data: vrow } = await admin.from("ad_videos").insert(row).select("id").single();
+        if (!canonicalId) canonicalId = vrow!.id;
+        try {
+          const tmp = `/tmp/static_${campaign_id}_${archetype}_${dim.format}.jpg`;
+          await renderStillCompositionTo(STATIC_COMPOSITION[archetype], { width: dim.w, height: dim.h, ...base.props }, tmp);
+          const fs = await import("fs/promises");
+          const buf = await fs.readFile(tmp);
+          const storagePath = `finals/${workspace_id}/${vrow!.id}.jpg`;
+          await uploadBuffer(storagePath, buf, "image/jpeg");
+          const url = await signedUrl(storagePath);
+          await admin.from("ad_videos").update({ static_jpg_url: url, status: "ready", meta: { archetype, storage_path: storagePath } }).eq("id", vrow!.id);
+          out.push({ format: dim.format, id: vrow!.id, ok: true });
+        } catch (err: any) {
+          await admin.from("ad_videos").update({ status: "failed", meta: { archetype, error: String(err?.message || err) } }).eq("id", vrow!.id);
+          out.push({ format: dim.format, id: vrow!.id, ok: false, error: String(err?.message || err) });
+        }
+      }
+      return out;
+    });
+
+    return { ok: results.some((r: any) => r.ok), archetype, results };
+  },
+);
+
 export const adToolFunctions = [
   adToolFaceRequested,
   adToolHeroRequested,
@@ -652,6 +722,7 @@ export const adToolFunctions = [
   adToolMusicRequested,
   adToolRenderRequested,
   adToolSegmentRegenerate,
+  adToolStaticRequested,
 ];
 
 // keep imports used even if tree-shaken in some builds
