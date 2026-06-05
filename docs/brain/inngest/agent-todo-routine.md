@@ -4,7 +4,7 @@ The Agent To-Do system runs across **two runtimes**. This page covers both the *
 
 | Runtime | Role | Where | Cadence |
 |---|---|---|---|
-| **Claude Code Routine** `agent-todo-routine` | Reasoning pass + system-level execution (sonnet_prompt inserts, brain/code PRs) + PR cleanup | Anthropic-managed cloud (clones repo, has git + `gh`) | Hourly (+ API trigger) |
+| **Claude Code Routine** `agent-todo-routine` | Reasoning pass + system-level execution (sonnet_prompt inserts, brain/code PRs) + PR cleanup | Anthropic-managed cloud (clones repo, has git; **no `gh` CLI** — PRs open via the GitHub REST API) | Hourly (+ API trigger) |
 | **Inngest worker** `agent-todo-execute` | Customer-facing execution: `customer_reply`, `customer_action`, `ticket_close` | Vercel serverless | Event-triggered |
 
 **Why split:** customer replies can't wait an hour after approval (Inngest fires in seconds); code/brain changes need real git access (only the Routine has it).
@@ -32,7 +32,7 @@ Configured at `claude.ai/code/routines`. Per-tick entry point: `npx tsx scripts/
 
 **Passes (in order):**
 1. **Reasoning** — `runReasoningPass()` (`src/lib/agent-todos/reasoning.ts`). For each escalated ticket with no active group: gather context (messages, customer, subs, orders, latest [[../tables/ticket_analyses]]), reason with Opus (`OPUS_MODEL`, tool-use `propose_todos`), write a `pending` group. Decision branches: `no_action`/`customer_fix`/`system_gap`/`analysis_gap`/`escalation_false_positive`.
-2. **System-level execution** — approved system-level todos via `executeSystemTodo()` (`src/lib/agent-todos/system-execute.ts`): DB writes for sonnet_prompt / analysis_rescore; CI-gated PRs (`npx tsc --noEmit` → branch → commit → push → `gh pr create`) for brain/code/grader/escalation_rule. **CI gate runs before push; broken branches never reach GitHub.**
+2. **System-level execution** — approved system-level todos via `executeSystemTodo()` (`src/lib/agent-todos/system-execute.ts`): DB writes for sonnet_prompt / analysis_rescore; CI-gated PRs (`npx tsc --noEmit` → branch → commit → push → open PR via **GitHub REST API** `POST /repos/{repo}/pulls`, authed by `GITHUB_TOKEN`) for brain/code/grader/escalation_rule. **CI gate runs before push; broken branches never reach GitHub.** (`gh` CLI isn't installed in the routine env, so PRs go through the REST API, not `gh`.)
 3. **PR cleanup** — reconcile merge status of executed PR todos (merged → stamp `execution_result.merged_at`; closed-without-merge → `status='rejected'`, `reject_reason='pr_closed_without_merge'`).
 
 ### Setup (one-time, per workspace)
