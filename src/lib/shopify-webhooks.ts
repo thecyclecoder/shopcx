@@ -7,7 +7,7 @@ import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { normalizeShopifyShippingAddress, resolveOrderAddresses } from "@/lib/address-normalize";
 import { inngest } from "@/lib/inngest/client";
-import { getMemberByCustomerId, deductPoints } from "@/lib/loyalty";
+import { getMemberByCustomerId, deductPoints, getOrCreateMember, calculateEarningPoints, earnPoints, getLoyaltySettings } from "@/lib/loyalty";
 
 // ── HMAC verification ──
 
@@ -853,6 +853,56 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
           source_name: payload.source_name,
         },
       });
+
+      // Loyalty earn — auto-enroll the customer if needed and credit points
+      // for the order. Matches the deduct-on-refund branch below: keep both
+      // mutations in this webhook so refunds and earns flow through the same
+      // ledger. Without this, no new customer has earned a single point since
+      // the Smile.io import on 2026-03-30 (5,000+ orders affected). Gated on
+      // workspace loyalty settings + a customer/email being resolvable from
+      // the Shopify payload.
+      try {
+        const settings = await getLoyaltySettings(workspaceId);
+        if (settings.enabled && customerId) {
+          const shopifyCustomerIdStr = String(
+            (payload.customer as { id?: string | number } | undefined)?.id || ""
+          );
+          const orderEmail = (payload.email as string) || (payload.customer as { email?: string } | undefined)?.email || "";
+          if (shopifyCustomerIdStr && orderEmail) {
+            const member = await getOrCreateMember(workspaceId, shopifyCustomerIdStr, orderEmail);
+            // Qualifying = product line items excluding Shipping Protection,
+            // bounded above by the order total (which naturally excludes any
+            // automatic order-level discount).
+            const lineItems = (payload.line_items as Array<{ sku?: string; price?: string; quantity?: number }>) || [];
+            const productSubtotalCents = lineItems
+              .filter((li) => li.sku !== "Insure01")
+              .reduce((s, li) => {
+                const unitCents = Math.round(parseFloat(li.price || "0") * 100);
+                return s + unitCents * (li.quantity || 1);
+              }, 0);
+            const orderTotalCents = Math.round(parseFloat((payload.total_price as string) || "0") * 100);
+            const qualifyingCents = Math.min(productSubtotalCents, orderTotalCents);
+            const points = calculateEarningPoints(
+              qualifyingCents / 100,
+              { tax: 0, discounts: 0, shipping: 0, shippingProtection: 0 },
+              settings,
+            );
+            if (points > 0) {
+              const existingOrderId = (existingOrder as { id?: string } | null)?.id || null;
+              await earnPoints(
+                member,
+                points,
+                existingOrderId,
+                `Order ${(payload.name as string) || shopifyOrderId}`,
+              );
+            }
+          }
+        }
+      } catch (e) {
+        // Non-fatal — the order is recorded; loyalty failures shouldn't
+        // block the webhook. Surface in logs so we notice if it breaks.
+        console.error("Loyalty earn on order create error:", e);
+      }
     }
 
     // Detect refund: financial_status changed to refunded or partially_refunded
