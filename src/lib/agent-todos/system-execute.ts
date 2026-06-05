@@ -112,7 +112,16 @@ function applyPayloadToTree(repoDir: string, todo: AgentTodo): string {
     const patchFile = join(repoDir, `.agent-todo-${todo.id}.patch`);
     writeFileSync(patchFile, p.unified_diff.endsWith("\n") ? p.unified_diff : p.unified_diff + "\n");
     try {
-      sh(`git apply --whitespace=nowarn "${patchFile}"`, repoDir);
+      // Strict first. LLM-generated diffs routinely miscount hunk headers
+      // (e.g. "@@ -34,7 @@" when the body holds 6 old-side lines), which
+      // git rejects as "corrupt patch". --recount recomputes the line
+      // counts from the actual hunk body, recovering those otherwise-good
+      // patches. Retry with it before giving up; context still has to match.
+      try {
+        sh(`git apply --whitespace=nowarn "${patchFile}"`, repoDir);
+      } catch {
+        sh(`git apply --whitespace=nowarn --recount "${patchFile}"`, repoDir);
+      }
     } finally {
       sh(`rm -f "${patchFile}"`, repoDir);
     }
