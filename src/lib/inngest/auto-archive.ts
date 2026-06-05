@@ -29,6 +29,11 @@ export const ticketAutoArchive = inngest.createFunction(
           .eq("status", "closed")
           .not("closed_at", "is", null)
           .lt("closed_at", cutoff)
+          // Never auto-archive an escalated ticket — archiving hides it from
+          // the active views while it still reads as needing attention, which
+          // is exactly how the escalated+archived backlog formed. An escalated
+          // ticket stays out of the archive until it's unescalated (handled).
+          .is("escalated_at", null)
           .limit(BATCH_SIZE);
 
         if (!candidates?.length) return 0;
