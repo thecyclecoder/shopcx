@@ -135,7 +135,7 @@ async function prCleanupPass() {
  * healthy no-op. Fail loudly instead: log present-vs-missing for each var,
  * and abort when the ones we can't run without are absent.
  */
-function checkEnv() {
+async function checkEnv() {
   const has = (k: string) => !!(process.env[k] && process.env[k] !== "");
   // Without these every Supabase query silently returns empty → abort.
   const REQUIRED = ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"];
@@ -162,12 +162,37 @@ function checkEnv() {
     console.error("[routine] Populate the routine environment (npx tsx scripts/print-routine-env.ts) and re-trigger.");
     process.exit(1);
   }
+
+  // Env vars present is necessary but NOT sufficient. The cloud environment's
+  // network policy can still block outbound to the Supabase host ("Host not
+  // in allowlist"); supabase-js surfaces that as { data: null, error }, which
+  // every caller treats as an empty result — so a network-blocked run looks
+  // identical to a healthy no-op. Probe the DB for real and abort on any
+  // error, so a blocked host (or revoked key) fails loudly with the reason.
+  try {
+    const admin = createAdminClient();
+    const { error } = await admin
+      .from("workspaces")
+      .select("id", { count: "exact", head: true })
+      .eq("id", WORKSPACE_ID);
+    if (error) throw new Error(error.message);
+    console.log("  ✓  Supabase live query OK (host reachable, key valid)");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`\n[routine] ABORT — Supabase env present but the live query failed: ${msg}`);
+    console.error("[routine] Most likely the environment's network policy blocks outbound to your Supabase host");
+    console.error("[routine] (the 'Host not in allowlist' case), so requests never reach the DB.");
+    console.error("[routine] Allow *.supabase.co — and the other API hosts the routine calls (api.anthropic.com,");
+    console.error("[routine] api.openai.com, api.github.com, api.resend.com, *.appstle.com, etc.) — in the routine");
+    console.error("[routine] environment's network settings, then re-trigger.");
+    process.exit(1);
+  }
 }
 
 async function main() {
   const runId = randomUUID();
   console.log(`[routine] agent-todo-routine run ${runId} · workspace ${WORKSPACE_ID} · repo ${REPO_DIR}`);
-  checkEnv();
+  await checkEnv();
   await reasoningPass(runId);
   await systemExecutionPass();
   await prCleanupPass();
