@@ -111,17 +111,22 @@ export function buildComposition(
   });
   const durationSec = acc;
 
-  // Distribute b-roll over the tail of talking segments (skip the first so the
-  // hook lands on the talking head; never overlay the very last CTA frames).
+  // Distribute b-roll cutaways evenly across the timeline (independent of the
+  // talking-segment count): let the hook land first (~first 1.5s), keep the
+  // final ~0.6s clean, then place non-overlapping clips in even slots.
   const bclips = [...broll].sort((a, b) => a.seq - b.seq);
   const overlays: Composition["broll"] = [];
-  for (let i = 0; i < bclips.length; i++) {
-    const host = segments[Math.min(i + 1, segments.length - 1)];
-    if (!host) break;
-    const durSec = Math.min(2.4, Number(bclips[i].duration_sec ?? 2.4), host.trimSec * 0.7);
-    const fromSec = Math.max(host.startSec, host.startSec + host.trimSec - durSec - 0.2);
-    if (fromSec + durSec > durationSec - 0.3) continue; // keep the CTA clean
-    overlays.push({ segment_id: bclips[i].id, fromSec, durSec, volume: 0.18 });
+  const n = bclips.length;
+  if (n > 0 && durationSec > 0) {
+    const usableStart = Math.min(1.5, durationSec * 0.12);
+    const usableEnd = Math.max(usableStart, durationSec - 0.6);
+    const slot = (usableEnd - usableStart) / n;
+    for (let i = 0; i < n; i++) {
+      const durSec = Math.max(1.2, Math.min(2.6, Number(bclips[i].duration_sec ?? 2.6), slot - 0.2));
+      const fromSec = Number((usableStart + i * slot).toFixed(2));
+      if (fromSec + durSec > durationSec) continue;
+      overlays.push({ segment_id: bclips[i].id, fromSec, durSec: Number(durSec.toFixed(2)), volume: 0.18 });
+    }
   }
 
   return {
