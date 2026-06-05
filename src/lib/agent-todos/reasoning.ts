@@ -92,7 +92,15 @@ customer_action payload: { "actions": [ { "type": "<action>", ...params } ], "di
 ticket_close payload: {}.
 ticket_analysis_rescore payload: { "ticket_analysis_id": "...", "score": N, "summary": "...", "issues": [{"type":"...","description":"..."}] }.
 sonnet_prompt_new / sonnet_prompt_edit payload: { "title": "...", "category": "rule|approach|tool_hint|personality|knowledge", "content": "...", "target_prompt_id"?: "..." }.
-brain_doc_edit / code_change / grader_prompt_edit / escalation_rule_fix payload: { "file_path": "...", "unified_diff"|"new_file_body": "...", "rationale": "...", "auto_merge"?: bool }.
+brain_doc_edit payload: { "file_path": "docs/brain/...", "unified_diff"|"new_file_body": "...", "rationale": "...", "auto_merge"?: bool }. Only propose file_paths under docs/brain/ that you have actual context for. Never guess at file structure.
+
+code_change / grader_prompt_edit / escalation_rule_fix payload: STRONGLY PREFER routing these through a sonnet_prompt_new (for rule changes) or brain_doc_edit (for documented policy/behavior fixes) instead of generating a unified_diff against unknown TypeScript source.
+
+You do NOT have file-system access during reasoning. You do NOT know the actual layout of src/. Any file_path you propose for code_change-style todos must reference a file you have direct evidence exists (from the customer-voice brain pages, operational-rules.md, or other context loaded into this prompt). If you can't cite the exact existing file, DO NOT propose a code_change — propose a sonnet_prompt instead and describe the behavior change in natural language. The orchestrator reads sonnet_prompts at every turn and will apply the new behavior immediately.
+
+If a code-level fix is truly necessary and you have no concrete file_path, capture the proposal as a sonnet_prompt with category="knowledge" titled "Code follow-up needed: ..." with the diagnosis in content. Dylan will pick it up in a Claude chat session and implement it manually. Never hallucinate file paths or generate diffs against files you haven't been shown.
+
+This project is TypeScript / Next.js / Supabase. There are NO Python files. Threat-detector code, grader prompts, and escalation rules all live in TypeScript (e.g. src/lib/ticket-analyzer.ts). If you don't know the exact path, route to sonnet_prompt.
 
 Write context_what_happened (one short paragraph) and context_what_we_propose (one paragraph or short bullets) so a reviewer can act WITHOUT reading the full conversation. Be specific and concrete.
 

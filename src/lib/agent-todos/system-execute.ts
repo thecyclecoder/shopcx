@@ -19,7 +19,7 @@
  * See docs/brain/specs/agent-todo-system.md § Phase 1 step 2 + Phase 4.7.
  */
 import { execSync } from "node:child_process";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -91,6 +91,23 @@ async function execAnalysisRescore(admin: Admin, todo: AgentTodo): Promise<Execu
 
 function applyPayloadToTree(repoDir: string, todo: AgentTodo): string {
   const p = todo.payload as { file_path?: string; unified_diff?: string; new_file_body?: string };
+
+  // Hallucination guard — if the model proposed a file_path that doesn't
+  // exist in the repo, fail fast with a clear error. Without this, git apply
+  // produces a generic "No valid patches in input" that masks the real
+  // problem (Opus guessing at the file structure rather than referencing
+  // a file the reasoning pass actually grounded against).
+  if (p.file_path) {
+    const abs = join(repoDir, p.file_path);
+    // For new_file_body we expect the file NOT to exist (we're creating it),
+    // so only enforce existence when applying a unified_diff to a known file.
+    if (p.unified_diff && !existsSync(abs)) {
+      throw new Error(
+        `proposed file_path "${p.file_path}" does not exist in the repo — likely hallucinated; reject this todo and re-prompt the reasoning pass with explicit file context`,
+      );
+    }
+  }
+
   if (p.unified_diff) {
     const patchFile = join(repoDir, `.agent-todo-${todo.id}.patch`);
     writeFileSync(patchFile, p.unified_diff.endsWith("\n") ? p.unified_diff : p.unified_diff + "\n");
