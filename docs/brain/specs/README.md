@@ -78,12 +78,12 @@ Single source of truth for what's being built next, what's parked, and what just
 - API surface: `/api/ads/*` (campaigns, avatars, angles, proposals, validate, hero/audio/talking-head/render) + `/api/workspaces/{id}/ad-tool-settings`
 - Dashboard: `/dashboard/marketing/ads/*`
 
-**Open sub-work (per lifecycle page):**
-- ⏳ Migration `20260604140000_ad_tool_archetype_cache.sql` not yet applied — re-run `npx tsx scripts/apply-ad-tool-migration.ts` (idempotent).
-- ⏳ Live **Higgsfield + OpenAI** credentials need to be wired per-workspace via Settings → Integrations.
-- ⏳ Run `npm i remotion @remotion/bundler @remotion/renderer @remotion/cli` before any video render — `renderAdFormat` throws `remotion_not_installed` until then.
-- ⏳ Flip `workspaces.ad_tool_enabled=true` per-workspace after Dylan reviews the first ad on `/dashboard/marketing/ads`.
-- ⏳ TTS vendor (Higgsfield Audio vs ElevenLabs) + Remotion runtime (Inngest serverless vs AWS Lambda) decisions pending under load.
+**Shipped since (2026-06): the proven model stack + creative library**
+- Gemini engine wired: Nano Banana Pro hero, Veo 3.1 Fast talking heads + b-roll, Lyria music. TTS dropped (VO = Veo native audio).
+- Creative library ([[../tables/ad_segments]] + `ad_campaigns.composition`): every piece persisted + reusable; staged Production UI; per-clip refresh + HQ-Veo-3 regenerate; b-roll studio (text / animate-photo / reuse-from-library, keep/discard); Gemini settings card. First real ad built + saved.
+
+**Open sub-work:**
+- 🚧 **Production render runtime → Remotion Lambda** — the one real blocker. Render can't run on Vercel (`remotion_not_installed`); rendering is currently done by hand via a local `tsx` script. Spec: **[ad-render-lambda.md](ad-render-lambda.md)** (run as `/goal`). Includes folding Whisper transcription into the render so captions never come back empty.
 
 ---
 
