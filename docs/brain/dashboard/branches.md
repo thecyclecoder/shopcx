@@ -8,12 +8,12 @@ Single surface for every open `claude/*` PR the To-Do routine has created (from 
 ## List
 Queries the GitHub REST API for open PRs whose head ref starts with `claude/`. Columns: Title (+ branch + file count) · Source todo (links back via `execution_result.pr_url` match) · Age · CI status (combined status of the head sha: passing/failing/pending) · Mergeability · **Squash & merge** / **Open in GitHub**.
 
-For each PR the API also does a single-PR GET (`/repos/{repo}/pulls/{number}`) — the LIST endpoint doesn't populate `mergeable` / `mergeable_state` / `changed_files`. From those it computes `safe_to_merge = mergeable === true && mergeable_state === "clean" && ci !== "failure"`.
+For each PR the API also does a single-PR GET (`/repos/{repo}/pulls/{number}`) — the LIST endpoint doesn't populate `mergeable` / `mergeable_state` / `changed_files`. From those it computes `safe_to_merge = mergeable === true && (mergeable_state === "clean" || "behind") && ci not in (failure, pending)`. `behind` (base advanced) is allowed — still a conflict-free squash; only `dirty`/`blocked`/`draft`/`unknown` are blocked.
 
 Also surfaced **inline on the todo detail page** ([[tickets__todos__id]]) as a PR card whenever `execution_result.pr_url` is set.
 
 ## Merge
-`POST /api/branches/[number]/merge` squash-merges a PR from the dashboard. **Owner-only** (mirrors the owner-only approval of `code_change` / `brain_doc_edit` — merging to main is owner-level). Re-validates safety **server-side** before merging (PR open, `claude/*` head, `mergeable === true`, `mergeable_state === "clean"`) so a stale client can't merge a conflicting/behind/blocked PR. On success it best-effort stamps the originating todo's `execution_result.merged_at` and deletes the branch. The **Squash & merge** button only renders when `safe_to_merge` AND the viewer's role is `owner`; everyone else uses **Open in GitHub**. Code still never *auto*-merges — this is a human (owner) click.
+`POST /api/branches/[number]/merge` squash-merges a PR from the dashboard. **Owner-only** (mirrors the owner-only approval of `code_change` / `brain_doc_edit` — merging to main is owner-level). Re-validates safety **server-side** before merging (PR open, `claude/*` head, `mergeable === true`, `mergeable_state` ∈ {`clean`, `behind`}) so a stale client can't merge a conflicting/behind/blocked PR. On success it best-effort stamps the originating todo's `execution_result.merged_at` and deletes the branch. The **Squash & merge** button only renders when `safe_to_merge` AND the viewer's role is `owner`; everyone else uses **Open in GitHub**. Code still never *auto*-merges — this is a human (owner) click.
 
 ## Config
 Needs a GitHub token in env: `GITHUB_TOKEN` (or `AGENT_TODO_GITHUB_TOKEN`); repo from `AGENT_TODO_REPO` (default `thecyclecoder/shopcx`). Without a token the API returns `{ configured: false }` and the page shows a setup hint.

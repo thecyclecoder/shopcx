@@ -106,9 +106,15 @@ export async function GET() {
       } catch {
         // leave defaults — button just won't show for this row
       }
-      // Safe = GitHub says mergeable, no conflicts/behind/blocked (clean), and
-      // CI isn't red. (No required checks → "clean" with ci "unknown" is fine.)
-      const safe_to_merge = mergeable === true && mergeable_state === "clean" && ci !== "failure";
+      // Safe = GitHub says mergeable (no textual conflict) and the state is
+      // either "clean" or "behind" (behind = base moved ahead, still a clean
+      // squash; common since main advances). Block dirty/blocked/draft/unknown
+      // and a red/pending CI. (No required checks → ci "unknown" is fine.)
+      const safe_to_merge =
+        mergeable === true &&
+        (mergeable_state === "clean" || mergeable_state === "behind") &&
+        ci !== "failure" &&
+        ci !== "pending";
 
       const todo = todoByUrl.get(p.html_url);
       return {

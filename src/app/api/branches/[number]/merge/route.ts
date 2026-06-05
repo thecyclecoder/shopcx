@@ -78,9 +78,10 @@ export async function POST(_request: Request, { params }: { params: Promise<{ nu
   if (!head?.startsWith("claude/")) {
     return NextResponse.json({ error: "Only claude/* PRs can be merged here" }, { status: 403 });
   }
-  if (pr.json.mergeable !== true || pr.json.mergeable_state !== "clean") {
+  const state = pr.json.mergeable_state as string | undefined;
+  if (pr.json.mergeable !== true || (state !== "clean" && state !== "behind")) {
     return NextResponse.json(
-      { error: `Not safe to merge (mergeable_state: ${pr.json.mergeable_state || "unknown"})` },
+      { error: `Not safe to merge (mergeable_state: ${state || "unknown"})` },
       { status: 409 },
     );
   }
