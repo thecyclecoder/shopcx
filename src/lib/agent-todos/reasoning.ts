@@ -272,6 +272,19 @@ async function gatherContext(admin: Admin, workspaceId: string, ticketId: string
 async function callOpus(systemPrompt: string, userContent: string, repoDir: string): Promise<ReasoningOutput | null> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
+  // Force the SDK to use OAuth (Claude Code login → Max subscription
+  // billing) instead of API-key billing. Without this, ANTHROPIC_API_KEY
+  // in the env (used by sonnet-orchestrator-v2.ts and other modules)
+  // would route the nested session through API metering. Scope is the
+  // SDK call only — restored in finally so live orchestrator paths are
+  // unaffected.
+  //
+  // To opt out and use API billing instead, set
+  // AGENT_TODO_REASONING_FORCE_API=1 in the env.
+  const forceApi = process.env.AGENT_TODO_REASONING_FORCE_API === "1";
+  const savedKey = !forceApi ? process.env.ANTHROPIC_API_KEY : undefined;
+  if (!forceApi) delete process.env.ANTHROPIC_API_KEY;
+
   const sdkSystemPrompt = `${systemPrompt}
 
 Output protocol: you have Read, Glob, Grep, and Bash tools to explore the repo at ${repoDir}. Use them to ground EVERY file_path you propose. If you cannot verify a file exists, do not propose code_change-style todos against it — emit a sonnet_prompt with category="knowledge" instead.
@@ -291,26 +304,32 @@ When you are ready to propose, emit your final answer as a single JSON code bloc
 Emit the JSON block as the LAST thing in your final response. After the JSON block, do not emit anything else.`;
 
   let finalText = "";
-  const iter = query({
-    prompt: userContent,
-    options: {
-      systemPrompt: sdkSystemPrompt,
-      cwd: repoDir,
-      model: OPUS_MODEL,
-      allowedTools: ["Read", "Glob", "Grep", "Bash"],
-      maxTurns: 30,
-      permissionMode: "bypassPermissions",
-      allowDangerouslySkipPermissions: true,
-    },
-  });
+  try {
+    const iter = query({
+      prompt: userContent,
+      options: {
+        systemPrompt: sdkSystemPrompt,
+        cwd: repoDir,
+        model: OPUS_MODEL,
+        allowedTools: ["Read", "Glob", "Grep", "Bash"],
+        maxTurns: 30,
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+      },
+    });
 
-  for await (const msg of iter) {
-    // Capture every assistant text block; the JSON we want is in the last one.
-    if (msg.type === "assistant" && (msg as { message?: { content?: Array<{ type: string; text?: string }> } }).message?.content) {
-      const content = (msg as { message: { content: Array<{ type: string; text?: string }> } }).message.content;
-      for (const block of content) {
-        if (block.type === "text" && block.text) finalText = block.text;
+    for await (const msg of iter) {
+      // Capture every assistant text block; the JSON we want is in the last one.
+      if (msg.type === "assistant" && (msg as { message?: { content?: Array<{ type: string; text?: string }> } }).message?.content) {
+        const content = (msg as { message: { content: Array<{ type: string; text?: string }> } }).message.content;
+        for (const block of content) {
+          if (block.type === "text" && block.text) finalText = block.text;
+        }
       }
+    }
+  } finally {
+    if (!forceApi && savedKey !== undefined) {
+      process.env.ANTHROPIC_API_KEY = savedKey;
     }
   }
 
