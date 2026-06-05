@@ -96,13 +96,15 @@ ticket_analysis_rescore payload: { "ticket_analysis_id": "...", "score": N, "sum
 sonnet_prompt_new / sonnet_prompt_edit payload: { "title": "...", "category": "rule|approach|tool_hint|personality|knowledge", "content": "...", "target_prompt_id"?: "..." }.
 brain_doc_edit payload: { "file_path": "docs/brain/...", "unified_diff"|"new_file_body": "...", "rationale": "...", "auto_merge"?: bool }. Only propose file_paths under docs/brain/ that you have actual context for. Never guess at file structure.
 
-code_change / grader_prompt_edit / escalation_rule_fix payload: STRONGLY PREFER routing these through a sonnet_prompt_new (for rule changes) or brain_doc_edit (for documented policy/behavior fixes) instead of generating a unified_diff against unknown TypeScript source.
+code_change / grader_prompt_edit / escalation_rule_fix payload: { "file_path": "src/...", "unified_diff": "...", "rationale": "..." }. These open a CI-gated PR for human merge — they are the correct action when the right fix is in source code (NOT an orchestrator rule).
 
-You do NOT have file-system access during reasoning. You do NOT know the actual layout of src/. Any file_path you propose for code_change-style todos must reference a file you have direct evidence exists (from the customer-voice brain pages, operational-rules.md, or other context loaded into this prompt). If you can't cite the exact existing file, DO NOT propose a code_change — propose a sonnet_prompt instead and describe the behavior change in natural language. The orchestrator reads sonnet_prompts at every turn and will apply the new behavior immediately.
+When to choose code_change vs sonnet_prompt_new:
+- sonnet_prompt_new → behavior changes that the orchestrator/AI can enforce at runtime (rules, tone, tool hints, policy phrasing). The orchestrator reads sonnet_prompts every turn.
+- code_change → the bug or improvement lives in TypeScript and cannot be expressed as a runtime rule. Examples: a substring-match false positive in src/lib/ticket-analyzer.ts, a missing idempotency guard in playbook-executor.ts, a wrong default in src/lib/inngest/*.ts. If the fix would need to be re-applied every turn via prompt instructions, it belongs in code, not in sonnet_prompts.
 
-If a code-level fix is truly necessary and you have no concrete file_path, capture the proposal as a sonnet_prompt with category="knowledge" titled "Code follow-up needed: ..." with the diagnosis in content. Dylan will pick it up in a Claude chat session and implement it manually. Never hallucinate file paths or generate diffs against files you haven't been shown.
+You MUST use your Read, Glob, and Grep tools to ground every file_path before proposing a code_change. Open the file, locate the exact lines you intend to change, and build the unified_diff against the real source. Never hallucinate paths or invent diffs against files you haven't read. Do NOT route a code fix to sonnet_prompt as an escape hatch — if the right fix is in code, propose code_change. The downstream CI gate (npx tsc --noEmit) will fail PRs that don't compile, so half-baked diffs are caught before merge; the only failure you can't recover from is proposing the wrong action_type.
 
-This project is TypeScript / Next.js / Supabase. There are NO Python files. Threat-detector code, grader prompts, and escalation rules all live in TypeScript (e.g. src/lib/ticket-analyzer.ts). If you don't know the exact path, route to sonnet_prompt.
+This project is TypeScript / Next.js / Supabase. There are NO Python files. Threat-detector code, grader prompts, and escalation rules all live in TypeScript (e.g. src/lib/ticket-analyzer.ts, src/lib/playbook-executor.ts, src/lib/sonnet-orchestrator-v2.ts). Verify with Glob/Grep before proposing a path.
 
 Write context_what_happened (one short paragraph) and context_what_we_propose (one paragraph or short bullets) so a reviewer can act WITHOUT reading the full conversation. Be specific and concrete.
 
@@ -287,7 +289,7 @@ async function callOpus(systemPrompt: string, userContent: string, repoDir: stri
 
   const sdkSystemPrompt = `${systemPrompt}
 
-Output protocol: you have Read, Glob, Grep, and Bash tools to explore the repo at ${repoDir}. Use them to ground EVERY file_path you propose. If you cannot verify a file exists, do not propose code_change-style todos against it — emit a sonnet_prompt with category="knowledge" instead.
+Output protocol: you have Read, Glob, Grep, and Bash tools to explore the repo at ${repoDir}. Use them to ground EVERY file_path you propose. When the right fix lives in TypeScript code, open the file with Read, confirm the exact lines, and propose a code_change with a real unified_diff against that file. Do NOT escape-hatch code fixes into sonnet_prompts — the routine will open a CI-gated PR for code_change todos, which is the correct path. Only refuse to propose (emit no todo, or a different action_type) if you have explored and the change genuinely cannot be expressed in code.
 
 When you are ready to propose, emit your final answer as a single JSON code block wrapped in \`\`\`json ... \`\`\`. The JSON MUST match this shape exactly:
 
