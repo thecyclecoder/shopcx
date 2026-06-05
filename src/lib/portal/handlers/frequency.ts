@@ -1,6 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, checkPortalBan } from "@/lib/portal/helpers";
 import { appstleUpdateBillingInterval } from "@/lib/appstle";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -25,6 +26,18 @@ export const frequency: RouteHandler = async ({ auth, route, req }) => {
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
   if (!intervalCount) return jsonErr({ error: "missing_intervalCount" }, 400);
   if (!isValidInterval(intervalRaw)) return jsonErr({ error: "invalid_interval" }, 400);
+
+  // Block frequency changes on failed-payment subs — see change-date.ts for context.
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("last_payment_status")
+    .eq("workspace_id", auth.workspaceId)
+    .eq("shopify_contract_id", String(contractId))
+    .maybeSingle();
+  if (sub?.last_payment_status === "failed") {
+    return jsonErr({ error: "payment_failed_update_blocked", message: "This subscription has a failed payment. Update your payment method or cancel before changing frequency." }, 409);
+  }
 
   const result = await appstleUpdateBillingInterval(auth.workspaceId, String(contractId), intervalRaw, intervalCount);
   if (!result.success) {
