@@ -253,7 +253,7 @@ async function executeTicketClose(admin: Admin, todo: AgentTodo): Promise<Execut
   const now = new Date().toISOString();
   await admin
     .from("tickets")
-    .update({ status: "closed", escalated_at: null, assigned_to: null, closed_at: now, updated_at: now })
+    .update({ status: "closed", escalated_at: null, escalated_to: null, escalation_reason: null, assigned_to: null, closed_at: now, updated_at: now })
     .eq("id", tid);
   await sysNote(admin, tid, "[System] Closed via To-Do system (false-positive escalation).");
   return { ok: true };
@@ -305,7 +305,7 @@ export async function maybeAutoCloseGroup(admin: Admin, todo: AgentTodo): Promis
   const now = new Date().toISOString();
   await admin
     .from("tickets")
-    .update({ status: "closed", escalated_at: null, assigned_to: null, closed_at: now, updated_at: now })
+    .update({ status: "closed", escalated_at: null, escalated_to: null, escalation_reason: null, assigned_to: null, closed_at: now, updated_at: now })
     .eq("id", tid);
 
   const approver = todo.approval_role ? `${todo.approval_role}` : "approver";
