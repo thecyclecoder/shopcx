@@ -17,7 +17,12 @@ All share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a sin
 - Loads campaign + avatar **face** (`reference_image_urls[0]`) + product isolated image → `generateNanoBananaProCombine([face, product])` (Gemini, 9:16, synchronous — identity-locked, sharp packaging text) → uploads hero → writes `ad_campaigns.hero_image_url` → emits `ad-tool/hero-completed`. Fails the campaign if the avatar has no face or the product has no isolated image. (Replaced Seedream/Soul combine.)
 - **`feedback`** (optional) is a free-text operator correction appended to the prompt on regeneration (e.g. "hands look wrong relative to arms") + a generic anatomy-fix clause. Sent by the Hero card's "Regenerate hero" with a comment.
 
-> **No `audio` stage.** TTS was removed — the VO is the talking-head Veo clips' native audio; the only added track is the Lyria music bed (generated in the render `assemble` step). The old `ad-tool/audio-requested` function + `/api/ads/campaigns/[id]/audio` route are deleted.
+> **No `audio` (TTS) stage.** The VO is the talking-head Veo clips' native audio; the only added track is the Lyria music bed. The old `ad-tool/audio-requested` function + `/api/ads/campaigns/[id]/audio` route are deleted.
+
+### `ad-tool-music-requested` (Lyria background music)
+- **Trigger:** event `ad-tool/music-requested` (`{ workspace_id, campaign_id, prompt? }`) · **Retries:** 1
+- `generateLyriaMusic` (optional style `prompt`, else default) → uploads → persists an [[../tables/ad_segments]] row (`kind=music`). Retires the previous active music bed only **after** the new one succeeds (a failed gen leaves the existing bed in place). Emits `ad-tool/music-completed`. Route: `POST /api/ads/campaigns/[id]/music`.
+- **Also auto-generated**: the render `assemble` step makes a bed if none is active — so music is optional in the staged flow, but the explicit stage lets the operator generate/preview/regenerate it before rendering.
 
 ### `ad-tool-talking-head-requested` (Veo 3.1 Fast, multi-segment, persisted)
 - **Trigger:** event `ad-tool/talking-head-requested` · **Retries:** 1
@@ -37,7 +42,7 @@ All share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a sin
 
 ## Staging / UI control
 
-Stages are **manual + staged** (no auto-orchestrator), each fired by its own route from the campaign page's **Production** panel (`/dashboard/marketing/ads/[id]`): `POST /hero`, `/talking-head`, `/broll`, `/render` (+ `/segments/regenerate`). The panel shows each stage's state (done/running/ready/blocked) from the DB and lights up the next. Generate in order: hero → talking head → b-roll (optional) → render. An ad rendered before a talking head exists is left in `draft` (recoverable), not `failed`, so it can be resumed and finished.
+Stages are **manual + staged** (no auto-orchestrator), each fired by its own route from the campaign page's **Production** panel (`/dashboard/marketing/ads/[id]`): `POST /hero`, `/talking-head`, `/broll`, `/music`, `/render` (+ `/segments/regenerate`). The panel shows each stage's state (done/running/ready/blocked) from the DB and lights up the next. Generate in order: hero → talking head → b-roll (optional) → render. An ad rendered before a talking head exists is left in `draft` (recoverable), not `failed`, so it can be resumed and finished.
 
 ## Downstream events sent
 

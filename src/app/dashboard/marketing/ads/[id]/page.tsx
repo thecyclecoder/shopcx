@@ -144,6 +144,8 @@ export default function AdDetailPage() {
   const talkingGenerating = segments.some((s) => s.kind === "talking_head" && s.status === "generating");
   const brollReady = segments.filter((s) => s.kind === "broll" && s.status === "ready");
   const brollGenerating = segments.some((s) => s.kind === "broll" && s.status === "generating");
+  const musicReady = segments.filter((s) => s.kind === "music" && s.status === "ready");
+  const musicGenerating = segments.some((s) => s.kind === "music" && s.status === "generating");
   const videoReady = videoOutputs.some((v) => v.status === "ready");
   const isRendering = campaign.status === "rendering" || videos.some((v) => v.status === "rendering");
 
@@ -151,13 +153,15 @@ export default function AdDetailPage() {
   const heroState: StageState = busyStage === "hero" ? "running" : campaign.hero_image_url ? "done" : "ready";
   const thState: StageState = busyStage === "talking-head" || talkingGenerating ? "running" : talkingReady.length ? "done" : campaign.hero_image_url ? "ready" : "blocked";
   const brollState: StageState = busyStage === "broll" || brollGenerating ? "running" : brollReady.length ? "done" : campaign.hero_image_url ? "ready" : "blocked";
+  const musicState: StageState = busyStage === "music" || musicGenerating ? "running" : musicReady.length ? "done" : "ready";
   const renderState: StageState = busyStage === "render" || isRendering ? "running" : videoReady ? "done" : talkingReady.length ? "ready" : "blocked";
 
   const stages = [
     { key: "hero", n: 1, title: "Hero shot", detail: "Avatar holding the product (Nano Banana Pro)", state: heroState, action: () => runStage("hero", "Hero"), cta: campaign.hero_image_url ? "Regenerate" : "Generate", blockedNote: "" },
     { key: "talking-head", n: 2, title: "Talking head", detail: `Veo clips that speak the script (${talkingReady.length || "0"} ready)`, state: thState, action: () => runStage("talking-head", "Talking head"), cta: talkingReady.length ? "Regenerate all" : "Generate", blockedNote: "Generate the hero first" },
     { key: "broll", n: 3, title: "B-roll", detail: `Optional muted/ASMR cutaways (${brollReady.length || "0"} ready)`, state: brollState, action: () => runStage("broll", "B-roll"), cta: brollReady.length ? "Regenerate" : "Generate", blockedNote: "Generate the hero first" },
-    { key: "render", n: 4, title: "Render", detail: "Stitch VO + b-roll + music + captions into all formats", state: renderState, action: () => runStage("render", "Render"), cta: videoReady ? "Re-render" : "Render", blockedNote: "Generate the talking head first" },
+    { key: "music", n: 4, title: "Background music", detail: musicReady.length ? "Lyria music bed ready (preview below)" : "Lyria music bed — optional; auto-added at render if skipped", state: musicState, action: () => runStage("music", "Music"), cta: musicReady.length ? "Regenerate" : "Generate", blockedNote: "" },
+    { key: "render", n: 5, title: "Render", detail: "Stitch VO + b-roll + music + captions into all formats", state: renderState, action: () => runStage("render", "Render"), cta: videoReady ? "Re-render" : "Render", blockedNote: "Generate the talking head first" },
   ];
   const nextStage = stages.find((s) => s.state === "ready")?.key;
 

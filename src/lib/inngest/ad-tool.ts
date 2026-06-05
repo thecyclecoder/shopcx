@@ -281,6 +281,40 @@ export const adToolBrollRequested = inngest.createFunction(
   },
 );
 
+// ── 4b. Background music (Lyria) ─────────────────────────────────────────────
+// Explicit control over the music bed. Render auto-generates one if missing, but
+// this lets the operator generate/regenerate it (optionally with a style prompt)
+// and preview it before rendering. The new clip replaces the prior active bed
+// only once it succeeds (a failed gen leaves the existing music in place).
+export const adToolMusicRequested = inngest.createFunction(
+  { id: "ad-tool-music-requested", retries: 1, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/music-requested" }] },
+  async ({ event, step }) => {
+    const { workspace_id, campaign_id } = event.data as EventData;
+    const prompt = ((event.data as { prompt?: string }).prompt || "").trim() || LYRIA_PROMPT;
+    const admin = createAdminClient();
+
+    const segId = await step.run("lyria-generate", async () => {
+      const id = await createSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "music", seq: 0, model: LYRIA_MODEL, prompt });
+      try {
+        const { buffer, mimeType } = await generateLyriaMusic({ workspaceId: workspace_id, prompt });
+        const ext = mimeType.includes("wav") ? "wav" : "mp3";
+        const path = `audio/${workspace_id}/${id}.${ext}`;
+        await uploadBuffer(path, buffer, mimeType);
+        await completeSegment(id, { storagePath: path });
+        // Retire any previous music bed now that this one succeeded.
+        await admin.from("ad_segments").update({ is_active: false }).eq("campaign_id", campaign_id).eq("kind", "music").neq("id", id);
+        return id;
+      } catch (err: any) {
+        await failSegment(id, String(err?.message || err));
+        throw err;
+      }
+    });
+
+    await step.sendEvent("music-completed", { name: "ad-tool/music-completed", data: { workspace_id, campaign_id } });
+    return { ok: true, segId };
+  },
+);
+
 // ── 5. Render (Whisper + Remotion, 4 formats) ───────────────────────────────
 export const adToolRenderRequested = inngest.createFunction(
   { id: "ad-tool-render-requested", retries: 1, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/render-requested" }] },
@@ -521,6 +555,7 @@ export const adToolFunctions = [
   adToolHeroRequested,
   adToolTalkingHeadRequested,
   adToolBrollRequested,
+  adToolMusicRequested,
   adToolRenderRequested,
   adToolSegmentRegenerate,
 ];
