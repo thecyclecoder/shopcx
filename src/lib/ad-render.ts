@@ -451,7 +451,7 @@ async function downloadTo(url: string, outPath: string): Promise<void> {
 /** Render the VO-spine video on Lambda (ExampleAd) → write to outPath. */
 async function renderVoSpineVideoOnLambda(props: VoSpineProps, outPath: string): Promise<void> {
   const { region, functionName, serveUrl } = lambdaConfig();
-  const lambda: any = await import(/* webpackIgnore: true */ "@remotion/lambda/client" as any);
+  const lambda: any = await import("@remotion/lambda/client" as any);
   const { renderId, bucketName } = await lambda.renderMediaOnLambda({
     region, functionName, serveUrl,
     composition: "ExampleAd",
@@ -476,7 +476,7 @@ async function renderVoSpineVideoOnLambda(props: VoSpineProps, outPath: string):
 /** Render a still on Lambda (AdStatic) → write to outPath. */
 async function renderStaticOnLambda(props: AdCompositionProps, outPath: string): Promise<void> {
   const { region, functionName, serveUrl } = lambdaConfig();
-  const lambda: any = await import(/* webpackIgnore: true */ "@remotion/lambda/client" as any);
+  const lambda: any = await import("@remotion/lambda/client" as any);
   const out = await lambda.renderStillOnLambda({
     region, functionName, serveUrl,
     composition: "AdStatic",

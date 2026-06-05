@@ -4,6 +4,11 @@ const nextConfig: NextConfig = {
   // Prevent 308 trailing-slash redirects — Shopify app proxy follows 3xx redirects,
   // which breaks the proxy flow (redirects to storefront instead of proxying to backend)
   skipTrailingSlashRedirect: true,
+  // Keep the Remotion Lambda client external (not webpack-bundled) so Vercel's
+  // file tracer includes it in the serverless function's node_modules — the
+  // Inngest render step dynamic-imports it to call AWS Lambda. Without this the
+  // function throws "Cannot find package '@remotion/lambda'" at runtime.
+  serverExternalPackages: ["@remotion/lambda", "@remotion/lambda-client"],
   // Note: we tried experimental.inlineCss — Next.js recommends it for
   // Tailwind — but on a page with 11 sections the inlined <style>
   // bloated to 162 KB, pushing the hero <img> from byte ~5K to byte
