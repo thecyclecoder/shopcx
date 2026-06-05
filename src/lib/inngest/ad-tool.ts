@@ -17,7 +17,6 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   generateSoulPortrait,
-  generateTtsAudio,
   generateDopVideo,
   pollJobUntilDone,
   creditsToCents,
@@ -112,7 +111,7 @@ function buildHoldingProductPrompt(productTitle: string, dims: any, vibeTags: st
 export const adToolHeroRequested = inngest.createFunction(
   { id: "ad-tool-hero-requested", retries: 2, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/hero-requested" }] },
   async ({ event, step }) => {
-    const { workspace_id, campaign_id } = event.data as EventData;
+    const { workspace_id, campaign_id, feedback } = event.data as EventData & { feedback?: string };
     const admin = createAdminClient();
 
     const ctx = await step.run("load", async () => {
@@ -150,7 +149,9 @@ export const adToolHeroRequested = inngest.createFunction(
     }
 
     const productTitle = (ctx.campaign as any)?.products?.title || "the product";
-    const prompt = buildHoldingProductPrompt(productTitle, ctx.dims, (ctx.campaign?.vibe_tags as string[]) || []);
+    let prompt = buildHoldingProductPrompt(productTitle, ctx.dims, (ctx.campaign?.vibe_tags as string[]) || []);
+    // Operator corrections from a previous attempt (e.g. anatomy fixes).
+    if (feedback) prompt += ` IMPORTANT corrections from the previous attempt — fix these: ${feedback}. Ensure hands, fingers, and arms are anatomically correct and naturally positioned.`;
 
     const heroUrl = await step.run("nano-banana-pro-combine", async () => {
       // Nano Banana Pro (Gemini) composes [face, product] → "holding product".
@@ -172,40 +173,9 @@ export const adToolHeroRequested = inngest.createFunction(
   },
 );
 
-// ── 2. Audio (TTS) ────────────────────────────────────────────────────────────
-export const adToolAudioRequested = inngest.createFunction(
-  { id: "ad-tool-audio-requested", retries: 2, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/audio-requested" }] },
-  async ({ event, step }) => {
-    const { workspace_id, campaign_id } = event.data as EventData;
-    const admin = createAdminClient();
-    const campaign = await step.run("load", async () => {
-      const { data } = await admin.from("ad_campaigns").select("script_text, voice_id").eq("id", campaign_id).single();
-      return data;
-    });
-    if (!campaign?.script_text) return { ok: false, reason: "no_script" };
-
-    const audioUrl = await step.run("tts-generate-poll", async () => {
-      const { jobSetId } = await generateTtsAudio({
-        workspaceId: workspace_id,
-        text: campaign.script_text,
-        voiceId: campaign.voice_id || "default",
-        campaignId: campaign_id,
-      });
-      if (!jobSetId) throw new Error("no_job_set");
-      const res = await pollJobUntilDone(workspace_id, jobSetId, { timeoutMs: 120000 });
-      if (res.status !== "completed" || !res.outputUrls[0]) throw new Error(`tts_${res.status}`);
-      const path = `audio/${workspace_id}/${campaign_id}.mp3`;
-      await uploadFromUrl(path, res.outputUrls[0], "audio/mpeg");
-      return signedUrl(path);
-    });
-
-    await admin.from("ad_campaigns").update({ audio_url: audioUrl }).eq("id", campaign_id);
-    await step.sendEvent("audio-completed", { name: "ad-tool/audio-completed", data: { workspace_id, campaign_id } });
-    return { ok: true, audioUrl };
-  },
-);
-
 // ── 3. Talking head (Veo 3.1 Fast, multi-segment, persisted) ─────────────────
+// NOTE: there is no separate "audio" stage. The VO is the talking-head clips'
+// native Veo audio; the only added track is the Lyria music bed (in render).
 // The proven stack: split the script into ~8s beats, generate each as a Veo clip
 // from the holding-product hero (Veo's native audio = the VO spine). Each clip is
 // a durable ad_segments row carrying the exact script that made it + its Whisper
@@ -273,7 +243,11 @@ export const adToolBrollRequested = inngest.createFunction(
     });
 
     const sources = ctx.media.filter((m) => m.slot !== "hero").slice(0, 3);
-    if (sources.length < 1) return { ok: false, reason: "no_broll_sources" };
+    // B-roll is optional — an ad renders fine with talking head + music alone.
+    if (sources.length < 1) {
+      await step.sendEvent("broll-completed", { name: "ad-tool/broll-completed", data: { workspace_id, campaign_id } });
+      return { ok: true, clips: [], reason: "no_broll_sources" };
+    }
     const motions = eligibleMotions(ctx.vibe);
 
     const clips = await step.run("dop-generate-persist", async () => {
@@ -409,7 +383,9 @@ export const adToolRenderRequested = inngest.createFunction(
     });
 
     if (!assembled) {
-      await admin.from("ad_campaigns").update({ status: "failed" }).eq("id", campaign_id);
+      // Rendered before any talking-head exists — recoverable, not a dead end.
+      // Leave the campaign in draft so the operator can generate the talking head.
+      await admin.from("ad_campaigns").update({ status: "draft" }).eq("id", campaign_id);
       return { ok: false, reason: "no_talking_segments" };
     }
 
@@ -543,7 +519,6 @@ export const adToolSegmentRegenerate = inngest.createFunction(
 export const adToolFunctions = [
   adToolFaceRequested,
   adToolHeroRequested,
-  adToolAudioRequested,
   adToolTalkingHeadRequested,
   adToolBrollRequested,
   adToolRenderRequested,

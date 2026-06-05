@@ -38,9 +38,13 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .single();
   if (!campaign) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
+  // Optional free-text correction appended to the prompt on regeneration
+  // (e.g. "the hands look wrong relative to the arms").
+  const feedback = typeof body.feedback === "string" ? body.feedback.trim() : "";
+
   await inngest.send({
     name: "ad-tool/hero-requested",
-    data: { workspace_id: workspaceId as string, campaign_id: id },
+    data: { workspace_id: workspaceId as string, campaign_id: id, feedback: feedback || undefined },
   });
 
   return NextResponse.json({ queued: true });

@@ -162,10 +162,15 @@ This is the locked-in creative pipeline, confirmed by building a real Amazing Co
 - **Re-launch refresh** — regenerate ONE talking beat + re-stitch (`adToolSegmentRegenerate`, `regenerateTalkingSegment`). See [[../recipes/ad-relaunch-refresh]]. UI: the campaign page's **Creative library** section ("Refresh this hook").
 - **Example ad backfilled** — the approved Amazing Coffee 22s ad is a live campaign in the library (face → avatar → hero → 3 talking + 2 b-roll + 1 music segments → composition → final MP4). `scripts/backfill-example-ad.ts`. `ad_tool_enabled=true` flipped for Superfoods.
 
+**✅ Staged production UI (2026-06-05):**
+- The campaign page (`/dashboard/marketing/ads/[id]`) has a **Production** panel: staged hero → talking-head → b-roll → render, each its own route + button, with live state and "next" highlighting. Fixed the gap where talking-head/b-roll had **no UI trigger at all** (you could only Render, which failed with `no_talking_segments`). Render run early now leaves the campaign in `draft` (resumable), not `failed`.
+- **Hero comment-regenerate** — the Hero card takes a free-text correction ("hands look wrong") → `POST /hero {feedback}` → appended to the Nano Banana Pro prompt.
+- **TTS audio removed** — no `audio` stage/route/function; VO = Veo native audio, only added track is the Lyria bed.
+
 **⏳ Open:**
-- **Live end-to-end Veo render not yet run from the app** — the pipeline is code-complete + typechecks, but a full wizard→Veo→render pass hasn't run against live quota (Veo 3.1 Fast daily cap). The proven artifacts were produced via one-off scripts and backfilled.
+- **Live end-to-end Veo render not yet run from the app** — the pipeline is code-complete + typechecks, but a full UI→Veo→render pass hasn't run against live quota (Veo 3.1 Fast daily cap). The proven artifacts were produced via one-off scripts and backfilled.
 - **Static path** still renders the hero+headline `AdStatic` (unchanged); only the video path uses the VO-spine composition.
-- **B-roll/music refresh** — only talking beats are refreshable via the UI; b-roll + music are reused as-is.
+- **B-roll/music refresh** — only talking beats are refreshable via the UI; b-roll + music are reused as-is. Regenerating the hero does NOT auto-refresh existing talking clips (regenerate those to pick up the new hero).
 
 Verification scripts: `scripts/test-ad-validator.ts`, `scripts/generate-amazing-coffee-angles.ts`, `scripts/generate-amazing-coffee-proposals.ts`, `scripts/test-higgsfield-auth.ts`.
 

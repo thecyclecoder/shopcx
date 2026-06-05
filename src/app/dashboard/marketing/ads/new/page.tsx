@@ -43,7 +43,6 @@ interface ScriptResult {
   violations: Violation[];
 }
 
-const VOICE_OPTIONS = ["energetic", "direct", "urgent"];
 
 export default function NewAdPage() {
   const workspace = useWorkspace();
@@ -59,7 +58,7 @@ export default function NewAdPage() {
   const [angleId, setAngleId] = useState<string | null>(null);
   const [lengthSec, setLengthSec] = useState<15 | 30>(30);
   const [also15, setAlso15] = useState(false);
-  const [voiceId, setVoiceId] = useState<string>("energetic");
+  const [voiceId] = useState<string>("energetic");
 
   // Script editor
   const [campaignId, setCampaignId] = useState<string | null>(null);
@@ -77,9 +76,7 @@ export default function NewAdPage() {
 
   // Media
   const [heroUrl, setHeroUrl] = useState<string | null>(null);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [heroBusy, setHeroBusy] = useState(false);
-  const [audioBusy, setAudioBusy] = useState(false);
 
   // Load avatars + products on mount
   useEffect(() => {
@@ -153,7 +150,6 @@ export default function NewAdPage() {
       const d = await res.json();
       setCampaignId(d.campaign.id);
       setHeroUrl(d.campaign.hero_image_url || null);
-      setAudioUrl(d.campaign.audio_url || null);
       applyScript(d.script);
     } else {
       const d = await res.json().catch(() => ({}));
@@ -204,7 +200,6 @@ export default function NewAdPage() {
     if (res.ok) {
       const d = await res.json();
       setHeroUrl(d.campaign.hero_image_url || null);
-      setAudioUrl(d.campaign.audio_url || null);
     }
   }
 
@@ -217,18 +212,6 @@ export default function NewAdPage() {
       body: JSON.stringify({ workspaceId: workspace.id }),
     });
     setHeroBusy(false);
-  }
-
-  async function generateAudio() {
-    if (!campaignId) return;
-    setAudioBusy(true);
-    await saveScript();
-    await fetch(`/api/ads/campaigns/${campaignId}/audio`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: workspace.id }),
-    });
-    setAudioBusy(false);
   }
 
   const selectedProduct = products.find((p) => p.id === productId);
@@ -468,47 +451,19 @@ export default function NewAdPage() {
         </Step>
       )}
 
-      {/* 6. Voice */}
+      {/* 6. Generate the hero, then finish in Production */}
       {campaignId && (
-        <Step n={6} title="Voice">
-          <select
-            value={voiceId}
-            onChange={async (e) => {
-              setVoiceId(e.target.value);
-              await fetch(`/api/ads/campaigns/${campaignId}`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ workspaceId: workspace.id, voice_id: e.target.value }),
-              });
-            }}
-            className="w-full max-w-xs rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-          >
-            {VOICE_OPTIONS.map((v) => (
-              <option key={v} value={v}>
-                {v}
-              </option>
-            ))}
-          </select>
-        </Step>
-      )}
-
-      {/* 7. Media */}
-      {campaignId && (
-        <Step n={7} title="Hero & audio">
+        <Step n={6} title="Hero shot">
+          <p className="mb-3 text-xs text-zinc-500">
+            Generate the holding-product shot — every talking-head clip is built from it. Then continue to Production to generate the talking head, b-roll, and render.
+          </p>
           <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={generateHero}
               disabled={heroBusy}
               className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
             >
-              {heroBusy ? "Queuing…" : "Generate hero"}
-            </button>
-            <button
-              onClick={generateAudio}
-              disabled={audioBusy}
-              className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
-            >
-              {audioBusy ? "Queuing…" : "Generate audio"}
+              {heroBusy ? "Queuing…" : heroUrl ? "Regenerate hero" : "Generate hero"}
             </button>
             <button
               onClick={pollCampaign}
@@ -518,32 +473,22 @@ export default function NewAdPage() {
             </button>
           </div>
 
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Hero</p>
-              {heroUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={heroUrl} alt="Hero" className="w-full rounded" />
-              ) : (
-                <p className="text-xs text-zinc-400">Not generated yet.</p>
-              )}
-            </div>
-            <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Audio</p>
-              {audioUrl ? (
-                <audio controls src={audioUrl} className="w-full" />
-              ) : (
-                <p className="text-xs text-zinc-400">Not generated yet.</p>
-              )}
-            </div>
+          <div className="mt-4 max-w-xs rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Hero</p>
+            {heroUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={heroUrl} alt="Hero" className="w-full rounded" />
+            ) : (
+              <p className="text-xs text-zinc-400">Not generated yet.</p>
+            )}
           </div>
 
           <div className="mt-6">
             <Link
               href={`/dashboard/marketing/ads/${campaignId}`}
-              className="text-sm text-indigo-600 hover:underline"
+              className="inline-block rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500"
             >
-              Go to ad detail →
+              Continue to Production →
             </Link>
           </div>
         </Step>

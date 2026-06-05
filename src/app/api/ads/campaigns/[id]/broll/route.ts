@@ -39,7 +39,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (!campaign) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   await inngest.send({
-    name: "ad-tool/audio-requested",
+    name: "ad-tool/broll-requested",
     data: { workspace_id: workspaceId as string, campaign_id: id },
   });
 
