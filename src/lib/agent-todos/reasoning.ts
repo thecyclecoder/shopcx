@@ -301,6 +301,20 @@ When you are ready to propose, emit your final answer as a single JSON code bloc
 
 Emit the JSON block as the LAST thing in your final response. After the JSON block, do not emit anything else.`;
 
+  // The Claude Code Routine runs with CLAUDECODE=1 in its env. The Agent SDK
+  // spawns the `claude` CLI as a subprocess, which inherits that var, trips the
+  // nested-session guard ("can't launch Claude Code inside Claude Code"), and
+  // exits code 1 — so reasoning silently produced 0 todos in the routine while
+  // working fine locally (no CLAUDECODE there). Strip the nested-session markers
+  // from the subprocess env (keeping PATH, ANTHROPIC_API_KEY, etc. intact) so
+  // the CLI launches. See anthropics/claude-agent-sdk-python#573.
+  const sdkEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined) sdkEnv[k] = v;
+  }
+  delete sdkEnv.CLAUDECODE;
+  delete sdkEnv.CLAUDE_CODE_ENTRYPOINT;
+
   let finalText = "";
   try {
     const iter = query({
@@ -313,6 +327,7 @@ Emit the JSON block as the LAST thing in your final response. After the JSON blo
         maxTurns: 30,
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
+        env: sdkEnv,
       },
     });
 
