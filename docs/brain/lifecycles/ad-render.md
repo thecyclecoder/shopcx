@@ -167,13 +167,16 @@ This is the locked-in creative pipeline, confirmed by building a real Amazing Co
 - **Hero comment-regenerate** — the Hero card takes a free-text correction ("hands look wrong") → `POST /hero {feedback}` → appended to the Nano Banana Pro prompt.
 - **TTS audio removed** — no `audio` stage/route/function; VO = Veo native audio, only added track is the Lyria bed.
 
-**🚧 Render runtime → Remotion Lambda (code shipped, awaiting AWS creds):**
-- Remotion can't run on Vercel serverless (`remotion_not_installed`). The render path now dispatches on `REMOTION_RENDER_MODE`: **lambda** (`renderMediaOnLambda`/`renderStillOnLambda` + poll + S3 download) for prod, **local** in-process for dev. See [[../integrations/remotion-lambda]]. Code + `scripts/deploy-remotion-lambda.ts` are in; needs an AWS IAM user + `deployFunction`/`deploySite` run to go live.
-- **Captions never empty**: the render `assemble` step now backfills Whisper transcripts for any talking clip missing them (was silently empty in prod). Needs `OPENAI_API_KEY` in Vercel.
+**✅ Render runtime → Remotion Lambda (LIVE, 2026-06-05):**
+- Remotion can't run on Vercel serverless (`remotion_not_installed`). The render path dispatches on `REMOTION_RENDER_MODE`: **lambda** (`renderMediaOnLambda`/`renderStillOnLambda` + poll + S3 download) in prod, **local** in-process for dev. See [[../integrations/remotion-lambda]].
+- **Provisioned + verified**: IAM `remotion-user`/`remotion-lambda-role`, function `remotion-render-4-0-471-…`, bucket `remotionlambda-useast1-n8xy9oay8f`, site `shopcx-ads`. A real ad rendered **on Lambda in ~39s** (2 talking + 2 b-roll + music + 35 captions). Env set in `.env.local` + Vercel Production; prod redeployed. Scripts: `scripts/deploy-remotion-lambda.ts`, `scripts/aws/*`.
+- **Captions never empty**: the render `assemble` step backfills Whisper transcripts for any talking clip missing them (was silently empty in prod). `OPENAI_API_KEY` present in Vercel.
 - **URL durability**: `ad_videos.meta.storage_path` stored; campaign GET re-signs `final_mp4_url`/`static_jpg_url` from it (no more 90-day-expiry links).
-- Interim: renders are produced via a local `tsx` script until the Lambda deploy runs.
+
+**✅ Verified live (2026-06-05):** an in-app render (Inngest → Lambda) produced both **video** formats — `reels_9x16` + `feed_4x5`, valid MP4s (HTTP 200, ~18-24 MB, 16s, captions + b-roll + music) in ~1 min. Note: Vercel git auto-deploy wasn't firing on recent pushes — production was updated via `vercel deploy --prod`.
 
 **⏳ Open:**
+- **Static formats fail on Lambda** — `AdStatic` (`stories_9x16` + `feed_4x5` static) errors with "Error loading image" for the hero (signed Supabase URL). `renderStillOnLambda` can't fetch/decode it within Remotion's `delayRender` window. Video is unaffected. Fix: pass the hero as a longer-TTL/public URL or preload it. The two **video** formats are the priority and work.
 - **Static path** still renders the hero+headline `AdStatic` (unchanged); only the video path uses the VO-spine composition.
 - **B-roll/music refresh** — only talking beats are refreshable via the UI; b-roll + music are reused as-is. Regenerating the hero does NOT auto-refresh existing talking clips (regenerate those to pick up the new hero).
 
