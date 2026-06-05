@@ -261,11 +261,13 @@ async function gatherContext(admin: Admin, workspaceId: string, ticketId: string
  * model hallucinates file paths (we hit "escalation/rules/threat_language.py"
  * — a Python file in our TypeScript project — on 2026-06-04).
  *
- * Auth: the Agent SDK respects whatever the host environment provides.
- * Inside a Claude Code Routine it uses the routine's session credentials
- * (billed against the Max subscription's Agent SDK credit bucket as of
- * 2026-06-15). When run locally / outside a routine, falls back to
- * ANTHROPIC_API_KEY.
+ * Auth: uses ANTHROPIC_API_KEY. Per Anthropic's ToS (Feb 2026) the Agent SDK
+ * requires API-key auth — OAuth/subscription tokens are restricted to Claude
+ * Code and Claude.ai. We do NOT delete the key to "force" subscription billing:
+ * that path has no valid credential in the routine env and silently returns
+ * nothing (which is why 2026-06-05 runs proposed 0 todos). The subscription
+ * Agent-SDK credit (live 2026-06-15) is billed via the Claude Code session
+ * itself, not reachable by tampering with the key in this nested SDK call.
  *
  * Cwd: the spawned Claude session inherits `cwd` here, which the
  * routine-run script sets to the repo root. So `Read("src/lib/...")` etc
@@ -274,18 +276,12 @@ async function gatherContext(admin: Admin, workspaceId: string, ticketId: string
 async function callOpus(systemPrompt: string, userContent: string, repoDir: string): Promise<ReasoningOutput | null> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
-  // Force the SDK to use OAuth (Claude Code login → Max subscription
-  // billing) instead of API-key billing. Without this, ANTHROPIC_API_KEY
-  // in the env (used by sonnet-orchestrator-v2.ts and other modules)
-  // would route the nested session through API metering. Scope is the
-  // SDK call only — restored in finally so live orchestrator paths are
-  // unaffected.
-  //
-  // To opt out and use API billing instead, set
-  // AGENT_TODO_REASONING_FORCE_API=1 in the env.
-  const forceApi = process.env.AGENT_TODO_REASONING_FORCE_API === "1";
-  const savedKey = !forceApi ? process.env.ANTHROPIC_API_KEY : undefined;
-  if (!forceApi) delete process.env.ANTHROPIC_API_KEY;
+  // The Agent SDK authenticates with ANTHROPIC_API_KEY. Fail loudly if it's
+  // missing rather than letting query() silently return nothing.
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.error("[reasoning] ANTHROPIC_API_KEY is not set — the Agent SDK cannot authenticate; proposing nothing for this ticket.");
+    return null;
+  }
 
   const sdkSystemPrompt = `${systemPrompt}
 
@@ -329,13 +325,15 @@ Emit the JSON block as the LAST thing in your final response. After the JSON blo
         }
       }
     }
-  } finally {
-    if (!forceApi && savedKey !== undefined) {
-      process.env.ANTHROPIC_API_KEY = savedKey;
-    }
+  } catch (err) {
+    console.error(`[reasoning] Agent SDK query() failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
   }
 
-  if (!finalText) return null;
+  if (!finalText) {
+    console.warn("[reasoning] Agent SDK produced no output (empty result) — proposing nothing for this ticket. Verify ANTHROPIC_API_KEY is valid and the model returned a response.");
+    return null;
+  }
 
   // Extract JSON block from the final text.
   const fenced = finalText.match(/```json\s*\n([\s\S]*?)\n```/);
