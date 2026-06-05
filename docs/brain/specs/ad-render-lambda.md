@@ -2,7 +2,11 @@
 
 **Status:** 🚧 code shipped, awaiting AWS creds for live deploy + verify · **Owner:** Dylan
 
-> **Progress (2026-06):** Phases 1–5 implemented + typechecked: `@remotion/lambda` dep, `scripts/deploy-remotion-lambda.ts` (deployFunction + getOrCreateBucket + deploySite), Lambda render dispatch in `ad-render.ts` (`renderVoSpineVideoTo`/`renderStaticTo` behind `REMOTION_RENDER_MODE`), Whisper backfill in the render assemble step, URL re-signing in the campaign GET, brain docs ([[../integrations/remotion-lambda]]). **Remaining (creds-gated):** create the IAM user, run `scripts/deploy-remotion-lambda.ts`, set the env vars in Vercel, flip `REMOTION_RENDER_MODE=lambda`, render an ad end-to-end from the app, then fold + delete this spec.
+> **Progress (2026-06):** Phases 1–5 implemented, typechecked, **and verified**: `@remotion/lambda` dep, `scripts/deploy-remotion-lambda.ts`, Lambda render dispatch in `ad-render.ts` (`renderVoSpineVideoTo`/`renderStaticTo` behind `REMOTION_RENDER_MODE`), Whisper backfill in the render assemble step, URL re-signing in the campaign GET, brain docs ([[../integrations/remotion-lambda]]). Verified: the Lambda SDK resolves (`deployFunction`/`renderMediaOnLambda`/`getRenderProgress`/`renderStillOnLambda`) and the new dispatcher renders an ad end-to-end in **local** mode (2 talking + 2 b-roll + music + 35 captions → 23 MB mp4).
+>
+> **AWS CLI ready:** installed (2.34.62); Remotion IAM policies generated in `scripts/aws/` + one-shot `scripts/aws/setup-remotion-aws.sh`.
+>
+> **Remaining — blocked on the operator authenticating AWS** (`aws configure` with admin creds; cannot be done by the agent). Then: (1) `bash scripts/aws/setup-remotion-aws.sh` → creates `remotion-user`/`remotion-lambda-role` + prints keys; (2) add `REMOTION_AWS_*` to `.env.local` + Vercel; (3) `npx tsx scripts/deploy-remotion-lambda.ts` → function + site + bucket; (4) set `REMOTION_LAMBDA_FUNCTION_NAME`/`REMOTION_LAMBDA_SERVE_URL`/`REMOTION_S3_BUCKET` + `REMOTION_RENDER_MODE=lambda` + `OPENAI_API_KEY` in Vercel; (5) render an ad from the app on `lambda` mode; (6) fold + delete this spec.
 
 ## Why
 
