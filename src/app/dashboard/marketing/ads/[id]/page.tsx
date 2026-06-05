@@ -33,10 +33,25 @@ interface Segment {
   seq: number;
   version: number;
   script_text: string | null;
+  prompt: string | null;
   model: string | null;
   trim_sec: number | null;
   status: string;
   error: string | null;
+  preview_url: string | null;
+}
+
+interface BrollSource {
+  slot: string;
+  alt_text: string | null;
+  url: string;
+}
+
+interface LibraryClip {
+  id: string;
+  prompt: string | null;
+  model: string | null;
+  source_url: string | null;
   preview_url: string | null;
 }
 
@@ -48,6 +63,7 @@ export default function AdDetailPage() {
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [videos, setVideos] = useState<Video[]>([]);
   const [segments, setSegments] = useState<Segment[]>([]);
+  const [brollSources, setBrollSources] = useState<BrollSource[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyStage, setBusyStage] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -60,9 +76,41 @@ export default function AdDetailPage() {
       setCampaign(d.campaign);
       setVideos(d.videos || []);
       setSegments(d.segments || []);
+      setBrollSources(d.brollSources || []);
     }
     setLoading(false);
   }, [id, workspace.id]);
+
+  // Add ONE b-roll clip: text-to-video or animate a chosen photo.
+  async function addBroll(opts: { mode: "text" | "image"; prompt: string; sourceUrl?: string; model: "fast" | "full" }) {
+    setMessage(null);
+    const res = await fetch(`/api/ads/campaigns/${id}/broll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: workspace.id, mode: opts.mode, prompt: opts.prompt, source_url: opts.sourceUrl, model: opts.model }),
+    });
+    setMessage(res.ok ? "Generating a b-roll clip — it'll appear below when ready." : "Failed to queue b-roll.");
+    if (res.ok) setTimeout(load, 1500);
+  }
+  // Reuse an existing library clip in this ad (no regeneration).
+  async function reuseBroll(segId: string) {
+    const res = await fetch(`/api/ads/campaigns/${id}/broll/reuse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: workspace.id, segId }),
+    });
+    setMessage(res.ok ? "Added from library." : "Failed to add from library.");
+    if (res.ok) load();
+  }
+  // Discard a clip from this ad's cut (stays in the library).
+  async function discardSegment(segId: string) {
+    const res = await fetch(`/api/ads/campaigns/${id}/segments/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: workspace.id, segId }),
+    });
+    if (res.ok) load();
+  }
 
   // Fire a stage (hero / talking-head / broll / render) and refresh.
   const runStage = useCallback(async (stage: string, label: string) => {
@@ -95,12 +143,12 @@ export default function AdDetailPage() {
 
   async function regenerate(
     seq: number,
-    opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string },
+    opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string; prompt?: string },
   ) {
     const res = await fetch(`/api/ads/campaigns/${id}/segments/regenerate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: workspace.id, seq, kind: opts.kind, model: opts.model, new_script: opts.newScript }),
+      body: JSON.stringify({ workspaceId: workspace.id, seq, kind: opts.kind, model: opts.model, new_script: opts.newScript, prompt: opts.prompt }),
     });
     const hq = opts.model === "full";
     setMessage(res.ok ? `Regenerating that clip${hq ? " in HQ Veo 3" : ""} and re-stitching. Check back shortly.` : "Failed to queue regenerate.");
@@ -147,8 +195,7 @@ export default function AdDetailPage() {
   // ── Production stages (staged, sequential, each points to the next) ─────────
   const talkingReady = segments.filter((s) => s.kind === "talking_head" && s.status === "ready");
   const talkingGenerating = segments.some((s) => s.kind === "talking_head" && s.status === "generating");
-  const brollReady = segments.filter((s) => s.kind === "broll" && s.status === "ready");
-  const brollGenerating = segments.some((s) => s.kind === "broll" && s.status === "generating");
+  const brollSegments = segments.filter((s) => s.kind === "broll");
   const musicReady = segments.filter((s) => s.kind === "music" && s.status === "ready");
   const musicGenerating = segments.some((s) => s.kind === "music" && s.status === "generating");
   const videoReady = videoOutputs.some((v) => v.status === "ready");
@@ -157,16 +204,15 @@ export default function AdDetailPage() {
   type StageState = "done" | "running" | "ready" | "blocked";
   const heroState: StageState = busyStage === "hero" ? "running" : campaign.hero_image_url ? "done" : "ready";
   const thState: StageState = busyStage === "talking-head" || talkingGenerating ? "running" : talkingReady.length ? "done" : campaign.hero_image_url ? "ready" : "blocked";
-  const brollState: StageState = busyStage === "broll" || brollGenerating ? "running" : brollReady.length ? "done" : campaign.hero_image_url ? "ready" : "blocked";
   const musicState: StageState = busyStage === "music" || musicGenerating ? "running" : musicReady.length ? "done" : "ready";
   const renderState: StageState = busyStage === "render" || isRendering ? "running" : videoReady ? "done" : talkingReady.length ? "ready" : "blocked";
 
+  // B-roll is its own studio (add one at a time) — not a single staged button.
   const stages = [
     { key: "hero", n: 1, title: "Hero shot", detail: "Avatar holding the product (Nano Banana Pro)", state: heroState, action: () => runStage("hero", "Hero"), cta: campaign.hero_image_url ? "Regenerate" : "Generate", blockedNote: "" },
     { key: "talking-head", n: 2, title: "Talking head", detail: `Veo clips that speak the script (${talkingReady.length || "0"} ready)`, state: thState, action: () => runStage("talking-head", "Talking head"), cta: talkingReady.length ? "Regenerate all" : "Generate", blockedNote: "Generate the hero first" },
-    { key: "broll", n: 3, title: "B-roll", detail: `Optional muted/ASMR cutaways (${brollReady.length || "0"} ready)`, state: brollState, action: () => runStage("broll", "B-roll"), cta: brollReady.length ? "Regenerate" : "Generate", blockedNote: "Generate the hero first" },
-    { key: "music", n: 4, title: "Background music", detail: musicReady.length ? "Lyria music bed ready (preview below)" : "Lyria music bed — optional; auto-added at render if skipped", state: musicState, action: () => runStage("music", "Music"), cta: musicReady.length ? "Regenerate" : "Generate", blockedNote: "" },
-    { key: "render", n: 5, title: "Render", detail: "Stitch VO + b-roll + music + captions into all formats", state: renderState, action: () => runStage("render", "Render"), cta: videoReady ? "Re-render" : "Render", blockedNote: "Generate the talking head first" },
+    { key: "music", n: 3, title: "Background music", detail: musicReady.length ? "Lyria music bed ready (preview below)" : "Lyria music bed — optional; auto-added at render if skipped", state: musicState, action: () => runStage("music", "Music"), cta: musicReady.length ? "Regenerate" : "Generate", blockedNote: "" },
+    { key: "render", n: 4, title: "Render", detail: `Stitch talking head + ${brollSegments.filter((b) => b.status === "ready").length} b-roll + music + captions`, state: renderState, action: () => runStage("render", "Render"), cta: videoReady ? "Re-render" : "Render", blockedNote: "Generate the talking head first" },
   ];
   const nextStage = stages.find((s) => s.state === "ready")?.key;
 
@@ -260,17 +306,30 @@ export default function AdDetailPage() {
         </div>
       </div>
 
-      {/* Creative library — the pieces that make up this ad. Refresh one beat
-          (e.g. a fatigued hook) and re-stitch without rebuilding everything. */}
+      {/* B-roll studio — add clips one at a time (text-to-video, animate a photo,
+          or reuse from the library). Keep or discard. Any number works (incl. 0). */}
+      <BrollStudio
+        workspaceId={workspace.id}
+        campaignId={id}
+        clips={brollSegments}
+        sources={brollSources}
+        onAdd={addBroll}
+        onReuse={reuseBroll}
+        onRegenerate={regenerate}
+        onDiscard={discardSegment}
+      />
+
+      {/* Creative library — the talking + music pieces. Refresh one beat (e.g. a
+          fatigued hook) and re-stitch without rebuilding everything. */}
       <div className="mt-8 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Creative library</h2>
+        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Talking head & music</h2>
         <span className="text-xs text-zinc-400">Refresh one beat → re-stitch (reuses every other piece)</span>
       </div>
-      {segments.length === 0 ? (
-        <p className="mt-2 text-sm text-zinc-500">No segments yet. Generate the talking head, b-roll, and render.</p>
+      {segments.filter((s) => s.kind !== "broll").length === 0 ? (
+        <p className="mt-2 text-sm text-zinc-500">No talking-head clips yet. Generate them in Production above.</p>
       ) : (
         <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {segments.map((s) => (
+          {segments.filter((s) => s.kind !== "broll").map((s) => (
             <SegmentCard key={s.id} s={s} onRegenerate={regenerate} />
           ))}
         </div>
@@ -344,18 +403,21 @@ function StageRow({ stage, isNext, busy }: { stage: Stage; isNext: boolean; busy
   );
 }
 
-function SegmentCard({ s, onRegenerate }: { s: Segment; onRegenerate: (seq: number, opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string }) => Promise<void> }) {
+function SegmentCard({ s, onRegenerate, onDiscard }: { s: Segment; onRegenerate: (seq: number, opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string; prompt?: string }) => Promise<void>; onDiscard?: (segId: string) => void }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(s.script_text || "");
+  const [promptDraft, setPromptDraft] = useState(s.prompt || "");
+  const [editingPrompt, setEditingPrompt] = useState(false);
   const [busy, setBusy] = useState(false);
   const kindLabel = s.kind === "talking_head" ? `Hook beat #${s.seq + 1}` : s.kind === "broll" ? `B-roll #${s.seq + 1}` : "Music bed";
   const isVeo = s.kind === "talking_head" || s.kind === "broll";
   const fast = (s.model || "").includes("fast");
-  async function run(opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string }) {
+  async function run(opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string; prompt?: string }) {
     setBusy(true);
     await onRegenerate(s.seq, opts);
     setBusy(false);
     setEditing(false);
+    setEditingPrompt(false);
   }
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
@@ -409,11 +471,162 @@ function SegmentCard({ s, onRegenerate }: { s: Segment; onRegenerate: (seq: numb
         </div>
       )}
       {s.kind === "broll" && (
-        <div className="mt-2 flex flex-wrap items-center gap-3">
-          <button onClick={() => run({ kind: "broll", model: "fast" })} disabled={busy} className="text-xs text-indigo-600 hover:underline disabled:opacity-50">Regenerate</button>
-          <button onClick={() => run({ kind: "broll", model: "full" })} disabled={busy} className="text-xs text-indigo-600 hover:underline disabled:opacity-50">
-            {busy ? "Queuing…" : "Regenerate in HQ (Veo 3)"}
-          </button>
+        <div className="mt-2">
+          {editingPrompt ? (
+            <div>
+              <textarea
+                value={promptDraft}
+                onChange={(e) => setPromptDraft(e.target.value)}
+                rows={4}
+                className="w-full rounded-md border border-zinc-300 bg-white p-2 text-xs dark:border-zinc-700 dark:bg-zinc-950"
+                placeholder="Describe the shot + motion (e.g. slow push-in on the pouch, warm daylight, no morphing)…"
+              />
+              <div className="mt-1 flex flex-wrap gap-2">
+                <button disabled={busy || !promptDraft.trim()} onClick={() => run({ kind: "broll", model: "fast", prompt: promptDraft.trim() })} className="rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50">{busy ? "Queuing…" : "Regenerate"}</button>
+                <button disabled={busy || !promptDraft.trim()} onClick={() => run({ kind: "broll", model: "full", prompt: promptDraft.trim() })} className="rounded border border-indigo-300 px-2 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50 dark:border-indigo-800 dark:text-indigo-300">HQ (Veo 3)</button>
+                <button onClick={() => setEditingPrompt(false)} className="text-xs text-zinc-500 hover:underline">Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-3">
+              <button onClick={() => run({ kind: "broll", model: "fast" })} disabled={busy} className="text-xs text-indigo-600 hover:underline disabled:opacity-50">Regenerate</button>
+              <button onClick={() => run({ kind: "broll", model: "full" })} disabled={busy} className="text-xs text-indigo-600 hover:underline disabled:opacity-50">{busy ? "Queuing…" : "Regenerate in HQ (Veo 3)"}</button>
+              <button onClick={() => { setPromptDraft(s.prompt || ""); setEditingPrompt(true); }} disabled={busy} className="text-xs text-zinc-500 hover:underline disabled:opacity-50">Edit shot prompt</button>
+              {onDiscard && <button onClick={() => onDiscard(s.id)} disabled={busy} className="text-xs text-red-500 hover:underline disabled:opacity-50">Discard</button>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BrollStudio({
+  workspaceId, campaignId, clips, sources, onAdd, onReuse, onRegenerate, onDiscard,
+}: {
+  workspaceId: string;
+  campaignId: string;
+  clips: Segment[];
+  sources: BrollSource[];
+  onAdd: (opts: { mode: "text" | "image"; prompt: string; sourceUrl?: string; model: "fast" | "full" }) => Promise<void>;
+  onReuse: (segId: string) => Promise<void>;
+  onRegenerate: (seq: number, opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string; prompt?: string }) => Promise<void>;
+  onDiscard: (segId: string) => void;
+}) {
+  const [mode, setMode] = useState<"text" | "photo" | "library">("text");
+  const [prompt, setPrompt] = useState("");
+  const [picked, setPicked] = useState<string | null>(null);
+  const [model, setModel] = useState<"fast" | "full">("fast");
+  const [busy, setBusy] = useState(false);
+  const [library, setLibrary] = useState<LibraryClip[] | null>(null);
+
+  async function openLibrary() {
+    setMode("library");
+    if (library === null) {
+      const res = await fetch(`/api/ads/broll-library?workspaceId=${workspaceId}&excludeCampaign=${campaignId}`);
+      setLibrary(res.ok ? (await res.json()).clips || [] : []);
+    }
+  }
+  async function add() {
+    setBusy(true);
+    if (mode === "text") await onAdd({ mode: "text", prompt: prompt.trim(), model });
+    else if (mode === "photo" && picked) await onAdd({ mode: "image", prompt: prompt.trim(), sourceUrl: picked, model });
+    setBusy(false);
+    setPrompt("");
+    setPicked(null);
+  }
+  const tab = (k: "text" | "photo" | "library", label: string) => (
+    <button
+      onClick={() => (k === "library" ? openLibrary() : setMode(k))}
+      className={`rounded-md px-3 py-1.5 text-xs font-medium ${mode === k ? "bg-indigo-600 text-white" : "border border-zinc-300 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"}`}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="mt-8">
+      <div className="mb-1 flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">B-roll</h2>
+        <span className="text-xs text-zinc-400">Add clips one at a time — any number works (or none)</span>
+      </div>
+
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="mb-3 flex flex-wrap gap-2">
+          {tab("text", "Describe (text → video)")}
+          {tab("photo", "Animate a photo")}
+          {tab("library", "From library")}
+        </div>
+
+        {mode === "library" ? (
+          library === null ? (
+            <p className="text-xs text-zinc-400">Loading library…</p>
+          ) : library.length === 0 ? (
+            <p className="text-xs text-zinc-400">No reusable b-roll yet. Make some with Describe or Animate a photo.</p>
+          ) : (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {library.map((c) => (
+                <div key={c.id} className="rounded-md border border-zinc-200 p-2 dark:border-zinc-800">
+                  {c.preview_url ? <video src={c.preview_url} className="w-full rounded" muted loop onMouseOver={(e) => e.currentTarget.play()} onMouseOut={(e) => e.currentTarget.pause()} /> : <div className="h-24 rounded bg-zinc-100 dark:bg-zinc-800" />}
+                  <button onClick={() => onReuse(c.id)} className="mt-1 w-full rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-500">Add to this ad</button>
+                </div>
+              ))}
+            </div>
+          )
+        ) : (
+          <div>
+            {mode === "photo" && (
+              <div className="mb-3">
+                <p className="mb-1 text-xs font-medium text-zinc-600 dark:text-zinc-400">Pick a photo to animate</p>
+                {sources.length === 0 ? (
+                  <p className="text-xs text-zinc-400">No product photos available.</p>
+                ) : (
+                  <div className="flex gap-2 overflow-x-auto pb-1">
+                    {sources.map((src) => (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        key={src.url}
+                        src={src.url}
+                        alt={src.alt_text || src.slot}
+                        onClick={() => setPicked(src.url)}
+                        className={`h-20 w-20 shrink-0 cursor-pointer rounded-md object-cover ${picked === src.url ? "ring-2 ring-indigo-500" : "border border-zinc-200 dark:border-zinc-800"}`}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={3}
+              placeholder={mode === "text" ? "Describe the b-roll scene (e.g. close-up of coffee being poured into a mug, steam rising, warm morning light)…" : "Optional: guide the motion (e.g. slow push-in, gentle drift, no morphing)…"}
+              className="w-full rounded-md border border-zinc-300 bg-white p-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+            />
+            <div className="mt-2 flex flex-wrap items-center gap-3">
+              <label className="flex items-center gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+                <input type="radio" checked={model === "fast"} onChange={() => setModel("fast")} /> Veo Fast
+              </label>
+              <label className="flex items-center gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+                <input type="radio" checked={model === "full"} onChange={() => setModel("full")} /> Veo 3 HQ
+              </label>
+              <button
+                onClick={add}
+                disabled={busy || (mode === "text" && !prompt.trim()) || (mode === "photo" && !picked)}
+                className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {busy ? "Queuing…" : "Add b-roll clip"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {clips.length > 0 && (
+        <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {clips.map((s) => (
+            <SegmentCard key={s.id} s={s} onRegenerate={onRegenerate} onDiscard={onDiscard} />
+          ))}
         </div>
       )}
     </div>

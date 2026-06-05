@@ -38,10 +38,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .single();
   if (!campaign) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
+  // Add ONE b-roll clip: mode "text" (text-to-video) or "image" (animate a still).
+  const mode = body.mode === "text" ? "text" : "image";
+  const model = body.model === "full" ? "full" : "fast";
+  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+  const sourceUrl = typeof body.source_url === "string" ? body.source_url.trim() : "";
+  if (mode === "image" && !sourceUrl) return NextResponse.json({ error: "source_url required for image mode" }, { status: 400 });
+  if (mode === "text" && !prompt) return NextResponse.json({ error: "prompt required for text mode" }, { status: 400 });
+
   await inngest.send({
     name: "ad-tool/broll-requested",
-    data: { workspace_id: workspaceId as string, campaign_id: id },
+    data: { workspace_id: workspaceId as string, campaign_id: id, mode, model, prompt: prompt || undefined, source_url: sourceUrl || undefined },
   });
 
-  return NextResponse.json({ queued: true });
+  return NextResponse.json({ queued: true, mode });
 }

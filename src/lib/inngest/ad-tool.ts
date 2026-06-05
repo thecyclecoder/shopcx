@@ -5,13 +5,15 @@
  * workspace can't monopolize Higgsfield rate limits. Every Higgsfield call is
  * logged to ad_jobs by the client wrapper for audit/replay.
  *
- *   ad-tool/hero-requested        → Soul hero image
- *   ad-tool/audio-requested       → TTS audio
- *   ad-tool/talking-head-requested→ Speak lip-sync (1 clip @15s, 2 @30s)
- *   ad-tool/broll-requested       → N parallel DoP clips
- *   ad-tool/render-requested      → Whisper + Remotion, 4 formats
+ *   ad-tool/hero-requested        → Nano Banana Pro holding-product shot
+ *   ad-tool/talking-head-requested→ Veo 3.1 Fast clips (VO spine), per beat
+ *   ad-tool/broll-requested       → ONE Veo b-roll clip (text- or image-to-video)
+ *   ad-tool/music-requested       → Lyria music bed
+ *   ad-tool/render-requested      → assemble creative library + Remotion, 4 formats
+ *   ad-tool/segment-regenerate    → refresh/HQ-upgrade one clip, re-stitch
  *
- * See docs/brain/specs/ad-tool.md Phases 3-5.
+ * Every piece persists to the creative library (ad_segments). See
+ * docs/brain/inngest/ad-tool.md + docs/brain/lifecycles/ad-render.md.
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -44,10 +46,28 @@ function buildTalkingHeadPrompt(productTitle: string, script: string): string {
 }
 const LYRIA_PROMPT = "Upbeat optimistic uplifting instrumental background music bed, light acoustic guitar and soft claps, warm and energetic but gentle, no vocals, loopable, 25 seconds.";
 
-// Veo b-roll: animate a product still into a muted/ASMR cutaway. No voices, no
+// Veo b-roll: animate a product still into a muted/ASMR cutaway. The prompt is
+// TAILORED to what the still actually shows (slot/alt) — a generic "pour/sizzle"
+// prompt on a macro ingredient photo produces nonsense motion. No voices, no
 // music (the VO spine + Lyria bed are added in the stitch).
-function buildBrollPrompt(productTitle: string): string {
-  return `Cinematic ASMR b-roll for ${productTitle}: bring this still to life with subtle, natural motion and a shallow depth of field. Satisfying tactile ambient sounds only — a gentle pour, soft clinks, a light crackle or sizzle. NO voices, NO talking, NO background music, NO on-screen text or captions.`;
+const NO_AUDIO_TEXT = "NO voices, NO talking, NO background music, NO on-screen text, captions, or logos.";
+function buildBrollPrompt(productTitle: string, slot = "", alt = ""): string {
+  const ctx = `${slot} ${alt}`.toLowerCase();
+  // A cup/drink/coffee scene → the classic pour/steam ASMR.
+  if (/cup|mug|drink|coffee|brew|pour|latte/.test(ctx)) {
+    return `ASMR close-up b-roll: a mug of ${productTitle} with soft steam rising, a gentle slow pour and a light spoon stir/clink. Photorealistic, keep it natural — NO morphing, warping, or extra limbs. ${NO_AUDIO_TEXT}`;
+  }
+  // Raw ingredient macro → tiny, believable motion only (no pour/sizzle).
+  if (slot.startsWith("ingredient")) {
+    const ing = alt || slot.replace(/^ingredient_/, "").replace(/_/g, " ");
+    return `Extreme close-up macro b-roll of ${ing}. VERY subtle motion only — a slow gentle camera push-in or rotation, faint particle/dust drift, soft natural light shift. Photorealistic, keep the object intact — NO morphing, warping, or transformation. ${NO_AUDIO_TEXT}`;
+  }
+  // Before/after or person/lifestyle → handheld lifestyle motion.
+  if (slot === "before" || slot === "after" || slot.startsWith("lifestyle") || /person|woman|man|hand|kitchen|home|drink/.test(ctx)) {
+    return `Authentic UGC lifestyle b-roll: ${alt || "a real person in a warm home/kitchen setting with " + productTitle}. Subtle natural movement with a gentle handheld camera drift, warm daylight, shallow depth of field. Photorealistic, NO morphing or warping. ${NO_AUDIO_TEXT}`;
+  }
+  // Fallback: gentle, safe motion.
+  return `Cinematic b-roll cutaway for ${productTitle}: bring this photo to life with a subtle, believable gentle camera drift and shallow depth of field. Photorealistic, keep everything intact — NO morphing or warping. ${NO_AUDIO_TEXT}`;
 }
 
 const CONCURRENCY: [{ limit: number; key: string }] = [{ limit: 3, key: "event.data.workspace_id" }];
@@ -231,58 +251,65 @@ export const adToolTalkingHeadRequested = inngest.createFunction(
   },
 );
 
-// ── 4. B-roll (Veo 3.1 Fast, image-to-video, persisted) ──────────────────────
-// Animate product-media stills into muted/ASMR cutaways with Veo (Higgsfield DoP
-// was 422-ing on this account). Each clip persists as an ad_segments row with the
-// source still it animated — so it can be regenerated in HQ Veo 3 later.
+// ── 4. B-roll (Veo 3.1, one clip at a time) ──────────────────────────────────
+// Add ONE b-roll clip per request, in the operator's chosen mode:
+//   - mode="text":  text-to-video from a description (no source image)
+//   - mode="image": animate a chosen still + a guiding prompt
+// Appends as the next b-roll seq (doesn't disturb existing clips). Higgsfield DoP
+// was 422-ing on this account, so b-roll is Veo. Fast by default, full = HQ.
+interface BrollEventData {
+  workspace_id: string;
+  campaign_id: string;
+  mode: "text" | "image";
+  prompt?: string;
+  source_url?: string;
+  model?: "fast" | "full";
+}
+
 export const adToolBrollRequested = inngest.createFunction(
   { id: "ad-tool-broll-requested", retries: 1, concurrency: CONCURRENCY, triggers: [{ event: "ad-tool/broll-requested" }] },
   async ({ event, step }) => {
-    const { workspace_id, campaign_id } = event.data as EventData;
+    const d = event.data as BrollEventData;
+    const { workspace_id, campaign_id } = d;
+    const mode = d.mode === "text" ? "text" : "image";
+    const veoModel = d.model === "full" ? VEO_MODEL : VEO_FAST_MODEL;
     const admin = createAdminClient();
+
     const ctx = await step.run("load", async () => {
-      const { data: c } = await admin.from("ad_campaigns").select("product_id, products(title)").eq("id", campaign_id).single();
-      // Lifestyle shots first, packshots second.
-      const { data: media } = await admin
-        .from("product_media")
-        .select("url, webp_1080_url, slot, display_order")
-        .eq("product_id", c?.product_id)
-        .order("display_order", { ascending: true })
-        .limit(8);
-      return { productTitle: (c as any)?.products?.title || "the product", media: media || [] };
+      const { data: c } = await admin.from("ad_campaigns").select("products(title)").eq("id", campaign_id).single();
+      // Append after the highest existing active b-roll seq.
+      const { data: existing } = await admin
+        .from("ad_segments")
+        .select("seq")
+        .eq("campaign_id", campaign_id)
+        .eq("kind", "broll")
+        .eq("is_active", true)
+        .order("seq", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      return { productTitle: (c as any)?.products?.title || "the product", nextSeq: (existing?.seq ?? -1) + 1 };
     });
 
-    // Prefer lifestyle/ingredient/before-after stills over packshots; skip hero.
-    const sources = ctx.media.filter((m) => m.slot !== "hero" && (m.webp_1080_url || m.url)).slice(0, 3);
-    if (sources.length < 1) {
-      await step.sendEvent("broll-completed", { name: "ad-tool/broll-completed", data: { workspace_id, campaign_id } });
-      return { ok: true, clips: [], reason: "no_broll_sources" };
-    }
-    const prompt = buildBrollPrompt(ctx.productTitle);
+    const sourceUrl = mode === "image" ? d.source_url || null : null;
+    if (mode === "image" && !sourceUrl) return { ok: false, reason: "image_mode_needs_source" };
+    const prompt = (d.prompt || "").trim() || buildBrollPrompt(ctx.productTitle);
 
-    const clips = await step.run("veo-generate-persist", async () => {
-      // Fresh generation replaces any prior b-roll clips (incl. failed DoP ones).
-      await admin.from("ad_segments").update({ is_active: false }).eq("campaign_id", campaign_id).eq("kind", "broll");
-      const out: Array<{ segId: string; ok: boolean; error?: string }> = [];
-      for (let i = 0; i < sources.length; i++) {
-        const imageUrl = (sources[i].webp_1080_url || sources[i].url) as string;
-        const segId = await createSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "broll", seq: i, model: VEO_FAST_MODEL, prompt, sourceUrl: imageUrl });
-        try {
-          const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl, aspectRatio: "9:16", model: VEO_FAST_MODEL, timeoutMs: 360000 });
-          const path = `broll/${workspace_id}/${segId}.mp4`;
-          await uploadBuffer(path, buffer, "video/mp4");
-          await completeSegment(segId, { storagePath: path });
-          out.push({ segId, ok: true });
-        } catch (err: any) {
-          await failSegment(segId, String(err?.message || err));
-          out.push({ segId, ok: false, error: String(err?.message || err) });
-        }
+    const result = await step.run("veo-generate-persist", async () => {
+      const segId = await createSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "broll", seq: ctx.nextSeq, model: veoModel, prompt, sourceUrl });
+      try {
+        const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: sourceUrl || undefined, aspectRatio: "9:16", model: veoModel, timeoutMs: 360000 });
+        const path = `broll/${workspace_id}/${segId}.mp4`;
+        await uploadBuffer(path, buffer, "video/mp4");
+        await completeSegment(segId, { storagePath: path });
+        return { segId, ok: true };
+      } catch (err: any) {
+        await failSegment(segId, String(err?.message || err));
+        return { segId, ok: false, error: String(err?.message || err) };
       }
-      return out;
     });
 
     await step.sendEvent("broll-completed", { name: "ad-tool/broll-completed", data: { workspace_id, campaign_id } });
-    return { ok: clips.some((c) => c.ok), clips };
+    return result;
   },
 );
 
@@ -522,6 +549,8 @@ interface RegenEventData {
   kind?: "talking_head" | "broll";
   new_script?: string;
   model?: "fast" | "full";
+  prompt?: string; // broll: custom shot description (overrides the tailored prompt)
+  mode?: "image" | "text"; // broll: animate the source still vs pure text-to-video
 }
 
 export const adToolSegmentRegenerate = inngest.createFunction(
@@ -549,12 +578,17 @@ export const adToolSegmentRegenerate = inngest.createFunction(
 
     const segId = await step.run("regen-veo", async () => {
       if (kind === "broll") {
-        const sourceUrl = ctx.existing?.source_url;
-        if (!sourceUrl) throw new Error("broll_no_source");
-        const prompt = ctx.existing?.prompt || buildBrollPrompt(ctx.productTitle);
+        const customPrompt = ((event.data as RegenEventData).prompt || "").trim();
+        const existingSource = ctx.existing?.source_url || null;
+        // mode: "image" = animate the still + guiding text; "text" = pure
+        // text-to-video from the description. Default to whatever it was.
+        const mode = (event.data as RegenEventData).mode || (existingSource ? "image" : "text");
+        const prompt = customPrompt || ctx.existing?.prompt || buildBrollPrompt(ctx.productTitle);
+        if (mode === "image" && !existingSource) throw new Error("broll_no_source");
+        const sourceUrl = mode === "image" ? existingSource : null;
         const id = await regenerateSegment({ workspaceId: workspace_id, campaignId: campaign_id, kind: "broll", seq, prompt, model: veoModel, sourceUrl });
         try {
-          const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: sourceUrl, aspectRatio: "9:16", model: veoModel, timeoutMs: 360000 });
+          const { buffer } = await generateVeoVideo({ workspaceId: workspace_id, prompt, imageUrl: sourceUrl || undefined, aspectRatio: "9:16", model: veoModel, timeoutMs: 360000 });
           const path = `broll/${workspace_id}/${id}.mp4`;
           await uploadBuffer(path, buffer, "video/mp4");
           await completeSegment(id, { storagePath: path });

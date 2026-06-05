@@ -28,9 +28,15 @@ All share `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]` so a sin
 - **Trigger:** event `ad-tool/talking-head-requested` · **Retries:** 1
 - Requires `hero_image_url`. `splitScriptIntoSegments` → ~8s beats; for each: `generateVeoVideo` (Veo 3.1 Fast, image-to-video from the hero, native audio = VO spine), Whisper sets the trim, persists an [[../tables/ad_segments]] row (`kind=talking_head`, its `script_text` + `transcript_json` + `trim_sec`). Sequential (Veo Fast daily cap). Emits `ad-tool/talking-head-completed`.
 
-### `ad-tool-broll-requested` (Veo 3.1 Fast image-to-video)
-- **Trigger:** event `ad-tool/broll-requested` · **Retries:** 1
-- Pulls up to 3 `product_media` stills (lifestyle/ingredient first; `slot != 'hero'`), `generateVeoVideo` each (image-to-video, ASMR prompt, muted) → persists an [[../tables/ad_segments]] row (`kind=broll`, with `source_url` = the still). Retires prior b-roll first. Emits `ad-tool/broll-completed`. **Switched from Higgsfield DoP → Veo** (DoP was returning HTTP 422 on this account).
+### `ad-tool-broll-requested` (ONE Veo b-roll clip, on demand)
+- **Trigger:** event `ad-tool/broll-requested` (`{ workspace_id, campaign_id, mode, prompt?, source_url?, model? }`) · **Retries:** 1
+- Adds **one** b-roll clip at the next seq (appends; doesn't disturb others):
+  - `mode="text"`: text-to-video from `prompt` (no source image).
+  - `mode="image"`: animate `source_url` (a chosen still) with `prompt` as guiding text.
+  - `model`: `fast` (default) | `full` (HQ Veo 3).
+- Persists an [[../tables/ad_segments]] row (`kind=broll`, `source_url`, `prompt`). Emits `ad-tool/broll-completed`. **Switched from Higgsfield DoP → Veo** (DoP returned HTTP 422 on this account).
+- **B-roll is a "studio", not a staged button**: add clips one at a time (text / animate-photo / **reuse from library**), keep or discard each; the ad renders with ANY count incl. zero (`buildComposition` overlays however many exist). Tailored default prompt: `buildBrollPrompt(productTitle, slot, alt)` (ingredient macros get subtle motion, not pour/sizzle — generic prompts were producing nonsense motion on a mushroom photo).
+- Routes: `POST /broll` (add one), `POST /broll/reuse {segId}` (copy a library clip in, no regen), `POST /segments/delete {segId}` (discard = soft `is_active=false`), `GET /api/ads/broll-library` (workspace-wide reusable clips, deduped by file).
 
 ### `ad-tool-render-requested`
 - **Trigger:** event `ad-tool/render-requested` · **Retries:** 1

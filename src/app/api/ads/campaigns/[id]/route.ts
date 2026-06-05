@@ -49,7 +49,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   // preview URLs so the operator can inspect (and refresh) each one.
   const { data: segs } = await auth.admin
     .from("ad_segments")
-    .select("id, kind, seq, version, script_text, model, storage_path, trim_sec, status, error")
+    .select("id, kind, seq, version, script_text, prompt, model, storage_path, trim_sec, status, error")
     .eq("campaign_id", id)
     .eq("is_active", true)
     .order("kind", { ascending: true })
@@ -62,7 +62,18 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     })),
   );
 
-  return NextResponse.json({ campaign, videos: videos || [], segments });
+  // Product-media stills for the b-roll "animate a photo" picker.
+  const { data: media } = await auth.admin
+    .from("product_media")
+    .select("slot, alt_text, webp_1080_url, url, display_order")
+    .eq("product_id", (campaign as any).product_id)
+    .order("display_order", { ascending: true })
+    .limit(30);
+  const brollSources = (media || [])
+    .filter((m) => m.slot !== "hero" && (m.webp_1080_url || m.url))
+    .map((m) => ({ slot: m.slot, alt_text: m.alt_text, url: (m.webp_1080_url || m.url) as string }));
+
+  return NextResponse.json({ campaign, videos: videos || [], segments, brollSources });
 }
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
