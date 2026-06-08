@@ -10,22 +10,23 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
   const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
   if (banCheck) return banCheck;
 
-  const contractId = url.searchParams.get("id") || url.searchParams.get("contractId") || "";
-  if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
+  const idParam = url.searchParams.get("id") || url.searchParams.get("contractId") || "";
+  if (!idParam) return jsonErr({ error: "missing_contractId" }, 400);
 
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
   if (!customer) return jsonErr({ error: "customer_not_found" }, 404);
 
   const admin = createAdminClient();
 
-  // DB-first lookup
-  const { data: sub } = await admin.from("subscriptions")
-    .select("*")
-    .eq("workspace_id", auth.workspaceId)
-    .eq("shopify_contract_id", contractId)
-    .single();
+  // Resolve by our UUID (the portal's canonical key) OR the legacy contract id.
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let subQuery = admin.from("subscriptions").select("*").eq("workspace_id", auth.workspaceId);
+  subQuery = UUID_RE.test(idParam) ? subQuery.eq("id", idParam) : subQuery.eq("shopify_contract_id", idParam);
+  const { data: sub } = await subQuery.maybeSingle();
 
   if (!sub) return jsonErr({ error: "subscription_not_found" }, 404);
+  // Downstream shopify_contract_id-keyed lookups (dunning, failures, events).
+  const contractId = (sub.shopify_contract_id as string) || idParam;
 
   // Tax quote. Internal subs only — Appstle subs are handled by
   // Shopify's tax pipeline. Returns null when Avalara isn't enabled

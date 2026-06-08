@@ -598,6 +598,9 @@ export async function POST(request: NextRequest) {
         shipping_protection_amount_cents: protectionAdded ? protectionCents : null,
         shipping_method_code: shippingMethodCode,
         shipping_rate_id: shippingRateId,
+        // Source of truth for where renewals ship + tax — the renewal scheduler,
+        // pricing engine, and portal all read subscriptions.shipping_address.
+        shipping_address: ship,
       })
       .select("id")
       .single();

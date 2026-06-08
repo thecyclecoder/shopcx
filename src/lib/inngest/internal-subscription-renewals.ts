@@ -107,13 +107,15 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
 
       const { data: customer } = await admin
         .from("customers")
-        .select("id, email, first_name, last_name, phone, shopify_customer_id")
+        .select("id, email, first_name, last_name, phone, shopify_customer_id, default_address")
         .eq("id", sub.customer_id)
         .single();
       if (!customer) return { skip: true, reason: "customer_not_found" } as const;
 
-      // Pull a shipping address. Subscriptions don't carry one on the
-      // row yet — derive from the most recent order for this customer.
+      // Shipping address. subscriptions.shipping_address is the SOURCE OF TRUTH —
+      // the portal address handler + checkout write it, so a customer's address
+      // change takes effect on the next renewal. Fall back to the most recent
+      // order, then the customer's default, so an older sub still ships.
       const { data: lastOrder } = await admin
         .from("orders")
         .select("shipping_address, billing_address")
@@ -122,13 +124,19 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         .limit(1)
         .maybeSingle();
 
+      const resolvedShipping =
+        (sub.shipping_address as Record<string, unknown> | null) ||
+        (lastOrder?.shipping_address as Record<string, unknown> | null) ||
+        (customer.default_address as Record<string, unknown> | null) ||
+        null;
+
       return {
         skip: false,
         sub,
         pm,
         customer,
-        shipping_address: (lastOrder?.shipping_address as Record<string, unknown> | null) || null,
-        billing_address: (lastOrder?.billing_address as Record<string, unknown> | null) || null,
+        shipping_address: resolvedShipping,
+        billing_address: (lastOrder?.billing_address as Record<string, unknown> | null) || resolvedShipping,
       } as const;
     });
 

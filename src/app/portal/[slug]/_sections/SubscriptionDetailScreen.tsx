@@ -85,6 +85,7 @@ export interface Contract {
   is_internal?: boolean | null;
   shipping_protection_added?: boolean;
   shipping_protection_amount_cents?: number;
+  tax?: { tax_cents: number; total_cents: number; quoted_at?: string | null } | null;
   portalState?: {
     bucket?: string;
     needsAttention?: boolean;
@@ -160,26 +161,18 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
   };
 
   const loadContract = useCallback(async () => {
-    const listRes = await fetch("/api/portal?route=subscriptions", { credentials: "same-origin" });
-    if (!listRes.ok) throw new Error("Could not load subscriptions");
-    const list = await listRes.json();
-    const found = (list.contracts || []).find((c: { internal_id?: string; id?: string }) => {
-      return c.internal_id === subscriptionId || c.id === subscriptionId;
-    });
+    // Load the full detail (resolved shipping address, pricing, coupons, payment
+    // method, and the fresh tax quote) by UUID — the detail handler is the single
+    // source, so the screen no longer pieces data together from the list.
+    const res = await fetch(`/api/portal?route=subscriptionDetail&id=${encodeURIComponent(subscriptionId)}`, { credentials: "same-origin" });
+    if (!res.ok) throw new Error("Could not load subscription");
+    const data = await res.json();
+    const found = data.contract;
     if (!found) throw new Error("Subscription not found");
     setContract(found as Contract);
-
-    // Estimated tax (internal subs) — saved to the sub + re-quoted after any
-    // mutation. Fetched here so it refreshes on every loadContract (onMutate).
-    if ((found as Contract).is_internal) {
-      try {
-        const taxRes = await fetch(`/api/portal?route=subscriptionTax&id=${encodeURIComponent(subscriptionId)}`, { credentials: "same-origin" });
-        const taxData = taxRes.ok ? await taxRes.json() : null;
-        setTaxCents(taxData?.tax?.tax_cents ?? null);
-      } catch { setTaxCents(null); }
-    } else {
-      setTaxCents(null);
-    }
+    // Tax is included in the detail response (re-quoted on each load via the
+    // input-hash freshness check). No separate fetch.
+    setTaxCents((found.tax?.tax_cents as number | undefined) ?? null);
   }, [subscriptionId]);
 
   const loadCatalog = useCallback(async () => {

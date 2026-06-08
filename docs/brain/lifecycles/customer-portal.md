@@ -13,6 +13,14 @@ The self-serve customer surface — where logged-in customers manage their subsc
 
 After editing `shopify-extension/portal-src/` files, **always run `node scripts/build-all-portals.js`** — it builds both surfaces from the same source so they don't drift. Then `shopify app deploy` for the extension itself.
 
+## Shipping address — one source of truth
+
+`subscriptions.shipping_address` is the **source of truth** for an internal sub. All three paths read it (with the same fallback chain — sub → most recent order → customer `default_address`):
+- **Change address** (`portal__handlers__address`) writes it.
+- **Renewal** ([[../inngest/internal-subscription-renewals]]) ships + taxes from it — *fixed 2026-06-08*: it used to read the last order only, so a customer's address change never took effect on the next renewal.
+- **Checkout** ([[storefront-checkout]]) now persists it on the subscription insert (previously only the order carried it → migrated/portal reads showed "No address on file").
+- **Display**: the detail screen loads from `route=subscriptionDetail` (now resolves by **UUID** via the same id-shape branch), which runs the full fallback resolution. The screen no longer pieces data together from the list endpoint — the detail handler is the single source (address + pricing + coupons + payment method + fresh tax in one response).
+
 ## Identifier discipline: UUID internally, contract id only at the Appstle edge
 
 A subscription's canonical key is its **UUID** (`subscriptions.id`). `shopify_contract_id` is an *external* detail — numeric for Appstle-billed subs, `internal-<hex>` for subs flipped to internal billing ([[../specs/storefront-mvp]] § 1c migration). It exists only to talk to Appstle.
