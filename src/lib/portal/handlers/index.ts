@@ -66,6 +66,8 @@ import { priceQuote } from "./price-quote";
 export { priceQuote } from "./price-quote";
 import { subscriptionTax } from "./subscription-tax";
 export { subscriptionTax } from "./subscription-tax";
+import { shippingProtection } from "./shipping-protection";
+export { shippingProtection } from "./shipping-protection";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -143,4 +145,7 @@ export const routeMap: Record<string, RouteHandler> = {
   subscriptionTax,
   subscriptiontax: subscriptionTax,
   subscription_tax: subscriptionTax,
+  shippingProtection,
+  shippingprotection: shippingProtection,
+  shipping_protection: shippingProtection,
 };

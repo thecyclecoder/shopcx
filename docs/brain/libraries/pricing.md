@@ -34,7 +34,7 @@ Items reference the **variant UUID** (`product_variants.id`), never the Shopify 
 ## Classification
 
 - **product** — catalog item with a rule → break × S&S. Counts toward `product_subtotal_cents` (the discountable base for coupons).
-- **protection** — "Shipping Protection" line → passthrough (its stored price, no discount). Billed via the sub's `shipping_protection_*` columns, so excluded from the product subtotal.
+- **protection** — billed/displayed from the sub's `shipping_protection_added` + `_amount_cents` **columns** (the renewal + engine read the column), so it's excluded from the product subtotal. For **internal** subs the portal toggle is column-based (`route=shippingProtection`) — NOT a line item — so the toggle, the order summary, and billing share one source of truth. (Appstle subs keep the line-item add/remove flow.) A protection *item* in `items` is legacy and gets excluded from the subtotal by title match.
 - **gift** — `is_gift` → $0. (Free gifts are a storefront concern, passthrough here.)
 
 ## Display layer — `portal/helpers/enrich-pricing.ts`

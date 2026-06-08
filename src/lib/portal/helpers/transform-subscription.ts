@@ -102,6 +102,11 @@ export function transformSubscription(
     id: sub.shopify_contract_id || sub.id,
     internal_id: sub.id,
     shopify_contract_id: sub.shopify_contract_id,
+    is_internal: sub.is_internal ?? null,
+    // Internal subs track shipping protection on the row (the renewal bills from
+    // it), not as a line item — surface it so the toggle + summary use one source.
+    shipping_protection_added: !!sub.shipping_protection_added,
+    shipping_protection_amount_cents: Number(sub.shipping_protection_amount_cents || 0),
     status: String(sub.status || "active").toUpperCase(),
     lastPaymentStatus: String(sub.last_payment_status || "SUCCEEDED").toUpperCase(),
     billingPolicy: {

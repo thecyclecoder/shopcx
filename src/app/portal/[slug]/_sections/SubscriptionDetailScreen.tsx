@@ -83,6 +83,8 @@ export interface Contract {
   paymentMethod?: { brand?: string; last4?: string; expiry?: string } | null;
   paymentManageUrl?: string | null;
   is_internal?: boolean | null;
+  shipping_protection_added?: boolean;
+  shipping_protection_amount_cents?: number;
   portalState?: {
     bucket?: string;
     needsAttention?: boolean;
@@ -2410,7 +2412,10 @@ function ShippingProtectionCard({
   onMutate: () => Promise<void>;
   action: ActionApi;
 }) {
-  const hasShipProt = !!shipLine;
+  // Internal subs track protection on the row (column) — single source of truth
+  // with billing + the order summary. Appstle subs use the line-item add/remove.
+  const isInternal = !!contract.is_internal;
+  const hasShipProt = isInternal ? !!contract.shipping_protection_added : !!shipLine;
   const [busy, setBusy] = useState(false);
 
   async function toggle() {
@@ -2418,7 +2423,17 @@ function ShippingProtectionCard({
     setBusy(true);
     action.startAction();
     try {
-      if (hasShipProt && shipLine) {
+      if (isInternal) {
+        const res = await fetch("/api/portal?route=shippingProtection", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ contractId: contract.id, enabled: !hasShipProt }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data?.error) { action.failAction(data?.message || data?.error || undefined); return; }
+        action.completeAction(hasShipProt ? "Shipping protection removed" : "Shipping protection added");
+      } else if (hasShipProt && shipLine) {
         const res = await fetch("/api/portal?route=removeLineItem", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
