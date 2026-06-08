@@ -15,6 +15,72 @@ export function clampInt(n: unknown, fallback: number): number {
   return Number.isFinite(x) ? Math.trunc(x) : fallback;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** All customer UUIDs in the caller's link group (incl. self). Linking is display-only. */
+async function customerLinkGroupIds(
+  admin: ReturnType<typeof createAdminClient>,
+  customerId: string,
+): Promise<string[]> {
+  const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", customerId).maybeSingle();
+  if (!link?.group_id) return [customerId];
+  const { data: group } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
+  const ids = (group || []).map((r) => r.customer_id as string);
+  return ids.length ? ids : [customerId];
+}
+
+export interface ResolvedSub {
+  id: string;
+  shopify_contract_id: string | null;
+  is_internal: boolean;
+  status: string | null;
+  customer_id: string;
+  last_payment_status: string | null;
+  items: unknown;
+  next_billing_date: string | null;
+  applied_discounts: unknown;
+}
+
+/**
+ * Resolve a portal subscription by the identifier the client sends.
+ *
+ * Our system keys on the subscription UUID. The contract id (Appstle/Shopify) is
+ * an external detail used ONLY when talking to Appstle — callers read
+ * `sub.shopify_contract_id` at that boundary and `sub.id` everywhere else. We
+ * still accept the legacy contract-id shape here so in-flight migrated subs (whose
+ * frontend payloads carry `internal-…`) keep working during the transition.
+ *
+ * Enforces that the sub belongs to the logged-in customer's link group — portal
+ * handlers previously looked subs up globally by contract id with no ownership
+ * check.
+ */
+export async function resolveSub(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  rawId: unknown,
+  loggedInShopifyCustomerId: string,
+): Promise<ResolvedSub | null> {
+  const id = typeof rawId === "string" ? rawId.trim() : rawId == null ? "" : String(rawId);
+  if (!id || !workspaceId || !loggedInShopifyCustomerId) return null;
+
+  const { data: customer } = await admin.from("customers")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_customer_id", loggedInShopifyCustomerId)
+    .maybeSingle();
+  if (!customer) return null;
+  const groupIds = await customerLinkGroupIds(admin, customer.id);
+
+  // UUID column can't be compared against a non-UUID literal — branch on shape.
+  let q = admin.from("subscriptions")
+    .select("id, shopify_contract_id, is_internal, status, customer_id, last_payment_status, items, next_billing_date, applied_discounts")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", groupIds);
+  q = UUID_RE.test(id) ? q.eq("id", id) : q.eq("shopify_contract_id", id);
+  const { data } = await q.maybeSingle();
+  return (data as ResolvedSub | null) || null;
+}
+
 export function shortId(gid: unknown): string {
   const s = String(gid || "");
   if (!s) return "";

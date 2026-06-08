@@ -13,6 +13,18 @@ The self-serve customer surface — where logged-in customers manage their subsc
 
 After editing `shopify-extension/portal-src/` files, **always run `node scripts/build-all-portals.js`** — it builds both surfaces from the same source so they don't drift. Then `shopify app deploy` for the extension itself.
 
+## Identifier discipline: UUID internally, contract id only at the Appstle edge
+
+A subscription's canonical key is its **UUID** (`subscriptions.id`). `shopify_contract_id` is an *external* detail — numeric for Appstle-billed subs, `internal-<hex>` for subs flipped to internal billing ([[../specs/storefront-mvp]] § 1c migration). It exists only to talk to Appstle.
+
+Every write handler resolves the sub through **`resolveSub(admin, workspaceId, rawId, loggedInShopifyCustomerId)`** in [[../libraries/portal__helpers]]:
+- Accepts the UUID **or** the legacy contract-id shape (transitional — both frontends still send `contract.id`).
+- Branches by id shape: UUID literals query `subscriptions.id`, anything else queries `shopify_contract_id` (the UUID column can't be compared against a non-UUID literal).
+- Enforces the sub belongs to the caller's **link group** — an ownership check the handlers previously lacked.
+- Returns the full row; handlers read `sub.id` for DB writes and pass `sub.shopify_contract_id` **only** into Appstle wrapper calls.
+
+**Gotcha (fixed 2026-06):** handlers used to parse the id with `clampInt(payload?.contractId, 0)`. That worked while every contract id was numeric, but coerced `internal-<hex>` ids to `0` → `missing_contractId`, breaking *every* action on a migrated sub. The internal-vs-Appstle branch lives in the `appstle*` wrappers ([[../libraries/appstle]]) keyed on the resolved `shopify_contract_id`, so the fix was purely at the handler entry point — no wrapper changes. Because both surfaces share these handlers, the one fix covers both portals.
+
 ## Self-serve actions available
 
 All routes are `/api/portal?route={name}` (App Proxy on the Shopify side) or POST to the same endpoint from the mini-site.

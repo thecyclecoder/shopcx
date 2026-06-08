@@ -1,6 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
 import { appstleGetUpcomingOrders, appstleAttemptBilling } from "@/lib/appstle";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 export const orderNow: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -11,7 +12,8 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
   let payload: Record<string, unknown> | null = null;
   try { payload = await req.json(); } catch { payload = null; }
 
-  const contractId = clampInt(payload?.contractId, 0);
+  const resolved = await resolveSub(createAdminClient(), auth.workspaceId, payload?.contractId, auth.loggedInCustomerId);
+  const contractId = resolved?.shopify_contract_id || "";
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
 
   // Get upcoming orders to find the billing attempt ID

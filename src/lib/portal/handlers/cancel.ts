@@ -2,7 +2,7 @@
 // Only falls through to hard cancel if journey is completed with cancellation outcome.
 
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, checkPortalBan } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 
@@ -15,7 +15,8 @@ export const cancel: RouteHandler = async ({ auth, route, req }) => {
   let payload: Record<string, unknown> | null = null;
   try { payload = await req.json(); } catch { payload = null; }
 
-  const contractId = clampInt(payload?.contractId, 0);
+  const resolved = await resolveSub(createAdminClient(), auth.workspaceId, payload?.contractId, auth.loggedInCustomerId);
+  const contractId = resolved?.shopify_contract_id || "";
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
 
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);

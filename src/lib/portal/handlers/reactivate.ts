@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, addDaysFromNow, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, addDaysFromNow, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
 import { appstleSubscriptionAction } from "@/lib/appstle";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -13,7 +13,8 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
   let payload: Record<string, unknown> | null = null;
   try { payload = await req.json(); } catch { payload = null; }
 
-  const contractId = clampInt(payload?.contractId, 0);
+  const resolved = await resolveSub(createAdminClient(), auth.workspaceId, payload?.contractId, auth.loggedInCustomerId);
+  const contractId = resolved?.shopify_contract_id || "";
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
 
   // Accept custom date from frontend, default to tomorrow
@@ -22,18 +23,21 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
     : addDaysFromNow(1);
 
   try {
-    // 1) Set next billing date
-    const admin = createAdminClient();
-    const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
-    if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
-    const apiKey = decrypt(ws.appstle_api_key_encrypted);
+    // 1) Set next billing date — Appstle subs go through the Appstle API; internal
+    //    subs get their date from the DB update below (no Appstle contract exists).
+    if (!resolved?.is_internal) {
+      const admin = createAdminClient();
+      const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
+      if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
+      const apiKey = decrypt(ws.appstle_api_key_encrypted);
 
-    await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-date?contractId=${contractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(nextBillingDate)}`,
-      { method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store" }
-    );
+      await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-date?contractId=${contractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(nextBillingDate)}`,
+        { method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store" }
+      );
+    }
 
-    // 2) Resume subscription
+    // 2) Resume subscription (wrapper is internal-aware)
     const result = await appstleSubscriptionAction(auth.workspaceId, String(contractId), "resume");
     if (!result.success) throw new Error(result.error || "Resume failed");
   } catch (e) {

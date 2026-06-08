@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { enrichItemTitles, subSwapVariant, subAddItem, subChangeQuantity, subRemoveItem } from "@/lib/subscription-items";
@@ -90,8 +90,12 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   }
   if (!shop) return jsonErr({ error: "missing_shop" }, 400);
 
-  const contractId = clampInt(payload?.contractId, 0);
-  if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
+  // Resolve by UUID (our canonical key); accept the legacy contract-id shape too.
+  // Downstream logic keys on shopify_contract_id (numeric for Appstle, internal-…
+  // for migrated subs) — switch to it only here.
+  const sub = await resolveSub(createAdminClient(), auth.workspaceId, payload?.contractId, auth.loggedInCustomerId);
+  if (!sub?.shopify_contract_id) return jsonErr({ error: "missing_contractId" }, 400);
+  const contractId = sub.shopify_contract_id;
 
   const oldVariants = asIntArray(payload?.oldVariants);
   const oldOneTimeVariants = asIntArray(payload?.oldOneTimeVariants);

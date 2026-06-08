@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, checkPortalBan } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
 import { appstleUpdateBillingInterval } from "@/lib/appstle";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -19,7 +19,8 @@ export const frequency: RouteHandler = async ({ auth, route, req }) => {
   let payload: Record<string, unknown> | null = null;
   try { payload = await req.json(); } catch { payload = null; }
 
-  const contractId = clampInt(payload?.contractId, 0);
+  const resolved = await resolveSub(createAdminClient(), auth.workspaceId, payload?.contractId, auth.loggedInCustomerId);
+  const contractId = resolved?.shopify_contract_id || "";
   const intervalCount = clampInt(payload?.intervalCount, 0);
   const intervalRaw = s(payload?.interval).toUpperCase();
 
