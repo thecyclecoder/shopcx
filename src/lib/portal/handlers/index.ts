@@ -62,6 +62,10 @@ import { paymentMethods } from "./payment-methods";
 export { paymentMethods } from "./payment-methods";
 import { updatePaymentMethod } from "./payment-method-update";
 export { updatePaymentMethod } from "./payment-method-update";
+import { priceQuote } from "./price-quote";
+export { priceQuote } from "./price-quote";
+import { subscriptionTax } from "./subscription-tax";
+export { subscriptionTax } from "./subscription-tax";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -133,4 +137,10 @@ export const routeMap: Record<string, RouteHandler> = {
   updatePaymentMethod,
   updatepaymentmethod: updatePaymentMethod,
   update_payment_method: updatePaymentMethod,
+  priceQuote,
+  pricequote: priceQuote,
+  price_quote: priceQuote,
+  subscriptionTax,
+  subscriptiontax: subscriptionTax,
+  subscription_tax: subscriptionTax,
 };

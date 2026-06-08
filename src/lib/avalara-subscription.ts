@@ -140,12 +140,21 @@ export async function quoteSubscriptionTax(
   if (!sub || !sub.is_internal) return null;
   if (!["active", "paused"].includes(sub.status as string)) return null;
 
-  const cartLines = subItemsToCartLines(sub.items);
+  // Price from the engine (catalog + rules) — internal sub items carry no baked
+  // price. Mirrors the renewal: tax quoted on the engine subtotal + the
+  // rule-decided shipping. (Applying the coupon to the taxable base is a
+  // documented refinement; the renewal quotes pre-coupon too.)
+  const { resolveSubscriptionPricing } = await import("@/lib/pricing");
+  const pricing = await resolveSubscriptionPricing(workspaceId, sub as { items?: unknown; delivery_price_cents?: number | null });
+  const pricedItems = pricing.lines
+    .filter((l) => l.kind === "product")
+    .map((l) => ({ variant_id: l.variant_id, product_id: l.product_id, sku: l.sku, title: l.title, variant_title: l.variant_title, quantity: l.quantity, price_cents: l.unit_cents }));
+  const cartLines = subItemsToCartLines(pricedItems);
   if (cartLines.length === 0) return null;
-  const subtotalCents = cartLines.reduce((s, l) => s + l.line_total_cents, 0);
+  const subtotalCents = pricing.product_subtotal_cents;
   if (subtotalCents <= 0) return null;
 
-  const shippingCents = Number(sub.delivery_price_cents || 0);
+  const shippingCents = pricing.shipping_cents;
   const protectionCents = sub.shipping_protection_added
     ? Number(sub.shipping_protection_amount_cents || 0)
     : 0;

@@ -90,9 +90,11 @@ export interface Contract {
   };
   crisisBanner?: { type?: string; message?: string } | null;
   pricing?: {
+    msrp_cents: number;
     subtotal_cents: number;
     discount_cents: number;
     shipping_cents: number;
+    protection_cents: number;
     total_cents: number;
     free_shipping: boolean;
     pills: Array<{ kind: string; label: string }>;
@@ -135,6 +137,7 @@ interface Props {
 export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
   const [contract, setContract] = useState<Contract | null>(null);
   const [catalog, setCatalog] = useState<CatalogProduct[]>([]);
+  const [taxCents, setTaxCents] = useState<number | null>(null);
   const [shipProtVariantIds, setShipProtVariantIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -163,6 +166,18 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
     });
     if (!found) throw new Error("Subscription not found");
     setContract(found as Contract);
+
+    // Estimated tax (internal subs) — saved to the sub + re-quoted after any
+    // mutation. Fetched here so it refreshes on every loadContract (onMutate).
+    if ((found as Contract).is_internal) {
+      try {
+        const taxRes = await fetch(`/api/portal?route=subscriptionTax&id=${encodeURIComponent(subscriptionId)}`, { credentials: "same-origin" });
+        const taxData = taxRes.ok ? await taxRes.json() : null;
+        setTaxCents(taxData?.tax?.tax_cents ?? null);
+      } catch { setTaxCents(null); }
+    } else {
+      setTaxCents(null);
+    }
   }, [subscriptionId]);
 
   const loadCatalog = useCallback(async () => {
@@ -299,7 +314,7 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
           <div className="text-left text-sm text-zinc-500 sm:text-right">
             <div>{cadence}</div>
             <div className="mt-0.5 font-medium text-zinc-700">
-              ${((contract.pricing?.total_cents ?? subtotalCents) / 100).toFixed(2)} per delivery
+              ${(((contract.pricing?.total_cents ?? subtotalCents) + (taxCents ?? 0)) / 100).toFixed(2)} per delivery
             </div>
           </div>
         </header>
@@ -328,6 +343,9 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
         action={action}
         excludeVariantIds={shipProtVariantIds}
       />
+
+      {/* Order summary — full breakdown of what they'll be charged. */}
+      {!isCancelled && <OrderSummaryCard pricing={contract.pricing} taxCents={taxCents} showTax={!!contract.is_internal} />}
 
       {/* Cadence + lifecycle controls — status-dependent */}
       {status === "active" && (
@@ -466,6 +484,62 @@ function ItemsActionsCard({
 }
 
 // ─────────────────────────── line components ────────────────────────
+
+function SummaryRow({ label, children, bold }: { label: React.ReactNode; children: React.ReactNode; bold?: boolean }) {
+  return (
+    <div className={`flex items-center justify-between ${bold ? "text-base font-semibold text-zinc-900" : "text-zinc-700"}`}>
+      <span>{label}</span>
+      <span>{children}</span>
+    </div>
+  );
+}
+
+/** Order summary — MSRP strikethrough → subtotal (+ rule discount %), coupon,
+ *  shipping, protection, estimated tax, and the all-in per-delivery total. */
+function OrderSummaryCard({ pricing, taxCents, showTax }: {
+  pricing?: Contract["pricing"]; taxCents: number | null; showTax: boolean;
+}) {
+  if (!pricing) return null;
+  const { msrp_cents, subtotal_cents, discount_cents, shipping_cents, protection_cents, free_shipping } = pricing;
+  const rulePct = msrp_cents > subtotal_cents && msrp_cents > 0 ? Math.round((1 - subtotal_cents / msrp_cents) * 100) : 0;
+  const total = Math.max(0, subtotal_cents - discount_cents) + shipping_cents + protection_cents + (showTax ? (taxCents ?? 0) : 0);
+
+  return (
+    <ActionCard title="Order summary" subtitle="What you'll be charged each delivery.">
+      <div className="space-y-2 text-sm">
+        <SummaryRow label="Subtotal">
+          <span className="flex items-center gap-2">
+            {msrp_cents > subtotal_cents && (
+              <span className="text-zinc-400 line-through">${(msrp_cents / 100).toFixed(2)}</span>
+            )}
+            <span className="font-medium text-zinc-900">${(subtotal_cents / 100).toFixed(2)}</span>
+            {rulePct > 0 && (
+              <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase text-emerald-700">{rulePct}% off</span>
+            )}
+          </span>
+        </SummaryRow>
+        {discount_cents > 0 && (
+          <SummaryRow label={<span className="text-emerald-700">Coupon</span>}>
+            <span className="text-emerald-700">−${(discount_cents / 100).toFixed(2)}</span>
+          </SummaryRow>
+        )}
+        <SummaryRow label="Shipping">
+          {free_shipping ? <span className="font-medium text-emerald-700">Free</span> : `$${(shipping_cents / 100).toFixed(2)}`}
+        </SummaryRow>
+        {protection_cents > 0 && (
+          <SummaryRow label="Shipping protection">${(protection_cents / 100).toFixed(2)}</SummaryRow>
+        )}
+        {showTax && (
+          <SummaryRow label="Estimated tax">
+            {taxCents == null ? <span className="text-zinc-400">Calculating…</span> : `$${(taxCents / 100).toFixed(2)}`}
+          </SummaryRow>
+        )}
+        <div className="my-1 border-t border-zinc-100" />
+        <SummaryRow label="Total per delivery" bold>${(total / 100).toFixed(2)}</SummaryRow>
+      </div>
+    </ActionCard>
+  );
+}
 
 /** Discount-pill color by kind — matches the subscriptions list. */
 function detailPillClasses(kind: string): string {
@@ -790,8 +864,28 @@ function AddSwapModal({
   const [variant, setVariant] = useState<CatalogVariant | null>(null);
   const [qty, setQty] = useState(1);
   const [busy, setBusy] = useState(false);
+  const [quote, setQuote] = useState<{ base_cents: number | null; unit_cents: number | null } | null>(null);
 
   const isSwap = mode === "swap";
+
+  // Internal subs: price the previewed line through the engine so the quantity
+  // break (mix-and-match across the projected total) + S&S match what will
+  // actually be charged. Appstle subs fall back to the client estimate below.
+  const swapLineVariantId = isSwap ? line?.variantId : undefined;
+  useEffect(() => {
+    if (!contract.is_internal || !variant) { setQuote(null); return; }
+    let alive = true;
+    fetch("/api/portal?route=priceQuote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ contractId: contract.id, variantId: String(variant.id), quantity: qty, replaceVariantId: swapLineVariantId }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (alive && d?.ok && d?.internal) setQuote({ base_cents: d.base_cents ?? null, unit_cents: d.unit_cents ?? null }); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [contract.is_internal, contract.id, variant?.id, qty, swapLineVariantId]); // eslint-disable-line react-hooks/exhaustive-deps
   const linePid = String(line?.productId || "");
   const products = catalog
     .filter((p) =>
@@ -885,9 +979,16 @@ function AddSwapModal({
 
   // Step 2: variant + qty
   const variants = (product?.variants || []).filter((v) => v.inventory_quantity == null || (v.inventory_quantity || 0) > 0);
-  const { msrpCents, payCents } = priceCentsFor(variant || undefined);
+  // Internal subs: the engine quote drives the price (rule S&S + mix-and-match
+  // break). Appstle subs (and while the quote loads) use the client estimate.
+  const clientPrice = priceCentsFor(variant || undefined);
+  const msrpCents = quote?.base_cents ?? clientPrice.msrpCents;
+  const payCents = quote?.unit_cents ?? clientPrice.payCents;
   const totalMsrp = (msrpCents || 0) * qty;
   const totalPay = (payCents || 0) * qty;
+  const discountPct = msrpCents && payCents != null && msrpCents > payCents
+    ? Math.round((1 - payCents / msrpCents) * 100)
+    : 0;
   const varImg = variantImage(variant || undefined) || productImage(product || undefined);
 
   return (
@@ -974,9 +1075,11 @@ function AddSwapModal({
               <span className="text-sm text-zinc-400 line-through">${(totalMsrp / 100).toFixed(2)}</span>
             )}
             <span className="text-lg font-bold text-zinc-900">${(totalPay / 100).toFixed(2)}</span>
-            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700">
-              25% off
-            </span>
+            {discountPct > 0 && (
+              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700">
+                {discountPct}% off
+              </span>
+            )}
           </div>
         </div>
       )}

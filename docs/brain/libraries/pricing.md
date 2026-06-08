@@ -47,6 +47,10 @@ Items reference the **variant UUID** (`product_variants.id`), never the Shopify 
 
 **Coupon card (one coupon per sub):** the detail screen's Coupon card reads `appliedDiscounts` (surfaced by the list handler in both shapes). When a coupon is live it shows it with a **Remove** button and hides the apply input — the customer must remove the current coupon before applying a different one. Remove sends both `discountId` (Appstle) and `discountCode` (internal coupons have no id).
 
+**Add/Swap modal price** (`route=priceQuote`): previews a line's price on an internal sub by running the engine on a *projected* (non-persisted) items array — so the modal shows the real mix-and-match quantity-break + S&S (you can't compute the mix-and-match tier from a single variant client-side). Appstle subs return `internal:false` and keep the client estimate.
+
+**Order summary breakdown** (detail page, `OrderSummaryCard`): MSRP strikethrough → subtotal (+ rule discount %) → coupon → shipping (Free) → protection → **estimated tax** → all-in total. Tax comes from `route=subscriptionTax` → `ensureFreshSubscriptionTaxQuote`, which is **saved to the sub** (`avalara_quote_*`) and **auto-refreshes after any mutation** (it re-quotes when `avalara_quote_at < updated_at`, and every mutation bumps `updated_at`). `quoteSubscriptionTax` prices through the engine (the sub's items carry no baked price), matching the renewal — tax is quoted on the pre-coupon engine subtotal, same as billing.
+
 **Coupon normalization:** `applied_discounts` comes in two shapes — the internal coupon engine's `{ type: "percentage"|"fixed_amount", value }` and the Appstle-synced `{ valueType: "PERCENTAGE"|"FIXED_AMOUNT", value }`. The display layer handles both (read-only, no cycle consumption) so an Appstle sub's coupon shows in its total. Billing uses the authoritative [[coupons]] `computeAppliedDiscountCents` (internal shape only) — Appstle coupons are charged by Appstle.
 
 ## Gotchas

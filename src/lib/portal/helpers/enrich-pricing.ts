@@ -12,6 +12,9 @@
 import { resolveSubscriptionPricing, type DiscountPill } from "@/lib/pricing";
 
 export interface ContractPricing {
+  /** Full MSRP subtotal (strikethrough) — Σ base × qty. */
+  msrp_cents: number;
+  /** Post S&S + quantity-break subtotal (pre-coupon). */
   subtotal_cents: number;
   discount_cents: number;
   shipping_cents: number;
@@ -72,6 +75,7 @@ export async function priceSubscription(
   const protectionCents = sub.shipping_protection_added ? Number(sub.shipping_protection_amount_cents || 0) : 0;
   const priced = new Map<string, PricedLineLite>();
   let subtotalCents = 0;
+  let msrpCents = 0;
   let shippingCents = Number(sub.delivery_price_cents || 0);
   const pills: DiscountPill[] = [];
 
@@ -83,10 +87,11 @@ export async function priceSubscription(
       priced.set(String(l.variant_id), v);
     }
     subtotalCents = pricing.product_subtotal_cents;
+    msrpCents = pricing.product_msrp_cents;
     shippingCents = pricing.shipping_cents;
     pills.push(...pricing.discounts);
   } else {
-    // Appstle — baked item prices; no strikethrough.
+    // Appstle — baked item prices; no strikethrough (MSRP = subtotal).
     const items = (Array.isArray(sub.items) ? sub.items : []) as Array<{ variant_id?: unknown; line_id?: string; price_cents?: number; quantity?: number; is_gift?: boolean; title?: string }>;
     for (const it of items) {
       const unit = Number(it.price_cents || 0);
@@ -96,6 +101,7 @@ export async function priceSubscription(
       const isProt = String(it.title || "").toLowerCase().includes("shipping protection");
       if (!it.is_gift && !isProt) subtotalCents += unit * (it.quantity || 1);
     }
+    msrpCents = subtotalCents;
   }
 
   const { discountCents, pill } = computeDisplayCoupon((sub.applied_discounts as Array<Record<string, unknown>>) || [], subtotalCents);
@@ -105,6 +111,7 @@ export async function priceSubscription(
   return {
     priced,
     pricing: {
+      msrp_cents: msrpCents,
       subtotal_cents: subtotalCents,
       discount_cents: discountCents,
       shipping_cents: shippingCents,
