@@ -23,6 +23,8 @@ Every write handler resolves the sub through **`resolveSub(admin, workspaceId, r
 - Enforces the sub belongs to the caller's **link group** — an ownership check the handlers previously lacked.
 - Returns the full row; handlers read `sub.id` for DB writes and pass `sub.shopify_contract_id` **only** into Appstle wrapper calls.
 
+**Remove-line-item gotchas (fixed 2026-06):** (1) the "last item" guard counted *real* items (excluding the Shipping Protection add-on) **before** removal and blocked at `≤1` — so toggling Shipping Protection off on a single-product sub wrongly tripped `would_remove_last_item`. It now checks real items remaining *after* the removal, and removing the add-on itself is always allowed while a real product stays. (2) `subRemoveItem` only routes to the internal path when given a `variantId` (`internalSubRemoveItem` keys on it); the handler now passes `variantId` for internal subs instead of `lineGid`, or it would fall through to the Appstle endpoint that has no contract for a migrated sub.
+
 **Gotcha (fixed 2026-06):** handlers used to parse the id with `clampInt(payload?.contractId, 0)`. That worked while every contract id was numeric, but coerced `internal-<hex>` ids to `0` → `missing_contractId`, breaking *every* action on a migrated sub. The internal-vs-Appstle branch lives in the `appstle*` wrappers ([[../libraries/appstle]]) keyed on the resolved `shopify_contract_id`, so the fix was purely at the handler entry point — no wrapper changes. Because both surfaces share these handlers, the one fix covers both portals.
 
 ## Self-serve actions available

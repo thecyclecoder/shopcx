@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
 import { subRemoveItem } from "@/lib/subscription-items";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -22,27 +22,48 @@ export const removeLineItem: RouteHandler = async ({ auth, route, req }) => {
   let payload: Record<string, unknown> | null = null;
   try { payload = await req.json(); } catch { payload = null; }
 
-  const contractId = payload?.contractId != null ? String(payload.contractId) : "";
   const lineId = typeof payload?.lineId === "string" ? payload.lineId : null;
   const variantId = payload?.variantId != null ? String(payload.variantId) : null;
-
-  if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
   if (!lineId && !variantId) return jsonErr({ error: "missing_lineId_or_variantId" }, 400);
 
-  // Pre-check: subscription must have >1 real item so we don't strand the customer with an empty contract
   const admin = createAdminClient();
-  const { data: sub } = await admin.from("subscriptions")
-    .select("items").eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
-  const items = (sub?.items as { variant_id?: string; line_id?: string; title?: string }[]) || [];
-  const realItems = items.filter(i => !(i.title || "").toLowerCase().includes("shipping protection"));
-  if (realItems.length <= 1) {
+  const resolved = await resolveSub(admin, auth.workspaceId, payload?.contractId, auth.loggedInCustomerId);
+  if (!resolved?.shopify_contract_id) return jsonErr({ error: "missing_contractId" }, 400);
+  const contractId = resolved.shopify_contract_id;
+
+  // Pre-check: at least one *real* (non-shipping-protection) item must remain
+  // AFTER this removal — so we don't strand the customer with an empty contract.
+  // Removing the shipping-protection add-on itself is always allowed as long as a
+  // real product stays; it isn't a real item, so the old "≤1 real item" check
+  // wrongly blocked toggling it off on a single-product sub.
+  const isShipProt = (i: { title?: string }) => (i.title || "").toLowerCase().includes("shipping protection");
+  const items = (resolved.items as { variant_id?: string; line_id?: string; title?: string }[]) || [];
+  const rawLineId = lineId && lineId.includes("/") ? lineId.split("/").pop() : lineId;
+  const target = items.find(i =>
+    (lineId && (i.line_id === lineId || i.line_id === rawLineId)) ||
+    (variantId && String(i.variant_id) === variantId),
+  );
+  const removingRealItem = target ? !isShipProt(target) : true; // unknown target → conservative
+  const realItemsAfter = items.filter(i => !isShipProt(i) && i !== target).length;
+  if (removingRealItem && realItemsAfter < 1) {
     return jsonErr({ error: "would_remove_last_item", detail: "At least one recurring item must remain on the subscription. Cancel the subscription instead." }, 400);
   }
 
-  // Execute removal
+  // Execute removal. Internal subs remove by variantId (internalSubRemoveItem
+  // keys on it — passing only a lineGid would fall through to the Appstle path,
+  // which has no contract for a migrated sub). Appstle subs prefer the precise
+  // lineGid. Fall back to the matched line's variant_id when the client omitted it.
+  const internalVariantId = variantId || (target?.variant_id ? String(target.variant_id) : null);
+  if (resolved.is_internal && !internalVariantId) {
+    return jsonErr({ error: "missing_variantId_for_internal_remove" }, 400);
+  }
+  const removeArg = resolved.is_internal
+    ? { variantId: internalVariantId! }
+    : lineId ? { lineGid: lineId } : { variantId: variantId! };
+
   let result: { success: boolean; error?: string };
   try {
-    result = await subRemoveItem(auth.workspaceId, contractId, lineId ? { lineGid: lineId } : { variantId: variantId! });
+    result = await subRemoveItem(auth.workspaceId, contractId, removeArg);
   } catch (e) {
     return handleAppstleError(e, { route: "removeLineItem", payload });
   }
