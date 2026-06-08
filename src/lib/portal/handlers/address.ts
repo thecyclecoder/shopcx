@@ -2,6 +2,7 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { isInternalSubscription } from "@/lib/internal-subscription";
 
 function s(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
@@ -88,28 +89,50 @@ export const address: RouteHandler = async ({ auth, route, req }) => {
     }
   }
 
-  try {
-    const admin = createAdminClient();
-    const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
-    if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
-    const apiKey = decrypt(ws.appstle_api_key_encrypted);
+  const admin = createAdminClient();
+  const isInternal = await isInternalSubscription(auth.workspaceId, String(contractId));
 
-    await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-shipping-address?contractId=${contractId}`,
-      {
-        method: "PUT",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          address1, address2, city, zip, country, countryCode,
-          province: provinceCode, provinceCode, firstName, lastName,
-          methodType, phone: phone || undefined, company: company || undefined,
-        }),
-        cache: "no-store",
+  // Appstle subs: push the address to Appstle. Internal subs aren't on
+  // Appstle — the local subscriptions row below is the source of truth.
+  if (!isInternal) {
+    try {
+      const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
+      if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
+      const apiKey = decrypt(ws.appstle_api_key_encrypted);
+
+      const res = await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-shipping-address?contractId=${contractId}`,
+        {
+          method: "PUT",
+          headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            address1, address2, city, zip, country, countryCode,
+            province: provinceCode, provinceCode, firstName, lastName,
+            methodType, phone: phone || undefined, company: company || undefined,
+          }),
+          cache: "no-store",
+        }
+      );
+      if (!res.ok && res.status !== 204) {
+        const errText = await res.text().catch(() => "");
+        throw Object.assign(new Error(`Appstle API error: ${res.status}`), { details: errText });
       }
-    );
-  } catch (e) {
-    return handleAppstleError(e);
+    } catch (e) {
+      return handleAppstleError(e);
+    }
   }
+
+  // ALWAYS persist the address locally. The internal scheduler ships +
+  // Avalara-quotes from subscriptions.shipping_address; without this an
+  // internal sub keeps shipping/taxing to the OLD address.
+  await admin.from("subscriptions").update({
+    shipping_address: {
+      first_name: firstName, last_name: lastName, phone: phone || null,
+      address1, address2: address2 || null,
+      city, province_code: provinceCode, zip, country_code: countryCode,
+    },
+    updated_at: new Date().toISOString(),
+  }).eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId));
 
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
   if (customer) {

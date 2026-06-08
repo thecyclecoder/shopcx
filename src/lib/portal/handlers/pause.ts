@@ -1,28 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
-import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { inngest } from "@/lib/inngest/client";
-
-async function appstlePut(workspaceId: string, path: string) {
-  const admin = createAdminClient();
-  const { data: ws } = await admin.from("workspaces")
-    .select("appstle_api_key_encrypted")
-    .eq("id", workspaceId).single();
-  if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
-  const apiKey = decrypt(ws.appstle_api_key_encrypted);
-
-  const res = await fetch(`https://subscription-admin.appstle.com${path}`, {
-    method: "PUT",
-    headers: { "X-API-Key": apiKey },
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Appstle API error: ${res.status} ${text}`);
-  }
-  return res.status === 204 ? null : res.json().catch(() => null);
-}
+import { appstleSubscriptionAction } from "@/lib/appstle";
 
 function addDays(days: number): string {
   const d = new Date();
@@ -57,14 +36,9 @@ export const pause: RouteHandler = async ({ auth, route, req }) => {
   const resumeAt = addDays(pauseDays);
   const resumeLabel = formatDateShort(resumeAt);
 
-  try {
-    // Real pause in Appstle
-    await appstlePut(auth.workspaceId,
-      `/api/external/v2/subscription-contracts-update-status?contractId=${contractId}&status=PAUSED`
-    );
-  } catch (e) {
-    return handleAppstleError(e);
-  }
+  // Route through the internal-aware wrapper (handles is_internal vs Appstle).
+  const pauseResult = await appstleSubscriptionAction(auth.workspaceId, String(contractId), "pause");
+  if (!pauseResult.success) return handleAppstleError(new Error(pauseResult.error || "Pause failed"));
 
   // Update our DB: status + pause_resume_at
   const admin = createAdminClient();

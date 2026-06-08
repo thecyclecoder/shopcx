@@ -1,7 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
-import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { appstleUpdateNextBillingDate } from "@/lib/appstle";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -51,22 +51,10 @@ export const changeDate: RouteHandler = async ({ auth, route, req }) => {
     }
   }
 
-  try {
-    const admin = createAdminClient();
-    const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
-    if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
-    const apiKey = decrypt(ws.appstle_api_key_encrypted);
-
-    const res = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-date?contractId=${contractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(nextBillingDate)}`,
-      { method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store" }
-    );
-    if (!res.ok && res.status !== 204) {
-      const errText = await res.text().catch(() => "");
-      throw Object.assign(new Error(`Appstle API error: ${res.status}`), { details: errText });
-    }
-  } catch (e) {
-    return handleAppstleError(e, { route: "changeDate", payload: { contractId, nextBillingDate } });
+  // Route through the internal-aware wrapper (handles is_internal vs Appstle).
+  const dateResult = await appstleUpdateNextBillingDate(auth.workspaceId, String(contractId), nextBillingDate);
+  if (!dateResult.success) {
+    return handleAppstleError(new Error(dateResult.error || "Date update failed"), { route: "changeDate", payload: { contractId, nextBillingDate } });
   }
 
   // Update local DB

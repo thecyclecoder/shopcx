@@ -2,7 +2,8 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { enrichItemTitles } from "@/lib/subscription-items";
+import { enrichItemTitles, subSwapVariant, subAddItem, subChangeQuantity, subRemoveItem } from "@/lib/subscription-items";
+import { isInternalSubscription } from "@/lib/internal-subscription";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -178,26 +179,70 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   }
   console.log("[replaceVariants] grandfathered check:", { isSingleSwap, grandfatheredBase, newVariantIdForPrice, oldLineId, oldVariantsLen: oldVariants.length });
 
-  let updated: Record<string, unknown> | null = null;
-  try {
-    const admin = createAdminClient();
-    const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
-    if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
-    const apiKey = decrypt(ws.appstle_api_key_encrypted);
+  const isInternal = await isInternalSubscription(auth.workspaceId, String(contractId));
 
-    const res = await fetch(`https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details/replace-variants-v3`, {
-      method: "POST",
-      headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      cache: "no-store",
-    });
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      throw Object.assign(new Error(`Appstle API error: ${res.status}`), { details: errText });
+  let updated: Record<string, unknown> | null = null;
+  if (isInternal) {
+    // Internal sub — no Appstle. Decompose the replace into internal-aware
+    // item mutations (each writes subscriptions.items, which the internal
+    // scheduler bills from). Covers the portal UI's swap / quantity / add.
+    let oldVarIds = oldVariants.map(String);
+    if (!oldVarIds.length && oldLineId) {
+      const adminDb = createAdminClient();
+      const { data: subData } = await adminDb.from("subscriptions").select("items").eq("shopify_contract_id", String(contractId)).single();
+      const items = (subData?.items as { variant_id?: string; line_id?: string }[]) || [];
+      const rawLineId = oldLineId.startsWith("gid://") ? oldLineId.split("/").pop() : oldLineId;
+      const li = items.find((i) => i.line_id === rawLineId || i.line_id === oldLineId);
+      if (li?.variant_id) oldVarIds = [String(li.variant_id)];
     }
-    updated = await res.json().catch(() => null);
-  } catch (e) {
-    return handleAppstleError(e, { route: "replaceVariants", payload: body });
+    const newEntries: Array<[string, number]> = newVariants ? Object.entries(newVariants).map(([k, v]) => [String(k), Number(v)]) : [];
+    const oneTimeEntries: Array<[string, number]> = newOneTimeVariants ? Object.entries(newOneTimeVariants).map(([k, v]) => [String(k), Number(v)]) : [];
+
+    const adminDb = createAdminClient();
+    const { data: cur } = await adminDb.from("subscriptions").select("items").eq("shopify_contract_id", String(contractId)).single();
+    const curVars = new Set(((cur?.items as { variant_id?: string }[]) || []).map((i) => String(i.variant_id)));
+
+    let r: { success: boolean; error?: string } = { success: true };
+    if (oldVarIds.length === 1 && newEntries.length === 1) {
+      r = await subSwapVariant(auth.workspaceId, String(contractId), oldVarIds[0], newEntries[0][0], newEntries[0][1] || 1);
+    } else {
+      for (const ov of oldVarIds) {
+        r = await subRemoveItem(auth.workspaceId, String(contractId), ov);
+        if (!r.success) break;
+      }
+      if (r.success) for (const [nv, nq] of newEntries) {
+        r = curVars.has(nv) && !oldVarIds.includes(nv)
+          ? await subChangeQuantity(auth.workspaceId, String(contractId), nv, nq)
+          : await subAddItem(auth.workspaceId, String(contractId), nv, nq);
+        if (!r.success) break;
+      }
+    }
+    if (r.success) for (const [nv, nq] of oneTimeEntries) {
+      r = await subAddItem(auth.workspaceId, String(contractId), nv, nq);
+      if (!r.success) break;
+    }
+    if (!r.success) return handleAppstleError(new Error(r.error || "Internal item update failed"), { route: "replaceVariants", payload: body });
+  } else {
+    try {
+      const admin = createAdminClient();
+      const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
+      if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
+      const apiKey = decrypt(ws.appstle_api_key_encrypted);
+
+      const res = await fetch(`https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details/replace-variants-v3`, {
+        method: "POST",
+        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw Object.assign(new Error(`Appstle API error: ${res.status}`), { details: errText });
+      }
+      updated = await res.json().catch(() => null);
+    } catch (e) {
+      return handleAppstleError(e, { route: "replaceVariants", payload: body });
+    }
   }
 
   // POST-SWAP: Apply grandfathered base price if detected
@@ -299,6 +344,11 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
         .update({ items: dbItems, updated_at: new Date().toISOString() })
         .eq("shopify_contract_id", String(contractId));
     }
+  } else if (isInternal) {
+    // Internal mutations already wrote subscriptions.items — surface the fresh lines.
+    const adminDb = createAdminClient();
+    const { data: fresh } = await adminDb.from("subscriptions").select("items").eq("shopify_contract_id", String(contractId)).single();
+    patch.lines = (fresh?.items as unknown[]) || [];
   }
 
   return jsonOk({ ok: true, route, contractId, patch });

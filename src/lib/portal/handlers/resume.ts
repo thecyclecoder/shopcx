@@ -1,19 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
-import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
-
-async function appstlePut(workspaceId: string, path: string) {
-  const admin = createAdminClient();
-  const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", workspaceId).single();
-  if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
-  const apiKey = decrypt(ws.appstle_api_key_encrypted);
-  const res = await fetch(`https://subscription-admin.appstle.com${path}`, {
-    method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`Appstle API error: ${res.status}`);
-  return res.status === 204 ? null : res.json().catch(() => null);
-}
+import { appstleSubscriptionAction } from "@/lib/appstle";
 
 export const resume: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -27,14 +15,9 @@ export const resume: RouteHandler = async ({ auth, route, req }) => {
   const contractId = clampInt(payload?.contractId, 0);
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
 
-  try {
-    // Resume in Appstle (sets status back to ACTIVE)
-    await appstlePut(auth.workspaceId,
-      `/api/external/v2/subscription-contracts-update-status?contractId=${contractId}&status=ACTIVE`
-    );
-  } catch (e) {
-    return handleAppstleError(e);
-  }
+  // Route through the internal-aware wrapper (handles is_internal vs Appstle).
+  const resumeResult = await appstleSubscriptionAction(auth.workspaceId, String(contractId), "resume");
+  if (!resumeResult.success) return handleAppstleError(new Error(resumeResult.error || "Resume failed"));
 
   // Update our DB: clear pause, set active
   const admin = createAdminClient();

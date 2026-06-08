@@ -52,7 +52,8 @@ Today `internalSubApplyDiscount` only stores `{title: code}` — no method/value
 - ⏳ When the target sub is **Appstle**: read its live line items + **current per-line prices** (grandfathered — not MSRP), build ONE merged internal sub = existing items + new items, **inherit the Appstle cadence + `next_billing_date`**, bill future renewals on the freshly-vaulted **Braintree** token.
 - ⏳ **Atomic + verified**: create + verify the internal sub FIRST, then cancel the Appstle contract. Never cancel before the internal sub is confirmed (customer must never be left sub-less). Idempotent (a checkout retry must not double-create / double-cancel).
 - ⏳ Target already **internal** → plain `appendCartItemsToSub`, no migration.
-- ⏳ Wire into `appendCartItemsToSub` (checkout add-to-sub) and the new portal payment-update path.
+- ⏳ **Migrate-on-any-checkout:** whenever a checkout captures a payment method, scan the customer for **any** active Appstle subscriptions and migrate **each** to internal on the freshly-vaulted Braintree token — even subs unrelated to the current cart. A plain new-sub checkout still sweeps their other Appstle subs onto our rails; add-to-sub is just the case where one of them also merges the cart items. **Cancelling the Appstle contract is part of every migration** (after the internal sub is created + verified).
+- ⏳ Wire into the checkout `route.ts` (post-charge, payment-method in hand), `appendCartItemsToSub`, and the new portal payment-update path.
 
 ---
 
