@@ -76,29 +76,16 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
   // Transform to frontend shape
   const contract = transformSubscription(sub, productMap);
 
-  // Internal subs: derive live prices from the catalog + pricing rules (quantity
-  // break × S&S, grandfathered overrides) instead of any baked value. Each line
-  // gets currentPrice = charged unit and basePrice = strikethrough. Appstle subs
-  // keep their Appstle-baked prices untouched.
-  if (sub.is_internal) {
-    try {
-      const { resolveSubscriptionPricing } = await import("@/lib/pricing");
-      const pricing = await resolveSubscriptionPricing(auth.workspaceId, sub);
-      const byLine = new Map(pricing.lines.map((l) => [l.line_id || l.variant_id, l]));
-      const byVariant = new Map(pricing.lines.map((l) => [l.variant_id, l]));
-      const enriched = (contract.lines as Array<Record<string, unknown>>).map((ln) => {
-        const p = byLine.get(String(ln.id || "")) || byVariant.get(String(ln.variantId || ""));
-        if (!p) return ln;
-        return {
-          ...ln,
-          currentPrice: { amount: (p.unit_cents / 100).toFixed(2), currencyCode: "USD" },
-          basePrice: p.base_cents > p.unit_cents ? { amount: (p.base_cents / 100).toFixed(2), currencyCode: "USD" } : null,
-        };
-      });
-      contract.lines = enriched as unknown as typeof contract.lines;
-    } catch (err) {
-      console.warn(`[portal] resolveSubscriptionPricing failed for ${sub.id}:`, err);
-    }
+  // Layer live pricing onto the contract — lines get a strikethrough base +
+  // charged price, plus the per-delivery total + qualified-discount pills.
+  // Internal subs price via the engine; Appstle subs keep baked prices and just
+  // get the coupon reflected.
+  let pricing: Awaited<ReturnType<typeof import("@/lib/portal/helpers/enrich-pricing").enrichContractPricing>> | null = null;
+  try {
+    const { enrichContractPricing } = await import("@/lib/portal/helpers/enrich-pricing");
+    pricing = await enrichContractPricing(auth.workspaceId, sub, contract as unknown as Record<string, unknown> & { lines?: unknown });
+  } catch (err) {
+    console.warn(`[portal] enrichContractPricing failed for ${sub.id}:`, err);
   }
 
   // Dunning cycles
@@ -299,6 +286,7 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     route,
     contract: {
       ...contract,
+      pricing,
       appliedDiscount,
       appliedDiscounts,
       crisisBanner,

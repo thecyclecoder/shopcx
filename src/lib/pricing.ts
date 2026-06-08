@@ -66,6 +66,11 @@ export interface PricedLine {
   is_grandfathered: boolean;
 }
 
+export interface DiscountPill {
+  kind: "sns" | "quantity_break" | "free_shipping" | "coupon";
+  label: string;
+}
+
 export interface SubscriptionPricing {
   lines: PricedLine[];
   /** Σ unit_cents × qty over *product* lines only — the discountable base. */
@@ -75,6 +80,9 @@ export interface SubscriptionPricing {
   /** Resolved shipping for this renewal (0 when a rule grants free shipping). */
   shipping_cents: number;
   free_shipping: boolean;
+  /** Qualified discounts as display pills (S&S, active quantity break, free
+   *  shipping). Coupons are appended by the caller from applied_discounts. */
+  discounts: DiscountPill[];
 }
 
 function isShippingProtection(i: PricingItem): boolean {
@@ -222,5 +230,23 @@ export async function resolveSubscriptionPricing(
   const free_shipping = subRules.some((r) => r.free_shipping);
   const shipping_cents = free_shipping ? 0 : Number(sub.delivery_price_cents || 0);
 
-  return { lines, product_subtotal_cents, product_msrp_cents, shipping_cents, free_shipping };
+  // 6. Qualified-discount pills. S&S = the highest S&S any product line gets
+  //    (covers rule + workspace-fallback). Quantity break = the active tier per
+  //    rule ("8% OFF Buy 2"). Free shipping when granted. Coupons are appended by
+  //    the caller from applied_discounts.
+  const discounts: DiscountPill[] = [];
+  const snsPcts = productLines.map((l) => l.sns_pct).filter((p) => p > 0);
+  if (snsPcts.length) discounts.push({ kind: "sns", label: `${Math.max(...snsPcts)}% Subscribe & Save` });
+  const seenBreak = new Set<string>();
+  for (const [ruleId, rule] of ruleMap) {
+    const totalQty = ruleTotalQty.get(ruleId) || 0;
+    const brk = breakPctForQty(rule.quantity_breaks, totalQty);
+    if (brk > 0) {
+      const label = `${brk}% OFF Buy ${totalQty}`;
+      if (!seenBreak.has(label)) { discounts.push({ kind: "quantity_break", label }); seenBreak.add(label); }
+    }
+  }
+  if (free_shipping) discounts.push({ kind: "free_shipping", label: "Free Shipping" });
+
+  return { lines, product_subtotal_cents, product_msrp_cents, shipping_cents, free_shipping, discounts };
 }

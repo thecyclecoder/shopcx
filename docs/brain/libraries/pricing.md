@@ -37,6 +37,16 @@ Items reference the **variant UUID** (`product_variants.id`), never the Shopify 
 - **protection** — "Shipping Protection" line → passthrough (its stored price, no discount). Billed via the sub's `shipping_protection_*` columns, so excluded from the product subtotal.
 - **gift** — `is_gift` → $0. (Free gifts are a storefront concern, passthrough here.)
 
+## Display layer — `portal/helpers/enrich-pricing.ts`
+
+`priceSubscription(workspaceId, sub)` is the shape-agnostic core for the **portal display**: it returns a per-line `{ base_cents, unit_cents }` map (keyed by line_id + variant_id) and an order-level summary (`subtotal / discount / shipping / protection / total / free_shipping / pills`). It runs the engine for internal subs and uses the baked item prices for Appstle subs. Consumers:
+- `enrichContractPricing(...)` — API-handler wrapper; writes `currentPrice` + `basePrice` onto `contract.lines`. Used by [[portal__handlers__subscriptions]] (list) and [[portal__handlers__subscription-detail]].
+- `page.tsx` (mini-site server render) calls `priceSubscription` directly and maps onto `PortalSubscription.items[].{price_cents, base_price_cents}` + `pricing`. **The mini-site list paints from page.tsx, not the API handler — both paths must price.**
+
+**Discount pills** (`pricing.discounts`): `{kind, label}` — `25% Subscribe & Save`, `8% OFF Buy 2` (active quantity-break tier), `Free Shipping`, plus a `coupon` pill appended from `applied_discounts`.
+
+**Coupon normalization:** `applied_discounts` comes in two shapes — the internal coupon engine's `{ type: "percentage"|"fixed_amount", value }` and the Appstle-synced `{ valueType: "PERCENTAGE"|"FIXED_AMOUNT", value }`. The display layer handles both (read-only, no cycle consumption) so an Appstle sub's coupon shows in its total. Billing uses the authoritative [[coupons]] `computeAppliedDiscountCents` (internal shape only) — Appstle coupons are charged by Appstle.
+
 ## Gotchas
 
 - **Never bake a price on an internal sub item.** A baked `price_cents` is legacy; the engine reads it only as a fallback when a variant isn't in the catalog (so nothing prices to $0 mid-rollout). Item mutations strip it.

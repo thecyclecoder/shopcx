@@ -68,9 +68,19 @@ export function SubscriptionsSection({ subscriptions, workspace }: Props) {
   );
 }
 
+function pillClasses(kind: string): string {
+  if (kind === "free_shipping") return "bg-sky-50 text-sky-700";
+  if (kind === "coupon") return "bg-amber-50 text-amber-700";
+  return "bg-emerald-50 text-emerald-700"; // sns + quantity_break
+}
+
 function SubCard({ sub, primaryColor }: { sub: PortalSubscription; primaryColor: string }) {
-  const realItems = sub.items.filter((i) => !i.is_gift);
-  const totalCents = realItems.reduce((s, i) => s + (i.price_cents || 0) * i.quantity, 0);
+  // Prefer the live per-delivery total from the pricing engine; fall back to a
+  // naive sum only if pricing wasn't attached.
+  const totalCents =
+    sub.pricing?.total_cents ??
+    sub.items.filter((i) => !i.is_gift).reduce((s, i) => s + (i.price_cents || 0) * i.quantity, 0);
+  const pills = sub.pricing?.pills || [];
   const nextBilling = sub.next_billing_date
     ? new Date(sub.next_billing_date).toLocaleDateString("en-US", {
         weekday: "long", month: "long", day: "numeric", year: "numeric",
@@ -99,6 +109,19 @@ function SubCard({ sub, primaryColor }: { sub: PortalSubscription; primaryColor:
         </div>
       </header>
 
+      {pills.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 border-b border-zinc-100 px-4 py-3 sm:px-5">
+          {pills.map((pill, i) => (
+            <span
+              key={i}
+              className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold ${pillClasses(pill.kind)}`}
+            >
+              {pill.label}
+            </span>
+          ))}
+        </div>
+      )}
+
       <ul className="divide-y divide-zinc-100">
         {sub.items.map((it, i) => (
           <li key={i} className="flex items-center gap-4 p-4 sm:p-5">
@@ -126,11 +149,18 @@ function SubCard({ sub, primaryColor }: { sub: PortalSubscription; primaryColor:
               </div>
               <div className="mt-0.5 text-xs text-zinc-500">Qty {it.quantity}</div>
             </div>
-            <div className="text-sm font-medium text-zinc-900">
+            <div className="text-right text-sm font-medium text-zinc-900">
               {it.is_gift ? (
                 <span className="text-emerald-700">Free</span>
               ) : (
-                `$${((it.price_cents || 0) / 100).toFixed(2)}`
+                <>
+                  {it.base_price_cents && it.base_price_cents > (it.price_cents || 0) && (
+                    <span className="mr-1.5 text-xs font-normal text-zinc-400 line-through">
+                      ${(it.base_price_cents / 100).toFixed(2)}
+                    </span>
+                  )}
+                  ${((it.price_cents || 0) / 100).toFixed(2)}
+                </>
               )}
             </div>
           </li>

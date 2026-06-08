@@ -137,8 +137,24 @@ export default async function PortalHome({
   // never render a gray placeholder when we have a Shopify image
   // available. Cheap — one products + one product_media query, both
   // covered by partial indexes.
-  const enrichedSubs = await enrichLineItemImages(admin, workspaceId, subs || []);
+  const imagedSubs = await enrichLineItemImages(admin, workspaceId, subs || []);
   const enrichedOrders = await enrichLineItemImages(admin, workspaceId, orders || []);
+
+  // Layer live pricing onto each sub — per-line charged + strikethrough base, and
+  // the per-delivery total + qualified-discount pills. Internal subs price via the
+  // engine; Appstle subs keep baked prices and just get the coupon reflected.
+  const { priceSubscription } = await import("@/lib/portal/helpers/enrich-pricing");
+  const enrichedSubs = await Promise.all(
+    (imagedSubs as Array<Record<string, unknown>>).map(async (sub) => {
+      const { priced, pricing } = await priceSubscription(workspaceId, sub);
+      const items = (Array.isArray(sub.items) ? sub.items : []).map((it: Record<string, unknown>) => {
+        const p = priced.get(String(it.line_id || "")) || priced.get(String(it.variant_id ?? ""));
+        if (!p) return it;
+        return { ...it, price_cents: p.unit_cents, base_price_cents: p.base_cents > p.unit_cents ? p.base_cents : null };
+      });
+      return { ...sub, items, pricing };
+    }),
+  );
 
   return (
     <PortalClient
@@ -217,6 +233,8 @@ export interface PortalSubscription {
     variant_title?: string | null;
     quantity: number;
     price_cents: number;
+    /** Strikethrough "full" price per unit (when a discount applies). */
+    base_price_cents?: number | null;
     sku?: string | null;
     image_url?: string | null;
     is_gift?: boolean;
@@ -227,4 +245,13 @@ export interface PortalSubscription {
   applied_discounts: Array<{ title?: string; value?: number; valueType?: string }> | null;
   is_internal: boolean | null;
   delivery_price_cents: number | null;
+  /** Live per-delivery pricing + qualified-discount pills. */
+  pricing?: {
+    subtotal_cents: number;
+    discount_cents: number;
+    shipping_cents: number;
+    total_cents: number;
+    free_shipping: boolean;
+    pills: Array<{ kind: string; label: string }>;
+  };
 }

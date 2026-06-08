@@ -4,6 +4,7 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { transformSubscription, getProductMap } from "@/lib/portal/helpers/transform-subscription";
+import { enrichContractPricing } from "@/lib/portal/helpers/enrich-pricing";
 
 function isSubscriptionLocked(sub: Record<string, unknown>, lockDays: number): boolean {
   // Lock only truly new subscriptions that haven't been billed yet.
@@ -154,7 +155,7 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
   const buckets: Record<Bucket, unknown[]> = { active: [], paused: [], cancelled: [], other: [] };
   let needsAttentionCount = 0;
 
-  const contracts = allSubs.map(sub => {
+  const contracts = await Promise.all(allSubs.map(async sub => {
     const bucket = bucketStatus(sub.status);
     const dunning = dunningMap[sub.shopify_contract_id];
     const needsAttention = sub.last_payment_status === "failed" || (dunning && ["active", "skipped"].includes(dunning.status));
@@ -171,11 +172,15 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
 
     if (needsAttention) needsAttentionCount++;
 
-    // Transform DB shape → frontend contract shape
+    // Transform DB shape → frontend contract shape, then layer live pricing
+    // (engine for internal subs, baked + coupon for Appstle) — lines get a
+    // strikethrough base + charged price, plus the per-delivery total + pills.
     const contract = transformSubscription(sub, productMap);
+    const pricing = await enrichContractPricing(auth.workspaceId, sub, contract);
 
     const enriched = {
       ...contract,
+      pricing,
       crisisBanner: crisisMap[sub.id] || null,
       portalState: {
         bucket,
@@ -189,7 +194,7 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
 
     buckets[bucket].push(enriched);
     return enriched;
-  });
+  }));
 
   return jsonOk({
     ok: true,
