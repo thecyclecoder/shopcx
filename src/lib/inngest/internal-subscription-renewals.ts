@@ -145,6 +145,16 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       ? Number(ctx.sub.shipping_protection_amount_cents || 0)
       : 0;
 
+    // Apply entire-order coupon discounts (consumes recurring_cycle_limit on a
+    // successful charge — persisted in the advance-billing step below). NOTE:
+    // tax is still quoted on the pre-discount subtotal via Avalara; applying
+    // the discount to the taxable base is a documented refinement (spec § 1b).
+    const { computeAppliedDiscountCents } = await import("@/lib/coupons");
+    const { discountCents, nextAppliedDiscounts } = computeAppliedDiscountCents(
+      (ctx.sub.applied_discounts as Array<Record<string, unknown>> | null) ?? null,
+      subtotalCents,
+    );
+
     // Reserve the order number NOW so we can use it as the Avalara
     // document code. The orders row gets inserted with this same
     // value below.
@@ -171,7 +181,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     const taxCents = taxResult?.tax_cents ?? 0;
     const avalaraTransactionCode = taxResult?.transaction_code || null;
 
-    const totalCents = subtotalCents + shippingCents + protectionCents + taxCents;
+    const totalCents = Math.max(0, subtotalCents - discountCents) + shippingCents + protectionCents + taxCents;
     if (totalCents <= 0) {
       return { skipped: true, reason: "zero_total" };
     }
@@ -284,6 +294,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           subscription_id,
           payment_details: {
             subtotal_cents: subtotalCents,
+            discount_cents: discountCents,
             shipping_cents: shippingCents,
             protection_cents: protectionCents,
             tax_cents: taxCents,
@@ -322,6 +333,9 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       // shouldn't recur.
       const update: Record<string, unknown> = {
         next_billing_date: next.toISOString(),
+        // Persist consumed coupon cycles (decremented / auto-expired) — only
+        // now, after a successful charge, so a failed charge doesn't burn one.
+        applied_discounts: nextAppliedDiscounts,
         updated_at: new Date().toISOString(),
       };
       if (droppedAnyOneTime) {

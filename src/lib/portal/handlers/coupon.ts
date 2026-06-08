@@ -2,6 +2,8 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { isInternalSubscription } from "@/lib/internal-subscription";
+import { applyCouponToSub, removeCouponFromSub } from "@/lib/coupons";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -35,9 +37,12 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
   const discountCode = s(payload?.discountCode);
   const discountId = s(payload?.discountId);
   if (mode === "apply" && !discountCode) return jsonErr({ error: "missing_discountCode" }, 400);
-  // If remove mode with no discountId, resolve from Appstle contract
+
+  const isInternal = await isInternalSubscription(auth.workspaceId, String(contractId));
+
+  // If remove mode with no discountId, resolve from Appstle contract (Appstle only).
   let resolvedRemoveId = discountId;
-  if (mode === "remove" && !resolvedRemoveId && !discountCode) {
+  if (!isInternal && mode === "remove" && !resolvedRemoveId && !discountCode) {
     const adminDb = createAdminClient();
     const { data: ws2 } = await adminDb.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
     if (ws2?.appstle_api_key_encrypted) {
@@ -56,7 +61,20 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
     if (!resolvedRemoveId) return jsonErr({ error: "missing_discountId_or_discountCode" }, 400);
   }
 
-  try {
+  if (isInternal) {
+    // Internal sub — apply/remove via the coupon engine (writes applied_discounts;
+    // the renewal scheduler applies + consumes it). NOTE: the grandfathered-floor
+    // guardrail (below, Appstle path) is a refinement to add for internal coupons.
+    if (mode === "apply") {
+      const r = await applyCouponToSub(auth.workspaceId, String(contractId), discountCode, auth.loggedInCustomerId);
+      if (!r.success) {
+        return jsonOk({ ok: false, route, contractId, mode, error: r.error === "coupon_not_found" ? "coupon_not_found" : "coupon_apply_failed" });
+      }
+    } else {
+      await removeCouponFromSub(auth.workspaceId, String(contractId), discountId || discountCode);
+    }
+  } else {
+    try {
     const admin = createAdminClient();
     const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
     if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
@@ -188,9 +206,10 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
         .update({ applied_discounts: remaining, updated_at: new Date().toISOString() })
         .eq("shopify_contract_id", String(contractId));
     }
-  } catch (e) {
-    if ((e as Error).message?.startsWith("Appstle")) return handleAppstleError(e);
-    throw e;
+    } catch (e) {
+      if ((e as Error).message?.startsWith("Appstle")) return handleAppstleError(e);
+      throw e;
+    }
   }
 
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
