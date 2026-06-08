@@ -1244,12 +1244,19 @@ function OrderActionsCard({ contract, primaryColor, onMutate, action }: {
 
   return (
     <ActionCard title="Order actions" subtitle="Manage your next shipment.">
-      <PrimaryButton busy={busy} onClick={() => setConfirmNow(true)} primaryColor={primaryColor}>
-        Order now
-      </PrimaryButton>
-      <GhostButton busy={busy} onClick={() => { setDate(""); setDateModal(true); }}>
-        Change next order date
-      </GhostButton>
+      {/* Stack on mobile, sit side-by-side (50/50) on desktop. */}
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="sm:flex-1">
+          <PrimaryButton busy={busy} onClick={() => setConfirmNow(true)} primaryColor={primaryColor}>
+            Order now
+          </PrimaryButton>
+        </div>
+        <div className="sm:flex-1">
+          <GhostButton busy={busy} onClick={() => { setDate(""); setDateModal(true); }}>
+            Change next order date
+          </GhostButton>
+        </div>
+      </div>
 
       {confirmNow && (
         <ModalShell
