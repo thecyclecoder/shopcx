@@ -1,72 +1,98 @@
 /**
- * Strangler migration: move a customer's Appstle subscriptions onto our
- * internal rails. The principle (spec § 1c): any time we capture a payment
- * method (checkout, portal payment-method update), sweep the customer's Appstle
- * subs to internal so future renewals bill on our Braintree token.
+ * Strangler migration: flip a customer's Appstle subscriptions to internal,
+ * IN PLACE — no new rows, so the stable subscription id and every reference to
+ * it (orders, tickets, customer_events, timeline) stay valid. Called wherever
+ * we capture a payment method (checkout, portal payment-method update).
  *
- * For each active Appstle sub: read its LIVE state (current/grandfathered prices,
- * cadence, next billing date), create a merged internal sub, verify it exists,
- * THEN cancel the Appstle contract — never the reverse. If the Appstle cancel
- * fails we roll back the just-created internal sub so the customer is never
- * double-billed. Atomic + idempotent (already-internal subs are skipped;
- * cancelled Appstle rows are excluded).
+ * HARD RULE — a migration MUST be billable. The internal scheduler charges via
+ * the sub's customer's default Braintree payment method. So we resolve the
+ * link group ([[customer_links]]), pick the member that has a default Braintree
+ * PM, reassign the sub to it, and SKIP any sub when no linked account has a PM.
+ * Linking is display-only, so reassigning customer_id across a link group is
+ * safe and is how the sub becomes billable.
  *
- * PAYMENT METHOD: the caller must have already vaulted the new Braintree token
- * and set it as the customer's default `customer_payment_methods` — the internal
- * renewal scheduler bills from that default. This helper does not vault cards.
+ * Per sub: read the LIVE Appstle state (preserve grandfathered prices, cadence,
+ * next date) → cancel the Appstle contract → flip the existing row to
+ * is_internal=true / active / billable customer. Cancel-then-flip so a failure
+ * stops the sub (re-runnable) rather than double-billing it.
  *
- * NOT yet wired into the live checkout charge path — it cancels real contracts,
- * so it needs a runtime test against real Appstle data first. See spec § 1c.
+ * See docs/brain/specs/storefront-mvp.md § 1c.
  */
-import { randomUUID } from "node:crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAppstleConfig } from "@/lib/subscription-items";
 import { appstleSubscriptionAction } from "@/lib/appstle";
 
+type Admin = ReturnType<typeof createAdminClient>;
+
 export interface MigrateResult {
-  migrated: Array<{ from: string; to: string }>;
-  skipped: string[];
+  migrated: Array<{ contractId: string; subId: string; billableCustomerId: string }>;
+  skipped: Array<{ contractId: string; reason: string }>;
   failed: Array<{ contractId: string; error: string }>;
 }
 
-interface MigrateItem { variant_id: string; title?: string; variant_title?: string; quantity?: number; price_cents?: number }
+/** All customer ids in the same link group (incl. self). */
+async function linkedCustomerIds(admin: Admin, customerId: string): Promise<string[]> {
+  const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", customerId).maybeSingle();
+  if (!link?.group_id) return [customerId];
+  const { data: group } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
+  const ids = (group || []).map((r) => r.customer_id as string);
+  return ids.length ? ids : [customerId];
+}
 
-export async function migrateCustomerAppstleSubsToInternal(
-  workspaceId: string,
-  customerId: string,
-  opts?: { mergeIntoContractId?: string; extraItems?: MigrateItem[] },
-): Promise<MigrateResult> {
+/** Pick the link-group member with a default Braintree PM (prefer `preferred`). */
+async function findBillableCustomer(admin: Admin, workspaceId: string, customerIds: string[], preferred: string): Promise<string | null> {
+  const { data: pms } = await admin
+    .from("customer_payment_methods")
+    .select("customer_id, braintree_payment_method_token")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", customerIds)
+    .eq("is_default", true)
+    .eq("provider", "braintree");
+  const withPm = new Set((pms || []).filter((p) => p.braintree_payment_method_token).map((p) => p.customer_id as string));
+  if (withPm.has(preferred)) return preferred;
+  for (const id of customerIds) if (withPm.has(id)) return id;
+  return null;
+}
+
+export async function migrateCustomerAppstleSubsToInternal(workspaceId: string, customerId: string): Promise<MigrateResult> {
   const admin = createAdminClient();
   const result: MigrateResult = { migrated: [], skipped: [], failed: [] };
 
+  const groupIds = await linkedCustomerIds(admin, customerId);
+  const billableCustomerId = await findBillableCustomer(admin, workspaceId, groupIds, customerId);
+
+  // Active Appstle subs across the whole link group.
   const { data: subs } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, billing_interval, billing_interval_count, next_billing_date, is_internal, delivery_price_cents, shipping_address, shipping_method_code, shipping_rate_id, shopify_customer_id")
+    .select("id, shopify_contract_id, status, is_internal")
     .eq("workspace_id", workspaceId)
-    .eq("customer_id", customerId)
-    .neq("status", "cancelled");
+    .in("customer_id", groupIds)
+    .neq("status", "cancelled")
+    .eq("is_internal", false);
   if (!subs?.length) return result;
 
-  const cfg = await getAppstleConfig(workspaceId);
+  // HARD RULE: a migration must be billable — no PM anywhere in the link group → skip all.
+  if (!billableCustomerId) {
+    for (const s of subs) result.skipped.push({ contractId: String(s.shopify_contract_id), reason: "no_braintree_pm_in_link_group" });
+    return result;
+  }
 
+  const cfg = await getAppstleConfig(workspaceId);
   for (const sub of subs) {
     const contractId = String(sub.shopify_contract_id);
-    if (sub.is_internal) { result.skipped.push(contractId); continue; }
     if (!cfg) { result.failed.push({ contractId, error: "Appstle not configured" }); continue; }
-
     try {
-      // Read the LIVE Appstle contract — source of truth for current prices,
-      // cadence, and next billing date (the local row can lag).
+      // Read the LIVE Appstle contract — source of truth for current
+      // (grandfathered) prices, cadence, and next billing date.
       const live = await (
         await fetch(
           `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${cfg.apiKey}`,
           { headers: { "X-API-Key": cfg.apiKey }, cache: "no-store" },
         )
       ).json();
-      if (!live || live.status === "CANCELLED") { result.skipped.push(contractId); continue; }
+      if (!live || live.status === "CANCELLED") { result.skipped.push({ contractId, reason: "already_cancelled_at_appstle" }); continue; }
 
-      // Preserve current (grandfathered) per-line prices.
-      const liveItems: MigrateItem[] = ((live.lines?.nodes as Array<Record<string, unknown>>) || [])
+      const items = ((live.lines?.nodes as Array<Record<string, unknown>>) || [])
         .map((l) => ({
           variant_id: String((l.variantId as string) || "").split("/").pop() || "",
           title: (l.title as string) || "",
@@ -75,54 +101,33 @@ export async function migrateCustomerAppstleSubsToInternal(
           price_cents: Math.round(parseFloat(String((l.currentPrice as Record<string, unknown> | undefined)?.amount ?? "0")) * 100),
         }))
         .filter((i) => i.variant_id);
+      const interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
+      const intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
+      const nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
 
-      const mergedItems = opts?.mergeIntoContractId === contractId && opts.extraItems?.length
-        ? [...liveItems, ...opts.extraItems]
-        : liveItems;
+      // Cancel Appstle FIRST (safe failure mode: a later flip failure stops the
+      // sub rather than letting both systems bill it).
+      const cancelR = await appstleSubscriptionAction(workspaceId, contractId, "cancel", "Migrated to internal billing", "ShopCX migration");
+      if (!cancelR.success) { result.failed.push({ contractId, error: `Appstle cancel failed: ${cancelR.error}` }); continue; }
 
-      // Inherit cadence + next billing date so the renewal rhythm doesn't shift.
-      const interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || sub.billing_interval || "DAY").toLowerCase();
-      const intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || sub.billing_interval_count || 1);
-      const nextBillingDate = (live.nextBillingDate as string) || sub.next_billing_date || new Date().toISOString();
-
-      // 1) Create the internal sub FIRST and verify it exists.
-      const newContractId = `internal-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-      const { data: created, error: createErr } = await admin
+      // Flip the EXISTING row in place → internal, active, billable customer.
+      const { error: flipErr } = await admin
         .from("subscriptions")
-        .insert({
-          workspace_id: workspaceId,
-          customer_id: customerId,
-          shopify_customer_id: sub.shopify_customer_id || null,
-          shopify_contract_id: newContractId,
+        .update({
+          is_internal: true,
           status: "active",
+          customer_id: billableCustomerId,
+          items,
+          next_billing_date: nextBillingDate,
           billing_interval: interval,
           billing_interval_count: intervalCount,
-          next_billing_date: nextBillingDate,
-          items: mergedItems,
-          delivery_price_cents: sub.delivery_price_cents || 0,
-          applied_discounts: [],
-          is_internal: true,
-          shipping_address: sub.shipping_address,
-          shipping_method_code: sub.shipping_method_code,
-          shipping_rate_id: sub.shipping_rate_id,
+          updated_at: new Date().toISOString(),
         })
-        .select("id")
-        .single();
-      if (createErr || !created) {
-        result.failed.push({ contractId, error: `internal create failed: ${createErr?.message || "no row"}` });
-        continue;
-      }
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_contract_id", contractId);
+      if (flipErr) { result.failed.push({ contractId, error: `flip failed (sub cancelled — re-run to recover): ${flipErr.message}` }); continue; }
 
-      // 2) Only now cancel the Appstle contract. If it fails, roll back the
-      //    just-created internal sub so the customer is never double-billed.
-      const cancelR = await appstleSubscriptionAction(workspaceId, contractId, "cancel", "Migrated to internal billing", "ShopCX migration");
-      if (!cancelR.success) {
-        await admin.from("subscriptions").delete().eq("id", created.id);
-        result.failed.push({ contractId, error: `Appstle cancel failed (internal rolled back): ${cancelR.error}` });
-        continue;
-      }
-
-      result.migrated.push({ from: contractId, to: newContractId });
+      result.migrated.push({ contractId, subId: String(sub.id), billableCustomerId });
     } catch (e) {
       result.failed.push({ contractId, error: e instanceof Error ? e.message : String(e) });
     }
