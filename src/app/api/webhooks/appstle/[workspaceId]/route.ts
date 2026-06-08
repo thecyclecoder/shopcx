@@ -128,6 +128,20 @@ async function handleSubscriptionEvent(
   const contractId = data.id ? extractId(data.id as string) : null;
   const status = data.status as string;
 
+  // Migrated-to-internal guard: once a contract has been flipped to an internal
+  // sub (strangler migration), Appstle events for it are stale — ignore them so
+  // they never clobber is_internal / customer_id / status. Without this, the
+  // migration's OWN cancel webhook reverts the flip (status→cancelled, customer
+  // → the Appstle/Shopify customer). See migrate-to-internal.ts.
+  if (contractId) {
+    const { data: existingSub } = await admin.from("subscriptions")
+      .select("is_internal").eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
+    if (existingSub?.is_internal) {
+      console.log(`[Appstle webhook] contract ${contractId} migrated to internal — ignoring ${eventType}`);
+      return;
+    }
+  }
+
   // Find or create customer
   let dbCustomer: { id: string } | null = null;
 
@@ -475,11 +489,16 @@ async function handleBillingEvent(
 ) {
   const contractId = String(data.contractId);
 
-  const { data: sub } = await admin.from("subscriptions").select("id, customer_id")
+  const { data: sub } = await admin.from("subscriptions").select("id, customer_id, is_internal")
     .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).single();
 
   if (!sub) {
     console.log(`Appstle billing: contract ${contractId} not found`);
+    return;
+  }
+  // Migrated-to-internal: Appstle no longer owns this contract's billing.
+  if (sub.is_internal) {
+    console.log(`Appstle billing: contract ${contractId} migrated to internal — ignoring ${eventType}`);
     return;
   }
 

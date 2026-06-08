@@ -18,6 +18,7 @@
  *
  * See docs/brain/specs/storefront-mvp.md § 1c.
  */
+import { randomUUID } from "node:crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAppstleConfig } from "@/lib/subscription-items";
 import { appstleSubscriptionAction } from "@/lib/appstle";
@@ -111,9 +112,15 @@ export async function migrateCustomerAppstleSubsToInternal(workspaceId: string, 
       if (!cancelR.success) { result.failed.push({ contractId, error: `Appstle cancel failed: ${cancelR.error}` }); continue; }
 
       // Flip the EXISTING row in place → internal, active, billable customer.
+      // Replace the Shopify/Appstle contract id with a native internal id: the
+      // sub is no longer Shopify-tied, and it decouples the row from any stale
+      // Appstle webhook keyed on the old contract id (belt-and-suspenders with
+      // the is_internal guard in the Appstle webhook handler).
+      const internalContractId = `internal-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
       const { error: flipErr } = await admin
         .from("subscriptions")
         .update({
+          shopify_contract_id: internalContractId,
           is_internal: true,
           status: "active",
           customer_id: billableCustomerId,
