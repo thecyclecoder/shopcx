@@ -40,6 +40,9 @@ export interface ContractLine {
   productId?: string;
   variantImage?: { transformedSrc?: string } | null;
   currentPrice?: { amount?: string; currencyCode?: string };
+  /** Strikethrough "full" price per unit (internal subs: catalog/grandfathered
+   *  base before quantity break + S&S). Only set when it exceeds currentPrice. */
+  basePrice?: { amount?: string; currencyCode?: string } | null;
   is_gift?: boolean;
 }
 
@@ -444,6 +447,23 @@ function ItemsActionsCard({
 
 // ─────────────────────────── line components ────────────────────────
 
+/** Price cell — shows the charged total, with the full (pre-discount) price
+ *  struck through above it when a quantity break / S&S discount applies. */
+function LinePrice({ ln, priceCents }: { ln: ContractLine; priceCents: number }) {
+  const baseUnit = parseFloat(ln.basePrice?.amount || "0");
+  const chargedUnit = parseFloat(ln.currentPrice?.amount || "0");
+  const showStrike = baseUnit > chargedUnit && baseUnit > 0;
+  const baseTotal = baseUnit * (ln.quantity || 1);
+  return (
+    <div className="text-right">
+      {showStrike && (
+        <div className="text-xs text-zinc-400 line-through">${baseTotal.toFixed(2)}</div>
+      )}
+      <div className="text-sm font-medium text-zinc-900">${(priceCents / 100).toFixed(2)}</div>
+    </div>
+  );
+}
+
 function LineRow({ ln }: { ln: ContractLine }) {
   const priceCents = Math.round(parseFloat(ln.currentPrice?.amount || "0") * 100) * (ln.quantity || 1);
   const img = ln.variantImage?.transformedSrc;
@@ -464,7 +484,7 @@ function LineRow({ ln }: { ln: ContractLine }) {
         </div>
         <div className="mt-0.5 text-xs text-zinc-500">Qty {ln.quantity || 1}</div>
       </div>
-      <div className="text-sm font-medium text-zinc-900">${(priceCents / 100).toFixed(2)}</div>
+      <LinePrice ln={ln} priceCents={priceCents} />
     </div>
   );
 }
@@ -551,7 +571,7 @@ function LineDisclosure({
           </div>
           <div className="mt-0.5 text-xs text-zinc-500">Qty {ln.quantity || 1}</div>
         </div>
-        <div className="text-sm font-medium text-zinc-900">${(priceCents / 100).toFixed(2)}</div>
+        <LinePrice ln={ln} priceCents={priceCents} />
       </div>
 
       <button

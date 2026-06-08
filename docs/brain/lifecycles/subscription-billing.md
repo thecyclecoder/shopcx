@@ -36,15 +36,25 @@ Window is 1 hour so we have buffer + can amortize across the hour evenly via con
 
 ## Internal scheduler — Phase 2: line item resolution
 
-For each due sub:
+Pricing is **derived, never baked**. The renewal calls the pricing engine
+([[../libraries/pricing]] · `resolveSubscriptionPricing`), which is the single
+source of truth shared with the portal display. For each due sub:
 
-1. **Compute the cycle's line items** from `subscription.items` JSONB.
-2. **Apply current pricing**:
-   - For grandfathered subs (`grandfathered=true` or price below `coupon_price_floor_pct`), use the locked-in `subscription.items[].price_cents_at_lock`.
-   - Otherwise, re-derive from current [[../tables/pricing_rules]] + [[../tables/product_variants]].`price_cents`.
-3. **Apply discount** if `applied_discounts` JSONB has an active code. One coupon per sub — never stack.
-4. **Add shipping protection** line if `subscription.shipping_protection_added=true`.
-5. **Compute pre-tax total**.
+1. **Resolve each line** from `subscription.items` JSONB — items are catalog
+   **references** (variant + product UUIDs, quantity), not prices.
+2. **Derive the price per line** = `base × (1 − quantity-break%) × (1 − S&S%)`,
+   where `base` = `items[].price_override_cents` (grandfathered lock) ?? catalog
+   `product_variants.price_cents`, the break is the **mix-and-match** tier for the
+   total quantity sharing the line's [[../tables/pricing_rules]], and S&S is the
+   rule's `subscribe_discount_pct` (else `workspaces.subscription_discount_pct`).
+3. **Snapshot** the engine's per-line charged prices onto the order's line items
+   (an order is a historical record, so it bakes the price; the sub never does).
+4. **Apply discount** if `applied_discounts` JSONB has an active code. One coupon
+   per sub — entire-order scope, on the product subtotal.
+5. **Shipping** = free when a rule grants it and the subtotal clears its
+   threshold, else the sub's locked rate. **Protection** line if
+   `shipping_protection_added=true` (passthrough; excluded from the discountable
+   product subtotal). **Compute pre-tax total**.
 
 ## Internal scheduler — Phase 3: tax quote
 

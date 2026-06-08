@@ -186,16 +186,59 @@ export async function internalSubUpdateNextBillingDate(
 // ────────────────────────────────────────────────────────────────────
 
 type Item = {
+  /** Canonical = product_variants.id (UUID). We never store Shopify variant ids
+   *  on internal subs; Shopify is being sunset. */
   variant_id?: string | number;
   product_id?: string;
   title?: string;
   variant_title?: string;
   quantity?: number;
+  /** Grandfathered locked base (pre-discount). Absent → price derived live from
+   *  the catalog + pricing rule by the engine (src/lib/pricing.ts). */
+  price_override_cents?: number | null;
+  /** @deprecated baked price — no longer written; the pricing engine derives it. */
   price_cents?: number;
   sku?: string;
   selling_plan?: string | null;
   line_id?: string;
 };
+
+const VARIANT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+interface ResolvedVariant {
+  id: string;
+  product_id: string;
+  title: string;
+  variant_title: string;
+  sku: string | null;
+}
+
+/**
+ * Resolve a variant the catalog way: accept either our UUID (`product_variants.id`)
+ * or a legacy Shopify variant id, and always return the canonical UUID + catalog
+ * metadata. Internal sub items reference the UUID — never the Shopify id.
+ */
+async function resolveVariant(variantIdOrShopify: string): Promise<ResolvedVariant | null> {
+  const admin = createAdminClient();
+  const raw = String(variantIdOrShopify || "");
+  if (!raw) return null;
+  const col = VARIANT_UUID_RE.test(raw) ? "id" : "shopify_variant_id";
+  const { data: v } = await admin
+    .from("product_variants")
+    .select("id, product_id, title, sku, products(title)")
+    .eq(col, raw)
+    .maybeSingle();
+  if (!v) return null;
+  const product = (v.products as { title?: string } | { title?: string }[] | null) || null;
+  const productTitle = Array.isArray(product) ? product[0]?.title : product?.title;
+  return {
+    id: v.id as string,
+    product_id: v.product_id as string,
+    title: productTitle || "Item",
+    variant_title: (v.title as string) || "",
+    sku: (v.sku as string) || null,
+  };
+}
 
 export async function internalSubAddItem(
   workspaceId: string,
@@ -207,30 +250,29 @@ export async function internalSubAddItem(
   const sub = await loadInternalSub(workspaceId, contractId);
   if (!sub) return { success: false, error: "Internal subscription not found" };
 
+  // Normalize the incoming id to the canonical variant UUID up front.
+  const resolved = await resolveVariant(String(variantId));
+  const canonicalId = resolved?.id || String(variantId);
+
   const items: Item[] = (sub.items as Item[]) || [];
-  const existing = items.find((i) => String(i.variant_id) === String(variantId));
+  const existing = items.find((i) => String(i.variant_id) === canonicalId);
   let nextItems: Item[];
   if (existing) {
     nextItems = items.map((i) =>
-      String(i.variant_id) === String(variantId) ? { ...i, quantity: (i.quantity || 0) + quantity } : i,
+      String(i.variant_id) === canonicalId ? { ...i, quantity: (i.quantity || 0) + quantity } : i,
     );
   } else {
-    // Hydrate from product_variants so the new item has a title + brand.
-    const { data: v } = await admin
-      .from("product_variants")
-      .select("id, shopify_variant_id, title, price_cents, product_id, products(title)")
-      .eq("shopify_variant_id", variantId)
-      .maybeSingle();
-    const productTitle = ((v?.products as { title?: string } | { title?: string }[] | null) || null) as { title?: string } | null;
+    // Store the catalog REFERENCE only — no baked price. The pricing engine
+    // derives the charged/displayed price live from the catalog + rule.
     nextItems = [
       ...items,
       {
-        variant_id: variantId,
-        product_id: v?.product_id as string | undefined,
-        title: productTitle?.title || "Item",
-        variant_title: v?.title || undefined,
+        variant_id: canonicalId,
+        product_id: resolved?.product_id,
+        title: resolved?.title || "Item",
+        variant_title: resolved?.variant_title || undefined,
+        sku: resolved?.sku || undefined,
         quantity,
-        price_cents: v?.price_cents as number | undefined,
       },
     ];
   }
@@ -250,8 +292,10 @@ export async function internalSubRemoveItem(
   const sub = await loadInternalSub(workspaceId, contractId);
   if (!sub) return { success: false, error: "Internal subscription not found" };
 
+  const resolved = await resolveVariant(String(variantId));
+  const key = resolved?.id || String(variantId);
   const items: Item[] = (sub.items as Item[]) || [];
-  const nextItems = items.filter((i) => String(i.variant_id) !== String(variantId));
+  const nextItems = items.filter((i) => String(i.variant_id) !== key && String(i.variant_id) !== String(variantId));
   await admin
     .from("subscriptions")
     .update({ items: nextItems, updated_at: new Date().toISOString() })
@@ -270,27 +314,29 @@ export async function internalSubSwapVariant(
   const sub = await loadInternalSub(workspaceId, contractId);
   if (!sub) return { success: false, error: "Internal subscription not found" };
 
+  // Match the old line by canonical UUID or (transitional) whatever id it stored.
+  const oldResolved = await resolveVariant(String(oldVariantId));
+  const oldKey = oldResolved?.id || String(oldVariantId);
   const items: Item[] = (sub.items as Item[]) || [];
-  const oldItem = items.find((i) => String(i.variant_id) === String(oldVariantId));
+  const oldItem = items.find((i) => String(i.variant_id) === oldKey || String(i.variant_id) === String(oldVariantId));
   if (!oldItem) return { success: false, error: `Variant ${oldVariantId} not on subscription` };
 
-  const { data: v } = await admin
-    .from("product_variants")
-    .select("id, shopify_variant_id, title, price_cents, product_id, products(title)")
-    .eq("shopify_variant_id", newVariantId)
-    .maybeSingle();
-  const productTitle = ((v?.products as { title?: string } | { title?: string }[] | null) || null) as { title?: string } | null;
-
+  // Resolve the NEW variant to its canonical UUID + catalog metadata. Store the
+  // reference only — no baked price; a swap also drops any grandfathered override
+  // (it's a different product, so the old lock no longer applies).
+  const resolved = await resolveVariant(String(newVariantId));
   const nextItems = items.map((i) =>
-    String(i.variant_id) === String(oldVariantId)
+    i === oldItem
       ? {
           ...i,
-          variant_id: newVariantId,
-          product_id: (v?.product_id as string | undefined) || i.product_id,
-          title: productTitle?.title || i.title,
-          variant_title: v?.title || i.variant_title,
-          price_cents: (v?.price_cents as number | undefined) ?? i.price_cents,
+          variant_id: resolved?.id || String(newVariantId),
+          product_id: resolved?.product_id || i.product_id,
+          title: resolved?.title || i.title,
+          variant_title: resolved?.variant_title ?? i.variant_title,
+          sku: resolved?.sku ?? i.sku,
           quantity: quantity ?? i.quantity,
+          price_cents: undefined,
+          price_override_cents: undefined,
         }
       : i,
   );
@@ -311,12 +357,16 @@ export async function internalSubUpdateLineItemPrice(
   const sub = await loadInternalSub(workspaceId, contractId);
   if (!sub) return { success: false, error: "Internal subscription not found" };
 
-  // Same convention as Appstle path: stored price is the customer-paid
-  // (post-25%-discount) value. Match the math in subUpdateLineItemPrice.
-  const discountedCents = Math.round(basePriceCents * 0.75);
+  // Grandfather lock: store the override BASE (pre-discount). The pricing engine
+  // applies the quantity break + S&S on top — so we keep the locked base, not a
+  // baked post-discount value (which is what the old Appstle-mirroring code did).
+  const resolved = await resolveVariant(String(variantId));
+  const key = resolved?.id || String(variantId);
   const items: Item[] = (sub.items as Item[]) || [];
   const nextItems = items.map((i) =>
-    String(i.variant_id) === String(variantId) ? { ...i, price_cents: discountedCents } : i,
+    String(i.variant_id) === key || String(i.variant_id) === String(variantId)
+      ? { ...i, price_override_cents: basePriceCents, price_cents: undefined }
+      : i,
   );
   await admin
     .from("subscriptions")

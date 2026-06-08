@@ -55,6 +55,77 @@ async function findBillableCustomer(admin: Admin, workspaceId: string, customerI
   return null;
 }
 
+/**
+ * Translate live Appstle line items into internal catalog references. Migrating to
+ * internal means dropping Shopify ids: each line resolves to our variant + product
+ * UUIDs, and we store NO baked price — the pricing engine derives it from the
+ * catalog + rule. The only exception is a grandfathered line (the customer was
+ * paying below the catalog-derived S&S price): we lock their base via
+ * price_override_cents so the engine reproduces it. Lines whose variant isn't in
+ * our catalog keep the legacy shape (Shopify id + baked price) as a safety net.
+ */
+async function appstleLinesToInternalItems(
+  admin: Admin,
+  workspaceId: string,
+  lines: Array<Record<string, unknown>>,
+): Promise<Array<Record<string, unknown>>> {
+  const { data: ws } = await admin.from("workspaces").select("subscription_discount_pct").eq("id", workspaceId).maybeSingle();
+  const fallbackSns = (ws?.subscription_discount_pct as number | undefined) ?? 25;
+
+  const items: Array<Record<string, unknown>> = [];
+  for (const l of lines) {
+    const shopifyVid = String((l.variantId as string) || "").split("/").pop() || "";
+    if (!shopifyVid) continue;
+    const quantity = (l.quantity as number) || 1;
+    const currentPriceCents = Math.round(parseFloat(String((l.currentPrice as Record<string, unknown> | undefined)?.amount ?? "0")) * 100);
+    const title = (l.title as string) || "";
+    const variantTitle = (l.variantTitle as string) || "";
+
+    const { data: v } = await admin
+      .from("product_variants")
+      .select("id, product_id, price_cents, title, sku")
+      .eq("shopify_variant_id", shopifyVid)
+      .maybeSingle();
+
+    if (!v) {
+      // Not in our catalog — keep the legacy shape so nothing is lost.
+      items.push({ variant_id: shopifyVid, title, variant_title: variantTitle, quantity, price_cents: currentPriceCents });
+      continue;
+    }
+
+    // S&S % for grandfather detection: the product's rule, else workspace default.
+    let snsPct = fallbackSns;
+    const { data: assign } = await admin
+      .from("product_pricing_rule")
+      .select("pricing_rule_id")
+      .eq("workspace_id", workspaceId)
+      .eq("product_id", v.product_id as string)
+      .maybeSingle();
+    if (assign?.pricing_rule_id) {
+      const { data: rule } = await admin.from("pricing_rules").select("subscribe_discount_pct").eq("id", assign.pricing_rule_id).maybeSingle();
+      snsPct = (rule?.subscribe_discount_pct as number | undefined) ?? fallbackSns;
+    }
+
+    const msrp = (v.price_cents as number) || 0;
+    const expectedSnsPrice = Math.round(msrp * (1 - snsPct / 100));
+    const item: Record<string, unknown> = {
+      variant_id: v.id,
+      product_id: v.product_id,
+      title: title || undefined,
+      variant_title: variantTitle || (v.title as string) || undefined,
+      sku: (v.sku as string) || undefined,
+      quantity,
+    };
+    // Grandfathered: paying below catalog S&S → lock the base so the engine
+    // reproduces their price (rules still stack on top of the locked base).
+    if (currentPriceCents > 0 && currentPriceCents < expectedSnsPrice) {
+      item.price_override_cents = Math.round(currentPriceCents / (1 - snsPct / 100));
+    }
+    items.push(item);
+  }
+  return items;
+}
+
 export async function migrateCustomerAppstleSubsToInternal(workspaceId: string, customerId: string): Promise<MigrateResult> {
   const admin = createAdminClient();
   const result: MigrateResult = { migrated: [], skipped: [], failed: [] };
@@ -93,15 +164,13 @@ export async function migrateCustomerAppstleSubsToInternal(workspaceId: string, 
       ).json();
       if (!live || live.status === "CANCELLED") { result.skipped.push({ contractId, reason: "already_cancelled_at_appstle" }); continue; }
 
-      const items = ((live.lines?.nodes as Array<Record<string, unknown>>) || [])
-        .map((l) => ({
-          variant_id: String((l.variantId as string) || "").split("/").pop() || "",
-          title: (l.title as string) || "",
-          variant_title: (l.variantTitle as string) || "",
-          quantity: (l.quantity as number) || 1,
-          price_cents: Math.round(parseFloat(String((l.currentPrice as Record<string, unknown> | undefined)?.amount ?? "0")) * 100),
-        }))
-        .filter((i) => i.variant_id);
+      // Translate Appstle lines → internal catalog UUID references (no baked
+      // price; grandfathered lines get a price_override_cents).
+      const items = await appstleLinesToInternalItems(
+        admin,
+        workspaceId,
+        (live.lines?.nodes as Array<Record<string, unknown>>) || [],
+      );
       const interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
       const intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
       const nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();

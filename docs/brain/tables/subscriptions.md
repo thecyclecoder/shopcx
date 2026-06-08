@@ -110,6 +110,7 @@ const { data } = await admin.from("customer_events")
 - **Internal joins ALWAYS use the UUID.** `id` (UUID) joins to `dunning_cycles.subscription_id`, `payment_failures.subscription_id`, `orders.subscription_id`, etc. `shopify_contract_id` + `shopify_customer_id` are Shopify-boundary fields ONLY — webhook ingest, Shopify API calls. Never use them as join keys between internal tables. They'll be deprecated once we sunset Shopify.
 - Always include linked customers — use `linkedIds(customerId)` helper, then `.in("customer_id", ids)`.
 - `items` is JSONB — variant ids live inside, not on a join table. Use `items->0->>'variantId'`.
+- **Internal-sub items are catalog references, not prices.** Each line is `{ variant_id (product_variants.id UUID), product_id (UUID), title, variant_title, sku, quantity, line_id, price_override_cents? }`. The price is **derived live** by the pricing engine ([[../libraries/pricing]]) from the catalog + [[pricing_rules]] — never baked. `price_override_cents` is the only price an internal sub carries, and only for grandfathered lines. A baked `price_cents` is legacy; mutations strip it. (Appstle subs are unchanged — they keep Appstle/Shopify-baked prices and Shopify variant ids.)
 
 ---
 

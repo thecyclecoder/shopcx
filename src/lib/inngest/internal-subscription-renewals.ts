@@ -135,12 +135,25 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     if (ctx.skip) return { skipped: true, reason: ctx.reason };
 
     // ── 2. Compute charge amount ────────────────────────────────
-    type Item = { quantity?: number; price_cents?: number };
-    const items = (ctx.sub.items as Item[]) || [];
-    const subtotalCents = items.reduce((s, i) => s + (i.price_cents || 0) * (i.quantity || 0), 0);
-    // Internal subs are subscribe-mode by definition → free shipping
-    // unless the sub locked in a paid method at checkout.
-    const shippingCents = Number(ctx.sub.delivery_price_cents || 0);
+    // Prices are DERIVED from the catalog + pricing rules (quantity break × S&S,
+    // grandfathered overrides) — never read from a baked value on the row. The
+    // engine returns per-line charged prices; we snapshot them as the order's
+    // line items (an order is a historical record, so it DOES bake the price).
+    const { resolveSubscriptionPricing } = await import("@/lib/pricing");
+    const pricing = await resolveSubscriptionPricing(workspace_id, ctx.sub);
+    const items = pricing.lines
+      .filter((l) => l.kind === "product")
+      .map((l) => ({
+        variant_id: l.variant_id,
+        sku: l.sku || undefined,
+        title: l.title,
+        variant_title: l.variant_title || undefined,
+        quantity: l.quantity,
+        price_cents: l.unit_cents,
+      }));
+    const subtotalCents = pricing.product_subtotal_cents;
+    // Free shipping is a pricing-rule decision; falls back to the sub's locked rate.
+    const shippingCents = pricing.shipping_cents;
     const protectionCents = ctx.sub.shipping_protection_added
       ? Number(ctx.sub.shipping_protection_amount_cents || 0)
       : 0;
@@ -170,7 +183,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       return commitSubscriptionRenewalTax(workspace_id, {
         subscriptionId: subscription_id,
         orderNumber,
-        items: ctx.sub.items,
+        items,
         shippingAddress: ctx.shipping_address || ctx.sub.shipping_address,
         shippingCents,
         shippingMethodLabel: (ctx.sub.shipping_method_code as string | null) || "Shipping",
