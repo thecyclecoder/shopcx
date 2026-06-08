@@ -262,7 +262,7 @@ export async function updateSession(request: NextRequest) {
           // /portal/{slug}?section={name} so the same page handles all
           // of them. URL bar stays clean (rewrite, not redirect).
           const PORTAL_SECTIONS = new Set([
-            "subscriptions", "orders", "payment-methods", "support", "account", "resources",
+            "subscriptions", "orders", "rewards", "payment-methods", "support", "account", "resources",
           ]);
           const sectionFromPath = pathname.replace(/^\/+/, "").replace(/\/+$/, "");
           if (PORTAL_SECTIONS.has(sectionFromPath)) {

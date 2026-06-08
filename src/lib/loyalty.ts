@@ -118,39 +118,53 @@ async function expandLinkedCustomerIds(
   return [...ids];
 }
 
+/**
+ * Linked accounts = one person, so loyalty is unified across the group. Points
+ * may be spread over sibling member rows (e.g. earned on one profile, redeemed on
+ * another), so the balance is the SUM across the group. The "canonical" member —
+ * the biggest current holder — is the identity that writes (earn/spend) target,
+ * which also consolidates future activity onto one row.
+ */
+function aggregateLinkedMembers(rows: LoyaltyMember[]): LoyaltyMember | null {
+  if (!rows.length) return null;
+  if (rows.length === 1) return rows[0];
+  const canonical = rows.reduce((a, b) => (Number(b.points_balance || 0) > Number(a.points_balance || 0) ? b : a));
+  const points_balance = rows.reduce((s, m) => s + Number(m.points_balance || 0), 0);
+  const points_earned = rows.reduce((s, m) => s + Number(m.points_earned || 0), 0);
+  return { ...canonical, points_balance, points_earned };
+}
+
 export async function getMember(
   workspaceId: string,
   shopifyCustomerId: string,
 ): Promise<LoyaltyMember | null> {
   const admin = createAdminClient();
-  // First try direct match on this Shopify ID (fast path)
-  const direct = await admin
-    .from("loyalty_members")
-    .select("*")
-    .eq("workspace_id", workspaceId)
-    .eq("shopify_customer_id", shopifyCustomerId)
-    .maybeSingle();
-  if (direct.data) return direct.data;
-
-  // Fallback: resolve the customer record for this Shopify ID and walk
-  // linked profiles. Loyalty record might live on a sibling.
+  // Resolve the customer for this Shopify id, then aggregate the WHOLE link group.
+  // (The old fast-path returned the direct shopify-id member even when it held 0
+  // points and a linked sibling held the balance — the linked-accounts bug.)
   const { data: cust } = await admin
     .from("customers")
     .select("id")
     .eq("workspace_id", workspaceId)
     .eq("shopify_customer_id", shopifyCustomerId)
     .maybeSingle();
-  if (!cust?.id) return null;
+  if (!cust?.id) {
+    // No customer row — fall back to a direct Shopify-id match.
+    const { data } = await admin
+      .from("loyalty_members")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_customer_id", shopifyCustomerId)
+      .maybeSingle();
+    return data || null;
+  }
   const linkedIds = await expandLinkedCustomerIds(workspaceId, cust.id);
-  const { data } = await admin
+  const { data: rows } = await admin
     .from("loyalty_members")
     .select("*")
     .eq("workspace_id", workspaceId)
-    .in("customer_id", linkedIds)
-    .order("points_balance", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  return data;
+    .in("customer_id", linkedIds);
+  return aggregateLinkedMembers(rows || []);
 }
 
 export async function getMemberByCustomerId(
@@ -159,15 +173,12 @@ export async function getMemberByCustomerId(
 ): Promise<LoyaltyMember | null> {
   const admin = createAdminClient();
   const linkedIds = await expandLinkedCustomerIds(workspaceId, customerId);
-  const { data } = await admin
+  const { data: rows } = await admin
     .from("loyalty_members")
     .select("*")
     .eq("workspace_id", workspaceId)
-    .in("customer_id", linkedIds)
-    .order("points_balance", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  return data;
+    .in("customer_id", linkedIds);
+  return aggregateLinkedMembers(rows || []);
 }
 
 export async function getOrCreateMember(
@@ -175,31 +186,33 @@ export async function getOrCreateMember(
   shopifyCustomerId: string,
   email: string,
 ): Promise<LoyaltyMember> {
-  const existing = await getMember(workspaceId, shopifyCustomerId);
-  if (existing) return existing;
-
   const admin = createAdminClient();
 
-  // Resolve customer_id from our customers table
+  // Loyalty identity is the customer UUID, never the Shopify id (Shopify is being
+  // sunset). Resolve the UUID, look the member up across the UUID link group, and
+  // create keyed on customer_id — so earning consolidates onto ONE member per
+  // person instead of splitting a new row per Shopify profile.
   const { data: customer } = await admin
     .from("customers")
     .select("id")
     .eq("workspace_id", workspaceId)
     .eq("shopify_customer_id", shopifyCustomerId)
-    .single();
+    .maybeSingle();
+
+  const existing = customer?.id
+    ? await getMemberByCustomerId(workspaceId, customer.id)
+    : await getMember(workspaceId, shopifyCustomerId);
+  if (existing) return existing;
 
   const { data, error } = await admin
     .from("loyalty_members")
-    .upsert(
-      {
-        workspace_id: workspaceId,
-        customer_id: customer?.id || null,
-        shopify_customer_id: shopifyCustomerId,
-        email,
-        source: "native",
-      },
-      { onConflict: "workspace_id,shopify_customer_id" },
-    )
+    .insert({
+      workspace_id: workspaceId,
+      customer_id: customer?.id || null,
+      shopify_customer_id: shopifyCustomerId, // retained for back-compat only
+      email,
+      source: "native",
+    })
     .select()
     .single();
 

@@ -20,6 +20,15 @@ Designed in a working session 2026-06-08. This spec bakes in those decisions. Au
 
 The checkout makes internal subs; the customer must be able to live with one. Most fixes are **wiring** (the internal branches already exist in the lib layer) — the only net-new is the coupon bridge and the Appstle→internal migration helper.
 
+> **Focus shift (2026-06-08): portal hardening.** Work has concentrated on making the customer portal airtight — the deliberate call is *the portal must be perfect before we close the storefront/checkout loop*, since both surfaces share the same internal-sub rails, pricing engine, and money math. Hardening shipped this session:
+> - **Dynamic pricing engine** ([[../libraries/pricing]]) — internal sub items are catalog references, not baked prices; price = `base × (1−quantity-break) × (1−S&S)` from [[../tables/pricing_rules]], grandfathered via `price_override_cents`. Drives display + billing. (Replaces baked `price_cents`; killed a swap-overcharge + a double-discount bug.)
+> - **Contract-id discipline** — every portal write handler resolves the sub by **UUID** via `resolveSub` (was `clampInt(contractId)`, which broke all actions on migrated `internal-…` subs). Items reference variant/product **UUIDs**, not Shopify ids (migration translates them).
+> - **Portal pricing display** — subscriptions list + detail show MSRP strikethrough → discounted price → qualified-discount **pills** (S&S / quantity break / free shipping / coupon), an **order-summary breakdown**, and **estimated tax**. Add/Swap modal previews the real engine price (mix-and-match break). Coupon card shows the live coupon + Remove (one per sub).
+> - **Tax quote** — engine-priced, **saved to the sub**, freshness keyed to an **input hash** (not `updated_at`) so it survives dynamic-pricing drift. Billing still does its own commit-true quote.
+> - **Shipping protection** — internal subs toggle the **column** (one source of truth with billing), not a line item.
+> - **Loyalty** — balance aggregates across the **UUID link group** (linked accounts = one person; fixed a 0-points bug); member identity keyed on customer UUID, not Shopify id. New **Rewards** portal section (hero + redemption + program details + fine print) alongside the existing sub-detail card.
+> - UI: order-actions/pause buttons 50/50 on desktop; remove-line-item guard fixed for add-ons.
+
 **Build status (2026-06-08):**
 - ✅ **1a portal handlers** wired internal-aware: pause, resume, change-date, address (+ local persist), replace-variants (swap/qty/add), coupon (apply/remove), loyalty-apply. *Pending:* payment-method update (part of 1c).
 - ✅ **1b coupon engine** shipped: `coupons` table (**migration applied to prod 2026-06-08**) + `src/lib/coupons.ts` (resolver internal→Shopify, apply/remove, mint, compute+consume) + internal renewal scheduler applies discounts. *Refinements:* tax-on-discounted-base, internal-path floor check.

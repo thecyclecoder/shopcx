@@ -56,8 +56,9 @@ All routes are `/api/portal?route={name}` (App Proxy on the Shopify side) or POS
 - **Address** ([[../libraries/portal__handlers__address]]) — shipping address editor
 - **Link accounts** ([[../libraries/portal__handlers__link-accounts]]) — confirm a suggested account link
 
-### Loyalty
-- **Balance** ([[../libraries/portal__handlers__loyalty-balance]]) — points balance + transaction history
+### Loyalty / Rewards
+- **Rewards section** (`_sections/RewardsSection.tsx`) — a dedicated sidebar nav item (`/rewards`, allowlisted in `PORTAL_SECTIONS`): points hero + redemption tiers (with progress) + minted coupons + "how it works" program details + fine print (points earn on the post-discount **product** subtotal — not tax/shipping). The `RewardsCard` on the sub-detail page stays too.
+- **Balance** ([[../libraries/portal__handlers__loyalty-balance]]) — points balance + program copy (earn rate, redemption rate, coupon lifetime). **Aggregates points across the UUID link group** — linked accounts are one person, so the balance is the SUM across sibling member rows (fixed a 0-points bug where the direct Shopify-id match returned a 0-pt sibling). Loyalty identity is the **customer UUID**, never the Shopify id; `getOrCreateMember` keys on `customer_id` so earning consolidates onto one member per person.
 - **Redeem** ([[../libraries/portal__handlers__loyalty-redeem]]) — spend points → generates Shopify discount code
 - **Apply to subscription** ([[../libraries/portal__handlers__loyalty-apply-subscription]]) — apply a redeemed loyalty coupon to a sub
 

@@ -31,6 +31,7 @@ import type { PortalSubscription, PortalOrder } from "./page";
 import { SubscriptionsSection } from "./_sections/SubscriptionsSection";
 import { AccountSection } from "./_sections/AccountSection";
 import { OrdersSection } from "./_sections/OrdersSection";
+import { RewardsSection } from "./_sections/RewardsSection";
 import { HomeSection } from "./_sections/HomeSection";
 import { ResourcesSection } from "./_sections/ResourcesSection";
 import { SupportSection } from "./_sections/SupportSection";
@@ -62,7 +63,7 @@ interface Props {
   orders: PortalOrder[];
 }
 
-type SectionId = "home" | "subscriptions" | "orders" | "payment_methods" | "support" | "account" | "resources";
+type SectionId = "home" | "subscriptions" | "orders" | "rewards" | "payment_methods" | "support" | "account" | "resources";
 
 // Each section's URL-bar slug. We rewrite these in middleware so the
 // customer never sees the /portal/{slug} prefix.
@@ -70,6 +71,7 @@ const SECTION_PATHS: Record<SectionId, string> = {
   home: "/",
   subscriptions: "/subscriptions",
   orders: "/orders",
+  rewards: "/rewards",
   payment_methods: "/payment-methods",
   support: "/support",
   account: "/account",
@@ -80,6 +82,7 @@ const NAV_ITEMS: Array<{ id: SectionId; label: string; icon: string }> = [
   { id: "home", label: "Home", icon: "M3 12l9-9 9 9v9a2 2 0 01-2 2h-3v-7H10v7H7a2 2 0 01-2-2v-9z" },
   { id: "subscriptions", label: "Subscriptions", icon: "M6 2a1 1 0 011-1h6a1 1 0 011 1v1h3a1 1 0 011 1v3.5l-1.5 9.5A2 2 0 0114.5 18h-9A2 2 0 013.5 16L2 6.5V3a1 1 0 011-1h3V2zm2 1v0H6V4h2V3zm4 0H8v1h4V3zm4 2H4l1.4 9.07A1 1 0 006.4 15h7.2a1 1 0 001-.93L16 5z" },
   { id: "orders", label: "Orders", icon: "M3 3h2l1 12h12l1-9H6m0 0L5 3m1 12a1 1 0 102 0 1 1 0 00-2 0zm10 0a1 1 0 102 0 1 1 0 00-2 0z" },
+  { id: "rewards", label: "Rewards", icon: "M20 12v9H4v-9M2 7h20v5H2V7zm10 0v14m0-14C12 4 9 2 7.5 3.5S6 7 12 7zm0 0c0-3 3-5 4.5-3.5S18 7 12 7z" },
   { id: "payment_methods", label: "Payment Methods", icon: "M2 5a2 2 0 012-2h16a2 2 0 012 2v14a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm0 4h20m-14 4h6m-6 3h4" },
   { id: "support", label: "Support", icon: "M12 2a10 10 0 100 20 10 10 0 000-20zm-1 14h2v2h-2v-2zm0-10h2v8h-2V6z" },
   { id: "resources", label: "Resources", icon: "M4 6h16v12H4V6zm2 2v8h12V8H6zm2 2h8v1H8v-1zm0 3h8v1H8v-1z" },
@@ -246,6 +249,9 @@ export default function PortalClient(props: Props) {
           )}
           {section === "orders" && (
             <OrdersSection orders={props.orders} primaryColor={props.workspace.primaryColor} />
+          )}
+          {section === "rewards" && (
+            <RewardsSection primaryColor={props.workspace.primaryColor} firstName={props.customer.firstName} />
           )}
           {section === "payment_methods" && (
             <PaymentMethodsSection primaryColor={props.workspace.primaryColor} />

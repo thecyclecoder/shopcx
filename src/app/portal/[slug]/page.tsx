@@ -180,9 +180,10 @@ export default async function PortalHome({
   );
 }
 
-function normalizeSection(raw: string | undefined): "home" | "subscriptions" | "orders" | "payment_methods" | "support" | "account" | "resources" {
+function normalizeSection(raw: string | undefined): "home" | "subscriptions" | "orders" | "rewards" | "payment_methods" | "support" | "account" | "resources" {
   if (raw === "subscriptions") return "subscriptions";
   if (raw === "orders") return "orders";
+  if (raw === "rewards") return "rewards";
   if (raw === "payment-methods" || raw === "payment_methods") return "payment_methods";
   if (raw === "support") return "support";
   if (raw === "account") return "account";

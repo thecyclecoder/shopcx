@@ -50,7 +50,14 @@ export const loyaltyBalance: RouteHandler = async ({ auth, route }) => {
       route,
       enabled: true,
       points_balance: member.points_balance,
+      lifetime_earned: member.points_earned || 0,
       dollar_value: pointsToDollarValue(member.points_balance, settings),
+      // Program-details copy: earn rate + redemption rate + coupon lifetime.
+      program: {
+        points_per_dollar: settings.points_per_dollar,
+        points_per_dollar_value: settings.points_per_dollar_value,
+        coupon_expiry_days: settings.coupon_expiry_days,
+      },
       tiers: tiersWithAffordability,
       unused_coupons: (redemptions || []).map(r => ({
         id: r.id,
