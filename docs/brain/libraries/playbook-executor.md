@@ -41,7 +41,9 @@ async function startPlaybook(admin: Admin, ticketId: string, playbookId: string,
 
 ## Gotchas
 
-_None documented._
+- **30-day MBG flow must create the return for real, not promise one.** `handle30DayFlow`'s `confirm_return` case is the terminal step of the 30-day money-back-guarantee flow (Refund playbook). When the customer confirms, it **must** call `createFullReturn()` (Shopify return + EasyPost label) and deliver the label **inline in the same reply**. It receives `tid` (threaded down from `handleApplyPolicy`) so the Shopify return links to the ticket. See [[../lifecycles/return-pipeline]] § "30-day flow regression".
+  - _Historical bug (fixed 2026-06-08, commit pending):_ the old code inserted a bare `returns` row with `status:"pending_label"` + `resolution_type:"refund"` and told the customer "we're generating your label and will email it shortly." **Both values are invalid** — valid statuses are `label_created`/`open`/`in_transit`/…, valid resolution types are the four `*_return`/`*_no_return` enums. Postgres rejected the insert, the error was **silently swallowed** (no `.select()`/error check), so the row never persisted, no label was ever bought, and `pending_label` was a dead-end status nothing processed. Customers got a label promise that was never fulfilled. Affected Jill Howe (b97f558e), Dolores Flynn (f5c47b1b) — both manually remediated via `createFullReturn()` + threaded label email.
+- **`complete` overrides your systemNote.** When a step returns `action:"complete"`, `executePlaybookStep` replaces the step's `systemNote` with `[Playbook Complete] {name}\n{summary}`. So a custom completion note (e.g. the 30-day "return approved" note) never shows in the thread — the `[Playbook Complete]` summary does. Don't rely on a completion-step systemNote being visible.
 
 ---
 

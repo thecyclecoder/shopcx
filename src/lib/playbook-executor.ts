@@ -569,7 +569,7 @@ async function executeStep(
 
     case "apply_policy": {
       if (!policy) return { action: "advance", newStep: step.step_order + 1, systemNote: "No policy configured." };
-      return handleApplyPolicy(admin, wsId, policy, orders, subs, ctx, step, dataContext, pers, policyRules, msg);
+      return handleApplyPolicy(admin, wsId, tid, policy, orders, subs, ctx, step, dataContext, pers, policyRules, msg);
     }
 
     case "offer_exception": {
@@ -1073,7 +1073,7 @@ async function handleCheckOtherSubs(
 }
 
 async function handleApplyPolicy(
-  admin: Admin, wsId: string,
+  admin: Admin, wsId: string, tid: string,
   policy: PlaybookPolicy, orders: OrderData[], subs: SubscriptionData[],
   ctx: Record<string, unknown>,
   step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null, policyRules: string,
@@ -1087,7 +1087,7 @@ async function handleApplyPolicy(
 
   // ── Handle 30-day money back flow continuation ──
   if (ctx._30day_eligible && ctx._30day_phase) {
-    return handle30DayFlow(admin, wsId, orders, ctx, step, customerMessage, pers);
+    return handle30DayFlow(admin, wsId, tid, orders, ctx, step, customerMessage, pers);
   }
 
   // Evaluate each order against policy conditions
@@ -3006,7 +3006,7 @@ async function handleAdjustSubscription(
 // ══════════════════════════════════════════════════════════════════
 
 async function handle30DayFlow(
-  admin: Admin, wsId: string, orders: OrderData[],
+  admin: Admin, wsId: string, tid: string, orders: OrderData[],
   ctx: Record<string, unknown>, step: PlaybookStep,
   customerMessage: string, pers: { name?: string; tone?: string } | null,
 ): Promise<PlaybookExecResult> {
@@ -3141,40 +3141,103 @@ async function handle30DayFlow(
         };
       }
 
-      // Confirmed — create return record (pending label generation by agent/Inngest)
+      // Confirmed — actually create the return: Shopify return record + EasyPost
+      // label, all in one shot via createFullReturn(). We never insert a bare
+      // "pending_label" row and promise a separate email — the customer is
+      // talking to us right now, so the label goes inline in this reply.
+      // See docs/brain/lifecycles/return-pipeline.md (single entry point) and
+      // feedback_return_label_in_reply.
       ctx._30day_phase = "processing";
 
-      const orderTotal = orderObjs[0]?.total_cents || 0;
+      const order0 = orderObjs[0];
+      const orderTotal = order0?.total_cents || 0;
       const estLabelCost = (ctx._30day_label_cost_cents as number) || 795;
-      const netRefund = orderTotal - estLabelCost;
 
-      const customerId = await (async () => {
-        const { data: o } = await admin.from("orders").select("customer_id").eq("order_number", orderObjs[0]?.order_number).eq("workspace_id", wsId).single();
-        return o?.customer_id;
-      })();
+      if (!order0?.id || !order0?.shopify_order_id) {
+        return {
+          action: "escalate_api_failure",
+          error: `30-day return: order ${order0?.order_number || "?"} missing id/shopify_order_id`,
+          systemNote: `[Playbook] 30-day flow: cannot create return — order missing identifiers. Escalated.`,
+        };
+      }
 
-      await admin.from("returns").insert({
-        workspace_id: wsId,
-        order_id: orderObjs[0]?.id,
-        order_number: orderObjs[0]?.order_number,
-        shopify_order_gid: orderObjs[0]?.shopify_order_id ? `gid://shopify/Order/${orderObjs[0].shopify_order_id}` : null,
-        customer_id: customerId || null,
-        status: "pending_label",
-        resolution_type: "refund",
+      // Pull the customer + shipping address the label needs.
+      const { data: orderRow } = await admin.from("orders")
+        .select("customer_id, shipping_address")
+        .eq("workspace_id", wsId).eq("order_number", order0.order_number).single();
+      const customerId = orderRow?.customer_id as string | undefined;
+      const addr = (orderRow?.shipping_address || null) as Record<string, string> | null;
+      const { data: cust } = customerId
+        ? await admin.from("customers").select("first_name, last_name, phone").eq("id", customerId).single()
+        : { data: null };
+
+      if (!customerId || !addr) {
+        return {
+          action: "escalate_api_failure",
+          error: `30-day return: missing ${!customerId ? "customer_id" : "shipping_address"} for ${order0.order_number}`,
+          systemNote: `[Playbook] 30-day flow: cannot create return — missing ${!customerId ? "customer" : "shipping address"}. Escalated.`,
+        };
+      }
+
+      const { createFullReturn } = await import("@/lib/shopify-returns");
+      const r = await createFullReturn({
+        workspaceId: wsId,
+        orderId: order0.id,
+        orderNumber: order0.order_number,
+        shopifyOrderGid: `gid://shopify/Order/${order0.shopify_order_id}`,
+        customerId,
+        ticketId: tid,
+        customerName: `${cust?.first_name || ""} ${cust?.last_name || ""}`.trim() || "Customer",
+        customerPhone: cust?.phone || undefined,
+        shippingAddress: {
+          street1: addr.address1 || addr.street1 || "",
+          city: addr.city || "",
+          state: addr.province_code || addr.provinceCode || addr.state || "",
+          zip: addr.zip || "",
+          country: addr.country_code || addr.countryCode || "US",
+        },
+        resolutionType: "refund_return",
         source: "playbook",
-        order_total_cents: orderTotal,
-        label_cost_cents: estLabelCost,
-        net_refund_cents: netRefund,
+        freeLabel: false,
       });
 
+      // Hard failure — no return was created. Don't promise anything; escalate
+      // so an agent picks it up (feedback_return_failure_escalation).
+      if (!r.success) {
+        return {
+          action: "escalate_api_failure",
+          error: `30-day return create failed for ${order0.order_number}: ${r.error || "unknown"}`,
+          systemNote: `[Playbook] 30-day flow: createFullReturn failed (${r.error || "unknown"}). Escalated.`,
+        };
+      }
+
+      const actualLabelCost = r.labelCostCents ?? estLabelCost;
+      const netRefund = orderTotal - actualLabelCost;
+
+      // Label couldn't be bought (EasyPost not configured / no rates), but the
+      // return record exists. Tell the customer an agent will follow up with the
+      // label — never claim a label was emailed.
+      if (!r.labelUrl) {
+        return {
+          action: "complete",
+          response: wrapResponse(
+            `<p>Your return is all set up. One of our team members will follow up shortly with your prepaid shipping label.</p><p>Once we receive the package back, your refund of <b>$${(netRefund / 100).toFixed(2)}</b> will be processed.</p>`,
+            pers, false,
+          ),
+          context: { ...ctx, _30day_outcome: "returned", return_id: r.returnId },
+          systemNote: `[Playbook] 30-day flow: return created (${r.returnId}) but label not generated (${r.error || "no label"}). Agent follow-up needed. Est. refund: $${(netRefund / 100).toFixed(2)}.`,
+        };
+      }
+
+      // Label bought — deliver it inline in this same reply.
       return {
         action: "complete",
         response: wrapResponse(
-          `<p>Your return has been approved! We're generating your prepaid shipping label now and will email it to you shortly.</p><p>Your refund of <b>$${(netRefund / 100).toFixed(2)}</b> will be processed once we receive the package back.</p><p>If you have any questions in the meantime, just reply to this email!</p>`,
+          `<p>Your return is all set up! Here's your prepaid shipping label:</p><p><a href="${r.labelUrl}">Download your return shipping label</a></p><p>Print it, attach it to your package, and drop it off at any ${r.carrier || "USPS"} location. Once we receive it, your refund of <b>$${(netRefund / 100).toFixed(2)}</b> will be processed.</p>`,
           pers, false,
         ),
-        context: { ...ctx, _30day_outcome: "returned" },
-        systemNote: `[Playbook] 30-day flow: return approved. Pending label. Est. refund: $${(netRefund / 100).toFixed(2)}.`,
+        context: { ...ctx, _30day_outcome: "returned", return_id: r.returnId, label_url: r.labelUrl, label_tracking_number: r.trackingNumber },
+        systemNote: `[Playbook] 30-day flow: return created (${r.returnId}), label bought (${r.carrier} ${r.trackingNumber}, $${(actualLabelCost / 100).toFixed(2)}). Refund: $${(netRefund / 100).toFixed(2)}.`,
       };
     }
 

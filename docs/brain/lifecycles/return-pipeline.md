@@ -121,6 +121,14 @@ Always filter with `.not("easypost_shipment_id", "is", null)` when finding refun
 
 When a crisis campaign issues a return (e.g. wrong item shipped during an OOS event), the Sonnet orchestrator owns the entire flow. No agent intervention, no escalation. See feedback_crisis_return_auto. The orchestrator picks the return-from order, calls `createFullReturn()` with `freeLabel=true`, and tells the customer "your refund will land in X days." The pipeline takes care of the rest.
 
+## 30-day flow regression (fixed 2026-06-08)
+
+The 30-day money-back-guarantee flow (Refund playbook → `handle30DayFlow` in [[../libraries/playbook-executor]]) had its own return-creation code that **bypassed `createFullReturn()`** — exactly the thing Phase 1 forbids. On customer confirmation it did a raw `returns` insert with `status:"pending_label"` and `resolution_type:"refund"` (both invalid enum values), which Postgres rejected and the code swallowed, then told the customer "we're generating your label and will email it to you shortly."
+
+Net effect: **no return, no label, no email — just a false promise.** `pending_label` was a dead-end status no code ever processed.
+
+Fixed by routing `confirm_return` through `createFullReturn()` and delivering the label inline in the same reply (per feedback_return_label_in_reply). Failures now `escalate_api_failure` (ticket stays open, agent To-Do) instead of promising a label. Lesson reinforced: **there is exactly one way to create a return — `createFullReturn()`.** Any flow with its own returns-table insert is a bug.
+
 ## Tags + escalation
 
 If `createFullReturn()` itself fails (Shopify return mutation rejected, EasyPost can't find a rate, etc.):
@@ -152,6 +160,7 @@ If `createFullReturn()` itself fails (Shopify return mutation rejected, EasyPost
 **Known gaps / not yet shipped:** None identified.
 
 **Recent activity:**
+- 30-day MBG flow (`handle30DayFlow.confirm_return`) now routes through `createFullReturn()` + inline label instead of a bare `pending_label` insert that silently failed. See § "30-day flow regression". (2026-06-08)
 - `2bce67a4` Returns: refund instantly on delivered using stored net_refund_cents
 - `5be66e2b` Returns: advance status to label_created when EasyPost label is bought
 - `c3e03c16` Returns: fix Improve-tab labels delivering to customer instead of warehouse
