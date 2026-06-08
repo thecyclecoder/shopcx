@@ -51,8 +51,9 @@ source of truth shared with the portal display. For each due sub:
    (an order is a historical record, so it bakes the price; the sub never does).
 4. **Apply discount** if `applied_discounts` JSONB has an active code. One coupon
    per sub — entire-order scope, on the product subtotal.
-5. **Shipping** = free when a rule grants it and the subtotal clears its
-   threshold, else the sub's locked rate. **Protection** line if
+5. **Shipping** = free when a rule has `free_shipping` (internal subs are always
+   subscription-mode, so the threshold doesn't gate it), else the sub's locked
+   rate. **Protection** line if
    `shipping_protection_added=true` (passthrough; excluded from the discountable
    product subtotal). **Compute pre-tax total**.
 

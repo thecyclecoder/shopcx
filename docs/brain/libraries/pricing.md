@@ -25,7 +25,7 @@ sns%   = pricing_rule.subscribe_discount_pct, else workspaces.subscription_disco
 unit   = round(base × (1 − break%/100) × (1 − sns%/100))
 ```
 
-Pricing data lives in [[../tables/pricing_rules]] (linked to products via [[../tables/product_pricing_rule]]): `quantity_breaks`, `subscribe_discount_pct`, `free_shipping` + `free_shipping_threshold_cents`. Free shipping is granted when any active rule on the sub has `free_shipping` and the product subtotal meets the threshold (internal subs are always subscription-mode, so `free_shipping_subscription_only` is always satisfied).
+Pricing data lives in [[../tables/pricing_rules]] (linked to products via [[../tables/product_pricing_rule]]): `quantity_breaks`, `subscribe_discount_pct`, `free_shipping`. Free shipping mirrors the storefront's authoritative rule — `free_shipping && (!free_shipping_subscription_only || isSubscribing)`. Internal subs are **always** subscription-mode, so a rule with `free_shipping = true` grants it outright; `free_shipping_threshold_cents` does **not** gate the decision (it's a one-time-order / banner concept).
 
 ## Identifier discipline
 

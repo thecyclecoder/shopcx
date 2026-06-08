@@ -213,11 +213,13 @@ export async function resolveSubscriptionPricing(
   const product_subtotal_cents = productLines.reduce((s, l) => s + l.unit_cents * l.quantity, 0);
   const product_msrp_cents = productLines.reduce((s, l) => s + l.base_cents * l.quantity, 0);
 
-  // 5. Free shipping — any active rule on the sub that grants it (threshold met).
+  // 5. Free shipping. Authoritative semantics (mirrors the storefront price
+  //    tables): free_shipping && (!free_shipping_subscription_only || isSubscribing).
+  //    Internal subs are ALWAYS subscription-mode, so the subscription_only flag is
+  //    always satisfied and the threshold does NOT gate the decision — a rule with
+  //    free_shipping = true grants it outright.
   const subRules = [...ruleMap.values()];
-  const free_shipping = subRules.some(
-    (r) => r.free_shipping && (!r.free_shipping_threshold_cents || product_subtotal_cents >= r.free_shipping_threshold_cents),
-  );
+  const free_shipping = subRules.some((r) => r.free_shipping);
   const shipping_cents = free_shipping ? 0 : Number(sub.delivery_price_cents || 0);
 
   return { lines, product_subtotal_cents, product_msrp_cents, shipping_cents, free_shipping };
