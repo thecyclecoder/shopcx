@@ -16,9 +16,14 @@ Designed in a working session 2026-06-08. This spec bakes in those decisions. Au
 
 ---
 
-## Phase 1 — Internal subscription management ⏳
+## Phase 1 — Internal subscription management 🚧
 
 The checkout makes internal subs; the customer must be able to live with one. Most fixes are **wiring** (the internal branches already exist in the lib layer) — the only net-new is the coupon bridge and the Appstle→internal migration helper.
+
+**Build status (2026-06-08):**
+- ✅ **1a portal handlers** wired internal-aware: pause, resume, change-date, address (+ local persist), replace-variants (swap/qty/add), coupon (apply/remove), loyalty-apply. *Pending:* payment-method update (part of 1c).
+- ✅ **1b coupon engine** shipped: `coupons` table + `src/lib/coupons.ts` (resolver internal→Shopify, apply/remove, mint, compute+consume) + internal renewal scheduler applies discounts. *Refinements:* tax-on-discounted-base, internal-path floor check.
+- 🚧 **1c migration helper** `migrateCustomerAppstleSubsToInternal` (`src/lib/migrate-to-internal.ts`) built (atomic create→verify→cancel, rollback on cancel-fail). *NOT yet wired into live checkout / portal payment-update — needs a runtime test against real Appstle data first (it cancels real contracts).*
 
 ### 1a. Wire the broken portal handlers through the internal branches
 Each handler below calls Appstle inline; route it through the existing internal-aware helper and **persist the change to the local `subscriptions` row** (the internal scheduler bills from `items`/`shipping_address`/`applied_discounts`).

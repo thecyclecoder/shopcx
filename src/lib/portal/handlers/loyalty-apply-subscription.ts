@@ -2,6 +2,7 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { isInternalSubscription } from "@/lib/internal-subscription";
 import {
   getLoyaltySettings,
   getMember,
@@ -169,6 +170,17 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     }
   }
 
+  const isInternalLoyalty = await isInternalSubscription(auth.workspaceId, String(contractId));
+  if (isInternalLoyalty) {
+    // Internal sub — apply the loyalty code (a real Shopify discount code) via
+    // the coupon engine (resolves through the Shopify lookup, writes
+    // subscriptions.applied_discounts for the renewal scheduler).
+    const { applyCouponToSub } = await import("@/lib/coupons");
+    const r = await applyCouponToSub(auth.workspaceId, String(contractId), code, auth.loggedInCustomerId);
+    if (!r.success) {
+      return jsonErr({ error: "coupon_apply_failed", message: r.error, request_payload: { contractId, code } }, 502);
+    }
+  } else {
   // Apply coupon to subscription via Appstle (remove existing first — only 1 coupon per subscription)
   try {
     const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
@@ -263,6 +275,7 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     }
   } catch (e) {
     return handleAppstleError(e, { route: "loyaltyApplySubscription", payload: { contractId, code } });
+  }
   }
 
   // Mark redemption as 'applied' (if it was from an existing coupon)
