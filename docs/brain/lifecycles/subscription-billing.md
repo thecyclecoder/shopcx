@@ -126,6 +126,19 @@ For internal subs these are pure DB updates. For Appstle subs we also call Appst
 
 [[../inngest/portal-auto-resume]] runs every minute, picks up subs where `pause_resume_at <= now()`, calls `resume()`.
 
+## Reactivating a cancelled subscription + manual price edits (money-safety)
+
+**A cancelled subscription CAN be reactivated** — `cancelled → active` is supported, not just `paused → active`. Use `appstleSubscriptionAction(ws, contractId, "resume")`, which PUTs Appstle `subscription-contracts-update-status?status=ACTIVE`. The local row goes `cancelled → active` too.
+
+These rules are non-obvious and a wrong move charges the customer immediately at the wrong price. Verified live on real win-back tickets (Susie 06-05, Kristin 06-08):
+
+- **Modify first, activate LAST.** When reactivating a cancelled sub, set the line items, line prices, and next billing date **while it is still cancelled**, then flip to `active`. Activating first bills immediately under the stale conditions (old next-billing date, MSRP price). Gate every reactivation: verify the modified state, then activate.
+- **Changing quantity RESETS the line price to MSRP.** `subChangeQuantity` goes through `replaceVariants` (remove + re-add); even with `carryForwardDiscount: "EXISTING_PLAN"` it drops the custom/grandfathered price (seen: $51.97 → $79.95). **Always re-assert the line price with `subUpdateLineItemPrice` after any quantity change.**
+- **The base→charged relationship VARIES per contract — read the live price, never assume `/0.75`.** Some contracts apply the 25% selling-plan discount (`charged = base × 0.75`); others are flat-priced (`charged = base`, line `pricingPolicy: null`). To charge a target rate **G**: discounted contract → `base = round(G / 0.75)`; flat contract → `base = G`. Confirm by reading the live Appstle line `currentPrice`, **not** a formula and **not** the DB.
+- **Billing-date slot is `08:00:00Z`** (store midnight Pacific). A bare `YYYY-MM-DD` becomes `T00:00:00Z` and Appstle snaps it a day early (asked 06-15, got 06-14). Pass the full `...T08:00:00Z`.
+- **`"UserGeneratedError: The subscription contract has changed"` (HTTP 400) is transient** — it fires when a follow-up edit lands before a prior mutation (e.g. a quantity change) has settled. Retry once the contract settles.
+- **The DB lags Appstle.** `subscriptions.items` / `subscriptions.next_billing_date` sync asynchronously and can show stale values right after a mutation — **verify against a live Appstle contract fetch**, not the local row.
+
 ## When dunning meets a charge
 
 If a sub is in an active [[../tables/dunning_cycles]] when its `next_billing_date` rolls around:
