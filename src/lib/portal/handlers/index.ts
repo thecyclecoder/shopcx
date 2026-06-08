@@ -60,6 +60,8 @@ import { supportList, supportTicket, supportReply, supportCreate } from "./suppo
 export { supportList, supportTicket, supportReply, supportCreate } from "./support";
 import { paymentMethods } from "./payment-methods";
 export { paymentMethods } from "./payment-methods";
+import { updatePaymentMethod } from "./payment-method-update";
+export { updatePaymentMethod } from "./payment-method-update";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -128,4 +130,7 @@ export const routeMap: Record<string, RouteHandler> = {
   paymentMethods,
   paymentmethods: paymentMethods,
   payment_methods: paymentMethods,
+  updatePaymentMethod,
+  updatepaymentmethod: updatePaymentMethod,
+  update_payment_method: updatePaymentMethod,
 };

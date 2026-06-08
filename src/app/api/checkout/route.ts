@@ -703,6 +703,22 @@ export async function POST(request: NextRequest) {
     await admin.from("transactions").update({ order_id: order.id }).eq("id", transactionRecordId);
   }
 
+  // ── 7b. Strangler migration: sweep this customer's Appstle subs onto our
+  // internal rails using the card just vaulted (now their default PM). The
+  // add_to_sub path already appended cart items to the target Appstle
+  // contract, so the helper carries them over from the live state. Non-fatal:
+  // the order already succeeded; a migration failure just leaves that sub on
+  // Appstle for next time.
+  try {
+    const { migrateCustomerAppstleSubsToInternal } = await import("@/lib/migrate-to-internal");
+    const mig = await migrateCustomerAppstleSubsToInternal(cart.workspace_id, customer.id);
+    if (mig.migrated.length || mig.failed.length) {
+      console.log(`[checkout] Appstle→internal: migrated ${mig.migrated.length}, failed ${mig.failed.length}`, mig.failed);
+    }
+  } catch (e) {
+    console.error("[checkout] Appstle→internal migration threw (non-fatal):", e instanceof Error ? e.message : e);
+  }
+
   // ── 8. Post-payment fraud check. ─────────────────────────────────
   // Runs the full rule engine (shared_address, high_velocity, address
   // distance, name mismatch, amazon_reseller w/ fuzzy match) on the

@@ -22,8 +22,8 @@ The checkout makes internal subs; the customer must be able to live with one. Mo
 
 **Build status (2026-06-08):**
 - ✅ **1a portal handlers** wired internal-aware: pause, resume, change-date, address (+ local persist), replace-variants (swap/qty/add), coupon (apply/remove), loyalty-apply. *Pending:* payment-method update (part of 1c).
-- ✅ **1b coupon engine** shipped: `coupons` table + `src/lib/coupons.ts` (resolver internal→Shopify, apply/remove, mint, compute+consume) + internal renewal scheduler applies discounts. *Refinements:* tax-on-discounted-base, internal-path floor check.
-- 🚧 **1c migration helper** `migrateCustomerAppstleSubsToInternal` (`src/lib/migrate-to-internal.ts`) built (atomic create→verify→cancel, rollback on cancel-fail). *NOT yet wired into live checkout / portal payment-update — needs a runtime test against real Appstle data first (it cancels real contracts).*
+- ✅ **1b coupon engine** shipped: `coupons` table (**migration applied to prod 2026-06-08**) + `src/lib/coupons.ts` (resolver internal→Shopify, apply/remove, mint, compute+consume) + internal renewal scheduler applies discounts. *Refinements:* tax-on-discounted-base, internal-path floor check.
+- ✅ **1c migration** — helper `migrateCustomerAppstleSubsToInternal` (`src/lib/migrate-to-internal.ts`, atomic create→verify→cancel + rollback) **wired into live checkout** (post-charge sweep) and the new **`updatePaymentMethod` portal handler** (vault card → default → migrate). ⚠️ **Cancels real Appstle contracts — runtime-test against one real Appstle sub before relying on it** (verify prices/cadence preserved, Appstle cancels, no double-bill). The portal Hosted-Fields card-entry UI is the remaining frontend piece.
 
 ### 1a. Wire the broken portal handlers through the internal branches
 Each handler below calls Appstle inline; route it through the existing internal-aware helper and **persist the change to the local `subscriptions` row** (the internal scheduler bills from `items`/`shipping_address`/`applied_discounts`).
