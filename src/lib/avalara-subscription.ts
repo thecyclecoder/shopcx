@@ -19,6 +19,7 @@
  * for the workspace — same convention as the checkout tax-quote
  * endpoint.
  */
+import { createHash } from "node:crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createTransaction } from "@/lib/avalara";
 import { buildAvalaraLines, type CartLineForTax } from "@/lib/avalara-cart";
@@ -114,10 +115,63 @@ function subItemsToCartLines(items: unknown): CartLineForTax[] {
   } as SubItem));
 }
 
+interface PricedTaxItem {
+  variant_id: string; product_id: string | null; sku: string | null;
+  title: string; variant_title: string; quantity: number; price_cents: number;
+}
+interface TaxInputs {
+  pricedItems: PricedTaxItem[];
+  subtotalCents: number;
+  shippingCents: number;
+  protectionCents: number;
+  shipTo: NonNullable<Awaited<ReturnType<typeof resolveSubAddress>>>;
+}
+
+/**
+ * Build the tax-determining inputs for an internal sub: engine-priced product
+ * lines + rule-decided shipping + protection column + resolved ship-to. Pure of
+ * Avalara — used both to compute a quote and to detect staleness. Returns null
+ * when the sub can't be quoted (wrong status / no items / no address).
+ */
+async function buildTaxInputs(
+  workspaceId: string,
+  sub: Record<string, unknown>,
+): Promise<TaxInputs | null> {
+  if (!["active", "paused"].includes(sub.status as string)) return null;
+  const { resolveSubscriptionPricing } = await import("@/lib/pricing");
+  const pricing = await resolveSubscriptionPricing(workspaceId, sub as { items?: unknown; delivery_price_cents?: number | null });
+  const pricedItems: PricedTaxItem[] = pricing.lines
+    .filter((l) => l.kind === "product")
+    .map((l) => ({ variant_id: l.variant_id, product_id: l.product_id, sku: l.sku, title: l.title, variant_title: l.variant_title, quantity: l.quantity, price_cents: l.unit_cents }));
+  if (pricedItems.length === 0) return null;
+  const subtotalCents = pricing.product_subtotal_cents;
+  if (subtotalCents <= 0) return null;
+  const shippingCents = pricing.shipping_cents;
+  const protectionCents = sub.shipping_protection_added ? Number(sub.shipping_protection_amount_cents || 0) : 0;
+  const shipTo = await resolveSubAddress(workspaceId, sub as unknown as RenewalSubFields);
+  if (!shipTo) return null;
+  return { pricedItems, subtotalCents, shippingCents, protectionCents, shipTo };
+}
+
+/**
+ * Deterministic hash of the inputs that determine tax. A change here (items,
+ * quantities, engine-derived prices from a catalog/rule edit, shipping,
+ * protection, or ship-to) invalidates the cached quote — robust to DYNAMIC
+ * pricing where the sub row's updated_at would NOT change.
+ */
+function hashTaxInputs(inputs: TaxInputs): string {
+  const items = inputs.pricedItems
+    .map((l) => `${l.variant_id}:${l.quantity}:${l.price_cents}`)
+    .sort();
+  const payload = JSON.stringify({ items, s: inputs.shippingCents, p: inputs.protectionCents, a: inputs.shipTo });
+  return createHash("sha256").update(payload).digest("hex").slice(0, 32);
+}
+
 /**
  * Quote tax for a sub's next renewal (SalesOrder, no filing). Saves
- * to subscriptions.avalara_quote_*. Returns { tax_cents, total_cents }
- * or null when Avalara isn't enabled / the sub can't be quoted yet.
+ * to subscriptions.avalara_quote_* (incl. the input hash). Returns
+ * { tax_cents, total_cents } or null when Avalara isn't enabled / the
+ * sub can't be quoted yet.
  */
 export async function quoteSubscriptionTax(
   workspaceId: string,
@@ -138,29 +192,17 @@ export async function quoteSubscriptionTax(
     .eq("id", subscriptionId)
     .single();
   if (!sub || !sub.is_internal) return null;
-  if (!["active", "paused"].includes(sub.status as string)) return null;
 
-  // Price from the engine (catalog + rules) — internal sub items carry no baked
-  // price. Mirrors the renewal: tax quoted on the engine subtotal + the
-  // rule-decided shipping. (Applying the coupon to the taxable base is a
-  // documented refinement; the renewal quotes pre-coupon too.)
-  const { resolveSubscriptionPricing } = await import("@/lib/pricing");
-  const pricing = await resolveSubscriptionPricing(workspaceId, sub as { items?: unknown; delivery_price_cents?: number | null });
-  const pricedItems = pricing.lines
-    .filter((l) => l.kind === "product")
-    .map((l) => ({ variant_id: l.variant_id, product_id: l.product_id, sku: l.sku, title: l.title, variant_title: l.variant_title, quantity: l.quantity, price_cents: l.unit_cents }));
+  // Engine-priced inputs (catalog + rules) — internal sub items carry no baked
+  // price. Mirrors the renewal: tax quoted on the engine subtotal + rule-decided
+  // shipping. (Coupon on the taxable base is a documented refinement; the renewal
+  // quotes pre-coupon too.)
+  const inputs = await buildTaxInputs(workspaceId, sub);
+  if (!inputs) return null;
+  const { pricedItems, subtotalCents, shippingCents, protectionCents, shipTo } = inputs;
+  const inputHash = hashTaxInputs(inputs);
   const cartLines = subItemsToCartLines(pricedItems);
   if (cartLines.length === 0) return null;
-  const subtotalCents = pricing.product_subtotal_cents;
-  if (subtotalCents <= 0) return null;
-
-  const shippingCents = pricing.shipping_cents;
-  const protectionCents = sub.shipping_protection_added
-    ? Number(sub.shipping_protection_amount_cents || 0)
-    : 0;
-
-  const shipTo = await resolveSubAddress(workspaceId, sub as RenewalSubFields);
-  if (!shipTo) return null;
 
   // Customer email for the Avalara customerCode field
   const { data: customer } = await admin
@@ -206,6 +248,7 @@ export async function quoteSubscriptionTax(
       avalara_quote_total_cents: totalCents,
       avalara_quote_at: new Date().toISOString(),
       avalara_quote_address: shipTo,
+      avalara_quote_hash: inputHash,
     })
     .eq("id", subscriptionId);
 
@@ -213,9 +256,12 @@ export async function quoteSubscriptionTax(
 }
 
 /**
- * Convenience: ensure a fresh quote exists. Returns the cached one
- * if `subscriptions.updated_at <= avalara_quote_at`, otherwise
- * re-quotes. Reads the sub row once to make that decision.
+ * Ensure a fresh quote exists. Returns the cached quote when the sub's current
+ * tax inputs still hash to `avalara_quote_hash`; otherwise re-quotes. The hash is
+ * robust to DYNAMIC pricing: a catalog price change or a pricing-rule edit
+ * re-prices the sub without touching the row (so `updated_at` wouldn't move), but
+ * the engine-derived prices in the hash change → we re-quote. Likewise any sub
+ * mutation (items, quantity, address, protection) changes the hash.
  */
 export async function ensureFreshSubscriptionTaxQuote(
   workspaceId: string,
@@ -224,16 +270,18 @@ export async function ensureFreshSubscriptionTaxQuote(
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("is_internal, avalara_quote_tax_cents, avalara_quote_total_cents, avalara_quote_at, updated_at")
+    .select("id, customer_id, items, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal, avalara_quote_hash, avalara_quote_tax_cents, avalara_quote_total_cents")
     .eq("id", subscriptionId)
     .single();
   if (!sub) return null;
-  // Internal subs only. Appstle handles its own tax pipeline via
-  // Shopify — we don't quote or display tax for those here.
+  // Internal subs only. Appstle handles its own tax pipeline via Shopify.
   if (!sub.is_internal) return null;
-  const quoteAt = sub.avalara_quote_at ? new Date(sub.avalara_quote_at).getTime() : 0;
-  const updatedAt = sub.updated_at ? new Date(sub.updated_at).getTime() : 0;
-  if (quoteAt > 0 && quoteAt >= updatedAt && sub.avalara_quote_tax_cents != null) {
+
+  const inputs = await buildTaxInputs(workspaceId, sub);
+  if (!inputs) return null; // not quotable yet (no items / no address)
+
+  // Cached quote still valid? (tax inputs unchanged since it was computed)
+  if (sub.avalara_quote_hash && sub.avalara_quote_hash === hashTaxInputs(inputs) && sub.avalara_quote_tax_cents != null) {
     return {
       tax_cents: sub.avalara_quote_tax_cents,
       total_cents: sub.avalara_quote_total_cents ?? sub.avalara_quote_tax_cents,
