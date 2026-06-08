@@ -43,14 +43,20 @@ See [[../inngest/agent-todo-routine]] for the full split. Short version:
 - No silent retries — a `failed` todo stays failed and surfaces in the queue.
 - Routine is stateless between runs; state lives in `agent_todos`.
 
-## Status / open work
+## Status — ✅ shipped & live (2026-06-08)
 
-**Shipped (code):** ✅ schema + migration · ✅ escalation routing change (3 sites) · ✅ reasoning lib + routine run/backfill scripts · ✅ `print-routine-env.ts` · ✅ Inngest worker + approve/reject/list/detail APIs · ✅ To-Do list + detail dashboards · ✅ escalated observability rebuild · ✅ branches surface + APIs · ✅ sidebar links + bubbles · ✅ brain pages. `npx tsc --noEmit` clean.
+Fully operational end-to-end: the routine reasons over escalated tickets, proposes todos, owner/admin approve on `/dashboard/tickets/todos`, customer-facing actions execute via the Inngest worker, and system-level todos open `claude/*` PRs that owners squash-merge from `/dashboard/branches`.
 
-**Manual / operational (cannot be done from code):**
-- ⏳ Apply the migration to the live DB (`supabase db push`).
-- ⏳ Create the `agent-todo-routine` at `claude.ai/code/routines`: repo = shopcx, model = Opus, hourly schedule + API trigger, env via `npx tsx scripts/print-routine-env.ts | pbcopy`, branch policy `claude/`-only. Set `AGENT_TODO_ROUTINE_TRIGGER_URL` (+ token) in Vercel so the approve API can wake it; set `GITHUB_TOKEN` for the Branches surface; confirm the Claude GitHub App is installed on `thecyclecoder/shopcx` with branch-push + PR permissions.
-- ⏳ Run `npx tsx scripts/agent-todo-backfill.ts` to populate todos for the currently-escalated tickets (incl. Millie's return-label proposal), validate end-to-end, then enable the hourly schedule.
+**Shipped (code):** schema + migration · escalation routing change (3 sites) · reasoning lib + routine run/backfill scripts · `print-routine-env.ts` · Inngest worker + approve/reject/list/detail APIs · To-Do list + detail dashboards · escalated observability rebuild · branches surface + owner squash-merge · sidebar links + bubbles · brain pages.
+
+**Operational (done):** migration applied · `agent-todo-routine` created at `claude.ai/code/routines` (Opus, schedule + API trigger) · routine env populated · `GITHUB_TOKEN` in Vercel + the routine env · Claude GitHub App confirmed on `thecyclecoder/shopcx` · backfill + first reasoning passes validated on live escalated tickets.
+
+**Hardening learned in production (2026-06-05/08), folded into [[../inngest/agent-todo-routine]]:**
+- Routine cloud env needs its **network policy to allowlist** the Supabase host (+ OpenAI/GitHub) — a blocked host makes every query silently return empty (looks like a healthy no-op). The run script now does a live-DB **preflight** that aborts loudly.
+- PRs open via the **GitHub REST API**, not the `gh` CLI (not installed in the routine sandbox).
+- Reasoning runs via a **direct Anthropic Messages API tool loop** (`read_file`/`grep`/`glob`), not the Agent SDK — the SDK spawns the `claude` CLI, which exits code 1 inside the routine (nested-session guard, `CLAUDECODE=1`).
+- `git apply` retries with `--recount` so miscounted LLM diffs still apply.
+- All three archive paths (auto-archiver, manual PATCH, merge) keep an escalated ticket from being archived-while-escalated; todo-close fully unescalates (`escalated_to`/`escalation_reason` cleared too).
 
 ## Related
 [[../tables/agent_todos]] · [[../inngest/agent-todo-routine]] · [[../inngest/unified-ticket-handler]] · [[../libraries/action-executor]] · [[../dashboard/tickets__todos]] · [[../dashboard/tickets__todos__id]] · [[../dashboard/tickets__escalated]] · [[../dashboard/branches]] · [[ticket-lifecycle]] · [[ai-learning]] · [[../customer-voice]] · [[../operational-rules]]

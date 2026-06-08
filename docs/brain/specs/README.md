@@ -10,26 +10,13 @@ Single source of truth for what's being built next, what's parked, and what just
 
 ---
 
-## Active project 1 — Agent To-Do system 🚧
-
-**Lifecycle:** [[../lifecycles/agent-todo-system]] (spec folded here) · **Spec:** [agent-todo-system.md](agent-todo-system.md) (kept until the routine is live)
-
-**Why this matters:** replaces 2-3 hours/day of synchronous ticket handling with a 30-min routine that proposes fixes (customer replies + actions + Sonnet rules + brain edits + code patches + AI-analysis corrections) into an approval queue on `/dashboard/tickets/todos`. Owner + admin approve in batch; execution is gated, role-scoped, and drift-checked. Customer-facing approval auto-closes the ticket. Reject = bring to Claude chat. **This is the common feedback surface for projects 2-4** — structural fixes those projects surface route back through the To-Do queue as `brain_doc_edit` / `code_change` / `sonnet_prompt_*` todos.
-
-**Shipped (code, `tsc` clean):** schema + migration `20260604190000_agent_todos.sql`; escalation routing change (3 sites in [[../inngest/unified-ticket-handler]]); reasoning lib + routine/backfill scripts; `print-routine-env.ts`; Inngest worker `agent-todo-execute` + approve/reject/list/detail APIs; To-Do list + detail dashboards; escalated observability rebuild; branches surface; sidebar links + bubbles; brain pages ([[../tables/agent_todos]], [[../inngest/agent-todo-routine]], [[../dashboard/tickets__todos]], [[../dashboard/tickets__todos__id]], [[../dashboard/tickets__escalated]], [[../dashboard/branches]]).
-
-**Open sub-work (operational — can't be done from code):**
-- ⏳ Apply the migration (`supabase db push`).
-- ⏳ Create `agent-todo-routine` at `claude.ai/code/routines` (repo, Opus, hourly + API trigger, env via `npx tsx scripts/print-routine-env.ts | pbcopy`, `claude/`-only branch policy). Set `AGENT_TODO_ROUTINE_TRIGGER_URL` + `GITHUB_TOKEN` in Vercel; confirm Claude GitHub App on `thecyclecoder/shopcx`.
-- ⏳ Run `npx tsx scripts/agent-todo-backfill.ts` for the currently-escalated tickets, validate, then enable the hourly schedule. Then fold + delete the spec.
-
-## Active project 2 — Storefront 🚧
+## Active project 1 — Storefront 🚧
 
 **Lifecycle:** [[../lifecycles/storefront-checkout]]
 
 **Why this matters:** owning the checkout removes the 3% Shopify txn fee, unlocks AOV boosters + custom sub-conversion logic, and prevents the hidden-parallel-sub pattern that bites us repeatedly.
 
-**Feedback surface:** bugs + structural gaps this project surfaces in tickets route back through the [[../lifecycles/agent-todo-system]] queue (project 1) as `code_change` / `brain_doc_edit` todos.
+**Feedback surface:** bugs + structural gaps this project surfaces in tickets route back through the [[../lifecycles/agent-todo-system]] queue (now shipped — [[../lifecycles/agent-todo-system]]) as `code_change` / `brain_doc_edit` todos.
 
 **Sub-phases shipped:**
 - PDP pixel, cart create + server-validated pricing
@@ -45,13 +32,13 @@ Single source of truth for what's being built next, what's parked, and what just
 
 ---
 
-## Active project 3 — Customer portal 🚧
+## Active project 2 — Customer portal 🚧
 
 **Lifecycle:** [[../lifecycles/customer-portal]]
 
 **Why this matters:** the in-house portal is replacing the Shopify-extension surface. Once it owns full sub-management it can do things the Shopify ext can't — better cancel-save UX, in-portal storefront flows, loyalty redemption, payment update without leaving the page.
 
-**Feedback surface:** portal bugs + gaps surfaced in tickets route back through the [[../lifecycles/agent-todo-system]] queue (project 1) as `code_change` / `brain_doc_edit` todos.
+**Feedback surface:** portal bugs + gaps surfaced in tickets route back through the [[../lifecycles/agent-todo-system]] queue (now shipped — [[../lifecycles/agent-todo-system]]) as `code_change` / `brain_doc_edit` todos.
 
 **Sub-phases shipped (per lifecycle page):**
 - Both surfaces (Shopify extension + in-house mini-site) wired
@@ -65,7 +52,7 @@ Single source of truth for what's being built next, what's parked, and what just
 
 ---
 
-## Active project 4 — Ad builder tool 🚧
+## Active project 3 — Ad builder tool 🚧
 
 **Lifecycle:** [[../lifecycles/ad-render]]
 
@@ -105,6 +92,7 @@ Single source of truth for what's being built next, what's parked, and what just
 
 ## Recently shipped (delete from this index after the next pass)
 
+- ✅ **Agent To-Do system** (2026-06-08) — live end-to-end: the hourly routine reasons over escalated tickets, proposes todos into the `/dashboard/tickets/todos` approval queue, customer-facing approvals execute via the Inngest worker, and system-level todos open `claude/*` PRs that owners squash-merge from `/dashboard/branches`. The common feedback surface for the other projects. Now in [[../lifecycles/agent-todo-system]]; spec folded + deleted.
 - ✅ **Prompt-learning auto-review** (2026-06-03) — now in [[../lifecycles/ai-learning]].
 - ✅ **Demographic enrichment lifecycle** (2026-06-03) — now in [[../lifecycles/demographic-enrichment]].
 - ✅ **Product Intelligence Engine, ShopGrowth removal** (2026-06-03) — now in [[../lifecycles/product-intelligence]].
