@@ -178,9 +178,23 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
     const contract = transformSubscription(sub, productMap);
     const pricing = await enrichContractPricing(auth.workspaceId, sub, contract);
 
+    // Surface the live coupon(s) so the detail screen's Coupon card can show
+    // them + a Remove button (it loads from this list endpoint). Normalize both
+    // shapes — internal {code,type,value} and Appstle {id,title,valueType,value}.
+    const appliedDiscounts = ((sub.applied_discounts as Array<Record<string, unknown>>) || []).map((d) => ({
+      id: (d.id as string) ?? null,
+      code: (d.code as string) ?? (d.title as string) ?? null,
+      title: (d.code as string) ?? (d.title as string) ?? null,
+      type: (d.type as string) ?? null,
+      value: d.value ?? null,
+      valueType: (d.valueType as string) ?? null,
+    }));
+
     const enriched = {
       ...contract,
       pricing,
+      appliedDiscounts,
+      appliedDiscount: appliedDiscounts[0] || null,
       crisisBanner: crisisMap[sub.id] || null,
       portalState: {
         bucket,

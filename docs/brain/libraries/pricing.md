@@ -43,7 +43,9 @@ Items reference the **variant UUID** (`product_variants.id`), never the Shopify 
 - `enrichContractPricing(...)` — API-handler wrapper; writes `currentPrice` + `basePrice` onto `contract.lines`. Used by [[portal__handlers__subscriptions]] (list) and [[portal__handlers__subscription-detail]].
 - `page.tsx` (mini-site server render) calls `priceSubscription` directly and maps onto `PortalSubscription.items[].{price_cents, base_price_cents}` + `pricing`. **The mini-site list paints from page.tsx, not the API handler — both paths must price.**
 
-**Discount pills** (`pricing.discounts`): `{kind, label}` — `25% Subscribe & Save`, `8% OFF Buy 2` (active quantity-break tier), `Free Shipping`, plus a `coupon` pill appended from `applied_discounts`.
+**Discount pills** (`pricing.discounts`): `{kind, label}` — `25% Subscribe & Save`, `8% OFF Buy 2` (active quantity-break tier), `Free Shipping`, plus a `coupon` pill appended from `applied_discounts`. Pills render in a row under the per-delivery total on **both** the list card and the detail header, and **re-derive on mutation** — the detail screen reloads from the list endpoint after every action, so swapping a product or changing quantity updates the tier (e.g. Buy 2 → Buy 3).
+
+**Coupon card (one coupon per sub):** the detail screen's Coupon card reads `appliedDiscounts` (surfaced by the list handler in both shapes). When a coupon is live it shows it with a **Remove** button and hides the apply input — the customer must remove the current coupon before applying a different one. Remove sends both `discountId` (Appstle) and `discountCode` (internal coupons have no id).
 
 **Coupon normalization:** `applied_discounts` comes in two shapes — the internal coupon engine's `{ type: "percentage"|"fixed_amount", value }` and the Appstle-synced `{ valueType: "PERCENTAGE"|"FIXED_AMOUNT", value }`. The display layer handles both (read-only, no cycle consumption) so an Appstle sub's coupon shows in its total. Billing uses the authoritative [[coupons]] `computeAppliedDiscountCents` (internal shape only) — Appstle coupons are charged by Appstle.
 

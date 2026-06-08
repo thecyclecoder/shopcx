@@ -89,6 +89,14 @@ export interface Contract {
     recoveryStatus?: string | null;
   };
   crisisBanner?: { type?: string; message?: string } | null;
+  pricing?: {
+    subtotal_cents: number;
+    discount_cents: number;
+    shipping_cents: number;
+    total_cents: number;
+    free_shipping: boolean;
+    pills: Array<{ kind: string; label: string }>;
+  } | null;
 }
 
 interface CatalogVariant {
@@ -291,10 +299,22 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
           <div className="text-left text-sm text-zinc-500 sm:text-right">
             <div>{cadence}</div>
             <div className="mt-0.5 font-medium text-zinc-700">
-              ${(subtotalCents / 100).toFixed(2)} per delivery
+              ${((contract.pricing?.total_cents ?? subtotalCents) / 100).toFixed(2)} per delivery
             </div>
           </div>
         </header>
+        {(contract.pricing?.pills?.length ?? 0) > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-5 pb-4 pt-4">
+            {contract.pricing!.pills.map((pill, i) => (
+              <span
+                key={i}
+                className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold ${detailPillClasses(pill.kind)}`}
+              >
+                {pill.label}
+              </span>
+            ))}
+          </div>
+        )}
       </article>
 
       {/* Items + per-line actions — shipping protection has its own
@@ -446,6 +466,13 @@ function ItemsActionsCard({
 }
 
 // ─────────────────────────── line components ────────────────────────
+
+/** Discount-pill color by kind — matches the subscriptions list. */
+function detailPillClasses(kind: string): string {
+  if (kind === "free_shipping") return "bg-sky-50 text-sky-700";
+  if (kind === "coupon") return "bg-amber-50 text-amber-700";
+  return "bg-emerald-50 text-emerald-700"; // sns + quantity_break
+}
 
 /** Price cell — shows the charged total, with the full (pre-discount) price
  *  struck through above it when a quantity break / S&S discount applies. */
@@ -1762,7 +1789,7 @@ function CouponCard({ contract, primaryColor, onMutate, action }: {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ contractId: contract.id, discountId: d.id, mode: "remove" }),
+        body: JSON.stringify({ contractId: contract.id, discountId: d.id, discountCode: d.code || d.title, mode: "remove" }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.error) {
@@ -1855,8 +1882,8 @@ function CouponCard({ contract, primaryColor, onMutate, action }: {
         </ul>
       )}
 
-      {hasCode ? null : hasManual ? (
-        <p className="text-sm text-zinc-600">Remove the existing discount to apply a coupon code.</p>
+      {allDiscounts.length > 0 ? (
+        <p className="text-sm text-zinc-600">Remove the current coupon to apply a different one.</p>
       ) : (
         <>
           <div className="flex gap-2">
