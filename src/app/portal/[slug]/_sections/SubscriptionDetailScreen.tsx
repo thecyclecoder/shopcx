@@ -1152,8 +1152,15 @@ function PauseCard({ contract, primaryColor, onMutate, action }: {
   }
   return (
     <ActionCard title="Pause subscription" subtitle="Take a break without losing your subscriber perks.">
-      <PrimaryButton busy={busy} onClick={() => doPause(30)} primaryColor={primaryColor}>Pause 30 days</PrimaryButton>
-      <GhostButton busy={busy} onClick={() => doPause(60)}>Pause 60 days</GhostButton>
+      {/* Stack on mobile, sit side-by-side (50/50) on desktop. */}
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="sm:flex-1">
+          <PrimaryButton busy={busy} onClick={() => doPause(30)} primaryColor={primaryColor}>Pause 30 days</PrimaryButton>
+        </div>
+        <div className="sm:flex-1">
+          <GhostButton busy={busy} onClick={() => doPause(60)}>Pause 60 days</GhostButton>
+        </div>
+      </div>
     </ActionCard>
   );
 }
