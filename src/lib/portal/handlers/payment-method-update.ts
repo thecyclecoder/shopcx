@@ -88,7 +88,7 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
   if (doMigrate) {
     try {
       const { migrateCustomerAppstleSubsToInternal } = await import("@/lib/migrate-to-internal");
-      const mig = await migrateCustomerAppstleSubsToInternal(auth.workspaceId, customer.id);
+      const mig = await migrateCustomerAppstleSubsToInternal(auth.workspaceId, customer.id, { isRecovery: recover });
       migratedCount = mig.migrated.length;
       if (mig.failed.length) console.error("[portal/payment] migration failures:", mig.failed);
     } catch (e) {

@@ -51,6 +51,7 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "/dashboard/customers", label: "Profiles", icon: ICONS.customers },
       { href: "/dashboard/demographics", label: "Demographics", icon: "M2.25 18L9 11.25l4.306 4.306a11.95 11.95 0 015.814-5.518l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941", adminOnly: true },
       { href: "/dashboard/subscriptions", label: "Subscriptions", icon: ICONS.subscriptions },
+      { href: "/dashboard/migrations", label: "Migrations", icon: "M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 00-3.7-3.7 48.678 48.678 0 00-7.324 0 4.006 4.006 0 00-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3l-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 003.7 3.7 48.656 48.656 0 007.324 0 4.006 4.006 0 003.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3l-3 3", ownerOnly: true },
       { href: "/dashboard/orders", label: "Orders", icon: ICONS.orders },
       { href: "/dashboard/returns", label: "Returns", icon: ICONS.returns },
       { href: "/dashboard/replacements", label: "Replacements", icon: "M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 00-3.7-3.7 48.678 48.678 0 00-7.324 0 4.006 4.006 0 00-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3l-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 003.7 3.7 48.656 48.656 0 007.324 0 4.006 4.006 0 003.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3l-3 3" },

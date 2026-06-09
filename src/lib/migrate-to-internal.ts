@@ -151,7 +151,11 @@ export async function ensureGroupMigratedIfBillable(workspaceId: string, custome
   return r.migrated.length;
 }
 
-export async function migrateCustomerAppstleSubsToInternal(workspaceId: string, customerId: string): Promise<MigrateResult> {
+export async function migrateCustomerAppstleSubsToInternal(
+  workspaceId: string,
+  customerId: string,
+  opts: { isRecovery?: boolean } = {},
+): Promise<MigrateResult> {
   const admin = createAdminClient();
   const result: MigrateResult = { migrated: [], skipped: [], failed: [] };
 
@@ -243,6 +247,28 @@ export async function migrateCustomerAppstleSubsToInternal(workspaceId: string, 
       if (flipErr) { result.failed.push({ contractId, error: `flip failed (re-run to recover): ${flipErr.message}` }); continue; }
 
       result.migrated.push({ contractId, subId: String(sub.id), billableCustomerId });
+
+      // Monitor: record + verify this migration. Pre-migration charge = sum of
+      // the live Appstle per-line charge (products only). Non-fatal.
+      try {
+        const liveLines = liveUsable ? ((live.lines?.nodes as Array<Record<string, unknown>>) || []) : [];
+        const preCharge = liveLines.reduce((s, l) => {
+          const amt = Math.round(parseFloat(String((l.currentPrice as Record<string, unknown> | undefined)?.amount ?? "0")) * 100);
+          return s + amt * Number(l.quantity || 1);
+        }, 0);
+        const { recordMigrationAudit, verifyMigration } = await import("@/lib/migration-audit");
+        const auditId = await recordMigrationAudit({
+          workspaceId,
+          subscriptionId: String(sub.id),
+          appstleContractId: contractId,
+          internalContractId,
+          preMigrationChargeCents: preCharge,
+          isRecovery: !!opts.isRecovery,
+        });
+        if (auditId) await verifyMigration(auditId);
+      } catch (e) {
+        console.error(`[migrate] audit failed (non-fatal) for ${contractId}:`, e instanceof Error ? e.message : e);
+      }
     } catch (e) {
       result.failed.push({ contractId, error: e instanceof Error ? e.message : String(e) });
     }

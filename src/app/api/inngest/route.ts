@@ -51,6 +51,7 @@ import {
   internalSubscriptionRenewalCron,
   internalSubscriptionRenewalAttempt,
 } from "@/lib/inngest/internal-subscription-renewals";
+import { migrationAuditRetryCron } from "@/lib/inngest/migration-audit-retry";
 import { returnsProcessDelivery, returnsIssueRefund } from "@/lib/inngest/returns";
 import { deliveryNightlyAudit } from "@/lib/inngest/delivery-audit";
 import { deliverPendingSends } from "@/lib/inngest/deliver-pending-send";
@@ -140,6 +141,7 @@ export const { GET, POST, PUT } = serve({
     amplifierWebhookProcess,
     internalSubscriptionRenewalCron,
     internalSubscriptionRenewalAttempt,
+    migrationAuditRetryCron,
     unifiedTicketHandler,
     returnsProcessDelivery,
     returnsIssueRefund,
