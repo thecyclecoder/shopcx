@@ -33,6 +33,18 @@ export async function handlePaymentMethodEvent(
     return;
   }
 
+  // Mirror the customer's Shopify cards into customer_payment_methods so the
+  // portal / dashboard / orchestrator can see them. Dunning rotation reads
+  // cards live from Shopify, but everything else reads this table — and it
+  // was Braintree-only until now, so Appstle customers' cards were invisible.
+  try {
+    const { syncShopifyPaymentMethods } = await import("@/lib/dunning");
+    const { synced } = await syncShopifyPaymentMethods(workspaceId, customer.id, customerId);
+    console.log(`Payment method webhook: synced ${synced} Shopify card(s) for customer ${customerId}`);
+  } catch (err) {
+    console.error("Payment method webhook: card sync failed (non-fatal):", err);
+  }
+
   // Auto-switch all active subscriptions to the new payment method
   if (paymentMethodId) {
     const { data: activeSubs } = await admin
@@ -55,20 +67,25 @@ export async function handlePaymentMethodEvent(
     }
   }
 
-  // Check if this customer has any active dunning cycles
+  // Check if this customer has any dunning cycles worth recovering.
+  // 'exhausted' is included on purpose: a sub that dunning *cancelled*
+  // leaves its cycle 'exhausted', and dunning/new-card-recovery is built to
+  // reactivate those (it resumes the cancelled sub + bills the new card).
+  // Gating only on active/skipped meant a customer adding a card after their
+  // sub was cancelled never auto-reactivated — the exact case we kept hitting.
   const { data: activeCycles } = await admin
     .from("dunning_cycles")
     .select("id")
     .eq("workspace_id", workspaceId)
     .eq("customer_id", customer.id)
-    .in("status", ["active", "skipped"]);
+    .in("status", ["active", "skipped", "exhausted"]);
 
   if (!activeCycles?.length) {
-    console.log(`Payment method webhook: no active dunning cycles for customer ${customerId}`);
+    console.log(`Payment method webhook: no recoverable dunning cycles for customer ${customerId}`);
     return;
   }
 
-  console.log(`Payment method webhook: customer ${customerId} has ${activeCycles.length} active dunning cycle(s), triggering recovery`);
+  console.log(`Payment method webhook: customer ${customerId} has ${activeCycles.length} recoverable dunning cycle(s), triggering recovery`);
 
   // Fire dunning recovery event
   await inngest.send({

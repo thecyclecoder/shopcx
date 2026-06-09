@@ -107,6 +107,93 @@ export async function getCustomerPaymentMethods(
   return methods;
 }
 
+// ── Shopify → customer_payment_methods mirror ──
+
+/**
+ * Mirror a customer's Shopify Payments cards into customer_payment_methods
+ * with provider='shopify'. Dunning's card-rotation reads cards live from
+ * Shopify, but the portal / dashboard / Sonnet orchestrator read this
+ * table — so an Appstle customer's card was invisible to them (the table
+ * was Braintree-only). Called from the customer_payment_methods webhook so
+ * the card is captured the moment the customer adds it.
+ *
+ * Upserts keyed on (workspace_id, shopify_payment_method_id). Only
+ * non-revoked cards are captured (getCustomerPaymentMethods drops revoked
+ * ones). If the customer has no default active method yet, the first card
+ * captured becomes the default so renewal/portal have one to show.
+ */
+export async function syncShopifyPaymentMethods(
+  workspaceId: string,
+  customerId: string,
+  shopifyCustomerId: string,
+): Promise<{ synced: number }> {
+  const admin = createAdminClient();
+
+  let cards: PaymentMethod[];
+  try {
+    cards = await getCustomerPaymentMethods(workspaceId, shopifyCustomerId);
+  } catch (err) {
+    console.error("[syncShopifyPaymentMethods] Shopify fetch failed:", err);
+    return { synced: 0 };
+  }
+  if (!cards.length) return { synced: 0 };
+
+  const { data: existingDefault } = await admin
+    .from("customer_payment_methods")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", customerId)
+    .eq("is_default", true)
+    .eq("status", "active")
+    .maybeSingle();
+  let needsDefault = !existingDefault;
+
+  let synced = 0;
+  for (const card of cards) {
+    const fields = {
+      payment_type: "credit_card" as const,
+      card_brand: card.brand,
+      last4: card.last4,
+      expiration_month: card.expiryMonth ? String(card.expiryMonth).padStart(2, "0") : null,
+      expiration_year: card.expiryYear ? String(card.expiryYear) : null,
+      status: "active" as const,
+      updated_at: new Date().toISOString(),
+    };
+
+    // Check-then-write rather than upsert: the unique index on
+    // shopify_payment_method_id is partial (WHERE NOT NULL), which
+    // PostgREST's ON CONFLICT inference handles inconsistently.
+    const { data: existing } = await admin
+      .from("customer_payment_methods")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_payment_method_id", card.id)
+      .maybeSingle();
+
+    let error;
+    if (existing) {
+      ({ error } = await admin.from("customer_payment_methods").update(fields).eq("id", existing.id));
+    } else {
+      ({ error } = await admin.from("customer_payment_methods").insert({
+        workspace_id: workspaceId,
+        customer_id: customerId,
+        provider: "shopify",
+        shopify_payment_method_id: card.id,
+        is_default: needsDefault,
+        ...fields,
+      }));
+      if (!error && needsDefault) needsDefault = false; // only the first becomes default
+    }
+    if (error) {
+      console.error(`[syncShopifyPaymentMethods] write failed for ${card.id}:`, error.message);
+      continue;
+    }
+    synced++;
+  }
+
+  return { synced };
+}
+
 // ── Deduplication ──
 
 export function deduplicatePaymentMethods(methods: PaymentMethod[]): PaymentMethod[] {

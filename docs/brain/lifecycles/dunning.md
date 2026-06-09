@@ -7,7 +7,7 @@ When a subscription's billing attempt fails, we don't immediately email the cust
 - Trigger: Shopify `billing_attempt_failure` webhook → handler in `src/lib/dunning-webhook.ts`.
 - Brain: [[../inngest/dunning]] — four functions: payment-failed, new-card-recovery, billing-success, payday-retry-cron.
 - State: [[../tables/dunning_cycles]] (per-billing-cycle), [[../tables/payment_failures]] (per-attempt).
-- Card source: [[../tables/customer_payment_methods]] (synced from Shopify `customerPaymentMethods` query).
+- Card source: dunning rotation reads cards **live** from Shopify (`getCustomerPaymentMethods()` in `src/lib/dunning.ts`). Separately, the payment-method webhook mirrors them into [[../tables/customer_payment_methods]] (`provider='shopify'`) for portal/dashboard/orchestrator visibility — that table is NOT what rotation reads.
 - Subscription mutations: [[../integrations/appstle]].
 - Customer comms: [[../integrations/resend]] (payment update + recovery + paused emails).
 - Settings: [[../tables/workspaces]] (`dunning_enabled`, `dunning_max_card_rotations`, `dunning_payday_retry_enabled`, `dunning_cycle_1_action`, `dunning_cycle_2_action`).
@@ -72,8 +72,12 @@ The cycle row updates to `status='exhausted'` after action is taken.
 If during ANY of the above, the customer updates their card in Shopify:
 
 1. Shopify fires `customer_payment_methods/create` or `customer_payment_methods/update` webhook.
-2. Handler in `src/lib/dunning-webhook.ts` checks for active dunning cycles for this customer ([[../tables/dunning_cycles]] `status='active'`).
+2. Handler in `src/lib/dunning-webhook.ts`:
+   - **Mirrors the card** into [[../tables/customer_payment_methods]] via `syncShopifyPaymentMethods()` (`provider='shopify'`) so the portal / dashboard / orchestrator can see it. Dunning rotation reads cards live from Shopify, but everything else reads this table, and it was Braintree-only before — so Appstle customers' cards were invisible until captured here.
+   - Checks for recoverable dunning cycles ([[../tables/dunning_cycles]] `status IN ('active','skipped','exhausted')`).
 3. If any → fires `dunning/new-card-recovery`.
+
+**Gotcha (why this used to silently fail):** the cycle filter previously only matched `active`/`skipped`. But a sub that dunning *cancelled* leaves its cycle `exhausted` — so adding a card after cancellation never fired recovery, even though the recovery function is explicitly built to reactivate dunning-cancelled subs (Step 1b). `exhausted` is now included. (Fixed 2026-06-09.)
 
 [[../inngest/dunning]] `dunning-new-card-recovery`:
 
@@ -112,6 +116,10 @@ Querying this table reveals retry patterns + failure-code distribution — feeds
 ## Terminal error codes
 
 `isTerminalErrorCode()` in `src/lib/dunning.ts` short-circuits the flow for codes like `card_blocked`, `do_not_honor` after first occurrence — no point rotating to other cards from the same customer if the bank has hard-blocked transactions. Direct-jump to the cycle action.
+
+## Gotcha: Appstle `contract-external` returns a stale status after a write
+
+Right after `appstleSubscriptionAction(resume/pause/cancel)`, reading `subscription-contracts/contract-external/{id}` can return the **pre-change** status for a short window (Appstle eventual consistency). Don't use that read to verify a status change succeeded — it produces false negatives (we briefly believed a successfully-resumed sub was still `CANCELLED`). The authoritative signal that a resume worked is that `top-orders` returns a fresh QUEUED billing schedule. A `resume` on a dunning-cancelled contract **does** reactivate it (confirmed in the Appstle UI) — the contract is not terminal the way a raw Shopify cancel would be.
 
 ## Appstle settings that must be OFF
 
@@ -162,6 +170,7 @@ Configured per workspace in [[../tables/slack_notification_rules]].
 **Known gaps / not yet shipped:** None identified.
 
 **Recent activity:**
+- Payment-method webhook now (a) mirrors Shopify cards into customer_payment_methods (`provider='shopify'`) and (b) fires new-card-recovery for `exhausted` (dunning-cancelled) cycles, not just active/skipped — so adding a card after cancellation auto-reactivates. (2026-06-09)
 - `84eefddd` Drop Appstle payment-update email; restyle ours to look human
 - `d3a1ae28` Terminal+single-card billing failure: cancel without entering dunning
 - `39a1232e` Dunning cycle 2: cancel instead of indefinite pause + auto-reactivate

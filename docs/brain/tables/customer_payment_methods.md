@@ -11,8 +11,9 @@ Customer payment methods snapshot from Shopify (last4, brand, expiry). Used for 
 | `id` | `uuid` | — | PK · default: `gen_random_uuid()` |
 | `workspace_id` | `uuid` | — | → [[workspaces]].id |
 | `customer_id` | `uuid` | — | → [[customers]].id |
-| `braintree_customer_id` | `text` | — |  |
-| `braintree_payment_method_token` | `text` | — |  |
+| `braintree_customer_id` | `text` | ✓ | null for `provider='shopify'` rows |
+| `braintree_payment_method_token` | `text` | ✓ | null for `provider='shopify'` rows; UNIQUE |
+| `shopify_payment_method_id` | `text` | ✓ | Shopify CustomerPaymentMethod gid; set for `provider='shopify'` rows. UNIQUE per workspace (partial index) |
 | `payment_type` | `text` | — | default: `'credit_card'` |
 | `card_brand` | `text` | ✓ |  |
 | `last4` | `text` | ✓ |  |
@@ -71,7 +72,8 @@ const { count } = await admin.from("customer_payment_methods")
 
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **Two providers live here.** `provider='braintree'` rows (storefront / internal subs) carry a `braintree_payment_method_token` and are charged via Braintree. `provider='shopify'` rows (Appstle subs) carry a `shopify_payment_method_id` instead — the Braintree columns are null. A CHECK constraint requires at least one handle. Braintree charge paths filter by token/provider, so Shopify rows are inert to them — never charge a Shopify row through Braintree (the comment in the provider migration: "Braintree tokens are nonsense to Shopify and vice versa").
+- **Shopify rows are written by the payment-method webhook**, via `syncShopifyPaymentMethods()` in `src/lib/dunning.ts` (provider migration originally said only `/api/checkout` writes — that's stale; the webhook is now a second writer). Dunning card-rotation still reads cards **live from Shopify**, not from this table.
 
 ---
 

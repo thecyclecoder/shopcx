@@ -18,6 +18,14 @@ Core dunning logic: card rotation, payment method dedup, payday scheduling
 async function getCustomerPaymentMethods(workspaceId: string, shopifyCustomerId: string,) : Promise<PaymentMethod[]>
 ```
 
+### `syncShopifyPaymentMethods` — function
+
+```ts
+async function syncShopifyPaymentMethods(workspaceId: string, customerId: string, shopifyCustomerId: string,) : Promise<{ synced: number }>
+```
+
+Mirrors a customer's live Shopify cards into [[../tables/customer_payment_methods]] as `provider='shopify'` rows (check-then-write, keyed on `shopify_payment_method_id`). Called from the payment-method webhook ([[dunning-webhook]]). First card becomes default if the customer has none. See [[../lifecycles/dunning]] Phase 5.
+
 ### `deduplicatePaymentMethods` — function
 
 ```ts
