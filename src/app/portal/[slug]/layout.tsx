@@ -11,6 +11,39 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { notFound } from "next/navigation";
+import type { Metadata } from "next";
+
+/**
+ * Portal metadata — inherits the storefront favicon (so a branded domain never
+ * shows the ShopCX icon) and uses an account-area title/description instead of the
+ * generic ShopCX root metadata. noindex: the portal is a logged-in account surface.
+ */
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const { slug } = await params;
+  const admin = createAdminClient();
+  const { data: ws } = await admin
+    .from("workspaces")
+    .select("name, portal_config, storefront_favicon_url, storefront_logo_url")
+    .eq("help_slug", slug)
+    .maybeSingle();
+  if (!ws) return {};
+
+  const brand = (ws.name as string | null) || "Account";
+  const minisite = ((ws.portal_config as Record<string, unknown> | null)?.minisite || {}) as Record<string, unknown>;
+  const iconUrl =
+    (minisite.favicon_url as string | null) ||
+    (minisite.logo_url as string | null) ||
+    (ws.storefront_favicon_url as string | null) ||
+    (ws.storefront_logo_url as string | null) ||
+    null;
+
+  return {
+    title: `My Account · ${brand}`,
+    description: `Manage your ${brand} subscriptions, orders, payment methods, and rewards.`,
+    icons: iconUrl ? { icon: iconUrl, apple: iconUrl } : undefined,
+    robots: { index: false, follow: false },
+  };
+}
 
 export default async function PortalLayout({
   children,
