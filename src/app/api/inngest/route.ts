@@ -52,6 +52,7 @@ import {
   internalSubscriptionRenewalAttempt,
 } from "@/lib/inngest/internal-subscription-renewals";
 import { migrationAuditRetryCron } from "@/lib/inngest/migration-audit-retry";
+import { migrationIntegritySweepCron } from "@/lib/inngest/migration-integrity-sweep";
 import { returnsProcessDelivery, returnsIssueRefund } from "@/lib/inngest/returns";
 import { deliveryNightlyAudit } from "@/lib/inngest/delivery-audit";
 import { deliverPendingSends } from "@/lib/inngest/deliver-pending-send";
@@ -142,6 +143,7 @@ export const { GET, POST, PUT } = serve({
     internalSubscriptionRenewalCron,
     internalSubscriptionRenewalAttempt,
     migrationAuditRetryCron,
+    migrationIntegritySweepCron,
     unifiedTicketHandler,
     returnsProcessDelivery,
     returnsIssueRefund,
