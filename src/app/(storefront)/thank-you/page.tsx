@@ -54,6 +54,9 @@ export default async function ThankYouPage({ searchParams }: PageProps) {
     .eq("id", order.workspace_id)
     .single();
 
+  const { getMetaPixelId } = await import("@/lib/meta-capi");
+  const metaPixelId = await getMetaPixelId(order.workspace_id as string);
+
   return (
     <main className="min-h-screen bg-zinc-50">
       <ThankYouClient
@@ -71,6 +74,7 @@ export default async function ThankYouPage({ searchParams }: PageProps) {
           name: workspace?.name || "Store",
           logo_url: workspace?.storefront_logo_url || null,
           primary_color: workspace?.storefront_primary_color || "#18181b",
+          meta_pixel_id: metaPixelId,
         }}
       />
     </main>

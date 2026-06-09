@@ -47,6 +47,7 @@ interface Workspace {
   primary_color: string;
   storefront_domain: string | null;
   storefront_slug: string | null;
+  meta_pixel_id?: string | null;
   shipping_protection: {
     price_cents: number;
     title: string;
@@ -198,7 +199,7 @@ export function CheckoutClient({
   const [cardError, setCardError] = useState<string | null>(null);
 
   useEffect(() => {
-    initPixel({ workspaceId: workspace.id, customerId: cart.customer_id });
+    initPixel({ workspaceId: workspace.id, customerId: cart.customer_id, metaPixelId: workspace.meta_pixel_id || null });
     track("checkout_view", {
       cart_token: cart.token,
       line_item_count: cart.line_items.length,

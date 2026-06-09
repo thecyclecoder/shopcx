@@ -90,7 +90,9 @@ One foundation, three payoffs: the smart popup (Phase 4), chapter-performance an
 
 ---
 
-## Phase 3 — Meta pixel + CAPI ⏳
+## Phase 3 — Meta pixel + CAPI ✅
+
+> **Shipped (2026-06-09).** Browser `fbq` injected by [[../libraries/storefront-pixel]] `initMetaPixel` (fires ViewContent/AddToCart/InitiateCheckout/Purchase/Lead with `eventID = event_id`); server CAPI in [[../libraries/meta-capi]] (`sendCapiEvents`, hashed user_data, `deriveFbc`); fan-out cron [[../inngest/meta-capi-dispatch]] (seeds `event_dispatches`, sends, retries→dlq). Dedup via shared `event_id`. Pixel id threaded into PDP (page-data) + checkout + thank-you. **Resolved the audit's `checkout_completed` bug** — it was a dropped duplicate; the canonical `order_placed` (→ Purchase, CAPI-backstopped) fires from checkout right after the confirmed charge. **Operational:** a `meta_capi` event_sink row (pixel_id + encrypted access_token + optional test_event_code) must exist + be active per workspace; no settings UI yet (create via script). **Open question resolved:** chose the cron-sweep fan-out over a per-event Inngest emit.
 
 **Decision: run BOTH browser pixel and server CAPI, deduped** (CAPI-only = ~4/10 match quality because the browser pixel is what sets `_fbp`/`_fbc`). Meta's 2026 guidance for paid accounts. The whole CAPI layer is currently unbuilt.
 

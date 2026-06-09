@@ -25,6 +25,7 @@ interface Props {
   productId: string;
   productHandle: string;
   customerId?: string | null;
+  metaPixelId?: string | null;
 }
 
 interface CtaPayload {
@@ -39,9 +40,10 @@ export function StorefrontPixelInit({
   productId,
   productHandle,
   customerId,
+  metaPixelId,
 }: Props) {
   useEffect(() => {
-    initPixel({ workspaceId, customerId: customerId || null });
+    initPixel({ workspaceId, customerId: customerId || null, metaPixelId: metaPixelId || null });
 
     // ── pdp_view (always fires once) ──────────────────────────────
     track("pdp_view", {

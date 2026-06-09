@@ -129,6 +129,7 @@ export function StorefrontPage({
         workspaceId={data.workspace.id}
         productId={data.product.id}
         productHandle={data.product.handle}
+        metaPixelId={data.workspace.meta_pixel_id}
       />
       {/* Phase 2 instrumentation — observes [data-section] nodes for
           chapter_view/dwell, tracks scroll_depth + cta_click. No UI. */}

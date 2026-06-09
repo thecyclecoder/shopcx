@@ -424,6 +424,7 @@ export interface PageData {
     storefront_domain: string | null;
     shopify_myshopify_domain: string | null;
     support_email: string | null;
+    meta_pixel_id: string | null;
     design: {
       font_key: string | null;
       primary_color: string | null;
@@ -906,6 +907,11 @@ export async function getPageData(
     }
   }
 
+  // Meta browser pixel id (public — only the access token is secret) from
+  // the active meta_capi sink, so the storefront can fire fbq deduped with
+  // the server CAPI stream. Cheap indexed lookup.
+  const metaPixelId = await loadMetaPixelId(workspace.id);
+
   return {
     product: productWithBump as Product,
     link_group: linkGroup,
@@ -942,6 +948,7 @@ export async function getPageData(
       storefront_domain: workspace.storefront_domain,
       shopify_myshopify_domain: workspace.shopify_myshopify_domain,
       support_email: workspace.support_email,
+      meta_pixel_id: metaPixelId,
       design: {
         font_key: workspace.storefront_font || null,
         primary_color: workspace.storefront_primary_color || null,
@@ -958,6 +965,27 @@ export async function getPageData(
 // (added in Phase 2 sync). Local variable helps Typescript narrow.
 function extractShopifyProductId(p: Product & { shopify_product_id?: string }): string {
   return (p as { shopify_product_id?: string }).shopify_product_id || "";
+}
+
+/**
+ * Pixel id for the active Meta CAPI sink, if one is configured. The
+ * pixel_id is public (it's exposed in the browser fbq snippet on every
+ * Meta-tracked site) — only the access_token is secret, and that stays
+ * server-side in the encrypted sink config. Returns null when there's no
+ * active meta_capi sink, so the browser pixel simply doesn't load.
+ */
+async function loadMetaPixelId(workspaceId: string): Promise<string | null> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("event_sinks")
+    .select("config")
+    .eq("workspace_id", workspaceId)
+    .eq("sink_type", "meta_capi")
+    .eq("is_active", true)
+    .limit(1)
+    .maybeSingle();
+  const pixelId = (data?.config as { pixel_id?: string } | undefined)?.pixel_id;
+  return pixelId || null;
 }
 
 /**

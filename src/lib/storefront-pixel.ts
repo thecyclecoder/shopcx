@@ -67,6 +67,22 @@ let queue: QueuedEvent[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let listenersBound = false;
 let customerId: string | null = null;
+let metaPixelId: string | null = null;
+
+/**
+ * Map our first-party event types → Meta standard events. Events not in
+ * this map don't fire to fbq (chapter_view/dwell/scroll_depth are
+ * internal-only telemetry). Each fbq call reuses our event_id as
+ * `eventID` so the server CAPI twin (sent from the same storefront_events
+ * row id) deduplicates inside Meta's 48h window.
+ */
+const META_EVENT_MAP: Record<string, string> = {
+  pdp_view: "ViewContent",
+  add_to_cart: "AddToCart",
+  checkout_view: "InitiateCheckout",
+  order_placed: "Purchase",
+  lead_captured: "Lead",
+};
 
 /**
  * Initialize the pixel for the current page. Must be called once per
@@ -74,10 +90,11 @@ let customerId: string | null = null;
  * calls. Idempotent — calling repeatedly is safe; only the first call
  * captures attribution.
  */
-export function initPixel(opts: { workspaceId: string; customerId?: string | null }) {
+export function initPixel(opts: { workspaceId: string; customerId?: string | null; metaPixelId?: string | null }) {
   if (typeof window === "undefined") return;
   workspaceId = opts.workspaceId;
   if (opts.customerId) customerId = opts.customerId;
+  if (opts.metaPixelId) initMetaPixel(opts.metaPixelId);
 
   // Ensure anonymous_id cookie exists. Side-effect of getOrCreate.
   getOrCreateAnonymousId();
@@ -117,11 +134,69 @@ export function track(eventType: string, meta?: EventMeta) {
   }
   queue.push(event);
 
+  // Browser-side Meta pixel twin (deduped with the server CAPI event via
+  // the shared event_id). Fires only for mapped standard events.
+  fireMetaPixel(eventType, event.event_id, meta);
+
   if (eventType === "order_placed") {
     flushSync();
   } else {
     scheduleFlush();
   }
+}
+
+/**
+ * Inject Meta's pixel base snippet once + init the pixel. Idempotent —
+ * a second call is a no-op. Safe to call before any track(); fbq queues
+ * calls internally until the script loads.
+ */
+function initMetaPixel(pixelId: string) {
+  if (typeof window === "undefined" || metaPixelId) return;
+  metaPixelId = pixelId;
+  const w = window as unknown as { fbq?: ((...args: unknown[]) => void) & { callMethod?: unknown; queue?: unknown[]; loaded?: boolean; version?: string; push?: unknown } };
+  if (!w.fbq) {
+    // Standard Meta pixel bootstrap (the snippet Meta ships), inlined so
+    // we control load timing and don't depend on an external <Script>.
+    const fbq = function (...args: unknown[]) {
+      const f = fbq as unknown as { callMethod?: (...a: unknown[]) => void; queue: unknown[] };
+      if (f.callMethod) f.callMethod(...args);
+      else f.queue.push(args);
+    } as unknown as { callMethod?: unknown; queue: unknown[]; push: unknown; loaded: boolean; version: string };
+    fbq.queue = [];
+    fbq.push = fbq;
+    fbq.loaded = true;
+    fbq.version = "2.0";
+    w.fbq = fbq as unknown as typeof w.fbq;
+    const s = document.createElement("script");
+    s.async = true;
+    s.src = "https://connect.facebook.net/en_US/fbevents.js";
+    document.head.appendChild(s);
+  }
+  w.fbq?.("init", pixelId);
+  // PageView is the canonical Meta base event; ViewContent fires
+  // separately from our pdp_view track() with the dedupe event_id.
+  w.fbq?.("track", "PageView");
+}
+
+function fireMetaPixel(eventType: string, eventId: string, meta?: EventMeta) {
+  if (!metaPixelId || typeof window === "undefined") return;
+  const metaEvent = META_EVENT_MAP[eventType];
+  if (!metaEvent) return;
+  const w = window as unknown as { fbq?: (...args: unknown[]) => void };
+  if (!w.fbq) return;
+  // custom_data — value/currency/contents when present in our payload.
+  const m = meta || {};
+  const customData: Record<string, unknown> = {};
+  const cents = typeof m.total_cents === "number" ? m.total_cents : typeof m.value_cents === "number" ? m.value_cents : null;
+  if (cents != null) {
+    customData.value = Math.round(cents) / 100;
+    customData.currency = (m.currency as string) || "USD";
+  }
+  if (m.product_id) customData.content_ids = [m.product_id];
+  if (m.variant_id || m.primary_variant_id) {
+    customData.content_type = "product";
+  }
+  w.fbq("track", metaEvent, customData, { eventID: eventId });
 }
 
 /**

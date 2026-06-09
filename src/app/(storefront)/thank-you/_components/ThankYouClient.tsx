@@ -34,16 +34,20 @@ interface Workspace {
   name: string;
   logo_url: string | null;
   primary_color: string;
+  meta_pixel_id?: string | null;
 }
 
 export function ThankYouClient({ order, workspace }: { order: OrderProps; workspace: Workspace }) {
   useEffect(() => {
-    initPixel({ workspaceId: workspace.id, customerId: null });
-    track("checkout_completed", {
-      order_id: order.id,
-      order_number: order.order_number,
-      total_cents: order.total_cents,
-    });
+    // The canonical order_placed event (→ Meta Purchase, with the server
+    // CAPI backstop) fires from the checkout page immediately after the
+    // confirmed charge — the most reliable capture point, since the order
+    // exists even if this redirect fails to load. We DON'T re-fire it here
+    // (the old `checkout_completed` was dropped by the pixel allowlist and
+    // would double-count Purchase if revived). initPixel still fires Meta
+    // PageView on the confirmation page.
+    initPixel({ workspaceId: workspace.id, customerId: null, metaPixelId: workspace.meta_pixel_id || null });
+    void track; // retained import; no thank-you-side funnel event
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

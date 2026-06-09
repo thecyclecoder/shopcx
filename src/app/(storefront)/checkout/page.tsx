@@ -93,6 +93,11 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
     .eq("id", cart.workspace_id)
     .single();
 
+  // Meta browser pixel id (public) so checkout fires InitiateCheckout
+  // deduped with the server CAPI stream.
+  const { getMetaPixelId } = await import("@/lib/meta-capi");
+  const metaPixelId = await getMetaPixelId(cart.workspace_id as string);
+
   // If the customer already identified via /api/checkout/identify, pull
   // their first/last so the contact-card name fields re-hydrate after
   // refresh. Cart already carries email/phone; first/last live on the
@@ -150,6 +155,7 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
           primary_color: workspace?.storefront_primary_color || "#18181b",
           storefront_domain: workspace?.storefront_domain || null,
           storefront_slug: workspace?.storefront_slug || null,
+          meta_pixel_id: metaPixelId,
           shipping_protection: workspace?.shipping_protection_enabled
             ? {
                 price_cents: (workspace?.shipping_protection_price_cents as number) || 495,
