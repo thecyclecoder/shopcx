@@ -65,7 +65,7 @@ interface KlaviyoListResponse {
   links?: { self?: string; next?: string; prev?: string };
 }
 
-async function getKlaviyoCredentials(workspaceId: string): Promise<{ apiKey: string; publicKey: string | null } | null> {
+export async function getKlaviyoCredentials(workspaceId: string): Promise<{ apiKey: string; publicKey: string | null } | null> {
   const admin = createAdminClient();
   const { data: ws } = await admin
     .from("workspaces")

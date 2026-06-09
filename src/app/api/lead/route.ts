@@ -41,6 +41,10 @@ interface Body {
   sms_consent?: boolean;
   source?: string;
   anonymous_id?: string | null;
+  /** Coupon minted for this lead (popup flow), stamped on the lead row. */
+  coupon_code?: string | null;
+  /** Quiz answers (Phase 4) — persisted to Klaviyo + the lead for segmentation. */
+  properties?: Record<string, unknown>;
 }
 
 export async function POST(request: Request) {
@@ -107,23 +111,63 @@ export async function POST(request: Request) {
     context: ctx,
   });
 
-  // Append to storefront_leads for capture-event analytics. Best-effort
-  // (table may not exist on all workspaces yet); failures are non-fatal.
+  // Resolve the session id (storefront_leads.session_id → storefront_sessions)
+  // so the lead threads back to the exact capture session.
+  let sessionId: string | null = null;
+  if (body.anonymous_id) {
+    const { data: sess } = await admin
+      .from("storefront_sessions")
+      .select("id")
+      .eq("workspace_id", body.workspace_id)
+      .eq("anonymous_id", body.anonymous_id)
+      .maybeSingle();
+    sessionId = (sess?.id as string) || null;
+  }
+
+  // Upsert storefront_leads. The previous code wrote boolean
+  // email_consent/sms_consent columns that DON'T EXIST (they're
+  // *_consent_at timestamps) and used .insert(), so a repeat email threw
+  // a unique violation — net result: no lead rows were ever written.
+  // Fix: map consent → *_consent_at, stamp session_id, upsert on
+  // (workspace_id, email).
+  const nowIso = new Date().toISOString();
   await admin
     .from("storefront_leads")
-    .insert({
-      workspace_id: body.workspace_id,
-      customer_id: customer.id,
-      anonymous_id: body.anonymous_id || null,
+    .upsert(
+      {
+        workspace_id: body.workspace_id,
+        customer_id: customer.id,
+        anonymous_id: body.anonymous_id || null,
+        session_id: sessionId,
+        email,
+        phone: body.phone || null,
+        email_consent_at: body.email_consent ? nowIso : null,
+        sms_consent_at: body.sms_consent && body.phone ? nowIso : null,
+        source: body.source || "unknown",
+        coupon_code_issued: body.coupon_code || null,
+        updated_at: nowIso,
+      },
+      { onConflict: "workspace_id,email" },
+    )
+    .then(() => undefined, (e) => {
+      console.warn("[lead] storefront_leads upsert failed:", e?.message || e);
+    });
+
+  // Fire Lead to Klaviyo (profile upsert + consent). Fire-and-forget —
+  // never block the response on Klaviyo. The Meta CAPI Lead is handled by
+  // the client `lead_captured` storefront event flowing through the CAPI
+  // cron (deduped on event_id), so we don't double-fire it here.
+  void import("@/lib/klaviyo-lead").then(({ upsertKlaviyoLead }) =>
+    upsertKlaviyoLead(body.workspace_id!, {
       email,
       phone: body.phone || null,
-      email_consent: !!body.email_consent,
-      sms_consent: !!body.sms_consent,
-      source: body.source || "unknown",
-    })
-    // Don't await an error response — table may not yet be migrated in
-    // every workspace + the lead is already created on customers.
-    .then(() => undefined, () => undefined);
+      firstName: body.first_name || null,
+      lastName: body.last_name || null,
+      emailConsent: !!body.email_consent,
+      smsConsent: !!(body.sms_consent && body.phone),
+      properties: { source: body.source || "unknown", ...(body.properties || {}) },
+    }).catch(() => undefined),
+  );
 
   return NextResponse.json({ customer_id: customer.id, created });
 }

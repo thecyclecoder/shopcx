@@ -146,18 +146,20 @@ Multi-step, **saving at each step** (progressive capture — a partial lead is s
 
 - ⏳ **Abandonment fallback (email-only leads):** if they finish the **email** step but **not** the **phone** step, wait **5 minutes** (Inngest delayed job) then **email** them the coupon code. **Do NOT auto-apply to the session** (no validated mobile / they've left). Recovers the lead's value without requiring phone.
 
-### 4f. Lead-capture plumbing fixes
-- ⏳ Fix `/api/lead` insert (`lead/route.ts:120-121`): map `email_consent`→`email_consent_at`, same SMS; switch `.insert()`→`.upsert(onConflict: workspace_id,email)`; stamp `session_id`. (Today no lead rows are written.)
-- ⏳ On capture: fire **Lead** to Klaviyo (profile upsert/subscribe) + **Meta CAPI Lead** (hashed em/ph + fbp/fbc from session). Identity linkage (`stitchVisitor` + `sid` cookie) already matches lead→later purchase — no new work there.
+### 4f. Lead-capture plumbing fixes ✅ (shipped 2026-06-09)
+- ✅ Fixed `/api/lead`: mapped `email_consent`/`sms_consent`→`*_consent_at` (the boolean columns never existed — the insert silently errored, so **no lead rows were ever written**), `.insert()`→`.upsert(onConflict: workspace_id,email)`, stamped `session_id` (resolved from `storefront_sessions`), added `coupon_code_issued` + `properties` passthrough.
+- ✅ On capture: `upsertKlaviyoLead` ([[../libraries/klaviyo-lead]]) fires Lead to Klaviyo (profile-import + subscription consent), fire-and-forget. **Meta CAPI Lead** flows via the client `lead_captured` storefront event → the CAPI cron (deduped on `event_id`), so it's not double-fired server-side. Identity linkage (`stitchVisitor` + `sid`) already matches lead→purchase.
 
 ---
 
-## Phase 5 — Checkout hardening + smoke test ⏳
+## Phase 5 — Checkout hardening + smoke test ✅ (smoke test = manual)
 
-- ⏳ One real live end-to-end **subscribe purchase** through checkout (Braintree sale + Avalara commit + fulfillment + internal sub created).
-- ⏳ Alert on `add_to_sub` failure *after* a successful charge (`route.ts:540`, currently log-only — customer charged, items don't join sub).
-- ⏳ Alert on Avalara error → silent $0 tax (`route.ts:229-234`).
-- ⏳ Discount-code at checkout (`cart/route.ts:201` stub) — now covered by the Phase 1b coupon engine.
+> **Shipped (2026-06-09).** New `notifyOpsAlert` (direct owner/admin Slack DM for money-critical failures) wired into both checkout sites: post-charge `add_to_sub` append failure and Avalara $0-tax (commit-failed AND threw). `/api/lead` upsert bug fixed (the real Phase 4f fix — see below). The one remaining item, a **real live end-to-end subscribe purchase**, requires a live Braintree charge and is a **manual** verification step (can't be run from the build environment).
+
+- ✅ Alert on `add_to_sub` failure *after* a successful charge (was log-only — customer charged, items don't join sub) → `notifyOpsAlert` critical DM.
+- ✅ Alert on Avalara error → silent $0 tax → `notifyOpsAlert` critical DM (both the `success:false` and thrown paths).
+- ⬜ One real live end-to-end **subscribe purchase** — **manual** (Braintree sale + Avalara commit + fulfillment + internal sub).
+- ✅ Discount-code at checkout — covered by the Phase 1b coupon engine.
 
 ---
 

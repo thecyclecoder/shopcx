@@ -226,11 +226,35 @@ export async function POST(request: NextRequest) {
           taxCents = avalaraResult.totalTaxCents ?? 0;
           avalaraTransactionCode = avalaraResult.transactionCode || orderNumber;
         } else {
+          // Tax silently fell to $0 on a tax-enabled workspace — we
+          // under-collected and owe the difference. Alert so it's caught
+          // the same day, not at filing time.
           console.warn(`[checkout] Avalara commit failed for ${orderNumber}:`, avalaraResult.error);
+          void import("@/lib/notify-ops-alert").then(({ notifyOpsAlert }) =>
+            notifyOpsAlert(cart.workspace_id, {
+              title: "Avalara tax failed — order billed with $0 tax",
+              severity: "critical",
+              lines: [
+                `Order \`${orderNumber}\` committed with *$0 tax* because the Avalara call failed on a tax-enabled workspace.`,
+                `Error: ${avalaraResult.error || "unknown"}`,
+                `Action: review + amend the Avalara transaction.`,
+              ],
+            }).catch(() => undefined),
+          );
         }
       }
     } catch (err) {
       console.warn(`[checkout] Avalara commit threw for ${orderNumber}:`, err);
+      void import("@/lib/notify-ops-alert").then(({ notifyOpsAlert }) =>
+        notifyOpsAlert(cart.workspace_id, {
+          title: "Avalara tax errored — order billed with $0 tax",
+          severity: "critical",
+          lines: [
+            `Order \`${orderNumber}\` committed with *$0 tax* — the Avalara call threw.`,
+            `Error: ${err instanceof Error ? err.message : String(err)}`,
+          ],
+        }).catch(() => undefined),
+      );
     }
   }
 
@@ -536,8 +560,21 @@ export async function POST(request: NextRequest) {
       createdSubscriptionIds.push(body.existing_sub_id);
     } else {
       // Loud — payment already went through, so this is a customer-
-      // facing problem an operator will need to fix manually.
+      // facing problem an operator will need to fix manually. DM the team
+      // so the dropped items get added to the sub by hand.
       console.error(`[checkout] add_to_sub append failed for cart ${cart.token}:`, appendRes.error);
+      void import("@/lib/notify-ops-alert").then(({ notifyOpsAlert }) =>
+        notifyOpsAlert(cart.workspace_id, {
+          title: "Checkout charged but add-to-sub failed",
+          severity: "critical",
+          lines: [
+            `Customer *${body.email || customer.id}* was charged but their items did NOT join subscription \`${body.existing_sub_id}\`.`,
+            `Order: \`${orderNumber}\` · Cart: \`${cart.token}\``,
+            `Error: ${appendRes.error || "unknown"}`,
+            `Action: add the cart's subscribe lines to the sub manually.`,
+          ],
+        }).catch(() => undefined),
+      );
     }
   }
 
