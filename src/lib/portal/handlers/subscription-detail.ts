@@ -223,9 +223,29 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     }
   }
 
-  // Payment method — query Shopify GraphQL for the last order's transaction
+  // Payment method. Internal subs bill via Braintree — show the default card the
+  // renewal will actually charge (customer_payment_methods, same resolution as
+  // internal-subscription-renewals). Appstle subs read the last Shopify order's
+  // transaction.
   let paymentMethod: { brand: string | null; last4: string | null; expiry: string | null; gateway: string | null } | null = null;
-  {
+  if (sub.is_internal) {
+    const { data: pm } = await admin.from("customer_payment_methods")
+      .select("card_brand, last4, expiration_month, expiration_year")
+      .eq("workspace_id", auth.workspaceId)
+      .eq("customer_id", sub.customer_id)
+      .eq("status", "active")
+      .eq("is_default", true)
+      .eq("provider", "braintree")
+      .maybeSingle();
+    if (pm) {
+      paymentMethod = {
+        brand: (pm.card_brand as string) || null,
+        last4: (pm.last4 as string) || null,
+        expiry: pm.expiration_month && pm.expiration_year ? `${pm.expiration_month}/${pm.expiration_year}` : null,
+        gateway: "braintree",
+      };
+    }
+  } else {
     // Find last order tied to THIS subscription, fall back to any order for this customer
     let lastOrder: { shopify_order_id: string } | null = null;
     const { data: subOrder } = await admin.from("orders")
