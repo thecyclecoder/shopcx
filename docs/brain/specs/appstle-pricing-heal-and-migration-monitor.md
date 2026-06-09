@@ -98,8 +98,11 @@ After a payment method is added + migration runs, write a **verification record*
 
 ## Remaining open work
 
-- ⏳ **Phase 1b — consolidate stray direct fetches onto real wrappers.** Phases 1–3 added a `healOnTouch` guard at each of the ~9 direct-`fetch` Appstle sites (functional chokepoint achieved). The cleaner end state: create real wrappers (`appstleUpdateShippingAddress`, `appstleResume`, `appstleRemoveDiscount`, …), delete every direct `fetch`, so there's one literal code path through `appstleMutate`. Deferred from this build because it touches sensitive billing code (dunning, journey-complete, action-executor) and deserves its own tested PR. The heal guards hold the guarantee until then.
-- ⏳ **Standalone integrity sweep** — a cron (independent of a payment-method add) that runs the verification checklist over *all* internal subs and flags any failing checks 1–3/6/8, catching subs migrated under the *old* logic before this build. The monitor + `verifyMigration` already exist; this just needs a sweeper that seeds audits for un-audited internal subs.
+- ⏳ **Phase 1b — consolidate stray direct fetches onto real wrappers.** Phases 1–3 added a `healOnTouch` guard at each of the ~9 direct-`fetch` Appstle sites (functional chokepoint achieved). The cleaner end state: create real wrappers (`appstleUpdateShippingAddress`, `appstleResume`, `appstleRemoveDiscount`, …), delete every direct `fetch`, so there's one literal code path through `appstleMutate`. Deferred because it touches sensitive billing code (dunning, journey-complete, action-executor); the heal guards hold the guarantee until then. **Note:** dunning's strays will be consolidated as part of the **dunning audit** (dunning now migrates subs — it's being reworked separately).
+
+**Shipped after the initial build:**
+- ✅ **Standalone integrity sweep** ([[../inngest/migration-integrity-sweep]] — `migration-integrity-sweep-cron`, daily) — seeds a one-off audit for every internal sub never audited and runs the checklist, catching old-logic migrations. First run flagged 5 cancelled subs with Shopify-id items.
+- ✅ **Recovery reactivation policy** — auto-reactivating all cancelled subs on recovery was rejected (risks reviving voluntary cancels + duplicates); recovery pins to active/paused subs only, reactivation is per-case during prep ([[customer-portal]] handles the William/Mary cases).
 
 **Resolved:** retry bound `N = 3` (10-min cron, no backoff — recovery charges settle fast); dashboard at `/dashboard/migrations` (owner-only).
 

@@ -42,6 +42,7 @@ interface NavSection { label: string; icon?: string; items: NavItem[]; collapsib
 const NAV_STRUCTURE: (NavItem | NavSection)[] = [
   { href: "/dashboard", label: "Dashboard", icon: ICONS.dashboard },
   { href: "/dashboard/tickets", label: "Tickets", icon: ICONS.tickets },
+  { href: "/dashboard/migrations", label: "Migration", icon: "M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 00-3.7-3.7 48.678 48.678 0 00-7.324 0 4.006 4.006 0 00-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3l-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 003.7 3.7 48.656 48.656 0 007.324 0 4.006 4.006 0 003.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3l-3 3", ownerOnly: true },
   { href: "/dashboard/social-comments", label: "Social Comments", icon: "M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.068.157 2.148.279 3.238.364.466.037.893.281 1.153.671L12 21l2.652-3.978c.26-.39.687-.634 1.153-.67 1.09-.086 2.17-.208 3.238-.365 1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" },
   {
     label: "Customers",
@@ -51,7 +52,6 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "/dashboard/customers", label: "Profiles", icon: ICONS.customers },
       { href: "/dashboard/demographics", label: "Demographics", icon: "M2.25 18L9 11.25l4.306 4.306a11.95 11.95 0 015.814-5.518l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941", adminOnly: true },
       { href: "/dashboard/subscriptions", label: "Subscriptions", icon: ICONS.subscriptions },
-      { href: "/dashboard/migrations", label: "Migrations", icon: "M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 00-3.7-3.7 48.678 48.678 0 00-7.324 0 4.006 4.006 0 00-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3l-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 003.7 3.7 48.656 48.656 0 007.324 0 4.006 4.006 0 003.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3l-3 3", ownerOnly: true },
       { href: "/dashboard/orders", label: "Orders", icon: ICONS.orders },
       { href: "/dashboard/returns", label: "Returns", icon: ICONS.returns },
       { href: "/dashboard/replacements", label: "Replacements", icon: "M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 00-3.7-3.7 48.678 48.678 0 00-7.324 0 4.006 4.006 0 00-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3l-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 003.7 3.7 48.656 48.656 0 007.324 0 4.006 4.006 0 003.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3l-3 3" },

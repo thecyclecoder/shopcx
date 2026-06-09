@@ -55,31 +55,25 @@ export async function recordMigrationAudit(input: RecordAuditInput): Promise<str
  * passed → all required checks ok. Otherwise retry_count++; pending until
  * MAX_RETRIES, then failed (flag for review).
  */
-export async function verifyMigration(auditId: string): Promise<{ status: string; checks: AuditCheck[] }> {
-  const admin = createAdminClient();
-  const { data: audit } = await admin.from("migration_audits").select("*").eq("id", auditId).maybeSingle();
-  if (!audit) return { status: "failed", checks: [{ key: "audit_exists", ok: false, detail: "audit row not found" }] };
+type Sub = Record<string, unknown>;
 
-  const { data: sub } = await admin
+async function loadSub(admin: ReturnType<typeof createAdminClient>, subscriptionId: string): Promise<Sub | null> {
+  const { data } = await admin
     .from("subscriptions")
     .select("id, is_internal, status, shopify_contract_id, items, customer_id, payment_method_id, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents")
-    .eq("id", audit.subscription_id)
+    .eq("id", subscriptionId)
     .maybeSingle();
+  return (data as Sub) || null;
+}
 
+/** Run the full checklist against the current sub state. */
+async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Record<string, unknown>, sub: Sub): Promise<AuditCheck[]> {
   const checks: AuditCheck[] = [];
   const push = (key: string, ok: boolean, detail?: string) => checks.push({ key, ok, detail });
 
-  if (!sub) {
-    push("subscription_exists", false, "subscription row gone");
-    return finalize(admin, audit, checks);
-  }
-
-  // 1. is_internal
   push("is_internal", sub.is_internal === true);
-  // 2. contract id is internal-*
   const cid = String(sub.shopify_contract_id || "");
   push("internal_contract_id", cid.startsWith("internal-"), cid);
-  // 3. items on UUIDs (no Shopify numeric variant ids), excluding shipping protection
   const items = (Array.isArray(sub.items) ? sub.items : []) as Array<Record<string, unknown>>;
   const badItems = items.filter((i) => {
     const isProt = String(i.title || "").toLowerCase().includes("shipping protection");
@@ -87,10 +81,8 @@ export async function verifyMigration(auditId: string): Promise<{ status: string
   });
   push("items_on_uuids", badItems.length === 0, badItems.length ? `${badItems.length} item(s) not UUID` : undefined);
 
-  // 4. Appstle contract actually cancelled + 5. cancel reason
   await verifyAppstleCancelled(admin, audit.workspace_id as string, String(audit.appstle_contract_id || ""), push);
 
-  // 6. Pricing sanity: internal engine charge == pre-migration Appstle charge (±tol)
   try {
     const { resolveSubscriptionPricing } = await import("@/lib/pricing");
     const pricing = await resolveSubscriptionPricing(audit.workspace_id as string, sub);
@@ -102,25 +94,89 @@ export async function verifyMigration(auditId: string): Promise<{ status: string
     push("pricing_preserved", false, e instanceof Error ? e.message : "pricing engine threw");
   }
 
-  // 7. Recovery: card pinned + a recent successful renewal
   if (audit.is_recovery) {
     push("card_pinned", !!sub.payment_method_id, sub.payment_method_id ? undefined : "no pinned card");
     const { data: txn } = await admin
-      .from("transactions")
-      .select("id, status")
-      .eq("subscription_id", sub.id)
-      .eq("type", "renewal")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .from("transactions").select("id, status").eq("subscription_id", sub.id as string)
+      .eq("type", "renewal").order("created_at", { ascending: false }).limit(1).maybeSingle();
     push("immediate_charge", txn?.status === "succeeded", txn ? `last renewal ${txn.status}` : "no renewal yet");
   }
 
-  // 8. No double-bill = internal active/paused AND Appstle cancelled (covered by 1 + 4)
   const internalLive = sub.is_internal === true && ["active", "paused"].includes(String(sub.status));
   const appstleCancelled = checks.find((c) => c.key === "appstle_cancelled")?.ok ?? false;
   push("no_double_bill", !(internalLive && !appstleCancelled), internalLive && !appstleCancelled ? "internal live but Appstle NOT cancelled" : undefined);
 
+  return checks;
+}
+
+/**
+ * Self-heal mechanically-fixable check failures. Returns true if anything was
+ * changed (so the caller re-verifies). Fixes:
+ *  - items_on_uuids: resolve each Shopify-id item → its catalog UUID + product_id.
+ *  - appstle_cancelled / no_double_bill: cancel the lingering Appstle contract.
+ * Pricing mismatches are NOT auto-fixed (need judgment) → those flag for review.
+ */
+async function autoHealMigration(
+  admin: ReturnType<typeof createAdminClient>,
+  audit: Record<string, unknown>,
+  sub: Sub,
+  checks: AuditCheck[],
+): Promise<boolean> {
+  let changed = false;
+  const failed = (key: string) => checks.some((c) => c.key === key && !c.ok);
+
+  // Fix Shopify-id items → UUIDs.
+  if (failed("items_on_uuids")) {
+    const items = (Array.isArray(sub.items) ? sub.items : []) as Array<Record<string, unknown>>;
+    let touched = false;
+    const fixed = await Promise.all(items.map(async (i) => {
+      const isProt = String(i.title || "").toLowerCase().includes("shipping protection");
+      if (isProt || UUID_RE.test(String(i.variant_id || ""))) return i;
+      const { data: v } = await admin
+        .from("product_variants").select("id, product_id, title, sku")
+        .eq("shopify_variant_id", String(i.variant_id || "")).maybeSingle();
+      if (!v) return i; // can't resolve — leave (will stay flagged)
+      touched = true;
+      return { ...i, variant_id: v.id, product_id: v.product_id, sku: i.sku ?? v.sku ?? undefined };
+    }));
+    if (touched) {
+      await admin.from("subscriptions").update({ items: fixed, updated_at: new Date().toISOString() }).eq("id", sub.id as string);
+      changed = true;
+    }
+  }
+
+  // Cancel a lingering Appstle contract (double-bill risk).
+  if ((failed("appstle_cancelled") || failed("no_double_bill")) && audit.appstle_contract_id) {
+    try {
+      const { appstleSubscriptionAction } = await import("@/lib/appstle");
+      // Use the OLD appstle contract id directly (the sub row now holds internal-*).
+      const r = await appstleSubscriptionAction(audit.workspace_id as string, String(audit.appstle_contract_id), "cancel", "migrated to shopcx", "ShopCX auto-heal");
+      if (r.success) changed = true;
+    } catch (e) {
+      console.error("[migration-audit] auto-heal cancel failed:", e instanceof Error ? e.message : e);
+    }
+  }
+
+  return changed;
+}
+
+export async function verifyMigration(auditId: string): Promise<{ status: string; checks: AuditCheck[] }> {
+  const admin = createAdminClient();
+  const { data: audit } = await admin.from("migration_audits").select("*").eq("id", auditId).maybeSingle();
+  if (!audit) return { status: "failed", checks: [{ key: "audit_exists", ok: false, detail: "audit row not found" }] };
+
+  let sub = await loadSub(admin, audit.subscription_id as string);
+  if (!sub) return finalize(admin, audit, [{ key: "subscription_exists", ok: false, detail: "subscription row gone" }]);
+
+  let checks = await runChecks(admin, audit, sub);
+  // Self-heal fixable failures, then re-verify once.
+  if (!checks.every((c) => c.ok)) {
+    const healed = await autoHealMigration(admin, audit, sub, checks);
+    if (healed) {
+      sub = await loadSub(admin, audit.subscription_id as string);
+      if (sub) checks = await runChecks(admin, audit, sub);
+    }
+  }
   return finalize(admin, audit, checks);
 }
 
