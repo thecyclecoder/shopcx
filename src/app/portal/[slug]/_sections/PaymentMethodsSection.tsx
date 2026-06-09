@@ -47,6 +47,10 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
   // When set, the add-card flow was deep-linked from a subscription: the new card
   // is pinned to THIS sub (not made default), then we return to it.
   const [forSub, setForSub] = useState<string | null>(null);
+  // Recovery mode: arrived via the failed-payment magic link → default + migrate +
+  // pin to all subs + Slack. Show a focused "update your card" experience.
+  const [recover, setRecover] = useState(false);
+  const [recovered, setRecovered] = useState(false);
   const hfRef = useRef<HostedFieldsCardHandle>(null);
 
   const load = useCallback(async () => {
@@ -69,7 +73,10 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
-    if (params.get("add") === "1") {
+    if (params.get("recover") === "1") {
+      setRecover(true);
+      startAdd();
+    } else if (params.get("add") === "1") {
       setForSub(params.get("forSub"));
       startAdd();
     }
@@ -98,12 +105,21 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
+        // recover → default + migrate + pin to all subs + Slack (server-side).
         // For a sub-scoped add: just vault (don't make default, don't migrate the
         // book) — we pin it to that one sub next.
-        body: JSON.stringify({ paymentMethodNonce: nonce, deviceData, ...(forSub ? { makeDefault: false, migrate: false } : {}) }),
+        body: JSON.stringify({ paymentMethodNonce: nonce, deviceData, ...(recover ? { recover: true } : forSub ? { makeDefault: false, migrate: false } : {}) }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.error) { setTokenError(data?.message || data?.error || "Couldn't save the card."); return; }
+
+      if (recover) {
+        setRecovered(true);
+        setAdding(false);
+        setClientToken(null);
+        await load();
+        return;
+      }
 
       if (forSub && data.payment_method_id) {
         // Pin the new card to the originating subscription, then return to it.
@@ -138,8 +154,27 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
     return <div className="rounded-xl border border-rose-200 bg-rose-50 p-6 text-sm text-rose-700">{error}</div>;
   }
 
+  // Recovery success — the card is updated and applied; nothing else to do.
+  if (recovered) {
+    return (
+      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-8 text-center">
+        <div className="text-4xl">✅</div>
+        <p className="mt-3 text-base font-semibold text-emerald-900">You&apos;re all set!</p>
+        <p className="mt-1 text-sm text-emerald-800">
+          Your new card is saved and applied to your subscriptions. We&apos;ll use it for your next delivery — nothing else for you to do.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
+      {recover && adding && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <p className="font-semibold">Update your payment method</p>
+          <p className="mt-0.5 text-amber-800">Pop in a new card below and we&apos;ll take care of the rest — it&apos;ll be used for all your subscriptions.</p>
+        </div>
+      )}
       {toast && (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800">{toast}</div>
       )}

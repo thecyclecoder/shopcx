@@ -57,7 +57,9 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
 
   // Flags: a plain "add a default card" makes it default + migrates the book;
   // "add a card for one subscription" passes makeDefault:false + migrate:false so
-  // it's just vaulted (the caller then pins it to that sub).
+  // it's just vaulted (the caller then pins it to that sub). `recover` is the
+  // failed-payment magic-link flow: default + migrate + pin to every sub + Slack.
+  const recover = payload?.recover === true;
   const makeDefault = payload?.makeDefault !== false;
   const doMigrate = payload?.migrate !== false;
 
@@ -94,14 +96,54 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
     }
   }
 
+  // Recovery flow: pin the new card to every one of the customer's internal subs
+  // across the link group (so the card that just failed is replaced everywhere),
+  // then DM the team on Slack.
+  let pinnedCount = 0;
+  if (recover) {
+    try {
+      const { linkGroupIds } = await import("@/lib/customer-links");
+      const groupIds = await linkGroupIds(admin, auth.workspaceId, customer.id);
+      const { data: subs } = await admin
+        .from("subscriptions")
+        .select("id")
+        .eq("workspace_id", auth.workspaceId)
+        .in("customer_id", groupIds)
+        .eq("is_internal", true)
+        .in("status", ["active", "paused"]);
+      const subIds = (subs || []).map((s) => s.id as string);
+      if (subIds.length) {
+        await admin.from("subscriptions")
+          .update({ payment_method_id: saved.id, updated_at: new Date().toISOString() })
+          .in("id", subIds);
+        pinnedCount = subIds.length;
+      }
+    } catch (e) {
+      console.error("[portal/payment] recover pin failed (non-fatal):", e instanceof Error ? e.message : e);
+    }
+    try {
+      const { notifyPaymentRecovered } = await import("@/lib/notify-payment-recovered");
+      await notifyPaymentRecovered(auth.workspaceId, {
+        customerName: [customer.first_name, customer.last_name].filter(Boolean).join(" "),
+        email: customer.email || "",
+        brand: vaulted.cardBrand,
+        last4: vaulted.last4,
+        migratedCount,
+        pinnedCount,
+      });
+    } catch (e) {
+      console.error("[portal/payment] recover Slack notify failed (non-fatal):", e instanceof Error ? e.message : e);
+    }
+  }
+
   await logPortalAction({
     workspaceId: auth.workspaceId,
     customerId: customer.id,
-    eventType: "portal.payment_method.updated",
-    summary: `Customer updated payment method via portal${migratedCount ? ` (migrated ${migratedCount} sub(s) to internal)` : ""}`,
-    properties: { last4: vaulted.last4, card_brand: vaulted.cardBrand, migrated_count: migratedCount },
+    eventType: recover ? "portal.payment_method.recovered" : "portal.payment_method.updated",
+    summary: `Customer ${recover ? "recovered" : "updated"} payment method via portal${migratedCount ? ` (migrated ${migratedCount} sub(s) to internal)` : ""}${pinnedCount ? ` (pinned to ${pinnedCount} sub(s))` : ""}`,
+    properties: { last4: vaulted.last4, card_brand: vaulted.cardBrand, migrated_count: migratedCount, pinned_count: pinnedCount, recover },
     createNote: false,
   });
 
-  return jsonOk({ ok: true, route, migrated_count: migratedCount, payment_method_id: saved.id, patch: { paymentMethod: { last4: vaulted.last4, cardBrand: vaulted.cardBrand } } });
+  return jsonOk({ ok: true, route, migrated_count: migratedCount, pinned_count: pinnedCount, payment_method_id: saved.id, patch: { paymentMethod: { last4: vaulted.last4, cardBrand: vaulted.cardBrand } } });
 };

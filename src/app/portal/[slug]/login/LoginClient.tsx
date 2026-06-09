@@ -29,6 +29,7 @@ type Stage = "email" | "code" | "magic_sent" | "auto_logging";
 function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
   const searchParams = useSearchParams();
   const token = searchParams.get("token");
+  const next = searchParams.get("next");
   const [stage, setStage] = useState<Stage>(token ? "auto_logging" : "email");
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
@@ -48,7 +49,7 @@ function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
     fetch("/api/portal/magic-login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, next }),
     })
       .then(r => r.json())
       .then(data => {
@@ -63,7 +64,7 @@ function PortalLogin({ logoUrl, primaryColor, brandName }: Props) {
         setError("Something went wrong. Please log in below.");
         setStage("email");
       });
-  }, [token]);
+  }, [token, next]);
 
   // Resend countdown tick
   useEffect(() => {

@@ -66,13 +66,33 @@ export function verifyMagicToken(token: string): MagicLinkPayload | null {
  * Generate a full magic link URL for a customer.
  * Uses the workspace subdomain if available (e.g. superfoods.shopcx.ai).
  */
-export async function generateMagicLinkURL(
+/**
+ * Payment-recovery link: a magic login that drops the customer straight onto the
+ * "update your card" surface (no clicks). Same signed token as a normal login,
+ * with `&next=/payment-methods?recover=1` — the login flow forwards `next` and the
+ * Payment Methods page auto-opens the add-card form in recover mode (vault +
+ * default + migrate the book + pin to their subs + Slack-notify).
+ */
+export async function generatePaymentRecoveryLink(
   customerId: string,
   shopifyCustomerId: string,
   email: string,
   workspaceId: string,
 ): Promise<string> {
+  return generateMagicLinkURL(customerId, shopifyCustomerId, email, workspaceId, "/payment-methods?recover=1");
+}
+
+export async function generateMagicLinkURL(
+  customerId: string,
+  shopifyCustomerId: string,
+  email: string,
+  workspaceId: string,
+  next?: string,
+): Promise<string> {
   const token = generateMagicToken(customerId, shopifyCustomerId, email, workspaceId);
+  // `next` is a portal-relative destination the login flow redirects to after
+  // auth (validated server-side in /api/portal/magic-login).
+  const nextQS = next ? `&next=${encodeURIComponent(next)}` : "";
 
   // Resolve the best host to put in the magic link URL. Priority order:
   //   1. portal_config.minisite.domain     (e.g. portal.example.com — bare /login path, no /portal prefix; middleware does the rewrite)
@@ -90,16 +110,16 @@ export async function generateMagicLinkURL(
     if (portalDomain) {
       // Dedicated portal subdomain — middleware rewrites /login →
       // /portal/{slug}/login internally, customer never sees /portal/.
-      return `https://${portalDomain}/login?token=${token}`;
+      return `https://${portalDomain}/login?token=${token}${nextQS}`;
     }
     if (ws?.help_custom_domain) {
-      return `https://${ws.help_custom_domain}/portal/login?token=${token}`;
+      return `https://${ws.help_custom_domain}/portal/login?token=${token}${nextQS}`;
     }
     if (ws?.help_slug) {
-      return `https://${ws.help_slug}.shopcx.ai/portal/login?token=${token}`;
+      return `https://${ws.help_slug}.shopcx.ai/portal/login?token=${token}${nextQS}`;
     }
   } catch { /* fallback */ }
 
   const base = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
-  return `${base}/portal/login?token=${token}`;
+  return `${base}/portal/login?token=${token}${nextQS}`;
 }

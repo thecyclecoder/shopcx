@@ -46,10 +46,15 @@ export async function POST(request: Request) {
     cookieStore.set("portal_customer_id", customer.id, cookieOpts);
     cookieStore.set("portal_workspace_id", payload.workspaceId, cookieOpts);
 
-    // Redirect to "/" — on the portal custom subdomain the middleware
-    // rewrites that to /portal/{slug} server-side, so the URL bar
-    // stays clean (portal.superfoodscompany.com/ instead of …/portal).
-    return NextResponse.json({ success: true, redirectUrl: "/" });
+    // Redirect to `next` (a portal-relative path, e.g. /payment-methods?recover=1
+    // for a payment-recovery link) when provided, else "/". Validate it's a safe
+    // same-origin relative path so the token can't be turned into an open redirect.
+    let redirectUrl = "/";
+    const next = typeof body.next === "string" ? body.next : "";
+    if (next.startsWith("/") && !next.startsWith("//") && !next.includes("://")) {
+      redirectUrl = next;
+    }
+    return NextResponse.json({ success: true, redirectUrl });
   }
 
   // ── Email login → send magic link ──
