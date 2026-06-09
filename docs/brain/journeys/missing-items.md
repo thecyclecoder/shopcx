@@ -25,6 +25,12 @@ Built by `src/lib/missing-items-journey-builder.ts`:
 3. **Customer ticks the missing ones.**
 4. **Confirm quantities** — for each ticked item, ask how many were missing (defaults to the full ordered qty).
 
+## Fully live / code-driven (no AI-prepared snapshot)
+
+Both render AND completion pull data **live** — the launch only stores identification (`{codeDriven, liveRendered, journeyType, ticketId, workspaceId}`), never AI-prepared steps or `metadata.lineItems`. The loader (`api/journey/[token]/route.ts`) rebuilds steps+metadata via `buildJourneySteps` on every click, and `api/journey/[token]/complete/route.ts` does the **same rebuild** to resolve the index-based answers (`item_0:damaged`) back to real line items.
+
+**Gotcha (fixed 2026-06-09):** completion used to read `metadata.lineItems` from the frozen `config_snapshot`, which the live-render launch path never populates. With `lineItems=[]`, `parseItemAccounting` couldn't map `item_0` → an item, silently dropped the report, and returned `allReceived:true`. A customer who correctly reported damaged coffee got "nothing for us to fix" → eventually a manual refund. Two safeguards now: (1) completion rebuilds line items live; (2) if the customer flagged *any* issue but parsing still resolves zero items, completion **replaces the whole order** rather than auto-closing as "all received OK." Never silently convert a flagged issue into no-replacement.
+
 ## On submit
 
 The submission is returned to the parent playbook execution. The playbook then:

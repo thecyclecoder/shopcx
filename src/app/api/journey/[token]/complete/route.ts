@@ -318,14 +318,71 @@ export async function POST(
     if (journeyType === "missing_items") {
       const selectResponse = responses?.select_items?.value || "";
       const accountingResponse = responses?.item_accounting?.value || "";
-      const lineItems = (metadata.lineItems as { title: string; quantity: number; sku?: string; variant_id?: string }[]) || [];
+
+      // Pull the journey's line items LIVE — exactly like the loader does on
+      // every click (api/journey/[token]/route.ts rebuilds steps+metadata
+      // from current data). The launch snapshot is identification-only (no
+      // metadata.lineItems), so parsing against it silently dropped every
+      // reported item and falsely concluded "all received OK" — which
+      // refunded a customer who had correctly reported damaged coffee. The
+      // response values are index-based ("item_0:damaged") and
+      // buildMissingItemsSteps builds those indices deterministically from
+      // the order's line_items, so a fresh rebuild reproduces the mapping.
+      let lineItems = (metadata.lineItems as { title: string; quantity: number; sku?: string; variant_id?: string }[]) || [];
+      let liveReplacementId = (metadata.replacementId as string | null) || null;
+      if (session.ticket_id) {
+        try {
+          const { buildJourneySteps } = await import("@/lib/journey-step-builder");
+          const built = await buildJourneySteps(wsId, "missing_items", session.customer_id || "", session.ticket_id);
+          const bm = (built.metadata || {}) as Record<string, unknown>;
+          if ((bm.lineItems as unknown[] | undefined)?.length) {
+            lineItems = bm.lineItems as typeof lineItems;
+          }
+          if (bm.replacementId) liveReplacementId = bm.replacementId as string;
+        } catch (err) {
+          console.error("[journey/complete] missing_items live rebuild failed:", err);
+        }
+      }
 
       if (session.ticket_id) {
         const { parseItemAccounting } = await import("@/lib/missing-items-journey-builder");
         const result = parseItemAccounting(selectResponse, accountingResponse, lineItems);
 
-        if (result.allReceived) {
-          // Everything received OK — no replacement needed
+        // Did the customer actually flag a problem? A per-item reason
+        // ("item_0:damaged") or the legacy digit-index shape ("0,2") both
+        // mean "something was wrong." If they flagged something but parsing
+        // resolved zero items, we must NOT close as "all received OK" — fall
+        // back to replacing the whole order rather than dropping their report.
+        const flaggedAnIssue = /:(damaged|missing|wrong)/.test(selectResponse)
+          || (/^[\d,\s]+$/.test(selectResponse.trim()) && selectResponse.trim().length > 0);
+
+        let replacementItems = result.replacementItems.map(i => ({
+          title: i.title,
+          quantity: i.quantity,
+          variantId: i.variantId || "",
+          sku: i.sku || "",
+          reason: i.reason as "missing" | "damaged" | "wrong",
+          type: "damaged_or_missing",       // legacy compat for playbook
+        }));
+        let reasons = Array.from(result.reasonsPresent) as string[];
+
+        if (result.allReceived && flaggedAnIssue && lineItems.length) {
+          replacementItems = lineItems.map(i => ({
+            title: i.title,
+            quantity: i.quantity,
+            variantId: i.variant_id || "",
+            sku: i.sku || "",
+            reason: "damaged" as const,
+            type: "damaged_or_missing",
+          }));
+          reasons = ["damaged"];
+          actionLog.push("Item report didn't map to a specific line — replacing the full order as a safety fallback (never auto-close a flagged issue as 'all OK')");
+        }
+
+        const needsReplacement = replacementItems.length > 0;
+
+        if (!needsReplacement) {
+          // Everything genuinely received OK — no replacement needed
           actionLog.push("All items received OK — no replacement needed");
 
           const { data: ticket } = await admin.from("tickets")
@@ -336,21 +393,9 @@ export async function POST(
           ctx.awaiting_item_selection = false;
           await admin.from("tickets").update({ playbook_context: ctx }).eq("id", session.ticket_id);
         } else {
-          // Items need replacing — write exact quantities + per-item reason
-          const replacementItems = result.replacementItems.map(i => ({
-            title: i.title,
-            quantity: i.quantity,
-            variantId: i.variantId || "",
-            sku: i.sku || "",
-            reason: i.reason,                 // missing | damaged | wrong
-            type: "damaged_or_missing",       // legacy compat for playbook
-          }));
-
-          // Combined reason for the replacement record + playbook
-          // executor. When mixed, "damaged_items" wins so the
-          // replacement copy mentions product quality (and the
-          // orchestrator's reply can flag heat etc.).
-          const reasons = Array.from(result.reasonsPresent);
+          // Combined reason for the replacement record + playbook executor.
+          // When mixed, "damaged_items" wins so the replacement copy mentions
+          // product quality (and the orchestrator's reply can flag heat etc.).
           const primaryReason: "damaged_items" | "missing_items" | "wrong_item" =
             reasons.includes("damaged") ? "damaged_items"
             : reasons.includes("missing") ? "missing_items"
@@ -362,20 +407,20 @@ export async function POST(
           const ctx = (ticket?.playbook_context || {}) as Record<string, unknown>;
           ctx.replacement_items = replacementItems;
           ctx.replacement_reasons_present = reasons;   // ["damaged","missing"] etc.
+          ctx.all_items_received = false;
           ctx.awaiting_item_selection = false;
           await admin.from("tickets").update({ playbook_context: ctx }).eq("id", session.ticket_id);
 
           // Update replacement record if exists
-          const replacementId = metadata.replacementId as string | null;
-          if (replacementId) {
+          if (liveReplacementId) {
             await admin.from("replacements").update({
               items: replacementItems,
               reason: primaryReason,
               updated_at: new Date().toISOString(),
-            }).eq("id", replacementId);
+            }).eq("id", liveReplacementId);
           }
 
-          actionLog.push(`Replacement needed (${primaryReason}): ${result.summary}`);
+          actionLog.push(`Replacement needed (${primaryReason}): ${replacementItems.map(i => `${i.quantity}x ${i.title} (${i.reason})`).join(", ")}`);
         }
       }
 
