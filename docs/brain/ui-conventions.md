@@ -2,6 +2,16 @@
 
 Cross-cutting UI/UX rules for both the dashboard and the customer-facing storefront. Migrated from agent-memory `feedback_*` entries. Where a rule belongs to a specific lifecycle, it's captured there too (see Cross-references).
 
+## Theme: light only
+
+The app is **forced light** — no dark theme, no OS following. Tailwind v4's `dark:`
+variant is redefined as class-based in `globals.css` (`@custom-variant dark
+(&:where(.dark, .dark *))`) + `:root { color-scheme: light }`, so every `dark:`
+utility (139 files' worth) goes inert unless a `.dark` ancestor exists — which we
+never add. Don't reintroduce a `@media (prefers-color-scheme: dark)` block; it
+made the app dark on macOS dark mode but light on phones. A future toggle would
+add `.dark` to `<html>`.
+
 ## Audience-driven defaults
 
 - **Storefront body copy uses 18px+ text and zinc-800+ contrast.** Superfoods Co's core customer is 45-64. Smaller text or lower contrast tanks readability. Headlines can be larger; body never goes below 16px.

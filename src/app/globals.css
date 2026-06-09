@@ -1,9 +1,17 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
+/* Force LIGHT theme app-wide. Tailwind v4's `dark:` variant defaults to the OS
+   (prefers-color-scheme) — which made the app dark on macOS dark mode but light
+   on phones. Redefining `dark:` as class-based means every `dark:` utility only
+   applies under an explicit `.dark` ancestor — which we never add — so they all
+   go inert and the app stays light. (Future theme toggle: add `.dark` to <html>.) */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  color-scheme: light;
 }
 
 @theme inline {
@@ -19,12 +27,6 @@
     "Liberation Mono", "Courier New", monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
 
 body {
   background: var(--background);
