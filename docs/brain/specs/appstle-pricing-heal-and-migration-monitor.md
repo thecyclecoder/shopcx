@@ -1,4 +1,6 @@
-# Appstle pricing heal + migration monitor ⏳
+# Appstle pricing heal + migration monitor 🚧
+
+> **Build status (2026-06-09): Phases 1–3 shipped.** Heal-on-touch gateway, smart migration (heal-by-migration), and the migration monitor (audit table + checklist + retry cron + `/dashboard/migrations`) are live. Resolved open questions: retry bound **N = 3** (10-min cron); dashboard at **`/dashboard/migrations`** (owner-only). **Remaining:** Phase 1b (consolidate stray direct fetches onto real wrappers) + the standalone integrity sweep — both ⏳ below. New code lives in [[../libraries/appstle-pricing]], [[../libraries/migration-audit]], [[../tables/migration_audits]].
 
 **Goal:** make every Appstle subscription structurally correct (a real `pricingPolicy` with base price + S&S cycle discount) before we ever act on it, migrate subs to internal with *provably correct* pricing, and **monitor that the post-payment-method actions (migration, cancel, immediate charge) happen flawlessly** — because the one thing we cannot lose is "free" renewal revenue.
 
@@ -45,7 +47,7 @@ Reading `basePrice` directly (vs always reverse-engineering from `currentPrice`)
 | **Heal** (sub stays on Appstle) | `PUT update-line-item-pricing-policy(basePrice = trueBase, [{afterCycle:0, PERCENTAGE, sns}])` |
 | **Migration** (sub → internal) | `price_override_cents = isGrandfathered ? trueBase : (none — use catalog)`; the internal sub is **born healed** |
 
-## Phase 1 — Shared inference + the Appstle gateway 🚧
+## Phase 1 — Shared inference + the Appstle gateway ✅
 
 **`src/lib/appstle-pricing.ts`** (new)
 - `inferAppstleLineBase(line, catalogMsrpCents, snsPct)` — pure, as above.
@@ -68,7 +70,7 @@ Every Appstle **mutation** routes through it. `skipHeal: true` for migration (he
 
 > **Hard rule going forward:** no new code calls `subscription-admin.appstle.com` to mutate a contract except through `appstleMutate`. A lint/grep check in review enforces it.
 
-## Phase 2 — Smart migration (heal-by-migration) ⏳
+## Phase 2 — Smart migration (heal-by-migration) ✅
 
 Upgrade `appstleLinesToInternalItems` in [[../libraries/migrate-to-internal]] to use `inferAppstleLineBase` on the **already-fetched** live contract instead of only reverse-engineering `currentPrice`:
 - `pricingPolicy` present → `trueBase = basePrice`; override only if `< catalogMsrp`.
@@ -76,7 +78,7 @@ Upgrade `appstleLinesToInternalItems` in [[../libraries/migrate-to-internal]] to
 - Migration calls Appstle **with `skipHeal: true`** — no point writing a policy to a contract we're about to cancel; the internal sub is born healed.
 - **Standardize the Appstle cancel reason to `"migrated to shopcx"`** (today it's "Migrated to internal billing"). `appstleSubscriptionAction(ws, contractId, "cancel", "migrated to shopcx", "ShopCX migration")`.
 
-## Phase 3 — Migration monitor (the checklist) ⏳
+## Phase 3 — Migration monitor (the checklist) ✅
 
 After a payment method is added + migration runs, write a **verification record** per migrated sub and verify each item; retry-then-flag on failure. North star: **after this passes, the sub will bill on its next renewal.**
 
@@ -94,11 +96,12 @@ After a payment method is added + migration runs, write a **verification record*
 
 **Immediate-charge → dunning feedback:** a recovery migration typically needs an immediate charge (the prior renewal failed). Fire the internal renewal (`internal-subscription/renewal-attempt`); on success, clear the dunning state so the customer exits the failed-payment funnel.
 
-## Open questions
+## Remaining open work
 
-- ⏳ Exact retry bound `N` + backoff for Phase 3 (proposal: 3 attempts, exponential, then flag).
-- ⏳ Monitor dashboard placement (new `/dashboard/migrations` page vs a panel on an existing ops page).
-- ⏳ Should the monitor also run a **standalone integrity sweep** (independent of a payment-method add) that flags any internal sub failing checks 1–3/6/8 — catching subs migrated under the *old* logic? (Deferred; nice once Phase 1–3 land.)
+- ⏳ **Phase 1b — consolidate stray direct fetches onto real wrappers.** Phases 1–3 added a `healOnTouch` guard at each of the ~9 direct-`fetch` Appstle sites (functional chokepoint achieved). The cleaner end state: create real wrappers (`appstleUpdateShippingAddress`, `appstleResume`, `appstleRemoveDiscount`, …), delete every direct `fetch`, so there's one literal code path through `appstleMutate`. Deferred from this build because it touches sensitive billing code (dunning, journey-complete, action-executor) and deserves its own tested PR. The heal guards hold the guarantee until then.
+- ⏳ **Standalone integrity sweep** — a cron (independent of a payment-method add) that runs the verification checklist over *all* internal subs and flags any failing checks 1–3/6/8, catching subs migrated under the *old* logic before this build. The monitor + `verifyMigration` already exist; this just needs a sweeper that seeds audits for un-audited internal subs.
+
+**Resolved:** retry bound `N = 3` (10-min cron, no backoff — recovery charges settle fast); dashboard at `/dashboard/migrations` (owner-only).
 
 ## Safety / invariants
 

@@ -13,6 +13,10 @@ The self-serve customer surface — where logged-in customers manage their subsc
 
 After editing `shopify-extension/portal-src/` files, **always run `node scripts/build-all-portals.js`** — it builds both surfaces from the same source so they don't drift. Then `shopify app deploy` for the extension itself.
 
+## Appstle pricing heal-on-touch
+
+Every Appstle **mutation** (portal action, ticket handler, orchestrator, cron) routes through a heal guard ([[../libraries/appstle-pricing]] `healOnTouch`/`appstleMutate`) that repairs `pricingPolicy: null` subs — the flat baked-price subs Appstle's original migration left behind — *before* acting. It writes a proper base + 25% S&S cycle that **preserves the customer's charge**, so the legacy portal applies the discount on modification and our migration reads clean `basePrice`. Idempotent (no-op once structured), non-fatal. Cancel + migration skip it (migration is heal-by-migration). See [[../specs/appstle-pricing-heal-and-migration-monitor]].
+
 ## Shipping address — one source of truth
 
 `subscriptions.shipping_address` is the **source of truth** for an internal sub. All three paths read it (with the same fallback chain — sub → most recent order → customer `default_address`):

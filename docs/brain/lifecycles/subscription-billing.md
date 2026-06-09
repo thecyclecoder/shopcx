@@ -125,14 +125,15 @@ For `is_internal=false`:
 
 ## Migration path (Appstle → internal)
 
-Not in production yet. Sketch:
+**Live** ([[migrate-to-internal]]). Triggered when a customer captures a payment method (checkout, portal add-card, recovery link) or by the self-healing guard on portal load. Per sub in the customer's link group:
 
-1. Backfill `braintree_customer_id` + `braintree_payment_method_token` for existing Appstle subs by vaulting their card via Braintree (requires Card-on-File migration from the Shopify Payments gateway — non-trivial; Braintree has a vault import API for this).
-2. Flip `is_internal=true` per sub in batches.
-3. Cancel the corresponding Appstle contract (no `cancellationFeedback` — we own it now).
-4. Watch [[../tables/transactions]] for the first internal charge.
+1. Resolve a **billable** member (default Braintree PM) — skip if none ("a migration must be billable").
+2. Read the **live Appstle contract**; translate lines → internal catalog **UUID** references via the smart pricing logic ([[appstle-pricing]] `inferAppstleLineBase`) — reads `pricingPolicy.basePrice` when present, else reverse-engineers `currentPrice/(1−sns)`; sets `price_override_cents` only when grandfathered. This is **heal-by-migration** (the internal sub is born with correct pricing; no Appstle heal first).
+3. Cancel the Appstle contract (reason **"migrated to shopcx"**).
+4. Flip the existing row **in place** → `is_internal=true`, native `internal-*` contract id, status preserved (active/paused/cancelled), reassigned to the billable member.
+5. **Verify** ([[migration-audit]]) — record a [[../tables/migration_audits]] row + run the 8-check checklist; the `/dashboard/migrations` monitor surfaces anything stuck, and the retry cron re-verifies pending rows.
 
-Until cutover, the two paths coexist. Out of scope for this doc — see CLAUDE.md § Phase 7 + [[../lifecycles/storefront-checkout]] § subscription platform cutover.
+Cancelled subs migrate too (using the local row when Appstle is unreadable). The Appstle webhook handler ignores `is_internal` subs so a stale cancel can't clobber a migrated row.
 
 ## Pause / resume / skip — both paths
 
