@@ -1611,6 +1611,9 @@ const US_STATES: Array<[string, string]> = [
   ["SD","South Dakota"],["TN","Tennessee"],["TX","Texas"],["UT","Utah"],["VT","Vermont"],
   ["VA","Virginia"],["WA","Washington"],["WV","West Virginia"],["WI","Wisconsin"],["WY","Wyoming"],
   ["DC","District of Columbia"],
+  // US territories
+  ["PR","Puerto Rico"],["VI","U.S. Virgin Islands"],["GU","Guam"],
+  ["AS","American Samoa"],["MP","Northern Mariana Islands"],
 ];
 
 interface VerificationResult {
