@@ -14,9 +14,34 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
 
   const resolved = await resolveSub(createAdminClient(), auth.workspaceId, payload?.contractId, auth.loggedInCustomerId);
   const contractId = resolved?.shopify_contract_id || "";
-  if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
+  if (!resolved || !contractId) return jsonErr({ error: "missing_contractId" }, 400);
 
-  // Get upcoming orders to find the billing attempt ID
+  // Internal subs: fire the SAME renewal pipeline a scheduled charge uses
+  // (charge → order → Avalara → Amplifier → advance next billing date). Async via
+  // Inngest, so this returns immediately and the order shows up shortly.
+  if (resolved.is_internal) {
+    if (resolved.status !== "active") {
+      return jsonErr({ error: "not_active", message: "This subscription isn't active." }, 409);
+    }
+    const { inngest } = await import("@/lib/inngest/client");
+    await inngest.send({
+      name: "internal-subscription/renewal-attempt",
+      data: { subscription_id: resolved.id, workspace_id: auth.workspaceId },
+    });
+    const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
+    if (customer) {
+      await logPortalAction({
+        workspaceId: auth.workspaceId, customerId: customer.id,
+        eventType: "portal.order_now",
+        summary: "Customer triggered an immediate renewal via portal (internal sub)",
+        properties: { subscription_id: resolved.id },
+        createNote: true,
+      });
+    }
+    return jsonOk({ ok: true, route, contractId, patch: {} });
+  }
+
+  // Appstle subs: attempt the upcoming Appstle billing.
   const ordersRes = await appstleGetUpcomingOrders(auth.workspaceId, String(contractId));
   if (!ordersRes.success || !ordersRes.orders?.length) {
     return jsonErr({ error: "no_upcoming_orders", message: "No upcoming orders found to bill." }, 400);

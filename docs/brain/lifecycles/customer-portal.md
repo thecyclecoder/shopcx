@@ -49,7 +49,7 @@ All routes are `/api/portal?route={name}` (App Proxy on the Shopify side) or POS
 - **Cancel journey flow** ([[../libraries/portal__handlers__cancel-journey]]) — full AI-driven retention flow per [[cancel-flow]]
 - **Change date** ([[../libraries/portal__handlers__change-date]]) — pick a new next-billing date
 - **Change frequency** ([[../libraries/portal__handlers__frequency]]) — monthly → bimonthly etc.
-- **Order now** ([[../libraries/portal__handlers__order-now]]) — fire an immediate billing attempt
+- **Order now** ([[../libraries/portal__handlers__order-now]]) — **internal subs**: fires the `internal-subscription/renewal-attempt` Inngest event, running the exact scheduled-renewal pipeline now (charge → order → Avalara → **Amplifier order** → advance next billing date). Async, so it returns immediately and the order appears shortly. Active subs only. **Appstle subs**: attempts the upcoming Appstle billing. (Good way to test the internal renewal end-to-end on demand.)
 - **Apply coupon** ([[../libraries/portal__handlers__coupon]]) — paste a code (validates via Shopify discount)
 - **Replace variants** ([[../libraries/portal__handlers__replace-variants]]) — flavor swap; preserves grandfathered pricing on like-for-like swaps
 - **Remove line item** ([[../libraries/portal__handlers__remove-line-item]]) — drop one item but keep the sub
