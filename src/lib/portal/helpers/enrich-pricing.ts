@@ -123,6 +123,31 @@ export async function priceSubscription(
   };
 }
 
+/**
+ * Display helper for dashboard widgets (ticket page, customer page) that read raw
+ * `subscriptions.items` and expect a baked `price_cents` per item. Internal subs
+ * carry NO baked price (engine-derived), so their items show `$NaN` — this fills
+ * each item's `price_cents` (engine charged unit) + `base_price_cents` (strike).
+ * Appstle items already have a baked `price_cents`, so they pass through.
+ */
+export async function priceSubItemsForDisplay(
+  workspaceId: string,
+  sub: { id?: string; is_internal?: boolean | null; items?: unknown; delivery_price_cents?: number | null },
+): Promise<Array<Record<string, unknown>>> {
+  const items = (Array.isArray(sub.items) ? sub.items : []) as Array<Record<string, unknown>>;
+  if (!sub.is_internal) return items;
+  try {
+    const { priced } = await priceSubscription(workspaceId, sub as Record<string, unknown>);
+    return items.map((i) => {
+      const p = priced.get(String(i.line_id || "")) || priced.get(String(i.variant_id ?? ""));
+      if (!p) return i;
+      return { ...i, price_cents: p.unit_cents, base_price_cents: p.base_cents > p.unit_cents ? p.base_cents : undefined };
+    });
+  } catch {
+    return items;
+  }
+}
+
 /** API-handler wrapper: prices the sub and writes base/charged onto contract.lines
  *  (internal subs only — Appstle lines already carry baked currentPrice). */
 export async function enrichContractPricing(

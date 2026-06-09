@@ -85,11 +85,17 @@ export async function GET(
         .order("created_at", { ascending: false })
         .limit(10);
 
-      const { data: subscriptions } = await admin
+      const { data: subscriptionsRaw } = await admin
         .from("subscriptions")
-        .select("id, status, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items, applied_discounts")
+        .select("id, status, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items, applied_discounts, is_internal, delivery_price_cents")
         .in("customer_id", linkedCustomerIds)
         .order("created_at", { ascending: false });
+      // Price internal-sub items via the engine so the ticket widget doesn't show
+      // $NaN (internal items carry no baked price_cents).
+      const { priceSubItemsForDisplay } = await import("@/lib/portal/helpers/enrich-pricing");
+      const subscriptions = await Promise.all(
+        (subscriptionsRaw || []).map(async (s) => ({ ...s, items: await priceSubItemsForDisplay(workspaceId, s) })),
+      );
 
       // LTV + order count come live from the orders table via the helper —
       // the customers row's denormalized columns drift.

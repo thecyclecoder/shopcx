@@ -43,12 +43,12 @@ Audited 2026-06-09 (see findings below). Decisions still open.
 ### Phase 4 — Internal billing-success closes the cycle ⏳
 - Appstle closes a cycle on the `billing-success` webhook. Internal subs have no webhook — so a **successful internal renewal** (`internal-subscription-renewals.ts` success path) must fire `dunning/billing-success` (or directly mark the cycle `recovered`) + log `customer_events` `payment.recovered`. Without this, an internal cycle never closes.
 
-## Open decisions
+## Settled decisions (2026-06-09)
 
-- **Internal retry cadence.** Reuse dunning's payday schedule (1st/15th/Fridays) re-firing the internal renewal? Or a simpler fixed backoff (e.g. day 1/3/5/7)? Appstle's card-rotation concept doesn't map (we have one default card).
-- **When to email.** Appstle emails only after card rotations exhaust. Internal has no rotation — email on the **first** failure, or after N silent Braintree retries?
-- **Ticket creation.** New ticket per dunning cycle, or attach to the most recent open ticket? Channel/persona for the recovery email?
-- **Cancel/pause policy** on exhaustion for internal subs (Appstle cancels via API; internal just sets status).
+1. **Retry cadence** — reuse dunning's existing **payday schedule** (1st/15th, Fridays, last business day), re-firing the internal renewal (`internal-subscription/renewal-attempt`) each scheduled date instead of an Appstle billing attempt.
+2. **When to email** — send the recovery email **after the first *terminal* error** (hard decline — bad card/closed account); for soft declines (insufficient funds, etc.) wait until the payday retries are exhausted, then email.
+3. **Ticket** — **attach to the most recent open ticket** (don't spawn a new one), so a reply threads into the existing conversation. Tag `dunning:active`.
+4. **Exhaustion policy** — **cancel** the internal sub when retries run out, BUT **reactivate on payment-method recovery**. (Recovery must reactivate subs cancelled *by dunning* — mark them so the recovery flow knows which cancelled subs to revive, vs. voluntary cancels / duplicates. This is why the generic auto-reactivate was rejected; reactivation keys on "cancelled by dunning".)
 
 ## Related
 

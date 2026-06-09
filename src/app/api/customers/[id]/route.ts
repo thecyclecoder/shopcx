@@ -86,12 +86,17 @@ export async function GET(
     .order("created_at", { ascending: false })
     .limit(20);
 
-  const { data: subscriptions } = await admin
+  const { data: subscriptionsRaw } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items, delivery_price_cents, applied_discounts, created_at, updated_at")
+    .select("id, shopify_contract_id, status, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items, delivery_price_cents, applied_discounts, is_internal, created_at, updated_at")
     .eq("workspace_id", workspaceId)
     .in("customer_id", linkedCustomerIds)
     .order("created_at", { ascending: false });
+  // Engine-price internal-sub items so the widget doesn't show $NaN.
+  const { priceSubItemsForDisplay } = await import("@/lib/portal/helpers/enrich-pricing");
+  const subscriptions = await Promise.all(
+    (subscriptionsRaw || []).map(async (s) => ({ ...s, items: await priceSubItemsForDisplay(workspaceId, s) })),
+  );
 
   // Compute LTV and order count live from the orders table — the customers row's
   // denormalized columns drift, so we always read via getCustomerStats.
