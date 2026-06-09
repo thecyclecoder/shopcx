@@ -1951,11 +1951,17 @@ function CouponCard({ contract, primaryColor, onMutate, action }: {
         <ul className="space-y-2">
           {allDiscounts.map((d, i) => {
             const label = d.code || d.title || "Discount";
-            const valueLabel = d.value != null
-              ? d.valueType === "PERCENTAGE" || d.type === "percentage"
+            // Value conventions differ: internal coupons store fixed_amount in
+            // CENTS, Appstle-synced ones (FIXED_AMOUNT) store DOLLARS. Percentages
+            // are 0-100 either way.
+            const isPct = d.type === "percentage" || d.valueType === "PERCENTAGE";
+            const valueLabel = d.value == null
+              ? null
+              : isPct
                 ? `${d.value}% off`
-                : `$${Number(d.value).toFixed(2)} off`
-              : null;
+                : d.type === "fixed_amount"
+                  ? `$${(Number(d.value) / 100).toFixed(2)} off` // internal: cents
+                  : `$${Number(d.value).toFixed(2)} off`; // Appstle: dollars
             return (
               <li key={d.id || i} className="flex items-center justify-between rounded-lg border border-zinc-200 bg-zinc-50 p-3">
                 <div className="min-w-0 flex-1">
@@ -2064,19 +2070,19 @@ function PaymentMethodCard({ contract }: { contract: Contract }) {
       ) : (
         <p className="text-sm text-zinc-600">No payment method on file.</p>
       )}
-      {manageUrl && (
-        <a
-          href={manageUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:border-zinc-400"
-        >
-          Manage payment methods
-          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3" />
-          </svg>
-        </a>
-      )}
+      {/* Go to our own Payment Methods page (not Shopify). Soon this is where a
+          customer adds/updates a card — which also triggers a full Appstle→internal
+          sub migration. Client-side nav; middleware rewrites /payment-methods. */}
+      <a
+        href="/payment-methods"
+        onClick={(e) => { e.preventDefault(); window.location.href = "/payment-methods"; }}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:border-zinc-400"
+      >
+        Manage payment methods
+        <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+        </svg>
+      </a>
     </ActionCard>
   );
 }
