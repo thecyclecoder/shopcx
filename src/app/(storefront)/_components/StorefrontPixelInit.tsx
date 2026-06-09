@@ -159,6 +159,10 @@ export function StorefrontPixelInit({
         trackPayload.variant_id = ds.variantId || null;
       }
       track("pack_selected", trackPayload);
+      // The pack-select → /customize transition IS the add-to-cart moment
+      // (spec Phase 2 / Phase 3 maps this → Meta AddToCart). Same payload,
+      // distinct event name so analytics + CAPI can key off it directly.
+      track("add_to_cart", trackPayload);
 
       // Block default anchor scroll, take over navigation.
       e.preventDefault();

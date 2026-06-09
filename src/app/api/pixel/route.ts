@@ -37,6 +37,12 @@ const TRANSPARENT_GIF = Buffer.from(
 const ALLOWED_EVENT_TYPES = new Set([
   "pdp_view",
   "pdp_engaged",
+  // Phase 2 on-site instrumentation — chapter/scroll/CTA telemetry.
+  "chapter_view",
+  "chapter_dwell",
+  "scroll_depth",
+  "cta_click",
+  "add_to_cart",
   "pack_selected",
   "customize_view",
   "upsell_added",

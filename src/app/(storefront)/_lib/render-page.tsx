@@ -23,6 +23,7 @@ import { FinalCTASection } from "../_sections/FinalCTASection";
 import { StorefrontHeader } from "../_components/StorefrontHeader";
 import { ProductJsonLd } from "../_components/ProductJsonLd";
 import { StorefrontPixelInit } from "../_components/StorefrontPixelInit";
+import { StorefrontChapterTracker } from "../_components/StorefrontChapterTracker";
 import { ActiveMemberProvider } from "./active-member-context";
 import { PricingModeProvider } from "./pricing-mode-context";
 import { UpsellChapter } from "../_sections/UpsellChapter";
@@ -129,6 +130,9 @@ export function StorefrontPage({
         productId={data.product.id}
         productHandle={data.product.handle}
       />
+      {/* Phase 2 instrumentation — observes [data-section] nodes for
+          chapter_view/dwell, tracks scroll_depth + cta_click. No UI. */}
+      <StorefrontChapterTracker productId={data.product.id} />
 
       <StorefrontHeader
         workspaceId={data.product.workspace_id}

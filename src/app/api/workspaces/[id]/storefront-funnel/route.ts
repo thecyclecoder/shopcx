@@ -146,6 +146,65 @@ export async function GET(
     .map(([utm_source, count]) => ({ utm_source, sessions: count }))
     .sort((a, b) => b.sessions - a.sessions).slice(0, 10);
 
+  // ── Chapter performance (Phase 2 instrumentation) ───────────────
+  // Per chapter: reach (distinct sessions that genuinely viewed it),
+  // median-ish avg dwell, and the key effectiveness metric — of the
+  // sessions that viewed a chapter, how many then clicked a
+  // scroll-to-price CTA *from that chapter* (cta_click kind, origin
+  // chapter). High view→scroll-to-price = the chapter sells.
+  const { data: chapterRows } = await admin
+    .from("storefront_events")
+    .select("event_type, session_id, meta")
+    .eq("workspace_id", workspaceId)
+    .in("event_type", ["chapter_view", "chapter_dwell", "cta_click"])
+    .gte("created_at", startIso)
+    .lte("created_at", endIso);
+
+  const viewSessions = new Map<string, Set<string>>(); // chapter → sessions
+  const dwellTotals = new Map<string, { ms: number; n: number }>();
+  const ctaSessions = new Map<string, Set<string>>(); // chapter → sessions w/ scroll_to_price click
+  const chapterOrder = new Map<string, number>();
+  for (const r of (chapterRows || []) as { event_type: string; session_id: string; meta: Record<string, unknown> }[]) {
+    const m = r.meta || {};
+    const chapter = typeof m.chapter === "string" ? m.chapter : null;
+    if (!chapter) continue;
+    if (typeof m.chapter_index === "number" && !chapterOrder.has(chapter)) {
+      chapterOrder.set(chapter, m.chapter_index);
+    }
+    if (r.event_type === "chapter_view") {
+      if (!viewSessions.has(chapter)) viewSessions.set(chapter, new Set());
+      viewSessions.get(chapter)!.add(r.session_id);
+    } else if (r.event_type === "chapter_dwell") {
+      const ms = typeof m.dwell_ms === "number" ? m.dwell_ms : 0;
+      const cur = dwellTotals.get(chapter) || { ms: 0, n: 0 };
+      cur.ms += ms; cur.n += 1;
+      dwellTotals.set(chapter, cur);
+    } else if (r.event_type === "cta_click" && m.cta_kind === "scroll_to_price") {
+      if (!ctaSessions.has(chapter)) ctaSessions.set(chapter, new Set());
+      ctaSessions.get(chapter)!.add(r.session_id);
+    }
+  }
+  const topOfFunnelSessions = sessionsByStep.pdp_view.size;
+  const chapterKeys = new Set<string>([...viewSessions.keys(), ...dwellTotals.keys(), ...ctaSessions.keys()]);
+  const chapterPerformance = [...chapterKeys]
+    .map((chapter) => {
+      const reach = viewSessions.get(chapter)?.size || 0;
+      const dwell = dwellTotals.get(chapter);
+      const ctaReach = ctaSessions.get(chapter)?.size || 0;
+      return {
+        chapter,
+        chapter_index: chapterOrder.get(chapter) ?? 999,
+        reach_sessions: reach,
+        reach_rate_pct: topOfFunnelSessions > 0 ? Math.round((reach / topOfFunnelSessions) * 100 * 10) / 10 : 0,
+        avg_dwell_ms: dwell && dwell.n > 0 ? Math.round(dwell.ms / dwell.n) : 0,
+        scroll_to_price_sessions: ctaReach,
+        // The effectiveness metric: of those who viewed this chapter, how
+        // many clicked through to pricing from it.
+        view_to_cta_pct: reach > 0 ? Math.round((ctaReach / reach) * 100 * 10) / 10 : 0,
+      };
+    })
+    .sort((a, b) => a.chapter_index - b.chapter_index);
+
   // ── Recent events stream ────────────────────────────────────────
   const { data: recent } = await admin
     .from("storefront_events")
@@ -260,6 +319,7 @@ export async function GET(
     deviceBreakdown,
     countryBreakdown,
     sourceBreakdown,
+    chapterPerformance,
     abandonedCarts,
     recentEvents: (recent || []).map(e => ({
       id: e.id,

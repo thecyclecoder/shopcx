@@ -34,6 +34,18 @@ Subsequent events on the same page:
 
 - `pdp_engaged` — first of: CTA click, scroll past 50%, 30s+ on page.
 - `pack_selected` — customer chose a tier or bundle (variant + qty + mode + frequency).
+- `add_to_cart` — fired at the **same** pack-select → /customize moment (the real add-to-cart). Distinct event name so analytics + Meta CAPI (AddToCart) key off it directly.
+
+### Phase 2 on-site instrumentation (chapter / scroll / CTA)
+
+`StorefrontChapterTracker` (`(storefront)/_components/`) mounts once per PDP next to `StorefrontPixelInit`. It **observes the existing `[data-section]` nodes** (every in-flow section already renders `<section data-section="…">`) — no `<Chapter>` wrapper or HOC, which is why it works with the `dynamic()`-imported sections (it scans the live DOM post-hydration + re-scans after 1.5s). `data-chapter-index` is stamped at runtime by DOM order.
+
+- `chapter_view` — a section was ≥50% visible for ≥1s (filters fast scroll-pasts). Once per chapter per page. **Jump-aware:** when a scroll-to-price CTA is clicked, chapters flown past are suppressed; the `pricing` chapter's view carries `origin_chapter` + `arrived_via_jump`.
+- `chapter_dwell` — accumulated active-time per chapter (`dwell_ms`), flushed on pagehide/visibility-hidden.
+- `scroll_depth` — `max_depth_pct` + `reversals` (yo-yo / comparison signal), flushed on exit.
+- `cta_click` — any `[data-cta]` click, tagged `cta_kind` + origin `chapter`. **`ShopCTA` is the single chokepoint** — it auto-stamps `data-cta`/`data-cta-kind` from its href (`#pricing` → `scroll_to_price`, `#buy-…` → `pack_select`).
+
+Rollup: `/api/workspaces/[id]/storefront-funnel` returns `chapterPerformance` (reach, reach %, avg dwell, →pricing sessions, **view→pricing %** = the effectiveness metric) rendered on the funnel dashboard.
 
 ## Phase 2 — cart create
 

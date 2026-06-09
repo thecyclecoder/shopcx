@@ -16,7 +16,10 @@ Designed in a working session 2026-06-08. This spec bakes in those decisions. Au
 
 ---
 
-## Phase 1 — Internal subscription management 🚧
+## Phase 1 — Internal subscription management ✅
+
+> **Shipped (2026-06-09).** 1a (all portal handlers internal-aware), 1b (`coupons` table + engine), 1c (in-place `migrateCustomerAppstleSubsToInternal` + billability gate + the portal **Braintree Hosted-Fields card-entry UI** in `portal/[slug]/_sections/PaymentMethodsSection.tsx` + the `payment-update` route + payment-recovery magic-link flow). Internal-sub **dunning** (failed-payment recovery: payday retries via the renewal cron, magic-link recovery email, cancel-on-exhaust + reactivate-on-recovery, AI/timeline visibility) shipped alongside — see [[../lifecycles/dunning]] § internal-sub dunning + [[../inngest/internal-dunning]]. Remaining storefront work is Phases 2–5.
+
 
 The checkout makes internal subs; the customer must be able to live with one. Most fixes are **wiring** (the internal branches already exist in the lib layer) — the only net-new is the coupon bridge and the Appstle→internal migration helper.
 
@@ -71,7 +74,9 @@ Today `internalSubApplyDiscount` only stores `{title: code}` — no method/value
 
 ---
 
-## Phase 2 — On-site instrumentation: chapter / CTA / scroll emitter ⏳
+## Phase 2 — On-site instrumentation: chapter / CTA / scroll emitter ✅
+
+> **Shipped (2026-06-09).** Resolved the open question by **observing existing `[data-section]` nodes** (every in-flow section already had `data-section`) — no `<Chapter>` wrapper/HOC, works with `dynamic()` sections. `StorefrontChapterTracker` emits `chapter_view` (≥1s ≥50%, jump-aware), `chapter_dwell`, `scroll_depth`, `cta_click`; `add_to_cart` fires at pack-select. `ShopCTA` (single CTA chokepoint) auto-stamps `data-cta`/`data-cta-kind`. `/api/pixel` allowlist extended; `chapterPerformance` rollup added to the funnel route + dashboard. See [[../lifecycles/storefront-checkout]] § Phase 2 instrumentation. NOTE: the audit's `checkout_completed` is actually `order_placed` (no separate event exists) — no fix needed.
 
 One foundation, three payoffs: the smart popup (Phase 4), chapter-performance analytics, and the Meta pixel stream (Phase 3). The ~16 PDP sections already exist as named components in `(storefront)/_sections/`.
 

@@ -104,6 +104,23 @@ export function ShopCTA({
     }
   }
 
+  // Instrument every CTA for the chapter tracker (spec Phase 2). One
+  // chokepoint = every button on the page is tagged. The kind is derived
+  // from the destination: an in-page scroll to #pricing is the canonical
+  // "this chapter sent them to pricing" signal; a #buy-… anchor is a
+  // pack-select (its own pack_selected/add_to_cart events fire elsewhere).
+  // Callers can override via dataAttributes['cta-kind'].
+  if (!dataAttrs["data-cta"]) dataAttrs["data-cta"] = label || "shop";
+  if (!dataAttrs["data-cta-kind"]) {
+    dataAttrs["data-cta-kind"] = href === "#pricing"
+      ? "scroll_to_price"
+      : href.startsWith("#buy-")
+        ? "pack_select"
+        : href.startsWith("#")
+          ? "scroll"
+          : "link";
+  }
+
   return (
     <div className={`flex flex-col items-center gap-3 ${desktopItemsClass} ${trustColorClass} ${className}`}>
       <a

@@ -52,6 +52,15 @@ interface FunnelData {
   deviceBreakdown: Array<{ device_type: string; sessions: number }>;
   countryBreakdown: Array<{ ip_country: string; sessions: number }>;
   sourceBreakdown: Array<{ utm_source: string; sessions: number }>;
+  chapterPerformance?: Array<{
+    chapter: string;
+    chapter_index: number;
+    reach_sessions: number;
+    reach_rate_pct: number;
+    avg_dwell_ms: number;
+    scroll_to_price_sessions: number;
+    view_to_cta_pct: number;
+  }>;
   abandonedCarts?: AbandonedCartsBlock;
   recentEvents: Array<{
     id: string;
@@ -189,6 +198,10 @@ export default function StorefrontFunnelPage() {
               rows={data.countryBreakdown.map(c => ({ label: c.ip_country, value: c.sessions }))}
             />
           </div>
+
+          {data.chapterPerformance && data.chapterPerformance.length > 0 && (
+            <ChapterPerformancePanel rows={data.chapterPerformance} />
+          )}
 
           {data.abandonedCarts && (
             <AbandonedCartsPanel block={data.abandonedCarts} />
@@ -489,10 +502,70 @@ function AbandonedCartsPanel({ block }: { block: AbandonedCartsBlock }) {
   );
 }
 
+function ChapterPerformancePanel({ rows }: { rows: NonNullable<FunnelData["chapterPerformance"]> }) {
+  const maxReach = Math.max(...rows.map(r => r.reach_sessions), 1);
+  const fmtChapter = (c: string) => c.replace(/[-_]/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+  const fmtDwell = (ms: number) => ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-4 flex items-baseline justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
+          Chapter performance
+        </h2>
+        <span className="text-[11px] text-zinc-400">
+          View→pricing % = of sessions that read a chapter, how many clicked through to pricing from it.
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
+              <th className="py-2 pr-2">Chapter</th>
+              <th className="py-2 pr-2 text-right">Reach</th>
+              <th className="py-2 pr-2 text-right">Reach %</th>
+              <th className="py-2 pr-2 text-right">Avg dwell</th>
+              <th className="py-2 pr-2 text-right">→ Pricing</th>
+              <th className="py-2 pr-2 text-right">View→pricing %</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.chapter} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{fmtChapter(r.chapter)}</td>
+                <td className="py-2 pr-2 text-right tabular-nums text-zinc-900 dark:text-zinc-100">
+                  <div className="flex items-center justify-end gap-2">
+                    <div className="hidden h-1.5 w-16 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800 sm:block">
+                      <div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${(r.reach_sessions / maxReach) * 100}%` }} />
+                    </div>
+                    {r.reach_sessions.toLocaleString()}
+                  </div>
+                </td>
+                <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{r.reach_rate_pct.toFixed(1)}%</td>
+                <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{fmtDwell(r.avg_dwell_ms)}</td>
+                <td className="py-2 pr-2 text-right tabular-nums text-zinc-700 dark:text-zinc-300">{r.scroll_to_price_sessions.toLocaleString()}</td>
+                <td className="py-2 pr-2 text-right tabular-nums font-semibold">
+                  <span className={r.view_to_cta_pct >= 15 ? "text-emerald-600" : r.view_to_cta_pct > 0 ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400"}>
+                    {r.view_to_cta_pct.toFixed(1)}%
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function EventChip({ type }: { type: string }) {
   const tone: Record<string, string> = {
     pdp_view: "bg-zinc-100 text-zinc-700",
     pdp_engaged: "bg-amber-100 text-amber-800",
+    chapter_view: "bg-sky-50 text-sky-700",
+    chapter_dwell: "bg-sky-50 text-sky-600",
+    scroll_depth: "bg-zinc-100 text-zinc-600",
+    cta_click: "bg-orange-100 text-orange-800",
+    add_to_cart: "bg-blue-100 text-blue-800",
     pack_selected: "bg-blue-100 text-blue-800",
     customize_view: "bg-indigo-100 text-indigo-800",
     upsell_added: "bg-emerald-100 text-emerald-800",
