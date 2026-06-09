@@ -114,6 +114,17 @@ export default async function PortalHome({
     (workspace.storefront_primary_color as string | null) ||
     "#18181b";
 
+  // Self-healing migration guard: if any Appstle subs remain and the customer has
+  // a working default Braintree card, sweep them onto internal billing before we
+  // render. Cheap no-op once everything's migrated. Best-effort — never block the
+  // portal on it.
+  try {
+    const { ensureGroupMigratedIfBillable } = await import("@/lib/migrate-to-internal");
+    await ensureGroupMigratedIfBillable(workspaceId, customerId);
+  } catch (err) {
+    console.warn("[portal] ensureGroupMigratedIfBillable threw (non-fatal):", err instanceof Error ? err.message : err);
+  }
+
   // ── Initial subscriptions list (small payload, drives the
   //    Subscriptions section's first paint).
   const { data: subs } = await admin

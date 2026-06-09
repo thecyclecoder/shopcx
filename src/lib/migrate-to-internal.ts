@@ -126,6 +126,41 @@ async function appstleLinesToInternalItems(
   return items;
 }
 
+/**
+ * Self-healing guard: if the customer's link group still has any Appstle subs AND
+ * a working default Braintree PM, migrate them. Cheap when there's nothing to do
+ * (one count query) — runs the actual migration only when a straggler exists, and
+ * then never again (no Appstle subs left). Call it wherever subs are fetched.
+ */
+export async function ensureGroupMigratedIfBillable(workspaceId: string, customerId: string): Promise<number> {
+  const admin = createAdminClient();
+  const groupIds = await linkedCustomerIds(admin, customerId);
+
+  const { count: appstleCount } = await admin
+    .from("subscriptions")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", groupIds)
+    .eq("is_internal", false)
+    .neq("status", "expired");
+  if (!appstleCount) return 0;
+
+  const { data: pm } = await admin
+    .from("customer_payment_methods")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", groupIds)
+    .eq("provider", "braintree")
+    .eq("status", "active")
+    .eq("is_default", true)
+    .limit(1)
+    .maybeSingle();
+  if (!pm) return 0;
+
+  const r = await migrateCustomerAppstleSubsToInternal(workspaceId, customerId);
+  return r.migrated.length;
+}
+
 export async function migrateCustomerAppstleSubsToInternal(workspaceId: string, customerId: string): Promise<MigrateResult> {
   const admin = createAdminClient();
   const result: MigrateResult = { migrated: [], skipped: [], failed: [] };
