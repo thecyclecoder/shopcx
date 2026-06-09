@@ -55,6 +55,7 @@ export const dunningPaymentFailed = inngest.createFunction(
       error_code,
       error_message,
       cycle_id,
+      source,
     } = event.data as {
       workspace_id: string;
       shopify_contract_id: string;
@@ -65,7 +66,25 @@ export const dunningPaymentFailed = inngest.createFunction(
       error_code: string | null;
       error_message: string | null;
       cycle_id?: string;
+      source?: string;
     };
+
+    // Internal subs (Braintree-billed) don't go through the Appstle card-rotation /
+    // Shopify path below — route to the internal dunning handler (retries via the
+    // payday schedule re-firing the internal renewal, recovery magic-link email).
+    if (source === "internal_subscription_renewal") {
+      return step.run("internal-dunning", async () => {
+        const { handleInternalDunningFailure } = await import("@/lib/inngest/internal-dunning");
+        return handleInternalDunningFailure({
+          workspace_id,
+          subscription_id: subscription_id as string,
+          customer_id,
+          internal_contract_id: shopify_contract_id,
+          error_code,
+          error_message,
+        });
+      });
+    }
 
     // Step 1: Check dunning settings
     const settings = await step.run("check-settings", async () => {

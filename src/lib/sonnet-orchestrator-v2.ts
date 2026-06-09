@@ -1131,7 +1131,7 @@ async function getDunningStatus(admin: Admin, wsId: string, custId: string): Pro
     { data: failures },
   ] = await Promise.all([
     admin.from("dunning_cycles")
-      .select("id, subscription_id, status, cycle_number, created_at")
+      .select("id, subscription_id, shopify_contract_id, status, cycle_number, payment_update_sent, payment_update_sent_at, next_retry_at, created_at")
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .order("created_at", { ascending: false }).limit(3),
     admin.from("payment_failures")
@@ -1146,7 +1146,12 @@ async function getDunningStatus(admin: Admin, wsId: string, custId: string): Pro
   if (cycles?.length) {
     parts.push("DUNNING CYCLES:");
     for (const c of cycles) {
-      parts.push(`- Subscription ${c.subscription_id} | Cycle #${c.cycle_number} | Status: ${c.status} | ${new Date(c.created_at).toLocaleDateString()}`);
+      const isInternal = String(c.shopify_contract_id || "").startsWith("internal-");
+      const linkSent = c.payment_update_sent
+        ? ` | Recovery link SENT${c.payment_update_sent_at ? ` ${new Date(c.payment_update_sent_at).toLocaleDateString()}` : ""}`
+        : " | No recovery link sent yet";
+      const nextRetry = c.next_retry_at ? ` | Next retry ${new Date(c.next_retry_at).toLocaleDateString()}` : "";
+      parts.push(`- Subscription ${c.subscription_id}${isInternal ? " (internal)" : ""} | Cycle #${c.cycle_number} | Status: ${c.status}${linkSent}${nextRetry} | ${new Date(c.created_at).toLocaleDateString()}`);
     }
   }
   if (failures?.length) {

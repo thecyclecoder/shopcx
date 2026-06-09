@@ -163,13 +163,27 @@ Configured per workspace in [[../tables/slack_notification_rules]].
 | `src/app/api/webhooks/shopify/route.ts` | Webhook entry point |
 | `src/app/dashboard/settings/dunning/page.tsx` | Settings UI |
 
+## Internal-sub dunning (Braintree-billed)
+
+The machinery above is **Appstle-only** — card rotation, Shopify billing-attempts, and the `billing-failure`/`-success` webhooks don't exist for internal (Braintree) subs. Internal subs get a parallel path in `src/lib/inngest/internal-dunning.ts` ([[../inngest/internal-dunning]]):
+
+- **Entry:** `internal-subscription-renewals.ts` decline fires a **complete** `dunning/payment-failed` (`source: "internal_subscription_renewal"`, `shopify_contract_id` = the `internal-*` id, Braintree `error_code`) **and** logs a `customer_events` `subscription.payment_failed` immediately (timeline + AI see it regardless of dunning's outcome).
+- **Router:** `dunning.ts` `dunningPaymentFailed` branches on `source === "internal_subscription_renewal"` at the very top → `handleInternalDunningFailure` (skips all Appstle/Shopify logic).
+- **Retry engine = the daily renewal cron.** On failure the handler moves the sub's `next_billing_date` to the next payday (`getNextPaydayDates`); `internalSubscriptionRenewalCron` re-attempts then. No Appstle billing-attempt. Cycle status → `retrying`, `next_retry_at` set.
+- **Email timing:** recovery magic-link (`generatePaymentRecoveryLink`, 7-day) sent **immediately on the first *terminal* Braintree decline** (`BRAINTREE_TERMINAL` set — expired/closed/invalid card); soft declines (insufficient funds) wait until retries exhaust (`MAX_PAYDAY_RETRIES = 4`), then email. Email attaches to the most-recent open ticket (tag `dunning:active`) so a reply threads in.
+- **Exhaustion:** sub **cancelled** (`subscription.cancelled` event, reason `dunning_exhausted`) + recovery email. Cancelled-by-dunning ≠ voluntary cancel: it has an `exhausted` dunning cycle.
+- **Recovery:** `payment-method-update.ts` recover flow calls `reactivateDunningCancelledSubs` (keyed on an exhausted/cancelled cycle, never voluntary cancels) → sub back to `active`, cycle → `recovered`, new card pinned in the same pass.
+- **Cycle close:** a **successful** internal renewal calls `closeInternalDunningOnSuccess` (no webhook to do it) → cycle `recovered` + `payment.recovered` event.
+- **AI visibility:** `getDunningStatus` (`get_dunning_status` tool) now surfaces `(internal)`, recovery-link-sent status, and `next_retry_at` so the agent can say "I've already sent you a link to update your card."
+
 ## Status / open work
 
-**Shipped:** Silent card rotation (`deduplicatePaymentMethods`), payday-aware retries (`getNextPaydayDates` — 1st/15th/Fridays/last-business-day), Cycle 2 cancel-instead-of-pause + auto-reactivate, customer-driven new-card recovery, terminal-card cancel-without-entering-dunning, replacement-of-Appstle-payment-update-email — all functional.
+**Shipped:** Silent card rotation (`deduplicatePaymentMethods`), payday-aware retries (`getNextPaydayDates` — 1st/15th/Fridays/last-business-day), Cycle 2 cancel-instead-of-pause + auto-reactivate, customer-driven new-card recovery, terminal-card cancel-without-entering-dunning, replacement-of-Appstle-payment-update-email, **internal-sub dunning (Braintree, payday-retry via renewal cron, magic-link recovery, cancel+reactivate, AI visibility)** — all functional.
 
 **Known gaps / not yet shipped:** None identified.
 
 **Recent activity:**
+- Internal-sub dunning shipped: internal renewal failures now enter dunning, retry on the payday schedule (renewal cron is the engine), email the magic-link recovery flow (terminal-now / soft-after-exhaust), cancel-on-exhaust + reactivate-on-recovery, and flow through `customer_events` for timeline + AI. (2026-06-09)
 - Payment-method webhook now (a) mirrors Shopify cards into customer_payment_methods (`provider='shopify'`) and (b) fires new-card-recovery for `exhausted` (dunning-cancelled) cycles, not just active/skipped — so adding a card after cancellation auto-reactivates. (2026-06-09)
 - `84eefddd` Drop Appstle payment-update email; restyle ours to look human
 - `d3a1ae28` Terminal+single-card billing failure: cancel without entering dunning

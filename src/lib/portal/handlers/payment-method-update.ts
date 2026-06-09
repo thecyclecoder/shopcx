@@ -102,10 +102,20 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
   // during prep (auto-reactivating all cancelled subs risks reviving voluntary
   // cancels + duplicates), so the recovery itself only touches active/paused subs.
   let pinnedCount = 0;
+  let reactivatedCount = 0;
   if (recover) {
     try {
       const { linkGroupIds } = await import("@/lib/customer-links");
       const groupIds = await linkGroupIds(admin, auth.workspaceId, customer.id);
+      // Reactivate subs that DUNNING cancelled (keyed on an exhausted dunning cycle
+      // — never voluntary cancels). Done before the pin query so revived subs are
+      // active and get the new card pinned in the same pass.
+      try {
+        const { reactivateDunningCancelledSubs } = await import("@/lib/inngest/internal-dunning");
+        reactivatedCount = await reactivateDunningCancelledSubs(auth.workspaceId, groupIds);
+      } catch (e) {
+        console.error("[portal/payment] dunning reactivate failed (non-fatal):", e instanceof Error ? e.message : e);
+      }
       const { data: subs } = await admin
         .from("subscriptions")
         .select("id")
@@ -132,6 +142,7 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
         last4: vaulted.last4,
         migratedCount,
         pinnedCount,
+        reactivatedCount,
       });
     } catch (e) {
       console.error("[portal/payment] recover Slack notify failed (non-fatal):", e instanceof Error ? e.message : e);
@@ -142,8 +153,8 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
     workspaceId: auth.workspaceId,
     customerId: customer.id,
     eventType: recover ? "portal.payment_method.recovered" : "portal.payment_method.updated",
-    summary: `Customer ${recover ? "recovered" : "updated"} payment method via portal${migratedCount ? ` (migrated ${migratedCount} sub(s) to internal)` : ""}${pinnedCount ? ` (pinned to ${pinnedCount} sub(s))` : ""}`,
-    properties: { last4: vaulted.last4, card_brand: vaulted.cardBrand, migrated_count: migratedCount, pinned_count: pinnedCount, recover },
+    summary: `Customer ${recover ? "recovered" : "updated"} payment method via portal${migratedCount ? ` (migrated ${migratedCount} sub(s) to internal)` : ""}${pinnedCount ? ` (pinned to ${pinnedCount} sub(s))` : ""}${reactivatedCount ? ` (reactivated ${reactivatedCount} dunning-cancelled sub(s))` : ""}`,
+    properties: { last4: vaulted.last4, card_brand: vaulted.cardBrand, migrated_count: migratedCount, pinned_count: pinnedCount, reactivated_count: reactivatedCount, recover },
     createNote: false,
   });
 

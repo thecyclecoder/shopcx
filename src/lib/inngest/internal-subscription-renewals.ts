@@ -293,17 +293,32 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           }
         });
       }
-      // Failure → dunning. We just fire the existing event so the
-      // dunning pipeline picks it up. The dunning function decides
-      // skip / pause / retry based on workspace config.
+      // Failure → internal dunning. Include shopify_contract_id (the internal-* id,
+      // which dunning keys cycles on) + the Braintree decline code as error_code so
+      // the dunning router can create a proper cycle. Also log a customer_events
+      // failure NOW so the timeline + AI see it regardless of dunning's outcome.
+      await step.run("log-payment-failed-event", async () => {
+        const { logCustomerEvent } = await import("@/lib/customer-events");
+        await logCustomerEvent({
+          workspaceId: workspace_id,
+          customerId: ctx.sub.customer_id as string | null,
+          eventType: "subscription.payment_failed",
+          source: "internal_subscription_renewal",
+          summary: `Renewal payment failed${charge.processorResponseText ? ` — ${charge.processorResponseText}` : ""}`,
+          properties: { subscription_id, amount_cents: totalCents, braintree_transaction_id: charge.transactionId, processor_response_code: charge.processorResponseCode },
+        });
+      });
       await step.sendEvent("dunning-event", {
         name: "dunning/payment-failed",
         data: {
           workspace_id,
           subscription_id,
+          shopify_contract_id: ctx.sub.shopify_contract_id, // internal-* id
           customer_id: ctx.sub.customer_id,
           amount_cents: totalCents,
           braintree_transaction_id: charge.transactionId,
+          error_code: charge.processorResponseCode,
+          error_message: charge.processorResponseText,
           processor_response_code: charge.processorResponseCode,
           processor_response_text: charge.processorResponseText,
           source: "internal_subscription_renewal",
@@ -450,6 +465,19 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       } else {
         console.warn(`[renewal] Amplifier order create failed for ${newOrder.order_number}:`, amplifierRes.error, amplifierRes.details);
       }
+    });
+
+    // ── 8. Close any open dunning cycle ─────────────────────────
+    // Internal subs have no Appstle billing-success webhook to close the cycle,
+    // so a recovered renewal must close it here (marks recovered + timeline event).
+    await step.run("close-dunning-cycle", async () => {
+      const { closeInternalDunningOnSuccess } = await import("@/lib/inngest/internal-dunning");
+      await closeInternalDunningOnSuccess(
+        workspace_id,
+        subscription_id,
+        ctx.sub.shopify_contract_id as string,
+        ctx.sub.customer_id as string | null,
+      );
     });
 
     return { ok: true, order_id: newOrder.id, order_number: newOrder.order_number };
