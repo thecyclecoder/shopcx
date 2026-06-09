@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAppstleConfig } from "@/lib/subscription-items";
 import { appstleSubscriptionAction } from "@/lib/appstle";
+import { inferAppstleLineBase, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -69,9 +70,6 @@ async function appstleLinesToInternalItems(
   workspaceId: string,
   lines: Array<Record<string, unknown>>,
 ): Promise<Array<Record<string, unknown>>> {
-  const { data: ws } = await admin.from("workspaces").select("subscription_discount_pct").eq("id", workspaceId).maybeSingle();
-  const fallbackSns = (ws?.subscription_discount_pct as number | undefined) ?? 25;
-
   const items: Array<Record<string, unknown>> = [];
   for (const l of lines) {
     const shopifyVid = String((l.variantId as string) || "").split("/").pop() || "";
@@ -93,21 +91,15 @@ async function appstleLinesToInternalItems(
       continue;
     }
 
-    // S&S % for grandfather detection: the product's rule, else workspace default.
-    let snsPct = fallbackSns;
-    const { data: assign } = await admin
-      .from("product_pricing_rule")
-      .select("pricing_rule_id")
-      .eq("workspace_id", workspaceId)
-      .eq("product_id", v.product_id as string)
-      .maybeSingle();
-    if (assign?.pricing_rule_id) {
-      const { data: rule } = await admin.from("pricing_rules").select("subscribe_discount_pct").eq("id", assign.pricing_rule_id).maybeSingle();
-      snsPct = (rule?.subscribe_discount_pct as number | undefined) ?? fallbackSns;
-    }
-
+    // SMART PRICING (heal-by-migration): use the shared inference on the line we
+    // already fetched. Reads pricingPolicy.basePrice directly when present
+    // (isolates the true base from stacked discounts; distinguishes standard from
+    // grandfathered); reverse-engineers currentPrice/(1−sns) only for the
+    // baked/flat (pricingPolicy:null) subs Appstle left behind.
     const msrp = (v.price_cents as number) || 0;
-    const expectedSnsPrice = Math.round(msrp * (1 - snsPct / 100));
+    const snsPct = await resolveLineSnsPct(admin, workspaceId, v.product_id as string);
+    const { trueBaseCents, isGrandfathered } = inferAppstleLineBase(l as AppstleLine, msrp, snsPct);
+
     const item: Record<string, unknown> = {
       variant_id: v.id,
       product_id: v.product_id,
@@ -116,11 +108,9 @@ async function appstleLinesToInternalItems(
       sku: (v.sku as string) || undefined,
       quantity,
     };
-    // Grandfathered: paying below catalog S&S → lock the base so the engine
-    // reproduces their price (rules still stack on top of the locked base).
-    if (currentPriceCents > 0 && currentPriceCents < expectedSnsPrice) {
-      item.price_override_cents = Math.round(currentPriceCents / (1 - snsPct / 100));
-    }
+    // Grandfathered (true base < catalog MSRP) → lock the base so the engine
+    // reproduces their price. Standard subs use the catalog (no override).
+    if (isGrandfathered && trueBaseCents > 0) item.price_override_cents = trueBaseCents;
     items.push(item);
   }
   return items;
@@ -216,7 +206,7 @@ export async function migrateCustomerAppstleSubsToInternal(workspaceId: string, 
         // sub rather than letting both systems bill it). Already-cancelled subs
         // have nothing to cancel.
         if (!isCancelled) {
-          const cancelR = await appstleSubscriptionAction(workspaceId, contractId, "cancel", "Migrated to internal billing", "ShopCX migration");
+          const cancelR = await appstleSubscriptionAction(workspaceId, contractId, "cancel", "migrated to shopcx", "ShopCX migration");
           if (!cancelR.success) { result.failed.push({ contractId, error: `Appstle cancel failed: ${cancelR.error}` }); continue; }
         }
       } else {
