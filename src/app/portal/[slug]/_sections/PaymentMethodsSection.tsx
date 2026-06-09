@@ -44,6 +44,9 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  // When set, the add-card flow was deep-linked from a subscription: the new card
+  // is pinned to THIS sub (not made default), then we return to it.
+  const [forSub, setForSub] = useState<string | null>(null);
   const hfRef = useRef<HostedFieldsCardHandle>(null);
 
   const load = useCallback(async () => {
@@ -60,6 +63,18 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Deep link from a sub's "+ Add a new card": auto-open the form and remember to
+  // pin the card to that sub afterward instead of making it the default.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("add") === "1") {
+      setForSub(params.get("forSub"));
+      startAdd();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function startAdd() {
     setAdding(true);
@@ -83,10 +98,25 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ paymentMethodNonce: nonce, deviceData }),
+        // For a sub-scoped add: just vault (don't make default, don't migrate the
+        // book) — we pin it to that one sub next.
+        body: JSON.stringify({ paymentMethodNonce: nonce, deviceData, ...(forSub ? { makeDefault: false, migrate: false } : {}) }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.error) { setTokenError(data?.message || data?.error || "Couldn't save the card."); return; }
+
+      if (forSub && data.payment_method_id) {
+        // Pin the new card to the originating subscription, then return to it.
+        await fetch("/api/portal?route=setSubscriptionPaymentMethod", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ contractId: forSub, paymentMethodId: data.payment_method_id }),
+        });
+        window.location.href = `/subscriptions/${forSub}`;
+        return;
+      }
+
       const migrated = Number(data?.migrated_count || 0);
       setToast(migrated > 0
         ? `Card saved and set as default — and ${migrated} subscription${migrated === 1 ? "" : "s"} moved to it.`
@@ -148,7 +178,11 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
       {adding ? (
         <div className="rounded-xl border border-zinc-200 bg-white p-5">
           <h3 className="text-sm font-semibold text-zinc-900">Add a payment method</h3>
-          <p className="mt-0.5 text-xs text-zinc-500">Your new card becomes your default and is used for all your subscriptions.</p>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            {forSub
+              ? "This card will be applied to just this subscription."
+              : "Your new card becomes your default and is used for all your subscriptions."}
+          </p>
           {tokenError && <p className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700">{tokenError}</p>}
           <div className="mt-4">
             {clientToken ? (

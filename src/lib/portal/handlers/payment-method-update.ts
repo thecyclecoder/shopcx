@@ -55,14 +55,20 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
   }
   if (!braintreeCustomerId) return jsonErr({ error: "no_braintree_customer" }, 400);
 
-  // Vault the new card + make it default.
+  // Flags: a plain "add a default card" makes it default + migrates the book;
+  // "add a card for one subscription" passes makeDefault:false + migrate:false so
+  // it's just vaulted (the caller then pins it to that sub).
+  const makeDefault = payload?.makeDefault !== false;
+  const doMigrate = payload?.migrate !== false;
+
+  // Vault the new card.
   let vaulted;
   try {
     vaulted = await vaultPaymentMethod(auth.workspaceId, braintreeCustomerId, nonce, deviceData);
   } catch (e) {
     return jsonErr({ error: "vault_failed", message: e instanceof Error ? e.message : String(e) }, 502);
   }
-  await savePaymentMethod({
+  const saved = await savePaymentMethod({
     workspaceId: auth.workspaceId,
     customerId: customer.id,
     braintreeCustomerId,
@@ -72,18 +78,20 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
     last4: vaulted.last4,
     expirationMonth: vaulted.expirationMonth,
     expirationYear: vaulted.expirationYear,
-    makeDefault: true,
+    makeDefault,
   });
 
-  // Strangler migration: fresh card on file → sweep Appstle subs to internal.
+  // Strangler migration: a fresh DEFAULT card → sweep Appstle subs to internal.
   let migratedCount = 0;
-  try {
-    const { migrateCustomerAppstleSubsToInternal } = await import("@/lib/migrate-to-internal");
-    const mig = await migrateCustomerAppstleSubsToInternal(auth.workspaceId, customer.id);
-    migratedCount = mig.migrated.length;
-    if (mig.failed.length) console.error("[portal/payment] migration failures:", mig.failed);
-  } catch (e) {
-    console.error("[portal/payment] migration threw (non-fatal):", e instanceof Error ? e.message : e);
+  if (doMigrate) {
+    try {
+      const { migrateCustomerAppstleSubsToInternal } = await import("@/lib/migrate-to-internal");
+      const mig = await migrateCustomerAppstleSubsToInternal(auth.workspaceId, customer.id);
+      migratedCount = mig.migrated.length;
+      if (mig.failed.length) console.error("[portal/payment] migration failures:", mig.failed);
+    } catch (e) {
+      console.error("[portal/payment] migration threw (non-fatal):", e instanceof Error ? e.message : e);
+    }
   }
 
   await logPortalAction({
@@ -95,5 +103,5 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
     createNote: false,
   });
 
-  return jsonOk({ ok: true, route, migrated_count: migratedCount, patch: { paymentMethod: { last4: vaulted.last4, cardBrand: vaulted.cardBrand } } });
+  return jsonOk({ ok: true, route, migrated_count: migratedCount, payment_method_id: saved.id, patch: { paymentMethod: { last4: vaulted.last4, cardBrand: vaulted.cardBrand } } });
 };

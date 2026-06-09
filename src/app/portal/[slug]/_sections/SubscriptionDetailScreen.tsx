@@ -2133,8 +2133,8 @@ function PaymentMethodCard({ contract, primaryColor, onMutate, action }: {
             {cards.length === 0 && <p className="text-sm text-zinc-500">No saved cards yet.</p>}
             <div className="flex items-center justify-between pt-1">
               <a
-                href="/payment-methods"
-                onClick={(e) => { e.preventDefault(); window.location.href = "/payment-methods"; }}
+                href={`/payment-methods?add=1&forSub=${encodeURIComponent(contract.internal_id || contract.id)}`}
+                onClick={(e) => { e.preventDefault(); window.location.href = `/payment-methods?add=1&forSub=${encodeURIComponent(contract.internal_id || contract.id)}`; }}
                 className="text-xs font-semibold"
                 style={{ color: primaryColor }}
               >
