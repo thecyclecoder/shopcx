@@ -49,6 +49,7 @@ Single source of truth for what's being built next, what's parked, and what just
 
 **Open sub-work:**
 - 🚧 **New customer portal** (v2) — net-new surface being built. Scope to be spec'd: which capabilities move from the Shopify ext to the in-house surface, what the design system looks like, how it co-exists with the existing in-house mini-site under `/portal`. Promote to its own spec when concrete: `specs/customer-portal-v2.md`.
+- ⏳ **Appstle pricing heal + migration monitor** — [[appstle-pricing-heal-and-migration-monitor]]. One Appstle gateway that heals `pricingPolicy:null` subs on touch (validated live), smart migration that reads `pricingPolicy.basePrice` directly (heal-by-migration), and a post-payment-method verification monitor (retry-then-flag) so we never lose a renewal. Design + decisions settled 2026-06-09; ready to build.
 
 ---
 
