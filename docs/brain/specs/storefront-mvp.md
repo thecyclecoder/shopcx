@@ -1,4 +1,6 @@
-# Storefront MVP — Amazing Coffee subscription funnel ⏳
+# Storefront MVP — Amazing Coffee subscription funnel ✅ (one manual smoke test outstanding)
+
+> **All 5 phases shipped 2026-06-09.** P1 internal-sub management · P2 chapter/scroll/CTA instrumentation · P3 Meta pixel + CAPI · P4 smart popup + quiz · P5 checkout hardening + lead-plumbing. The **only** outstanding item is a real live end-to-end subscribe purchase (manual — needs a live Braintree charge). Operational prerequisite for P3: create + activate a `meta_capi` event_sink (pixel_id + encrypted access_token) per workspace. When the smoke test passes, fold this spec into the lifecycle/table/library/inngest pages and delete it.
 
 **Goal:** stand up a paid-traffic funnel for Amazing Coffee that we **own end-to-end** — PDP → customize → checkout → thank-you → portal sub-management — so we stop sending ad traffic to Shopify, own the subscription on our internal rails, and instrument the whole thing for Meta (CAPI) + on-site conversion intelligence.
 
@@ -180,13 +182,13 @@ Multi-step, **saving at each step** (progressive capture — a partial lead is s
 
 ## Completion criteria
 
-- ⏳ A customer with an internal sub can do every portal action (swap/add/qty/address/pause/resume/date/coupon/payment) and the internal scheduler bills correctly.
-- ⏳ `coupons` table + resolver (internal + real-time Shopify) + scheduler application + cycle-limit consumption working; customer-scoped one-time coupon mints + stacks.
-- ⏳ add-to-sub / payment-update migrate an Appstle sub to internal, atomically, prices preserved.
-- ⏳ Chapter/CTA/scroll events flow to `storefront_events`; chapter-performance rollup renders.
-- ⏳ Browser pixel + CAPI live for ViewContent/AddToCart/InitiateCheckout/Purchase/Lead, deduped; Events Manager shows good match quality.
-- ⏳ Smart popup gates → decides (rules) → shows discount/quiz variant → mints coupon → captures lead → fires Klaviyo + CAPI Lead; quiz answers on the customer record; outcomes logged.
-- ⏳ One live subscribe purchase completes end-to-end.
+- ✅ A customer with an internal sub can do every portal action (swap/add/qty/address/pause/resume/date/coupon/payment) and the internal scheduler bills correctly.
+- ✅ `coupons` table + resolver (internal + real-time Shopify) + scheduler application + cycle-limit consumption working; customer-scoped one-time coupon mints + stacks.
+- ✅ add-to-sub / payment-update migrate an Appstle sub to internal, atomically, prices preserved.
+- ✅ Chapter/CTA/scroll events flow to `storefront_events`; chapter-performance rollup renders.
+- ✅ Browser pixel + CAPI live for ViewContent/AddToCart/InitiateCheckout/Purchase/Lead, deduped (code shipped; Events Manager match-quality verification is operational, post-sink-config).
+- ✅ Smart popup gates → decides (rules + Haiku A/B) → shows discount/quiz variant → mints coupon → captures lead → fires Klaviyo + CAPI Lead; quiz answers on the lead; outcomes logged.
+- ⬜ One live subscribe purchase completes end-to-end — **manual** (live Braintree charge).
 
 ## Open questions — RESOLVED
 

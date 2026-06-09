@@ -154,25 +154,20 @@ Browser POSTs to `/api/checkout`:
 
 `/thank-you?order={id}` reads the order from [[../tables/orders]]. Fires a rich `order_placed` event with full order context (line items, total, currency, customer email, click IDs) for downstream attribution. This is the Meta/TikTok "Purchase" event.
 
-## Phase 7 — CAPI fan-out
+## Phase 7 — CAPI fan-out ✅ (Meta shipped; cron-based, not per-event)
 
-Every event ingested at `/api/pixel` triggers an Inngest fan-out via `storefront/event.created`. For each active [[../tables/event_sinks]] row matching the event_type filter, a [[../tables/event_dispatches]] row is inserted with `status='pending'`.
+**Shipped design (storefront-mvp Phase 3):** a **cron sweep**, NOT a per-event `storefront/event.created` emit (the original plan). [[../inngest/meta-capi-dispatch]] runs every minute: for each active `meta_capi` [[../tables/event_sinks]] it seeds `pending` [[../tables/event_dispatches]] for recent mapped events, sends pending+failed via [[../libraries/meta-capi]] `sendCapiEvents`, and records `sent`/`failed`/`dlq`. The cron decouples delivery from the `/api/pixel` hot path; `event_dispatches` is the retry ledger. Browser pixel + server CAPI dedup on Meta's side via the shared `event_id` (= `storefront_events.id`) — the browser `fbq` is injected by [[../libraries/storefront-pixel]] `initMetaPixel`.
 
-Sink dispatchers (one Inngest function per sink type):
+Event map (browser ⇄ server, same id): `pdp_view`→ViewContent, `add_to_cart`→AddToCart, `checkout_view`→InitiateCheckout, `order_placed`→Purchase, `lead_captured`→Lead.
 
-- `dispatch.meta_capi` → [[../integrations/meta-marketing]] CAPI POST with the same `event_id` (browser pixel + server CAPI dedup on Meta's side).
-- `dispatch.tiktok` → TikTok Events API.
-- `dispatch.google` → Google Enhanced Conversions.
-- `dispatch.klaviyo` → [[../integrations/klaviyo]] Track API.
-- `dispatch.custom_webhook` → generic webhook.
+The meta-capi sender:
+1. Resolves the sink, decrypts the access token.
+2. Maps our event → Meta standard event.
+3. Hashes PII (SHA-256, lowercase + trim) — em/ph/fn/ln/ct/st/zp/country/external_id; passes `_fbp`/`_fbc` (cookie or derived from `fbclid`) + UA unhashed. Raw IP isn't stored, so `client_ip_address` is absent.
+4. POSTs the batch with each `event_id` for dedup.
+5. Updates the dispatch row with response code + body; after `MAX_ATTEMPTS` → `dlq`.
 
-Each:
-
-1. Loads sink config, decrypts credentials.
-2. Maps our event payload to the sink's schema.
-3. Hashes PII (email/phone SHA-256, lowercase + trim first per Meta/TikTok spec).
-4. POSTs with `event_id` for dedup + IP + UA + `_fbp` + `_fbc` from the session row.
-5. Updates dispatch row with response code + body. Retry on transient failure; after N → `status='dlq'`.
+**Not yet built:** TikTok / Google / Klaviyo-Track / custom-webhook sink dispatchers (the `event_sinks` schema supports them; only `meta_capi` has a sender). Klaviyo leads currently go via [[../libraries/klaviyo-lead]] from `/api/lead`, not the sink path.
 
 ## Identity bootstrap
 
