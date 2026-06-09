@@ -40,9 +40,8 @@ function statusLabel(o: PortalOrder): { label: string; tone: "emerald" | "amber"
   return { label: "Processing", tone: "amber" };
 }
 
-export function OrdersSection({ orders, primaryColor }: Props) {
+export function OrdersSection({ orders }: Props) {
   const [openId, setOpenId] = useState<string | null>(null);
-  const [reordering, setReordering] = useState<string | null>(null);
 
   if (orders.length === 0) {
     return (
@@ -51,57 +50,6 @@ export function OrdersSection({ orders, primaryColor }: Props) {
         <p className="mt-1 text-sm text-zinc-500">When you place an order it&apos;ll show up here.</p>
       </div>
     );
-  }
-
-  async function reorder(o: PortalOrder) {
-    if (reordering) return;
-    setReordering(o.id);
-    try {
-      // Build a fresh cart_draft with the order's chargeable line
-      // items (skip gifts; cart auto-injects qualifying gifts on
-      // its own). All items default to one-time mode — customer
-      // picks subscribe/onetime in /customize.
-      const lines = o.line_items
-        .filter((l) => !l.is_gift && l.variant_id)
-        .map((l) => ({
-          variant_id: l.variant_id!,
-          quantity: l.quantity,
-        }));
-      if (lines.length === 0) {
-        setReordering(null);
-        return;
-      }
-      // We need workspace_id — read it from any cookie? No, use a
-      // small POST that lets /api/cart figure it out from session.
-      // /api/cart actually requires workspace_id. Hack: fetch the
-      // page metadata via the portal. Simpler: include the
-      // workspace via a query the portal exposes. For v1, hit the
-      // bootstrap endpoint to discover workspace_id.
-      const boot = await fetch("/api/portal?route=bootstrap", { credentials: "same-origin" });
-      const bootData = await boot.json().catch(() => ({}));
-      const workspaceId = bootData?.config?.workspace_id || bootData?.workspace_id;
-      if (!workspaceId) {
-        setReordering(null);
-        return;
-      }
-      const res = await fetch("/api/cart", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({
-          workspace_id: workspaceId,
-          line_items: lines,
-          mode: "onetime",
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      const token = data?.cart?.token;
-      if (token) {
-        window.location.href = `/customize?token=${encodeURIComponent(token)}`;
-        return;
-      }
-    } catch { /* ignore */ }
-    setReordering(null);
   }
 
   return (
@@ -207,17 +155,6 @@ export function OrdersSection({ orders, primaryColor }: Props) {
                   </div>
                 )}
 
-                <div className="mt-4">
-                  <button
-                    type="button"
-                    onClick={() => reorder(o)}
-                    disabled={reordering === o.id}
-                    className="rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-sm transition disabled:opacity-50"
-                    style={{ backgroundColor: primaryColor }}
-                  >
-                    {reordering === o.id ? "Loading…" : "Reorder these items"}
-                  </button>
-                </div>
               </div>
             )}
           </article>
