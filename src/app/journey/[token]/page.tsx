@@ -1546,7 +1546,7 @@ function AddressForm({
   const [street1, setStreet1] = useState(current.address1 || current.street1 || "");
   const [street2, setStreet2] = useState(current.address2 || current.street2 || "");
   const [city, setCity] = useState(current.city || "");
-  const [state, setState] = useState(current.provinceCode || current.state || "");
+  const [state, setState] = useState(current.provinceCode || current.province_code || current.state || "");
   const [zip, setZip] = useState(current.zip || "");
 
   const isValid = street1.trim() && city.trim() && state.trim() && zip.trim();

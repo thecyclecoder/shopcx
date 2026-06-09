@@ -80,7 +80,7 @@ export async function buildShippingAddressSteps(
     const addrLines = [
       currentAddress.address1 || currentAddress.street1,
       currentAddress.address2 || currentAddress.street2,
-      [currentAddress.city, currentAddress.provinceCode || currentAddress.state, currentAddress.zip].filter(Boolean).join(", "),
+      [currentAddress.city, currentAddress.provinceCode || currentAddress.province_code || currentAddress.state, currentAddress.zip].filter(Boolean).join(", "),
     ].filter(Boolean).join("\n");
 
     steps.push({

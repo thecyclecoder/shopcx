@@ -163,10 +163,12 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
         address1: addr.address1 || "",
         address2: addr.address2 || "",
         city: addr.city || "",
-        province: addr.province || "",
-        provinceCode: addr.provinceCode || "",
+        // Stored addresses use snake_case (province_code/country_code); order +
+        // Appstle shapes use camelCase. Accept both so the state isn't dropped.
+        province: addr.province || addr.province_code || addr.provinceCode || "",
+        provinceCode: addr.provinceCode || addr.province_code || addr.province || "",
         zip: addr.zip || "",
-        country: addr.country || "",
+        country: addr.country || addr.country_code || addr.countryCode || "",
       },
     };
   }
