@@ -3153,6 +3153,27 @@ async function handle30DayFlow(
       const orderTotal = order0?.total_cents || 0;
       const estLabelCost = (ctx._30day_label_cost_cents as number) || 795;
 
+      // Guard: Shopify will return "No returnable items found on this order"
+      // for any order that hasn't been fulfilled yet, because returnable
+      // line items only exist post-fulfillment. Detect that case up front
+      // and tell the customer to reply once the package arrives — DO NOT
+      // call createFullReturn (it would fail) and DO NOT escalate (the
+      // human can't create the return either until fulfillment).
+      const fulfillment = (order0?.fulfillment_status || "").toUpperCase();
+      const isFulfilled = fulfillment === "FULFILLED" || fulfillment === "PARTIAL";
+      if (!isFulfilled) {
+        const netRefund = orderTotal - estLabelCost;
+        ctx._30day_phase = "awaiting_fulfillment";
+        return {
+          action: "respond",
+          response:
+            `<p>I checked on your order ${order0?.order_number ? "#" + order0.order_number : ""} and it actually hasn't shipped out yet — it's still being processed at our warehouse, so I can't generate a return label for it just yet.</p>` +
+            `<p>Once it arrives, just reply here and I'll send you the prepaid return label right away. Your refund of <b>$${(netRefund / 100).toFixed(2)}</b> will process once it's back to our warehouse.</p>`,
+          context: ctx,
+          systemNote: `[Playbook] 30-day flow: order ${order0?.order_number || "?"} not yet fulfilled (status=${fulfillment || "null"}). Holding for delivery instead of attempting createFullReturn.`,
+        };
+      }
+
       if (!order0?.id || !order0?.shopify_order_id) {
         return {
           action: "escalate_api_failure",
