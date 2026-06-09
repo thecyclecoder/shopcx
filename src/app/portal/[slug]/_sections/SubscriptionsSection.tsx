@@ -25,6 +25,7 @@ interface Props {
 export function SubscriptionsSection({ subscriptions, workspace }: Props) {
   const active = subscriptions.filter((s) => s.status === "active");
   const paused = subscriptions.filter((s) => s.status === "paused");
+  const cancelled = subscriptions.filter((s) => s.status === "cancelled");
 
   if (subscriptions.length === 0) {
     return (
@@ -64,6 +65,19 @@ export function SubscriptionsSection({ subscriptions, workspace }: Props) {
           </div>
         </section>
       )}
+
+      {cancelled.length > 0 && (
+        <section>
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">
+            Cancelled{cancelled.length > 1 ? ` (${cancelled.length})` : ""}
+          </h2>
+          <div className="space-y-4">
+            {cancelled.map((s) => (
+              <SubCard key={s.id} sub={s} primaryColor={workspace.primaryColor} />
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
@@ -93,18 +107,20 @@ function SubCard({ sub, primaryColor }: { sub: PortalSubscription; primaryColor:
       <header className="flex flex-col gap-1 border-b border-zinc-100 p-5 sm:flex-row sm:items-baseline sm:justify-between">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-            {sub.status === "paused" ? "Paused subscription" : "Next delivery"}
+            {sub.status === "cancelled" ? "Cancelled subscription" : sub.status === "paused" ? "Paused subscription" : "Next delivery"}
           </p>
           <p className="mt-0.5 text-base font-semibold text-zinc-900">
-            {sub.status === "paused"
-              ? "Resume anytime"
-              : nextBilling || "Date to be set"}
+            {sub.status === "cancelled"
+              ? "Reactivate anytime"
+              : sub.status === "paused"
+                ? "Resume anytime"
+                : nextBilling || "Date to be set"}
           </p>
         </div>
         <div className="text-left text-sm text-zinc-500 sm:text-right">
           <div>{cadence}</div>
           <div className="mt-0.5 font-medium text-zinc-700">
-            ${(totalCents / 100).toFixed(2)} per delivery
+            {sub.status === "cancelled" ? "—" : `$${(totalCents / 100).toFixed(2)} per delivery`}
           </div>
         </div>
       </header>
@@ -180,7 +196,7 @@ function SubCard({ sub, primaryColor }: { sub: PortalSubscription; primaryColor:
           className="inline-flex items-center gap-1 rounded-lg px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90"
           style={{ background: primaryColor }}
         >
-          Manage subscription
+          {sub.status === "cancelled" ? "Reactivate subscription" : "Manage subscription"}
           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
           </svg>
