@@ -56,6 +56,8 @@ Sonnet returns `{action_type, actions: [...]}` with the action type and params; 
 - `redeem_points` — spend points to generate a Shopify discount code
 - `redeem_points_as_refund` — apply points value as a refund instead of a coupon
 
+**One coupon per order — never offer to "redeem all points."** Only one coupon applies per order (and one per subscription renewal), so redeeming a big balance into many codes mints coupons the customer can't stack — pointless, and "9 codes for all your points" reads as absurd. When a customer asks to redeem all their points, explain one-coupon-per-order and offer the single **highest tier they can afford** (e.g. 1,500 pts → $15), then redeem just that one. Enforced in the orchestrator's loyalty context (`sonnet-orchestrator-v2.ts`), which lists the tiers + this rule.
+
 ### Customer
 - `update_customer_info` — name / phone / email updates
 - `link_account_by_email` — confirm an account link

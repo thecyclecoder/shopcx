@@ -729,6 +729,14 @@ DRAFT ORDERS: orders flagged [DRAFT — not a renewal] are manual draft orders (
       const tierList = tiers.map(t => `${t.label} (${t.points_cost} pts → $${t.discount_value} off)`).join(", ");
       parts.push(`Available redemption tiers: ${tierList}`);
       parts.push("IMPORTANT: Only offer these exact tiers — never invent other amounts.");
+      // One coupon per order. Redeeming many tiers at once just mints codes
+      // the customer can never stack (only one applies per order/renewal), so
+      // it's pointless — and offering "9 codes for all your points" reads as
+      // absurd. When a customer asks to redeem ALL their points, do NOT offer
+      // to generate multiple codes. Explain one-coupon-per-order and offer the
+      // single highest tier they can afford, then redeem just that one.
+      const topTier = tiers.reduce((a, b) => (b.points_cost > a.points_cost ? b : a), tiers[0]);
+      parts.push(`IMPORTANT: Only ONE coupon can be used per order (and one per subscription renewal). NEVER offer to redeem all of a customer's points into multiple codes — extra codes are useless. If they ask to "redeem all my points", say something like: one coupon per order, so there isn't much sense redeeming everything at once; the max single redemption is ${topTier.points_cost} points for $${topTier.discount_value} off — offer to redeem THAT one and send the code.`);
     }
 
     const { data: redemptions } = await admin.from("loyalty_redemptions")
