@@ -108,19 +108,33 @@ async function getAmplifierConfig(workspaceId: string): Promise<{ apiKey: string
  * `postal_code` (not zip), `country_code` (not country).
  */
 function normalizeAddress(addr: Address): Record<string, unknown> {
-  const first = addr.first_name || (addr.name ? addr.name.split(" ").slice(0, -1).join(" ") : "");
-  const last = addr.last_name || (addr.name ? addr.name.split(" ").slice(-1).join(" ") : "");
+  // Addresses reach us in BOTH shapes: snake_case (older order rows) and camelCase
+  // (portal address handler + checkout — firstName/provinceCode/countryCode).
+  // Accept either, or name/country would silently empty out (Amplifier rejects
+  // those) and country_code would become "UN" from slicing "United States".
+  const a = addr as Record<string, unknown>;
+  const str = (...keys: string[]): string => {
+    for (const k of keys) { const v = a[k]; if (typeof v === "string" && v.trim()) return v.trim(); }
+    return "";
+  };
+  const name = str("name");
+  const first = str("first_name", "firstName") || (name ? name.split(" ").slice(0, -1).join(" ") : "");
+  const last = str("last_name", "lastName") || (name ? name.split(" ").slice(-1).join(" ") : "");
+  // country_code ONLY from an actual code field (2-letter), never sliced from a
+  // country name. Default US.
+  const rawCountry = str("country_code", "countryCode");
+  const country_code = /^[A-Za-z]{2}$/.test(rawCountry) ? rawCountry.toUpperCase() : "US";
   return {
-    first_name: (first || "").slice(0, 30),
-    last_name: (last || "").slice(0, 30),
-    address1: (addr.address1 || "").slice(0, 80),
-    address2: (addr.address2 || "").slice(0, 80) || undefined,
-    city: (addr.city || "").slice(0, 50),
-    state: (addr.province_code || addr.province || addr.state || "").toUpperCase().slice(0, 2),
-    postal_code: (addr.postal_code || addr.zip || "").slice(0, 50),
-    country_code: (addr.country_code || addr.country || "US").slice(0, 2).toUpperCase(),
-    phone: addr.phone || undefined,
-    email: addr.email || undefined,
+    first_name: first.slice(0, 30),
+    last_name: last.slice(0, 30),
+    address1: str("address1", "street1").slice(0, 80),
+    address2: (str("address2", "street2").slice(0, 80)) || undefined,
+    city: str("city").slice(0, 50),
+    state: str("province_code", "provinceCode", "province", "state").toUpperCase().slice(0, 2),
+    postal_code: str("postal_code", "zip").slice(0, 50),
+    country_code,
+    phone: str("phone") || undefined,
+    email: str("email") || undefined,
   };
 }
 
