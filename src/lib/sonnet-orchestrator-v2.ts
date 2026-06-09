@@ -903,7 +903,7 @@ async function getReturns(admin: Admin, wsId: string, custId: string): Promise<s
 
   // Returns
   const { data: returns } = await admin.from("returns")
-    .select("id, status, order_number, return_line_items, net_refund_cents, tracking_number, carrier, shipped_at, delivered_at, refunded_at, created_at")
+    .select("id, status, order_number, return_line_items, net_refund_cents, tracking_number, carrier, label_url, shipped_at, delivered_at, refunded_at, created_at")
     .eq("workspace_id", wsId).in("customer_id", allCustIds)
     .order("created_at", { ascending: false }).limit(5);
 
@@ -913,7 +913,11 @@ async function getReturns(admin: Admin, wsId: string, custId: string): Promise<s
       const items = (r.return_line_items as { title?: string; quantity?: number }[] || []).map(i => `${i.title || "item"} x${i.quantity || 1}`).join(", ");
       const date = new Date(r.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
       const refund = r.net_refund_cents ? `$${(r.net_refund_cents / 100).toFixed(2)}` : "pending";
-      parts.push(`- ${date} | Status: ${r.status} | Order #${r.order_number || "?"} | Items: ${items} | Refund: ${refund}${r.tracking_number ? ` | Tracking: ${r.tracking_number} (${r.carrier || "?"})` : ""}${r.shipped_at ? ` | Shipped: ${new Date(r.shipped_at).toLocaleDateString()}` : ""}${r.delivered_at ? ` | Delivered: ${new Date(r.delivered_at).toLocaleDateString()}` : ""}${r.refunded_at ? ` | Refunded: ${new Date(r.refunded_at).toLocaleDateString()}` : ""}`);
+      // label_url is surfaced so that, once a label exists, the only move on
+      // follow-ups is to re-deliver THIS exact link — never troubleshoot,
+      // offer alternatives, or create a new return. See the "re-deliver the
+      // label, don't keep solving" rule in sonnet_prompts.
+      parts.push(`- ${date} | Status: ${r.status} | Order #${r.order_number || "?"} | Items: ${items} | Refund: ${refund}${r.tracking_number ? ` | Tracking: ${r.tracking_number} (${r.carrier || "?"})` : ""}${r.label_url ? ` | Return label (re-send this exact link if asked): ${r.label_url}` : ""}${r.shipped_at ? ` | Shipped: ${new Date(r.shipped_at).toLocaleDateString()}` : ""}${r.delivered_at ? ` | Delivered: ${new Date(r.delivered_at).toLocaleDateString()}` : ""}${r.refunded_at ? ` | Refunded: ${new Date(r.refunded_at).toLocaleDateString()}` : ""}`);
     }
   } else {
     parts.push("RETURNS: No return requests found for this customer.");

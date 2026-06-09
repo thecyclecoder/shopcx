@@ -129,6 +129,10 @@ Net effect: **no return, no label, no email — just a false promise.** `pending
 
 Fixed by routing `confirm_return` through `createFullReturn()` and delivering the label inline in the same reply (per feedback_return_label_in_reply). Failures now `escalate_api_failure` (ticket stays open, agent To-Do) instead of promising a label. Lesson reinforced: **there is exactly one way to create a return — `createFullReturn()`.** Any flow with its own returns-table insert is a bug.
 
+## After the label is delivered — re-deliver only, never troubleshoot
+
+Once a return/replacement label has been created and sent, that is the full extent of what we can do — printing + drop-off is the customer's responsibility. If the customer follows up (can't print, no printer, "where do I drop it off", "again?", "USPS won't take it"), the AI must NOT troubleshoot, offer alternatives (print shops, QR codes — we have no Label Broker/QR support anyway, pickups, paperless), add explanations, or create a new return. The only move is to re-deliver the **exact same** label link in one short sentence. Enforced by the `sonnet_prompts` rule "Once a label is delivered, only re-deliver it…", and the orchestrator's `get_returns` tool now surfaces `label_url` so the AI has the link to re-send. Dylan's directive 2026-06-09 (a crisis-return customer got babied through three conflicting printer answers). Applies to refunds, replacements, and crisis returns alike.
+
 ## Tags + escalation
 
 If `createFullReturn()` itself fails (Shopify return mutation rejected, EasyPost can't find a rate, etc.):
