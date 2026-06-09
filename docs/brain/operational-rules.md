@@ -52,6 +52,10 @@ Critical for the `amazon_reseller` fraud rule which compares ship vs bill — ne
 - **Don't push to Vercel during active Inngest syncs** — Vercel's deploy reaps in-flight functions. Wait for syncs to drain.
 - **Dylan reviews on the live deployment, not localhost.** When he "can't see" a change, it's almost always undeployed — not missing code. To show a change, commit + push to `main` (Vercel auto-deploys production); don't spin up a local dev server to demo. Scope each commit to its own feature; leave his unrelated in-progress edits uncommitted.
 
+## Migrations — always apply them
+
+- **When you write a migration, apply it to the database in the same session — don't leave it for "the next deploy."** Dylan's directive (2026-06). Use the `pg` Client pattern in `scripts/apply-*-migration.ts` (tries the pooler/direct connection-string candidates, runs the SQL, verifies the columns/indexes/constraints landed). A migration file that's committed but unapplied means any new code that reads the new columns fails against the live DB until a deploy that may be hours away.
+
 ## Shopify extension deploy
 
 After editing files under `shopify-extension/portal-src/`:
