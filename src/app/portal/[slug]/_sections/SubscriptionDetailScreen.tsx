@@ -52,7 +52,7 @@ export interface AppliedDiscount {
   title?: string;
   value?: number | string;
   valueType?: "PERCENTAGE" | "FIXED_AMOUNT";
-  type?: "MANUAL" | "CODE_DISCOUNT" | "AUTOMATIC_DISCOUNT" | "code" | "percentage";
+  type?: "MANUAL" | "CODE_DISCOUNT" | "AUTOMATIC_DISCOUNT" | "code" | "percentage" | "fixed_amount";
 }
 
 export interface DeliveryAddress {
