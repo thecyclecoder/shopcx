@@ -230,7 +230,7 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
   );
   const next = contract.nextBillingDate
     ? new Date(contract.nextBillingDate).toLocaleDateString("en-US", {
-        weekday: "long", month: "long", day: "numeric", year: "numeric",
+        weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC",
       })
     : null;
   // Shipping protection lives as a line item on the contract (the
@@ -327,6 +327,18 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
         )}
       </article>
 
+      {/* Lifecycle control — sits above the items so the primary state action
+          (pause / resume / reactivate) is front-and-center. */}
+      {status === "active" && (
+        <PauseCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+      )}
+      {status === "paused" && (
+        <ResumeCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+      )}
+      {isCancelled && (
+        <ReactivateCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+      )}
+
       {/* Items + per-line actions — shipping protection has its own
           dedicated toggle card below, so hide it from the items list. */}
       <ItemsActionsCard
@@ -342,19 +354,13 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
       {/* Order summary — full breakdown of what they'll be charged. */}
       {!isCancelled && <OrderSummaryCard pricing={contract.pricing} taxCents={taxCents} showTax={!!contract.is_internal} />}
 
-      {/* Cadence + lifecycle controls — status-dependent */}
+      {/* Manage cadence — order now / change date / frequency (active only).
+          Pause/Resume/Reactivate render above the items. */}
       {status === "active" && (
         <>
           <OrderActionsCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
           <FrequencyCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
-          <PauseCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
         </>
-      )}
-      {status === "paused" && (
-        <ResumeCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
-      )}
-      {isCancelled && (
-        <ReactivateCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
       )}
 
       {/* Account-level cards — only on live subs */}
@@ -1460,7 +1466,7 @@ function OrderActionsCard({ contract, primaryColor, onMutate, action }: {
                     return;
                   }
                   setDateModal(false);
-                  const pretty = new Date(date + "T00:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+                  const pretty = new Date(date + "T00:00:00Z").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
                   run("changeDate", { contractId: contract.id, nextBillingDate: date }, `Next order date changed to ${pretty}`);
                 }}
                 className="rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"

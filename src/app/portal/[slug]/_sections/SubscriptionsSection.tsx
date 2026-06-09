@@ -83,7 +83,7 @@ function SubCard({ sub, primaryColor }: { sub: PortalSubscription; primaryColor:
   const pills = sub.pricing?.pills || [];
   const nextBilling = sub.next_billing_date
     ? new Date(sub.next_billing_date).toLocaleDateString("en-US", {
-        weekday: "long", month: "long", day: "numeric", year: "numeric",
+        weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC",
       })
     : null;
   const cadence = friendlyCadence(sub.billing_interval, sub.billing_interval_count);
