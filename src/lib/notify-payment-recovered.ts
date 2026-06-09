@@ -9,7 +9,7 @@ import { getSlackToken, postMessage } from "@/lib/slack";
  */
 export async function notifyPaymentRecovered(
   workspaceId: string,
-  info: { customerName: string; email: string; brand: string | null; last4: string | null; migratedCount: number; pinnedCount: number },
+  info: { customerName: string; email: string; brand: string | null; last4: string | null; migratedCount: number; pinnedCount: number; reactivatedCount?: number },
 ): Promise<void> {
   try {
     const token = await getSlackToken(workspaceId);

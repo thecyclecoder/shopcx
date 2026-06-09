@@ -96,9 +96,11 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
     }
   }
 
-  // Recovery flow: pin the new card to every one of the customer's internal subs
-  // across the link group (so the card that just failed is replaced everywhere),
-  // then DM the team on Slack.
+  // Recovery flow: pin the new card to every active internal sub across the link
+  // group (so the failed card is replaced everywhere the next renewal will charge),
+  // then DM the team. Reactivating involuntarily-cancelled subs is handled per-case
+  // during prep (auto-reactivating all cancelled subs risks reviving voluntary
+  // cancels + duplicates), so the recovery itself only touches active/paused subs.
   let pinnedCount = 0;
   if (recover) {
     try {
