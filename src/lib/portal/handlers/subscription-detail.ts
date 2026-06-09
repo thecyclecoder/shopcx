@@ -229,14 +229,29 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
   // transaction.
   let paymentMethod: { brand: string | null; last4: string | null; expiry: string | null; gateway: string | null } | null = null;
   if (sub.is_internal) {
-    const { data: pm } = await admin.from("customer_payment_methods")
-      .select("card_brand, last4, expiration_month, expiration_year")
-      .eq("workspace_id", auth.workspaceId)
-      .eq("customer_id", sub.customer_id)
-      .eq("status", "active")
-      .eq("is_default", true)
-      .eq("provider", "braintree")
-      .maybeSingle();
+    // Show the sub's PINNED card if set + still valid, else the customer default —
+    // mirrors the renewal's resolution so the displayed card is what gets charged.
+    let pm: { card_brand: string | null; last4: string | null; expiration_month: string | null; expiration_year: string | null } | null = null;
+    if (sub.payment_method_id) {
+      const { data } = await admin.from("customer_payment_methods")
+        .select("card_brand, last4, expiration_month, expiration_year")
+        .eq("workspace_id", auth.workspaceId)
+        .eq("id", sub.payment_method_id as string)
+        .eq("status", "active")
+        .maybeSingle();
+      pm = data;
+    }
+    if (!pm) {
+      const { data } = await admin.from("customer_payment_methods")
+        .select("card_brand, last4, expiration_month, expiration_year")
+        .eq("workspace_id", auth.workspaceId)
+        .eq("customer_id", sub.customer_id)
+        .eq("status", "active")
+        .eq("is_default", true)
+        .eq("provider", "braintree")
+        .maybeSingle();
+      pm = data;
+    }
     if (pm) {
       paymentMethod = {
         brand: (pm.card_brand as string) || null,

@@ -68,6 +68,14 @@ Call [[../integrations/avalara]] `transactions/create`:
 
 Avalara returns the tax line. Cache on the sub's `avalara_quote_*` columns (matches the cart-time caching pattern from [[storefront-checkout]]).
 
+## Internal scheduler — payment method
+
+The renewal charges the sub's **pinned** card (`subscriptions.payment_method_id`,
+set via the portal per-sub picker) if it's still active, otherwise the customer's
+**default** `customer_payment_methods` row. The pin falls back automatically if the
+card is removed (`ON DELETE SET NULL`). The portal sub-detail shows the same
+resolution so the displayed card matches what's charged.
+
 ## Internal scheduler — Phase 4: charge
 
 [[../integrations/braintree]] `transaction.sale`:

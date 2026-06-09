@@ -377,7 +377,7 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
           )}
           <AddressCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
           <CouponCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
-          <PaymentMethodCard contract={contract} />
+          <PaymentMethodCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
           <RewardsCard contract={contract} primaryColor={workspace.primaryColor} action={action} />
           {productIdsForReviews.length > 0 && <ReviewsCard productIds={productIdsForReviews} />}
           <CancelCard onStart={() => setCancelMode(true)} />
@@ -2056,10 +2056,47 @@ function CouponCard({ contract, primaryColor, onMutate, action }: {
   );
 }
 
-function PaymentMethodCard({ contract }: { contract: Contract }) {
+interface VaultedCard { id: string; brand: string | null; last4: string | null; is_default: boolean; provider: string; status: string }
+
+function PaymentMethodCard({ contract, primaryColor, onMutate, action }: {
+  contract: Contract; primaryColor: string; onMutate: () => Promise<void>; action: ActionApi;
+}) {
   const pm = contract.paymentMethod;
-  const manageUrl = contract.paymentManageUrl;
-  if (!pm && !manageUrl) return null;
+  const isInternal = !!contract.is_internal;
+  const [picking, setPicking] = useState(false);
+  const [cards, setCards] = useState<VaultedCard[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  if (!pm && !isInternal) return null;
+
+  async function openPicker() {
+    setPicking(true);
+    try {
+      const res = await fetch("/api/portal?route=paymentMethods", { credentials: "same-origin" });
+      const data = res.ok ? await res.json() : null;
+      setCards(((data?.methods as VaultedCard[]) || []).filter((m) => m.provider === "braintree" && m.status === "active"));
+    } catch { setCards([]); }
+  }
+
+  async function selectCard(id: string) {
+    if (busy) return;
+    setBusy(true);
+    action.startAction();
+    try {
+      const res = await fetch("/api/portal?route=setSubscriptionPaymentMethod", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ contractId: contract.id, paymentMethodId: id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) { action.failAction(data?.message || data?.error || undefined); return; }
+      action.completeAction("Payment method updated for this subscription");
+      setPicking(false);
+      await onMutate();
+    } catch { action.failAction(); }
+    finally { setBusy(false); }
+  }
 
   return (
     <ActionCard title="Payment method">
@@ -2067,28 +2104,66 @@ function PaymentMethodCard({ contract }: { contract: Contract }) {
         <div className="flex items-center gap-3">
           <span className="text-2xl" aria-hidden>💳</span>
           <div>
-            <div className="text-sm font-semibold text-zinc-900">
-              {pm.brand || "Card"} ending in {pm.last4 || "••••"}
-            </div>
+            <div className="text-sm font-semibold text-zinc-900">{pm.brand || "Card"} ending in {pm.last4 || "••••"}</div>
             {pm.expiry && <div className="text-xs text-zinc-500">Expires {pm.expiry}</div>}
           </div>
         </div>
       ) : (
         <p className="text-sm text-zinc-600">No payment method on file.</p>
       )}
-      {/* Go to our own Payment Methods page (not Shopify). Soon this is where a
-          customer adds/updates a card — which also triggers a full Appstle→internal
-          sub migration. Client-side nav; middleware rewrites /payment-methods. */}
-      <a
-        href="/payment-methods"
-        onClick={(e) => { e.preventDefault(); window.location.href = "/payment-methods"; }}
-        className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:border-zinc-400"
-      >
-        Manage payment methods
-        <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-        </svg>
-      </a>
+
+      {isInternal ? (
+        picking ? (
+          <div className="mt-3 space-y-2">
+            {cards.map((c) => {
+              const isCurrent = pm?.last4 === c.last4 && (pm?.brand || "").toLowerCase() === (c.brand || "").toLowerCase();
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => selectCard(c.id)}
+                  className={`flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-left text-sm transition disabled:opacity-50 ${isCurrent ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 bg-white hover:border-zinc-300"}`}
+                >
+                  <span className="font-medium text-zinc-900">{c.brand || "Card"} •• {c.last4 || "••••"}</span>
+                  <span className="text-xs text-zinc-500">{isCurrent ? "Current" : c.is_default ? "Default" : "Use this"}</span>
+                </button>
+              );
+            })}
+            {cards.length === 0 && <p className="text-sm text-zinc-500">No saved cards yet.</p>}
+            <div className="flex items-center justify-between pt-1">
+              <a
+                href="/payment-methods"
+                onClick={(e) => { e.preventDefault(); window.location.href = "/payment-methods"; }}
+                className="text-xs font-semibold"
+                style={{ color: primaryColor }}
+              >
+                + Add a new card
+              </a>
+              <button type="button" onClick={() => setPicking(false)} className="text-xs font-medium text-zinc-500 hover:text-zinc-700">Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={openPicker}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:border-zinc-400"
+          >
+            Change card for this subscription
+          </button>
+        )
+      ) : (
+        <a
+          href="/payment-methods"
+          onClick={(e) => { e.preventDefault(); window.location.href = "/payment-methods"; }}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:border-zinc-400"
+        >
+          Manage payment methods
+          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+          </svg>
+        </a>
+      )}
     </ActionCard>
   );
 }

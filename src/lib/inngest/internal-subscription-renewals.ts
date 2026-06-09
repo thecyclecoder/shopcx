@@ -88,21 +88,38 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     const ctx = await step.run("load-context", async () => {
       const { data: sub } = await admin
         .from("subscriptions")
-        .select("id, workspace_id, customer_id, items, billing_interval, billing_interval_count, next_billing_date, status, applied_discounts, shopify_contract_id, is_internal, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, shipping_address")
+        .select("id, workspace_id, customer_id, items, billing_interval, billing_interval_count, next_billing_date, status, applied_discounts, shopify_contract_id, is_internal, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, shipping_address, payment_method_id")
         .eq("id", subscription_id)
         .single();
       if (!sub?.is_internal) return { skip: true, reason: "not_internal" } as const;
       if (sub.status !== "active") return { skip: true, reason: `status_${sub.status}` } as const;
       if (!sub.customer_id) return { skip: true, reason: "no_customer" } as const;
 
-      const { data: pm } = await admin
-        .from("customer_payment_methods")
-        .select("id, braintree_customer_id, braintree_payment_method_token")
-        .eq("workspace_id", workspace_id)
-        .eq("customer_id", sub.customer_id)
-        .eq("status", "active")
-        .eq("is_default", true)
-        .maybeSingle();
+      // Charge the sub's PINNED card if set + still valid, else the customer's
+      // default. (The pin is set in the portal; falls back automatically if the
+      // pinned card was removed.)
+      let pm: { id: string; braintree_customer_id: string; braintree_payment_method_token: string } | null = null;
+      if (sub.payment_method_id) {
+        const { data } = await admin
+          .from("customer_payment_methods")
+          .select("id, braintree_customer_id, braintree_payment_method_token")
+          .eq("workspace_id", workspace_id)
+          .eq("id", sub.payment_method_id)
+          .eq("status", "active")
+          .maybeSingle();
+        pm = data;
+      }
+      if (!pm) {
+        const { data } = await admin
+          .from("customer_payment_methods")
+          .select("id, braintree_customer_id, braintree_payment_method_token")
+          .eq("workspace_id", workspace_id)
+          .eq("customer_id", sub.customer_id)
+          .eq("status", "active")
+          .eq("is_default", true)
+          .maybeSingle();
+        pm = data;
+      }
       if (!pm) return { skip: true, reason: "no_payment_method" } as const;
 
       const { data: customer } = await admin

@@ -70,6 +70,8 @@ import { shippingProtection } from "./shipping-protection";
 export { shippingProtection } from "./shipping-protection";
 import { braintreeClientToken } from "./braintree-client-token";
 export { braintreeClientToken } from "./braintree-client-token";
+import { setSubscriptionPaymentMethod } from "./set-subscription-payment-method";
+export { setSubscriptionPaymentMethod } from "./set-subscription-payment-method";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -153,4 +155,7 @@ export const routeMap: Record<string, RouteHandler> = {
   braintreeClientToken,
   braintreeclienttoken: braintreeClientToken,
   braintree_client_token: braintreeClientToken,
+  setSubscriptionPaymentMethod,
+  setsubscriptionpaymentmethod: setSubscriptionPaymentMethod,
+  set_subscription_payment_method: setSubscriptionPaymentMethod,
 };
