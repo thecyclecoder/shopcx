@@ -103,9 +103,10 @@ gateway.transaction.sale({
    - `next_billing_date = current_next + billing_interval`.
    - `last_payment_status = 'settled'`.
    - `last_braintree_txn_id`.
-5. Write [[../tables/customer_events]] `subscription.charged`.
-6. Fire `order_placed` storefront event → CAPI fan-out ([[storefront-checkout]] Phase 7).
-7. Tag the customer's most recent ticket (if any) with `wb` if this is a win-back. Otherwise no ticket change.
+5. Create the **Amplifier fulfillment order** (`createAmplifierOrder`) with the priced line items — including a **Haiku-personalized founder note** on the packing slip (`buildPackingSlipMessage` → `claude-haiku-4-5`, same as the storefront checkout; non-fatal, falls back to the static template). Backfills `orders.amplifier_order_id`. Note: Amplifier's `normalizeAddress` accepts both snake_case and camelCase address shapes and only takes `country_code` from a real 2-letter code (never sliced from a country name).
+6. Write [[../tables/customer_events]] `subscription.charged`.
+7. Fire `order_placed` storefront event → CAPI fan-out ([[storefront-checkout]] Phase 7).
+8. Tag the customer's most recent ticket (if any) with `wb` if this is a win-back. Otherwise no ticket change.
 
 ### Decline
 

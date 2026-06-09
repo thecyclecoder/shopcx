@@ -405,6 +405,25 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         unit_price_cents: l.price_cents,
         reference_id: l.variant_id ? String(l.variant_id) : undefined,
       }));
+
+      // Haiku-personalized founder note on the packing slip — same as the
+      // storefront checkout. Non-fatal: a generation failure just falls back to
+      // the static template inside buildPackingSlipMessage.
+      let packingSlipMessage: string | undefined;
+      try {
+        const { buildPackingSlipMessage } = await import("@/lib/packing-slip-message");
+        const distinctProducts = new Set(items.map((l: Item2) => String(l.variant_id || l.sku || l.title))).size;
+        packingSlipMessage = await buildPackingSlipMessage({
+          workspaceId: workspace_id,
+          customerId: ctx.sub.customer_id as string,
+          orderId: newOrder.id,
+          firstName: ctx.customer.first_name || "",
+          productCount: distinctProducts,
+        });
+      } catch (e) {
+        console.warn(`[renewal] packing slip message failed for ${newOrder.order_number}:`, e instanceof Error ? e.message : e);
+      }
+
       const amplifierRes = await createAmplifierOrder({
         workspaceId: workspace_id,
         orderNumber: newOrder.order_number,
@@ -418,6 +437,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         subtotalCents,
         shippingCents,
         taxCents,
+        packingSlipMessage,
       });
       if (amplifierRes.success && amplifierRes.amplifier_order_id) {
         await admin
