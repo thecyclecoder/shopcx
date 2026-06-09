@@ -242,13 +242,17 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
       pm = data;
     }
     if (!pm) {
+      // Default spans the link group (one default per person) — may be on a sibling.
+      const { linkGroupIds } = await import("@/lib/customer-links");
+      const groupIds = await linkGroupIds(admin, auth.workspaceId, sub.customer_id as string);
       const { data } = await admin.from("customer_payment_methods")
         .select("card_brand, last4, expiration_month, expiration_year")
         .eq("workspace_id", auth.workspaceId)
-        .eq("customer_id", sub.customer_id)
+        .in("customer_id", groupIds)
         .eq("status", "active")
         .eq("is_default", true)
         .eq("provider", "braintree")
+        .limit(1)
         .maybeSingle();
       pm = data;
     }

@@ -110,13 +110,18 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         pm = data;
       }
       if (!pm) {
+        // Default card spans the LINK GROUP (one default per person), so it may
+        // live on a linked sibling, not sub.customer_id.
+        const { linkGroupIds } = await import("@/lib/customer-links");
+        const groupIds = await linkGroupIds(admin, workspace_id, sub.customer_id);
         const { data } = await admin
           .from("customer_payment_methods")
           .select("id, braintree_customer_id, braintree_payment_method_token")
           .eq("workspace_id", workspace_id)
-          .eq("customer_id", sub.customer_id)
+          .in("customer_id", groupIds)
           .eq("status", "active")
           .eq("is_default", true)
+          .limit(1)
           .maybeSingle();
         pm = data;
       }

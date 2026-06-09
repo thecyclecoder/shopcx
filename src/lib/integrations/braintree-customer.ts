@@ -133,15 +133,17 @@ export interface PaymentMethodSaveInput {
 export async function savePaymentMethod(input: PaymentMethodSaveInput): Promise<{ id: string }> {
   const admin = createAdminClient();
 
-  // If this is being made the new default, demote all the customer's
-  // other defaults first. Constraint-free (no partial unique index on
-  // is_default) so a clean UPDATE → INSERT does the job.
+  // If this is being made the new default, demote every other default across the
+  // customer's LINK GROUP — linked accounts are one person, so there's exactly one
+  // default per person (not per profile, which produced two "default" cards).
   if (input.makeDefault) {
+    const { linkGroupIds } = await import("@/lib/customer-links");
+    const groupIds = await linkGroupIds(admin, input.workspaceId, input.customerId);
     await admin
       .from("customer_payment_methods")
       .update({ is_default: false, updated_at: new Date().toISOString() })
       .eq("workspace_id", input.workspaceId)
-      .eq("customer_id", input.customerId)
+      .in("customer_id", groupIds)
       .eq("is_default", true);
   }
 

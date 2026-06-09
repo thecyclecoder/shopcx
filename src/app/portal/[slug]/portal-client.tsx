@@ -91,12 +91,19 @@ const NAV_ITEMS: Array<{ id: SectionId; label: string; icon: string }> = [
 
 export default function PortalClient(props: Props) {
   const [section, setSectionState] = useState<SectionId>(props.initialSection || "home");
+  // The currently-open sub detail. Starts from the server prop (a cold-load of
+  // /subscriptions/{id}) but is CLIENT state so navigating to the Subscriptions
+  // list clears it — otherwise hitting /subscriptions kept showing the last
+  // detail the SPA had open.
+  const [detailSubscriptionId, setDetailSubscriptionId] = useState<string | null>(props.detailSubscriptionId || null);
   // Update both state AND the URL bar without triggering a Next.js
   // server roundtrip. Middleware rewrites the section path internally
   // so links into specific sections (refresh, share, back button)
   // hit the right page on cold-load.
   function setSection(s: SectionId) {
     setSectionState(s);
+    // The Subscriptions nav always means "show the list".
+    if (s === "subscriptions") setDetailSubscriptionId(null);
     try {
       const path = SECTION_PATHS[s];
       if (typeof window !== "undefined") {
@@ -216,7 +223,7 @@ export default function PortalClient(props: Props) {
           {/* Desktop section header — hidden on mobile (top bar shows it).
               Suppressed on the subscription detail screen since that
               screen renders its own header + breadcrumb. */}
-          {!(section === "subscriptions" && props.detailSubscriptionId) && (
+          {!(section === "subscriptions" && detailSubscriptionId) && (
             <div className="mb-6 hidden lg:block">
               <p className="text-sm text-zinc-500">{greeting}</p>
               <h1 className="mt-1 text-3xl font-bold text-zinc-900">
@@ -235,9 +242,9 @@ export default function PortalClient(props: Props) {
             />
           )}
           {section === "subscriptions" && (
-            props.detailSubscriptionId ? (
+            detailSubscriptionId ? (
               <SubscriptionDetailScreen
-                subscriptionId={props.detailSubscriptionId}
+                subscriptionId={detailSubscriptionId}
                 workspace={props.workspace}
               />
             ) : (
