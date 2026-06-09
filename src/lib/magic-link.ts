@@ -26,13 +26,14 @@ export function generateMagicToken(
   shopifyCustomerId: string,
   email: string,
   workspaceId: string,
+  expiryHours: number = EXPIRY_HOURS,
 ): string {
   const payload: MagicLinkPayload = {
     customerId,
     shopifyCustomerId,
     email,
     workspaceId,
-    exp: Date.now() + EXPIRY_HOURS * 60 * 60 * 1000,
+    exp: Date.now() + expiryHours * 60 * 60 * 1000,
   };
 
   const data = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -79,7 +80,8 @@ export async function generatePaymentRecoveryLink(
   email: string,
   workspaceId: string,
 ): Promise<string> {
-  return generateMagicLinkURL(customerId, shopifyCustomerId, email, workspaceId, "/payment-methods?recover=1");
+  // 7-day TTL — a failed-payment recovery email may sit unread for days.
+  return generateMagicLinkURL(customerId, shopifyCustomerId, email, workspaceId, "/payment-methods?recover=1", 24 * 7);
 }
 
 export async function generateMagicLinkURL(
@@ -88,8 +90,9 @@ export async function generateMagicLinkURL(
   email: string,
   workspaceId: string,
   next?: string,
+  expiryHours?: number,
 ): Promise<string> {
-  const token = generateMagicToken(customerId, shopifyCustomerId, email, workspaceId);
+  const token = generateMagicToken(customerId, shopifyCustomerId, email, workspaceId, expiryHours);
   // `next` is a portal-relative destination the login flow redirects to after
   // auth (validated server-side in /api/portal/magic-login).
   const nextQS = next ? `&next=${encodeURIComponent(next)}` : "";
