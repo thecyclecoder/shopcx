@@ -56,6 +56,7 @@ All routes are `/api/portal?route={name}` (App Proxy on the Shopify side) or POS
 
 ### Payment methods
 - **List** ([[../libraries/portal__handlers__payment-methods]]) — vaulted cards, last4, expiry
+- **Add a card** — the Payment Methods page renders the storefront's `HostedFieldsCard` (Braintree Hosted Fields). `route=braintreeClientToken` mints a client token bound to the customer's Braintree customer id (resolve-or-create); tokenize → `route=updatePaymentMethod` vaults the card, **makes it default**, and **migrates the customer's whole book** — `migrateCustomerAppstleSubsToInternal` now sweeps **active, paused, AND cancelled** Appstle subs onto internal rails, **preserving each sub's status** (active→active, paused→paused, cancelled→cancelled; was hardcoded active + active-only). `updatePaymentMethod` resolves-or-creates the Braintree customer so a first card works.
 - **Sub-detail payment card** — for **internal** subs the detail screen shows the default Braintree card from `customer_payment_methods` (same resolution as the renewal: `customer_id` + `is_default` + active), so the displayed card matches what's charged. Appstle subs read the last Shopify order's transaction. (Was Shopify-only → internal subs showed "No payment method on file".)
 - **Update** — adds a new vaulted card via Braintree Hosted Fields; switches default; migrates the sub off Appstle's gateway to internal Braintree where applicable (Appstle → Internal migration path on update)
 

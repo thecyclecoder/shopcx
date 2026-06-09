@@ -68,6 +68,8 @@ import { subscriptionTax } from "./subscription-tax";
 export { subscriptionTax } from "./subscription-tax";
 import { shippingProtection } from "./shipping-protection";
 export { shippingProtection } from "./shipping-protection";
+import { braintreeClientToken } from "./braintree-client-token";
+export { braintreeClientToken } from "./braintree-client-token";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -148,4 +150,7 @@ export const routeMap: Record<string, RouteHandler> = {
   shippingProtection,
   shippingprotection: shippingProtection,
   shipping_protection: shippingProtection,
+  braintreeClientToken,
+  braintreeclienttoken: braintreeClientToken,
+  braintree_client_token: braintreeClientToken,
 };

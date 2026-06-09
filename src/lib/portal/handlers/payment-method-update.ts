@@ -27,7 +27,9 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
   if (!customer) return jsonErr({ error: "customer_not_found" }, 404);
 
   const admin = createAdminClient();
-  // Resolve the Braintree customer id to vault against (from an existing PM row).
+  // Resolve the Braintree customer id to vault against. Prefer an existing PM
+  // row; for the customer's FIRST card there's none, so resolve-or-create the
+  // Braintree customer (same helper the checkout client-token uses).
   const { data: existingPm } = await admin
     .from("customer_payment_methods")
     .select("braintree_customer_id")
@@ -36,7 +38,21 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
     .not("braintree_customer_id", "is", null)
     .limit(1)
     .maybeSingle();
-  const braintreeCustomerId = existingPm?.braintree_customer_id as string | undefined;
+  let braintreeCustomerId = existingPm?.braintree_customer_id as string | undefined;
+  if (!braintreeCustomerId) {
+    try {
+      const { resolveBraintreeCustomerId } = await import("@/lib/integrations/braintree-customer");
+      braintreeCustomerId = (await resolveBraintreeCustomerId({
+        workspaceId: auth.workspaceId,
+        customerId: customer.id,
+        email: customer.email || "",
+        firstName: (customer.first_name as string | null) || undefined,
+        lastName: (customer.last_name as string | null) || undefined,
+      })) || undefined;
+    } catch (e) {
+      return jsonErr({ error: "no_braintree_customer", message: e instanceof Error ? e.message : String(e) }, 502);
+    }
+  }
   if (!braintreeCustomerId) return jsonErr({ error: "no_braintree_customer" }, 400);
 
   // Vault the new card + make it default.
@@ -79,5 +95,5 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
     createNote: false,
   });
 
-  return jsonOk({ ok: true, route, patch: { paymentMethod: { last4: vaulted.last4, cardBrand: vaulted.cardBrand } } });
+  return jsonOk({ ok: true, route, migrated_count: migratedCount, patch: { paymentMethod: { last4: vaulted.last4, cardBrand: vaulted.cardBrand } } });
 };

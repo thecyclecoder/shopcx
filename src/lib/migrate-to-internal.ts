@@ -133,13 +133,13 @@ export async function migrateCustomerAppstleSubsToInternal(workspaceId: string, 
   const groupIds = await linkedCustomerIds(admin, customerId);
   const billableCustomerId = await findBillableCustomer(admin, workspaceId, groupIds, customerId);
 
-  // Active Appstle subs across the whole link group.
+  // ALL Appstle subs across the link group — active, paused, AND cancelled.
+  // Adding a payment method sweeps the customer's whole book onto internal rails.
   const { data: subs } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, is_internal")
+    .select("id, shopify_contract_id, status, is_internal, items, billing_interval, billing_interval_count, next_billing_date")
     .eq("workspace_id", workspaceId)
     .in("customer_id", groupIds)
-    .neq("status", "cancelled")
     .eq("is_internal", false);
   if (!subs?.length) return result;
 
@@ -152,6 +152,7 @@ export async function migrateCustomerAppstleSubsToInternal(workspaceId: string, 
   const cfg = await getAppstleConfig(workspaceId);
   for (const sub of subs) {
     const contractId = String(sub.shopify_contract_id);
+    const isCancelled = sub.status === "cancelled";
     if (!cfg) { result.failed.push({ contractId, error: "Appstle not configured" }); continue; }
     try {
       // Read the LIVE Appstle contract — source of truth for current
@@ -162,36 +163,49 @@ export async function migrateCustomerAppstleSubsToInternal(workspaceId: string, 
           { headers: { "X-API-Key": cfg.apiKey }, cache: "no-store" },
         )
       ).json();
-      if (!live || live.status === "CANCELLED") { result.skipped.push({ contractId, reason: "already_cancelled_at_appstle" }); continue; }
+      const liveUsable = !!live && live.status !== "CANCELLED";
 
-      // Translate Appstle lines → internal catalog UUID references (no baked
-      // price; grandfathered lines get a price_override_cents).
-      const items = await appstleLinesToInternalItems(
-        admin,
-        workspaceId,
-        (live.lines?.nodes as Array<Record<string, unknown>>) || [],
-      );
-      const interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
-      const intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
-      const nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
+      let items: Array<Record<string, unknown>>;
+      let interval: string;
+      let intervalCount: number;
+      let nextBillingDate: string;
+      if (liveUsable) {
+        // Translate Appstle lines → internal catalog UUID references (no baked
+        // price; grandfathered lines get a price_override_cents).
+        items = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []);
+        interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
+        intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
+        nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
 
-      // Cancel Appstle FIRST (safe failure mode: a later flip failure stops the
-      // sub rather than letting both systems bill it).
-      const cancelR = await appstleSubscriptionAction(workspaceId, contractId, "cancel", "Migrated to internal billing", "ShopCX migration");
-      if (!cancelR.success) { result.failed.push({ contractId, error: `Appstle cancel failed: ${cancelR.error}` }); continue; }
+        // Cancel Appstle FIRST (safe failure mode: a later flip failure stops the
+        // sub rather than letting both systems bill it). Already-cancelled subs
+        // have nothing to cancel.
+        if (!isCancelled) {
+          const cancelR = await appstleSubscriptionAction(workspaceId, contractId, "cancel", "Migrated to internal billing", "ShopCX migration");
+          if (!cancelR.success) { result.failed.push({ contractId, error: `Appstle cancel failed: ${cancelR.error}` }); continue; }
+        }
+      } else {
+        // No usable live Appstle data. Only safe for cancelled subs (they won't
+        // bill) — migrate them onto internal rails using the local row. An
+        // active/paused sub we can't read is left alone (re-runnable).
+        if (!isCancelled) { result.skipped.push({ contractId, reason: "appstle_unavailable" }); continue; }
+        items = (sub.items as Array<Record<string, unknown>>) || [];
+        interval = String(sub.billing_interval || "week").toLowerCase();
+        intervalCount = Number(sub.billing_interval_count || 1);
+        nextBillingDate = (sub.next_billing_date as string) || new Date().toISOString();
+      }
 
-      // Flip the EXISTING row in place → internal, active, billable customer.
-      // Replace the Shopify/Appstle contract id with a native internal id: the
-      // sub is no longer Shopify-tied, and it decouples the row from any stale
-      // Appstle webhook keyed on the old contract id (belt-and-suspenders with
-      // the is_internal guard in the Appstle webhook handler).
+      // Flip the EXISTING row in place → internal, billable customer, PRESERVING
+      // status (active→active, paused→paused, cancelled→cancelled). Replace the
+      // Shopify/Appstle contract id with a native internal id so the sub is no
+      // longer Shopify-tied and a stale Appstle webhook can't clobber it.
       const internalContractId = `internal-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
       const { error: flipErr } = await admin
         .from("subscriptions")
         .update({
           shopify_contract_id: internalContractId,
           is_internal: true,
-          status: "active",
+          status: sub.status,
           customer_id: billableCustomerId,
           items,
           next_billing_date: nextBillingDate,
@@ -201,7 +215,7 @@ export async function migrateCustomerAppstleSubsToInternal(workspaceId: string, 
         })
         .eq("workspace_id", workspaceId)
         .eq("shopify_contract_id", contractId);
-      if (flipErr) { result.failed.push({ contractId, error: `flip failed (sub cancelled — re-run to recover): ${flipErr.message}` }); continue; }
+      if (flipErr) { result.failed.push({ contractId, error: `flip failed (re-run to recover): ${flipErr.message}` }); continue; }
 
       result.migrated.push({ contractId, subId: String(sub.id), billableCustomerId });
     } catch (e) {

@@ -1,21 +1,15 @@
 "use client";
 
 /**
- * Payment Methods section — read-only list of the customer's saved
- * cards. The list spans linked customer profiles so a shared wallet
- * shows up as one. Each row shows brand, last4, expiration, and the
- * default badge.
- *
- * v1 is read-only on purpose. Vault-a-new-card needs Braintree
- * Hosted Fields on the client + a /api/portal mutation that gates on
- * the workspace's portal_migration_enabled flag (then carries every
- * active Appstle subscription onto our internal billing scheduler).
- * Until that ships, the "Add new card" CTA is rendered as a disabled
- * "Coming soon" affordance so customers see the surface but can't
- * trigger it.
+ * Payment Methods section — saved cards + add a new card (Braintree Hosted
+ * Fields). The list spans linked customer profiles so a shared wallet shows as
+ * one. Adding a card vaults it in Braintree, makes it the default, and sweeps the
+ * customer's Appstle subs (active / paused / cancelled) onto our internal billing
+ * via updatePaymentMethod → migrateCustomerAppstleSubsToInternal.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { HostedFieldsCard, type HostedFieldsCardHandle } from "@/app/(storefront)/checkout/_components/HostedFieldsCard";
 
 interface PortalPaymentMethod {
   id: string;
@@ -41,28 +35,71 @@ interface Props {
 
 export function PaymentMethodsSection({ primaryColor }: Props) {
   const [methods, setMethods] = useState<PortalPaymentMethod[]>([]);
-  const [migrationEnabled, setMigrationEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const res = await fetch("/api/portal?route=paymentMethods", { credentials: "same-origin" });
-        if (!res.ok) throw new Error("Could not load payment methods");
-        const data = await res.json() as PortalPaymentMethodsResponse;
-        if (!alive) return;
-        setMethods(data.methods || []);
-        setMigrationEnabled(!!data.migrationEnabled);
-      } catch (e) {
-        if (alive) setError(e instanceof Error ? e.message : "Failed to load");
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-    return () => { alive = false; };
+  // Add-card flow
+  const [adding, setAdding] = useState(false);
+  const [clientToken, setClientToken] = useState<string | null>(null);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const hfRef = useRef<HostedFieldsCardHandle>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch("/api/portal?route=paymentMethods", { credentials: "same-origin" });
+      if (!res.ok) throw new Error("Could not load payment methods");
+      const data = (await res.json()) as PortalPaymentMethodsResponse;
+      setMethods(data.methods || []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load");
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function startAdd() {
+    setAdding(true);
+    setTokenError(null);
+    setClientToken(null);
+    try {
+      const res = await fetch("/api/portal?route=braintreeClientToken", { credentials: "same-origin" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.client_token) { setTokenError(data?.message || data?.error || "Couldn't start card entry."); return; }
+      setClientToken(data.client_token);
+    } catch { setTokenError("Couldn't start card entry."); }
+  }
+
+  async function saveCard() {
+    if (!hfRef.current || saving) return;
+    setSaving(true);
+    setToast(null);
+    try {
+      const { nonce, deviceData } = await hfRef.current.tokenize();
+      const res = await fetch("/api/portal?route=updatePaymentMethod", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ paymentMethodNonce: nonce, deviceData }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.error) { setTokenError(data?.message || data?.error || "Couldn't save the card."); return; }
+      const migrated = Number(data?.migrated_count || 0);
+      setToast(migrated > 0
+        ? `Card saved and set as default — and ${migrated} subscription${migrated === 1 ? "" : "s"} moved to it.`
+        : "Card saved and set as your default.");
+      setAdding(false);
+      setClientToken(null);
+      await load();
+    } catch (e) {
+      setTokenError(e instanceof Error ? e.message : "Couldn't save the card.");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   if (loading) {
     return <div className="rounded-xl border border-zinc-200 bg-white p-6 text-sm text-zinc-500">Loading payment methods…</div>;
@@ -73,20 +110,19 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
 
   return (
     <div className="space-y-4">
-      {methods.length === 0 ? (
+      {toast && (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800">{toast}</div>
+      )}
+
+      {methods.length === 0 && !adding ? (
         <div className="rounded-xl border border-dashed border-zinc-300 bg-white p-8 text-center">
           <p className="text-sm font-medium text-zinc-700">No saved payment methods.</p>
-          <p className="mt-1 text-xs text-zinc-500">
-            Your active subscriptions still bill through the card you used at checkout.
-          </p>
+          <p className="mt-1 text-xs text-zinc-500">Add a card to manage and pay for your subscriptions here.</p>
         </div>
       ) : (
         <ul className="space-y-3">
           {methods.map((m) => (
-            <li
-              key={m.id}
-              className="flex items-center justify-between rounded-xl border border-zinc-200 bg-white p-4 shadow-sm"
-            >
+            <li key={m.id} className="flex items-center justify-between rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
               <div className="flex items-center gap-4">
                 <CardLogo brand={m.brand} />
                 <div>
@@ -94,17 +130,12 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
                     {m.brand || "Card"} ending in {m.last4 || "••••"}
                   </div>
                   <div className="mt-0.5 text-xs text-zinc-500">
-                    {m.expiration_month && m.expiration_year
-                      ? `Expires ${m.expiration_month}/${m.expiration_year.slice(-2)}`
-                      : ""}
+                    {m.expiration_month && m.expiration_year ? `Expires ${m.expiration_month}/${m.expiration_year.slice(-2)}` : ""}
                   </div>
                 </div>
               </div>
               {m.is_default && (
-                <span
-                  className="rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-white"
-                  style={{ background: primaryColor }}
-                >
+                <span className="rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-white" style={{ background: primaryColor }}>
                   Default
                 </span>
               )}
@@ -113,21 +144,54 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
         </ul>
       )}
 
-      <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+      {/* Add a card */}
+      {adding ? (
+        <div className="rounded-xl border border-zinc-200 bg-white p-5">
+          <h3 className="text-sm font-semibold text-zinc-900">Add a payment method</h3>
+          <p className="mt-0.5 text-xs text-zinc-500">Your new card becomes your default and is used for all your subscriptions.</p>
+          {tokenError && <p className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700">{tokenError}</p>}
+          <div className="mt-4">
+            {clientToken ? (
+              <HostedFieldsCard
+                ref={hfRef}
+                clientToken={clientToken}
+                primaryColor={primaryColor}
+                cardholderName=""
+                onError={(msg) => setTokenError(msg)}
+              />
+            ) : !tokenError ? (
+              <p className="text-sm text-zinc-500">Loading secure card entry…</p>
+            ) : null}
+          </div>
+          <div className="mt-4 flex gap-2">
+            <button
+              type="button"
+              disabled={saving || !clientToken}
+              onClick={saveCard}
+              className="flex-1 rounded-lg px-4 py-2.5 text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-50"
+              style={{ background: primaryColor }}
+            >
+              {saving ? "Saving…" : "Save card"}
+            </button>
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => { setAdding(false); setClientToken(null); setTokenError(null); }}
+              className="rounded-lg border border-zinc-300 bg-white px-4 py-2.5 text-sm font-semibold text-zinc-700 hover:border-zinc-400 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
         <button
           type="button"
-          disabled
-          title="Coming soon — we're upgrading the billing system to support self-service card updates."
-          className="w-full cursor-not-allowed rounded-lg border border-dashed border-zinc-300 bg-white px-4 py-3 text-sm font-medium text-zinc-400"
+          onClick={startAdd}
+          className="w-full rounded-lg border border-zinc-300 bg-white px-4 py-3 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
         >
-          + Add a new payment method (coming soon)
+          + Add a payment method
         </button>
-        <p className="mt-2 text-xs text-zinc-500">
-          {migrationEnabled
-            ? "We'll have self-service card management here shortly."
-            : "Need to update your card today? Reply to your latest order email and our team will help right away."}
-        </p>
-      </div>
+      )}
     </div>
   );
 }
@@ -135,14 +199,10 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
 function CardLogo({ brand }: { brand: string | null }) {
   const b = (brand || "").toLowerCase();
   const tone =
-    b.includes("visa")
-      ? "bg-blue-100 text-blue-800"
-      : b.includes("master")
-        ? "bg-orange-100 text-orange-800"
-        : b.includes("amex") || b.includes("american")
-          ? "bg-sky-100 text-sky-800"
-          : b.includes("discover")
-            ? "bg-amber-100 text-amber-800"
+    b.includes("visa") ? "bg-blue-100 text-blue-800"
+      : b.includes("master") ? "bg-orange-100 text-orange-800"
+        : b.includes("amex") || b.includes("american") ? "bg-sky-100 text-sky-800"
+          : b.includes("discover") ? "bg-amber-100 text-amber-800"
             : "bg-zinc-100 text-zinc-700";
   const label = brand || "Card";
   return (
