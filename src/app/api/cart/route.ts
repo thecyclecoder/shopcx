@@ -235,7 +235,11 @@ export async function POST(request: NextRequest) {
         email: body.email || null,
         phone: body.phone || null,
         line_items: linesWithGifts,
-        discount_code: body.discount_code || null,
+        // Auto-apply the popup's customer-scoped coupon: when the smart
+        // popup claimed one (phone step), it set a `popup_coupon` cookie so
+        // the discount lands on the cart the visitor creates afterwards,
+        // without ever showing the code on screen.
+        discount_code: body.discount_code || request.cookies.get("popup_coupon")?.value || null,
         subscription_frequency_days: mode === "subscribe" ? freqDays : null,
         subtotal_cents: subtotalCents,
         discount_cents: discountCents,

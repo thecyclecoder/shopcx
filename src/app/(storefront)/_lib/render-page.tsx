@@ -24,6 +24,7 @@ import { StorefrontHeader } from "../_components/StorefrontHeader";
 import { ProductJsonLd } from "../_components/ProductJsonLd";
 import { StorefrontPixelInit } from "../_components/StorefrontPixelInit";
 import { StorefrontChapterTracker } from "../_components/StorefrontChapterTracker";
+import { SmartPopup } from "../_components/SmartPopup";
 import { ActiveMemberProvider } from "./active-member-context";
 import { PricingModeProvider } from "./pricing-mode-context";
 import { UpsellChapter } from "../_sections/UpsellChapter";
@@ -134,6 +135,14 @@ export function StorefrontPage({
       {/* Phase 2 instrumentation — observes [data-section] nodes for
           chapter_view/dwell, tracks scroll_depth + cta_click. No UI. */}
       <StorefrontChapterTracker productId={data.product.id} />
+      {/* Phase 4 — behaviorally-triggered smart popup. Silent for
+          decisive buyers; intervenes only on hesitation/indecision. */}
+      <SmartPopup
+        workspaceId={data.workspace.id}
+        productId={data.product.id}
+        hasActiveSub={false}
+        benefitOptions={data.benefit_selections.map((b) => b.benefit_name).filter(Boolean)}
+      />
 
       <StorefrontHeader
         workspaceId={data.product.workspace_id}

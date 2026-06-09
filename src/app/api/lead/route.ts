@@ -45,6 +45,14 @@ interface Body {
   coupon_code?: string | null;
   /** Quiz answers (Phase 4) — persisted to Klaviyo + the lead for segmentation. */
   properties?: Record<string, unknown>;
+  /**
+   * Popup email step: mint a customer-scoped single-use coupon now (never
+   * returned to the client — delivered only by SMS at the phone step, or by
+   * the 5-min email fallback). When set, also arms the abandonment fallback.
+   */
+  mint_coupon?: { type: "percentage" | "fixed_amount"; value: number } | null;
+  /** Quiz answers to persist on the lead (cups/day + health goal). */
+  quiz_answers?: Record<string, unknown> | null;
 }
 
 export async function POST(request: Request) {
@@ -124,6 +132,26 @@ export async function POST(request: Request) {
     sessionId = (sess?.id as string) || null;
   }
 
+  // Popup email step: mint the customer-scoped single-use coupon now. We
+  // never return it to the client — it's revealed only via SMS (phone step)
+  // or the 5-min email fallback. Stored on the lead so both deliveries +
+  // the fallback job can read it.
+  let mintedCoupon: string | null = body.coupon_code || null;
+  if (body.mint_coupon && !mintedCoupon) {
+    try {
+      const { mintCustomerCoupon } = await import("@/lib/coupons");
+      const res = await mintCustomerCoupon(body.workspace_id, customer.id, {
+        type: body.mint_coupon.type,
+        value: body.mint_coupon.value,
+        recurring_cycle_limit: 1,
+        codePrefix: "WELCOME",
+      });
+      mintedCoupon = res?.code || null;
+    } catch (e) {
+      console.warn("[lead] coupon mint failed:", e instanceof Error ? e.message : e);
+    }
+  }
+
   // Upsert storefront_leads. The previous code wrote boolean
   // email_consent/sms_consent columns that DON'T EXIST (they're
   // *_consent_at timestamps) and used .insert(), so a repeat email threw
@@ -144,7 +172,8 @@ export async function POST(request: Request) {
         email_consent_at: body.email_consent ? nowIso : null,
         sms_consent_at: body.sms_consent && body.phone ? nowIso : null,
         source: body.source || "unknown",
-        coupon_code_issued: body.coupon_code || null,
+        coupon_code_issued: mintedCoupon,
+        quiz_answers: body.quiz_answers || {},
         updated_at: nowIso,
       },
       { onConflict: "workspace_id,email" },
@@ -165,9 +194,21 @@ export async function POST(request: Request) {
       lastName: body.last_name || null,
       emailConsent: !!body.email_consent,
       smsConsent: !!(body.sms_consent && body.phone),
-      properties: { source: body.source || "unknown", ...(body.properties || {}) },
+      properties: { source: body.source || "unknown", ...(body.properties || {}), ...(body.quiz_answers || {}) },
     }).catch(() => undefined),
   );
 
-  return NextResponse.json({ customer_id: customer.id, created });
+  // Arm the abandonment fallback: if this lead minted a coupon (popup email
+  // step) but never completes the phone step, an Inngest delayed job emails
+  // the code after 5 min. Fired only when a coupon was minted.
+  if (mintedCoupon && body.mint_coupon) {
+    void import("@/lib/inngest/client").then(({ inngest }) =>
+      inngest.send({
+        name: "popup/email-lead-captured",
+        data: { workspace_id: body.workspace_id, customer_id: customer.id, email },
+      }).catch(() => undefined),
+    );
+  }
+
+  return NextResponse.json({ customer_id: customer.id, created, coupon_minted: !!mintedCoupon });
 }

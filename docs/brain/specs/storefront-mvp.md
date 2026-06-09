@@ -104,7 +104,9 @@ One foundation, three payoffs: the smart popup (Phase 4), chapter-performance an
 
 ---
 
-## Phase 4 — Smart popup + quiz (lead capture) ⏳
+## Phase 4 — Smart popup + quiz (lead capture) ✅
+
+> **Shipped (2026-06-09).** `SmartPopup` (`(storefront)/_components/`) runs the candidacy gate + behavioral timeline locally, then `/api/popup/decide` (rules [[../libraries/popup-decide]] + Haiku A/B, one decision/session, daily cap) returns `{show, variant, offer}` and logs [[../tables/popup_decisions]]. Offer computed live by `computePopupOffer` (≈44% multiplicative stack + free shipping + free gift). Multi-step form (survey → email → phone → confirmation) saves at each step: email → `/api/lead` (mints the coupon, arms [[../inngest/popup-coupon-fallback]]); phone → `/api/popup/claim` ([[../libraries/twilio-lookup]] mobile-gate → SMS the code → auto-apply via `popup_coupon` cookie picked up by `/api/cart`). Confirmation never shows the code. 5-min email fallback for email-only leads (deduped vs SMS). Outcome funnel via `/api/popup/outcome`. Gamified "you've been selected" + countdown. **Migration `20260609180000_smart_popup.sql` applied to prod.** Pragmatic notes: `hasActiveSub` passed `false` (storefront is anonymous — returning-subscriber suppression needs a logged-in signal, future); free-shipping value is a representative constant (no address at popup time); quiz answers stored on `storefront_leads.quiz_answers` + Klaviyo props (not new customers columns).
 
 The "smart form." A behaviorally-triggered popup that **stays silent for locked-in buyers** (protect margin) and intervenes only on hesitation/indecision, capturing the lead and offering a big stacked discount.
 
@@ -186,14 +188,14 @@ Multi-step, **saving at each step** (progressive capture — a partial lead is s
 - ⏳ Smart popup gates → decides (rules) → shows discount/quiz variant → mints coupon → captures lead → fires Klaviyo + CAPI Lead; quiz answers on the customer record; outcomes logged.
 - ⏳ One live subscribe purchase completes end-to-end.
 
-## Open questions
+## Open questions — RESOLVED
 
-- `<Chapter>` wrapper vs. a HOC for the dynamically-imported sections (PriceTable/Bundle/Reviews/FAQ are `dynamic()`).
-- Quiz recommendation logic — pure mapping (cups/day → pack) or scored against benefits?
-- Where quiz answers live — columns on `customers` vs. a `quiz_responses` table (lean table for extensibility).
-- CAPI fan-out trigger — Inngest event per pixel write vs. a batched cron over `storefront_events`.
-- Twilio Lookup — block VoIP, or allow SMS-capable VoIP (mobile-only is stricter)? Lookup cost is per-check but only runs post-email, so volume is bounded.
-- Coupon delivery dedup — the 5-min email fallback must only fire if the phone step never completed, so a lead never gets both the SMS *and* the fallback email.
+- ~~`<Chapter>` wrapper vs. HOC~~ → **neither**; observe existing `[data-section]` nodes (Phase 2).
+- ~~Quiz recommendation logic~~ → **pure mapping** (cups/day → pack); kept simple.
+- ~~Where quiz answers live~~ → **`storefront_leads.quiz_answers` jsonb** + Klaviyo props (not customers columns) — leaner + that's where segmentation happens.
+- ~~CAPI fan-out trigger~~ → **batched cron** over `storefront_events` (Phase 3) — decouples the pixel hot path, event_dispatches is the retry ledger.
+- ~~Twilio Lookup VoIP~~ → **mobile-only** (block landline + VoIP), fail-closed.
+- ~~Coupon delivery dedup~~ → fallback guards on `sms_consent_at IS NULL` + `fallback_emailed_at IS NULL`; SMS path sets `sms_consent_at` → fallback skips.
 
 ## Related
 
