@@ -3,6 +3,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { healOnTouch } from "@/lib/appstle-pricing";
 import {
   isInternalSubscription,
   internalSubAddItem,
@@ -139,6 +140,7 @@ export async function appstleRemoveLineItem(
   contractId: string,
   variantOrLine: { variantId?: string; lineGid?: string },
 ): Promise<{ success: boolean; error?: string }> {
+  await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
@@ -323,6 +325,7 @@ export async function subAddItem(
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubAddItem(workspaceId, contractId, variantId, quantity);
   }
+  await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
@@ -382,6 +385,7 @@ export async function subChangeQuantity(
     await admin.from("subscriptions").update({ items, updated_at: new Date().toISOString() }).eq("id", sub.id);
     return { success: true };
   }
+  await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
@@ -432,6 +436,7 @@ export async function subUpdateLineItemPrice(
     // our DB items array is keyed by variant_id directly.
     return internalSubUpdateLineItemPrice(workspaceId, contractId, variantId, basePriceCents);
   }
+  await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
@@ -550,6 +555,7 @@ export async function subSwapVariant(
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
   }
+  await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 

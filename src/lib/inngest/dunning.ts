@@ -847,6 +847,8 @@ async function resetBillingDateAfterDunning(
   try {
     const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", workspaceId).single();
     if (ws?.appstle_api_key_encrypted) {
+      const { healOnTouch } = await import("@/lib/appstle-pricing");
+      await healOnTouch(workspaceId, shopifyContractId);
       const { decrypt } = await import("@/lib/crypto");
       const apiKey = decrypt(ws.appstle_api_key_encrypted);
       const dateStr = nextDate.toISOString().split("T")[0]; // YYYY-MM-DD

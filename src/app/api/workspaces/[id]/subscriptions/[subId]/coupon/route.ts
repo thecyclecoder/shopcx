@@ -77,6 +77,9 @@ export async function DELETE(
   const { discountId } = await request.json();
   if (!discountId) return NextResponse.json({ error: "discountId required" }, { status: 400 });
 
+  const { healOnTouch } = await import("@/lib/appstle-pricing");
+  await healOnTouch(workspaceId, String(sub.shopify_contract_id));
+
   const res = await fetch(
     `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${sub.shopify_contract_id}&discountId=${discountId}`,
     { method: "PUT", headers: { "X-API-Key": creds.apiKey } }

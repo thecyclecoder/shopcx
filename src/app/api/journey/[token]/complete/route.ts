@@ -258,6 +258,8 @@ export async function POST(
                   if (wsCreds?.appstle_api_key_encrypted) {
                     const { decrypt } = await import("@/lib/crypto");
                     const appstleKey = decrypt(wsCreds.appstle_api_key_encrypted);
+                    const { healOnTouch } = await import("@/lib/appstle-pricing");
+                    await healOnTouch(wsId, String(sub.shopify_contract_id));
                     // Appstle's GraphQL validator requires countryCode +
                     // provinceCode (the bare `country`/`province` fields
                     // alone return a 400 "deliveryMethod.shipping.address.

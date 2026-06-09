@@ -228,6 +228,8 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     if (!r.success) return handleAppstleError(new Error(r.error || "Internal item update failed"), { route: "replaceVariants", payload: body });
   } else {
     try {
+      const { healOnTouch } = await import("@/lib/appstle-pricing");
+      await healOnTouch(auth.workspaceId, String(contractId));
       const admin = createAdminClient();
       const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
       if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");

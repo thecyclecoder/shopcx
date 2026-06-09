@@ -11,6 +11,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 
 async function appstleResume(workspaceId: string, contractId: string) {
+  const { healOnTouch } = await import("@/lib/appstle-pricing");
+  await healOnTouch(workspaceId, contractId);
   const admin = createAdminClient();
   const { data: ws } = await admin.from("workspaces")
     .select("appstle_api_key_encrypted")

@@ -26,6 +26,8 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
     // 1) Set next billing date — Appstle subs go through the Appstle API; internal
     //    subs get their date from the DB update below (no Appstle contract exists).
     if (!resolved?.is_internal) {
+      const { healOnTouch } = await import("@/lib/appstle-pricing");
+      await healOnTouch(auth.workspaceId, String(contractId));
       const admin = createAdminClient();
       const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
       if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");

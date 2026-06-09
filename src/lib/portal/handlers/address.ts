@@ -97,6 +97,8 @@ export const address: RouteHandler = async ({ auth, route, req }) => {
   // Appstle — the local subscriptions row below is the source of truth.
   if (!isInternal) {
     try {
+      const { healOnTouch } = await import("@/lib/appstle-pricing");
+      await healOnTouch(auth.workspaceId, String(contractId));
       const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
       if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
       const apiKey = decrypt(ws.appstle_api_key_encrypted);

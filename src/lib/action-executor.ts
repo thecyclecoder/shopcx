@@ -1559,6 +1559,8 @@ export const directActionHandlers: Record<
     // Subscription branch — Appstle endpoint
     if (p.contract_id) {
       try {
+        const { healOnTouch } = await import("@/lib/appstle-pricing");
+        await healOnTouch(ctx.workspaceId, String(p.contract_id));
         const { data: ws } = await ctx.admin.from("workspaces")
           .select("appstle_api_key_encrypted").eq("id", ctx.workspaceId).single();
         if (ws?.appstle_api_key_encrypted) {

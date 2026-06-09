@@ -1,6 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { loggedAppstleFetch } from "@/lib/appstle-call-log";
+import { healOnTouch } from "@/lib/appstle-pricing";
 import {
   isInternalSubscription,
   internalSubscriptionAction,
@@ -39,6 +40,9 @@ export async function appstleSubscriptionAction(
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubscriptionAction(workspaceId, contractId, action);
   }
+
+  // Heal-on-touch (skip on cancel — no point structuring a sub we're killing).
+  if (action !== "cancel") await healOnTouch(workspaceId, contractId);
 
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
@@ -115,6 +119,7 @@ export async function appstleSkipNextOrder(
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubSkipNextOrder(workspaceId, contractId);
   }
+  await healOnTouch(workspaceId, contractId);
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -146,6 +151,7 @@ export async function appstleUpdateBillingInterval(
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubUpdateBillingInterval(workspaceId, contractId, interval, intervalCount);
   }
+  await healOnTouch(workspaceId, contractId);
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -222,6 +228,7 @@ export async function appstleUpdateNextBillingDate(
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
   }
+  await healOnTouch(workspaceId, contractId);
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -327,6 +334,7 @@ export async function appstleSkipUpcomingOrder(
   workspaceId: string,
   contractId: string,
 ): Promise<{ success: boolean; error?: string }> {
+  await healOnTouch(workspaceId, contractId);
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -409,6 +417,7 @@ export async function appstleSwitchPaymentMethod(
     if (error) return { success: false, error: error.message };
     return { success: true };
   }
+  await healOnTouch(workspaceId, contractId);
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -493,6 +502,7 @@ export async function appstleAddFreeProduct(
     }
     return { success: true };
   }
+  await healOnTouch(workspaceId, contractId);
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
@@ -532,6 +542,7 @@ export async function appstleSwapProduct(
     const { internalSubSwapVariant } = await import("@/lib/internal-subscription");
     return internalSubSwapVariant(workspaceId, contractId, oldVariantId, newVariantId);
   }
+  await healOnTouch(workspaceId, contractId);
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
