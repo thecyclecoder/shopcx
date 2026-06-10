@@ -38,6 +38,14 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   if (error || !campaign)
     return NextResponse.json({ error: "not_found" }, { status: 404 });
 
+  // Re-sign the hero from its stable path (stored URL is a time-limited signed
+  // URL that expires) so the detail page never shows a broken hero image.
+  {
+    const { signedUrl } = await import("@/lib/ad-storage");
+    const fresh = await signedUrl(`avatars/${workspaceId}/heroes/${id}.png`).catch(() => null);
+    if (fresh) (campaign as any).hero_image_url = fresh;
+  }
+
   const { data: videoRows } = await auth.admin
     .from("ad_videos")
     .select("*")

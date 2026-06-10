@@ -38,7 +38,18 @@ export async function GET(req: Request) {
     .order("created_at", { ascending: false });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data || []);
+
+  // Re-sign the hero thumbnail from its stable storage path so library cards
+  // never show a broken image (the stored hero_image_url is a time-limited
+  // signed URL that expires). Path is deterministic per campaign.
+  const { signedUrl } = await import("@/lib/ad-storage");
+  const rows = await Promise.all(
+    (data || []).map(async (c) => {
+      const fresh = await signedUrl(`avatars/${workspaceId}/heroes/${c.id}.png`).catch(() => null);
+      return fresh ? { ...c, hero_image_url: fresh } : c;
+    }),
+  );
+  return NextResponse.json(rows);
 }
 
 export async function POST(req: Request) {
