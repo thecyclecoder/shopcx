@@ -31,6 +31,21 @@ export interface RawArticle {
 
 interface ProductRef { id: string; title: string; handle: string }
 
+/** Remove Shopify's editor cruft (meta/base tags, comments) from a body. */
+export function cleanBodyHtml(html: string): string {
+  return (html || "")
+    .replace(/<meta[^>]*>/gi, "")
+    .replace(/<base[^>]*>/gi, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .trim();
+}
+
+/** A clean plain-text excerpt (≤240 chars) from the summary, else the body. */
+export function cleanExcerpt(rawSummary: string | null, contentText: string): string {
+  const fromSummary = htmlToText(rawSummary || "");
+  return (fromSummary.length > 10 ? fromSummary : contentText).slice(0, 240).trim();
+}
+
 /** Strip HTML → plain text for search + classification. */
 export function htmlToText(html: string): string {
   return (html || "")
@@ -137,6 +152,8 @@ export async function importBlogArticle(
 
   const classification = await classifyArticle(workspaceId, { title: article.title, contentText }, catalog);
   const images = await migratePostImages(workspaceId, article.handle, article.contentHtml, article.featuredImageUrl);
+  const cleanHtml = cleanBodyHtml(images.html);
+  const excerpt = cleanExcerpt(article.excerpt, contentText);
 
   const { data: post, error } = await admin
     .from("posts")
@@ -147,8 +164,8 @@ export async function importBlogArticle(
         blog_handle: article.blogHandle,
         handle: article.handle,
         title: article.title,
-        excerpt: article.excerpt,
-        content_html: images.html,
+        excerpt,
+        content_html: cleanHtml,
         content_text: contentText,
         featured_image_url: images.featuredImageUrl,
         seo_title: article.seoTitle,
