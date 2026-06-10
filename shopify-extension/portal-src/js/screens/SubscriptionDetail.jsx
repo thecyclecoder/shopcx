@@ -811,9 +811,13 @@ function CouponCard({ contract, startAction, completeAction, failAction, onUpdat
 
   function formatDiscountValue(d) {
     if (!d?.value) return '';
-    return d.valueType === 'PERCENTAGE' || d.type === 'percentage'
-      ? d.value + '% off'
-      : '$' + Number(d.value).toFixed(2) + ' off';
+    if (d.valueType === 'PERCENTAGE' || d.type === 'percentage') return d.value + '% off';
+    // Fixed amount — units differ by source: INTERNAL coupons store the value in
+    // CENTS (type 'fixed_amount', e.g. 1500 = $15), Appstle coupons store DOLLARS
+    // (valueType 'FIXED_AMOUNT', e.g. 15 = $15). Treating internal cents as dollars
+    // was rendering a $15 loyalty coupon as "$1500.00 off".
+    const dollars = d.type === 'fixed_amount' ? Number(d.value) / 100 : Number(d.value);
+    return '$' + dollars.toFixed(2) + ' off';
   }
 
   return (
