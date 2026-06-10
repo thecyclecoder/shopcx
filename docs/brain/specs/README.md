@@ -47,7 +47,12 @@ Single source of truth for what's being built next, what's parked, and what just
 - Payment-method update with Appstle → internal migration on card change
 - Identity linking, event log + internal ticket notes
 
+**MVP hardening shipped (2026-06-10):** account linked-accounts list + email read-only, first-delivery mutation gate (both portals), support sidebar tickets across linked accounts (archived read-only), payment-recovery magic-link emails + dunning visibility. The in-house portal is **adequately hardened for MVP**.
+
 **Open sub-work:**
+- ⏳ **Portal: finish "Resources" sidebar** — the Resources section exists but is incomplete; flesh out the content/data it surfaces. (Later session.)
+- ⏳ **Portal: add "Promotions" sidebar item** — net-new sidebar section for active promotions/offers. (Later session.)
+- ⏳ **Portal: add "Shop" sidebar item** — net-new sidebar section for in-portal shopping (re-order / add products without leaving the portal). (Later session.)
 - 🚧 **New customer portal** (v2) — net-new surface being built. Scope to be spec'd: which capabilities move from the Shopify ext to the in-house surface, what the design system looks like, how it co-exists with the existing in-house mini-site under `/portal`. Promote to its own spec when concrete: `specs/customer-portal-v2.md`.
 - ⏳ **Appstle pricing heal + migration monitor** — [[appstle-pricing-heal-and-migration-monitor]]. One Appstle gateway that heals `pricingPolicy:null` subs on touch (validated live), smart migration that reads `pricingPolicy.basePrice` directly (heal-by-migration), and a post-payment-method verification monitor (retry-then-flag) so we never lose a renewal. Design + decisions settled 2026-06-09; ready to build.
 
