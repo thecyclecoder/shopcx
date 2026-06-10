@@ -43,6 +43,7 @@ POSTs are **form-encoded** (`URLSearchParams`; objects `JSON.stringify`'d), toke
 ### Phase 1 — Meta ads client `src/lib/meta-ads.ts` ⏳
 - `getMetaUserToken(workspaceId)` — decrypt the active `meta_connections.access_token_encrypted`.
 - `listAdAccounts(workspaceId)` (`/me/adaccounts?fields=id,name,account_status,currency` or from `meta_ad_accounts`), `listCampaigns(token, actId)` (`act_{id}/campaigns?fields=id,name,status,objective&effective_status=[ACTIVE,PAUSED]`), `listAdSets(token, actId, campaignId)` (`act_{id}/adsets?fields=id,name,status,campaign_id`).
+- `listPages(token)` (`/me/accounts?fields=id,name,instagram_business_account{id,username}`) — **the creative's `page_id` is operator-selected, not the workspace's organic page.** The connected `workspaces.meta_page_id` is the org page (e.g. *Ashwavana*); Amazing Coffee ads may run under a different FB page, so the publish flow lets Dylan pick the page (and its linked IG account becomes `instagram_user_id`).
 - `uploadAdVideo(token, actId, fileUrl, name)` + `waitForVideoReady(token, videoId)` (poll), `uploadAdImage(token, actId, bytes)`→hash, `createAdCreative(token, actId, body)`, `createAd(token, actId, body)`. Form-encoded `metaPost` helper. v21.0.
 - **Acceptance:** can list accounts/campaigns/adsets + the create helpers typecheck.
 
@@ -52,11 +53,11 @@ POSTs are **form-encoded** (`URLSearchParams`; objects `JSON.stringify`'d), toke
 - **Acceptance:** returns 4 headlines + 4 primary texts for Amazing Coffee, on-brand, within limits.
 
 ### Phase 3 — Publish-job table ⏳
-- Migration `ad_publish_jobs`: `id`, `workspace_id`, `campaign_id`, `video_id`, `meta_account_id`, `meta_campaign_id`, `meta_adset_id`, `headlines jsonb`, `primary_texts jsonb`, `description`, `cta_type`, `destination_url`, `publish_status` (`queued|uploading|creating|published|failed`), `meta_video_id`, `meta_creative_id`, `meta_ad_id`, `error`, `created_by`, timestamps. RLS (workspace SELECT + service-role) per [[../operational-rules]] § RLS. Apply in-session (`scripts/apply-*`).
+- Migration `ad_publish_jobs`: `id`, `workspace_id`, `campaign_id`, `video_id`, `meta_account_id`, `meta_campaign_id`, `meta_adset_id`, `meta_page_id`, `meta_instagram_user_id`, `headlines jsonb`, `primary_texts jsonb`, `description`, `cta_type`, `destination_url`, `publish_status` (`queued|uploading|creating|published|failed`), `meta_video_id`, `meta_creative_id`, `meta_ad_id`, `error`, `created_by`, timestamps. RLS (workspace SELECT + service-role) per [[../operational-rules]] § RLS. Apply in-session (`scripts/apply-*`).
 - **Acceptance:** table + RLS live.
 
 ### Phase 4 — API routes ⏳
-- `GET /api/ads/meta/accounts` · `GET /api/ads/meta/campaigns?accountId=` · `GET /api/ads/meta/adsets?accountId=&campaignId=` (proxy Graph via the client; workspace-authorized).
+- `GET /api/ads/meta/accounts` · `GET /api/ads/meta/campaigns?accountId=` · `GET /api/ads/meta/adsets?accountId=&campaignId=` · `GET /api/ads/meta/pages` (FB pages + linked IG; for the creative `page_id`/`instagram_user_id`). All proxy Graph via the client; workspace-authorized.
 - `POST /api/ads/campaigns/[id]/meta-copy` → `generateMetaCopy` (editable in UI).
 - `POST /api/ads/campaigns/[id]/publish` `{ video_id, account, campaign, adset, headlines[], primary_texts[], description?, cta_type, destination_url, status }` → insert `ad_publish_jobs` + fire `ad-tool/publish-to-meta`.
 - **Acceptance:** dropdowns populate from a live Meta account; publish enqueues a job.
@@ -66,7 +67,7 @@ POSTs are **form-encoded** (`URLSearchParams`; objects `JSON.stringify`'d), toke
 - **Acceptance:** a real ad lands in the chosen ad set (PAUSED), visible in Meta Ads Manager, job row → `published` with `meta_ad_id`.
 
 ### Phase 6 — UI: "Publish to Meta" on the campaign page ⏳
-- Panel on `/dashboard/marketing/ads/[id]`: **Generate copy** → editable list of 4 headlines + 4 primary texts (+ optional description) + **CTA** select + **destination URL** (default the storefront/product URL + UTM tokens) → cascading **Ad account → Campaign → Ad set** selects → **Publish** (PAUSED default, with an "publish active" checkbox). Show job status + a deep link to the ad in Ads Manager.
+- Panel on `/dashboard/marketing/ads/[id]`: **Generate copy** → editable list of 4 headlines + 4 primary texts (+ optional description) + **CTA** select + **destination URL** (default the storefront/product URL + UTM tokens) → **Facebook Page** select (drives `page_id` + its IG account) → cascading **Ad account → Campaign → Ad set** selects → **Publish** (PAUSED default, with a "publish active" checkbox). Show job status + a deep link to the ad in Ads Manager.
 - **Acceptance:** Dylan publishes an ad end-to-end from the dashboard.
 
 ### Phase 7 — Brain docs + fold ⏳
@@ -77,8 +78,9 @@ POSTs are **form-encoded** (`URLSearchParams`; objects `JSON.stringify`'d), toke
 - **Copy variations** ride in `asset_feed_spec` (Meta optimizes across the 4 headlines × 4 bodies) — matches the "+3 variations" ask. Single-copy `object_story_spec` is the fallback.
 - **Video** = the campaign's ready `reels_9x16` `final_mp4_url` (signed; Meta downloads it). Later: also upload `feed_4x5` for placement customization (shopgrowth's PAC pattern) — deferred.
 - **Destination URL** defaults to the store/product URL; append UTM (`campaign`/`ad`/`angle`).
-- **Scopes**: needs `ads_management` (already in the OAuth scope list — verify the connected token has it via `/me/permissions`).
-- **No new Meta app** — reuse the existing connection + `meta_ad_accounts`.
+- **Scopes**: needs `ads_management` — **verified present** on the connected token (along with `ads_read`, `business_management`); token expires **2026-06-30** (reconnect before then).
+- **Pick the page**: the creative `page_id` is operator-selected via `listPages` (don't hard-code `workspaces.meta_page_id` — that's the org *Ashwavana* page; ads may run under a different page). The selected page's linked `instagram_business_account` → `instagram_user_id`. Persist the chosen `page_id`/`instagram_user_id` on the publish job.
+- **No new Meta app** — reuse the existing connection + `meta_ad_accounts` (Amazing Coffee & Creamer = `act_2352876514967984`).
 
 ## Definition of done
 From a campaign on `/dashboard/marketing/ads/[id]`, Dylan generates copy (4 headlines + 4 primary texts + CTA), picks ad account/campaign/ad set, and publishes — the video uploads to Meta, a creative + ad are created (PAUSED) in the ad set, and the `meta_ad_id` + Ads Manager link surface. Brain updated; spec folded + deleted.
