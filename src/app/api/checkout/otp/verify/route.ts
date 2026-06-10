@@ -18,6 +18,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { checkVerification } from "@/lib/twilio-verify";
+import { toE164US } from "@/lib/shopify-customer-update";
 import { setSessionCookie } from "@/lib/auth-session";
 
 interface PostBody {
@@ -68,7 +69,10 @@ export async function POST(request: NextRequest) {
   const serviceSid = ws?.twilio_verify_service_sid as string | null;
   if (!serviceSid) return NextResponse.json({ error: "verify_not_configured" }, { status: 500 });
 
-  const destination = session.channel === "sms" ? (customer.phone as string) : (customer.email as string);
+  // Must match the E.164 `To` the verification was CREATED with in otp/start.
+  const destination = session.channel === "sms"
+    ? (toE164US(customer.phone as string) || (customer.phone as string))
+    : (customer.email as string);
   const check = await checkVerification(serviceSid, destination, code);
 
   if (!check.approved) {

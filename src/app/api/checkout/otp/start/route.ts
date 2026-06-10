@@ -25,6 +25,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { startVerification } from "@/lib/twilio-verify";
+import { toE164US } from "@/lib/shopify-customer-update";
 
 interface PostBody {
   cart_token?: string;
@@ -98,7 +99,10 @@ export async function POST(request: NextRequest) {
 
   // Decide channel. The phone we send to is the one ON FILE for the
   // matched profile, NEVER the one typed into checkout — anti-spoof.
-  const profilePhone = (customer.phone as string | null) || null;
+  // Normalize to E.164: many stored numbers are display-formatted
+  // ("(858) 334-9198"), which Twilio Verify rejects outright — that
+  // silently 502'd the whole OTP path and no modal ever showed.
+  const profilePhone = customer.phone ? toE164US(customer.phone as string) : null;
   const hasSms = !!profilePhone;
   const hasEmail = !!customer.email;
   let channel: "sms" | "email" = body.channel || (hasSms ? "sms" : "email");

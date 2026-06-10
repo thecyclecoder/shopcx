@@ -14,6 +14,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { startVerification } from "@/lib/twilio-verify";
+import { toE164US } from "@/lib/shopify-customer-update";
 
 interface PostBody {
   session_id?: string;
@@ -71,8 +72,10 @@ export async function POST(request: NextRequest) {
   const serviceSid = ws?.twilio_verify_service_sid as string | null;
   if (!serviceSid) return NextResponse.json({ error: "verify_not_configured" }, { status: 500 });
 
-  // Channel resolution — explicit body wins; else stick with existing
-  const profilePhone = (customer.phone as string | null) || null;
+  // Channel resolution — explicit body wins; else stick with existing.
+  // Normalize to E.164 (stored numbers are often display-formatted, which
+  // Twilio Verify rejects).
+  const profilePhone = customer.phone ? toE164US(customer.phone as string) : null;
   const requestedChannel: "sms" | "email" = body.channel || (session.channel as "sms" | "email");
   let channel: "sms" | "email" = requestedChannel;
   if (channel === "sms" && !profilePhone) channel = "email";
