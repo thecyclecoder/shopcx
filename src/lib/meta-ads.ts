@@ -65,15 +65,6 @@ async function metaPost(path: string, body: Record<string, unknown>, token: stri
   return json;
 }
 
-/** Whether an ad set is flagged Dynamic Creative (asset_feed_spec creatives only work in these). */
-export async function isDynamicAdSet(token: string, adsetId: string): Promise<boolean> {
-  try {
-    const j = await metaGet(`${adsetId}?fields=is_dynamic_creative`, token);
-    return j.is_dynamic_creative === true;
-  } catch {
-    return false;
-  }
-}
 
 // ── Listing (for the publish selectors) ─────────────────────────────────────
 
@@ -158,52 +149,43 @@ export async function getVideoThumbnail(token: string, videoId: string): Promise
 }
 
 /**
- * Create an ad creative. Two shapes (Meta is strict here):
- *   - **dynamic ad set** → `asset_feed_spec` with `ad_formats:[AUTOMATIC_FORMAT]`,
- *     so the headline × body variations become a dynamic creative. ONLY works in
- *     ad sets flagged `is_dynamic_creative` (else "Dynamic Creative ads can only
- *     be created under Dynamic Creative Ad Sets").
- *   - **regular ad set** → single `object_story_spec.video_data` (first headline +
- *     first primary text). Video ads REQUIRE a thumbnail (`image_url`/`image_hash`).
+ * Create a **non-dynamic, multi-text** video ad creative — one video, multiple
+ * headline + primary-text options ("Add text option / Add headline option"),
+ * publishable into a **regular** (non-Dynamic-Creative) ad set that holds many ads.
+ *
+ * The shape (confirmed from shopgrowth's working publisher — see
+ * docs/brain/lifecycles/ad-publish.md):
+ *   - `asset_feed_spec` carries the variations: `titles[]`, `bodies[]`,
+ *     `descriptions[]`, `call_to_action_types`, and the link in `link_urls`.
+ *   - **NO `ad_formats`, NO `optimization_type`, NO `asset_customization_rules`** —
+ *     those three are what force Dynamic-Creative semantics and trigger "Dynamic
+ *     Creative ads can only be created under Dynamic Creative Ad Sets". Omitting
+ *     them keeps the creative a plain multi-text ad.
+ *   - `object_story_spec: { page_id, instagram_user_id }` — required for accounts
+ *     without a default promotable page (ours). Adding it does NOT make it dynamic.
+ *   - The **link** goes in `asset_feed_spec.link_urls = [{ website_url }]`, NOT a
+ *     top-level `link` and NOT in `call_to_action` (else "link field is required").
+ *   - Video ads need a **thumbnail** — `thumbnail_hash` on the video asset.
+ *   - UTM tracking stays in the top-level `url_tags` (link_urls can't carry it).
+ *   - `degrees_of_freedom_spec.text_optimizations = OPT_OUT` — don't let Meta
+ *     auto-rewrite the copy.
  */
-export async function createAdCreative(token: string, a: CreativeArgs, opts: { dynamic: boolean; thumbnailUrl?: string | null }): Promise<string> {
-  const ig = a.instagramUserId ? { instagram_user_id: a.instagramUserId } : {};
-  let body: Record<string, unknown>;
-  if (opts.dynamic) {
-    body = {
-      name: a.name,
-      object_story_spec: { page_id: a.pageId, ...ig },
-      asset_feed_spec: {
-        videos: [{ video_id: a.videoId, ...(a.thumbnailHash ? { thumbnail_hash: a.thumbnailHash } : {}) }],
-        titles: a.headlines.filter(Boolean).map((text) => ({ text })),
-        bodies: a.primaryTexts.filter(Boolean).map((text) => ({ text })),
-        ...(a.description ? { descriptions: [{ text: a.description }] } : {}),
-        call_to_action_types: [a.ctaType],
-        link_urls: [{ website_url: a.destinationUrl }],
-        ad_formats: ["AUTOMATIC_FORMAT"],
-      },
-      degrees_of_freedom_spec: { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" } } },
-      ...(a.urlTags ? { url_tags: a.urlTags } : {}),
-    };
-  } else {
-    const thumb = opts.thumbnailUrl ? { image_url: opts.thumbnailUrl } : a.thumbnailHash ? { image_hash: a.thumbnailHash } : {};
-    body = {
-      name: a.name,
-      object_story_spec: {
-        page_id: a.pageId,
-        ...ig,
-        video_data: {
-          video_id: a.videoId,
-          title: a.headlines.find(Boolean) || "",
-          message: a.primaryTexts.find(Boolean) || "",
-          ...(a.description ? { link_description: a.description } : {}),
-          ...thumb,
-          call_to_action: { type: a.ctaType, value: { link: a.destinationUrl } },
-        },
-      },
-      ...(a.urlTags ? { url_tags: a.urlTags } : {}),
-    };
-  }
+export async function createAdCreative(token: string, a: CreativeArgs): Promise<string> {
+  const body: Record<string, unknown> = {
+    name: a.name,
+    object_story_spec: { page_id: a.pageId, ...(a.instagramUserId ? { instagram_user_id: a.instagramUserId } : {}) },
+    asset_feed_spec: {
+      videos: [{ video_id: a.videoId, ...(a.thumbnailHash ? { thumbnail_hash: a.thumbnailHash } : {}) }],
+      titles: a.headlines.filter(Boolean).map((text) => ({ text })),
+      bodies: a.primaryTexts.filter(Boolean).map((text) => ({ text })),
+      ...(a.description ? { descriptions: [{ text: a.description }] } : {}),
+      call_to_action_types: [a.ctaType],
+      link_urls: [{ website_url: a.destinationUrl }],
+      // intentionally NO ad_formats / optimization_type / asset_customization_rules
+    },
+    degrees_of_freedom_spec: { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" } } },
+    ...(a.urlTags ? { url_tags: a.urlTags } : {}),
+  };
   const j = await metaPost(`${actId(a.accountId)}/adcreatives`, body, token);
   if (!j.id) throw new Error("meta_creative_no_id");
   return j.id;

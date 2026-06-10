@@ -39,7 +39,7 @@ import { loadAngleInputs } from "@/lib/ad-angles";
 import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo, renderStillCompositionTo } from "@/lib/ad-render";
 import { loadStaticInputs, buildReviewProps, buildOfferProps, buildBenefitAuthorityProps, DEFAULT_BRAND, type StaticArchetype } from "@/lib/ad-static";
-import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, isDynamicAdSet, createAdCreative, createAd } from "@/lib/meta-ads";
+import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, uploadAdImage, createAdCreative, createAd } from "@/lib/meta-ads";
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
 // hallucinated filler (we still proofread captions, but tighter input = cleaner).
@@ -751,24 +751,30 @@ export const adToolPublishToMeta = inngest.createFunction(
         await waitForVideoReady(ctx.token!, videoId, { timeoutMs: 300000 });
 
         await setStatus("creating");
-        // Video ads need a thumbnail; copy variations only work in dynamic ad sets.
-        const [thumbnailUrl, dynamic] = await Promise.all([
-          getVideoThumbnail(ctx.token!, videoId),
-          isDynamicAdSet(ctx.token!, j.meta_adset_id),
-        ]);
+        // Video ads need a thumbnail. asset_feed_spec wants a thumbnail_hash, so
+        // pull Meta's auto-generated thumbnail and re-upload it to get a hash.
+        let thumbnailHash: string | null = null;
+        const thumbnailUrl = await getVideoThumbnail(ctx.token!, videoId);
+        if (thumbnailUrl) {
+          try {
+            const bytes = Buffer.from(await (await fetch(thumbnailUrl)).arrayBuffer());
+            thumbnailHash = await uploadAdImage(ctx.token!, j.meta_account_id, bytes);
+          } catch { /* fall through — creative create will surface a thumbnail error if truly required */ }
+        }
         const creativeId = await createAdCreative(ctx.token!, {
           accountId: j.meta_account_id,
           name: ctx.adName,
           pageId: j.meta_page_id,
           instagramUserId: j.meta_instagram_user_id,
           videoId,
+          thumbnailHash,
           headlines: j.headlines || [],
           primaryTexts: j.primary_texts || [],
           description: j.description,
           ctaType: j.cta_type,
           destinationUrl: j.destination_url,
           urlTags: `utm_source=meta&utm_medium=paid_social&utm_campaign=${encodeURIComponent(ctx.adName)}`,
-        }, { dynamic, thumbnailUrl });
+        });
         await admin.from("ad_publish_jobs").update({ meta_creative_id: creativeId }).eq("id", job_id);
 
         const adId = await createAd(ctx.token!, j.meta_account_id, {
