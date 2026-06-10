@@ -67,6 +67,7 @@ for (const r of data || []) counts.set(r.status, (counts.get(r.status) || 0) + 1
 - `avatar_id` is `ON DELETE SET NULL` — archiving/deleting an [[ad_avatars]] row leaves the campaign intact but avatar-less.
 - `length_sec` is `15` or `30`. 30s ads render as **two** talking-head clips — see [[ad_videos]].`talking_head_segments_url`.
 - Internal joins use UUIDs (`variant_id` → [[product_variants]].id, not `shopify_variant_id`).
+- **`name` becomes the published Meta ad name** ([[../lifecycles/ad-publish]]) — keep **demographic/ethnicity terms out of it** (e.g. "(Black)", "(Latina)") or Meta may flag the ad. To tag which avatar a campaign uses, use the avatar's ID-prefix code instead: `(av-<first 4 of avatar_id>)`. The default name `${product} — ${hook_slug}` is already clean; ethnicity only creeps in via manual naming.
 
 ---
 
