@@ -508,6 +508,8 @@ function PriceCard({
             <img
               src={rule.free_gift_image_url}
               alt=""
+              loading="lazy"
+              decoding="async"
               className="h-16 w-16 flex-shrink-0 rounded-lg bg-white object-contain p-1.5 shadow-sm sm:h-20 sm:w-20"
             />
           )}
