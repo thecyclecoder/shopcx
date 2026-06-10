@@ -85,6 +85,7 @@ Single source of truth for what's being built next, what's parked, and what just
 - ✅ **Static ads — separate design-led process (2026-06-05)** — three designed archetypes (review screenshot · offer card · benefit/authority), hybrid engine, rendered on Lambda across 1:1/4:5/9:16 from product intelligence. Verified in-app (Inngest → Lambda). Folded into [[../lifecycles/ad-static]]; spec deleted.
 
 **Open sub-work:**
+- ⏳ **Publish ads to Meta** — from a campaign: generate copy (headline + 3 variations, primary text + 3 variations, pick CTA), select ad account/campaign/ad set, upload video → creative → ad (PAUSED). Replicates the working publisher in the sibling `shopgrowth` repo; reuses shopcx's Meta OAuth + `meta_ad_accounts`. Spec: **[ad-publish-meta.md](ad-publish-meta.md)** (run as `/goal`).
 - ⏳ **TODO (Dylan): static-ad design tweaks** — the static pipeline ships, but the *visual design* of the three archetypes is a first pass and needs Dylan's review/iteration. All visual changes live in `remotion/StaticAds.tsx` + `DEFAULT_BRAND` (`src/lib/ad-static.ts`); preview via sample render, then re-run `scripts/deploy-remotion-lambda.ts`. Details + checklist in [[../lifecycles/ad-static]] § Status / open work.
 - Minor: NBP backdrop auto-gen for offer cards; editable-copy UI before static render; native/UGC archetype; only talking beats refreshable via UI ([[../lifecycles/ad-render]] / [[../lifecycles/ad-static]] § Open).
 
