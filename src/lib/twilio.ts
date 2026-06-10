@@ -1,4 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { normalizePhoneForTwilio } from "@/lib/phone";
 import crypto from "crypto";
 
 /**
@@ -65,7 +66,9 @@ export async function sendSMS(
   try {
     const authHeader = Buffer.from(`${accountSid}:${authToken}`).toString("base64");
     const params = new URLSearchParams({
-      To: to,
+      // Normalize to E.164 at the boundary — stored numbers are often
+      // display-formatted, which Twilio rejects.
+      To: normalizePhoneForTwilio(to),
       Body: truncatedBody,
     });
     if (msSid) {

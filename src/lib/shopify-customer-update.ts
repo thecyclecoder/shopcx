@@ -93,20 +93,7 @@ export async function updateShopifyCustomer(input: ShopifyCustomerUpdateInput): 
   }
 }
 
-/**
- * Normalize a US phone string to E.164. Accepts:
- *   "(720) 808-7208" → "+17208087208"
- *   "720-808-7208"  → "+17208087208"
- *   "7208087208"    → "+17208087208"
- *   "17208087208"   → "+17208087208"
- *   "+17208087208"  → "+17208087208"
- * Returns null when the digits don't add up to 10 (or 11 with
- * leading 1) — the action handler treats that as an input error.
- */
-export function toE164US(raw: string): string | null {
-  const digits = raw.replace(/\D/g, "");
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
-  if (raw.startsWith("+") && digits.length >= 10) return `+${digits}`;
-  return null;
-}
+// Canonical phone normalization now lives in @/lib/phone. Re-exported here for
+// the existing callers (action-executor, checkout OTP routes) that import it
+// from this module.
+export { toE164US } from "@/lib/phone";

@@ -11,6 +11,8 @@
  * on any API error we FAIL CLOSED (treat as not-verified) so a Lookup
  * outage can't leak the discount to unverified numbers.
  */
+import { normalizePhoneForTwilio } from "@/lib/phone";
+
 const LOOKUP_BASE = "https://lookups.twilio.com/v2/PhoneNumbers";
 
 export interface PhoneLookupResult {
@@ -29,7 +31,8 @@ export async function lookupPhone(phone: string): Promise<PhoneLookupResult> {
     return { valid: false, mobile: false, e164: null, carrier: null, lineType: null, reason: "twilio_not_configured" };
   }
 
-  const cleaned = phone.trim();
+  // Lookup also requires E.164 — normalize before the call.
+  const cleaned = normalizePhoneForTwilio(phone);
   const url = `${LOOKUP_BASE}/${encodeURIComponent(cleaned)}?Fields=line_type_intelligence`;
   const auth = Buffer.from(`${accountSid}:${authToken}`).toString("base64");
 

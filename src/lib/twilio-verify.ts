@@ -15,6 +15,7 @@
  * action which calls `createVerifyService` below.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { normalizePhoneForTwilio } from "@/lib/phone";
 
 const TWILIO_VERIFY_HOST = "https://verify.twilio.com";
 
@@ -106,7 +107,8 @@ export async function startVerification(
   // comes from the Verify Service's own FriendlyName, set to the workspace name
   // at provisioning in createVerifyService.
   const params = new URLSearchParams({
-    To: to,
+    // E.164 for SMS; emails (email channel) pass through untouched.
+    To: normalizePhoneForTwilio(to),
     Channel: channel,
   });
 
@@ -142,7 +144,8 @@ export async function checkVerification(
   if ("error" in creds) return { success: false, approved: false, error: creds.error };
 
   const params = new URLSearchParams({
-    To: to,
+    // Must match the normalized To used in startVerification.
+    To: normalizePhoneForTwilio(to),
     Code: code,
   });
   const res = await fetch(`${TWILIO_VERIFY_HOST}/v2/Services/${serviceSid}/VerificationCheck`, {

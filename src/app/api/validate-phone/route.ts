@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
+import { normalizePhoneForTwilio } from "@/lib/phone";
 
 export async function GET(req: NextRequest) {
-  const phone = req.nextUrl.searchParams.get("phone");
-  if (!phone) return NextResponse.json({ valid: false, error: "Phone required" });
+  const raw = req.nextUrl.searchParams.get("phone");
+  if (!raw) return NextResponse.json({ valid: false, error: "Phone required" });
+  // Lookup requires E.164 — normalize before the call.
+  const phone = normalizePhoneForTwilio(raw);
 
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
