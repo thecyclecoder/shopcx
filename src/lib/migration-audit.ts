@@ -71,13 +71,6 @@ async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Rec
   const checks: AuditCheck[] = [];
   const push = (key: string, ok: boolean, detail?: string) => checks.push({ key, ok, detail });
 
-  // A cancelled migrated sub never bills, so the billing-protection checks
-  // (items on UUIDs, card pinned, immediate charge) are moot for it — only
-  // the core migration facts (is_internal, internal contract id, Appstle
-  // cancelled, no double-bill) matter. Without this, a correctly-cancelled
-  // sub (a superseded duplicate, a voluntary cancel, a test sub) false-flags
-  // on the dashboard forever. We still RECORD the billing checks for
-  // visibility, but they don't fail the audit when the sub is cancelled.
   const isLive = ["active", "paused"].includes(String(sub.status));
 
   push("is_internal", sub.is_internal === true);
@@ -88,11 +81,7 @@ async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Rec
     const isProt = String(i.title || "").toLowerCase().includes("shipping protection");
     return !isProt && !UUID_RE.test(String(i.variant_id || ""));
   });
-  push(
-    "items_on_uuids",
-    badItems.length === 0 || !isLive,
-    badItems.length ? `${badItems.length} item(s) not UUID${!isLive ? " (cancelled — won't bill)" : ""}` : undefined,
-  );
+  push("items_on_uuids", badItems.length === 0, badItems.length ? `${badItems.length} item(s) not UUID` : undefined);
 
   await verifyAppstleCancelled(admin, audit.workspace_id as string, String(audit.appstle_contract_id || ""), push);
 
@@ -107,14 +96,35 @@ async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Rec
     push("pricing_preserved", false, e instanceof Error ? e.message : "pricing engine threw");
   }
 
-  // Recovery checks only apply to a LIVE sub — a recovery that ended
-  // cancelled (e.g. a superseded duplicate) has no card or renewal by design.
-  if (audit.is_recovery && isLive) {
-    push("card_pinned", !!sub.payment_method_id, sub.payment_method_id ? undefined : "no pinned card");
-    const { data: txn } = await admin
-      .from("transactions").select("id, status").eq("subscription_id", sub.id as string)
-      .eq("type", "renewal").order("created_at", { ascending: false }).limit(1).maybeSingle();
-    push("immediate_charge", txn?.status === "succeeded", txn ? `last renewal ${txn.status}` : "no renewal yet");
+  if (audit.is_recovery) {
+    // "Billable card" — a sub with no PINNED card bills on the link-group
+    // default (same fallback the renewal + sub-detail display use), so the
+    // check passes when EITHER a pinned card or a default exists. This is
+    // why even a cancelled-but-reactivatable sub is fine: if reactivated it
+    // charges the default. It only fails when there's genuinely no card
+    // anywhere in the link group.
+    let hasCard = !!sub.payment_method_id;
+    if (!hasCard) {
+      const { linkGroupIds } = await import("@/lib/customer-links");
+      const groupIds = await linkGroupIds(admin, audit.workspace_id as string, sub.customer_id as string);
+      const { data: def } = await admin
+        .from("customer_payment_methods").select("id")
+        .eq("workspace_id", audit.workspace_id as string)
+        .in("customer_id", groupIds)
+        .eq("status", "active").eq("is_default", true).eq("provider", "braintree")
+        .limit(1).maybeSingle();
+      hasCard = !!def;
+    }
+    push("card_pinned", hasCard, hasCard ? (sub.payment_method_id ? "pinned" : "link-group default") : "no card in link group");
+
+    // The immediate recovery charge only exists for a LIVE sub — a recovery
+    // that ended cancelled (e.g. a superseded duplicate) never charged.
+    if (isLive) {
+      const { data: txn } = await admin
+        .from("transactions").select("id, status").eq("subscription_id", sub.id as string)
+        .eq("type", "renewal").order("created_at", { ascending: false }).limit(1).maybeSingle();
+      push("immediate_charge", txn?.status === "succeeded", txn ? `last renewal ${txn.status}` : "no renewal yet");
+    }
   }
 
   const internalLive = sub.is_internal === true && ["active", "paused"].includes(String(sub.status));
